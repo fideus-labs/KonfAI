@@ -136,6 +136,55 @@ Each phase: deliverable · key files · tests/benchmarks · **GO/NO-GO gate** ·
 - **No new core runtime deps** (AGENTS.md §13.4). The Python side adds only an ONNX exporter; `onnx`/`onnxruntime` become an `export` extra declared in the same commit.
 - **Commits:** Conventional Commits, no AI branding/trailers (AGENTS.md §12). **No push without an explicit ask.**
 
+## 4b. konfai-apps integration — the seam, runtime selector, and manifest contract
+
+Mapped from the konfai-apps source. konfai-rs is a **runtime**, not a surface; it plugs into konfai-apps at exactly **one seam** and leaves everything else untouched.
+
+**The run flow & the seam.** `KonfAIApp.infer()` (`konfai-apps/konfai_apps/app.py`) runs under `@run_distributed_app` (isolated temp workspace) and:
+1. `_write_inputs_to_dataset()` → symlinks inputs into `./Dataset/P{idx}/Volume_{i}`,
+2. `app_repository.install_inference()` → downloads `.pt` + `.yml` + `.py`, pip-installs `requirements.txt`,
+3. **`konfai.predictor.predict(models_path, …, Prediction.yml)`** ← **THE SEAM** (`app.py:900`),
+4. torch forward (`predictor.py:565` → `network.py:710`), writes `./Predictions/`,
+5. `copytree(./Predictions → output)`.
+
+**Runtime selector.** Branch at `app.py:900` on an `app.json` `runtime` field:
+```
+runtime: pytorch  → konfai.predictor.predict(.pt, Prediction.yml)            # today
+runtime: portable → konfai_rs(model.onnx, manifest.json, ./Dataset → ./Predictions)
+```
+A `--runtime {pytorch,portable}` flag is added in `cli.py:add_common_konfai_apps`; the dispatch branch sits just before the `predict()` call.
+
+**What stays in konfai-apps (Python) vs moves to konfai-rs (Rust):**
+
+| Stays in konfai-apps | Moves to konfai-rs |
+|---|---|
+| App resolution Local/HF/Remote; download/cache | Load `model.onnx` |
+| `./Dataset/P*/Volume_*` layout + input symlinking | Read `./Dataset`, geometry-aware |
+| `./Predictions` collection → output | Patch sliding-window + overlap blend; write `./Predictions` (same layout) |
+| Surfaces: CLI, FastAPI server, remote client, SSE | Forward + reduction (Mean/Median for TTA/ensemble) |
+| VRAM-aware config mutation; `app.json` schema | Pre/post folded into the ONNX graph |
+
+**The contract = `model.onnx` + `manifest.json`.** Proposed minimal manifest (produced by the Phase-1 exporter, consumed by konfai-rs):
+```json
+{
+  "konfai_rs_manifest": 1,
+  "model": "model.onnx",
+  "input":  { "name": "input",  "group": "Volume_0", "channels": 5, "dtype": "f32" },
+  "output": { "name": "output", "group": "sCT",      "channels": 1, "dtype": "f32" },
+  "patch":  { "size": [256, 256], "overlap": [0, 0], "dim": 2, "extend_slice": 2 },
+  "preprocess_in_graph": true,
+  "postprocess_in_graph": true,
+  "reduction": "mean",
+  "geometry": "preserve_from_input"
+}
+```
+
+**Distribution.** `app_repository.install_inference` gains a `portable` branch: download `model.onnx` + `manifest.json` instead of `.pt`. The bundle on HF/Local/Remote carries both, so an app can ship *both* runtimes and the selector picks.
+
+**Trust win.** The `portable` path performs **no `pip install`, no `torch.load(weights_only=False)` pickle, no arbitrary `.py` import** — the model is just an ONNX graph + a fixed Rust runtime (`AUDIT.md` §4b).
+
+**Browser.** The FastAPI server (`app_server.py`) can `StaticFiles`-mount the konfai-rs WASM bundle + `model.onnx`; execution is 100% client-side — konfai-apps distributes, konfai-rs executes.
+
 ## 5. First concrete actions (next steps)
 
 1. **Toolchain** — installing now: Rust (`rustup`/`cargo`) + `wasm32` target; `onnx`/`onnxruntime` in the Pixi dev env. (Pixi dev already has torch 2.12 + konfai.)
