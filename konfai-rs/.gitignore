@@ -1,0 +1,6 @@
+/target
+/models
+/assets
+Cargo.lock
+*.onnx
+*.bin

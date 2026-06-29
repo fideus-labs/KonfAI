@@ -1,0 +1,24 @@
+[package]
+name = "konfai-rs"
+version = "0.0.0"
+edition = "2021"
+description = "Portable inference engine for KonfAI models (Burn + ONNX, build-time codegen)"
+license = "Apache-2.0"
+
+[lib]
+name = "konfai_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "konfai-rs"
+path = "src/bin/konfai_rs.rs"
+
+[dependencies]
+burn = { version = "0.21", features = ["ndarray", "wgpu"] }
+burn-store = "0.21"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+burn-onnx = "0.21"
