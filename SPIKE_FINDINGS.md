@@ -1,22 +1,24 @@
 # konfai-rs — Phase-0 Spike Findings
 
 > Result of the Phase-0 gate in [`RUST_BURN_IMPLEMENTATION_PLAN.md`](RUST_BURN_IMPLEMENTATION_PLAN.md).
-> Run 2026-06-29 on the in-repo example 2D UNet. **Throwaway PoC** — sources under `spike/`, no product code.
+> Run 2026-06-29. **Throwaway PoC** — sources under `spike/`, no product code.
 
-## Verdict: ✅ GO (toolchain + KonfAI export path proven)
+## Verdict: ✅ GO — proven on BOTH the example UNet AND the real `impact_synth` model, on CPU AND WebGPU
 
 The full chain works **end-to-end with near-bit-exact parity**, no Python at inference:
 
 ```
 KonfAI Network ──torch.onnx(dynamo)──▶ ONNX ──burn-onnx ModelGen──▶ Burn model ──forward──▶ output
-   (example UNet, dim=2, 1,925,446 params)
 ```
 
-| Hop | Result |
-|---|---|
-| KonfAI `UNet` → ONNX | parity vs torch **MAE 1.0e-8** |
-| ONNX → `burn-onnx` `ModelGen` (build-time codegen) | imports + generates Rust; **all ops recognized** (Conv2d, ConvTranspose2d, MaxPool2d, Softmax, …) |
-| Burn forward (NdArray / CPU backend) | parity vs onnxruntime **MAE 8.6e-9**, max 6e-8 |
+| Model | → ONNX (vs torch) | burn-onnx import | Burn CPU (vs ORT) | Burn WGPU (vs ORT) |
+|---|---|---|---|---|
+| Example UNet (2D, 1.9M params) | MAE **1.0e-8** | ✅ all ops | MAE **8.6e-9** | — |
+| **`impact_synth` MR** (smp UNet++ resnet34, 2.5D 5-ch, **26M params**, Tanh head) | MAE **6.4e-6** | ✅ all ops | MAE **6.3e-6** | MAE **5.5e-6** |
+
+**The #1 risk (op coverage) is retired for `impact_synth`.** Its ops (resnet34: Conv2d/BatchNorm/ReLU/MaxPool/Add; UNet++ decoder: Upsample/Concat/Conv; Tanh) all import and run. It is **2D / 2.5D (no 3D conv, no exotic ops)** — the favourable case. WGPU ran on an NVIDIA RTX PRO 5000 (Vulkan); since **WGPU is the same backend that compiles to WASM/WebGPU**, the browser compute path is strongly de-risked.
+
+> `impact_synth` brings an external dep `segmentation_models_pytorch` (smp) on the Python/export side — needed to *build* the model for export, not at Rust inference. The exported ONNX is self-contained.
 
 ## The recipe (reusable for Phase 1 — non-obvious bits the export must encode)
 
@@ -35,12 +37,18 @@ KonfAI Network ──torch.onnx(dynamo)──▶ ONNX ──burn-onnx ModelGen�
    `build.rs`: `burn_onnx::ModelGen::new().input("assets/model.onnx").out_dir("model/").run_from_script();`
    Load trained weights via the generated `Model::<B>::default()` (weights baked in); `Model::new(&device)` is random init.
 
-## What is NOT yet proven (remaining Phase-0/1 validations)
+## Proven now (2026-06-29)
 
-- **Real target model `impact_synth`** (sCT, likely 3D + InstanceNorm/ReflectionPad/ConvTranspose). Only the **2D example UNet** is proven here. impact_synth needs an HF download (`KonfAIApp("VBoussot/ImpactSynth:…")`) and may hit different ops — **the op-coverage risk lives there, not in the chain itself.**
-- **WGPU backend** (the browser-relevant one). Only **NdArray/CPU** is proven. WGPU is a backend swap in the same crate — next cheap validation.
-- **WASM + WebGPU in a browser** — Phase 3.
-- **Patch tiling + geometry-aware I/O** — Phase 4 (not exercised; this spike ran a single fixed patch).
+- ✅ Toolchain + KonfAI export path (example UNet).
+- ✅ **Real `impact_synth` MR** model imports + runs with parity (CPU **and** WGPU).
+- ✅ **WGPU backend** (NVIDIA RTX PRO 5000, Vulkan).
+
+## What is NOT yet proven (remaining validations)
+
+- **WASM + WebGPU in a browser** — Phase 3. (WGPU compute proven natively; remaining = the `wasm-bindgen` + WASM build + browser WebGPU device init.)
+- **Patch tiling + geometry-aware I/O** — Phase 4 (this spike ran a single fixed patch, random-weight or real-weight; the per-volume sliding-window + overlap blend + NIfTI/geometry path is untouched).
+- **Real trained weights end-to-end accuracy** — the spike used the architecture with the exported weights; a full sCT-vs-reference clinical parity (vs the Python `Predictor`, with the 5-fold ensemble) is Phase 2/4.
+- **Other variants** (CBCT, MR_CBCT, Finetune) — same architecture, expected to behave identically.
 
 ## Reproduce
 
