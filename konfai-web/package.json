@@ -1,0 +1,17 @@
+{
+  "name": "konfai-web",
+  "version": "0.0.0",
+  "description": "Portable in-browser inference for KonfAI models (ONNX Runtime Web + WebGPU).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "node test/validate.mjs",
+    "serve": "npx --yes serve ."
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.27.0"
+  },
+  "devDependencies": {
+    "onnxruntime-node": "^1.27.0"
+  }
+}

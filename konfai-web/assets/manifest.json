@@ -1,0 +1,31 @@
+{
+  "konfai_rs_manifest": 1,
+  "model": "model.onnx",
+  "opset": 18,
+  "output_module": "UNetBlock_0.Head.Softmax",
+  "input": {
+    "name": "input",
+    "group": "MR",
+    "channels": 1,
+    "dtype": "f32"
+  },
+  "output": {
+    "name": "output",
+    "group": "seg",
+    "channels": 2,
+    "dtype": "f32"
+  },
+  "patch": {
+    "size": [
+      64,
+      64
+    ],
+    "overlap": [
+      0,
+      0
+    ],
+    "dim": 2,
+    "extend_slice": 0
+  },
+  "geometry": "preserve_from_input"
+}

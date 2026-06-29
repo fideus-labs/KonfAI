@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>konfai-web — portable KonfAI inference</title>
+<style>body{font-family:system-ui;margin:2rem;max-width:48rem}pre{background:#f4f4f4;padding:1rem;border-radius:6px;min-height:6rem}</style></head>
+<body>
+  <h1>konfai-web</h1>
+  <p>Loads a konfai bundle (<code>model.onnx</code> + <code>manifest.json</code>) and runs inference
+     in the browser via ONNX Runtime Web (WebGPU). No Python, no install.</p>
+  <button id="run">Run inference</button>
+  <pre id="log"></pre>
+  <script type="module" src="main.mjs"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+node_modules/
+assets/*.onnx
+assets/*.onnx.data
+package-lock.json
