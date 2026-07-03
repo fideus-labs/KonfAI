@@ -24,6 +24,7 @@ import csv
 import glob
 import math
 import os
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,19 @@ from konfai import current_date
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_format_level
 
+_h5_file_locks: dict[str, threading.RLock] = {}
+_h5_file_locks_guard = threading.Lock()
+
+
+def _get_h5_file_lock(filename: str) -> threading.RLock:
+    """Return the process-wide lock guarding one HDF5 file across worker threads."""
+    with _h5_file_locks_guard:
+        lock = _h5_file_locks.get(filename)
+        if lock is None:
+            lock = threading.RLock()
+            _h5_file_locks[filename] = lock
+        return lock
+
 
 class Attribute(dict[str, Any]):
     """Metadata container storing repeated values with a stack-like naming scheme."""
@@ -62,8 +76,9 @@ class Attribute(dict[str, Any]):
         i = self._count_key(key)
         if i > 0 and f"{key}_{i - 1}" in super().keys():
             return str(super().__getitem__(f"{key}_{i - 1}"))
-        else:
-            raise NameError(f"{key} not in cache_attribute")
+        if key in super().keys():
+            return str(super().__getitem__(key))
+        raise NameError(f"{key} not in cache_attribute")
 
     def __setitem__(self, key: str, value: Any) -> None:
         if "_" not in key:
@@ -88,8 +103,9 @@ class Attribute(dict[str, Any]):
         i = self._count_key(key)
         if i > 0 and f"{key}_{i - 1}" in super().keys():
             return super().pop(f"{key}_{i - 1}")
-        else:
-            raise NameError(f"{key} not in cache_attribute")
+        if key in super().keys():
+            return super().pop(key)
+        raise NameError(f"{key} not in cache_attribute")
 
     def get_np_array(self, key: str) -> np.ndarray:
         return np.fromstring(self[key][1:-1], sep=" ", dtype=np.double)
@@ -203,9 +219,9 @@ def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     attributes["Direction"] = np.asarray(file_reader.GetDirection())
     for k in file_reader.GetMetaDataKeys():
         attributes[k] = file_reader.GetMetaData(k)
-    size = list(file_reader.GetSize())
-    if len(size) == 3:
-        size = list(reversed(size))
+    # SimpleITK GetSize() is (x, y, [z], ...); KonfAI arrays are numpy-order [C, (Z), Y, X], so the
+    # spatial size must be reversed for EVERY rank, not only 3-D (2-D/4-D used to come out transposed).
+    size = list(reversed(file_reader.GetSize()))
     size = [file_reader.GetNumberOfComponents(), *size]
     return size, attributes
 
@@ -312,26 +328,40 @@ class Dataset:
             if not self.filename.endswith(".h5"):
                 self.filename += ".h5"
             self.read = read
+            self._lock: threading.RLock | None = None
 
         def __enter__(self):
-            if self.read:
-                self.h5 = h5py.File(self.filename, "r")
-            else:
-                if not os.path.exists(self.filename):
-                    if len(self.filename.split("/")) > 1 and not os.path.exists(
-                        "/".join(self.filename.split("/")[:-1])
-                    ):
-                        os.makedirs("/".join(self.filename.split("/")[:-1]))
-                    self.h5 = h5py.File(self.filename, "w")
+            # A single HDF5 file cannot be opened concurrently from several threads:
+            # the whole open/use/close sequence is serialised per file so that two
+            # cache workers never race between the existence check and the "w"/"r+"
+            # open (which would truncate each other's data).
+            self._lock = _get_h5_file_lock(self.filename)
+            self._lock.acquire()
+            try:
+                if self.read:
+                    self.h5 = h5py.File(self.filename, "r")
                 else:
-                    self.h5 = h5py.File(self.filename, "r+")
-                self.h5.attrs["Date"] = current_date()
-            self.h5.__enter__()
+                    if not os.path.exists(self.filename):
+                        Path(self.filename).parent.mkdir(parents=True, exist_ok=True)
+                        self.h5 = h5py.File(self.filename, "w")
+                    else:
+                        self.h5 = h5py.File(self.filename, "r+")
+                    self.h5.attrs["Date"] = current_date()
+                self.h5.__enter__()
+            except BaseException:
+                self._lock.release()
+                self._lock = None
+                raise
             return self.h5
 
         def __exit__(self, exc_type, value, traceback):
-            if self.h5 is not None:
-                self.h5.close()
+            try:
+                if self.h5 is not None:
+                    self.h5.close()
+            finally:
+                if self._lock is not None:
+                    self._lock.release()
+                    self._lock = None
 
         def file_to_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
             dataset = self._get_dataset(groups, name)
@@ -394,10 +424,14 @@ class Dataset:
                 for i, transform in enumerate(transforms):
                     if isinstance(transform, sitk.Euler3DTransform):
                         transform_type = "Euler3DTransform_double_3_3"
-                    if isinstance(transform, sitk.AffineTransform):
+                    elif isinstance(transform, sitk.AffineTransform):
                         transform_type = "AffineTransform_double_3_3"
-                    if isinstance(transform, sitk.BSplineTransform):
+                    elif isinstance(transform, sitk.BSplineTransform):
                         transform_type = "BSplineTransform_double_3_3"
+                    else:
+                        raise DatasetManagerError(
+                            f"Unsupported transform type '{type(transform).__name__}' for entry '{name}'."
+                        )
                     attributes[f"{i}:Transform"] = transform_type
                     attributes[f"{i}:FixedParameters"] = transform.GetFixedParameters()
 
@@ -504,14 +538,14 @@ class Dataset:
 
         def _resolve_data_path(self, name: str) -> str | None:
             base = f"{self.filename}{name}"
-            direct = f"{base}.{self.file_format}"
-            if os.path.exists(direct):
-                return direct
-
             for suffix in (".itk.txt", ".fcsv", ".xml", ".vtk", ".npy"):
                 candidate = f"{base}{suffix}"
                 if os.path.exists(candidate):
                     return candidate
+
+            direct = f"{base}.{self.file_format}"
+            if os.path.exists(direct):
+                return direct
 
             matches = glob.glob(f"{base}.*")
             return matches[0] if matches else None
@@ -557,10 +591,14 @@ class Dataset:
                 for i, transform in enumerate(transforms):
                     if isinstance(transform, sitk.Euler3DTransform):
                         transform_type = "Euler3DTransform_double_3_3"
-                    if isinstance(transform, sitk.AffineTransform):
+                    elif isinstance(transform, sitk.AffineTransform):
                         transform_type = "AffineTransform_double_3_3"
-                    if isinstance(transform, sitk.BSplineTransform):
+                    elif isinstance(transform, sitk.BSplineTransform):
                         transform_type = "BSplineTransform_double_3_3"
+                    else:
+                        raise DatasetManagerError(
+                            f"Unsupported transform type '{type(transform).__name__}' for entry '{name}'."
+                        )
                     attributes[f"{i}:Transform"] = transform_type
                     attributes[f"{i}:FixedParameters"] = transform.GetFixedParameters()
 
@@ -575,9 +613,14 @@ class Dataset:
                 data = read_landmarks(Path(f"{self.filename}{name}.fcsv"))
             elif os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:
-                    result = etree.parse(xml_file, etree.XMLParser(remove_blank_text=True)).getroot()  # nosec B320
-                    xml_file.close()
-                    return result
+                    root = etree.parse(xml_file, etree.XMLParser(remove_blank_text=True)).getroot()  # nosec B320
+                node = root
+                while len(node):
+                    node = node[-1]
+                for key, value in node.attrib.items():
+                    attributes[key] = value
+                text = (node.text or "").strip()
+                data = np.fromstring(text, sep=",", dtype=np.float64) if text else np.asarray([], dtype=np.float64)
             elif os.path.exists(f"{self.filename}{name}.vtk"):
                 import vtk
 
@@ -595,11 +638,12 @@ class Dataset:
             else:
                 pattern = f"{self.filename}{name}.*"
                 matches = glob.glob(pattern)
-                if matches:
-                    path = matches[0]
-                    image = sitk.ReadImage(path)
-                    data, attributes_tmp = image_to_data(image)
-                    attributes.update(attributes_tmp)
+                if not matches:
+                    raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
+                path = matches[0]
+                image = sitk.ReadImage(path)
+                data, attributes_tmp = image_to_data(image)
+                attributes.update(attributes_tmp)
             return data, attributes
 
         def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
@@ -671,8 +715,7 @@ class Dataset:
         ) -> None:
             if attributes is None:
                 attributes = Attribute()
-            if not os.path.exists(self.filename):
-                os.makedirs(self.filename)
+            os.makedirs(self.filename, exist_ok=True)
             if isinstance(data, sitk.Image):
                 for k, v in attributes.items():
                     if v and len(v):
@@ -744,9 +787,8 @@ class Dataset:
                 attributes["Direction"] = np.asarray(file_reader.GetDirection())
                 for k in file_reader.GetMetaDataKeys():
                     attributes[k] = file_reader.GetMetaData(k)
-                size = list(file_reader.GetSize())
-                if len(size) == 3:
-                    size = list(reversed(size))
+                # Reverse for every rank (see the module-level get_infos): 2-D/4-D used to be transposed.
+                size = list(reversed(file_reader.GetSize()))
                 size = [file_reader.GetNumberOfComponents(), *size]
             else:
                 data, attributes = self.file_to_data(group if group is not None else "", name)
@@ -1063,8 +1105,7 @@ class Dataset:
         if attributes is None:
             attributes = Attribute()
         if self.is_directory:
-            if not os.path.exists(self.filename):
-                os.makedirs(self.filename)
+            os.makedirs(self.filename, exist_ok=True)
         if self.is_directory:
             s_group = group.split("/")
             if len(s_group) > 1:
@@ -1086,13 +1127,13 @@ class Dataset:
                 if os.path.exists(f"{self.filename}{sub_directory}{name}{'.h5' if self.file_format == 'h5' else ''}"):
                     with Dataset.File(
                         f"{self.filename}{sub_directory}{name}",
-                        False,
+                        True,
                         self.file_format,
                         self.level,
                     ) as file:
                         return file.file_to_data("", group)
         else:
-            with Dataset.File(self.filename, False, self.file_format, self.level) as file:
+            with Dataset.File(self.filename, True, self.file_format, self.level) as file:
                 return file.file_to_data(groups, name)
         raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
 
@@ -1151,10 +1192,12 @@ class Dataset:
         for i, transform_type in enumerate(transforms_type):
             if transform_type == "Euler3DTransform_double_3_3":
                 transform = sitk.Euler3DTransform()
-            if transform_type == "AffineTransform_double_3_3":
+            elif transform_type == "AffineTransform_double_3_3":
                 transform = sitk.AffineTransform(3)
-            if transform_type == "BSplineTransform_double_3_3":
+            elif transform_type == "BSplineTransform_double_3_3":
                 transform = sitk.BSplineTransform(3)
+            else:
+                raise DatasetManagerError(f"Unsupported transform type '{transform_type}' for entry '{name}'.")
             transform.SetFixedParameters(ast.literal_eval(attribute[f"{i}:FixedParameters"]))
             transform.SetParameters(tuple(transform_parameters[i]))
             transforms.append(transform)

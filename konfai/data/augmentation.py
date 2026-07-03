@@ -263,7 +263,7 @@ class DataAugmentation(NeedDevice, ABC):
 
     def inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         if a in self.who_index[index]:
-            tensor = self._inverse(index, a, tensor)
+            tensor = self._inverse(index, self.who_index[index].index(a), tensor)
         return tensor
 
     @abstractmethod
@@ -284,12 +284,15 @@ class EulerTransform(DataAugmentation):
     ) -> list[torch.Tensor]:
         results = []
         for tensor, matrix in zip(tensors, self.matrix[index], strict=False):
+            # Integer tensors are label maps: interpolating them blends class ids into
+            # non-existent labels, so resample them with nearest-neighbour instead.
+            mode = "nearest" if not tensor.dtype.is_floating_point else "bilinear"
             results.append(
                 F.grid_sample(
                     tensor.unsqueeze(0).type(torch.float32),
                     F.affine_grid(matrix[:, :-1, ...], [1, *list(tensor.shape)], align_corners=True).to(tensor.device),
                     align_corners=True,
-                    mode="bilinear",
+                    mode=mode,
                     padding_mode="reflection",
                 )
                 .type(tensor.dtype)
@@ -298,6 +301,7 @@ class EulerTransform(DataAugmentation):
         return results
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        mode = "nearest" if not tensor.dtype.is_floating_point else "bilinear"
         return (
             F.grid_sample(
                 tensor.unsqueeze(0).type(torch.float32),
@@ -307,7 +311,7 @@ class EulerTransform(DataAugmentation):
                     align_corners=True,
                 ).to(tensor.device),
                 align_corners=True,
-                mode="bilinear",
+                mode=mode,
                 padding_mode="reflection",
             )
             .type(tensor.dtype)
@@ -327,8 +331,13 @@ class Translate(EulerTransform):
         func = _translate_3d_matrix if dim == 3 else _translate_2d_matrix
         translate = torch.rand((len(shapes), dim)) * torch.tensor(self.t_max - self.t_min) + torch.tensor(self.t_min)
         if self.is_int:
-            translate = torch.round(translate * 100) / 100
-        self.matrix[index] = [torch.unsqueeze(func(value), dim=0) for value in translate]
+            translate = torch.round(translate)
+        matrices = []
+        for value, shape in zip(translate, shapes, strict=False):
+            sizes = torch.tensor(list(reversed(shape)), dtype=torch.float32)
+            normalized = value * 2.0 / (sizes - 1)
+            matrices.append(torch.unsqueeze(func(normalized), dim=0))
+        self.matrix[index] = matrices
         return shapes
 
 
@@ -345,7 +354,9 @@ class Rotate(EulerTransform):
         angles = []
 
         if self.is_quarter:
-            angles = torch.deg2rad(torch.Tensor.repeat(torch.tensor([90.0, 180.0, 270.0]), 3))
+            quarter_angles = torch.tensor([90.0, 180.0, 270.0])
+            choices = torch.randint(0, quarter_angles.numel(), (len(shapes), dim))
+            angles = torch.deg2rad(quarter_angles[choices])
         else:
             angles = torch.deg2rad(
                 torch.rand((len(shapes), dim)) * torch.tensor(self.a_max - self.a_min) + torch.tensor(self.a_min)
@@ -422,8 +433,8 @@ class ColorTransform(DataAugmentation):
             results.append(result.reshape(tensor.shape))
         return results
 
-    def _inverse(self, index: int, a: int, tensors: torch.Tensor) -> torch.Tensor:
-        pass
+    def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor
 
 
 class Brightness(ColorTransform):
@@ -551,7 +562,7 @@ class Noise(DataAugmentation):
         return results
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        pass
+        return tensor
 
 
 class CutOUT(DataAugmentation):
@@ -601,7 +612,7 @@ class CutOUT(DataAugmentation):
         return results
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        pass
+        return tensor
 
 
 class Elastix(DataAugmentation):
@@ -678,12 +689,14 @@ class Elastix(DataAugmentation):
     ) -> list[torch.Tensor]:
         results = []
         for tensor, displacement_field in zip(tensors, self.displacement_fields[index], strict=False):
+            # Integer tensors are label maps: nearest-neighbour keeps class ids intact.
+            mode = "nearest" if not tensor.dtype.is_floating_point else "bilinear"
             results.append(
                 F.grid_sample(
                     tensor.type(torch.float32).unsqueeze(0),
                     displacement_field.to(tensor.device),
                     align_corners=True,
-                    mode="bilinear",
+                    mode=mode,
                     padding_mode="border",
                 )
                 .type(tensor.dtype)

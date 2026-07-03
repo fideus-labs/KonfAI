@@ -81,6 +81,9 @@ class PathCombine(ABC):
 
     def set_patch_config(self, patch_size: list[int], overlap: int):
         self._data_per_device.clear()
+        if overlap <= 0:
+            self.data = torch.ones(patch_size)
+            return
         self.data = F.pad(
             torch.ones([size - overlap * 2 for size in patch_size]),
             [overlap] * 2 * len(patch_size),
@@ -193,6 +196,15 @@ class Accumulator:
             (list(reference.shape[:n]) + list(max([[v.stop for v in patch] for patch in self.patch_slices]))),
             dtype=reference.dtype,
         ).to(reference.device)
+        # Overlap blending weights each patch (edge bands < 1 so interior overlaps sum to unity).
+        # A voxel covered by fewer patches (a volume border without whole-image padding) would sum
+        # to < 1 and come out darkened (x0.5 edges, x0.25 corners), so divide by the accumulated
+        # weight. The weight map is identical for every patch and constant across batch/channels, so
+        # it is computed once and accumulated spatially only; with padding weight_sum is ~1 and the
+        # division is a near no-op.
+        combine = self.patch_combine
+        weight_sum = torch.zeros(result.shape[n:], device=result.device) if combine is not None else torch.empty(0)
+        weight_patch: torch.Tensor | None = None
         for patch_slice, data in zip(self.patch_slices, self._layer_accumulator, strict=False):
             if data is not None:
                 slices_dest = tuple([slice(result.shape[i]) for i in range(n)] + list(patch_slice))
@@ -200,10 +212,15 @@ class Accumulator:
                 for dim, s in enumerate(patch_slice):
                     if s.stop - s.start == 1:
                         data = data.unsqueeze(dim=dim + n)
-                if self.patch_combine is not None:
-                    result[slices_dest] += self.patch_combine(data)
+                if combine is not None:
+                    result[slices_dest] += combine(data)
+                    if weight_patch is None:
+                        weight_patch = combine(torch.ones_like(data))[(0,) * n]
+                    weight_sum[patch_slice] += weight_patch
                 else:
                     result[slices_dest] = data
+        if combine is not None:
+            result = result / weight_sum.clamp(min=1e-8)
         result = result[tuple([slice(None, None)] + [slice(0, s) for s in self.shape])]
 
         self._layer_accumulator.clear()
@@ -424,10 +441,11 @@ class DatasetManager:
         self.shape = _shape
         self.data_augmentations_list = data_augmentations_list
         self._patch_stream_sources: dict[bool, tuple[Dataset, str, list[int], list[Transform]] | None] = {}
+        self._stream_attributes_persisted: set[int] = set()
         self.reset_augmentation()
         self.cache_attributes_bak = copy.deepcopy(self.cache_attributes)
 
-    def reset_augmentation(self):
+    def reset_augmentation(self, reset_state: bool = True):
         self.cache_attributes[:] = self.cache_attributes[:1]
         self.augmented_data.clear()
         self.total_augmentations = 0
@@ -440,7 +458,8 @@ class DatasetManager:
                 caches_attribute.append(copy.deepcopy(self.cache_attributes[0]))
 
             for data_augmentation in data_augmentations.data_augmentations:
-                data_augmentation.reset_state(self.index)
+                if reset_state:
+                    data_augmentation.reset_state(self.index)
                 shape = data_augmentation.state_init(self.index, shape, caches_attribute)
             for it, s in enumerate(shape):
                 self.cache_attributes.append(caches_attribute[it])
@@ -698,8 +717,21 @@ class DatasetManager:
         tensor = self.patch.apply_read_plan(torch.from_numpy(data), plan)
         cache_attribute = Attribute(self.cache_attributes[a])
         cache_attribute.update(attributes)
+        persist = a not in self._stream_attributes_persisted
+        keys_before = set(cache_attribute.keys()) if persist else set()
         for transform in transforms:
             tensor = transform(self.name, tensor, cache_attribute)
+        if persist:
+            # Streaming applies the trailing transforms per patch on this throwaway
+            # copy, but state they record for their own inversion (e.g. TensorCast's
+            # source dtype) must survive on the persistent case attribute, exactly as
+            # the non-streamed path stores it while transforming the full volume.
+            persistent = self.cache_attributes[a]
+            persistent_keys = set(persistent.keys())
+            for key, value in cache_attribute.items():
+                if key not in keys_before and key not in persistent_keys:
+                    dict.__setitem__(persistent, key, value)
+            self._stream_attributes_persisted.add(a)
         return tensor, cache_attribute
 
     def unload(self) -> None:

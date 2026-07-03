@@ -46,6 +46,12 @@ from konfai.utils.runtime import State, get_cpu_info, get_memory, get_memory_inf
 from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_path_spec
 
 
+def _cache_worker_count(cpu_count: int, device_count: int) -> int:
+    """Number of caching threads: CPUs shared across devices, but never below one."""
+    divisor = device_count if device_count > 0 else 1
+    return max(1, cpu_count // divisor)
+
+
 class GroupTransform:
     """Collection of transforms attached to one source-to-destination group path."""
 
@@ -247,10 +253,17 @@ class DatasetIter(data.Dataset):
     def reset_augmentation(self, label):
         if self.inline_augmentations and self.has_augmented_samples and len(self.data_augmentations_list) > 0:
             for index in range(self.nb_dataset):
+                # Augmentation objects are shared across destination groups, so the
+                # random parameters for a case are drawn once here; each group then
+                # rebuilds its patch grid from that single draw, keeping every group
+                # of the case aligned on the same transform.
+                for data_augmentations in self.data_augmentations_list:
+                    for data_augmentation in data_augmentations.data_augmentations:
+                        data_augmentation.reset_state(index)
                 for group_src in self.groups_src:
                     for group_dest in self.groups_src[group_src]:
                         self.data[group_dest][index].unload_augmentation()
-                        self.data[group_dest][index].reset_augmentation()
+                        self.data[group_dest][index].reset_augmentation(reset_state=False)
             self.load(label + " Augmentation")
 
     def load(self, label: str):
@@ -282,9 +295,7 @@ class DatasetIter(data.Dataset):
 
                 cpu_count = os.cpu_count() or 1
                 try:
-                    with ThreadPoolExecutor(
-                        max_workers=cpu_count // (device_count() if device_count() > 0 else 1)
-                    ) as executor:
+                    with ThreadPoolExecutor(max_workers=_cache_worker_count(cpu_count, device_count())) as executor:
                         future_to_index = {executor.submit(process, index): index for index in indexs}
                         for fut in as_completed(future_to_index):
                             index = future_to_index[fut]
@@ -447,7 +458,7 @@ class Subset:
         index, is_exclusion = self._resolve_selector(subset, names)
         if is_exclusion:
             return [i for i in range(len(names)) if i not in index]
-        return list(index)
+        return sorted(index)
 
     def __call__(self, names: list[str], infos: dict[str, tuple[list[int], Attribute]]) -> set[str]:
         names = sorted(names)
@@ -470,11 +481,9 @@ class Subset:
                         include_index.update(resolved_index)
                         has_include = True
                 index_set = include_index if has_include else set(range(size))
-                index = list(index_set.difference(exclude_index))
+                index = sorted(index_set.difference(exclude_index))
         else:
             index = self._get_index(self.subset, names)
-        if self.shuffle:
-            index = random.sample(index, len(index))  # nosec B311
         return {names[i] for i in index}
 
     def __str__(self):
@@ -906,7 +915,9 @@ class Data(ABC):
         """Resolve dataset files, validate subsets, and precompute train/validation mappings."""
         datasets = self._resolve_dataset_sources()
         dataset_name, subset_names = self._resolve_common_names(datasets)
-        subset_names_list = list(subset_names)
+        subset_names_list = sorted(subset_names)
+        if self.subset.shuffle:
+            subset_names_list = random.sample(subset_names_list, len(subset_names_list))  # nosec B311
         train_names, validation_names = self._split_train_validation_names(
             subset_names_list,
             dataset_name,
@@ -994,6 +1005,13 @@ class Data(ABC):
                 start = (size * rank) // world_size
                 end = (size * (rank + 1)) // world_size
                 mappings.append(mapping[start:end])
+            # TRAIN/RESUME wraps the model in DDP(static_graph=True): every rank must run the same
+            # number of backward all-reduces per epoch. Contiguous shards can differ by one sample,
+            # which desynchronises the collective and hangs NCCL, so drop the tail to equal length
+            # (DistributedSampler drop_last). The sampler reshuffles each epoch, so nothing is lost
+            # permanently. world_size == 1 keeps every sample (min_len == full length).
+            min_len = min(len(shard) for shard in mappings)
+            mappings = [shard[:min_len] for shard in mappings]
         return mappings
 
     @staticmethod
