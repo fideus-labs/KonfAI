@@ -14,36 +14,42 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Command-line wrapper for running IMPACT-Synth through KonfAI Apps."""
+"""Command-line wrapper for running IMPACT-Synth through KonfAI Apps.
+
+Exposes the app operations with synthesis vocabulary: ``synthesize`` / ``eval`` / ``uncertainty`` / ``pipeline``.
+"""
 
 import argparse
 
-from konfai_apps import KonfAIApp
-from konfai_apps.app_repository import get_available_apps_on_hf_repo
-from konfai_apps.cli import add_common_konfai_apps
+from konfai_apps.cli import build_app_cli
 
 IMPACT_SYNTH_KONFAI_REPO = "VBoussot/ImpactSynth"
 
 
-def main():
-    """Parse CLI arguments and run the selected IMPACT-Synth app pipeline."""
-    parser = argparse.ArgumentParser(
-        prog="impact-synth-konfai",
-        description="ImpactSynth (KonfAI app wrapper)",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+def _add_selection(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "model",
-        choices=list(get_available_apps_on_hf_repo(IMPACT_SYNTH_KONFAI_REPO, False)),
-        help="Select which model to use. This determines what is predicted.",
+        help="Which synthesis model to use (determines what is predicted). "
+        "An unknown name is reported when the app is resolved.",
     )
-    parser.add_argument("--ensemble", type=int, default=0, help="Size of model ensemble")
-    parser.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
-    parser.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
 
-    kwargs = add_common_konfai_apps(parser)
 
-    model = kwargs.pop("model")
+def _add_infer_knobs(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--ensemble", type=int, default=0, help="Size of model ensemble.")
+    parser.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
+    parser.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples.")
 
-    konfai_app = KonfAIApp(f"{IMPACT_SYNTH_KONFAI_REPO}:{model}", kwargs.pop("download"), kwargs.pop("force_update"))
-    konfai_app.pipeline(**kwargs)
+
+main = build_app_cli(
+    "impact-synth-konfai",
+    "ImpactSynth (KonfAI app wrapper): whole-body synthetic CT from MR/CBCT.",
+    resolve_app=lambda args: f"{IMPACT_SYNTH_KONFAI_REPO}:{args.model}",
+    add_selection=_add_selection,
+    add_infer_knobs=_add_infer_knobs,
+    resolve_infer=lambda args: {"ensemble": args.ensemble, "ensemble_models": [], "tta": args.tta, "mc": args.mc},
+    infer_command="synthesize",
+)
+
+
+if __name__ == "__main__":
+    main()
