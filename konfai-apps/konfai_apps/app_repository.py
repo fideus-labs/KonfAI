@@ -897,6 +897,28 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
             filename = self._app_name + "/" + filename
         return LocalAppRepositoryFromHF.download(self._repo_id, filename, self._force_update)
 
+    def get_app_filenames(self) -> list[str]:
+        """Return the app files as paths relative to the app folder."""
+        return self._get_filenames()
+
+    def download_files(self, filenames: list[str] | None = None, force_update: bool = True) -> list[Path]:
+        """
+        Download app files into the local Hugging Face cache and return their local paths.
+
+        Parameters
+        ----------
+        filenames:
+            Paths relative to the app folder; the whole app is downloaded when empty or None.
+        force_update:
+            Refresh the files from the Hub instead of reusing cached copies.
+        """
+        paths: list[Path] = []
+        for filename in filenames or self.get_app_filenames():
+            if not filename.startswith(self._app_name):
+                filename = f"{self._app_name}/{filename}"
+            paths.append(LocalAppRepositoryFromHF.download(self._repo_id, filename, force_update))
+        return paths
+
     def get_name(self) -> str:
         return f"{self._repo_id}:{self._app_name}"
 

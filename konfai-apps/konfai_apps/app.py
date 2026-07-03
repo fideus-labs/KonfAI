@@ -35,7 +35,7 @@ import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import AppRepositoryError, KonfAIAppClientError
-from konfai.utils.runtime import MinimalLog, State
+from konfai.utils.runtime import MinimalLog, State, safe_torch_load
 from konfai.utils.utils import SUPPORTED_EXTENSIONS
 from ruamel.yaml import YAML
 
@@ -155,6 +155,17 @@ def run_distributed_app(
             workspace_dir = Path(cast(str | os.PathLike[str], tmp_dir))
         workspace_dir = workspace_dir.resolve()
         user_dir = os.getcwd()
+        # Resolve every caller-supplied path against the caller's directory before chdir'ing
+        # into the workspace: a relative path would otherwise be interpreted inside the
+        # (possibly auto-created and then deleted) temporary workspace.
+        if bound.arguments.get("output") is not None:
+            bound.arguments["output"] = Path(bound.arguments["output"]).resolve()
+        for key in ("inputs", "gt", "mask"):
+            value = bound.arguments.get(key)
+            if value is not None:
+                bound.arguments[key] = [[Path(p).resolve() for p in group] for group in value]
+        if bound.arguments.get("dataset") is not None:
+            bound.arguments["dataset"] = Path(bound.arguments["dataset"]).resolve()
         added_to_syspath = False
         try:
             os.makedirs(workspace_dir, exist_ok=True)
@@ -164,10 +175,10 @@ def run_distributed_app(
                 sys.path.insert(0, cwd)
                 added_to_syspath = True
             with MinimalLog():
-                func(*args, **kwargs)
+                func(*bound.args, **bound.kwargs)
         except KeyboardInterrupt:
             print("\n[KonfAI-Apps] Manual interruption (Ctrl+C)")
-            return
+            raise SystemExit(130) from None
         finally:
             if added_to_syspath and str(workspace_dir) in sys.path:
                 sys.path.remove(str(workspace_dir))
@@ -280,10 +291,12 @@ class KonfAIAppClient(AbstractKonfAIApp):
                         continue
                     if line.startswith("data: "):
                         msg = line[6:]
-                        if msg == "__DONE__" or msg.startswith("__ERROR__"):
+                        if msg == "__DONE__":
                             return
-                        else:
-                            print(msg, flush=True)
+                        if msg.startswith("__ERROR__"):
+                            detail = msg[len("__ERROR__") :].strip()
+                            raise RuntimeError(f"Remote job failed: {detail}" if detail else "Remote job failed")
+                        print(msg, flush=True)
 
         except requests.exceptions.ReadTimeout as e:
             raise RuntimeError(f"Log stream stalled (no data received for {read_timeout}s)") from e
@@ -475,6 +488,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
             output = bound.arguments.pop("output", None)
             files = []
             data = {}
+            dataset_zip_dir: str | None = None
             finished = False
             with ensure_finally_on_signals():
                 try:
@@ -482,9 +496,23 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     for k, v in bound.arguments.items():
                         if k in data_arguments:
                             if v is not None:
+                                group_sizes: list[int] = []
                                 for group in v:
+                                    count = 0
                                     for p in group:
-                                        files.append((k, open(p, "rb")))
+                                        p = Path(p)
+                                        group_files = KonfAIApp._list_supported_files([p]) if p.is_dir() else [p]
+                                        for file_path in group_files:
+                                            files.append((k, open(file_path, "rb")))
+                                            count += 1
+                                    group_sizes.append(count)
+                                data[f"{k}_groups"] = ",".join(str(c) for c in group_sizes)
+                        elif k == "dataset":
+                            if v is not None:
+                                dataset_zip_dir = tempfile.mkdtemp(prefix="konfai_dataset_")
+                                zip_base = os.path.join(dataset_zip_dir, "dataset")
+                                shutil.make_archive(zip_base, "zip", root_dir=str(Path(v)))
+                                files.append(("dataset", open(f"{zip_base}.zip", "rb")))
                         else:
                             data[k] = v
 
@@ -499,6 +527,8 @@ class KonfAIAppClient(AbstractKonfAIApp):
                             data["models"] = ",".join(data["models"])
                         else:
                             del data["models"]
+                    if "gpu" in data:
+                        data["gpu"] = ",".join(str(x) for x in data["gpu"])
                     connect_timeout = 60
                     read_timeout: int = 600
 
@@ -520,6 +550,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     finished = True
                 except (CancelProcess, KeyboardInterrupt):
                     print("[KonfAI-Apps] Interrupted (SIGINT/SIGTERM)")
+                    raise SystemExit(130) from None
                 except requests.RequestException as e:
                     raise RuntimeError(f"Failed to submit job to remote KonfAI server: {e}") from e
                 finally:
@@ -529,8 +560,14 @@ class KonfAIAppClient(AbstractKonfAIApp):
                         except (OSError, ValueError):
                             pass
 
+                    if dataset_zip_dir is not None:
+                        shutil.rmtree(dataset_zip_dir, ignore_errors=True)
+
                     if job_id is not None and not finished:
-                        self.kill_job(job_id)
+                        try:
+                            self.kill_job(job_id)
+                        except (RuntimeError, TimeoutError) as kill_error:
+                            print(f"[KonfAI-Apps] Failed to kill remote job {job_id}: {kill_error}")
 
         return wrapper
 
@@ -615,6 +652,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         config_file: str = "Config.yml",
+        lr: float | None = None,
         tmp_dir: Path | None = None,
     ) -> None:
         pass
@@ -683,13 +721,39 @@ class KonfAIApp(AbstractKonfAIApp):
         return any(lower.endswith("." + ext) for ext in SUPPORTED_EXTENSIONS)
 
     @staticmethod
+    def _supported_suffix(file: Path) -> str:
+        """
+        Return the registered format extension of `file`, with a leading dot.
+
+        For names carrying extra dots (e.g. ``patient.1.nii.gz``) this returns the
+        longest matching supported extension (``.nii.gz``) rather than every dotted
+        segment (``.1.nii.gz``), so the ``Volume_i`` copy keeps a name KonfAI can read.
+
+        Parameters
+        ----------
+        file : Path
+            A file already known to have a supported extension.
+
+        Returns
+        -------
+        str
+            The extension (dot-prefixed); falls back to `file.suffix` if nothing matches.
+        """
+        lower = file.name.lower()
+        matches = [ext for ext in SUPPORTED_EXTENSIONS if lower.endswith("." + ext)]
+        if not matches:
+            return file.suffix
+        return "." + max(matches, key=len)
+
+    @staticmethod
     def _list_supported_files(paths: list[Path]) -> list[Path]:
         """
         Expand a list of input paths into a flat list of supported files.
 
         Each element in `paths` may be:
         - a file: must match supported extensions
-        - a directory: recursively scanned for supported files
+        - a directory: recursively scanned for supported files, listed in
+          sorted path order so that cases pair consistently across groups
 
         Parameters
         ----------
@@ -717,9 +781,7 @@ class KonfAIApp(AbstractKonfAIApp):
                 else:
                     raise FileNotFoundError(f"No supported file found: '{path.name}' is not a supported format.")
             else:
-                for f in path.rglob("*"):
-                    if f.is_file() and KonfAIApp._match_supported(f):
-                        files.append(f)
+                files.extend(sorted(f for f in path.rglob("*") if f.is_file() and KonfAIApp._match_supported(f)))
                 if not files:
                     raise FileNotFoundError(f"No supported files found in directory: '{path}'.")
         return files
@@ -782,7 +844,7 @@ class KonfAIApp(AbstractKonfAIApp):
             shutil.rmtree(dataset_path)
         for i, input_path in enumerate(inputs):
             for idx, file in enumerate(KonfAIApp._list_supported_files(input_path)):
-                suffix = "".join(file.suffixes)
+                suffix = KonfAIApp._supported_suffix(file)
                 KonfAIApp.symlink(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
 
     def _write_inference_stack_to_dataset(self, inputs: list[list[Path]]) -> None:
@@ -807,7 +869,7 @@ class KonfAIApp(AbstractKonfAIApp):
                 reader.ReadImageInformation()
                 n_channels = reader.GetNumberOfComponents()
                 if n_channels > 1:
-                    suffix = "".join(file.suffixes)
+                    suffix = KonfAIApp._supported_suffix(file)
                     KonfAIApp.symlink(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
                 else:
                     raise FileNotFoundError(
@@ -829,7 +891,7 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         for i, gt_path in enumerate(gt):
             for idx, file in enumerate(KonfAIApp._list_supported_files(gt_path)):
-                suffix = "".join(file.suffixes)
+                suffix = KonfAIApp._supported_suffix(file)
                 KonfAIApp.symlink(file, Path(f"./Dataset/P{idx:03d}/Reference_{i}{suffix}"))
 
     def _write_mask_or_default(self, mask: list[list[Path]] | None) -> None:
@@ -857,7 +919,7 @@ class KonfAIApp(AbstractKonfAIApp):
         else:
             for i, mask_path in enumerate(mask):
                 for idx, file in enumerate(KonfAIApp._list_supported_files(mask_path)):
-                    suffix = "".join(file.suffixes)
+                    suffix = KonfAIApp._supported_suffix(file)
                     KonfAIApp.symlink(file, Path(f"./Dataset/P{idx:03d}/Mask_{i}{suffix}"))
 
     @run_distributed_app
@@ -1030,7 +1092,7 @@ class KonfAIApp(AbstractKonfAIApp):
         )
         outputs = []
         inference_stacks = []
-        for f in (output / "Predictions").rglob("*"):
+        for f in sorted((output / "Predictions").rglob("*")):
             if f.is_file() and KonfAIApp._match_supported(f):
                 if f.name == "InferenceStack.mha":
                     inference_stacks.append(f)
@@ -1052,9 +1114,7 @@ class KonfAIApp(AbstractKonfAIApp):
         ``epoch``/``it`` at 0, so ``range(0, epochs)`` runs all fine-tuning epochs with a fresh LR
         schedule.
         """
-        import torch
-
-        state_dict = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)  # nosec B614
+        state_dict = safe_torch_load(checkpoint_path, "cpu")
         if "Model" not in state_dict:
             raise AppRepositoryError(f"Checkpoint '{checkpoint_path}' has no 'Model' weights to fine-tune from.")
         return {"Model": state_dict["Model"]}
@@ -1072,6 +1132,7 @@ class KonfAIApp(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         config_file: str = "Config.yml",
+        lr: float | None = None,
         tmp_dir: Path | None = None,
     ) -> None:
         """
@@ -1133,6 +1194,7 @@ class KonfAIApp(AbstractKonfAIApp):
                     model_config,
                     work_dir / "Checkpoints",
                     work_dir / "Statistics",
+                    lr=lr,
                 )
 
                 produced_dir = work_dir / "Checkpoints" / train_name

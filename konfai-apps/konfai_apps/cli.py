@@ -101,6 +101,24 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     return kwargs
 
 
+def run_download_cli(kwargs: dict[str, Any]) -> None:
+    """Download app files from Hugging Face into the local cache, with minimal console output."""
+    from konfai.utils.runtime import MinimalLog
+
+    from .app_repository import LocalAppRepositoryFromHF
+
+    repository = get_app_repository_info(kwargs["app"], False)
+    if not isinstance(repository, LocalAppRepositoryFromHF):
+        raise SystemExit("'download' only applies to Hugging Face apps (expected 'repo_id:app_name').")
+
+    force_update = not kwargs.get("no_force_update", False)
+    filenames = kwargs.get("files") or repository.get_app_filenames()
+    with MinimalLog():
+        for filename in filenames:
+            repository.download_files([filename], force_update)
+            print(f"[KonfAI-Apps] {filename} is ready.")
+
+
 def main_apps() -> None:
     """Entry point for the `konfai-apps` command-line interface."""
     parser = argparse.ArgumentParser(
@@ -350,6 +368,22 @@ def main_apps() -> None:
     bundle_p.add_argument("--in-channels", type=int, help="Override --onnx input channels (else read from config).")
     bundle_p.add_argument("--output-module", help="Named head to export for --onnx (default: last graph output).")
 
+    download_p = subparsers.add_parser(
+        "download", help="Download KonfAI App files from Hugging Face into the local cache."
+    )
+    download_p.add_argument("app", type=str, help="KonfAI App name, e.g. 'VBoussot/ImpactSynth:AppName'")
+    download_p.add_argument(
+        "files",
+        nargs="*",
+        help="File(s) to download, relative to the app folder. Downloads the whole app when omitted.",
+    )
+    download_p.add_argument(
+        "--no-force-update",
+        "--no_force_update",
+        action="store_true",
+        help="Reuse cached files when present instead of refreshing them from the Hub.",
+    )
+
     parser.add_argument("--version", action="version", version=_package_version())
 
     kwargs = vars(parser.parse_args())
@@ -358,6 +392,10 @@ def main_apps() -> None:
         from konfai_apps.bundle import run_bundle_cli
 
         run_bundle_cli(kwargs)
+        return
+
+    if kwargs.get("command") == "download":
+        run_download_cli(kwargs)
         return
 
     host = kwargs.pop("host")
@@ -384,6 +422,24 @@ def main_apps() -> None:
         konfai_app.fine_tune(**kwargs)
 
 
+def _configure_server_auth_env(auth: str, token: str | None, token_env: str) -> None:
+    """Resolve the bearer token into ``KONFAI_API_TOKEN`` (the variable the server actually reads).
+
+    ``--auth off`` clears it so a leftover ``KONFAI_API_TOKEN`` cannot silently re-enable auth; bearer
+    mode copies the token from ``token_env`` (or ``--token``) into ``KONFAI_API_TOKEN`` so a custom
+    ``--token-env`` is honoured instead of silently disabling authentication.
+    """
+    if auth == "off":
+        os.environ.pop("KONFAI_API_TOKEN", None)
+        return
+    if token:
+        os.environ[token_env] = token
+    resolved = os.environ.get(token_env)
+    if not resolved:
+        raise SystemExit(f"Auth is enabled but no token found. Set {token_env} or pass --token (dev).")
+    os.environ["KONFAI_API_TOKEN"] = resolved
+
+
 def main_apps_server() -> None:
     """Entry point for launching the KonfAI Apps FastAPI server."""
     import uvicorn
@@ -406,11 +462,7 @@ def main_apps_server() -> None:
 
     args = parser.parse_args()
 
-    if args.auth == "bearer":
-        if args.token:
-            os.environ[args.token_env] = args.token
-        if not os.environ.get(args.token_env):
-            raise SystemExit(f"Auth is enabled but no token found. Set {args.token_env} or pass --token (dev).")
+    _configure_server_auth_env(args.auth, args.token, args.token_env)
 
     if not args.apps.exists():
         raise SystemExit(f"Config file not found: {args.apps}")
