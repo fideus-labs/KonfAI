@@ -200,7 +200,8 @@ class Accumulator:
         result = torch.zeros(
             (list(reference.shape[:n]) + list(max([[v.stop for v in patch] for patch in self.patch_slices]))),
             dtype=reference.dtype,
-        ).to(reference.device)
+            device=reference.device,
+        )
         # Overlap blending weights each patch (edge bands < 1 so interior overlaps sum to unity).
         # A voxel covered by fewer patches (a volume border without whole-image padding) would sum
         # to < 1 and come out darkened (x0.5 edges, x0.25 corners), so divide by the accumulated
