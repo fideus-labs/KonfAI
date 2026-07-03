@@ -17,7 +17,7 @@ This installs the core CLI entrypoints:
 Optional extras exposed by the package metadata:
 
 ```bash
-python -m pip install "konfai[imaging]"   # SimpleITK + h5py (most medical imaging workflows)
+python -m pip install "konfai[imaging]"   # all imaging backends: SimpleITK, h5py, pydicom, zarr, ngff-zarr
 python -m pip install "konfai[dicom]"     # pydicom — DICOM series reader
 python -m pip install "konfai[omezarr]"   # zarr + ngff-zarr — OME-Zarr dataset read/write
 python -m pip install "konfai[all]"       # every optional extra at once
@@ -30,16 +30,25 @@ python -m pip install "konfai[dev]"       # test, docs, lint, and server tooling
 | --- | --- | --- |
 | `itk` | `SimpleITK` | reading/writing ITK formats (`.mha`, `.nii.gz`, …) |
 | `hdf5` | `h5py` | HDF5-backed datasets |
-| `imaging` | `SimpleITK`, `h5py` | the common medical-imaging stack (ITK + HDF5) |
+| `imaging` | `SimpleITK`, `h5py`, `pydicom`, `zarr`, `ngff-zarr` | **all four storage backends at once** (ITK + HDF5 + DICOM + OME-Zarr) — the common medical-imaging stack |
 | `dicom` | `pydicom` | DICOM series input — see {doc}`../concepts/imaging-formats` |
 | `omezarr` | `zarr`, `ngff-zarr` | OME-Zarr / OME-NGFF input — see {doc}`../concepts/imaging-formats` |
 | `tensorboard` | `tensorboard` | TensorBoard logging |
 | `monitoring` | `nvidia-ml-py` | GPU monitoring |
 | `vtk` | `vtk` | VTK-dependent rendering and mesh features |
-| `lpips` | `lpips` | LPIPS perceptual metrics |
+| `lpips` | `lpips` | the `LPIPS` perceptual metric |
+| `ssim` | `scikit-image` | the `SSIM` metric |
+| `fid` | `scipy`, `torchvision` | the `FID` metric |
+| `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export (experimental; see {doc}`../reference/python-api`) |
 | `cluster` | `submitit` | `konfai-cluster` job submission |
 | `all` | all of the above | install every optional extra at once |
 | `dev` | pytest, ruff, sphinx, fastapi, … | local development, tests, docs, and the app server |
+
+```{tip}
+`konfai[imaging]` already covers DICOM and OME-Zarr — you do **not** need to add
+`[dicom]` or `[omezarr]` on top of it. See {doc}`../reference/components/storage-backends`
+for which format token maps to which backend.
+```
 
 Install the standalone apps package separately when you need packaged app
 execution:

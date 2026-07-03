@@ -1,10 +1,163 @@
+/* The logo is the full KonfAI wordmark (mark + "KonfAI"), so hide the theme's
+ * duplicate text label and size the transparent lockup for the header. */
 .sy-head-brand img {
-    height: 44px;
+    height: 30px;
     width: auto;
+}
+
+.sy-head-brand strong {
+    display: none;
 }
 
 @media (max-width: 768px) {
     .sy-head-brand img {
-        height: 36px;
+        height: 26px;
     }
+}
+
+/* ------------------------------------------------------------------ *
+ * Landing page (docs/source/index.rst)
+ * Self-contained hero + navigation cards; works in light and dark.
+ * ------------------------------------------------------------------ */
+
+:root {
+    --konfai-accent: #14b8a6;      /* teal-500, matches the logo */
+    --konfai-accent-deep: #0d9488; /* teal-600 */
+    --konfai-hair: rgba(128, 128, 128, 0.22);
+    --konfai-hair-soft: rgba(128, 128, 128, 0.10);
+}
+
+.konfai-landing {
+    margin: 0 0 2.5rem;
+}
+
+.konfai-hero {
+    padding: 0.25rem 0 1.75rem;
+    border-bottom: 1px solid var(--konfai-hair);
+    margin-bottom: 2rem;
+}
+
+.konfai-eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--konfai-accent);
+    margin: 0 0 0.75rem;
+}
+
+.konfai-tagline {
+    font-size: 1.18rem;
+    line-height: 1.6;
+    max-width: 46rem;
+    margin: 0 0 1.6rem;
+    opacity: 0.92;
+}
+
+.konfai-cta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.7rem;
+}
+
+.konfai-btn {
+    display: inline-block;
+    padding: 0.6rem 1.15rem;
+    border-radius: 0.6rem;
+    font-weight: 600;
+    font-size: 0.95rem;
+    text-decoration: none !important;
+    transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+    border: 1px solid transparent;
+}
+
+.konfai-btn:hover {
+    transform: translateY(-1px);
+}
+
+.konfai-btn-primary {
+    background: var(--konfai-accent);
+    color: #04201d !important;
+}
+
+.konfai-btn-primary:hover {
+    background: var(--konfai-accent-deep);
+}
+
+.konfai-btn-ghost {
+    border-color: var(--konfai-hair);
+    color: inherit !important;
+}
+
+.konfai-btn-ghost:hover {
+    border-color: var(--konfai-accent);
+    background: var(--konfai-hair-soft);
+}
+
+.konfai-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: 1rem;
+    margin: 0 0 2.25rem;
+}
+
+.konfai-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 1.15rem 1.2rem;
+    border: 1px solid var(--konfai-hair);
+    border-radius: 0.85rem;
+    text-decoration: none !important;
+    color: inherit !important;
+    background: transparent;
+    transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+}
+
+.konfai-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--konfai-accent);
+    background: var(--konfai-hair-soft);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.konfai-card-ico {
+    font-size: 1.6rem;
+    line-height: 1;
+}
+
+.konfai-card-title {
+    font-weight: 700;
+    font-size: 1.05rem;
+}
+
+.konfai-card-desc {
+    font-size: 0.9rem;
+    line-height: 1.5;
+    opacity: 0.72;
+}
+
+.konfai-arch {
+    margin: 0;
+    padding: 1.4rem 1.2rem 1.1rem;
+    border: 1px solid var(--konfai-hair);
+    border-radius: 0.85rem;
+    background: var(--konfai-hair-soft);
+}
+
+.konfai-arch svg {
+    display: block;
+    width: 100%;
+    max-width: 52rem;
+    height: auto;
+    margin: 0 auto;
+}
+
+.konfai-arch figcaption {
+    margin: 0.9rem auto 0;
+    max-width: 44rem;
+    text-align: center;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    opacity: 0.7;
 }

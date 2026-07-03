@@ -27,9 +27,19 @@ exclude_patterns = ["_build", "build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "shibuya"
 html_title = "KonfAI documentation"
-html_logo = os.path.abspath("../../logo.png")
 html_favicon = os.path.abspath("../../logo.png")
 html_css_files = ["custom.css"]
+
+# The KonfAI logo is a full wordmark (mark + "KonfAI"). We use transparent-
+# background versions of it derived from logo.png: the original mint art for the
+# dark header, and a deep-teal recolor for the light header (mint is too light on
+# white). shibuya runs pathto(src, 1), so paths are relative to the output root
+# (include the _static/ prefix; depth is adjusted per page). The theme's
+# duplicate "KonfAI" text label is hidden in custom.css.
+html_theme_options = {
+    "light_logo": "_static/konfai-logo-light.png",
+    "dark_logo": "_static/konfai-logo-dark.png",
+}
 
 myst_enable_extensions = [
     "deflist",

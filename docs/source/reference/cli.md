@@ -36,27 +36,55 @@ Use `konfai` when you are still designing a workflow directly from YAML.
 | `-q`, `--quiet` | Reduce console output. |
 | `-tb`, `--tensorboard` | Launch TensorBoard. |
 
+### Default config file per command
+
+If `-c/--config` is omitted, each command falls back to a **fixed filename in the
+current directory**:
+
+| Command | Default config | Root key |
+| --- | --- | --- |
+| `TRAIN` / `RESUME` | `./Config.yml` | `Trainer:` |
+| `PREDICTION` | `./Prediction.yml` | `Predictor:` |
+| `EVALUATION` | `./Evaluation.yml` | `Evaluator:` |
+
+```{note}
+The `--config` help text mentions `Train.yml`, but the real TRAIN default is
+**`./Config.yml`**. Also remember that **reading a config rewrites it on disk** —
+after a run your YAML will contain the resolved defaults. See
+{doc}`../concepts/configuration`.
+```
+
 ### Command-specific options
 
 `TRAIN`
 
-- `--checkpoints-dir`
-- `--statistics-dir`
+- `--checkpoints-dir` / `--checkpoints_dir` (default `./Checkpoints/`)
+- `--statistics-dir` / `--statistics_dir` (default `./Statistics/`)
 
 `RESUME`
 
-- `--model`
-- `--checkpoints-dir`
-- `--statistics-dir`
+- `--model` — checkpoint path to resume from (**required**)
+- `--lr` — override the learning rate on resume (omit to keep the checkpoint LR)
+- `-checkpoints-dir` / `-statistics-dir` — note the **single leading dash** here
+  (an inconsistency with TRAIN's `--` forms; both parse, but invoke them exactly
+  as written)
 
 `PREDICTION`
 
-- `--models`
-- `--predictions-dir`
+- `--models` — one or more checkpoint paths (**required**); multiple = ensemble
+- `--predictions-dir` / `--predictions_dir` (default `./Predictions/`)
 
 `EVALUATION`
 
-- `--evaluations-dir`
+- `--evaluations-dir` / `--evaluations_dir` (default `./Evaluations/`)
+
+```{note}
+**Device selection quirks.** The CLI default is **CPU** (`--gpu` defaults to an
+empty list); pass `--gpu 0` to use a GPU. Valid `--gpu` ids are frozen at startup
+from the visible CUDA devices, so an id that isn't visible is rejected by argparse.
+`--cpu` must be `> 0`. `--version` works on the root parser (`konfai --version`)
+but not on a subcommand.
+```
 
 ## `konfai-apps`
 
@@ -158,8 +186,17 @@ It adds job-submission options such as:
 
 The cluster command depends on the optional `cluster` extra.
 
+## ONNX export is not a subcommand
+
+`konfai/export.py` can export a trained model to ONNX (+ a manifest) for the
+planned `konfai-rs` portable-inference path, but it is a **Python-API-only,
+experimental** feature — there is no `konfai export` subcommand. See
+{doc}`python-api` and {doc}`stability`.
+
 ## See also
 
+- {doc}`components/index` — the components a config can reference
 - {doc}`environment`
-- {doc}`app-server-api`
+- {doc}`app-server-api` — the `konfai-apps-server` HTTP contract
+- {doc}`python-api` — the `konfai_apps` Python API
 - {doc}`../usage/apps`

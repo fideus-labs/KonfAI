@@ -33,7 +33,7 @@ From PyPI:
 
 .. code-block:: bash
 
-   python -m pip install konfai
+   python -m pip install "konfai[imaging]"
 
 From source:
 
@@ -41,7 +41,13 @@ From source:
 
    git clone https://github.com/vboussot/KonfAI.git
    cd KonfAI
-   python -m pip install -e .
+   python -m pip install -e ".[imaging]"
+
+.. note::
+
+   The ``[imaging]`` extra pulls in SimpleITK, which is **required to read the
+   ``.mha`` demo data** below. Plain ``pip install konfai`` will train-fail with
+   an import error on the first run.
 
 Verify the install:
 
@@ -55,6 +61,14 @@ What to keep in mind before you start:
 - `Config.yml` is the training workflow
 - `Prediction.yml` writes model outputs to disk
 - `Evaluation.yml` compares those saved outputs against references
+
+.. warning::
+
+   **KonfAI rewrites your config.** After any run, ``Config.yml`` will contain
+   the resolved default values that KonfAI materialised (this is expected and is
+   how a run leaves a fully-reproducible config on disk). ``None`` is written as
+   the literal string ``None``. If you see a git diff on your YAML after a run,
+   nothing is broken — see :doc:`concepts/configuration`.
 
 Download the demo dataset
 -------------------------
@@ -119,10 +133,19 @@ Run prediction
 Use one checkpoint from ``Checkpoints/SEG_BASELINE``. ``Prediction.yml`` defines
 which outputs are written and under which group names.
 
+First list what training produced, then substitute a real filename for
+``<checkpoint>.pt``:
+
+.. code-block:: bash
+
+   ls Checkpoints/SEG_BASELINE/
+
 .. code-block:: bash
 
    konfai PREDICTION -y --gpu 0 --config Prediction.yml \
      --models Checkpoints/SEG_BASELINE/<checkpoint>.pt
+
+Pass several checkpoints to ``--models`` to run an ensemble.
 
 Prediction writes:
 

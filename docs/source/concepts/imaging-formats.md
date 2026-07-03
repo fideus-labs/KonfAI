@@ -1,15 +1,3 @@
----
-type: reference
-title: Imaging Format Readers
-created: 2026-06-27
-tags:
-  - dicom
-  - ome-zarr
-  - imaging
-related:
-  - '[[Datasets]]'
----
-
 # Imaging Format Readers
 
 Beyond the SimpleITK formats handled by `konfai/utils/ITK.py`, KonfAI ships two

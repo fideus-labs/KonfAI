@@ -1,16 +1,3 @@
----
-type: reference
-title: Declarative YAML Model Graphs
-created: 2026-06-27
-tags:
-  - models
-  - yaml
-  - registry
-related:
-  - '[[Model-Graph]]'
-  - '[[Datasets]]'
----
-
 # Declarative YAML model graphs
 
 `konfai.utils.model_builder` builds a full `konfai.network.network.Network`.
