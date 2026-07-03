@@ -580,6 +580,8 @@ class KonfAIAppClient(AbstractKonfAIApp):
         ensemble_models: list[str] = [],
         tta: int = 0,
         mc: int = 0,
+        patch_size: list[int] | None = None,
+        batch_size: int | None = None,
         uncertainty: bool = False,
         prediction_file: str = "Prediction.yml",
         gpu: list[int] = [],
@@ -627,6 +629,8 @@ class KonfAIAppClient(AbstractKonfAIApp):
         ensemble_models: list[str] = [],
         tta: int = 0,
         mc: int = 0,
+        patch_size: list[int] | None = None,
+        batch_size: int | None = None,
         prediction_file: str = "Prediction.yml",
         mask: list[list[Path]] | None = None,
         evaluation_file: str = "Evaluation.yml",
@@ -931,6 +935,8 @@ class KonfAIApp(AbstractKonfAIApp):
         ensemble_models: list[str] = [],
         tta: int = 0,
         mc: int = 0,
+        patch_size: list[int] | None = None,
+        batch_size: int | None = None,
         uncertainty: bool = False,
         prediction_file: str = "Prediction.yml",
         gpu: list[int] = cuda_visible_devices(),
@@ -962,7 +968,15 @@ class KonfAIApp(AbstractKonfAIApp):
 
             available_vram = min(available_vram_per_device)
         models_path = self.app_repository.install_inference(
-            tta, ensemble, ensemble_models, mc, uncertainty, prediction_file, available_vram
+            tta,
+            ensemble,
+            ensemble_models,
+            mc,
+            uncertainty,
+            prediction_file,
+            available_vram,
+            forced_patch_size=patch_size,
+            forced_batch_size=batch_size,
         )
         from konfai.predictor import predict
 
@@ -1050,6 +1064,8 @@ class KonfAIApp(AbstractKonfAIApp):
         ensemble_models: list[str] = [],
         tta: int = 0,
         mc: int = 0,
+        patch_size: list[int] | None = None,
+        batch_size: int | None = None,
         prediction_file: str = "Prediction.yml",
         mask: list[list[Path]] | None = None,
         evaluation_file: str = "Evaluation.yml",
@@ -1077,18 +1093,20 @@ class KonfAIApp(AbstractKonfAIApp):
         - runs uncertainty only if ``uncertainty=True``
         """
         self.infer(
-            inputs,
-            output / "Predictions",
-            ensemble,
-            ensemble_models,
-            tta,
-            mc,
-            uncertainty,
-            prediction_file,
-            gpu,
-            cpu,
-            quiet,
-            tmp_dir,
+            inputs=inputs,
+            output=output / "Predictions",
+            ensemble=ensemble,
+            ensemble_models=ensemble_models,
+            tta=tta,
+            mc=mc,
+            patch_size=patch_size,
+            batch_size=batch_size,
+            uncertainty=uncertainty,
+            prediction_file=prediction_file,
+            gpu=gpu,
+            cpu=cpu,
+            quiet=quiet,
+            tmp_dir=tmp_dir,
         )
         outputs = []
         inference_stacks = []
