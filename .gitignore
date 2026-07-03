@@ -12,8 +12,7 @@ examples/Synthesis/Task_1
 .pytest_cache
 .vscode
 .mypy_cache
-apps/impact_reg
-apps/impact_seg
 docs/build/
 .codex
 docs/_build/
+build/

@@ -43,34 +43,44 @@ python -m pip install -e apps/impact_synth
 
 ## ⚙️ Usage
 
-Perform image-to-sCT synthesis:
+The CLI is organised into sub-commands, mirroring the KonfAI Apps operations:
+
+| Sub-command | Purpose |
+|---|---|
+| `synthesize` | Generate the synthetic CT (inference). |
+| `eval` | Evaluate a synthetic CT against a reference CT. |
+| `uncertainty` | Estimate uncertainty (TTA / MC-dropout / ensemble spread). |
+| `pipeline` | Run synthesis, then evaluation and uncertainty in one command. |
+
+Generate a synthetic CT:
 
 ```bash
-impact-synth-konfai MR -i path/to/input.nii.gz -o ./Output/
+impact-synth-konfai synthesize MR -i path/to/input.nii.gz -o ./Output/
 ```
 
-### Optional arguments
+Evaluate against a reference CT, or run everything at once:
+
+```bash
+impact-synth-konfai eval MR -i input.nii.gz --gt reference_ct.nii.gz -o ./Output/
+impact-synth-konfai pipeline CBCT -i patient01.nii.gz --gt ct.nii.gz -o patient01 --gpu 0 --tta 2 --ensemble 5 -uncertainty
+```
+
+### Arguments
 
 | Flag | Description | Default |
 |------|--------------|----------|
-| `MODEL` | Input modality / model name on Hugging Face | `MR` or  `CBCT`|
-| `-i`, `--input` | Path to the input file | *required* |
-| `-o`, `--output` | Path to save the synthetic CT | `./Output/` |
-| `--gt` | Path to reference CT (ground truth), if available (enables evaluation workflows) | *unset* |
-| `--mask` | Path to region-of-interest mask used for evaluation and uncertainty analysis | *unset* |
-| `--tta` | Number of test-time augmentations (TTA) | `2` |
-| `--ensemble` | Number of models to ensemble | `5` |
-| `--mc` | Monte Carlo dropout samples for uncertainty | `1` |
-| `-uncertainty` | Save uncertainty maps | `False` |
-| `--gpu` | GPU list (e.g. `0` or `0,1`) | CPU if unset |
-| `--cpu` | Number of CPU cores (if no GPU) | `1` |
+| `MODEL` | Model name on Hugging Face (`MR` or `CBCT`) — determines what is predicted | *required* |
+| `-i`, `--inputs` | Input file(s) or a dataset directory | *required* |
+| `-o`, `--output` | Output directory | `./Output/` |
+| `--ensemble` | Number of models to ensemble (`synthesize` / `pipeline`) | `0` |
+| `--tta` | Number of test-time augmentations (`synthesize` / `pipeline`) | `0` |
+| `--mc` | Monte Carlo dropout samples (`synthesize` / `pipeline`) | `0` |
+| `-uncertainty` | Also write the inference stack (`synthesize` / `pipeline`) | `False` |
+| `--gt` | Reference CT(s) — required by `eval`, optional in `pipeline` | *unset* |
+| `--mask` | Evaluation mask(s) (`eval` / `pipeline`) | *unset* |
+| `--gpu` | GPU id(s), e.g. `0` or `0 1` | CPU if unset |
+| `--cpu` | Number of CPU worker processes | *unset* |
 | `-q`, `--quiet` | Suppress console output | `False` |
-
-### Example
-
-```bash
-impact-synth-konfai CBCT -i patient01.nii.gz -o patient01 --gpu 0 --tta 2 --ensemble 5 -uncertainty
-```
 
 ---
 
@@ -98,9 +108,23 @@ If you use **IMPACT-Synth-KonfAI** in your work, please cite:
 
 ---
 
+## ⚡ Performance & VRAM
+
+Benchmarked on an **NVIDIA RTX PRO 5000 (24 GB)**, synthetic data, patch `[1, 512, 512]`, 5-model ensemble (`Concat`). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+
+| Free VRAM | Batch (auto) | Peak VRAM |
+|:--|:--|:--|
+| 8 GB  | 16 | ~7.6 GB |
+| 16 GB | 28 | ~15 GB |
+| 24 GB | 48 | ~21.7 GB |
+
+Measured peak VRAM: batch 8 → 4.0 GB · 16 → 7.6 GB · 24 → 12.8 GB · 32 → 17.5 GB · 48 → 21.7 GB. Inference ≈ **25 s / case** on the benchmark volume (scales with the case size).
+
+---
+
 ## 🔗 Links
 
-- 🤗 **Model Hub:** [huggingface.co/VBoussot/IMPACT-Synth](https://huggingface.co/VBoussot/ImpactSynth)  
+- 🤗 **Model Hub:** [huggingface.co/VBoussot/ImpactSynth](https://huggingface.co/VBoussot/ImpactSynth)  
 - 📦 **PyPI Package:** [pypi.org/project/impact_synth_konfai](https://pypi.org/project/impact_synth_konfai)  
 
 ---

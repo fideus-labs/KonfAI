@@ -78,7 +78,7 @@ Install and run your first workflow:
 ```bash
 git clone https://github.com/vboussot/KonfAI.git
 cd KonfAI
-python -m pip install -e .
+python -m pip install -e ".[imaging]"   # [imaging] pulls SimpleITK/h5py, required to read the .mha demo data
 cd examples/Segmentation
 
 python -m pip install -U "huggingface_hub[cli]"
