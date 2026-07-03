@@ -2,6 +2,7 @@ name: konfai_apps_ci
 
 on:
   push:
+    branches: [main]
     paths:
       - ".github/workflows/konfai_apps_ci.yml"
       - "konfai-apps/**"
