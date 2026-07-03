@@ -176,12 +176,17 @@ class Accumulator:
         self.patch_size = patch_size
         self.patch_combine = patch_combine
         self.batch = batch
+        self._filled = 0
 
     def add_layer(self, index: int, layer: torch.Tensor) -> None:
+        if self._layer_accumulator[index] is None:
+            self._filled += 1
         self._layer_accumulator[index] = layer
 
     def is_full(self) -> bool:
-        return len(self.patch_slices) == len([v for v in self._layer_accumulator if v is not None])
+        # O(1): a running counter avoids re-scanning every slot after each added patch
+        # (the completion check ran once per patch, i.e. O(P^2) per case).
+        return self._filled == len(self.patch_slices)
 
     def assemble(self) -> torch.Tensor:
         n = 2 if self.batch else 1
@@ -224,6 +229,7 @@ class Accumulator:
         result = result[tuple([slice(None, None)] + [slice(0, s) for s in self.shape])]
 
         self._layer_accumulator.clear()
+        self._filled = 0
         return result
 
 
