@@ -257,9 +257,15 @@ class Measure:
         def reset_loss(self) -> None:
             self._loss.clear()
 
-        def add(self, weight: float, value: torch.Tensor | tuple[torch.Tensor, float]) -> None:
+        def add(self, weight: float, value: torch.Tensor | tuple[torch.Tensor, float | dict[str, float]]) -> None:
             if isinstance(value, tuple):
                 loss_value, true_value = value
+                if isinstance(true_value, dict):
+                    # Per-label/landmark metrics (Dice, TRE) report a dict; the logging windows
+                    # nan-mean ``_values``, so store a scalar summary here while the tensor still
+                    # carries the metric. Absent labels are NaN and are ignored by the mean.
+                    numeric = [v for v in true_value.values() if isinstance(v, int | float)]
+                    true_value = float(np.nanmean(numeric)) if numeric else float("nan")
             else:
                 loss_value = value
                 true_value = value.item()
@@ -272,13 +278,15 @@ class Measure:
             return self._loss[-1] * self._weight[-1] if len(self._loss) else torch.zeros((1), requires_grad=True)
 
         def get_loss(self) -> torch.Tensor:
-            return (
-                torch.stack(
-                    [w * loss_value for w, loss_value in zip(self._weight, self._loss, strict=False)], dim=0
-                ).mean(dim=0)
-                if len(self._loss)
-                else torch.zeros((1), requires_grad=True)
-            )
+            if not len(self._loss):
+                return torch.zeros((1), requires_grad=True)
+            # ``_weight`` accumulates across iterations for the logging windows while ``_loss`` is
+            # reset every iteration; align the current losses with their own (trailing) weights so a
+            # loss-weight scheduler drives the gradient instead of the first weight ever recorded.
+            weights = self._weight[-len(self._loss) :]
+            return torch.stack(
+                [w * loss_value for w, loss_value in zip(weights, self._loss, strict=False)], dim=0
+            ).mean(dim=0)
 
         def __len__(self) -> int:
             return len(self._loss)
@@ -295,6 +303,7 @@ class Measure:
                 output_group, model_classname
             )
         self._loss: dict[int, dict[str, Measure.Loss]] = {}
+        self.scaler: torch.amp.GradScaler | None = None
 
     def init(self, model: torch.nn.Module, group_dest: list[str]) -> None:
         outputs_group_rename = {}
@@ -326,7 +335,10 @@ class Measure:
                             "and correctly loaded from the dataset.",
                         )
                 for criterion in self.outputs_criterions[output_group][target_group]:
-                    if getattr(self.outputs_criterions[output_group][target_group][criterion], "accepts_init", False):
+                    # ``criterion`` is the criterion module (dict key); the flag lives on it, not on
+                    # the CriterionsAttr value — indexing the dict here would always read False and
+                    # silently skip graph-rewiring criteria such as KLDivergence.
+                    if getattr(criterion, "accepts_init", False):
                         outputs_group_rename[output_group] = criterion.init(model, output_group, target_group)
 
         outputs_criterions_bak = self.outputs_criterions.copy()
@@ -403,7 +415,10 @@ class Measure:
                                 loss_value = v.get_last_loss()
                                 loss = loss.to(loss_value.device) + loss_value
                             loss = loss / nb_patch
-                            loss.backward()
+                            if self.scaler is not None:
+                                self.scaler.scale(loss).backward()
+                            else:
+                                loss.backward()
 
     def get_loss(self) -> list[torch.Tensor]:
         loss: dict[int, torch.Tensor] = {}
@@ -652,7 +667,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
             elif isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
                 if module.weight is not None:
-                    torch.nn.init.normal_(module.weight, 0.0, std=init_gain)
+                    # Normalisation gamma must centre on 1, not 0 (the pix2pix convention): a gamma
+                    # near 0 scales the normalised activations to ~0 and stalls early training.
+                    torch.nn.init.normal_(module.weight, 1.0, std=init_gain)
                 if module.bias is not None:
                     torch.nn.init.constant_(module.bias, 0.0)
 
@@ -667,8 +684,12 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                 branchs[str(i)] = sinput
 
             out = inputs[0]
-            tmp = []
+            tmp: list[int | str] = []
             for name, module in self.items():
+                # Reset per module: ``tmp`` tracks out_branches a nested sibling already filled via
+                # inner-match. Kept across siblings, a later sibling sharing that out_branch would skip
+                # the fallback below and its output would be silently dropped.
+                tmp = []
                 if self._modulesArgs[name].training is None or (
                     not (self._modulesArgs[name].training and self._training == NetState.PREDICTION)
                     and not (not self._modulesArgs[name].training and self._training == NetState.TRAIN)
@@ -962,6 +983,7 @@ class Network(ModuleArgsDict, ABC):
         state_dict: dict[str, dict[str, torch.Tensor] | int],
         init: bool = True,
         ema: bool = False,
+        override_lr: float | None = None,
     ):
         if init:
             self.apply(
@@ -999,9 +1021,7 @@ class Network(ModuleArgsDict, ABC):
                     model_state_dict[alias] = model_state_dict_tmp[alias]
             self.load_state_dict(model_state_dict)
         if f"{self.get_name()}_optimizer_state_dict" in state_dict and self.optimizer:
-            last_lr = self.optimizer.param_groups[0]["lr"]
             self.optimizer.load_state_dict(state_dict[f"{self.get_name()}_optimizer_state_dict"])
-            self.optimizer.param_groups[0]["lr"] = last_lr
         if f"{self.get_name()}_it" in state_dict:
             _it = state_dict.get(f"{self.get_name()}_it")
             if isinstance(_it, int):
@@ -1011,9 +1031,23 @@ class Network(ModuleArgsDict, ABC):
             if isinstance(_nb_lr_update, int):
                 self._nb_lr_update = _nb_lr_update
 
+        if override_lr is not None and self.optimizer is not None:
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = override_lr
+                param_group["initial_lr"] = override_lr
+
         for scheduler in self.schedulers:
-            if scheduler.last_epoch == -1:
-                scheduler.last_epoch = self._nb_lr_update
+            sched: Any = scheduler
+            if override_lr is not None:
+                if hasattr(sched, "base_lrs"):
+                    sched.base_lrs = [override_lr for _ in sched.base_lrs]
+                if hasattr(sched, "initial_lr"):
+                    sched.initial_lr = override_lr
+                sched.last_epoch = 0
+                if hasattr(sched, "_last_lr"):
+                    sched._last_lr = [override_lr for _ in sched._last_lr]
+            else:
+                sched.last_epoch = self._nb_lr_update
         self.initialized()
 
     def _compute_channels_trace(
@@ -1102,6 +1136,8 @@ class Network(ModuleArgsDict, ABC):
             self.patch.init(f"{konfai_root()}.Model.{key}.Patch")
         if state != State.PREDICTION:
             self.scaler = torch.amp.GradScaler("cuda", enabled=autocast)
+            if self.measure is not None:
+                self.measure.scaler = self.scaler
             if self.optimizerLoader:
                 self.optimizer = self.optimizerLoader.get_optimizer(key, self.parameters(False))
                 self.optimizer.zero_grad()

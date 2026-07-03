@@ -740,16 +740,6 @@ class CycleGanDiscriminator(network.Network):
             out_branch=[1],
         )
 
-    def initialized(self):
-        self["Discriminator_A"]["Sample"].set_measure(
-            self.measure,
-            ["Discriminator.Discriminator_A.Head.Flatten:None:PatchGanLoss"],
-        )
-        self["Discriminator_B"]["Sample"].set_measure(
-            self.measure,
-            ["Discriminator.Discriminator_B.Head.Flatten:None:PatchGanLoss"],
-        )
-
 
 class CycleGanGeneratorV1(network.Network):
     def __init__(

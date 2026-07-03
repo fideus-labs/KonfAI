@@ -362,6 +362,14 @@ class DDPM(network.Network):
         attention: bool = False,
         dim: int = 3,
     ) -> None:
+        # Experimental / not currently runnable: the time-embedding module is wired with a single
+        # input but its forward needs two, and it expects a [0, 1] fraction while the graph feeds
+        # integer timesteps — so no forward pass succeeds. Fail fast with a clear message instead of
+        # an opaque crash deep in the graph, until the time-conditioning is fixed and validated.
+        raise NotImplementedError(
+            "DDPM is experimental and not currently runnable (its time-embedding wiring is broken and "
+            "no forward pass succeeds). Do not select it in a config until it is fixed."
+        )
         super().__init__(
             in_channels=1,
             optimizer=optimizer,

@@ -245,18 +245,29 @@ class SSIM(MaskedLoss):
         structural_similarity = _require_optional(
             "skimage.metrics", criterion="SSIM", extra="ssim"
         ).structural_similarity
-        return structural_similarity(
-            x[0][0].detach().cpu().numpy(),
-            y[0][0].cpu().numpy(),
+        value = structural_similarity(
+            x.detach().cpu().numpy(),
+            y.detach().cpu().numpy(),
             data_range=dynamic_range,
+            channel_axis=0,
             gradient=False,
             full=False,
         )
+        return x.new_tensor(float(value))
 
     def __init__(self, dynamic_range: float | None = None) -> None:
         _require_optional("skimage.metrics", criterion="SSIM", extra="ssim")
         dynamic_range = dynamic_range if dynamic_range else 1024 + 3000
         super().__init__(partial(SSIM._loss, dynamic_range), True)
+
+    def forward(
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+    ) -> tuple[torch.Tensor, float]:
+        if len(targets) == 1:
+            targets = (targets[0], torch.ones_like(targets[0], dtype=torch.uint8))
+        return super().forward(output, *targets)
 
 
 class LPIPS(MaskedLoss):
@@ -316,7 +327,9 @@ class Dice(Criterion):
         target = F.interpolate(targets[0], output.shape[2:], mode="nearest")
         result = {}
         loss = torch.tensor(0, dtype=torch.float32).to(output.device)
-        labels = labels if labels is not None else torch.unique(target)
+        if labels is None:
+            labels = [int(label) for label in torch.unique(target) if int(label) != 0]
+        count = 0
         for label in labels:
             tp = target == label
             if tp.any().item():
@@ -326,10 +339,13 @@ class Dice(Criterion):
                     pp = output == label
                 loss_tmp = Dice.dice_per_channel(pp.float(), tp.float())
                 loss += loss_tmp
+                count += 1
                 result[label] = loss_tmp.item()
             else:
                 result[label] = np.nan
-        return 1 - loss / len(labels), result
+        if count == 0:
+            return loss, result
+        return 1 - loss / count, result
 
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
@@ -338,9 +354,10 @@ class Dice(Criterion):
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is not None:
+            mask = torch.where(mask == 1, 1, 0)
             return self.loss(
-                (output * torch.where(targets[1] == 1, 1, 0)).to(torch.uint8),
-                (targets[0] * torch.where(targets[1] == 1, 1, 0)).to(torch.uint8),
+                output * mask.to(output.dtype),
+                targets[0] * mask.to(targets[0].dtype),
             )
         else:
             return self.loss(output, targets[0])
@@ -571,9 +588,9 @@ class PerceptualLoss(Criterion):
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
         if len(output.shape) == 5 and len(self.shape) == 2:
             for i in range(output.shape[2]):
-                loss = loss + self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets]) / output.shape[2]
+                loss = loss + self._compute(output[:, :, i, ...], *[t[:, :, i, ...] for t in targets]) / output.shape[2]
         else:
-            loss = self._compute(output, targets)
+            loss = self._compute(output, *targets)
         return loss.to(output)
 
 
@@ -1409,7 +1426,12 @@ class Variance(Criterion):
         return self.name
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        return output.float().var(1).mean(), output.float().var(1).mean().item()
+        output = output.float()
+        if output.shape[1] > 1:
+            variance = output.var(1).mean()
+        else:
+            variance = torch.zeros((), device=output.device, dtype=output.dtype)
+        return variance, variance.item()
 
 
 class Mean(Criterion):

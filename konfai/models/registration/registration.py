@@ -42,6 +42,13 @@ class VoxelMorph(network.Network):
         nb_batch_per_step: int = 1,
         rigid: bool = False,
     ):
+        if dim != 2:
+            # Experimental: SpatialTransformer / ResizeTransform / VecInt are 2-D-hardcoded, so the
+            # 3-D default (dim=3, shape=[192, 192, 192]) crashes at forward. Fail fast with a clear
+            # message until the warping components are made ndim-generic.
+            raise NotImplementedError(
+                f"VoxelMorph currently supports dim=2 only (its warping components are 2-D-hardcoded); got dim={dim}."
+            )
         super().__init__(
             in_channels=channels[0],
             optimizer=optimizer,
