@@ -26,8 +26,10 @@ from unittest.mock import MagicMock  # noqa: E402
 
 import torch  # noqa: E402
 
+import konfai.utils.dataset as dataset_module  # noqa: E402
 from konfai.data.patching import Accumulator  # noqa: E402
 from konfai.predictor import ModelComposite  # noqa: E402
+from konfai.utils.dataset import Attribute, Dataset  # noqa: E402
 
 
 def test_accumulator_is_full_counts_without_rescanning():
@@ -80,3 +82,47 @@ def test_ensemble_reads_each_checkpoint_once_across_batches():
     mc.load([Path("/other.pt")])
     assert 1 not in mc._state_cache and 2 not in mc._state_cache
     assert mc._state_cache.get(0) == {"w": "/other.pt"}
+
+
+def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
+    """P4: the header read is cached per (group, name); results are copies (no aliasing)."""
+    ds = Dataset.__new__(Dataset)
+    ds.is_directory = False
+    ds.filename = "/fake/ds"
+    ds.file_format = "sitk"
+    ds.level = 0
+    ds._names_cache = {}
+    ds._infos_cache = {}
+
+    opens = {"n": 0}
+
+    class _FakeFile:
+        def __init__(self, *args, **kwargs):
+            opens["n"] += 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_infos(self, groups, name):
+            return [4, 5, 6], Attribute({"Spacing": "1.0 1.0 1.0"})
+
+    monkeypatch.setattr(dataset_module.Dataset, "File", _FakeFile)
+
+    first = ds.get_infos("g", "n")
+    assert opens["n"] == 1
+    second = ds.get_infos("g", "n")
+    assert opens["n"] == 1, "second call must be served from cache, not re-open the file"
+    assert first[0] == second[0] == [4, 5, 6]
+
+    # Copies, not aliases: mutating a returned result must not poison the cache.
+    first[0].append(999)
+    third = ds.get_infos("g", "n")
+    assert third[0] == [4, 5, 6]
+
+    # A write invalidates the cache (mirrors get_names).
+    ds._infos_cache.clear()  # write() calls this
+    ds.get_infos("g", "n")
+    assert opens["n"] == 2, "after invalidation the header is read again"

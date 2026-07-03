@@ -1088,6 +1088,7 @@ class Dataset:
         self.filename = str(filename)
         self.file_format = file_format
         self._names_cache: dict[str, list[str]] = {}
+        self._infos_cache: dict[tuple[str, str], tuple[list[int], Attribute]] = {}
 
     def _exists_on_disk(self) -> bool:
         if os.path.exists(self.filename):
@@ -1102,6 +1103,7 @@ class Dataset:
         attributes: Attribute | None = None,
     ) -> None:
         self._names_cache.clear()
+        self._infos_cache.clear()
         if attributes is None:
             attributes = Attribute()
         if self.is_directory:
@@ -1290,6 +1292,15 @@ class Dataset:
         return list(groups)
 
     def get_infos(self, groups: str, name: str) -> tuple[list[int], Attribute]:
+        # Memoize the header read (SITK reader + ReadImageInformation, or the HDF5/Zarr
+        # metadata parse): get_infos is called once per name per group per build-pass at
+        # setup, so caching it (like get_names) avoids re-parsing the same header N times.
+        # Cache and hand back copies so a caller mutating the geometry cannot poison it.
+        cache_key = (groups, name)
+        cached = self._infos_cache.get(cache_key)
+        if cached is not None:
+            shape, attr = cached
+            return list(shape), Attribute(attr)
         if self.is_directory:
             for sub_directory in self._get_sub_directories(groups):
                 group = groups.split("/")[-1]
@@ -1300,10 +1311,14 @@ class Dataset:
                         self.file_format,
                         self.level,
                     ) as file:
-                        return file.get_infos("", group)
+                        result = file.get_infos("", group)
+                        self._infos_cache[cache_key] = (list(result[0]), Attribute(result[1]))
+                        return result
         else:
             with Dataset.File(self.filename, True, self.file_format, self.level) as file:
-                return file.get_infos(groups, name)
+                result = file.get_infos(groups, name)
+                self._infos_cache[cache_key] = (list(result[0]), Attribute(result[1]))
+                return result
         raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
 
     def get_statistics(self, groups: str) -> dict[str, dict[str, dict[str, float | list[float]]]]:
