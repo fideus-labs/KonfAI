@@ -6,6 +6,7 @@ import argparse
 import importlib.metadata
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -99,6 +100,262 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     if not with_uncertainty:
         kwargs["uncertainty"] = False
     return kwargs
+
+
+def _resolved_path(value: str) -> Path:
+    return Path(value).resolve()
+
+
+def _positive_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError("CPU value must be > 0")
+    return ivalue
+
+
+def _add_app_io(parser: argparse.ArgumentParser) -> None:
+    """Add the input/output/device options shared by every app operation."""
+    parser.add_argument(
+        "-i",
+        "--inputs",
+        type=_resolved_path,
+        nargs="+",
+        action="append",
+        required=True,
+        help="Input path(s): one or multiple volume files, or a dataset directory.",
+    )
+    parser.add_argument(
+        "-o", "--output", type=_resolved_path, default=Path("./Output").resolve(), help="Output directory / file."
+    )
+    parser.add_argument(
+        "--tmp-dir",
+        "--tmp_dir",
+        dest="tmp_dir",
+        type=_resolved_path,
+        default=None,
+        help="Temporary directory (optional).",
+    )
+    device = parser.add_mutually_exclusive_group()
+    device.add_argument(
+        "--gpu", type=int, nargs="+", default=[], help="GPU device ids, e.g. '0' or '0 1'. CPU if omitted."
+    )
+    device.add_argument("--cpu", type=_positive_int, default=None, help="Run on CPU using N worker processes.")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output.")
+    parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront.")
+    parser.add_argument("--force_update", action="store_true", help="Refresh required app files before running.")
+
+
+def _add_gt(parser: argparse.ArgumentParser, required: bool) -> None:
+    parser.add_argument(
+        "--gt",
+        type=_resolved_path,
+        nargs="+",
+        action="append",
+        required=required,
+        help="Ground-truth path(s): one or multiple data files, or a dataset directory.",
+    )
+
+
+def _add_mask(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--mask", type=_resolved_path, nargs="+", action="append", help="Optional evaluation mask path(s)."
+    )
+
+
+def _add_patch_overrides(parser: argparse.ArgumentParser) -> None:
+    """Add the optional patch/batch overrides (``--patch-size`` / ``--batch-size``).
+
+    When omitted the app follows its VRAM plan (or the config default); when given they force the
+    inference ``Patch.patch_size`` / ``batch_size``. A single ``--patch-size`` value is an isotropic cube.
+    """
+    parser.add_argument(
+        "--patch-size",
+        "--patch_size",
+        dest="patch_size",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Override the inference patch size, e.g. '192' (cube) or '192 192 192'. Default: VRAM plan / config.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        "--batch_size",
+        dest="batch_size",
+        type=int,
+        default=None,
+        help="Override the inference batch size. Default: VRAM plan / config.",
+    )
+
+
+def build_app_cli(
+    prog: str,
+    description: str,
+    *,
+    resolve_app: Callable[[argparse.Namespace], str],
+    add_selection: Callable[[argparse.ArgumentParser], None] | None = None,
+    add_infer_knobs: Callable[[argparse.ArgumentParser], None] | None = None,
+    resolve_infer: Callable[[argparse.Namespace], dict[str, Any]] | None = None,
+    infer_command: str = "infer",
+    with_uncertainty: bool = True,
+) -> Callable[[], None]:
+    """Build a ``main()`` for a repo-pinned app CLI exposing ``<infer_command>``/eval/uncertainty/pipeline.
+
+    The set of *operations* is uniform across apps, but the *arguments* stay domain-specific through hooks:
+
+    - ``resolve_app(args) -> "repo:app"``          resolves the pinned app id from the parsed selection;
+    - ``add_selection(subparser)``                 adds the model/task selection args (shared by every command);
+    - ``add_infer_knobs(subparser)``               adds the inference knobs (ensemble/folds/models/tta/mc …);
+    - ``resolve_infer(args) -> dict``              maps those knobs to ``KonfAIApp.infer`` kwargs.
+
+    ``infer_command`` names the inference operation with the app's own vocabulary (e.g. ``segment``,
+    ``synthesize``); ``with_uncertainty=False`` drops the uncertainty command for models that do not support it.
+    """
+    select = add_selection or (lambda parser: None)
+    knobs = add_infer_knobs or (lambda parser: None)
+    infer_kwargs = resolve_infer or (lambda args: {})
+
+    def main() -> None:
+        parser = argparse.ArgumentParser(
+            prog=prog,
+            description=description,
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+            allow_abbrev=False,
+        )
+        subparsers = parser.add_subparsers(dest="command", required=True)
+
+        run_p = subparsers.add_parser(infer_command, help=f"Run {infer_command} (model inference).")
+        select(run_p)
+        _add_app_io(run_p)
+        knobs(run_p)
+        _add_patch_overrides(run_p)
+        if with_uncertainty:
+            run_p.add_argument("-uncertainty", action="store_true", help="Also write the inference stack.")
+        run_p.add_argument(
+            "--prediction-file",
+            "--prediction_file",
+            dest="prediction_file",
+            default="Prediction.yml",
+            help="Prediction config filename inside the app.",
+        )
+
+        eval_p = subparsers.add_parser("eval", help="Evaluate the model against ground-truth labels.")
+        select(eval_p)
+        _add_app_io(eval_p)
+        _add_gt(eval_p, required=True)
+        _add_mask(eval_p)
+        eval_p.add_argument(
+            "--evaluation-file",
+            "--evaluation_file",
+            dest="evaluation_file",
+            default="Evaluation.yml",
+            help="Evaluation config filename inside the app.",
+        )
+
+        if with_uncertainty:
+            unc_p = subparsers.add_parser("uncertainty", help="Compute model uncertainty.")
+            select(unc_p)
+            _add_app_io(unc_p)
+            unc_p.add_argument(
+                "--uncertainty-file",
+                "--uncertainty_file",
+                dest="uncertainty_file",
+                default="Uncertainty.yml",
+                help="Uncertainty config filename inside the app.",
+            )
+
+        pipe_p = subparsers.add_parser(
+            "pipeline", help=f"Run {infer_command}, then evaluation and uncertainty in a single command."
+        )
+        select(pipe_p)
+        _add_app_io(pipe_p)
+        knobs(pipe_p)
+        _add_patch_overrides(pipe_p)
+        _add_gt(pipe_p, required=False)
+        _add_mask(pipe_p)
+        pipe_p.add_argument(
+            "--prediction-file",
+            "--prediction_file",
+            dest="prediction_file",
+            default="Prediction.yml",
+            help="Prediction config filename inside the app.",
+        )
+        pipe_p.add_argument(
+            "--evaluation-file",
+            "--evaluation_file",
+            dest="evaluation_file",
+            default="Evaluation.yml",
+            help="Evaluation config filename inside the app.",
+        )
+        if with_uncertainty:
+            pipe_p.add_argument(
+                "--uncertainty-file",
+                "--uncertainty_file",
+                dest="uncertainty_file",
+                default="Uncertainty.yml",
+                help="Uncertainty config filename inside the app.",
+            )
+            pipe_p.add_argument("-uncertainty", action="store_true", help="Also run the uncertainty workflow.")
+
+        args = parser.parse_args()
+        gpu = [] if args.cpu is not None else args.gpu
+        konfai_app = app_module.KonfAIApp(resolve_app(args), args.download, args.force_update)
+
+        if args.command == infer_command:
+            konfai_app.infer(
+                inputs=args.inputs,
+                output=args.output,
+                tmp_dir=args.tmp_dir,
+                gpu=gpu,
+                cpu=args.cpu,
+                quiet=args.quiet,
+                uncertainty=getattr(args, "uncertainty", False),
+                prediction_file=args.prediction_file,
+                patch_size=args.patch_size,
+                batch_size=args.batch_size,
+                **infer_kwargs(args),
+            )
+        elif args.command == "eval":
+            konfai_app.evaluate(
+                inputs=args.inputs,
+                gt=args.gt,
+                mask=args.mask,
+                output=args.output,
+                tmp_dir=args.tmp_dir,
+                evaluation_file=args.evaluation_file,
+                gpu=gpu,
+                cpu=args.cpu,
+                quiet=args.quiet,
+            )
+        elif args.command == "uncertainty":
+            konfai_app.uncertainty(
+                inputs=args.inputs,
+                output=args.output,
+                tmp_dir=args.tmp_dir,
+                uncertainty_file=args.uncertainty_file,
+                gpu=gpu,
+                cpu=args.cpu,
+                quiet=args.quiet,
+            )
+        elif args.command == "pipeline":
+            konfai_app.pipeline(
+                inputs=args.inputs,
+                gt=args.gt,
+                mask=args.mask,
+                output=args.output,
+                tmp_dir=args.tmp_dir,
+                prediction_file=args.prediction_file,
+                evaluation_file=args.evaluation_file,
+                uncertainty=getattr(args, "uncertainty", False),
+                uncertainty_file=getattr(args, "uncertainty_file", "Uncertainty.yml"),
+                gpu=gpu,
+                cpu=args.cpu,
+                quiet=args.quiet,
+                patch_size=args.patch_size,
+                batch_size=args.batch_size,
+                **infer_kwargs(args),
+            )
+
+    return main
 
 
 def run_download_cli(kwargs: dict[str, Any]) -> None:
@@ -217,6 +474,7 @@ def main_apps() -> None:
     )
     infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
     infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
+    _add_patch_overrides(infer_p)
     infer_p.add_argument("-uncertainty", action="store_true", help="If enabled, inference write the inference stack")
     infer_p.add_argument(
         "--prediction-file",
@@ -276,6 +534,7 @@ def main_apps() -> None:
     )
     pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
     pipe_p.add_argument("--mc", type=int, default=0, help="Number of Monte Carlo dropout samples.")
+    _add_patch_overrides(pipe_p)
     pipe_p.add_argument(
         "--prediction-file",
         "--prediction_file",
@@ -340,6 +599,13 @@ def main_apps() -> None:
         type=str,
         default="Config.yml",
         help="Training configuration filename inside the app.",
+    )
+    ft_p.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Override the learning rate. If omitted, the checkpoint learning rate is resumed and the "
+        "scheduler continues; if set, the learning rate restarts from this value.",
     )
 
     bundle_p = subparsers.add_parser(

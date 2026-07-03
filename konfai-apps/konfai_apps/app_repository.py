@@ -37,7 +37,7 @@ from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
 from konfai.utils.errors import AppMetadataError, AppRepositoryError, ConfigError
 from konfai.utils.utils import is_windows_absolute_path
-from packaging.requirements import Requirement
+from packaging.requirements import InvalidRequirement, Requirement
 from ruamel.yaml import YAML
 
 
@@ -157,6 +157,7 @@ class AppRepositoryInfo(ABC):
         inputs_evaluations: dict[EvaluationKey, dict[str, DataEntry]],
         terminology: dict[int, TerminologyEntry] | None = None,
         vram_plan: dict[int, VRAMPlanEntry] | None = None,
+        patch_size: list[int] | None = None,
     ) -> None:
         super().__init__()
         self._app_name = app_name
@@ -172,6 +173,7 @@ class AppRepositoryInfo(ABC):
         self._inputs_evaluations = inputs_evaluations
         self._terminology = terminology
         self._vram_plan = vram_plan
+        self._patch_size = patch_size
 
     def __str__(self) -> str:
         return (
@@ -208,6 +210,10 @@ class AppRepositoryInfo(ABC):
 
     def get_maximum_tta(self) -> int:
         return self._maximum_tta
+
+    def get_patch_size(self) -> list[int] | None:
+        """The app's default inference patch size (per-dim), for UI patch controls; None if undeclared."""
+        return self._patch_size
 
     def get_mc_dropout(self) -> int:
         return self._mc_dropout
@@ -321,6 +327,9 @@ class LocalAppRepository(AppRepositoryInfo):
                 for key, value in app_repository_metadata["vram_plan"].items()
             }
 
+        patch_size = app_repository_metadata.get("patch_size")
+        patch_size = [int(x) for x in patch_size] if isinstance(patch_size, list) else None
+
         checkpoints_name: list[str] = app_repository_metadata.get("models", [])
         checkpoints_name_available = self._get_available_checkpoint_names(checkpoints_name, filenames)
 
@@ -338,6 +347,7 @@ class LocalAppRepository(AppRepositoryInfo):
             inputs_evaluations=inputs_evaluations,
             terminology=terminology,
             vram_plan=vram_plan,
+            patch_size=patch_size,
         )
 
     def _get_available_checkpoint_names(self, checkpoints_name: list[str], filenames: list[str]) -> list[str]:
@@ -423,16 +433,29 @@ class LocalAppRepository(AppRepositoryInfo):
     def _set_patch_size_and_batch_size(
         self,
         inference_file_path: str,
-        patch_size: list[int],
-        batch_size: int,
+        patch_size: list[int] | None = None,
+        batch_size: int | None = None,
     ) -> None:
+        """Write the inference ``Patch.patch_size`` / ``batch_size``, overriding only the values given.
+
+        A single-element ``patch_size`` is broadcast to the config's spatial dimensionality (an isotropic
+        cube), so ``--patch-size 192`` works regardless of 2D/3D; a full list is written verbatim.
+        """
+        if patch_size is None and batch_size is None:
+            return
         yaml = YAML()
         with open(inference_file_path) as file:
             data = yaml.load(file)
 
         tmp = data["Predictor"]["Dataset"]
-        tmp["Patch"]["patch_size"] = patch_size
-        tmp["batch_size"] = batch_size
+        if patch_size is not None:
+            if len(patch_size) == 1:
+                existing = tmp.get("Patch", {}).get("patch_size")
+                dim = len(existing) if isinstance(existing, list) and len(existing) > 1 else 3
+                patch_size = patch_size * dim
+            tmp["Patch"]["patch_size"] = patch_size
+        if batch_size is not None:
+            tmp["batch_size"] = batch_size
 
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
@@ -444,6 +467,23 @@ class LocalAppRepository(AppRepositoryInfo):
     @abstractmethod
     def _download(self, filename: str) -> Path:
         raise NotImplementedError()
+
+    def _all_repo_filenames(self) -> list[str]:
+        """The complete app file list.
+
+        For a Hugging Face repo the local snapshot is populated lazily (one file per ``hf_hub_download``),
+        so a snapshot-derived listing can omit bundle assets not pulled yet (e.g. elastix parameter maps).
+        Refresh it from the Hub tree once — a lightweight metadata call, no file transfer — so every asset
+        is known; the per-file downloads still hit the local cache, and it falls back to the local snapshot
+        when offline.
+        """
+        filenames = self._get_filenames()
+        if isinstance(self, LocalAppRepositoryFromHF):
+            try:
+                filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
+            except AppRepositoryError:
+                pass
+        return filenames
 
     def has_capabilities(self) -> tuple[bool, bool, bool]:
         filenames = self._get_filenames()
@@ -461,9 +501,13 @@ class LocalAppRepository(AppRepositoryInfo):
         return files_path
 
     def download_inference(
-        self, number_of_model: int, name_of_models: list[str], prediction_file: str
+        self,
+        number_of_model: int,
+        name_of_models: list[str],
+        prediction_file: str,
+        install_requirements: bool = False,
     ) -> tuple[list[Path], Path, list[tuple[str, Path]]]:
-        filenames = self._get_filenames()
+        filenames = self._all_repo_filenames()
         models_path: list[Path] = []
         codes_path: list[tuple[str, Path]] = []
 
@@ -492,19 +536,30 @@ class LocalAppRepository(AppRepositoryInfo):
             for name in models_to_download[:number_of_model]:
                 models_path.append(self._download(name))
 
+        # Make every bundle asset (custom .py, elastix parameter maps, lookup tables, …) available in
+        # the run workspace, as documented ("files can live in the app directory and will be available
+        # at runtime"). Model checkpoints (.pt) are handled separately via ``models_path``.
         for filename in filenames:
-            if filename.endswith(".py"):
+            if not filename.endswith(".pt"):
                 codes_path.append((filename, self._download(filename)))
 
-        self._install_requirements(filenames)
+        self._install_requirements(filenames, install_requirements)
 
         return models_path, inference_file_path, codes_path
 
-    def _install_requirements(self, filenames: list[str]) -> None:
-        """Install any missing/outdated packages listed in the app's requirements.txt."""
+    def _install_requirements(self, filenames: list[str], install_requirements: bool = False) -> None:
+        """Install missing/outdated packages listed in the app's requirements.txt.
+
+        Installation is opt-in (``install_requirements=True``) and defaults to a no-op. Core
+        packages (torch, konfai, …) are never installed or altered, and lines that are not
+        PEP 508 requirements (``-r``, ``--extra-index-url``, ``git+https``…) are skipped.
+        """
+        if not install_requirements:
+            return
         requirements_filename = self._find_repo_filename("requirements.txt", filenames)
         if requirements_filename is None:
             return
+        protected = {"torch", "torchvision", "torchaudio", "konfai", "konfai-apps"}
         with open(self._download(requirements_filename), encoding="utf-8") as file:
             required_lines = [line.strip() for line in file if line.strip() and not line.startswith("#")]
         installed = {
@@ -514,8 +569,14 @@ class LocalAppRepository(AppRepositoryInfo):
         }
         missing_or_outdated = []
         for line in required_lines:
-            req = Requirement(line)
+            try:
+                req = Requirement(line)
+            except InvalidRequirement:
+                continue
             name = req.name.lower()
+            if name in protected:
+                print(f"[KonfAI-Apps] Skipping protected requirement '{line}'.")
+                continue
             installed_version_str = installed.get(name)
             if installed_version_str is None:
                 missing_or_outdated.append(line)
@@ -538,20 +599,22 @@ class LocalAppRepository(AppRepositoryInfo):
         return files_path
 
     def download_evaluation(self, evaluation_file: str) -> tuple[Path, list[tuple[str, Path]]]:
-        filenames = self._get_filenames()
+        filenames = self._all_repo_filenames()
         codes_path: list[tuple[str, Path]] = []
-        evaluation_file_path = self._download(self._require_repo_filename(evaluation_file, filenames))
+        config_filename = self._require_repo_filename(evaluation_file, filenames)
+        evaluation_file_path = self._download(config_filename)
         for filename in filenames:
-            if filename.endswith(".py"):
+            if filename != config_filename and not filename.endswith(".pt"):
                 codes_path.append((filename, self._download(filename)))
         return evaluation_file_path, codes_path
 
     def download_uncertainty(self, uncertainty_file: str) -> tuple[Path, list[tuple[str, Path]]]:
-        filenames = self._get_filenames()
+        filenames = self._all_repo_filenames()
         codes_path: list[tuple[str, Path]] = []
-        uncertainty_file_path = self._download(self._require_repo_filename(uncertainty_file, filenames))
+        config_filename = self._require_repo_filename(uncertainty_file, filenames)
+        uncertainty_file_path = self._download(config_filename)
         for filename in filenames:
-            if filename.endswith(".py"):
+            if filename != config_filename and not filename.endswith(".pt"):
                 codes_path.append((filename, self._download(filename)))
         return uncertainty_file_path, codes_path
 
@@ -564,13 +627,23 @@ class LocalAppRepository(AppRepositoryInfo):
         uncertainty: bool,
         prediction_file: str,
         available_vram: float | None,
+        install_requirements: bool = False,
+        forced_patch_size: list[int] | None = None,
+        forced_batch_size: int | None = None,
     ) -> list[Path]:
         if len(name_of_models) == 0 and number_of_model == 0:
             number_of_model = len(self._checkpoints_name)
 
         models_path, inference_file_path, codes_path = self.download_inference(
-            number_of_model, name_of_models, prediction_file
+            number_of_model, name_of_models, prediction_file, install_requirements
         )
+        # Copy every bundle asset into the workspace first, then write (and tweak) the prediction config
+        # last so its modifications are never clobbered by a raw copy of the same file.
+        for repo_filename, code_path in codes_path:
+            dest = Path(repo_filename)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(code_path, dest)
+
         shutil.copy2(inference_file_path, prediction_file)
         self._set_number_of_augmentation(prediction_file, number_of_augmentation)
         # NOTE: `number_of_mc_dropout` is reserved for an upcoming MC-dropout feature
@@ -578,6 +651,10 @@ class LocalAppRepository(AppRepositoryInfo):
         # through but not yet applied to the prediction config.
         if not uncertainty:
             self._disable_uncertainty(prediction_file)
+        # Patch/batch precedence: an explicit override wins; otherwise the app's VRAM plan (largest
+        # threshold that fits the detected free VRAM); otherwise the config's own defaults are left as-is.
+        plan_patch_size: list[int] | None = None
+        plan_batch_size: int | None = None
         if self._vram_plan is not None and available_vram is not None:
             thresholds = sorted(self._vram_plan.keys())
             selected_t = thresholds[0]
@@ -586,33 +663,31 @@ class LocalAppRepository(AppRepositoryInfo):
                     selected_t = threshold
                 else:
                     break
-            vram_plan = self._vram_plan[selected_t]
-            self._set_patch_size_and_batch_size(prediction_file, vram_plan.patch_size, vram_plan.batch_size)
-        for repo_filename, code_path in codes_path:
-            if code_path.suffix == ".py":
-                dest = Path(repo_filename)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(code_path, dest)
+            plan_patch_size = self._vram_plan[selected_t].patch_size
+            plan_batch_size = self._vram_plan[selected_t].batch_size
+        self._set_patch_size_and_batch_size(
+            prediction_file,
+            forced_patch_size if forced_patch_size is not None else plan_patch_size,
+            forced_batch_size if forced_batch_size is not None else plan_batch_size,
+        )
 
         return models_path
 
     def install_evaluation(self, evaluation_file: str) -> None:
         evaluation_file_path, codes_path = self.download_evaluation(evaluation_file)
-        shutil.copy2(evaluation_file_path, evaluation_file)
         for repo_filename, code_path in codes_path:
-            if code_path.suffix == ".py":
-                dest = Path(repo_filename)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(code_path, dest)
+            dest = Path(repo_filename)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(code_path, dest)
+        shutil.copy2(evaluation_file_path, evaluation_file)
 
     def install_uncertainty(self, uncertainty_file: str) -> None:
         uncertainty_file_path, codes_path = self.download_uncertainty(uncertainty_file)
-        shutil.copy2(uncertainty_file_path, uncertainty_file)
         for repo_filename, code_path in codes_path:
-            if code_path.suffix == ".py":
-                dest = Path(repo_filename)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(code_path, dest)
+            dest = Path(repo_filename)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(code_path, dest)
+        shutil.copy2(uncertainty_file_path, uncertainty_file)
 
     def _resolve_fine_tune_models(self, filenames: list[str], name_of_models: list[str]) -> list[tuple[str, Path]]:
         """
@@ -658,6 +733,7 @@ class LocalAppRepository(AppRepositoryInfo):
         epochs: int,
         it_validation: int | None,
         name_of_models: list[str],
+        install_requirements: bool = False,
     ) -> list[tuple[str, Path]]:
         """
         Install the app assets needed for fine-tuning and resolve the selected checkpoint(s).
@@ -678,7 +754,7 @@ class LocalAppRepository(AppRepositoryInfo):
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self._download(filename), dest)
 
-        self._install_requirements(filenames)
+        self._install_requirements(filenames, install_requirements)
 
         metadata_file = path / "app.json"
         config_file_path = path / config_file
@@ -845,9 +921,6 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
         if force_update:
             try:
-                from huggingface_hub.constants import HF_HUB_CACHE
-                from huggingface_hub.file_download import repo_folder_name
-
                 filename_path = PurePosixPath(filename)
                 if len(filename_path.parts) < 2:
                     raise AppRepositoryError(
@@ -855,17 +928,6 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
                     )
                 app_name = filename_path.parts[0]
                 allow_patterns = LocalAppRepositoryFromHF._get_sync_patterns(repo_id, app_name, filename)
-
-                lock_path = (
-                    Path(HF_HUB_CACHE)
-                    / ".locks"
-                    / repo_folder_name(
-                        repo_id=base_repo_id,
-                        repo_type="model",
-                    )
-                )
-                if lock_path.is_dir():
-                    shutil.rmtree(lock_path)
 
                 snapshot_dir = snapshot_download(
                     repo_id=base_repo_id,
