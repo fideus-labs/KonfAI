@@ -37,6 +37,16 @@ yaml = ruamel.yaml.YAML()
 _log = logging.getLogger(__name__)
 
 
+def _escape_key_component(component: str) -> str:
+    """Percent-encode ``.`` (and ``%``) so a dict key survives dotted-path splitting."""
+    return component.replace("%", "%25").replace(".", "%2E")
+
+
+def _unescape_key_component(component: str) -> str:
+    """Inverse of :func:`_escape_key_component`."""
+    return component.replace("%2E", ".").replace("%25", "%")
+
+
 class Config:
     """
     Context manager for reading and updating a subtree of the active YAML
@@ -51,7 +61,7 @@ class Config:
 
     def __init__(self, key: str) -> None:
         self.filename = Path(os.environ["KONFAI_config_file"])
-        self.keys = key.split(".")
+        self.keys = [_unescape_key_component(part) for part in key.split(".")]
 
     def __enter__(self):
         if not self.filename.exists():
@@ -227,7 +237,11 @@ class Config:
                     else:
                         value_tmp = next(v for k, v in value.items() if "default" in k)
 
-                    value_config[key] = None
+                    # dict[str, Object] entries are materialised by a later nested Config context,
+                    # so a None placeholder is correct; primitive entries have no such pass, so they
+                    # must be persisted here or the write-back collapses the whole dict to ``{}``
+                    # (empty on the next run, silently dropping the defaults).
+                    value_config[key] = value_tmp if isinstance(value_tmp, int | float | str | bool) else None
                     dict_value[key] = value_tmp
                 value = dict_value
         self.config[name] = value_config if value_config is not None else "None"
@@ -518,7 +532,9 @@ def apply_config(konfai_args: str | None = None):
 
                                 try:
                                     kwargs[param.name] = {
-                                        value: apply_config(f"{key_tmp}.{param.name}.{value}")(value_type)()
+                                        value: apply_config(f"{key_tmp}.{param.name}.{_escape_key_component(value)}")(
+                                            value_type
+                                        )()
                                         for value in values
                                     }
                                 except Exception as exc:
