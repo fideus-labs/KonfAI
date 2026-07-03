@@ -76,12 +76,14 @@ def test_ensemble_reads_each_checkpoint_once_across_batches():
             mc._ensure_model_loaded(idx)
 
     assert len(reads) == 3, f"expected 3 disk reads (one per index), got {len(reads)}"
-    assert set(reads) == {"/fake/ckpt_0.pt", "/fake/ckpt_1.pt", "/fake/ckpt_2.pt"}
+    # Compare via str(Path(...)) so the expected separators match the platform
+    # (the reads store str(src); Windows renders these with backslashes).
+    assert set(reads) == {str(Path(f"/fake/ckpt_{i}.pt")) for i in range(3)}
 
     # load() must invalidate the stale cache when the sources change.
     mc.load([Path("/other.pt")])
     assert 1 not in mc._state_cache and 2 not in mc._state_cache
-    assert mc._state_cache.get(0) == {"w": "/other.pt"}
+    assert mc._state_cache.get(0) == {"w": str(Path("/other.pt"))}
 
 
 def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
