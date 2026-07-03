@@ -94,30 +94,39 @@ python -m pip install -e apps/mrsegmentator
 
 ## ⚙️ Usage
 
-Run inference on an MRI scan:
+The CLI is organised into sub-commands, mirroring the KonfAI Apps operations:
+
+| Sub-command | Purpose |
+|---|---|
+| `segment` | Run the segmentation (inference). |
+| `eval` | Evaluate a segmentation against a reference. |
+| `uncertainty` | Estimate uncertainty (fold-ensemble spread). |
+| `pipeline` | Segment, then evaluate and estimate uncertainty in one command. |
+
+Run segmentation on an MRI scan:
 ```bash
-mrsegmentator-konfai -i path/to/input.nii.gz -o ./Output/
+mrsegmentator-konfai segment -i path/to/input.nii.gz -o ./Output/
 ```
 
-### Optional arguments
+Evaluate against a reference, or run everything at once:
+```bash
+mrsegmentator-konfai eval -i input.nii.gz --gt reference.nii.gz -o ./Output/
+mrsegmentator-konfai pipeline -i input.nii.gz --gt reference.nii.gz --gpu 0 -f 3 -uncertainty
+```
+
+### Arguments
 
 | Flag | Description | Default |
 |------|--------------|----------|
-| `-i`, `--input` | Path to the input MRI volume | *required* |
-| `-o`, `--output` | Path to save the segmentation | `./Output/` |
-| `--gt` | Path to reference segmentation (ground truth), if available (enables evaluation workflows) | *unset* |
-| `--mask` | Path to region-of-interest mask used for evaluation and uncertainty analysis | *unset* |
-| `-f`, `--folds` | Number of model folds to ensemble (1–5) | `2` |
-| `-uncertainty` | Save uncertainty maps | `False` |
-| `--gpu` | GPU list (e.g. `0` or `0,1`) | CPU if unset |
-| `--cpu` | Number of CPU cores (if no GPU) | `1` |
+| `-i`, `--inputs` | Input MRI volume(s) or a dataset directory | *required* |
+| `-o`, `--output` | Output directory | `./Output/` |
+| `-f`, `--folds` | Number of model folds to ensemble, 1–5 (`segment` / `pipeline`) | `2` |
+| `-uncertainty` | Also write the inference stack (`segment` / `pipeline`) | `False` |
+| `--gt` | Reference segmentation(s) — required by `eval`, optional in `pipeline` | *unset* |
+| `--mask` | Evaluation mask(s) (`eval` / `pipeline`) | *unset* |
+| `--gpu` | GPU id(s), e.g. `0` or `0 1` | CPU if unset |
+| `--cpu` | Number of CPU worker processes | *unset* |
 | `-q`, `--quiet` | Suppress console output | `False` |
-
-### Example
-
-```bash
-mrsegmentator-konfai -i path/to/input.nii.gz -o ./Output/ --gt path/to/reference.nii.gz --mask path/to/mask.nii.gz --gpu 0 -f 3 -uncertainty
-```
 
 ---
 
@@ -132,6 +141,20 @@ If you use **MRSegmentator-KonfAI** in your work, please cite the original MRSeg
 - Boussot, V., & Dillenseger, J.-L. (2025).  
   **KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging**.  
   arXiv preprint [arXiv:2508.09823](https://arxiv.org/abs/2508.09823)
+
+---
+
+## ⚡ Performance & VRAM
+
+Benchmarked on an **NVIDIA RTX PRO 5000 (24 GB)**, synthetic data, patch `[96, 128, 160]`, 5-model ensemble (`Concat`), half precision (autocast). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+
+| Free VRAM | Batch (auto) | Peak VRAM |
+|:--|:--|:--|
+| 8 GB  | 4  | ~8 GB |
+| 16 GB | 8  | ~15 GB |
+| 24 GB | 12 | ~23 GB |
+
+Measured peak VRAM (single model, half): batch 4 → 6.9 GB · 8 → 13.3 GB · 12 → 19.7 GB — the full 5-model ensemble adds ~15 %. Inference ≈ 25 s/model → **~125 s / case** for the full ensemble (scales with the case size).
 
 ---
 
