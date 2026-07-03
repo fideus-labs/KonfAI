@@ -23,8 +23,7 @@ CrossEntropyLoss:
 ```{note}
 Each entry carries an `nb_step` (window width). Multiple schedulers can be
 **chained** into consecutive iteration windows; an `nb_step: 0` (or `None`)
-window is the terminal, always-on schedule. `Constant` is the one used across
-tests and examples; `CosineAnnealing` is implemented but unexercised.
+window is the terminal, always-on schedule.
 ```
 
 ## B. Learning-rate schedulers
@@ -45,9 +44,8 @@ schedulers:
 | `PolyLRScheduler` | nnU-Net-style polynomial LR decay `lr = initial_lr·(1 − step/max_steps)^exponent`. | `initial_lr` (**required**), `max_steps` (**required**), `exponent=0.9` (+ `nb_step`) |
 
 ```{note}
-`PolyLRScheduler` is tested and stable; `Warmup` is implemented but not covered
-by tests/examples. The `optimizer` itself is injected by the framework — you do
-not write it under `schedulers:`.
+The `optimizer` itself is injected by the framework — you do not write it under
+`schedulers:`.
 ```
 
 ## See also

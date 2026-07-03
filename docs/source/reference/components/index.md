@@ -3,15 +3,11 @@
 Almost everything in a KonfAI config is a **component referenced by name**: a
 model, a loss, a metric, a transform, an augmentation, a scheduler, or a storage
 backend. This section is the catalogue of what ships in the box — the names you
-can drop into a YAML file today, their constructor arguments, and, just as
-important, **how mature each one is**.
+can drop into a YAML file today and their constructor arguments.
 
 ```{note}
-These pages are generated from a source-level audit of `konfai/` (class names,
-constructor signatures, and stability are taken from the code, not from
-marketing). Where a component is experimental, partially implemented, or crashes
-with its default arguments, it is labelled as such — see {doc}`../stability` for
-the aggregated maturity matrix.
+These pages are generated from a source-level read of `konfai/`: class names,
+constructor signatures and defaults are taken directly from the code.
 ```
 
 ## The pages
@@ -60,18 +56,7 @@ ways to get the exhaustive list for any component:
    `konfai/data/transform.py`, `konfai/data/augmentation.py`,
    `konfai/models/**`, and `konfai/metric/schedulers.py`.
 
-## Reading the stability column
-
-| Label | Meaning |
-| --- | --- |
-| **Stable** | Implemented and exercised by the test suite and/or the shipped examples. Safe to rely on. |
-| **Usable** | Implemented and functional, but not covered by tests or examples. Works; verify on your data. |
-| **Optional-dep** | Stable, but needs an extra installed (`pip install "konfai[…]"`); raises an actionable error otherwise. |
-| **Experimental** | Research / undocumented code. May need a very specific config; interfaces can change. |
-| **Broken by default** | The default constructor raises or fails — usable only with specific arguments (or not at all yet). Flagged explicitly. |
-
 ## See also
 
-- {doc}`../stability` — the aggregated maturity matrix across every kind
 - {doc}`../../concepts/configuration` — how names and `classpath` are resolved
 - {doc}`../api/extension-points` — writing your own model / loss / transform

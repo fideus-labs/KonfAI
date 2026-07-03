@@ -5,7 +5,6 @@ Reference
    :maxdepth: 1
 
    components/index
-   stability
    cli
    environment
    app-server-api

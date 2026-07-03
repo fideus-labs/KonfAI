@@ -8,12 +8,12 @@ directly — you pick a **format token** in a `dataset_filenames` spec
 
 ## Backends
 
-| Backend | Format token(s) | Kind | Optional extra | Stability |
-| --- | --- | --- | --- | --- |
-| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | `konfai[itk]` (`SimpleITK`) | **Stable** (default, most-used) |
-| `Dataset.H5File` | `h5` | Single monolithic HDF5 file | `konfai[hdf5]` (`h5py`) | **Stable** |
-| `Dataset.OmeZarrFile` | `omezarr, ome-zarr, ome_zarr, zarr` (+ `@level`) | OME-Zarr pyramid directory | `konfai[omezarr]` (`zarr` + `ngff-zarr`) | **Usable, recent** (tested; thin adapter) |
-| `Dataset.DicomFile` | `dicom` | DICOM series directory | `konfai[dicom]` (`pydicom`) | **Usable, recent** (tested; scalar-array writes only) |
+| Backend | Format token(s) | Kind | Optional extra |
+| --- | --- | --- | --- |
+| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | `konfai[itk]` (`SimpleITK`) |
+| `Dataset.H5File` | `h5` | Single monolithic HDF5 file | `konfai[hdf5]` (`h5py`) |
+| `Dataset.OmeZarrFile` | `omezarr, ome-zarr, ome_zarr, zarr` (+ `@level`) | OME-Zarr pyramid directory | `konfai[omezarr]` (`zarr` + `ngff-zarr`) |
+| `Dataset.DicomFile` (DICOM series; scalar-array writes) | `dicom` | DICOM series directory | `konfai[dicom]` (`pydicom`) |
 
 ```{tip}
 `pip install "konfai[imaging]"` installs **all four** backends at once

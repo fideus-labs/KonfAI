@@ -189,9 +189,8 @@ The cluster command depends on the optional `cluster` extra.
 ## ONNX export is not a subcommand
 
 `konfai/export.py` can export a trained model to ONNX (+ a manifest) for the
-planned `konfai-rs` portable-inference path, but it is a **Python-API-only,
-experimental** feature — there is no `konfai export` subcommand. See
-{doc}`python-api` and {doc}`stability`.
+`konfai-rs` portable-inference path, but it is a **Python-API-only** feature —
+there is no `konfai export` subcommand. See {doc}`python-api`.
 
 ## See also
 

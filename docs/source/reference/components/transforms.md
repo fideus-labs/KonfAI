@@ -45,11 +45,11 @@ channel axis first). **Inv** flags whether a working `inverse()` exists.
 | `Crop` | Crop to foreground bounding box; caches the box; updates Origin. | `inverse=True` | **yes** | **yes** (pads back) |
 | `ResampleToResolution` | Resample to a target voxel spacing (per-axis `<0` = keep). | `spacing=[1,1,1], inverse=True` | **yes** | **yes** |
 | `ResampleToShape` | Resample to a target shape (per-axis `0/<0` = keep). | `shape=[100,256,256], inverse=True` | **yes** | **yes** |
-| `ResampleTransform` | Warp by stored SimpleITK transforms read from the dataset. | `transforms`, `inverse=True` | no | **stub** ⚠ |
+| `ResampleTransform` | Warp by stored SimpleITK transforms read from the dataset. | `transforms`, `inverse=True` | no | no |
 | `Canonical` | Reorient to canonical direction (3-D); updates Origin/Direction. | `inverse=True` | no | **yes** |
 | `Permute` | Permute spatial axes. `dims` is a pipe-separated axis list. | `dims="1\|0\|2", inverse=True` | **yes** | **yes** |
 | `Flip` | Flip spatial axes. | `dims="1\|0\|2", inverse=True` | no | **yes** (self-inverse) |
-| `Squeeze` | `tensor.squeeze(dim)`. | `dim` (required), `inverse=True` | ⚠ no `transform_shape` override | **yes** |
+| `Squeeze` | `tensor.squeeze(dim)`. Does not override `transform_shape` — use on the channel axis or in post-processing. | `dim` (required), `inverse=True` | no | **yes** |
 | `Flatten` | Flatten to 1-D. | — | **yes** | no |
 
 ## Labels & masks
@@ -69,8 +69,7 @@ channel axis first). **Inv** flags whether a working `inverse()` exists.
 
 ## Ensemble / uncertainty post-processing
 
-Operate on a stacked `[N, …]` ensemble axis (prediction post-processing; not used
-by the shipped example configs).
+Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 
 | Name | Purpose | Key args | Shape |
 | --- | --- | --- | --- |
@@ -83,30 +82,14 @@ by the shipped example configs).
 
 ## Side-effect & advanced
 
-| Name | Purpose | Stability |
-| --- | --- | --- |
-| `Statistics` | Records ImageMin/Max/Mean/Std to the attribute cache; returns the tensor unchanged. Feeds e.g. `IMPACTSynth`. Order in the list matters. | **Stable** (Synthesis example) |
-| `Save` | Marker only — currently a **no-op passthrough** (a checkpoint hint, not a working saver). | **Stub** ⚠ |
-| `KonfAIInference` | Run a nested KonfAI app inference in a spawned subprocess. | **Experimental / heavy** — needs `konfai-apps`; requires `num_workers: 0`; defaults to a specific HF repo |
+| Name | Purpose |
+| --- | --- |
+| `Statistics` | Records ImageMin/Max/Mean/Std to the attribute cache and returns the tensor unchanged (feeds e.g. `IMPACTSynth`). Order in the transform list matters. |
+| `Save` | Marker — a no-op passthrough (a checkpoint hint, not a saver). |
+| `KonfAIInference` | Run a nested KonfAI app inference in a spawned subprocess. Needs `konfai-apps` and `num_workers: 0`; defaults to a specific HF repo. |
 
 `†` changes the **channel** dimension, not spatial — no `transform_shape`
 override needed.
-
-```{warning}
-**Known stubs / sharp edges.** `ResampleTransform.inverse`, `Save.__call__` are
-no-ops. `Squeeze` does not override `transform_shape`, so use it only on the
-channel axis or in post-processing. The ensemble transforms and `KonfAIInference`
-are prediction-time utilities not covered by the example configs.
-```
-
-## Stability at a glance
-
-- **Well-exercised** (tests + examples): `Clip`, `Standardize`, `Normalize`,
-  `TensorCast`, `ResampleToResolution`, `ResampleToShape`, `Padding`, `Mask`,
-  `Statistics`.
-- **Usable but untested here**: everything else in the tables.
-- **Stubs / sharp edges**: `ResampleTransform.inverse`, `Save`, `Squeeze` shape,
-  `KonfAIInference`.
 
 ## See also
 

@@ -104,11 +104,10 @@ export_onnx_into_bundle(b, checkpoint="CV_0.pt")   # writes model.onnx + manifes
 | `export_onnx_into_bundle(bundle, *, patch_size=None, in_channels=None, prediction_config="Prediction.yml", checkpoint=None, output_module=None, root="Predictor")` | Load the model, export `model.onnx` + `manifest.json` via `konfai.export`. |
 | `derive_requirements(py_files)` | Best-effort AST import scan → PyPI names (a draft to review, not authoritative). |
 
-```{warning}
-ONNX export is **experimental and Python-API-only** (there is no `konfai` CLI
-subcommand for it). It exports a **single, static-shape** head of a feed-forward
-model; custom-`forward` models (diffusion/StyleGAN/…) do not round-trip. See
-`konfai/export.py` and {doc}`stability`.
+```{note}
+ONNX export is **Python-API-only** (there is no `konfai` CLI subcommand for it).
+It exports a **single, static-shape** head of a feed-forward model; custom-`forward`
+models (diffusion/StyleGAN/…) do not round-trip. See `konfai/export.py`.
 ```
 
 ## Trust model

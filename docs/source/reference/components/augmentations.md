@@ -24,8 +24,8 @@ test-time augmentation reassembly.
 ```
 
 ```{important}
-**Only `Mask` and `Permute` may change spatial shape** — verified against the
-code (all others return shapes unchanged). Everything else preserves geometry.
+**Only `Mask` and `Permute` may change spatial shape** (verified against the
+code). Everything else preserves geometry.
 ```
 
 ## Spatial (Euler transforms)
@@ -38,14 +38,14 @@ Reversible affine warps via `grid_sample` (nearest-neighbour for label tensors).
 | `Rotate` | Random rotation (degrees). | `a_min=0, a_max=360, is_quarter=False` | no | **yes** |
 | `Scale` | Random log2-normal isotropic scale. | `s_std=0.2` | no | **yes** |
 | `Flip` | Per-axis random flip; optional vector-field channel negation. | `f_prob=[0.33,0.33,0.33], vector_field=False` | no | **yes** (self-inverse) |
-| `Elastix` | Random BSpline elastic warp (SimpleITK). | `grid_spacing=16, max_displacement=16` | no | **stub** ⚠ |
+| `Elastix` | Random BSpline elastic warp (SimpleITK). | `grid_spacing=16, max_displacement=16` | no | no |
 | `Permute` | Random spatial-axis permutation (**3-D only**). | `prob_permute=[0.5,0.5]` | **yes** | **yes** |
-| `Mask` | Randomly place a mask volume; outside → `value` (SimpleITK). | `mask` (required), `value` (required) | **yes** | **stub** ⚠ |
+| `Mask` | Randomly place a mask volume; outside → `value` (SimpleITK). | `mask` (required), `value` (required) | **yes** | no |
 
 ## Intensity (colour transforms)
 
 Apply a per-index colour affine to RGB(3-ch) or L(1-ch) tensors. Their inverse is
-intentionally a no-op (colour changes don't move voxels).
+a no-op (colour changes don't move voxels).
 
 | Name | Purpose | Key args (defaults) |
 | --- | --- | --- |
@@ -59,23 +59,13 @@ intentionally a no-op (colour changes don't move voxels).
 
 | Name | Purpose | Key args (defaults) | Notes |
 | --- | --- | --- | --- |
-| `Noise` | Diffusion-style forward noising (zero-terminal-SNR β schedule). | `n_std` (required), `noise_step=1000` | **`prob` is repurposed** as the max noise timestep, not an apply probability; always applies. |
-| `CutOUT` | Random cutout box filled with `value`. | `c_prob`, `cutout_size`, `value` (all required) | `c_prob` appears unused (leftover); gating uses the base probability. |
+| `Noise` | Diffusion-style forward noising (zero-terminal-SNR β schedule). | `n_std` (required), `noise_step=1000` | Its `prob` is the max noise timestep, not an apply probability; it always applies. |
+| `CutOUT` | Random cutout box filled with `value`. | `c_prob`, `cutout_size`, `value` (all required) | Gating uses the base probability. |
 
-```{warning}
-**Known stubs.** `Elastix._inverse` and `Mask._inverse` are unimplemented (`pass`)
-— any test-time-augmentation reassembly that relies on inverting them will fail.
-`Elastix`/`Mask` require SimpleITK. The `vector_field` flag on `Flip` should only
-be enabled for single-channel or genuine vector-field groups.
+```{note}
+`Elastix` and `Mask` require SimpleITK. The `vector_field` flag on `Flip` should
+only be enabled for single-channel or genuine vector-field groups.
 ```
-
-## Stability at a glance
-
-- **Well-exercised** (tests + shipped configs): `Flip` (the only augmentation
-  used in the example train configs), with `Rotate`/`Translate`/`Brightness`/
-  `Noise`/`CutOUT`/`Elastix`/`Mask` covered by unit tests.
-- **Usable**: the remaining colour and spatial ops.
-- **Stubs**: `Elastix._inverse`, `Mask._inverse`.
 
 ## See also
 

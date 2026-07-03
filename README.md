@@ -111,7 +111,7 @@ notebook entry points) lives in the
 
 Everything below is referenceable by name in YAML. See the
 [**built-in component catalogue**](https://konfai.readthedocs.io/en/latest/reference/components/index.html)
-for classpaths, arguments, and an honest per-component maturity label.
+for classpaths and constructor arguments.
 
 | Kind | Examples | Catalogue |
 | --- | --- | --- |
@@ -124,9 +124,6 @@ for classpaths, arguments, and an honest per-component maturity label.
 
 Not limited to these: any importable class (`monai.losses:DiceLoss`,
 `torch:nn:L1Loss`, or a local `Model:MyNet`) works via the `module:Class` form.
-Some components are research-grade or crash with their defaults — the
-[**stability matrix**](https://konfai.readthedocs.io/en/latest/reference/stability.html)
-tells you which.
 
 ---
 

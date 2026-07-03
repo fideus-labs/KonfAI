@@ -67,4 +67,3 @@ wrappers add `pipeline`. See {doc}`../usage/apps` for how to run them and
 
 - {doc}`../concepts/apps` — what an app is and when to package one
 - {doc}`../usage/apps` — running apps from the CLI
-- {doc}`../reference/stability` — the full maturity matrix
