@@ -677,11 +677,16 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         for module in self._modules.values():
             ModuleArgsDict.init_func(module, init_type, init_gain)
 
-    def named_forward(self, *inputs: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
+    def named_forward(
+        self, *inputs: torch.Tensor, attributes: list[list[Attribute]] | None = None
+    ) -> Iterator[tuple[str, torch.Tensor]]:
         if len(inputs) > 0:
             branchs: dict[str, torch.Tensor] = {}
+            attribute_branchs: dict[str, list[Attribute]] = {}
             for i, sinput in enumerate(inputs):
                 branchs[str(i)] = sinput
+                if attributes is not None and i < len(attributes) and attributes[i] is not None:
+                    attribute_branchs[str(i)] = attributes[i]
 
             out = inputs[0]
             tmp: list[int | str] = []
@@ -719,7 +724,12 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     else:
                         if isinstance(module, ModuleArgsDict):
                             for k, out in module.named_forward(
-                                *[branchs[i] for i in self._modulesArgs[name].in_branch]
+                                *[branchs[i] for i in self._modulesArgs[name].in_branch],
+                                attributes=(
+                                    [attribute_branchs.get(i, [Attribute()]) for i in self._modulesArgs[name].in_branch]
+                                    if attribute_branchs
+                                    else None
+                                ),
                             ):
                                 for ob in self._modulesArgs[name].out_branch:
                                     if ob in module._modulesArgs[k.split(".")[0].replace(";accu;", "")].out_branch:
@@ -730,7 +740,16 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                                 if ob not in tmp:
                                     branchs[ob] = out
                         elif isinstance(module, torch.nn.Module):
-                            out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])
+                            if getattr(module, "accepts_attributes", False):
+                                out = module(
+                                    *[branchs[i] for i in self._modulesArgs[name].in_branch],
+                                    attributes=[
+                                        attribute_branchs.get(i, [Attribute()])
+                                        for i in self._modulesArgs[name].in_branch
+                                    ],
+                                )
+                            else:
+                                out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])
                             for ob in self._modulesArgs[name].out_branch:
                                 branchs[ob] = out
                             yield name, out
@@ -1151,7 +1170,9 @@ class Network(ModuleArgsDict, ABC):
     def initialized(self):
         pass
 
-    def named_forward(self, *inputs: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
+    def named_forward(
+        self, *inputs: torch.Tensor, attributes: list[list[Attribute]] | None = None
+    ) -> Iterator[tuple[str, torch.Tensor]]:
         if self.patch:
             self.patch.load(inputs[0].shape[2:])
             accumulators: dict[str, Accumulator] = {}
@@ -1159,7 +1180,7 @@ class Network(ModuleArgsDict, ABC):
             patch_iterator = self.patch.disassemble(*inputs)
             buffer = []
             for i, patch_input in enumerate(patch_iterator):
-                for name, output_layer in super().named_forward(*patch_input):
+                for name, output_layer in super().named_forward(*patch_input, attributes=attributes):
                     yield f";accu;{name}", output_layer
                     buffer.append((name.split(".")[0], output_layer))
                     if len(buffer) == 2:
@@ -1184,18 +1205,21 @@ class Network(ModuleArgsDict, ABC):
             for name, accumulator in accumulators.items():
                 yield name, accumulator.assemble()
         else:
-            for name, output_layer in super().named_forward(*inputs):
+            for name, output_layer in super().named_forward(*inputs, attributes=attributes):
                 yield name, output_layer
 
     def get_layers(
-        self, inputs: list[torch.Tensor], layers_name: list[str]
+        self,
+        inputs: list[torch.Tensor],
+        layers_name: list[str],
+        attributes: list[list[Attribute]] | None = None,
     ) -> Iterator[tuple[str, torch.Tensor, PatchIndexed | None]]:
         layers_name = layers_name.copy()
         output_layer_accumulator: dict[str, Accumulator] = {}
         output_layer_patch_indexed: dict[str, PatchIndexed] = {}
         it = 0
         debug = "KONFAI_DEBUG" in os.environ
-        for name_tmp, output_layer in self.named_forward(*inputs):
+        for name_tmp, output_layer in self.named_forward(*inputs, attributes=attributes):
             name = name_tmp.replace(";accu;", "")
             if debug:
                 if "KONFAI_DEBUG_LAST_LAYER" in os.environ:
@@ -1294,6 +1318,9 @@ class Network(ModuleArgsDict, ABC):
         for name, layer, patch_indexed in self.get_layers(
             [batch_data_item.tensor for batch_data_item in batch_sample.values() if batch_data_item.is_input],
             list(set(list(measure_output_layers) + output_layers)),
+            attributes=[
+                batch_data_item.attribute for batch_data_item in batch_sample.values() if batch_data_item.is_input
+            ],
         ):
             outputs_group = [outputs_group for outputs_group in self.outputsGroup if name in outputs_group]
 
