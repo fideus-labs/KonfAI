@@ -115,8 +115,11 @@ tag_regex = "^v(?P<version>.*)$"
 local_scheme = "no-local-version"
 
 [tool.setuptools.packages.find]
-include = ["konfai*"]
-exclude = ["apps*"]
+# "konfai.*" (with the dot) keeps namespace subpackages such as konfai.models.* while NOT matching
+# the sibling "konfai-apps" directory (hyphen), which the old "konfai*" glob wrongly bundled into the
+# published wheel. Keep the default namespaces=true so PEP 420 packages (konfai/models) ship.
+include = ["konfai", "konfai.*"]
+exclude = ["apps*", "konfai-apps*"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
@@ -158,13 +161,14 @@ scikit-image = "*"
 
 [tool.pixi.feature.dev.tasks]
 test = { cmd = "pytest -q tests/", description = "Run the test suite" }
+test-apps = { cmd = "pytest -q konfai-apps/tests", description = "Run the konfai-apps test suite" }
 test-cov = { cmd = "pytest --cov=konfai --cov-report=term-missing tests/", description = "Run tests with coverage" }
 lint = { cmd = "ruff check konfai konfai-apps/konfai_apps", description = "Lint source code" }
 format = { cmd = "ruff format konfai konfai-apps/konfai_apps", description = "Format source code" }
 format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps", description = "Check formatting without modifying files" }
 typecheck = { cmd = "python -m mypy konfai --ignore-missing-imports --no-site-packages", description = "Type-check the konfai package" }
 build = { cmd = "python -m build", description = "Build sdist and wheel" }
-check = { depends-on = ["lint", "format-check", "test"], description = "Run all quality checks" }
+check = { depends-on = ["lint", "format-check", "test", "test-apps"], description = "Run all quality checks" }
 
 # ---------------------------------------------------------------------------
 # Feature: lint

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "konfai-apps"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Standalone KonfAI Apps package with local and remote app execution"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -12,13 +12,6 @@ requires-python = ">=3.10"
 
 authors = [
   { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
-]
-
-dependencies = [
-  "konfai",
-  "fastapi",
-  "uvicorn",
-  "python-multipart"
 ]
 
 [project.urls]

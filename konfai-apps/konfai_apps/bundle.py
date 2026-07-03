@@ -199,6 +199,7 @@ def export_onnx_into_bundle(
     import yaml
     from konfai.export import export_to_onnx, list_output_modules
     from konfai.network.network import ModelLoader
+    from konfai.utils.runtime import safe_torch_load
 
     bundle = Path(bundle)
     config_path = bundle / prediction_config
@@ -238,7 +239,7 @@ def export_onnx_into_bundle(
             ckpt_path = Path(checkpoint)
             if not ckpt_path.is_absolute():
                 ckpt_path = bundle / ckpt_path.name
-            state = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)  # nosec B614
+            state = safe_torch_load(ckpt_path, "cpu")
             model.load(state, init=False)
 
         example = torch.randn(1, in_channels, *patch_size)

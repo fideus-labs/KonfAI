@@ -17,6 +17,7 @@
 """FastAPI server exposing KonfAI Apps as remote asynchronous jobs."""
 
 import asyncio
+import hmac
 import json
 import os
 import shutil
@@ -25,18 +26,19 @@ import subprocess  # nosec B404
 import tempfile
 import time
 import uuid
+import zipfile
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 import konfai
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from konfai.utils.errors import AppRepositoryError
+from konfai.utils.errors import AppMetadataError, AppRepositoryError
 
 from .app_repository import get_app_repository_info
 
@@ -72,7 +74,7 @@ def require_token(credentials: HTTPAuthorizationCredentials | None = Depends(sec
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Missing bearer token")
 
-    if credentials.credentials != expected:
+    if not hmac.compare_digest(credentials.credentials, expected):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
@@ -98,9 +100,11 @@ async def lifespan(_app: FastAPI):
     """Initialize and clear process-wide server state across FastAPI lifecycles."""
     initialize_gpu_semaphores()
     reset_sse_state()
+    SERVER_STATE.loop = asyncio.get_running_loop()
     try:
         yield
     finally:
+        SERVER_STATE.loop = None
         SERVER_STATE.gpu_semaphores.clear()
         reset_sse_state()
 
@@ -110,6 +114,35 @@ app = FastAPI(lifespan=lifespan)
 
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # 2GB
 MAX_TOTAL_BYTES = 6 * 1024 * 1024 * 1024  # 6GB
+
+_T = TypeVar("_T")
+
+
+def split_into_groups(items: list[_T], groups: str) -> list[list[_T]]:
+    """Re-split a flat, ordered list into consecutive groups from a size CSV."""
+    out: list[list[_T]] = []
+    idx = 0
+    for size in (int(s) for s in groups.split(",")):
+        out.append(list(items[idx : idx + size]))
+        idx += size
+    return out
+
+
+def save_upload_groups(
+    files: list[UploadFile],
+    groups: str,
+    base: Path,
+    max_file_bytes: int = MAX_FILE_BYTES,
+    max_total_bytes: int = MAX_TOTAL_BYTES,
+) -> list[list[Path]]:
+    """Persist uploaded files into one ``g{i}`` subdirectory per declared group."""
+    saved: list[list[Path]] = []
+    total = 0
+    for i, group in enumerate(split_into_groups(files, groups)):
+        paths = save_uploads(group, base / f"g{i}", max_file_bytes, max_total_bytes - total)
+        saved.append(paths)
+        total += sum(p.stat().st_size for p in paths)
+    return saved
 
 
 def save_uploads(
@@ -149,6 +182,15 @@ def save_uploads(
                 continue
 
             p = dst / Path(f.filename).name
+            if p.exists():
+                # Two uploads in the same group can share a basename (e.g. every case named the same);
+                # disambiguate instead of silently overwriting, which would drop a case. Order is kept
+                # (out is appended in upload order), so the group boundaries still map back correctly.
+                base, dot, ext = Path(f.filename).name.partition(".")
+                counter = 1
+                while p.exists():
+                    p = dst / f"{base}_{counter}{dot}{ext}"
+                    counter += 1
             written = 0
 
             try:
@@ -177,6 +219,59 @@ def save_uploads(
         raise
 
     return out
+
+
+def extract_zip_safely(upload: UploadFile, dest: Path) -> Path:
+    """
+    Persist an uploaded zip archive and extract its contents under ``dest``.
+
+    Every archive member is validated so its resolved destination stays inside
+    ``dest``; absolute paths or ``..`` traversal entries are rejected before any
+    extraction happens (zip-slip protection).
+
+    Parameters
+    ----------
+    upload : UploadFile
+        Uploaded zip archive.
+    dest : Path
+        Directory into which the archive is extracted (created if missing).
+
+    Returns
+    -------
+    Path
+        Resolved ``dest`` directory containing the extracted tree.
+
+    Raises
+    ------
+    HTTPException
+        If the payload is not a valid zip or contains an unsafe member path.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    dest = dest.resolve()
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".zip", dir=dest.parent)
+    archive_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as w:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                w.write(chunk)
+
+        try:
+            with zipfile.ZipFile(archive_path) as zf:
+                for member in zf.namelist():
+                    target = (dest / member).resolve()
+                    if target != dest and dest not in target.parents:
+                        raise HTTPException(400, f"Unsafe path in archive: {member}")
+                zf.extractall(dest)
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(400, "Uploaded dataset is not a valid zip archive") from exc
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+    return dest
 
 
 @dataclass
@@ -227,6 +322,7 @@ class AppServerState:
     active_sse_global: int = 0
     active_sse_jobs: set[str] = field(default_factory=set)
     active_sse_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    loop: asyncio.AbstractEventLoop | None = None
 
 
 SERVER_STATE = AppServerState()
@@ -317,7 +413,7 @@ def release_gpus(gpus: list[int]) -> None:
 
 
 MAX_SSE_GLOBAL = 200
-SSE_TTL_S = 600
+SSE_HEARTBEAT_S = 15
 
 
 async def sse_log_stream(job: Job):
@@ -327,15 +423,19 @@ async def sse_log_stream(job: Job):
     This stream is protected by:
     - a global limit on the number of concurrent streams
     - a per-job limit (only one active stream per job_id)
-    - a hard TTL (SSE_TTL_S) after which the stream is closed
+    - a heartbeat (SSE_HEARTBEAT_S) that keeps idle connections alive
 
     The stream yields:
         data: <log line>\n\n
 
+    During quiet periods a ``: keepalive`` comment is emitted instead of a
+    completion marker, so a long-running but silent job is never mistaken for
+    a finished one.
+
     Termination conditions:
     - "__DONE__" log marker
     - "__ERROR__" marker
-    - TTL expiration
+    - job reaching a terminal status (done/error/killed)
     - client disconnect
 
     Admission control and cleanup are guaranteed via a lock and a
@@ -356,17 +456,21 @@ async def sse_log_stream(job: Job):
         SERVER_STATE.active_sse_global += 1
         SERVER_STATE.active_sse_jobs.add(job.job_id)
 
-    start = time.time()
     try:
         yield f"data: [KonfAI-Apps] Remote job {job.job_id} log stream connected\n\n"
 
         while True:
-            # ---- TTL ----
-            if time.time() - start > SSE_TTL_S:
-                yield "data: __DONE__\n\n"
-                break
+            try:
+                line = await asyncio.wait_for(job.log_q.get(), timeout=SSE_HEARTBEAT_S)
+            except asyncio.TimeoutError:
+                # Keep the connection alive during quiet periods without signalling
+                # completion. Stop only once the job itself has terminated (guards
+                # against a completion marker dropped from a saturated queue).
+                yield ": keepalive\n\n"
+                if job.status in {"done", "error", "killed"}:
+                    break
+                continue
 
-            line = await job.log_q.get()
             yield f"data: {line.strip()}\n\n"
 
             if line == "__DONE__" or line.startswith("__ERROR__"):
@@ -417,6 +521,17 @@ def get_vram(devices: list[int] = Query(...)):
     return {"used_gb": used_gb, "total_gb": total_gb}
 
 
+def _require_configured_app(app_id: str) -> None:
+    """Reject app ids outside this server's configured allowlist.
+
+    Without this guard the repository resolver would fetch arbitrary HuggingFace repos, read arbitrary
+    local directories, or reach out to arbitrary remote servers (SSRF / exfiltration) for any token
+    holder. The job endpoints already enforce the same allowlist (see the job wrapper).
+    """
+    if app_id not in _APPS:
+        raise HTTPException(404, f"Unknown app '{app_id}'")
+
+
 @protected.get("/repo_apps_list")
 def get_apps():
     """Return the list of app identifiers configured for this server."""
@@ -433,10 +548,11 @@ def get_app_info(app_id: str):
     app_id : str
         App identifier as exposed by the repository configuration.
     """
+    _require_configured_app(app_id)
 
     try:
         app = get_app_repository_info(app_id, False)
-    except AppRepositoryError:
+    except (AppRepositoryError, AppMetadataError):
         return {
             "app": app_id,
             "available": False,
@@ -474,6 +590,7 @@ def download_app_repository_configs(app_id: str, background_tasks: BackgroundTas
     """
     Download the configuration files of an app as a ZIP archive.
     """
+    _require_configured_app(app_id)
     try:
         app = get_app_repository_info(app_id, False)
     except AppRepositoryError as exc:
@@ -513,12 +630,27 @@ def q_put_drop_oldest(q: asyncio.Queue[str], item: str) -> None:
     except asyncio.QueueFull:
         try:
             q.get_nowait()
-        except asyncio.QueueFull:
+        except asyncio.QueueEmpty:
             return
         try:
             q.put_nowait(item)
         except asyncio.QueueFull:
             pass
+
+
+def emit_log(job: Job, line: str) -> None:
+    """
+    Push a log line onto a job's SSE queue safely from any thread.
+
+    ``asyncio.Queue`` is not thread-safe. Job execution runs in a worker thread
+    (and ``kill_job`` in the request thread pool), so log lines are scheduled
+    onto the event loop instead of touching the queue directly.
+    """
+    loop = SERVER_STATE.loop
+    if loop is not None:
+        loop.call_soon_threadsafe(q_put_drop_oldest, job.log_q, line)
+    else:
+        q_put_drop_oldest(job.log_q, line)
 
 
 def _run_job_sync(
@@ -546,7 +678,7 @@ def _run_job_sync(
         Fully resolved command line to execute.
     """
     job.status = "running"
-    q_put_drop_oldest(job.log_q, f"[KonfAI-Apps] Starting job in: {job.run_dir}")
+    emit_log(job, f"[KonfAI-Apps] Starting job in: {job.run_dir}")
 
     try:
         proc = subprocess.Popen(
@@ -562,14 +694,14 @@ def _run_job_sync(
         job.proc = proc
         if proc.stdout:
             for line in proc.stdout:
-                q_put_drop_oldest(job.log_q, line.rstrip("\n"))
+                emit_log(job, line.rstrip("\n"))
 
         rc = proc.wait()
         if rc != 0:
             job.status = "error"
             job.error = f"Subprocess failed (exit code {rc})"
-            q_put_drop_oldest(job.log_q, f"__ERROR__ {job.error}")
-            q_put_drop_oldest(job.log_q, "__DONE__")
+            emit_log(job, f"__ERROR__ {job.error}")
+            emit_log(job, "__DONE__")
             return
 
         zip_base = job.run_dir / "result"
@@ -577,14 +709,14 @@ def _run_job_sync(
         job.zip_path = Path(zip_file)
 
         job.status = "done"
-        q_put_drop_oldest(job.log_q, f"Result zip created: {job.zip_path}")
-        q_put_drop_oldest(job.log_q, "__DONE__")
+        emit_log(job, f"Result zip created: {job.zip_path}")
+        emit_log(job, "__DONE__")
 
     except Exception as e:
         job.status = "error"
         job.error = str(e)
-        q_put_drop_oldest(job.log_q, f"__ERROR__ {job.error}")
-        q_put_drop_oldest(job.log_q, "__DONE__")
+        emit_log(job, f"__ERROR__ {job.error}")
+        emit_log(job, "__DONE__")
 
 
 async def start_job(job: Job, cmd: list[str], requested_gpus: list[int] | None):
@@ -666,6 +798,8 @@ def submit_job():
                 raise HTTPException(429, "Server busy: too many active jobs")
 
             app_name = kwargs.get("app_name")
+            if app_name not in _APPS:
+                raise HTTPException(404, f"Unknown app '{app_name}'")
 
             job_id = uuid.uuid4().hex[:12]
             run_dir = Path(tempfile.mkdtemp(prefix=f"konfai_job_{job_id}_")).resolve()
@@ -688,17 +822,24 @@ def submit_job():
                 inputs_upload_files = kwargs.get("inputs")
                 inputs = None
                 if inputs_upload_files:
-                    inputs = save_uploads(inputs_upload_files, job.input_dir)
+                    inputs = save_upload_groups(
+                        inputs_upload_files, kwargs.get("inputs_groups"), job.input_dir / "inputs"
+                    )
 
                 gt_upload_files = kwargs.get("gt")
                 gt = None
                 if gt_upload_files:
-                    gt = save_uploads(gt_upload_files, job.input_dir)
+                    gt = save_upload_groups(gt_upload_files, kwargs.get("gt_groups"), job.input_dir / "gt")
 
                 mask_upload_files = kwargs.get("mask")
                 mask = None
                 if mask_upload_files:
-                    mask = save_uploads(mask_upload_files, job.input_dir)
+                    mask = save_upload_groups(mask_upload_files, kwargs.get("mask_groups"), job.input_dir / "mask")
+
+                dataset_upload = kwargs.get("dataset")
+                dataset_dir = None
+                if dataset_upload is not None:
+                    dataset_dir = extract_zip_safely(dataset_upload, job.input_dir / "dataset")
 
                 gpu = kwargs.get("gpu")
                 cpu = kwargs.get("cpu")
@@ -706,20 +847,35 @@ def submit_job():
 
                 cmd = await fn(*args, **kwargs)
                 cmd += ["--output", str(job.output_dir)]
-                if gpu is None:
-                    gpu_list = None
-                    cmd += ["--cpu", str(cpu)]
+
+                requested = [int(x) for x in (gpu or "").split(",") if x.strip()]
+                if requested:
+                    if not SERVER_STATE.gpu_semaphores:
+                        raise HTTPException(503, "No GPU available on this server; retry with --cpu")
+                    unknown = sorted({g for g in requested if g not in SERVER_STATE.gpu_semaphores})
+                    if unknown:
+                        raise HTTPException(400, f"Unknown GPU id(s): {unknown}")
+                    gpu_list = requested
                 else:
-                    gpu_list = [int(x.strip()) for x in gpu.split(",") if x.strip()]
+                    gpu_list = sorted(SERVER_STATE.gpu_semaphores) or None
+
+                if gpu_list is None:
+                    cmd += ["--cpu", str(cpu)]
 
                 if inputs:
-                    cmd += ["--inputs"] + [str(p) for p in inputs]
+                    for group in inputs:
+                        cmd += ["--inputs"] + [str(p) for p in group]
 
                 if gt:
-                    cmd += ["--gt"] + [str(p) for p in gt]
+                    for group in gt:
+                        cmd += ["--gt"] + [str(p) for p in group]
 
                 if mask:
-                    cmd += ["--mask"] + [str(p) for p in mask]
+                    for group in mask:
+                        cmd += ["--mask"] + [str(p) for p in group]
+
+                if dataset_dir is not None:
+                    cmd += ["--dataset", str(dataset_dir)]
 
                 if quiet:
                     cmd += ["--quiet"]
@@ -746,13 +902,14 @@ def submit_job():
 async def infer(
     app_name: str,
     inputs: Annotated[list[UploadFile], File(...)],
+    inputs_groups: Annotated[str | None, Form()] = None,
     ensemble: Annotated[int, Form()] = 0,
     ensemble_models: Annotated[str, Form()] = "",  # CSV
     tta: Annotated[int, Form()] = 0,
     mc: Annotated[int, Form()] = 0,
     uncertainty: Annotated[bool, Form()] = False,
     prediction_file: Annotated[str, Form()] = "Prediction.yml",
-    gpu: Annotated[str | None, Form()] = None,  # CSV "0,1"
+    gpu: Annotated[str | None, Form()] = "",  # CSV "0,1"
     cpu: Annotated[int, Form()] = 1,
     quiet: Annotated[bool, Form()] = False,
 ):
@@ -825,8 +982,11 @@ async def evaluate(
     inputs: Annotated[list[UploadFile], File(...)],
     gt: Annotated[list[UploadFile], File(...)],
     mask: Annotated[list[UploadFile], File(...)] = [],
+    inputs_groups: Annotated[str | None, Form()] = None,
+    gt_groups: Annotated[str | None, Form()] = None,
+    mask_groups: Annotated[str | None, Form()] = None,
     evaluation_file: Annotated[str, Form()] = "Evaluation.yml",
-    gpu: Annotated[str | None, Form()] = None,
+    gpu: Annotated[str | None, Form()] = "",
     cpu: Annotated[int, Form()] = 1,
     quiet: Annotated[bool, Form()] = False,
 ):
@@ -875,6 +1035,7 @@ async def evaluate(
 async def uncertainty(
     app_name: str,
     inputs: Annotated[list[UploadFile], File(...)],
+    inputs_groups: Annotated[str | None, Form()] = None,
     uncertainty_file: Annotated[str, Form()] = "Uncertainty.yml",
     gpu: Annotated[str | None, Form()] = "",
     cpu: Annotated[int, Form()] = 1,
@@ -922,6 +1083,9 @@ async def pipeline(
     app_name: str,
     inputs: Annotated[list[UploadFile], File(...)],
     gt: Annotated[list[UploadFile], File(...)],
+    inputs_groups: Annotated[str | None, Form()] = None,
+    gt_groups: Annotated[str | None, Form()] = None,
+    mask_groups: Annotated[str | None, Form()] = None,
     ensemble: Annotated[int, Form()] = 0,
     ensemble_models: Annotated[str, Form()] = "",
     tta: Annotated[int, Form()] = 0,
@@ -1011,12 +1175,13 @@ async def pipeline(
 @submit_job()
 async def fine_tune(
     app_name: str,
-    inputs: Annotated[list[UploadFile], File(...)],
+    dataset: Annotated[UploadFile, File(...)],
     name: Annotated[str, Form()] = "Finetune",
     epochs: Annotated[int, Form()] = 10,
     it_validation: Annotated[int, Form()] = 1000,
     models: Annotated[str, Form()] = "",  # CSV
     config_file: Annotated[str, Form()] = "Config.yml",
+    lr: Annotated[float | None, Form()] = None,
     gpu: Annotated[str | None, Form()] = "",
     cpu: Annotated[int, Form()] = 1,
     quiet: Annotated[bool, Form()] = False,
@@ -1031,8 +1196,9 @@ async def fine_tune(
     ----------
     app_name : str
         Application name.
-    inputs : list[UploadFile]
-        Training dataset.
+    dataset : UploadFile
+        Training dataset directory packaged as a single zip archive; the server
+        extracts it and passes the resulting directory to ``--dataset``.
     name : str
         Run name.
     epochs : int
@@ -1043,6 +1209,9 @@ async def fine_tune(
         Comma-separated checkpoint name(s) to fine-tune (empty = first available).
     config_file : str
         Training configuration file.
+    lr : float | None
+        Learning-rate override forwarded to fine-tuning (``None`` resumes the
+        checkpoint learning rate).
     gpu : str | None
         GPU selection or auto mode.
     cpu : int
@@ -1070,6 +1239,8 @@ async def fine_tune(
     models_list = [x.strip() for x in models.split(",") if x.strip()]
     if models_list:
         cmd += ["--models", *models_list]
+    if lr is not None:
+        cmd += ["--lr", str(lr)]
     return cmd
 
 
@@ -1224,8 +1395,8 @@ def kill_job(job_id: str):
 
         job.status = "killed"
         job.error = "Killed by user"
-        q_put_drop_oldest(job.log_q, "__ERROR__ Killed by user")
-        q_put_drop_oldest(job.log_q, "__DONE__")
+        emit_log(job, "__ERROR__ Killed by user")
+        emit_log(job, "__DONE__")
 
         return {"job_id": job.job_id, "status": "killed", "message": "Kill requested"}
 

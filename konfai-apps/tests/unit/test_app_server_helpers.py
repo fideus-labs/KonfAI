@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
 import io
+import shutil
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -178,6 +180,7 @@ def test_submit_job_cleans_workspace_when_setup_fails(
     run_dir = tmp_path / "job"
     run_dir.mkdir()
     monkeypatch.setattr(app_server.tempfile, "mkdtemp", lambda prefix: str(run_dir))
+    monkeypatch.setattr(app_server, "_APPS", ["demo"])
 
     @app_server.submit_job()
     async def failing_job(*args, **kwargs):
@@ -198,3 +201,445 @@ def test_submit_job_cleans_workspace_when_setup_fails(
     asyncio.run(scenario())
     assert app_server.JOBS == {}
     assert run_dir.exists() is False
+
+
+def test_submit_job_rejects_app_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    monkeypatch.setattr(app_server.tempfile, "mkdtemp", lambda prefix: str(run_dir))
+    monkeypatch.setattr(app_server, "_APPS", ["known"])
+
+    calls: list[str] = []
+
+    @app_server.submit_job()
+    async def stub_job(*args, **kwargs):
+        calls.append("ran")
+        return ["konfai-apps", "infer", "evil"]
+
+    async def scenario() -> None:
+        with pytest.raises(HTTPException) as exc:
+            await stub_job(
+                app_name="evil",
+                inputs=None,
+                gt=None,
+                mask=None,
+                gpu=None,
+                cpu=1,
+                quiet=False,
+            )
+        assert exc.value.status_code == 404
+
+    asyncio.run(scenario())
+    # Rejected before any workspace is created or the command builder runs.
+    assert calls == []
+    assert run_dir.exists() is False
+    assert app_server.JOBS == {}
+
+
+def test_submit_job_errors_when_gpu_requested_but_none_available(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    monkeypatch.setattr(app_server.tempfile, "mkdtemp", lambda prefix: str(run_dir))
+    monkeypatch.setattr(app_server, "_APPS", ["demo"])
+
+    old = app_server.GPU_SEM.copy()
+    app_server.GPU_SEM.clear()
+
+    @app_server.submit_job()
+    async def stub_job(*args, **kwargs):
+        return ["konfai-apps", "infer", "demo"]
+
+    async def scenario() -> None:
+        with pytest.raises(HTTPException) as exc:
+            await stub_job(
+                app_name="demo",
+                inputs=None,
+                gt=None,
+                mask=None,
+                gpu="0",
+                cpu=1,
+                quiet=False,
+            )
+        assert exc.value.status_code == 503
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        app_server.GPU_SEM.clear()
+        app_server.GPU_SEM.update(old)
+
+    assert app_server.JOBS == {}
+    assert run_dir.exists() is False
+
+
+def test_submit_job_rejects_unknown_gpu_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    monkeypatch.setattr(app_server.tempfile, "mkdtemp", lambda prefix: str(run_dir))
+    monkeypatch.setattr(app_server, "_APPS", ["demo"])
+
+    old = app_server.GPU_SEM.copy()
+    app_server.GPU_SEM.clear()
+    app_server.GPU_SEM.update({0: asyncio.Semaphore(1)})
+
+    @app_server.submit_job()
+    async def stub_job(*args, **kwargs):
+        return ["konfai-apps", "infer", "demo"]
+
+    async def scenario() -> None:
+        with pytest.raises(HTTPException) as exc:
+            await stub_job(
+                app_name="demo",
+                inputs=None,
+                gt=None,
+                mask=None,
+                gpu="5",
+                cpu=1,
+                quiet=False,
+            )
+        assert exc.value.status_code == 400
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        app_server.GPU_SEM.clear()
+        app_server.GPU_SEM.update(old)
+
+    assert app_server.JOBS == {}
+    assert run_dir.exists() is False
+
+
+def test_q_put_drop_oldest_drops_oldest_when_full() -> None:
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2)
+    app_server.q_put_drop_oldest(queue, "a")
+    app_server.q_put_drop_oldest(queue, "b")
+    app_server.q_put_drop_oldest(queue, "c")
+
+    assert queue.get_nowait() == "b"
+    assert queue.get_nowait() == "c"
+    assert queue.empty()
+
+
+def test_emit_log_without_loop_enqueues_directly() -> None:
+    job = _make_job("nolog")
+    app_server.SERVER_STATE.loop = None
+    app_server.emit_log(job, "hello")
+    assert job.log_q.get_nowait() == "hello"
+
+
+def test_save_uploads_separates_categories(tmp_path: Path) -> None:
+    same_name = "Volume.mha"
+    input_upload = SimpleNamespace(filename=same_name, file=io.BytesIO(b"input"))
+    gt_upload = SimpleNamespace(filename=same_name, file=io.BytesIO(b"gt"))
+
+    inputs = app_server.save_uploads([input_upload], tmp_path / "inputs")
+    gt = app_server.save_uploads([gt_upload], tmp_path / "gt")
+
+    assert inputs[0] != gt[0]
+    assert inputs[0].read_bytes() == b"input"
+    assert gt[0].read_bytes() == b"gt"
+
+
+def test_split_into_groups_respects_declared_sizes() -> None:
+    assert app_server.split_into_groups(["f0", "f1", "f2"], "1,2") == [["f0"], ["f1", "f2"]]
+
+
+def test_save_upload_groups_isolates_colliding_basenames(tmp_path: Path) -> None:
+    first = SimpleNamespace(filename="ct.nii.gz", file=io.BytesIO(b"first"))
+    second = SimpleNamespace(filename="ct.nii.gz", file=io.BytesIO(b"second"))
+
+    saved = app_server.save_upload_groups([first, second], "1,1", tmp_path / "inputs")
+
+    assert len(saved) == 2
+    assert saved[0][0] != saved[1][0]
+    assert saved[0][0].read_bytes() == b"first"
+    assert saved[1][0].read_bytes() == b"second"
+    assert saved[0][0].parent.name == "g0"
+    assert saved[1][0].parent.name == "g1"
+
+
+def _capture_submit_cmd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    submit_kwargs: dict,
+) -> list[str]:
+    run_dir = tmp_path / "job"
+    monkeypatch.setattr(app_server.tempfile, "mkdtemp", lambda prefix: str(run_dir))
+    monkeypatch.setattr(app_server, "_APPS", ["demo"])
+
+    captured: dict[str, list[str]] = {}
+
+    async def fake_start_job(job, cmd, gpus):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+
+    monkeypatch.setattr(app_server, "start_job", fake_start_job)
+
+    @app_server.submit_job()
+    async def stub_job(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return ["konfai-apps", "infer", "demo"]
+
+    old_jobs = dict(app_server.JOBS)
+
+    async def scenario() -> None:
+        await stub_job(app_name="demo", **submit_kwargs)
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        app_server.JOBS.clear()
+        app_server.JOBS.update(old_jobs)
+
+    return captured["cmd"]
+
+
+def _capture_submit_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    submit_kwargs: dict,
+    gpu_ids: list[int] | None = None,
+) -> dict:
+    run_dir = tmp_path / "job"
+    monkeypatch.setattr(app_server.tempfile, "mkdtemp", lambda prefix: str(run_dir))
+    monkeypatch.setattr(app_server, "_APPS", ["demo"])
+
+    captured: dict = {}
+
+    async def fake_start_job(job, cmd, gpus):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        captured["gpus"] = gpus
+
+    monkeypatch.setattr(app_server, "start_job", fake_start_job)
+
+    @app_server.submit_job()
+    async def stub_job(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return ["konfai-apps", "infer", "demo"]
+
+    old_jobs = dict(app_server.JOBS)
+    old_sem = app_server.GPU_SEM.copy()
+    app_server.GPU_SEM.clear()
+    for gid in gpu_ids or []:
+        app_server.GPU_SEM[gid] = asyncio.Semaphore(1)
+
+    async def scenario() -> None:
+        await stub_job(app_name="demo", **submit_kwargs)
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        app_server.JOBS.clear()
+        app_server.JOBS.update(old_jobs)
+        app_server.GPU_SEM.clear()
+        app_server.GPU_SEM.update(old_sem)
+
+    return captured
+
+
+def test_submit_job_auto_mode_uses_all_available_gpus(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured = _capture_submit_gpu(
+        monkeypatch,
+        tmp_path,
+        {"inputs": None, "gt": None, "mask": None, "gpu": "", "cpu": 1, "quiet": False},
+        gpu_ids=[0, 1],
+    )
+
+    # Empty selection with GPUs present resolves to every available GPU, no 503.
+    assert captured["gpus"] == [0, 1]
+    assert "--cpu" not in captured["cmd"]
+
+
+def test_submit_job_auto_mode_falls_back_to_cpu_without_gpus(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured = _capture_submit_gpu(
+        monkeypatch,
+        tmp_path,
+        {"inputs": None, "gt": None, "mask": None, "gpu": "", "cpu": 3, "quiet": False},
+        gpu_ids=None,
+    )
+
+    # Empty selection on a CPU-only server runs on CPU without raising 503.
+    assert captured["gpus"] is None
+    assert "--cpu" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--cpu") + 1] == "3"
+
+
+def test_submit_job_explicit_mode_preserves_every_requested_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured = _capture_submit_gpu(
+        monkeypatch,
+        tmp_path,
+        {"inputs": None, "gt": None, "mask": None, "gpu": "0,1", "cpu": 1, "quiet": False},
+        gpu_ids=[0, 1],
+    )
+
+    # A CSV selection keeps every id instead of collapsing to the last one.
+    assert captured["gpus"] == [0, 1]
+    assert "--cpu" not in captured["cmd"]
+
+
+def test_submit_job_emits_one_inputs_flag_per_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    inputs = [
+        SimpleNamespace(filename="ct.nii.gz", file=io.BytesIO(b"c")),
+        SimpleNamespace(filename="mr.nii.gz", file=io.BytesIO(b"m")),
+    ]
+
+    cmd = _capture_submit_cmd(
+        monkeypatch,
+        tmp_path,
+        {
+            "inputs": inputs,
+            "inputs_groups": "1,1",
+            "gt": None,
+            "mask": None,
+            "gpu": None,
+            "cpu": 1,
+            "quiet": False,
+        },
+    )
+
+    assert cmd.count("--inputs") == 2
+    input_paths = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--inputs"]
+    assert Path(input_paths[0]).parent.name == "g0"
+    assert Path(input_paths[1]).parent.name == "g1"
+    assert [Path(p).name for p in input_paths] == ["ct.nii.gz", "mr.nii.gz"]
+
+
+def test_submit_job_mono_input_emits_single_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    inputs = [SimpleNamespace(filename="ct.nii.gz", file=io.BytesIO(b"c"))]
+
+    cmd = _capture_submit_cmd(
+        monkeypatch,
+        tmp_path,
+        {
+            "inputs": inputs,
+            "inputs_groups": "1",
+            "gt": None,
+            "mask": None,
+            "gpu": None,
+            "cpu": 1,
+            "quiet": False,
+        },
+    )
+
+    assert cmd.count("--inputs") == 1
+    input_path = Path(cmd[cmd.index("--inputs") + 1])
+    assert input_path.parent.name == "g0"
+    assert input_path.name == "ct.nii.gz"
+
+
+def _make_dataset_upload(tmp_path: Path) -> SimpleNamespace:
+    src = tmp_path / "src"
+    (src / "P000").mkdir(parents=True)
+    (src / "P000" / "Volume_0.mha").write_bytes(b"v0")
+    (src / "P000" / "Volume_1.mha").write_bytes(b"v1")
+    zip_path = shutil.make_archive(str(tmp_path / "dataset"), "zip", root_dir=str(src))
+    return SimpleNamespace(filename="dataset.zip", file=io.BytesIO(Path(zip_path).read_bytes()))
+
+
+def test_extract_zip_safely_reconstructs_tree(tmp_path: Path) -> None:
+    upload = _make_dataset_upload(tmp_path)
+
+    dest = app_server.extract_zip_safely(upload, tmp_path / "job" / "dataset")
+
+    assert dest == (tmp_path / "job" / "dataset").resolve()
+    assert (dest / "P000" / "Volume_0.mha").read_bytes() == b"v0"
+    assert (dest / "P000" / "Volume_1.mha").read_bytes() == b"v1"
+    # The temporary archive is removed once extraction completes.
+    assert list(dest.parent.glob("*.zip")) == []
+
+
+@pytest.mark.parametrize("evil_name", ["../evil.txt", "sub/../../evil.txt", "/abs/evil.txt"])
+def test_extract_zip_safely_blocks_zip_slip(tmp_path: Path, evil_name: str) -> None:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr(evil_name, b"pwn")
+    payload.seek(0)
+    upload = SimpleNamespace(filename="dataset.zip", file=payload)
+
+    with pytest.raises(HTTPException) as exc:
+        app_server.extract_zip_safely(upload, tmp_path / "job" / "dataset")
+
+    assert exc.value.status_code == 400
+    assert not (tmp_path / "job" / "evil.txt").exists()
+    assert not (tmp_path / "evil.txt").exists()
+    assert not Path("/abs/evil.txt").exists()
+
+
+def test_extract_zip_safely_rejects_non_zip_payload(tmp_path: Path) -> None:
+    upload = SimpleNamespace(filename="dataset.zip", file=io.BytesIO(b"not a zip"))
+
+    with pytest.raises(HTTPException) as exc:
+        app_server.extract_zip_safely(upload, tmp_path / "job" / "dataset")
+
+    assert exc.value.status_code == 400
+
+
+def test_submit_job_extracts_dataset_and_appends_dataset_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dataset_upload = _make_dataset_upload(tmp_path)
+
+    cmd = _capture_submit_cmd(
+        monkeypatch,
+        tmp_path,
+        {
+            "inputs": None,
+            "gt": None,
+            "mask": None,
+            "dataset": dataset_upload,
+            "gpu": None,
+            "cpu": 1,
+            "quiet": False,
+        },
+    )
+
+    assert "--inputs" not in cmd
+    assert cmd.count("--dataset") == 1
+    dataset_arg = Path(cmd[cmd.index("--dataset") + 1])
+    assert dataset_arg.name == "dataset"
+    assert (dataset_arg / "P000" / "Volume_0.mha").read_bytes() == b"v0"
+
+
+def test_submit_job_without_dataset_emits_no_dataset_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    inputs = [SimpleNamespace(filename="ct.nii.gz", file=io.BytesIO(b"c"))]
+
+    cmd = _capture_submit_cmd(
+        monkeypatch,
+        tmp_path,
+        {
+            "inputs": inputs,
+            "inputs_groups": "1",
+            "gt": None,
+            "mask": None,
+            "gpu": None,
+            "cpu": 1,
+            "quiet": False,
+        },
+    )
+
+    assert "--dataset" not in cmd
+    assert cmd.count("--inputs") == 1

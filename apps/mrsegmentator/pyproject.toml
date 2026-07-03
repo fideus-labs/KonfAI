@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mrsegmentator-konfai"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Fast and lightweight MRSegmentator CLI powered by the KonfAI framework."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -12,11 +12,6 @@ requires-python = ">=3.10"
 
 authors = [
   { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
-]
-
-dependencies = [
-  "konfai>=1.6",
-  "konfai-apps>=1.6",
 ]
 
 [project.urls]
