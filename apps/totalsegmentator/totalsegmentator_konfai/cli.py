@@ -14,34 +14,42 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Command-line wrapper for running TotalSegmentator through KonfAI Apps."""
+"""Command-line wrapper for running TotalSegmentator through KonfAI Apps.
+
+Exposes the app operations with segmentation vocabulary: ``segment`` / ``eval`` / ``pipeline``
+(TotalSegmentator models do not provide an uncertainty workflow).
+"""
 
 import argparse
 
-from konfai_apps import KonfAIApp
-from konfai_apps.app_repository import get_available_apps_on_hf_repo
-from konfai_apps.cli import add_common_konfai_apps
+from konfai_apps.cli import build_app_cli
 
 TOTAL_SEGMENTATOR_KONFAI_REPO = "VBoussot/TotalSegmentator-KonfAI"
 
 
-def main():
-    """Parse CLI arguments and run the selected TotalSegmentator app pipeline."""
-    parser = argparse.ArgumentParser(
-        prog="totalsegmentator-konfai",
-        description="TotalSegmentator (KonfAI app wrapper)",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+def _add_selection(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "task",
-        choices=list(get_available_apps_on_hf_repo(TOTAL_SEGMENTATOR_KONFAI_REPO, False)),
-        help="Select which model to use. This determines what is predicted.",
+        help="Which anatomical task/model to use (determines what is predicted). "
+        "An unknown name is reported when the app is resolved.",
     )
-    parser.add_argument("--models", nargs="+", default=[], help="Explicit list of model identifiers/paths to use.")
-    kwargs = add_common_konfai_apps(parser, False)
-    task = kwargs.pop("task")
-    konfai_app = KonfAIApp(
-        f"{TOTAL_SEGMENTATOR_KONFAI_REPO}:{task}", kwargs.pop("download"), kwargs.pop("force_update")
-    )
-    kwargs["ensemble_models"] = kwargs.pop("models")
-    konfai_app.pipeline(**kwargs)
+
+
+def _add_infer_knobs(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--models", nargs="+", default=[], help="Explicit list of model identifiers/paths to ensemble.")
+
+
+main = build_app_cli(
+    "totalsegmentator-konfai",
+    "TotalSegmentator (KonfAI app wrapper): whole-body CT segmentation.",
+    resolve_app=lambda args: f"{TOTAL_SEGMENTATOR_KONFAI_REPO}:{args.task}",
+    add_selection=_add_selection,
+    add_infer_knobs=_add_infer_knobs,
+    resolve_infer=lambda args: {"ensemble": 0, "ensemble_models": args.models, "tta": 0, "mc": 0},
+    infer_command="segment",
+    with_uncertainty=False,
+)
+
+
+if __name__ == "__main__":
+    main()

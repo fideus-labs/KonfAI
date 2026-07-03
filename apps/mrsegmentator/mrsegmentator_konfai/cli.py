@@ -14,29 +14,38 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Command-line wrapper for running MRSegmentator through KonfAI Apps."""
+"""Command-line wrapper for running MRSegmentator through KonfAI Apps.
+
+Exposes the app operations with segmentation vocabulary: ``segment`` / ``eval`` / ``uncertainty`` / ``pipeline``.
+"""
 
 import argparse
 
-from konfai_apps import KonfAIApp
-from konfai_apps.cli import add_common_konfai_apps
+from konfai_apps.cli import build_app_cli
 
 MR_SEGMENTATOR_KONFAI_REPO = "VBoussot/MRSegmentator-KonfAI"
 
 
-def main():
-    """Parse CLI arguments and run the MRSegmentator app pipeline."""
-    parser = argparse.ArgumentParser(
-        prog="mrsegmentator-konfai",
-        description="MRSegmentator (KonfAI app wrapper)",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+def _add_infer_knobs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "-f", "--folds", choices=[1, 2, 3, 4, 5], help="Number of folds to ensemble.", default=2, type=int
+        "-f",
+        "--folds",
+        choices=[1, 2, 3, 4, 5],
+        default=2,
+        type=int,
+        help="Number of cross-validation folds to ensemble.",
     )
-    kwargs = add_common_konfai_apps(parser)
-    kwargs["ensemble"] = kwargs.pop("folds")
-    konfai_app = KonfAIApp(
-        f"{MR_SEGMENTATOR_KONFAI_REPO}:MRSegmentator", kwargs.pop("download"), kwargs.pop("force_update")
-    )
-    konfai_app.pipeline(**kwargs)
+
+
+main = build_app_cli(
+    "mrsegmentator-konfai",
+    "MRSegmentator (KonfAI app wrapper): multi-organ MR segmentation.",
+    resolve_app=lambda args: f"{MR_SEGMENTATOR_KONFAI_REPO}:MRSegmentator",
+    add_infer_knobs=_add_infer_knobs,
+    resolve_infer=lambda args: {"ensemble": args.folds, "ensemble_models": [], "tta": 0, "mc": 0},
+    infer_command="segment",
+)
+
+
+if __name__ == "__main__":
+    main()
