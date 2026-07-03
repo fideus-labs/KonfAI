@@ -152,6 +152,14 @@ def _run(parser: argparse.ArgumentParser) -> None:
         help="Directory where training statistics/logs are saved (default: ./Statistics/).",
     )
 
+    resume_p.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Override the learning rate on resume. If omitted, the checkpoint learning rate is "
+        "resumed and the scheduler continues; if set, the learning rate restarts from this value.",
+    )
+
     predict_p = subparsers.add_parser(str(State.PREDICTION), help="Run inference using a trained model.")
     add_common_args(predict_p)
 

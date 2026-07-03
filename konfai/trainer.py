@@ -19,6 +19,7 @@
 import os
 import shutil
 from pathlib import Path
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -52,6 +53,8 @@ from konfai.utils.runtime import (
     confirm_overwrite_or_raise,
     description,
     run_distributed_app,
+    safe_torch_load,
+    synchronize_data,
 )
 
 
@@ -107,8 +110,8 @@ class EarlyStopping(EarlyStoppingBase):
         for v in self.monitor:
             if v not in values.keys():
                 raise TrainerError(
-                    "Metric '{}' specified in EarlyStopping.monitor not found in logged values. ",
-                    f"Available keys: {v}. Please check your configuration.",
+                    f"Metric '{v}' specified in EarlyStopping.monitor not found in logged values. "
+                    f"Available keys: {sorted(values.keys())}. Please check your configuration."
                 )
         return sum([i for v, i in values.items() if v in self.monitor])
 
@@ -227,11 +230,7 @@ class _Trainer:
         best_loss = float("inf")
         best_ckpt: Path | None = None
         for checkpoint_path in all_checkpoints:
-            state_dict = torch.load(
-                checkpoint_path,
-                map_location=torch.device("cpu"),
-                weights_only=False,
-            )  # nosec B614
+            state_dict = safe_torch_load(checkpoint_path, torch.device("cpu"))
             checkpoint_loss = float(state_dict.get("loss", float("inf")))
             if checkpoint_loss < best_loss:
                 best_loss = checkpoint_loss
@@ -319,15 +318,21 @@ class _Trainer:
 
                         if self.dataloader_validation is not None:
                             loss = self._validate()
-                        score = self.early_stopping.get_score(loss)
-                        self.checkpoint_save(score)
-                        if self.early_stopping(score):
-                            break
 
-                        # Stop once the schedulers have decayed the learning rate to zero:
-                        # no further optimisation is possible, so end the run cleanly.
-                        optimizer = self.model.module.optimizer
-                        if optimizer is not None and optimizer.param_groups[0]["lr"] <= 0:
+                        stop = False
+                        if self.global_rank == 0:
+                            score = self.early_stopping.get_score(loss)
+                            self.checkpoint_save(score)
+                            stop = self.early_stopping(score)
+
+                            # Stop once the schedulers have decayed the learning rate to zero:
+                            # no further optimisation is possible, so end the run cleanly.
+                            optimizer = self.model.module.optimizer
+                            if not stop and optimizer is not None and optimizer.param_groups[0]["lr"] <= 0:
+                                self.early_stopping.stop()
+                                stop = True
+
+                        if self._broadcast_stop(stop):
                             self.early_stopping.stop()
                             break
 
@@ -372,6 +377,20 @@ class _Trainer:
             self.model_ema.module.set_state(NetState.TRAIN)
         return self._validation_log(batch_sample)
 
+    def _broadcast_stop(self, stop: bool) -> bool:
+        """
+        Share rank 0's stop decision with every rank so the training loop is left together.
+
+        Only rank 0 owns the aggregated metrics and therefore the early-stopping decision.
+        Broadcasting it prevents ranks from diverging (some breaking, some continuing).
+        """
+        outputs = synchronize_data(
+            self.world_size,
+            self.local_rank * self.size + self.size - 1,
+            stop,
+        )
+        return bool(outputs[0])
+
     def checkpoint_save(self, loss: float | None) -> None:
         """
         Saves model and optimizer states. Keeps either all checkpoints or only the best one.
@@ -385,18 +404,23 @@ class _Trainer:
         path = checkpoints_directory() / self.train_name
         path.mkdir(parents=True, exist_ok=True)
 
-        name = current_date() + ".pt"
-        save_path = path / name
+        date = current_date()
+        save_path = path / f"{date}.pt"
+        collision = 1
+        while save_path.exists():
+            save_path = path / f"{date}_{collision}.pt"
+            collision += 1
 
         save_dict = {
             "epoch": self.epoch,
             "it": self.it,
-            "loss": loss if loss is not None else 0,
+            "loss": loss if loss is not None else float("inf"),
             "Model": self.model.module.state_dict(),
         }
 
         if self.model_ema is not None:
             save_dict["Model_EMA"] = self.model_ema.module.state_dict()
+            save_dict["Model_EMA_n_averaged"] = int(self.model_ema.n_averaged)
 
         save_dict.update(
             {
@@ -591,6 +615,7 @@ class Trainer(DistributedObject):
         self.autocast = autocast
         self.epochs = epochs
         self.epoch = 0
+        self.override_lr: float | None = None
         self.early_stopping = early_stopping
         self.it = 0
         self.it_validation = it_validation
@@ -650,11 +675,13 @@ class Trainer(DistributedObject):
         state_dict = {}
         if state != State.TRAIN:
             state_dict = self._load()
-        self.model.load(state_dict, init=True, ema=False)
+        self.model.load(state_dict, init=True, ema=False, override_lr=self.override_lr)
         if self.ema_decay > 0:
             self.model_ema = AveragedModel(self.model, avg_fn=self._avg_fn)
             if state_dict is not None:
                 self.model_ema.module.load(state_dict, init=False, ema=True)
+                if "Model_EMA_n_averaged" in state_dict:
+                    self.model_ema.n_averaged.fill_(cast(int, state_dict["Model_EMA_n_averaged"]))
 
         (statistics_directory() / self.name).mkdir(exist_ok=True)
         shutil.copyfile(self.config_path_src, self.config_namefile)
@@ -667,8 +694,11 @@ class Trainer(DistributedObject):
             for name in validation_names:
                 f.write(name + "\n")
 
-    def set_model(self, path_to_model: Path) -> None:
+    def set_model(self, path_to_model: str | Path) -> None:
         self.path_to_model = str(path_to_model)
+
+    def set_lr(self, lr: float | None) -> None:
+        self.override_lr = lr
 
     def __exit__(self, exc_type, value, traceback):
         """Exit training context and trigger save of model/checkpoints."""
@@ -682,17 +712,8 @@ class Trainer(DistributedObject):
         Returns:
             dict: State dictionary loaded from checkpoint.
         """
-        if self.path_to_model.startswith("https://"):
-            try:
-                state_dict = {
-                    self.path_to_model.split(":")[1]: torch.hub.load_state_dict_from_url(
-                        url=self.path_to_model.split(":")[0], map_location="cpu", check_hash=True
-                    )
-                }
-            except Exception as exc:
-                raise Exception(f"Model : {self.path_to_model} does not exist !") from exc
-        elif Path(self.path_to_model).exists():
-            state_dict = torch.load(str(self.path_to_model), map_location=torch.device("cpu"), weights_only=False)  # nosec B614
+        if self.path_to_model.startswith("https://") or Path(self.path_to_model).exists():
+            state_dict = safe_torch_load(self.path_to_model, torch.device("cpu"))
         else:
             raise ValueError(f"Invalid model path entry: {self.path_to_model}")
 
@@ -714,10 +735,15 @@ class Trainer(DistributedObject):
         """
         EMA update rule used by AveragedModel.
 
+        Follows the standard exponential moving average convention: the running
+        average is weighted by ``ema_decay`` and the current model contributes
+        ``1 - ema_decay``. A decay close to 1 keeps the average stable and lets the
+        model nudge it only slightly.
+
         Returns:
             torch.Tensor: Blended parameter using decay factor.
         """
-        return (1 - self.ema_decay) * averaged_model_parameter + self.ema_decay * model_parameter
+        return self.ema_decay * averaged_model_parameter + (1 - self.ema_decay) * model_parameter
 
     def run_process(
         self,
@@ -774,6 +800,7 @@ def build_train(
     config: Path | str = Path("./Config.yml"),
     checkpoints_dir: Path | str = Path("./Checkpoints/"),
     statistics_dir: Path | str = Path("./Statistics/"),
+    lr: float | None = None,
 ) -> DistributedObject:
     """
     Build and return the configured training workflow without executing it.
@@ -790,6 +817,10 @@ def build_train(
         Output directory for checkpoints.
     statistics_dir : Path | str, optional
         Output directory for statistics and logs.
+    lr : float | None, optional
+        Runtime learning-rate override applied when resuming/fine-tuning. When
+        ``None`` the checkpoint learning rate is resumed and the scheduler
+        continues; when set, the learning rate restarts from this value.
 
     Returns
     -------
@@ -808,7 +839,10 @@ def build_train(
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
     trainer = apply_config()(Trainer)()
     if model is not None:
-        trainer.set_model(Path(model))
+        # Keep https:// checkpoint URLs as raw strings: Path() collapses the '//' into
+        # 'https:/…', which then fails both the startswith('https://') check and Path.exists().
+        trainer.set_model(model if isinstance(model, str) and model.startswith("https://") else Path(model))
+    trainer.set_lr(lr)
     return trainer
 
 
@@ -824,6 +858,7 @@ def train(
     config: Path | str = Path("./Config.yml"),
     checkpoints_dir: Path | str = Path("./Checkpoints/"),
     statistics_dir: Path | str = Path("./Statistics/"),
+    lr: float | None = None,
 ) -> DistributedObject:
     """
     Build and execute the configured training workflow.
@@ -838,6 +873,7 @@ def train(
         config=config,
         checkpoints_dir=checkpoints_dir,
         statistics_dir=statistics_dir,
+        lr=lr,
     )
 
 

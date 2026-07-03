@@ -135,8 +135,11 @@ def test_data_split_does_not_duplicate_tail_samples(monkeypatch: pytest.MonkeyPa
     flattened = [item for shard in shards for item in shard]
 
     assert len(shards) == 2
-    assert sorted(flattened) == sorted(mapping)
-    assert len(flattened) == len(mapping)
+    # drop_last semantics: shards are equal length (DDP needs matching step counts), the tail is
+    # dropped, and no sample is ever duplicated across ranks.
+    assert {len(shard) for shard in shards} == {2}
+    assert len(flattened) == len(set(flattened))
+    assert set(flattened).issubset(set(mapping))
 
 
 def test_execute_distributed_object_sets_shared_master_port_without_forcing_launch_blocking(
