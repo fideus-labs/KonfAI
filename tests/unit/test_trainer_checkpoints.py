@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
+from torch import nn
+from torch.optim.swa_utils import AveragedModel
 
 import konfai.trainer as trainer_module
 from konfai.trainer import _Trainer
@@ -117,3 +119,76 @@ def test_best_checkpoint_bootstrap_scans_existing_files_once_and_prunes_stale_on
     checkpoints = sorted(checkpoint_dir.glob("*.pt"))
     assert [path.name for path in checkpoints] == ["ckpt_new_best.pt"]
     assert original_load(checkpoints[0], map_location="cpu", weights_only=False)["loss"] == 2.0
+
+
+def test_best_checkpoint_survives_same_second_collision(tmp_path: Path, monkeypatch) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["same_stamp", "same_stamp"])
+
+    trainer.checkpoint_save(1.0)  # best
+    trainer.checkpoint_save(2.0)  # worse, produced within the same timestamp
+
+    checkpoints = sorted((tmp_path / "Checkpoints" / "RUN").glob("*.pt"))
+    assert len(checkpoints) == 1
+    assert torch.load(checkpoints[0], map_location="cpu", weights_only=False)["loss"] == 1.0
+
+
+def test_exit_checkpoint_loss_does_not_poison_best(tmp_path: Path, monkeypatch) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["exit_stamp"])
+
+    trainer.checkpoint_save(None)  # the save emitted on context exit
+
+    saved = torch.load(
+        tmp_path / "Checkpoints" / "RUN" / "exit_stamp.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert saved["loss"] == float("inf")
+
+
+def test_bootstrap_prefers_real_best_over_exit_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    checkpoint_dir = tmp_path / "Checkpoints" / "RUN"
+    checkpoint_dir.mkdir(parents=True)
+    torch.save({"loss": 3.0}, checkpoint_dir / "real_best.pt")
+    torch.save({"loss": float("inf")}, checkpoint_dir / "exit.pt")
+
+    trainer = _build_trainer(tmp_path, monkeypatch, ["new_stamp"])
+
+    assert [path.name for path in sorted(checkpoint_dir.glob("*.pt"))] == ["real_best.pt"]
+    assert trainer._best_checkpoint_loss == 3.0
+
+
+def test_checkpoint_persists_ema_n_averaged(tmp_path: Path, monkeypatch) -> None:
+    base = nn.Linear(2, 2)
+    ema = AveragedModel(base)
+    ema.update_parameters(base)
+    ema.update_parameters(base)
+
+    trainer = _build_trainer(tmp_path, monkeypatch, ["ema_stamp"])
+    trainer.model_ema = cast(Any, ema)
+
+    trainer.checkpoint_save(1.0)
+
+    saved = torch.load(
+        tmp_path / "Checkpoints" / "RUN" / "ema_stamp.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert "Model_EMA" in saved
+    assert saved["Model_EMA_n_averaged"] == int(ema.n_averaged) == 2
+
+
+def test_broadcast_stop_returns_local_value_without_distributed(tmp_path: Path, monkeypatch) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["stamp"])
+
+    assert trainer._broadcast_stop(True) is True
+    assert trainer._broadcast_stop(False) is False
+
+
+def test_broadcast_stop_adopts_rank_zero_decision(tmp_path: Path, monkeypatch) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["stamp"])
+
+    monkeypatch.setattr(trainer_module, "synchronize_data", lambda *_args, **_kwargs: [True, False, False])
+    assert trainer._broadcast_stop(False) is True  # a non-zero rank still stops when rank 0 does
+
+    monkeypatch.setattr(trainer_module, "synchronize_data", lambda *_args, **_kwargs: [False, True])
+    assert trainer._broadcast_stop(True) is False  # a non-zero rank keeps going when rank 0 does

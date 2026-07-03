@@ -178,8 +178,30 @@ class Statistics:
             "50pc": float(np.nanpercentile(values, 50)) if np.any(~np.isnan(values)) else np.nan,
             "75pc": float(np.nanpercentile(values, 75)) if np.any(~np.isnan(values)) else np.nan,
             "mean": float(np.nanmean(values)) if np.any(~np.isnan(values)) else np.nan,
-            "count": float(np.count_nonzero(~np.isnan(values))) if np.any(~np.isnan(values)) else np.nan,
+            "count": float(np.count_nonzero(~np.isnan(values))),
         }
+
+    @staticmethod
+    def _to_serializable(obj: Any) -> Any:
+        """
+        Recursively replace non-finite floating-point values with ``None``.
+
+        NaN and ±Infinity have no representation in standard JSON. Converting them
+        to ``null`` keeps the serialized report parseable by strict JSON readers.
+
+        Args:
+            obj: Any structure (dict, list, scalar) to normalize.
+
+        Returns:
+            The same structure with every non-finite float replaced by ``None``.
+        """
+        if isinstance(obj, dict):
+            return {key: Statistics._to_serializable(value) for key, value in obj.items()}
+        if isinstance(obj, list):
+            return [Statistics._to_serializable(value) for value in obj]
+        if isinstance(obj, (float, np.floating)) and not np.isfinite(obj):
+            return None
+        return obj
 
     def write(self, outputs: list[dict[str, dict[str, Any]]]) -> None:
         """
@@ -214,13 +236,13 @@ class Statistics:
             result["aggregates"][metric_name] = Statistics.get_statistic(values)
 
         with open(self.filename, "w") as f:
-            f.write(json.dumps(result, indent=4))
+            f.write(json.dumps(Statistics._to_serializable(result), indent=4, allow_nan=False))
 
-    def read(self):
+    def read(self) -> dict[str, float]:
         with open(self.filename) as f:
             json_data = json.load(f)
 
-        result = {}
+        result: dict[str, float] = {}
 
         aggregates = json_data.get("aggregates", {})
 
@@ -229,14 +251,14 @@ class Statistics:
             if mean_value is None:
                 continue
 
-            # Nettoyage du nom
-            parts = key.split(":")
-            if parts[-2] == "Dice":
+            # A dict-valued metric emits both an aggregate entry
+            # ("output:target:Metric") and one entry per component
+            # ("output:target:Metric:component"); the latter share the aggregate
+            # key as a prefix, so keep only top-level metrics.
+            if key.rsplit(":", 1)[0] in aggregates:
                 continue
-            else:
-                metric_name = parts[-1]
 
-            result[metric_name] = mean_value
+            result[key] = mean_value
 
         return result
 
@@ -404,7 +426,7 @@ class Evaluator(DistributedObject):
                             if not np.isnan(v):
                                 loss += v
                                 c += 1
-                        result[f"{output_group}:{target_group}:{metric.get_name()}"] = loss / c
+                        result[f"{output_group}:{target_group}:{metric.get_name()}"] = loss / c if c > 0 else np.nan
                     else:
                         result[f"{output_group}:{target_group}:{metric.get_name()}"] = true_loss
         if len(self.metrics) > 0:

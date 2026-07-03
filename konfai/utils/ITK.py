@@ -37,6 +37,11 @@ def _require_simpleitk() -> None:
 
 
 def _invert_via_displacement_field(transform: sitk.Transform, image: sitk.Image) -> sitk.DisplacementFieldTransform:
+    if image is None:
+        raise TransformError(
+            "Inverting a non-linear transform requires a reference image to sample the displacement field, "
+            "but none was provided."
+        )
     displacement_field_filter = sitk.TransformToDisplacementFieldFilter()
     displacement_field_filter.SetReferenceImage(image)
     displacement_field = displacement_field_filter.Execute(transform)
@@ -139,7 +144,7 @@ def apply_to_image_rigid_transform(image: sitk.Image, transform_files: dict[str 
     return result
 
 
-def apply_to_data_transform(data: np.ndarray, transform_files: dict[str | sitk.Transform, bool]) -> sitk.Image:
+def apply_to_data_transform(data: np.ndarray, transform_files: dict[str | sitk.Transform, bool]) -> np.ndarray:
     transforms = compose_transform(transform_files)
     result = np.copy(data)
     # _LPS = lambda matrix: np.array([-matrix[0], -matrix[1], matrix[2]], dtype=np.double)

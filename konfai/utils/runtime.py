@@ -229,6 +229,26 @@ def get_device(device: int):
     return device if torch.cuda.is_available() and device >= 0 else torch.device("cpu")
 
 
+def safe_torch_load(path_or_url: str | Path, map_location: Any) -> Any:
+    """
+    Load a checkpoint from a local path or an ``https://`` URL, preferring the
+    safe ``weights_only=True`` deserializer.
+
+    For a local (trusted) checkpoint, fall back to ``weights_only=False`` only
+    when the safe unpickler refuses to reconstruct stored objects. A remote
+    ``https://`` checkpoint is untrusted and is loaded with ``weights_only=True``
+    only: a payload crafted to fail the safe load must not trigger the
+    arbitrary-code unpickler.
+    """
+    source = str(path_or_url)
+    if source.startswith("https://"):
+        return torch.hub.load_state_dict_from_url(source, map_location=map_location, weights_only=True)
+    try:
+        return torch.load(source, map_location=map_location, weights_only=True)
+    except Exception:
+        return torch.load(source, map_location=map_location, weights_only=False)  # nosec B614
+
+
 class State(Enum):
     """Workflow state exported through the KonfAI process environment."""
 
@@ -245,7 +265,16 @@ def is_interactive_session() -> bool:
     """Return whether KonfAI can safely prompt on stdin/stdout."""
     stdin = getattr(sys, "stdin", None)
     stdout = getattr(sys, "stdout", None)
-    return bool(stdin and stdout and hasattr(stdin, "isatty") and stdin.isatty() and stdout.isatty())
+    # ``stdout`` may be a Log/MinimalLog proxy (write/flush/fileno only); guard its ``isatty``
+    # exactly like ``stdin`` so a redirected stream degrades to non-interactive instead of raising.
+    return bool(
+        stdin
+        and stdout
+        and hasattr(stdin, "isatty")
+        and hasattr(stdout, "isatty")
+        and stdin.isatty()
+        and stdout.isatty()
+    )
 
 
 def confirm_overwrite_or_raise(path: Path, label: str, error_cls: type[Exception]) -> None:
@@ -666,6 +695,10 @@ def execute_distributed_object(
 
         with distributed_object as configured_object:
             with Log(configured_object.name, 0):
+                if configured_object.manual_seed is not None:
+                    np.random.seed(configured_object.manual_seed)
+                    random.seed(configured_object.manual_seed)
+                    torch.manual_seed(configured_object.manual_seed)
                 if cluster_config is not None:
                     configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
                     import submitit
@@ -765,9 +798,10 @@ def cleanup():
 
 def synchronize_data(world_size: int, gpu: int, data: Any) -> list[Any]:
     """Gather arbitrary Python objects across ranks when distributed is active."""
-    if torch.cuda.is_available() and dist.is_initialized():
-        outputs: list[dict[str, tuple[dict[str, float], dict[str, float]]] | None] = [None] * world_size
-        torch.cuda.set_device(gpu)
+    if dist.is_initialized():
+        outputs: list[Any] = [None] * world_size
+        if torch.cuda.is_available():
+            torch.cuda.set_device(gpu)
         dist.all_gather_object(outputs, data)
     else:
         outputs = [data]
