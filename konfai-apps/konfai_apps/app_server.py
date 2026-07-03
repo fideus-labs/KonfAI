@@ -568,6 +568,7 @@ def get_app_info(app_id: str):
         "checkpoints_name_available": app.get_checkpoints_name_available(),
         "maximum_tta": app.get_maximum_tta(),
         "mc_dropout": app.get_mc_dropout(),
+        "patch_size": app.get_patch_size(),
         "has_capabilities": app.has_capabilities(),
     }
     terminology = app.get_terminology()
