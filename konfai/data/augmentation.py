@@ -382,16 +382,30 @@ class Scale(EulerTransform):
 
 
 class Flip(DataAugmentation):
-    def __init__(self, f_prob: list[float] = [0.33, 0.33, 0.33]) -> None:
+    def __init__(self, f_prob: list[float] = [0.33, 0.33, 0.33], vector_field: bool = False) -> None:
         super().__init__()
         self.f_prob = f_prob
-        self.flip: dict[int, list[int]] = {}
+        self.vector_field = vector_field
+        self.flip: dict[int, list[list[int]]] = {}
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         prob = torch.rand((len(shapes), len(self.f_prob))) < torch.tensor(self.f_prob)
         dims = torch.tensor([1, 2, 3][: len(self.f_prob)])
         self.flip[index] = [dims[mask].tolist() for mask in prob]
         return shapes
+
+    def _flip(self, tensor: torch.Tensor, dims: list[int]) -> torch.Tensor:
+        result = torch.flip(tensor, dims=dims)
+        # A displacement/vector field (one channel per spatial axis, channel-first [C=(dx,dy,dz),(D),H,W])
+        # is not mirror-invariant: flipping a spatial axis must also negate its component channel
+        # (channel = tensor.dim() - 1 - dim, as channels are in (x,y,z) order and axes are reversed).
+        # Enable ``vector_field`` only in configs whose augmented tensors are single-channel (scalars/masks,
+        # left untouched) or genuine vector fields: any OTHER multi-channel tensor whose channel count
+        # equals the spatial rank (e.g. a 3-contrast volume in 3D) would be wrongly negated by this guard.
+        if self.vector_field and tensor.shape[0] == tensor.dim() - 1:
+            for dim in dims:
+                result[tensor.dim() - 1 - dim] = -result[tensor.dim() - 1 - dim]
+        return result
 
     def _compute(
         self,
@@ -401,11 +415,11 @@ class Flip(DataAugmentation):
     ) -> list[torch.Tensor]:
         results = []
         for tensor, flip in zip(tensors, self.flip[index], strict=False):
-            results.append(torch.flip(tensor, dims=flip))
+            results.append(self._flip(tensor, flip))
         return results
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        return torch.flip(tensor, dims=self.flip[index][a])
+        return self._flip(tensor, self.flip[index][a])
 
 
 class ColorTransform(DataAugmentation):

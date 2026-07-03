@@ -52,6 +52,7 @@ from konfai.utils.runtime import (
     confirm_overwrite_or_raise,
     description,
     run_distributed_app,
+    safe_torch_load,
 )
 from konfai.utils.utils import get_module, split_path_spec
 
@@ -726,7 +727,7 @@ class ModelComposite(Network):
             return source
         if isinstance(source, str) and source.startswith("https://"):
             return torch.hub.load_state_dict_from_url(url=source, map_location="cpu", check_hash=True)
-        return torch.load(str(source), map_location=torch.device("cpu"), weights_only=False)  # nosec B614
+        return safe_torch_load(source, torch.device("cpu"))
 
     def _ensure_model_loaded(self, index: int) -> Network:
         model = self._get_model()
@@ -936,6 +937,13 @@ class Predictor(DistributedObject):
         shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
 
         self.model_composite = ModelComposite(self.model, self.combine)
+        if not self.path_to_models:
+            raise PredictorError(
+                "No model checkpoint available for prediction.",
+                "At least one '.pt' checkpoint must be provided (for KonfAI Apps, declare it via the "
+                "'models' field in app.json).",
+                "Without a checkpoint the model is never executed and prediction would silently produce no output.",
+            )
         self.model_composite.load(self._load())
 
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
