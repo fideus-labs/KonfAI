@@ -1,5 +1,5 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![PyPI version](https://img.shields.io/pypi/v/mrsegmentator-konfai.svg?color=blue)](https://pypi.org/project/mrsegmentator-konfai/)
+[![PyPI version](https://img.shields.io/pypi/v/totalsegmentator-konfai.svg?color=blue)](https://pypi.org/project/totalsegmentator-konfai/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml)
 [![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_apps_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_apps_ci.yml)
@@ -92,31 +92,42 @@ python -m pip install -e apps/totalsegmentator
 
 ## ⚙️ Usage
 
+The CLI is organised into sub-commands, mirroring the KonfAI Apps operations:
+
+| Sub-command | Purpose |
+|---|---|
+| `segment` | Run the segmentation (inference). |
+| `eval` | Evaluate a segmentation against a reference. |
+| `pipeline` | Segment, then evaluate in one command. |
+
 Perform segmentation on an input volume:
 
 ```bash
-totalsegmentator-konfai total -i path/to/image.nii.gz -o ./Output/
+totalsegmentator-konfai segment total -i path/to/image.nii.gz -o ./Output/
 ```
 
-### Optional arguments
+Evaluate against a reference, or run both at once:
+
+```bash
+totalsegmentator-konfai eval total -i image.nii.gz --gt reference.nii.gz -o ./Output/
+totalsegmentator-konfai pipeline total -i image.nii.gz --gt reference.nii.gz --gpu 0
+```
+
+### Arguments
 
 | Flag | Description | Default |
 |------|--------------|----------|
-| `TASK` | Input modality / model name on Hugging Face | `total`, `total_mr`, `total_3mm`, `total_mr_3mm`|
-| `-i`, `--input` | Path to the input medical image | *required* |
-| `-o`, `--output` | Path to save the segmentation | `./Output/` |
-| `--gt` | Path to reference segmentation (ground truth), if available (enables evaluation workflows) | *unset* |
-| `--mask` | Path to region-of-interest mask used for evaluation and uncertainty analysis | *unset* |
-| `--gpu` | GPU list (e.g. `0` or `0,1`) | CPU if unset |
-| `--cpu` | Number of CPU cores (if no GPU) | `1` |
+| `TASK` | Model on Hugging Face (`total`, `total_mr`, `total_3mm`, `total_mr_3mm`) — determines what is predicted | *required* |
+| `-i`, `--inputs` | Input medical image(s) or a dataset directory | *required* |
+| `-o`, `--output` | Output directory | `./Output/` |
+| `--models` | Explicit model identifiers/paths to ensemble (`segment` / `pipeline`) | *unset* |
+| `--gt` | Reference segmentation(s) — required by `eval`, optional in `pipeline` | *unset* |
+| `--mask` | Evaluation mask(s) (`eval` / `pipeline`) | *unset* |
+| `--gpu` | GPU id(s), e.g. `0` or `0 1` | CPU if unset |
+| `--cpu` | Number of CPU worker processes | *unset* |
 | `-q`, `--quiet` | Suppress console output | `False` |
 
-### Example
-
-```bash
-totalsegmentator-konfai total -i path/to/input.nii.gz -o ./Output/ --gt path/to/reference.nii.gz --mask path/to/mask.nii.gz --gpu 0 -uncertainty
-
-```
+> **Note:** TotalSegmentator models do not expose an uncertainty workflow, so there is no `uncertainty` sub-command.
 
 ---
 
@@ -135,6 +146,20 @@ If you use **TotalSegmentator-KonfAI** in your work, please cite the original To
 - Boussot, V., & Dillenseger, J.-L. (2025).  
   **KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging**.  
   arXiv preprint [arXiv:2508.09823](https://arxiv.org/abs/2508.09823)
+
+---
+
+## ⚡ Performance & VRAM
+
+Benchmarked on an **NVIDIA RTX PRO 5000 (24 GB)**, synthetic data, patch `[96, 128, 160]`, 5-model ensemble (`Concat`), half precision (autocast). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+
+| Free VRAM | Batch (auto) | Peak VRAM |
+|:--|:--|:--|
+| 8 GB  | 4  | ~8 GB |
+| 16 GB | 8  | ~15 GB |
+| 24 GB | 12 | ~23 GB |
+
+Measured peak VRAM (single model, half): batch 4 → 5.6 GB · 8 → 10.6 GB · 12 → 15.6 GB — the full 5-model ensemble adds ~15 %. Inference ≈ 20 s/model → **~110 s / case** for the full ensemble (scales with the case size).
 
 ---
 

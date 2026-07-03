@@ -19,7 +19,7 @@ Medical image synthesis example based on:
 - `Config.yml` for training
 - `Prediction.yml` for inference
 - `Evaluation.yml` for evaluation
-- `UNetpp.py` and `UnNormalize.py` for local custom Python modules
+- `Model.py` and `UnNormalize.py` for local custom Python modules
 
 Use this example if you want to understand how KonfAI combines:
 
