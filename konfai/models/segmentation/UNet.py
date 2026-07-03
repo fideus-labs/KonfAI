@@ -113,13 +113,18 @@ class UNetBlock(network.ModuleArgsDict):
             if nb_class > 0:
                 self.add_module("Head", UNetHead(channels[1], nb_class, dim, i), out_branch=[-1])
         if i > 0:
+            skip_branch = 1
             if attention:
+                # Write the gated skip to a branch NOT used inside Attention: an out_branch that
+                # matches an internal name (e.g. [1] == W_g's branch) would capture that half-
+                # resolution projection instead of the final Multiply output (like DDPM uses [2]).
                 self.add_module(
                     "Attention",
                     blocks.Attention(f_g=channels[1], f_l=channels[0], f_int=channels[0], dim=dim),
                     in_branch=[1, 0],
-                    out_branch=[1],
+                    out_branch=[2],
                 )
+                skip_branch = 2
             self.add_module(
                 upsample_mode.name,
                 blocks.upsample(
@@ -131,7 +136,7 @@ class UNetBlock(network.ModuleArgsDict):
                     stride=2,
                 ),
             )
-            self.add_module("SkipConnection", blocks.Concat(), in_branch=[0, 1])
+            self.add_module("SkipConnection", blocks.Concat(), in_branch=[0, skip_branch])
 
 
 class UNet(network.Network):

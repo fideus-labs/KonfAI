@@ -99,8 +99,12 @@ class PolyLRScheduler(torch.optim.lr_scheduler._LRScheduler):
 
     def step(self, current_step=None):
         if current_step is None:
-            current_step = self.ctr
-            self.ctr += 1
+            if self.last_epoch != -1:
+                current_step = self.last_epoch
+                self.last_epoch += 1
+            else:
+                current_step = self.ctr
+                self.ctr += 1
 
         current_step = min(current_step, self.max_steps)
 

@@ -18,14 +18,18 @@
 
 import inspect
 import os
+import subprocess
+import sys
 
 os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
 os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import torch  # noqa: E402
 from konfai.data.augmentation import Flip, Rotate  # noqa: E402
-from konfai.data.transform import ResampleToShape, Standardize  # noqa: E402
+from konfai.data.data_manager import DataTrain  # noqa: E402
+from konfai.data.transform import Padding, ResampleToShape, Standardize  # noqa: E402
 from konfai.network.blocks import Select, Unsqueeze  # noqa: E402
 from konfai.utils.dataset import Attribute  # noqa: E402
 from konfai.utils.errors import ConfigError, MeasureError  # noqa: E402
@@ -89,7 +93,9 @@ def test_resample_to_shape_does_not_mutate_config():
     """#9 transform_shape must not write resolved dims back into the shared instance config."""
     resampler = ResampleToShape(shape=[0, 16, 16])
     before = resampler.shape.clone()
-    out = resampler.transform_shape("CT", "case", [8, 16, 16], Attribute())
+    attributes = Attribute()
+    attributes["Spacing"] = np.asarray([1.0, 1.0, 1.0], dtype=np.float64)
+    out = resampler.transform_shape("CT", "case", [8, 16, 16], attributes)
     assert out[0] == 8  # sentinel 0 resolved to the input dim for this call
     assert torch.equal(resampler.shape, before), "self.shape must stay [0, 16, 16] for the next case"
 
@@ -214,3 +220,98 @@ def test_linear_vae_is_parameterized_and_variational():
     torch.manual_seed(1)
     second = dict(model.named_forward(x))["Head.Tanh"]
     assert not torch.allclose(first, second)
+
+
+def _geometry(origin: list[float], spacing: list[float]) -> Attribute:
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray(origin, dtype=np.float64)
+    attributes["Spacing"] = np.asarray(spacing, dtype=np.float64)
+    attributes["Direction"] = np.eye(len(origin), dtype=np.float64).reshape(-1)
+    return attributes
+
+
+def test_padding_shifts_origin_along_the_padded_axes():
+    """Each F.pad pair (X, Y, Z) must shift the matching (x, y, z) origin component."""
+    attributes = _geometry(origin=[10.0, 20.0, 30.0], spacing=[1.0, 2.0, 4.0])
+
+    padded = Padding(padding=[1, 0, 2, 0, 3, 0])("case", torch.zeros(1, 5, 5, 5), attributes)
+
+    assert list(padded.shape) == [1, 8, 7, 6]
+    np.testing.assert_allclose(
+        attributes.get_np_array("Origin"),
+        [10.0 - 1 * 1.0, 20.0 - 2 * 2.0, 30.0 - 3 * 4.0],
+    )
+
+
+def test_padding_after_the_data_keeps_origin():
+    """Padding only on the high side of each axis must leave the origin untouched."""
+    attributes = _geometry(origin=[10.0, 20.0, 30.0], spacing=[1.0, 2.0, 4.0])
+
+    padded = Padding(padding=[0, 2, 0, 0, 0, 1])("case", torch.zeros(1, 5, 5, 5), attributes)
+
+    assert list(padded.shape) == [1, 6, 5, 7]
+    np.testing.assert_allclose(attributes.get_np_array("Origin"), [10.0, 20.0, 30.0])
+
+
+_SPLIT_PROBE = """
+import os
+import random
+
+os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
+os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
+
+from konfai.data.data_manager import DataTrain
+
+names = [f"CASE_{i:03d}" for i in range(20)]
+data = DataTrain(augmentations=None, validation="0:4")
+data._resolve_dataset_sources = lambda: {}
+data._resolve_common_names = lambda datasets: ({}, set(names))
+data._get_datasets = lambda case_names, dataset_name, augmentations: ({}, [])
+random.seed(1234)
+data._prepare_datasets()
+print(";".join(data._prepared_train_names))
+print(";".join(data._prepared_validation_names))
+"""
+
+
+def test_train_validation_split_is_reproducible_across_interpreters():
+    """Same seed → same split, whatever the interpreter's string-hash randomization."""
+    outputs = []
+    for hash_seed in ("0", "424242"):
+        env = dict(os.environ, PYTHONHASHSEED=hash_seed)
+        result = subprocess.run(
+            [sys.executable, "-c", _SPLIT_PROBE],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        outputs.append(result.stdout)
+    assert outputs[0] == outputs[1]
+    train_names, validation_names = (line.split(";") for line in outputs[0].splitlines())
+    assert len(train_names) == 16
+    assert len(validation_names) == 4
+    assert set(train_names).isdisjoint(validation_names)
+
+
+def test_train_split_shuffle_draws_from_sorted_names(monkeypatch):
+    """The seeded shuffle must receive the case names in sorted order and drive the split."""
+    captured: dict[str, list[str]] = {}
+
+    def fake_sample(population, k):
+        captured["population"] = list(population)
+        assert k == len(population)
+        return list(reversed(population))
+
+    monkeypatch.setattr("konfai.data.data_manager.random.sample", fake_sample)
+
+    data = DataTrain(augmentations=None, validation="0:2")
+    names = {"CASE_010", "CASE_002", "CASE_001", "CASE_005", "CASE_003"}
+    data._resolve_dataset_sources = lambda: {}
+    data._resolve_common_names = lambda datasets: ({}, names)
+    data._get_datasets = lambda case_names, dataset_name, augmentations: ({}, [])
+    data._prepare_datasets()
+
+    assert captured["population"] == sorted(names)
+    assert data._prepared_validation_names == ["CASE_010", "CASE_005"]
+    assert data._prepared_train_names == ["CASE_003", "CASE_002", "CASE_001"]
