@@ -348,7 +348,7 @@ class Padding(TransformInverse):
             matrix = torch.tensor(cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin))))
             origin = torch.matmul(origin, matrix)
             for dim in range(len(self.padding) // 2):
-                origin[-dim - 1] -= self.padding[dim * 2] * cache_attribute.get_np_array("Spacing")[-dim - 1]
+                origin[dim] -= self.padding[dim * 2] * cache_attribute.get_np_array("Spacing")[dim]
             cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
         result = F.pad(
             tensor.unsqueeze(0),
@@ -415,7 +415,8 @@ class Resample(TransformInverse, ABC):
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         cache_attribute.pop_np_array("Size")
         size_1 = cache_attribute.pop_np_array("Size")
-        _ = cache_attribute.pop_np_array("Spacing")
+        if "Spacing" in cache_attribute:
+            cache_attribute.pop_np_array("Spacing")
         return self._resample(tensor, [int(size) for size in size_1])
 
 
@@ -426,12 +427,12 @@ class ResampleToResolution(Resample):
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         if "Spacing" not in cache_attribute:
-            TransformError(
+            raise TransformError(
                 "Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
                 "Make sure your input is a image (e.g., .nii, .mha) with proper metadata.",
             )
         if len(shape) != len(self.spacing):
-            TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
+            raise TransformError(f"Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
         image_spacing = cache_attribute.get_tensor("Spacing")
         resize_factor = torch.tensor(
             [s / i_s if s > 0 else 1.0 for s, i_s in zip(self.spacing, image_spacing, strict=False)]
@@ -463,12 +464,12 @@ class ResampleToShape(Resample):
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         if "Spacing" not in cache_attribute:
-            TransformError(
+            raise TransformError(
                 "Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
                 "Make sure your input is a image (e.g., .nii, .mha) with proper metadata.",
             )
         if len(shape) != len(self.shape):
-            TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
+            raise TransformError(f"Shape and target dimensions do not match: shape={shape}, target_shape={self.shape}")
         new_shape = self.shape.clone()
         for i, s in enumerate(self.shape):
             if s == 0:
@@ -869,13 +870,18 @@ class OneHot(TransformInverse):
         return torch.argmax(tensor, dim=1).unsqueeze(1)
 
 
+# Published app used by KonfAIInference when the configuration leaves repo/model unset.
+DEFAULT_INFERENCE_REPO_ID = "VBoussot/MRSegmentator-KonfAI"
+DEFAULT_INFERENCE_MODEL_NAME = "MRSegmentator"
+
+
 class KonfAIInference(Transform):
     supports_dataloader_workers = False
 
     def __init__(
         self,
-        repo_id: str = "VBoussot/MRSegmentator-KonfAI",
-        model_name: str = "MRSegmentator",
+        repo_id: str = DEFAULT_INFERENCE_REPO_ID,
+        model_name: str = DEFAULT_INFERENCE_MODEL_NAME,
         checkpoints_name: list[str] = ["fold_0"],
         number_of_tta: int = 0,
         number_of_mc: int = 0,
@@ -945,15 +951,20 @@ class KonfAIInference(Transform):
             if p.exitcode != 0:
                 raise RuntimeError("Inference process failed")
 
-            result = []
-            for file in (Path(tmpdir) / "Output").rglob("*.mha"):
-                if file.name != "InferenceStack.mha":
-                    result.append(torch.from_numpy(image_to_data(sitk.ReadImage(str(file)))[0]))
-            return torch.stack(result, dim=1).squeeze(0)
+            return self._reassemble_output(Path(tmpdir) / "Output")
+
+    @staticmethod
+    def _reassemble_output(output_dir: Path) -> torch.Tensor:
+        result = []
+        for file in sorted(output_dir.rglob("*.mha")):
+            if file.name != "InferenceStack.mha":
+                result.append(torch.from_numpy(image_to_data(sitk.ReadImage(str(file)))[0]))
+        return torch.stack(result, dim=1).squeeze(0)
 
 
 class InferenceStack(Transform):
     def __init__(self, dataset: str, name: str, mode: str = "mean"):
+        super().__init__()
         self.dataset = None
         if dataset:
             filename, _, file_format = split_path_spec(dataset)
@@ -1058,9 +1069,12 @@ class Crop(TransformInverse):
         # cannot be known without the pixel data. If the box was already computed and persisted
         # as a sidecar attribute, reuse it and skip the read; otherwise compute it once from the
         # volume. (A fully-lazy variant would require deferring patch planning past _load().)
+        # ``shape`` is already the channel-stripped spatial shape (patching strips [C, *spatial]
+        # before calling transform_shape), so the crop box — one row per spatial axis — aligns with
+        # ``shape`` directly, exactly like ``__call__`` aligns it with ``tensor.shape[1:]``.
         if "box" in cache_attribute:
             box = self._parse_box(cache_attribute["box"])
-            return [shape[0]] + [int(s - a - b) for (a, b), s in zip(box, shape[1:], strict=False)]
+            return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
         data = None
         for dataset in self.datasets:
             if dataset.is_dataset_exist(group_src, name):
@@ -1071,10 +1085,10 @@ class Crop(TransformInverse):
         treshold = np.percentile(data, 5)
         image = data_to_image((data > treshold).astype(np.uint8), cache_attribute)
         box = box_with_mask(image, [1], [0] * (len(data.shape) - 1))
-        for i, ((_, b), s) in enumerate(zip(box, shape[1:], strict=False)):
+        for i, ((_, b), s) in enumerate(zip(box, shape, strict=False)):
             box[i][1] = s - b
         cache_attribute["box"] = box
-        return [shape[0]] + [int(s - a - b) for (a, b), s in zip(box, shape[1:], strict=False)]
+        return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
 
     @staticmethod
     def _parse_box(box_str: str) -> np.ndarray:
