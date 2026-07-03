@@ -126,3 +126,60 @@ def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
     ds._infos_cache.clear()  # write() calls this
     ds.get_infos("g", "n")
     assert opens["n"] == 2, "after invalidation the header is read again"
+
+
+def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_path, monkeypatch):
+    """P2: threading get_dicom_info's sorted files stays byte-identical while removing re-scans/re-sorts."""
+    import numpy as np
+    import pytest
+
+    pytest.importorskip("pydicom")
+    from konfai.utils import dicom
+    from konfai.utils.errors import DatasetManagerError
+
+    root = tmp_path / "case"
+    vol = (np.arange(1 * 4 * 5 * 6).reshape(1, 4, 5, 6) % 97).astype(np.float32)
+    dicom.write_dicom_series(root, vol, origin=(1.0, 2.0, 3.0), spacing=(0.7, 0.8, 2.5), direction=np.eye(3).flatten())
+
+    # (a) byte-identical: standalone (info=None) path == threaded (info precomputed) path
+    sl = (slice(None), slice(1, 3), slice(None), slice(None))
+    ref = dicom.read_dicom_series_slice(root, sl)
+    info = dicom.get_dicom_info(root)
+    got = dicom.read_dicom_series_slice(root, sl, series_uid=info["series_uid"], info=info)
+    for a, b in zip(ref, got):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+
+    assert len(info["sorted_files"]) == vol.shape[1]
+    assert all(isinstance(p, Path) for p in info["sorted_files"])
+
+    # a mismatching series_uid must not silently read the wrong series
+    with pytest.raises(DatasetManagerError):
+        dicom.read_dicom_series_slice(root, sl, series_uid="9.9.9.mismatch", info=info)
+
+    # arity-mismatch path (info=None) still raises before any file selection
+    with pytest.raises(DatasetManagerError):
+        dicom.read_dicom_series_slice(root, (slice(None), slice(0, 2)))
+
+    # (b) redundant work is gone: spy discover_series / sort_series call counts
+    calls = {"discover": 0, "sort": 0}
+    real_discover, real_sort = dicom.discover_series, dicom.sort_series
+    monkeypatch.setattr(dicom, "discover_series", lambda *a, **k: (calls.__setitem__("discover", calls["discover"] + 1), real_discover(*a, **k))[1])
+    monkeypatch.setattr(dicom, "sort_series", lambda *a, **k: (calls.__setitem__("sort", calls["sort"] + 1), real_sort(*a, **k))[1])
+
+    dataset_file = Dataset.DicomFile(str(tmp_path), read=True)
+
+    # one patch read: 1 discovery + 2 sorts (pre-fix: 3 discoveries + 4 sorts)
+    calls["discover"] = calls["sort"] = 0
+    data, _attr = dataset_file.file_to_data_slice("", "case", sl)
+    assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
+    assert calls["discover"] == 1
+    assert calls["sort"] == 2
+
+    # statistics over Z: 1 discovery (pre-fix: O(Z)); numerics preserved (Welford, ddof=1)
+    calls["discover"] = calls["sort"] = 0
+    stats = dataset_file.file_to_data_statistics("", "case")
+    assert calls["discover"] == 1
+    assert np.isclose(stats["mean"], float(vol.mean()), atol=1e-4)
+    assert np.isclose(stats["std"], float(np.std(vol, ddof=1)), atol=1e-4)
+    assert np.isclose(stats["min"], float(vol.min()), atol=1e-4)
+    assert np.isclose(stats["max"], float(vol.max()), atol=1e-4)

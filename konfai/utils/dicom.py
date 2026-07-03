@@ -387,6 +387,7 @@ def get_dicom_info(
     return {
         "series_uid": selected_uid,
         "files": files,
+        "sorted_files": [Path(ds.filename) for ds in datasets],
         "shape": [1, len(datasets), rows, columns],
         "origin": origin,
         "spacing": spacing,
@@ -400,9 +401,15 @@ def read_dicom_series_slice(
     *,
     series_uid: str | None = None,
     apply_rescale: bool = True,
+    info: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Read only the selected DICOM slices and return updated patch geometry."""
-    info = get_dicom_info(directory, series_uid=series_uid)
+    if info is None:
+        info = get_dicom_info(directory, series_uid=series_uid)
+    elif series_uid is not None and series_uid != info["series_uid"]:
+        raise DatasetManagerError(
+            f"series_uid '{series_uid}' does not match the provided info series '{info['series_uid']}'."
+        )
     shape = info["shape"]
     if len(slices) != len(shape):
         raise DatasetManagerError(f"Expected {len(shape)} slices, got {len(slices)}.")
@@ -411,10 +418,8 @@ def read_dicom_series_slice(
     if list(channel_indices) not in ([0], []):
         raise DatasetManagerError("DICOM stores scalar data and supports only channel 0.")
 
-    _selected_uid, files = _select_series_files(directory, series_uid or info["series_uid"])
-    headers = sort_series(files, stop_before_pixels=True)
     z_indices = list(range(*normalized[1].indices(shape[1])))
-    selected_files = [Path(headers[index].filename) for index in z_indices]
+    selected_files = [info["sorted_files"][index] for index in z_indices]
     datasets = sort_series(selected_files)
     volume = read_volume(datasets, apply_rescale=apply_rescale)
     volume = volume[normalized[0], :, normalized[2], normalized[3]]
