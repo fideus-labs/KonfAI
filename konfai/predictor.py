@@ -712,6 +712,10 @@ class ModelComposite(Network):
         self._base_model_name = model.get_name()
         self._state_sources: list[dict[str, Any] | Path | str] = []
         self._loaded_state_index: int | None = None
+        # Cache the CPU state_dict per index so a local-path ensemble is read from
+        # disk once, not re-read + re-unpickled on every batch (the index cycles
+        # 0..N-1 each forward, so the next batch would otherwise reload all N).
+        self._state_cache: dict[int, dict[str, Any]] = {}
         self.add_module(
             self._model_name,
             copy.deepcopy(model),
@@ -732,10 +736,14 @@ class ModelComposite(Network):
     def _ensure_model_loaded(self, index: int) -> Network:
         model = self._get_model()
         if self._loaded_state_index != index:
+            state = self._state_cache.get(index)
+            if state is None:
+                state = self._read_state_source(self._state_sources[index])
+                self._state_cache[index] = state
             # Checkpoints are keyed by the base model name, not by the streamed
             # ensemble suffix added after the previous load.
             model.set_name(self._base_model_name)
-            model.load(self._read_state_source(self._state_sources[index]), init=False)
+            model.load(state, init=False)
             model.set_name(f"{self._base_model_name}_{index}")
             self._loaded_state_index = index
         return model
@@ -749,6 +757,7 @@ class ModelComposite(Network):
         """
         self._state_sources = state_sources
         self._loaded_state_index = None
+        self._state_cache = {}
         if len(self._state_sources) == 1:
             self._ensure_model_loaded(0)
 
