@@ -976,7 +976,9 @@ class Dataset:
 
             path = self._path(name)
             info = get_dicom_info(path)
-            data, origin, spacing, direction = read_dicom_series_slice(path, slices, series_uid=info["series_uid"])
+            data, origin, spacing, direction = read_dicom_series_slice(
+                path, slices, series_uid=info["series_uid"], info=info
+            )
             info.update(origin=origin, spacing=spacing, direction=direction)
             return data, self._attributes(info)
 
@@ -986,13 +988,18 @@ class Dataset:
             name: str,
             channels: list[int] | None = None,
         ) -> dict[str, float]:
-            shape, _ = self.get_infos(group, name)
+            from konfai.utils.dicom import get_dicom_info, read_dicom_series_slice
+
+            path = self._path(name)
+            info = get_dicom_info(path)
+            shape = info["shape"]
             state: dict[str, float] | None = None
             for index in range(shape[1]):
-                chunk, _ = self.file_to_data_slice(
-                    group,
-                    name,
+                chunk, _, _, _ = read_dicom_series_slice(
+                    path,
                     (slice(None), slice(index, index + 1), slice(None), slice(None)),
+                    series_uid=info["series_uid"],
+                    info=info,
                 )
                 if channels is not None:
                     chunk = chunk[channels]
