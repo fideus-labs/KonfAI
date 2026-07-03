@@ -988,6 +988,33 @@ class InferenceStack(Transform):
         )
 
 
+class Norm(Transform):
+    """Vector magnitude over the trailing component axis.
+
+    Reduces a stacked vector field (e.g. a displacement-field ensemble ``[N, (D), H, W, C]``) to
+    per-sample magnitudes ``[N, (D), H, W]``, typically before ``Variance``/``StandardDeviation``.
+    The trailing tensor axis is the first geometry axis (numpy order is reversed), so that axis is
+    dropped from ``Origin``/``Spacing``/``Direction``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "Origin" in cache_attribute:
+            origin = cache_attribute.pop_np_array("Origin")
+            spacing = cache_attribute.pop_np_array("Spacing")
+            direction = cache_attribute.pop_np_array("Direction")
+            rank = len(origin)
+            cache_attribute["Origin"] = origin[1:]
+            cache_attribute["Spacing"] = spacing[1:]
+            cache_attribute["Direction"] = direction.reshape(rank, rank)[1:, 1:].flatten()
+        return torch.linalg.norm(tensors.float(), dim=-1)
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        return shape[:-1]
+
+
 class Variance(Transform):
     def __init__(self) -> None:
         super().__init__()
