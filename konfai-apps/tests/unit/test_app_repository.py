@@ -1,12 +1,10 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
-from huggingface_hub import constants as hf_constants
-from huggingface_hub import file_download as hf_file_download
-from konfai_apps import app_repository as app_repository_module
-
 from konfai.utils.errors import AppMetadataError
+from konfai_apps import app_repository as app_repository_module
 
 
 def test_get_app_repository_info_rejects_missing_required_metadata_keys(tmp_path: Path) -> None:
@@ -139,17 +137,12 @@ def test_local_hf_download_syncs_non_model_files_for_current_revision(
         def __init__(self, path: str) -> None:
             self.path = path
 
-    cache_dir = tmp_path / "hf-cache"
-    lock_dir = cache_dir / ".locks" / "repo-lock"
-    lock_dir.mkdir(parents=True)
     snapshot_dir = tmp_path / "snapshot"
     (snapshot_dir / "demo_app").mkdir(parents=True)
 
     calls: dict[str, object] = {}
 
     monkeypatch.setattr(app_repository_module, "RepoFolder", DummyFolder)
-    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(cache_dir))
-    monkeypatch.setattr(hf_file_download, "repo_folder_name", lambda repo_id, repo_type: "repo-lock")
     monkeypatch.setattr(app_repository_module.shutil, "rmtree", lambda path: calls.setdefault("removed", str(path)))
     monkeypatch.setattr(
         app_repository_module.LocalAppRepositoryFromHF,
@@ -178,7 +171,7 @@ def test_local_hf_download_syncs_non_model_files_for_current_revision(
     )
 
     assert result == snapshot_dir / "demo_app" / "Inference.yml"
-    assert calls["removed"] == str(lock_dir)
+    assert "removed" not in calls
     assert calls["snapshot"] == {
         "repo_id": "org/demo",
         "repo_type": "model",
@@ -341,7 +334,9 @@ def test_local_hf_download_inference_refreshes_selected_remote_model(
 
     assert models_path == [tmp_path / "CV_0.pt"]
     assert prediction_path == inference_yml
-    assert codes_path == []
+    # download_inference now stages every non-model bundle file (so assets like elastix parameter maps
+    # are available in the run workspace, as the apps docs promise).
+    assert codes_path == [("Inference.yml", inference_yml), ("app.json", app_json)]
     assert get_filenames_calls == [False, False, True]
 
 
@@ -411,6 +406,70 @@ def test_local_directory_nested_uncertainty_file_is_detected(tmp_path: Path) -> 
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
 
     assert repo.has_capabilities() == (False, False, True)
+
+
+def test_install_evaluation_stages_non_python_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    app_root.mkdir(parents=True)
+    (app_root / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Demo App",
+                "description": "Local eval app",
+                "short_description": "Demo",
+                "tta": 0,
+                "mc_dropout": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_root / "Evaluation.yml").write_text("Evaluator: {}\n", encoding="utf-8")
+    (app_root / "labels.csv").write_text("id,name\n1,liver\n", encoding="utf-8")
+    (app_root / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (app_root / "model.pt").write_text("weights", encoding="utf-8")
+
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    repo.install_evaluation("Evaluation.yml")
+
+    assert (workspace / "Evaluation.yml").exists()
+    assert (workspace / "labels.csv").exists()
+    assert (workspace / "helper.py").exists()
+    assert not (workspace / "model.pt").exists()
+
+
+def test_install_uncertainty_stages_non_python_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    app_root.mkdir(parents=True)
+    (app_root / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Demo App",
+                "description": "Local uncertainty app",
+                "short_description": "Demo",
+                "tta": 0,
+                "mc_dropout": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_root / "Uncertainty.yml").write_text("Predictor: {}\n", encoding="utf-8")
+    (app_root / "lookup.json").write_text("{}\n", encoding="utf-8")
+    (app_root / "model.pt").write_text("weights", encoding="utf-8")
+
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    repo.install_uncertainty("Uncertainty.yml")
+
+    assert (workspace / "Uncertainty.yml").exists()
+    assert (workspace / "lookup.json").exists()
+    assert not (workspace / "model.pt").exists()
 
 
 def _write_two_checkpoint_app(app_root: Path) -> None:
@@ -506,3 +565,69 @@ def test_install_fine_tune_rejects_unknown_checkpoint(tmp_path: Path) -> None:
 
     with pytest.raises(app_repository_module.AppRepositoryError):
         _install_fine_tune(app_root, workspace, ["CV_9"])
+
+
+def _write_app_with_requirements(app_root: Path, requirements: str) -> None:
+    app_root.mkdir(parents=True, exist_ok=True)
+    (app_root / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Demo App",
+                "description": "Local app with requirements",
+                "short_description": "Demo",
+                "tta": 0,
+                "mc_dropout": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_root / "requirements.txt").write_text(requirements, encoding="utf-8")
+
+
+def test_install_requirements_is_a_noop_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_app_with_requirements(app_root, "konfai-nonexistent-xyz==1.2.3\n")
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+
+    calls: list[object] = []
+    monkeypatch.setattr(app_repository_module.subprocess, "check_call", lambda *args, **kwargs: calls.append(args))
+
+    repo._install_requirements(repo._get_filenames())
+
+    assert calls == []
+
+
+def test_install_requirements_skips_protected_and_non_pep508_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_app_with_requirements(
+        app_root,
+        "\n".join(
+            [
+                "# comment line",
+                "-r other-requirements.txt",
+                "--extra-index-url https://example.com/simple",
+                "git+https://github.com/foo/bar.git#egg=bar",
+                "torch==1.0.0",
+                "konfai==0.0.1",
+                "konfai-nonexistent-xyz==1.2.3",
+            ]
+        )
+        + "\n",
+    )
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        app_repository_module.subprocess, "check_call", lambda cmd, *args, **kwargs: captured.append(cmd)
+    )
+
+    repo._install_requirements(repo._get_filenames(), install_requirements=True)
+
+    assert len(captured) == 1
+    cmd = captured[0]
+    assert cmd[:5] == [sys.executable, "-m", "pip", "install", "konfai-nonexistent-xyz==1.2.3"]
+    assert "torch==1.0.0" not in cmd
+    assert "konfai==0.0.1" not in cmd
+    assert not any(part.startswith(("-r", "--extra-index-url", "git+")) for part in cmd[4:])
