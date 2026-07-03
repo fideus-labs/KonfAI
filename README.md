@@ -5,272 +5,205 @@
 [![Documentation Status](https://readthedocs.org/projects/konfai/badge/?version=latest)](https://konfai.readthedocs.io/en/latest/?badge=latest)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://www.arxiv.org/abs/2508.09823)
 
-
 # 🧠 KonfAI
-<img src="https://raw.githubusercontent.com/vboussot/KonfAI/main/logo.png" alt="KonfAI Logo" width="250" align="right"/>
 
-**KonfAI** is a modular, **YAML-driven** deep learning framework for medical
-imaging, built on **PyTorch**.
+<img src="https://raw.githubusercontent.com/vboussot/KonfAI/main/logo.png" alt="KonfAI Logo" width="230" align="right"/>
 
-It lets you define complete pipelines, from data loading to prediction and
-evaluation, through configuration instead of orchestration scripts.
+**KonfAI is a modular, YAML-driven deep learning framework for medical imaging,
+built on PyTorch.** You describe an entire pipeline — data loading, model, losses,
+metrics, augmentations, optimizer, and the train / predict / evaluate workflow —
+in **configuration**, not orchestration scripts. The config *is* the experiment:
+a complete, reproducible record you can diff, share, and re-run.
 
-- reproducible workflows with explicit configs and outputs
-- modular components for datasets, transforms, models, losses, and metrics
-- designed for research, experimentation, and agent-driven workflows
-
-KonfAI has been used in several top-performing challenge projects:
-[🔗 SynthRAD2025 – Task 1](https://github.com/vboussot/Synthrad2025_Task_1) •
-[🔗 SynthRAD2025 – Task 2](https://github.com/vboussot/Synthrad2025_Task_2) •
-[🔗 CURVAS PDACVI 2025](https://github.com/vboussot/CurvasPDACVI) •
-[🔗 TrackRAD 2025](https://github.com/vboussot/TrackRAD2025) •
-[🔗 Panther](https://github.com/vboussot/Panther) •
-[🔗 CURVAS](https://github.com/vboussot/CURVAS)
-
-Paper:
-> [**KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging**](https://www.arxiv.org/abs/2508.09823)
-
----
-
-## 🚀 Why KonfAI?
-
-Most frameworks focus on models.
-**KonfAI focuses on pipelines.**
-
-- 🧩 Compose full workflows from modular components
-- 🔁 Iterate without rewriting Python scripts
-- 📦 Turn experiments into reusable **KonfAI Apps**
-- 🤖 Use KonfAI as a backend for LLM-driven experimentation through **KonfAI-MCP**
-
----
-
-## 📥 Install
-
-```bash
-pip install konfai                # core framework
-pip install "konfai[imaging]"     # + SimpleITK & h5py imaging readers
+```yaml
+Trainer:
+  Model:
+    classpath: UNet.yml          # a model, referenced by name
+  Dataset:
+    groups_src: { CT: {...}, SEG: {...} }   # channel-first, lazy, patch-based
+  epochs: 100
 ```
 
-Or use [Pixi](https://pixi.sh) for a fully reproducible environment:
-
 ```bash
-pixi install                      # resolve and install all environments
-pixi run test                     # verify
+konfai TRAIN -c Config.yml --gpu 0     # then PREDICTION, then EVALUATION
 ```
 
-KonfAI exposes three YAML-driven CLI workflows:
+KonfAI has powered **top-ranking MICCAI-challenge results** across segmentation,
+registration, and synthesis:
+[SynthRAD2025 T1](https://github.com/vboussot/Synthrad2025_Task_1) ·
+[SynthRAD2025 T2](https://github.com/vboussot/Synthrad2025_Task_2) ·
+[CURVAS PDACVI](https://github.com/vboussot/CurvasPDACVI) ·
+[TrackRAD2025](https://github.com/vboussot/TrackRAD2025) ·
+[Panther](https://github.com/vboussot/Panther) ·
+[CURVAS](https://github.com/vboussot/CURVAS)
 
-| Command | Purpose |
-| --- | --- |
-| `konfai TRAIN` | train a model from a YAML config |
-| `konfai PREDICTION` | run inference and export predictions |
-| `konfai EVALUATION` | compute metrics on saved predictions |
-
-For all optional extras (`itk`, `hdf5`, `dicom`, `omezarr`, `all`, `dev`, …) see
-[`docs/source/getting-started/installation.md`](docs/source/getting-started/installation.md).
+> 📄 **Paper:** [KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging](https://www.arxiv.org/abs/2508.09823) (Boussot & Dillenseger, 2025)
 
 ---
 
-## ⚡ Quickstart
+## Why KonfAI?
 
-Install and run your first workflow:
+Most frameworks focus on *models*. **KonfAI focuses on *pipelines*.**
+
+- 🧩 **Compose** full workflows from modular, named components — no glue code.
+- 🔁 **Iterate** by editing YAML, not rewriting Python.
+- 🔬 **Reproduce** every run: KonfAI resolves and writes back the full config.
+- 🩻 **Scale to real volumes**: data is always read lazily as overlapping patches — never loaded whole into RAM.
+- 📦 **Ship** a mature workflow as a reusable [**KonfAI App**](https://konfai.readthedocs.io/en/latest/concepts/apps.html) (CLI, HTTP server, 3D Slicer).
+- 🤖 **Drive it with an agent**: KonfAI-MCP lets an LLM inspect data, author configs, and launch runs.
+
+---
+
+## Install
 
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
-cd KonfAI
-python -m pip install -e ".[imaging]"   # [imaging] pulls SimpleITK/h5py, required to read the .mha demo data
+pip install "konfai[imaging]"     # core + all imaging backends (recommended)
+pip install konfai                # core only (bring your own data reader)
+```
+
+`[imaging]` pulls SimpleITK / h5py / pydicom / zarr — needed to read `.mha`,
+`.nii.gz`, DICOM, and OME-Zarr. For the full extras matrix (`ssim`, `fid`,
+`lpips`, `export`, `cluster`, …) and a reproducible Pixi setup, see the
+[installation guide](https://konfai.readthedocs.io/en/latest/getting-started/installation.html).
+
+---
+
+## Three workflows, three configs
+
+KonfAI is command-driven; each CLI state maps to one YAML file:
+
+| Command | Config | Does |
+| --- | --- | --- |
+| `konfai TRAIN` / `RESUME` | `Config.yml` (`Trainer:`) | fit a model |
+| `konfai PREDICTION` | `Prediction.yml` (`Predictor:`) | patch/TTA/ensemble inference → datasets |
+| `konfai EVALUATION` | `Evaluation.yml` (`Evaluator:`) | metrics on saved predictions |
+
+Full CLI reference (flags, `konfai-cluster`, `konfai-apps`):
+[docs/reference/cli](https://konfai.readthedocs.io/en/latest/reference/cli.html).
+
+---
+
+## Quickstart (5-minute teaser)
+
+```bash
+git clone https://github.com/vboussot/KonfAI.git && cd KonfAI
+pip install -e ".[imaging]"
 cd examples/Segmentation
 
-python -m pip install -U "huggingface_hub[cli]"
-hf download VBoussot/konfai-demo \
-  --repo-type dataset \
-  --include "Segmentation/**" \
-  --local-dir Dataset
-mv Dataset/Segmentation/* Dataset/
-rmdir Dataset/Segmentation
-rm -rf Dataset/.cache
+# download the small public demo dataset
+pip install -U "huggingface_hub[cli]"
+hf download VBoussot/konfai-demo --repo-type dataset --include "Segmentation/**" --local-dir Dataset
+mv Dataset/Segmentation/* Dataset/ && rmdir Dataset/Segmentation && rm -rf Dataset/.cache
+
+konfai TRAIN -y --gpu 0 --config Config.yml     # use --cpu 1 if you have no GPU
 ```
 
-This downloads a small public demo subset and prepares the layout expected by
-the example:
+> 💡 After a run, `Config.yml` will contain the resolved defaults KonfAI
+> materialised — that's expected, and it's what makes runs reproducible.
 
-```text
-Dataset/
-├── 1PC006/
-│   ├── CT.mha
-│   └── SEG.mha
-└── ...
-```
-
-- `CT` is the input image
-- `SEG` is the segmentation label map
-
-Then launch the first training run:
-
-```bash
-konfai TRAIN -y --gpu 0 --config Config.yml
-```
-
-Then:
-
-```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/<checkpoint>.pt
-konfai EVALUATION -y --config Evaluation.yml
-```
-
-If you do not have a GPU available, replace ``--gpu 0`` with ``--cpu 1``.
-
-Edit these files first:
-
-- `Config.yml` → training
-- `Prediction.yml` → exported outputs
-- `Evaluation.yml` → metrics on saved predictions
-
-Notebook entry points:
-
-- `examples/Segmentation/Segmentation_demo.ipynb`
-- `examples/Synthesis/Synthesis_demo.ipynb`
-
-For editable installs and optional extras such as `server` or `cluster`, see:
-
-- [`docs/source/getting-started/installation.md`](docs/source/getting-started/installation.md)
-- [`docs/source/quickstart.rst`](docs/source/quickstart.rst)
-- [`examples/Segmentation/README.md`](examples/Segmentation/README.md)
+The full walkthrough (predict, evaluate, what to inspect, common first issues,
+notebook entry points) lives in the
+[**Quickstart**](https://konfai.readthedocs.io/en/latest/quickstart.html).
 
 ---
 
-## 🤖 Agent-Ready by Design
+## What's in the box
 
-KonfAI is designed to serve as a **deterministic backend for LLM-driven experimentation**.
+Everything below is referenceable by name in YAML. See the
+[**built-in component catalogue**](https://konfai.readthedocs.io/en/latest/reference/components/index.html)
+for classpaths, arguments, and an honest per-component maturity label.
 
-Through **KonfAI-MCP Server**, agents can:
+| Kind | Examples | Catalogue |
+| --- | --- | --- |
+| **Models** | `UNet`, `NestedUNet`, `ResNet`, `VAE`, `VoxelMorph`, GAN/diffusion families | [models](https://konfai.readthedocs.io/en/latest/reference/components/models.html) |
+| **Losses & metrics** | `Dice`, `MAE`, `PSNR`, `SSIM`, `LPIPS`, `FID`, `CrossEntropyLoss`, `TRE`, `IMPACTReg`, `IMPACTSynth` | [losses-metrics](https://konfai.readthedocs.io/en/latest/reference/components/losses-metrics.html) |
+| **Transforms** | `Standardize`, `Normalize`, `Clip`, `Resample*`, `OneHot`, `Crop` (~40) | [transforms](https://konfai.readthedocs.io/en/latest/reference/components/transforms.html) |
+| **Augmentations** | `Flip`, `Rotate`, `Elastix`, `Noise`, `CutOUT` (~15) | [augmentations](https://konfai.readthedocs.io/en/latest/reference/components/augmentations.html) |
+| **Schedulers** | weight (`Constant`, `CosineAnnealing`) + LR (`PolyLRScheduler`, `Warmup`, any torch) | [schedulers](https://konfai.readthedocs.io/en/latest/reference/components/schedulers.html) |
+| **Storage backends** | ITK, HDF5, DICOM series, OME-Zarr | [storage-backends](https://konfai.readthedocs.io/en/latest/reference/components/storage-backends.html) |
 
-- inspect datasets
-- generate or refine configurations
-- launch experiments
-- analyze results and iterate
-
-All executions remain:
-- reproducible
-- structured
-- grounded in YAML workflows
-
-👉 KonfAI bridges the gap between **LLM reasoning** and **real experimental execution**.
+Not limited to these: any importable class (`monai.losses:DiceLoss`,
+`torch:nn:L1Loss`, or a local `Model:MyNet`) works via the `module:Class` form.
+Some components are research-grade or crash with their defaults — the
+[**stability matrix**](https://konfai.readthedocs.io/en/latest/reference/stability.html)
+tells you which.
 
 ---
 
-## 📦 KonfAI Apps
+## 🤖 Agent-ready by design
 
-A **KonfAI App** is a self-contained workflow package built with KonfAI.
+KonfAI is built to serve as a **deterministic backend for LLM-driven
+experimentation**. Through the **KonfAI-MCP server**, an agent can:
 
-It can expose:
+- 🔎 inspect datasets and infer their structure
+- 📝 generate and validate YAML configurations
+- 🚀 launch training / prediction / evaluation runs
+- 📈 read live metrics, compare runs, and iterate
 
-- inference
-- evaluation
-- uncertainty estimation
-- full pipelines
-- fine-tuning
+Every execution stays **reproducible, structured, and grounded in the same YAML
+workflows** a human would run — bridging LLM reasoning and real experimental
+execution. See the [ecosystem map](https://konfai.readthedocs.io/en/latest/ecosystem/index.html)
+for the current status.
 
-Apps live in [`apps/`](https://github.com/vboussot/KonfAI/tree/main/apps) and
-can be used through:
+---
 
-| Interface | Entry point |
+## Ecosystem
+
+| Package | What it is |
 | --- | --- |
-| 🖥️ CLI | `konfai-apps` |
-| 🐍 Python API | `konfai_apps.KonfAIApp` |
-| 🌐 Remote server | `konfai-apps-server` + `konfai-apps --host ...` |
-| 🧠 3D Slicer | [SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI) |
+| **`konfai`** | the core framework (this repo) |
+| **`konfai-apps`** | package a workflow as an app — [CLI](https://konfai.readthedocs.io/en/latest/reference/cli.html), [HTTP server](https://konfai.readthedocs.io/en/latest/reference/app-server-api.html), [Python API](https://konfai.readthedocs.io/en/latest/reference/python-api.html) |
+| **App bundles** (`apps/`) | ready-to-run: `impact-synth`, `impact-seg`, `mrsegmentator`, `totalsegmentator`, `impact-reg` |
+| **[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI)** | run KonfAI apps from a 3D Slicer GUI |
+| **KonfAI-MCP** | expose KonfAI to LLM agents — inspect data, author configs, launch and monitor runs |
 
-Use Apps when a workflow is already stable and you want a cleaner user-facing
-interface than the low-level YAML CLI.
-
----
-
-## 📚 Documentation
-
-The README is only the entry point. The full documentation is available here:
-
-- https://konfai.readthedocs.io/en/latest/
+See the [ecosystem map](https://konfai.readthedocs.io/en/latest/ecosystem/index.html)
+for what is shipped vs. in-progress.
 
 ---
 
-## 🐳 Docker
+## Documentation
 
-KonfAI ships a Docker setup for CLI-oriented workflows.
+📚 **Full docs: <https://konfai.readthedocs.io/en/latest/>**
 
-- Dockerfile: [`docker/Dockerfile`](docker/Dockerfile)
-- guide: [`docs/source/usage/docker.md`](docs/source/usage/docker.md)
-- image: `vboussot/konfai`
+- [Quickstart](https://konfai.readthedocs.io/en/latest/quickstart.html) — first end-to-end run
+- [Core concepts](https://konfai.readthedocs.io/en/latest/concepts/index.html) — how YAML becomes Python objects
+- [Component catalogue](https://konfai.readthedocs.io/en/latest/reference/components/index.html) — everything you can configure
+- [Examples](https://konfai.readthedocs.io/en/latest/examples/index.html) — runnable Segmentation & Synthesis workflows
 
-Example:
+🐳 **Docker:** `vboussot/konfai` —
+[guide](https://konfai.readthedocs.io/en/latest/usage/docker.html).
+
+---
+
+## Development & contributing
 
 ```bash
-docker run --rm -it \
-  --gpus all \
-  -v "$(pwd):/workspace" \
-  -w /workspace \
-  vboussot/konfai TRAIN --gpu 0 -c examples/Synthesis/Config.yml
-```
-
----
-
-## 🛠️ Development
-
-Clone the repo and set up the environment with [Pixi](https://pixi.sh):
-
-```bash
-git clone https://github.com/vboussot/KonfAI.git
-cd KonfAI
+git clone https://github.com/vboussot/KonfAI.git && cd KonfAI
 pixi install
 pixi run test      # run the test suite
 pixi run check     # lint + format-check + test (run before pushing)
 ```
 
-pip users:
-
-```bash
-pip install -e ".[dev]"
-pytest -q tests/
-ruff check konfai
-```
-
-See [`docs/source/development.md`](docs/source/development.md) for the full
-developer guide, including available Pixi tasks, pre-commit setup, and how to
-build the documentation.
+Contributions are welcome — improve examples, clarify docs, add tests, or extend
+models / transforms / apps. See the
+[developer guide](https://konfai.readthedocs.io/en/latest/development.html) and
+[contributing guide](https://konfai.readthedocs.io/en/latest/contributing.html).
 
 **AI coding agents:** start with [`AGENTS.md`](AGENTS.md) — the canonical
 reference for conventions, commands, and repository rules.
 
 ---
 
-## 🤝 Contributing
+## Citation
 
-Contributions are welcome.
-
-Typical ways to help:
-
-- improve examples and notebooks
-- clarify documentation
-- add tests for real user paths
-- extend models, transforms, or apps
-
-Local setup:
-
-```bash
-git clone https://github.com/vboussot/KonfAI.git
-cd KonfAI
-python -m pip install -e .
-python -m pip install pytest pre-commit
+```bibtex
+@article{boussot2025konfai,
+  title   = {KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging},
+  author  = {Boussot, Valentin and Dillenseger, Jean-Louis},
+  journal = {arXiv preprint arXiv:2508.09823},
+  year    = {2025}
+}
 ```
 
-Useful commands:
-
-```bash
-pytest -q
-pre-commit run --all-files
-make -C docs html
-```
-
-Contributor guide:
-
-- [`docs/source/contributing.md`](docs/source/contributing.md)
+Licensed under [Apache-2.0](LICENSE).
