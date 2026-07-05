@@ -92,8 +92,9 @@ bundles under `apps/` (e.g. `impact-synth-konfai synthesize ...`, `impact-seg-ko
 are thin task-named wrappers.
 
 > ⚠️ **Trust model.** Resolving/running an app **copies and imports the app's `.py` files**
-> (runs arbitrary code) and can pip-install its `requirements.txt`. **Only run apps from sources
-> you trust.** See [references/apps-layer.md](references/apps-layer.md).
+> (runs arbitrary code) and **pip-installs its `requirements.txt` by default** (opt out with
+> `KONFAI_APPS_INSTALL_REQUIREMENTS=0`). **Only run apps from sources you trust.**
+> See [references/apps-layer.md](references/apps-layer.md).
 
 ## Reference material (load on demand)
 

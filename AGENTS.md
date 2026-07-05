@@ -62,7 +62,7 @@ Every extension point is **"subclass a base, reference it by classpath in YAML"*
 
 A separate package layered on KonfAI's **public** API (core never imports it). An "app" bundles a config + custom `.py` + `.pt` weights, resolved from a Local dir, a HuggingFace repo, or a Remote server; the `apps/*` bundles are thin CLI wrappers.
 
-> ⚠️ **Trust model.** Resolving an app **copies and imports its `.py` files** → it **runs arbitrary code**. It can also **pip-install its `requirements.txt`**, but that is **opt-in** (`install_requirements=True`; off by default). **Only resolve apps from sources you trust.**
+> ⚠️ **Trust model.** Resolving an app **copies and imports its `.py` files** → it **runs arbitrary code**. It also **pip-installs its `requirements.txt` by default** (only missing/mismatched packages; core packages like `torch`/`konfai` are never touched; opt out with `KONFAI_APPS_INSTALL_REQUIREMENTS=0`). **Only resolve apps from sources you trust.**
 
 ## 6. Running things
 

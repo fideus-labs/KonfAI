@@ -111,11 +111,13 @@ models (diffusion/StyleGAN/…) do not round-trip. See `konfai/export.py`.
 ```{danger}
 Resolving an app **copies its `.py` files into the run workspace and imports
 them** unconditionally — running a model by classpath (`Model:MyNet`) executes
-the app's own Python, i.e. arbitrary code. The `requirements.txt` pip-install,
-by contrast, is **opt-in**: it only runs when you pass
-`install_requirements=True`, and it is off by default. **Only resolve apps from
-sources you trust.** On the server side, the `--apps` allowlist is the trust
-boundary; keep it tightly scoped.
+the app's own Python, i.e. arbitrary code. Resolving also **pip-installs the
+app's `requirements.txt` by default**: only missing or version-mismatched
+packages are installed, core packages (`torch`, `konfai`, …) are never touched,
+and non-PEP 508 lines (`-r`, `--extra-index-url`, `git+…`) are skipped. Set
+`KONFAI_APPS_INSTALL_REQUIREMENTS=0` to opt out (offline / CI / reproducible
+environments). **Only resolve apps from sources you trust.** On the server
+side, the `--apps` allowlist is the trust boundary; keep it tightly scoped.
 ```
 
 ## See also

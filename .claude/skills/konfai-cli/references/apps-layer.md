@@ -24,8 +24,9 @@ Resolving or running an app is **not** a pure data download. It:
 
 - **copies the app's `.py` files into a run workspace and imports them** (the workspace is put
   on `sys.path`, and KonfAI imports the custom modules) — i.e. it **runs arbitrary code**;
-- can **pip-install `requirements.txt`** — this mechanism is **opt-in and off by default**
-  (`install_requirements=True`); when enabled it installs the app's declared dependencies;
+- **pip-installs `requirements.txt` by default** on every local resolution — only missing or
+  version-mismatched packages, core packages (`torch`, `konfai`, …) are never touched, and
+  non-PEP 508 lines are skipped; opt out with `KONFAI_APPS_INSTALL_REQUIREMENTS=0`;
 - for HuggingFace apps, **downloads weights/config over the network**;
 - in remote mode, **uploads your inputs and config** to the server.
 

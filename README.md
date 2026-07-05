@@ -49,7 +49,7 @@ Most frameworks focus on *models*. **KonfAI focuses on *pipelines*.**
 - 🔁 **Iterate** by editing YAML, not rewriting Python.
 - 🔬 **Reproduce** every run: KonfAI resolves and writes back the full config.
 - 🩻 **Scale to real volumes**: data is always read lazily as overlapping patches — never loaded whole into RAM.
-- 📦 **Ship** a mature workflow as a reusable [**KonfAI App**](https://konfai.readthedocs.io/en/latest/concepts/apps.html) (CLI, HTTP server, 3D Slicer).
+- 📦 **Ship** a mature workflow as a reusable [**KonfAI App**](https://konfai.readthedocs.io/en/latest/usage/apps.html) (CLI, HTTP server, 3D Slicer).
 - 🤖 **Drive it with an agent**: KonfAI-MCP lets an LLM inspect data, author configs, and launch runs.
 
 ---
@@ -184,8 +184,7 @@ pixi run check     # lint + format-check + test (run before pushing)
 
 Contributions are welcome — improve examples, clarify docs, add tests, or extend
 models / transforms / apps. See the
-[developer guide](https://konfai.readthedocs.io/en/latest/development.html) and
-[contributing guide](https://konfai.readthedocs.io/en/latest/contributing.html).
+[developer guide](https://konfai.readthedocs.io/en/latest/development.html).
 
 **AI coding agents:** start with [`AGENTS.md`](AGENTS.md) — the canonical
 reference for conventions, commands, and repository rules.

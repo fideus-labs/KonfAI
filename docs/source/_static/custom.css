@@ -28,85 +28,85 @@
 
 :root {
     --kf-surface: #ffffff;
-    --kf-surface-2: #eff6f4;
+    --kf-surface-2: #eef2f1;
     --kf-ink: #10201c;
     --kf-ink-2: #3a4f4a;
     --kf-muted: #647d77;
     --kf-accent: #0c7568;
     --kf-accent-strong: #095c51;
-    --kf-accent-soft: rgba(12, 117, 104, 0.08);
-    --kf-accent-line: rgba(12, 117, 104, 0.32);
-    --kf-steel: #2a6f96;
-    --kf-steel-soft: rgba(42, 111, 150, 0.07);
-    --kf-steel-line: rgba(42, 111, 150, 0.34);
-    --kf-violet: #6d5bb8;
-    --kf-violet-soft: rgba(109, 91, 184, 0.08);
-    --kf-violet-line: rgba(109, 91, 184, 0.34);
-    --kf-coral: #c2564b;
-    --kf-coral-soft: rgba(194, 86, 75, 0.08);
-    --kf-coral-line: rgba(194, 86, 75, 0.34);
-    --kf-amber: #9d5407;
-    --kf-amber-soft: rgba(157, 84, 7, 0.08);
-    --kf-amber-line: rgba(157, 84, 7, 0.36);
-    --kf-hair: rgba(13, 42, 38, 0.13);
-    --kf-hair-2: rgba(13, 42, 38, 0.065);
+    --kf-accent-soft: rgba(12, 117, 104, 0.12);
+    --kf-accent-line: rgba(12, 117, 104, 0.44);
+    --kf-steel: #21709e;
+    --kf-steel-soft: rgba(33, 112, 158, 0.11);
+    --kf-steel-line: rgba(33, 112, 158, 0.44);
+    --kf-violet: #6852c4;
+    --kf-violet-soft: rgba(104, 82, 196, 0.11);
+    --kf-violet-line: rgba(104, 82, 196, 0.44);
+    --kf-coral: #c94f41;
+    --kf-coral-soft: rgba(201, 79, 65, 0.11);
+    --kf-coral-line: rgba(201, 79, 65, 0.44);
+    --kf-amber: #a65a04;
+    --kf-amber-soft: rgba(166, 90, 4, 0.11);
+    --kf-amber-line: rgba(166, 90, 4, 0.46);
+    --kf-hair: rgba(25, 39, 42, 0.14);
+    --kf-hair-2: rgba(25, 39, 42, 0.08);
     --kf-shadow: 0 1px 2px rgba(13, 42, 38, 0.05), 0 12px 32px -16px rgba(13, 42, 38, 0.20);
     --kf-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 html.dark {
-    --kf-surface: #111a18;
-    --kf-surface-2: #17231f;
-    --kf-ink: #e9f3ef;
-    --kf-ink-2: #b8c9c3;
-    --kf-muted: #85978f;
-    --kf-accent: #5ecdbb;
-    --kf-accent-strong: #8fdfd0;
-    --kf-accent-soft: rgba(94, 205, 187, 0.10);
-    --kf-accent-line: rgba(94, 205, 187, 0.30);
-    --kf-steel: #7db8d9;
-    --kf-steel-soft: rgba(125, 184, 217, 0.08);
-    --kf-steel-line: rgba(125, 184, 217, 0.32);
-    --kf-violet: #a795e3;
-    --kf-violet-soft: rgba(167, 149, 227, 0.09);
-    --kf-violet-line: rgba(167, 149, 227, 0.32);
-    --kf-coral: #e08d84;
-    --kf-coral-soft: rgba(224, 141, 132, 0.09);
-    --kf-coral-line: rgba(224, 141, 132, 0.32);
-    --kf-amber: #e5b054;
-    --kf-amber-soft: rgba(229, 176, 84, 0.09);
-    --kf-amber-line: rgba(229, 176, 84, 0.34);
-    --kf-hair: rgba(178, 220, 210, 0.14);
-    --kf-hair-2: rgba(178, 220, 210, 0.07);
+    --kf-surface: #191e21;
+    --kf-surface-2: #20262a;
+    --kf-ink: #eef2f3;
+    --kf-ink-2: #c6cfd0;
+    --kf-muted: #9aa5a6;
+    --kf-accent: #3fdcc3;
+    --kf-accent-strong: #7fead9;
+    --kf-accent-soft: rgba(63, 220, 195, 0.13);
+    --kf-accent-line: rgba(63, 220, 195, 0.44);
+    --kf-steel: #8fc9ec;
+    --kf-steel-soft: rgba(143, 201, 236, 0.14);
+    --kf-steel-line: rgba(143, 201, 236, 0.42);
+    --kf-violet: #b7a5f5;
+    --kf-violet-soft: rgba(183, 165, 245, 0.15);
+    --kf-violet-line: rgba(183, 165, 245, 0.42);
+    --kf-coral: #f59c90;
+    --kf-coral-soft: rgba(245, 156, 144, 0.14);
+    --kf-coral-line: rgba(245, 156, 144, 0.42);
+    --kf-amber: #f2bd62;
+    --kf-amber-soft: rgba(242, 189, 98, 0.14);
+    --kf-amber-line: rgba(242, 189, 98, 0.44);
+    --kf-hair: rgba(168, 184, 188, 0.17);
+    --kf-hair-2: rgba(163, 178, 182, 0.09);
     --kf-shadow: 0 1px 2px rgba(0, 0, 0, 0.45), 0 18px 42px -20px rgba(0, 0, 0, 0.75);
 }
 
 /* auto mode: system prefers dark and the user has not forced light */
 @media (prefers-color-scheme: dark) {
     html:not(.light) {
-        --kf-surface: #111a18;
-        --kf-surface-2: #17231f;
-        --kf-ink: #e9f3ef;
-        --kf-ink-2: #b8c9c3;
-        --kf-muted: #85978f;
-        --kf-accent: #5ecdbb;
-        --kf-accent-strong: #8fdfd0;
-        --kf-accent-soft: rgba(94, 205, 187, 0.10);
-        --kf-accent-line: rgba(94, 205, 187, 0.30);
-        --kf-steel: #7db8d9;
-        --kf-steel-soft: rgba(125, 184, 217, 0.08);
-        --kf-steel-line: rgba(125, 184, 217, 0.32);
-        --kf-violet: #a795e3;
-        --kf-violet-soft: rgba(167, 149, 227, 0.09);
-        --kf-violet-line: rgba(167, 149, 227, 0.32);
-        --kf-coral: #e08d84;
-        --kf-coral-soft: rgba(224, 141, 132, 0.09);
-        --kf-coral-line: rgba(224, 141, 132, 0.32);
-        --kf-amber: #e5b054;
-        --kf-amber-soft: rgba(229, 176, 84, 0.09);
-        --kf-amber-line: rgba(229, 176, 84, 0.34);
-        --kf-hair: rgba(178, 220, 210, 0.14);
-        --kf-hair-2: rgba(178, 220, 210, 0.07);
+        --kf-surface: #191e21;
+        --kf-surface-2: #20262a;
+        --kf-ink: #eef2f3;
+        --kf-ink-2: #c6cfd0;
+        --kf-muted: #9aa5a6;
+        --kf-accent: #3fdcc3;
+        --kf-accent-strong: #7fead9;
+        --kf-accent-soft: rgba(63, 220, 195, 0.13);
+        --kf-accent-line: rgba(63, 220, 195, 0.44);
+        --kf-steel: #8fc9ec;
+        --kf-steel-soft: rgba(143, 201, 236, 0.14);
+        --kf-steel-line: rgba(143, 201, 236, 0.42);
+        --kf-violet: #b7a5f5;
+        --kf-violet-soft: rgba(183, 165, 245, 0.15);
+        --kf-violet-line: rgba(183, 165, 245, 0.42);
+        --kf-coral: #f59c90;
+        --kf-coral-soft: rgba(245, 156, 144, 0.14);
+        --kf-coral-line: rgba(245, 156, 144, 0.42);
+        --kf-amber: #f2bd62;
+        --kf-amber-soft: rgba(242, 189, 98, 0.14);
+        --kf-amber-line: rgba(242, 189, 98, 0.44);
+        --kf-hair: rgba(168, 184, 188, 0.17);
+        --kf-hair-2: rgba(163, 178, 182, 0.09);
         --kf-shadow: 0 1px 2px rgba(0, 0, 0, 0.45), 0 18px 42px -20px rgba(0, 0, 0, 0.75);
     }
 }
@@ -377,9 +377,9 @@ html.dark .kf-btn-primary { color: #06231e !important; }
 .kf-pillar {
     padding: 1.15rem 1.2rem;
     border: 1px solid var(--kf-hair);
-    border-top: 2px solid var(--kf-hue-line);
+    border-top: 3px solid var(--kf-hue-line);
     border-radius: 0.9rem;
-    background: linear-gradient(var(--kf-hue-soft), transparent 42%), var(--kf-surface);
+    background: linear-gradient(var(--kf-hue-soft), transparent 58%), var(--kf-surface);
     transition: border-color 0.14s ease;
 }
 
@@ -406,9 +406,9 @@ html.dark .kf-btn-primary { color: #06231e !important; }
     gap: 0.4rem;
     padding: 1.2rem 1.25rem;
     border: 1px solid var(--kf-hair);
-    border-top: 2px solid var(--kf-hue-line);
+    border-top: 3px solid var(--kf-hue-line);
     border-radius: 0.9rem;
-    background: linear-gradient(var(--kf-hue-soft), transparent 46%), var(--kf-surface);
+    background: linear-gradient(var(--kf-hue-soft), transparent 58%), var(--kf-surface);
     text-decoration: none !important;
     color: inherit !important;
     transition: transform 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
@@ -726,4 +726,62 @@ article.yue blockquote {
     padding: 0.7rem 1rem;
     margin: 1.2rem 0;
     color: var(--kf-ink-2);
+}
+
+/* ------------------------------------------------------------------ *
+ * Landing-only layout fixes (scoped via :has so no other page moves):
+ * - the landing has no in-page TOC, so drop the empty right column
+ *   that squeezed the hero (RTD parks its ad there, mid-hero);
+ * - hide the duplicated "KonfAI" H1 — the header wordmark already
+ *   names the site (the title is kept for the tab/sidebar).
+ * ------------------------------------------------------------------ */
+.sy-page:has(.kf-landing) #rside,
+.sy-page:has(.kf-landing) .rside-overlay {
+    display: none;
+}
+
+main.sy-main:has(.kf-landing) article.yue {
+    max-width: 100%;
+}
+
+article.yue:has(.kf-landing) > h1:first-child,
+article.yue:has(.kf-landing) > section > h1:first-child {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    margin: 0;
+    padding: 0;
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Site-wide dark canvas: lift the theme's near-black slate to a deep
+ * teal so dark mode reads as the brand's world, not a void. Borders
+ * and dividers pick up the same tint.
+ * ------------------------------------------------------------------ */
+html.dark {
+    --sy-c-background: #14171a;
+    --sy-c-border: rgba(163, 178, 182, 0.16);
+    --sy-c-divider: rgba(163, 178, 182, 0.09);
+}
+
+@media (prefers-color-scheme: dark) {
+    html:not(.light) {
+        --sy-c-background: #14171a;
+        --sy-c-border: rgba(163, 178, 182, 0.16);
+        --sy-c-divider: rgba(163, 178, 182, 0.09);
+    }
+}
+
+/* the hero eyebrow stays on one line (it wraps gracefully only on phones) */
+.kf-hero .kf-eyebrow {
+    white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+    .kf-hero .kf-eyebrow {
+        white-space: normal;
+    }
 }

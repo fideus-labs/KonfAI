@@ -59,9 +59,9 @@ wrappers add `pipeline`. See {doc}`../usage/apps` for how to run them and
 
 ```{note}
 **Trust model.** Resolving a `konfai-apps` app copies and imports its `.py`
-files (arbitrary code; the `requirements.txt` pip-install is opt-in via
-`install_requirements=True` and off by default), so only resolve apps from
-sources you trust — see {doc}`../reference/python-api`.
+files (arbitrary code) and pip-installs its `requirements.txt` by default
+(opt out with `KONFAI_APPS_INSTALL_REQUIREMENTS=0`), so only resolve apps
+from sources you trust — see {doc}`../reference/python-api`.
 ```
 
 ## See also
