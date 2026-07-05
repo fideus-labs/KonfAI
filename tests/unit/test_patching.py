@@ -24,7 +24,7 @@ os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
 import pytest  # noqa: E402
 import torch  # noqa: E402
 
-from konfai.data.patching import Accumulator, Cosinus, Mean  # noqa: E402
+from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean  # noqa: E402
 from konfai.utils.errors import PatchError  # noqa: E402
 from konfai.utils.utils import get_patch_slices_from_shape  # noqa: E402
 
@@ -118,5 +118,17 @@ def test_path_combine_call_applies_window_and_caches_device():
     tensor = torch.ones(1, 1, 6, 6)
     weighted = combine(tensor)
     assert torch.allclose(weighted[0, 0], combine.data)
-    # The per-device window is cached on first use.
-    assert tensor.device in combine._data_per_device
+    # The window is cached per (device, dtype) on first use and matches the tensor dtype.
+    assert (tensor.device, tensor.dtype) in combine._data_per_device
+
+
+def test_gaussian_window_favours_centre_and_reassembles_to_a_weighted_average():
+    gaussian = Gaussian()
+    gaussian.set_patch_config([8, 8], 2)
+    # nnU-Net-style importance map: centre weight far exceeds the border, but the edge stays > 0.
+    assert float(gaussian.data[4, 4]) > float(gaussian.data[0, 0]) > 0
+    # A single patch must still reassemble to its raw values (assemble divides by the accumulated weight).
+    accumulator = Accumulator([(slice(0, 8), slice(0, 8))], patch_size=[8, 8], patch_combine=gaussian, batch=True)
+    accumulator.add_layer(0, torch.full((1, 1, 8, 8), 3.0))
+    out = accumulator.assemble()[0, 0]
+    torch.testing.assert_close(out, torch.full((8, 8), 3.0), rtol=0, atol=1e-4)

@@ -17,14 +17,11 @@
 """Patch extraction, accumulation, and patch-combination helpers for KonfAI."""
 
 import copy
-import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import partial
 
 import numpy as np
-import SimpleITK as sitk
 import torch
 import torch.nn.functional as F
 
@@ -52,102 +49,74 @@ class PathCombine(ABC):
     def __init__(self) -> None:
         self.data: torch.Tensor
         self.overlap: int
-        self._data_per_device: dict[torch.device, torch.Tensor] = {}
+        self._data_per_device: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
-    """
-    A = slice(0, overlap)
-    B = slice(-overlap, None)
-    C = slice(overlap, -overlap)
-
-    1D
-        A+B
-    2D :
-        AA+AB+BA+BB
-
-        AC+BC
-        CA+CB
-    3D :
-        AAA+AAB+ABA+ABB+BAA+BAB+BBA+BBB
-
-        CAA+CAB+CBA+CBB
-        ACA+ACB+BCA+BCB
-        AAC+ABC+BAC+BBC
-
-        CCA+CCB
-        CAC+CBC
-        ACC+BCC
-
-    """
-
-    def set_patch_config(self, patch_size: list[int], overlap: int):
+    def set_patch_config(self, patch_size: list[int], overlap: int) -> None:
         self._data_per_device.clear()
+        self.overlap = overlap
         if overlap <= 0:
             self.data = torch.ones(patch_size)
             return
-        self.data = F.pad(
-            torch.ones([size - overlap * 2 for size in patch_size]),
-            [overlap] * 2 * len(patch_size),
-            mode="constant",
-            value=0,
-        )
-        self.data = self._set_function(self.data, overlap)
-        dim = len(patch_size)
-
-        a = slice(0, overlap)
-        b = slice(-overlap, None)
-        c = slice(overlap, -overlap)
-
-        for i in range(dim):
-            slices_badge = list(itertools.product(*[[a, b] for _ in range(dim - i)]))
-            for indexs in itertools.combinations([0, 1, 2], i):
-                result = []
-                for slices_tuple in slices_badge:
-                    slices_list = list(slices_tuple)
-                    for index in indexs:
-                        slices_list.insert(index, c)
-                    result.append(tuple(slices_list))
-                for patch, s in zip(PathCombine._normalise([self.data[s] for s in result]), result, strict=False):
-                    self.data[s] = patch
-
-    @staticmethod
-    def _normalise(patchs: list[torch.Tensor]) -> list[torch.Tensor]:
-        data_sum = torch.sum(torch.concat([patch.unsqueeze(0) for patch in patchs], dim=0), dim=0)
-        return [d / data_sum for d in patchs]
+        # The per-patch weight is the outer product of one 1-D window per axis. It is separable by
+        # construction, so a per-axis partition of unity stays a partition of unity in N-D and overlapping
+        # patches blend without darkening — no distance map or explicit renormalisation loop is needed, and
+        # the trailing ``result / weight_sum`` in Accumulator.assemble stays exact at the volume borders.
+        data = self._window_1d(patch_size[0], overlap)
+        for size in patch_size[1:]:
+            data = data.unsqueeze(-1) * self._window_1d(size, overlap)
+        self.data = data
 
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
-        if tensor.device not in self._data_per_device:
-            self._data_per_device[tensor.device] = self.data.to(tensor.device)
-        return self._data_per_device[tensor.device] * tensor
+        key = (tensor.device, tensor.dtype)
+        if key not in self._data_per_device:
+            # Match the tensor dtype: the weight has no reason to carry more precision than the data it
+            # scales, and a float64 weight would upcast the whole (channels x volume) blend.
+            self._data_per_device[key] = self.data.to(device=tensor.device, dtype=tensor.dtype)
+        return self._data_per_device[key] * tensor
 
     @abstractmethod
-    def _set_function(self, data: torch.Tensor, overlap: int) -> torch.Tensor:
-        pass
+    def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
+        """Return the 1-D blend weight along one axis (length ``size``, ``overlap`` voxels tapered per side)."""
 
 
 class Mean(PathCombine):
-    """Uniform patch-combination strategy for overlapping predictions."""
+    """Uniform weighting: overlapping patches are plain-averaged by the assembly normalisation."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
-    def _set_function(self, data: torch.Tensor, overlap: int) -> torch.Tensor:
-        return torch.ones_like(self.data)
+    def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
+        return torch.ones(size)
 
 
 class Cosinus(PathCombine):
-    """Cosine-based weighting strategy for smoother overlap blending."""
+    """Raised-cosine (sin**2) taper: a smooth partition of unity across the patch overlap."""
 
-    def __init__(self) -> None:
+    def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
+        window = torch.ones(size)
+        # sin**2 ramp over the overlap; the neighbouring patch's cos**2 ramp is its complement, so the two
+        # sum to exactly one across the overlap. The +0.5 phase keeps the very edge > 0 so a single-patch
+        # border (where result/weight_sum must recover the raw value) never divides by zero.
+        ramp = torch.sin((torch.arange(overlap, dtype=torch.float32) + 0.5) / overlap * (torch.pi / 2)) ** 2
+        window[:overlap] = ramp
+        window[size - overlap :] = ramp.flip(0)
+        return window
+
+
+class Gaussian(PathCombine):
+    """nnU-Net-style Gaussian importance weighting.
+
+    Favours patch centres — where the model sees the most surrounding context — and down-weights the
+    borders, which suppresses seam artefacts. Not a partition of unity, but ``Accumulator.assemble``
+    normalises by the accumulated weight, so overlapping patches still form a correct weighted average.
+    """
+
+    def __init__(self, sigma_scale: float = 0.125) -> None:
         super().__init__()
+        self.sigma_scale = sigma_scale
 
-    def _function_sides(self, overlap: int, x: float):
-        return np.clip(np.cos(np.pi / (2 * (overlap + 1)) * x), 0, 1)
-
-    def _set_function(self, data: torch.Tensor, overlap: int) -> torch.Tensor:
-        image = sitk.GetImageFromArray(np.asarray(data, dtype=np.uint8))
-        danielsson_distance_map_image_filter = sitk.DanielssonDistanceMapImageFilter()
-        distance = torch.tensor(sitk.GetArrayFromImage(danielsson_distance_map_image_filter.Execute(image)))
-        return distance.apply_(partial(self._function_sides, overlap))
+    def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
+        sigma = max(size * self.sigma_scale, 1e-6)
+        center = (size - 1) / 2
+        coords = torch.arange(size, dtype=torch.float32)
+        return torch.exp(-((coords - center) ** 2) / (2.0 * sigma**2))
 
 
 class Accumulator:
