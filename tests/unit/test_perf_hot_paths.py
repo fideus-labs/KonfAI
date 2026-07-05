@@ -16,20 +16,15 @@
 
 """Regression tests for the performance hot-path fixes (see AUDIT.md — Performance backlog)."""
 
-import os
+from pathlib import Path
+from unittest.mock import MagicMock
 
-os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
-os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
+import torch
 
-from pathlib import Path  # noqa: E402
-from unittest.mock import MagicMock  # noqa: E402
-
-import torch  # noqa: E402
-
-import konfai.utils.dataset as dataset_module  # noqa: E402
-from konfai.data.patching import Accumulator  # noqa: E402
-from konfai.predictor import ModelComposite  # noqa: E402
-from konfai.utils.dataset import Attribute, Dataset  # noqa: E402
+import konfai.utils.dataset as dataset_module
+from konfai.data.patching import Accumulator
+from konfai.predictor import ModelComposite
+from konfai.utils.dataset import Attribute, Dataset
 
 
 def test_accumulator_is_full_counts_without_rescanning():

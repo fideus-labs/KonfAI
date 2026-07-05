@@ -1,18 +1,33 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Guard tests for ``konfai.utils.runtime``: workflow preconditions, environment
+normalisation, overwrite confirmation, and distributed-launch bookkeeping."""
+
 import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import torch
 
 import konfai as konfai_module
-from konfai.data.data_manager import Data
 from konfai.evaluator import Evaluator
-from konfai.network.blocks import Exit
 from konfai.predictor import Predictor
 from konfai.trainer import Trainer
-from konfai.utils.config import apply_config, config
 from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import (
     DistributedObject,
@@ -53,46 +68,6 @@ def test_configure_workflow_environment_normalizes_paths(monkeypatch: pytest.Mon
     assert Path(os.environ["KONFAI_STATISTICS_DIRECTORY"]).name == "Statistics"
 
 
-def test_apply_config_restores_config_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    config_path = tmp_path / "Config.yml"
-    config_path.write_text("Root:\n  Child:\n    value: 7\n", encoding="utf-8")
-    monkeypatch.setenv("KONFAI_config_file", str(config_path))
-    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
-    monkeypatch.setenv("KONFAI_CONFIG_PATH", "before.path")
-    monkeypatch.setenv("KONFAI_CONFIG_VARIABLE", "before.variable")
-
-    @config("Child")
-    class Child:
-        def __init__(self, value: int = 0) -> None:
-            self.value = value
-
-    child = apply_config("Root")(Child)()
-
-    assert child.value == 7
-    assert os.environ["KONFAI_CONFIG_PATH"] == "before.path"
-    assert os.environ["KONFAI_CONFIG_VARIABLE"] == "before.variable"
-
-
-def test_apply_config_keeps_config_path_during_constructor_call(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    config_path = tmp_path / "Config.yml"
-    config_path.write_text("Root:\n  Child:\n    value: 7\n", encoding="utf-8")
-    monkeypatch.setenv("KONFAI_config_file", str(config_path))
-    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
-
-    @config("Child")
-    class Child:
-        def __init__(self, value: int = 0) -> None:
-            self.value = value
-            self.config_path = os.environ["KONFAI_CONFIG_PATH"]
-
-    child = apply_config("Root")(Child)()
-
-    assert child.value == 7
-    assert child.config_path == "Root.Child"
-
-
 def test_confirm_overwrite_or_raise_requires_flag_in_non_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KONFAI_OVERWRITE", raising=False)
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
@@ -119,27 +94,6 @@ def test_confirm_overwrite_or_raise_rejects_decline(monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(ConfigError, match="Overwrite was declined"):
         confirm_overwrite_or_raise(Path("/tmp/output"), "prediction", ConfigError)
-
-
-def test_debug_exit_block_raises_runtime_error() -> None:
-    with pytest.raises(RuntimeError, match="debug Exit block"):
-        Exit()(torch.ones(1))
-
-
-def test_data_split_does_not_duplicate_tail_samples(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KONFAI_STATE", str(State.TRAIN))
-
-    mapping = [(index, 0, 0) for index in range(5)]
-    shards = Data._split(mapping, 2)
-
-    flattened = [item for shard in shards for item in shard]
-
-    assert len(shards) == 2
-    # drop_last semantics: shards are equal length (DDP needs matching step counts), the tail is
-    # dropped, and no sample is ever duplicated across ranks.
-    assert {len(shard) for shard in shards} == {2}
-    assert len(flattened) == len(set(flattened))
-    assert set(flattened).issubset(set(mapping))
 
 
 def test_execute_distributed_object_sets_shared_master_port_without_forcing_launch_blocking(

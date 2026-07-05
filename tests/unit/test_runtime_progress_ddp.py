@@ -17,13 +17,9 @@
 """Regression tests for the runtime progress/DDP audit fixes (see AUDIT.md)."""
 
 import contextlib
-import os
 import random
 
-os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
-os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
-
-import konfai.utils.runtime as rt  # noqa: E402
+import konfai.utils.runtime as rt
 
 
 def test_synchronize_data_gathers_on_cpu(monkeypatch):
