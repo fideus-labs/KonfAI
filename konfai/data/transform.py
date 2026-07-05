@@ -613,12 +613,20 @@ class Dilate(Transform):
 
         data = (tensor > 0).to(torch.float32)
         spatial_dims = data.dim() - 1
-        kernel_size = 2 * self.dilate + 1
+        d = self.dilate
+        k = 2 * d + 1
 
+        # A cubic (box) structuring element is separable: dilating by a k**n box equals n successive
+        # 1-D max-pools, one per spatial axis. This is bit-identical to a single k**n max-pool (max is
+        # associative and the box is the Minkowski sum of 1-D segments) for ~k**(n-1)x fewer comparisons
+        # — the k**3 dense pool is the dominant cost of the whole-volume mask load.
         if spatial_dims == 2:
-            data = F.max_pool2d(data, kernel_size=kernel_size, stride=1, padding=self.dilate)
+            data = F.max_pool2d(data, kernel_size=(k, 1), stride=1, padding=(d, 0))
+            data = F.max_pool2d(data, kernel_size=(1, k), stride=1, padding=(0, d))
         elif spatial_dims == 3:
-            data = F.max_pool3d(data, kernel_size=kernel_size, stride=1, padding=self.dilate)
+            data = F.max_pool3d(data, kernel_size=(k, 1, 1), stride=1, padding=(d, 0, 0))
+            data = F.max_pool3d(data, kernel_size=(1, k, 1), stride=1, padding=(0, d, 0))
+            data = F.max_pool3d(data, kernel_size=(1, 1, k), stride=1, padding=(0, 0, d))
         else:
             raise ValueError(
                 "[Dilate] Unsupported tensor shape for "
