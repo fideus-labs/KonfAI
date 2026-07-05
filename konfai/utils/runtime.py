@@ -221,7 +221,9 @@ class NeedDevice:
 
     def __init__(self) -> None:
         super().__init__()
-        self.device: torch.device
+        # Default to CPU so ``self.device`` is always set: an object that is never explicitly moved (e.g. an
+        # output dataset off the propagation path) then reads as CPU instead of raising AttributeError.
+        self.device: torch.device = torch.device("cpu")
 
     def to(self, device: int):
         self.device = get_device(device)

@@ -366,15 +366,39 @@ class OutSameAsGroupDataset(OutputDataset):
         else:
             chunks = [layer]
 
+        # The per-model channel reduction (softmax/argmax over the class dimension of a whole-volume
+        # multi-class output) is a strided reduction over billions of elements — slow on CPU, trivial on
+        # the GPU. Blending stays on CPU (patches are never all held in VRAM); only the already-assembled
+        # chunk is moved to the device for the reduction, then the small reduced result comes back. Falls
+        # back to CPU when there is no CUDA device or the chunk does not fit free VRAM.
+        reduce_device = self._reduction_device(chunks[0]) if chunks else torch.device("cpu")
         results = []
         for i, layer in enumerate(chunks):
             attr = base_attr if (i == len(chunks) - 1) else Attribute(base_attr)
+            layer = layer.to(reduce_device)
             for transform in self.before_reduction_transforms:
                 layer = transform(self.names[index], layer, Attribute(attr))
-            results.append(layer)
+            results.append(layer.cpu() if layer.device.type != "cpu" else layer)
 
         # Mean, Median -> [1, C, ...] | Concat -> [M, C, ...]
         return torch.stack(results, dim=0)
+
+    def _reduction_device(self, chunk: torch.Tensor) -> torch.device:
+        """Device for the channel-reduction transforms: this dataset's CUDA device when the chunk (plus
+        working headroom) fits free VRAM, else CPU (the memory-safe fallback)."""
+        # NeedDevice stores a CUDA ordinal (int) on GPU and a torch.device on CPU; normalise to a device.
+        device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
+        if device.type != "cuda":
+            return torch.device("cpu")
+        try:
+            # The forward pass leaves the allocator holding a large reserved cache; release the unused part
+            # back to the driver so a genuinely-free GPU is not mistaken for a full one.
+            torch.cuda.empty_cache()
+            free, _ = torch.cuda.mem_get_info(device)
+        except Exception:  # nosec B110 - any CUDA query failure just keeps the reduction on CPU
+            return torch.device("cpu")
+        needed = chunk.numel() * chunk.element_size() * 3  # chunk + a same-size softmax temp + headroom
+        return device if needed < free else torch.device("cpu")
 
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
         results = [
@@ -1042,6 +1066,10 @@ class Predictor(DistributedObject):
             if len(cuda_visible_devices())
             else self.model_composite
         )
+        if len(cuda_visible_devices()):
+            # Co-locate the output writers with the model so their reduction/transforms know the GPU.
+            for output_dataset in self.outputs_dataset.values():
+                output_dataset.to(local_rank * self.size)
         model_composite = Model(model_composite)
         with _Predictor(
             world_size,
