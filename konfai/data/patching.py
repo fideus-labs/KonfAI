@@ -209,7 +209,14 @@ class Accumulator:
         # it is computed once and accumulated spatially only; with padding weight_sum is ~1 and the
         # division is a near no-op.
         combine = self.patch_combine
-        weight_sum = torch.zeros(result.shape[n:], device=result.device) if combine is not None else torch.empty(0)
+        # Match the result dtype so the final ``result / weight_sum`` does not promote the whole
+        # (channels x volume) accumulator to float32 — a default float32 weight_sum silently doubled the
+        # peak memory of large multi-class reassemblies (e.g. a 118-class whole-body segmentation).
+        weight_sum = (
+            torch.zeros(result.shape[n:], dtype=result.dtype, device=result.device)
+            if combine is not None
+            else torch.empty(0)
+        )
         weight_patch: torch.Tensor | None = None
         for patch_slice, data in zip(self.patch_slices, self._layer_accumulator, strict=False):
             if data is not None:

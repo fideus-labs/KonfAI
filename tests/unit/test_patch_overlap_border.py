@@ -56,3 +56,25 @@ def test_overlap_blend_corner_not_quartered_in_2d() -> None:
 
         assert out.shape == (14, 14)
         torch.testing.assert_close(out, torch.ones(14, 14), rtol=0, atol=1e-5)
+
+
+def test_blended_reassembly_preserves_patch_dtype() -> None:
+    # The weight-normalised reassembly must not promote a float16 accumulator to float32: a default
+    # float32 weight_sum silently doubled the peak memory of large multi-class volumes (the 118-class
+    # whole-body segmentation OOM). Many channels make the effect visible in the assembled shape.
+    patch_slices = [
+        (slice(0, 8), slice(0, 8)),
+        (slice(0, 8), slice(6, 14)),
+        (slice(6, 14), slice(0, 8)),
+        (slice(6, 14), slice(6, 14)),
+    ]
+    combine = Cosinus()
+    combine.set_patch_config([8, 8], 2)
+    accumulator = Accumulator(patch_slices, patch_size=[8, 8], patch_combine=combine, batch=True)
+    for index in range(len(patch_slices)):
+        accumulator.add_layer(index, torch.ones(1, 5, 8, 8, dtype=torch.float16))
+
+    out = accumulator.assemble()
+
+    assert out.dtype == torch.float16
+    torch.testing.assert_close(out[0], torch.ones(5, 14, 14, dtype=torch.float16), rtol=0, atol=1e-2)
