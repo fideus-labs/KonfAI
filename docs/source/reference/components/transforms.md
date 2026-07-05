@@ -84,7 +84,7 @@ Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 
 | Name | Purpose |
 | --- | --- |
-| `Statistics` | Records ImageMin/Max/Mean/Std to the attribute cache and returns the tensor unchanged (feeds e.g. `IMPACTSynth`). Order in the transform list matters. |
+| `Statistics` | Records ImageMin/Max/Mean/Std to the attribute cache and returns the tensor unchanged (feeds the perceptual criteria `SAM_Perceptual`, `IMPACTSynth`, `IMPACTReg`). Order in the transform list matters. |
 | `Save` | Marker — a no-op passthrough (a checkpoint hint, not a saver). |
 | `KonfAIInference` | Run a nested KonfAI app inference in a spawned subprocess. Needs `konfai-apps` and `num_workers: 0`; defaults to a specific HF repo. |
 
