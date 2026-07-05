@@ -42,5 +42,4 @@ See also
 --------
 
 - :doc:`/usage/apps`
-- :doc:`/usage/remote-server`
 - :doc:`/reference/app-server-api`

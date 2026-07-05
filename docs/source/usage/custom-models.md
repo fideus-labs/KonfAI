@@ -1,7 +1,9 @@
 # Using custom models, transforms, augmentations, and losses
 
-KonfAI custom objects are regular Python classes selected from YAML through
-`classpath` and instantiated through `apply_config()`.
+When the built-in components are not enough, you extend KonfAI by writing
+regular Python classes and selecting them from YAML — no core edits. Custom
+objects are selected through `classpath` and instantiated through
+`apply_config()`; this page gives the contract each object type must satisfy.
 
 To integrate cleanly, a custom object must satisfy two contracts:
 
@@ -15,6 +17,10 @@ This page focuses on the custom object types that matter most in practice:
 - transforms
 - augmentations
 - losses and metrics
+
+**A local classpath such as `Model:UNetpp5` imports a Python file resolved
+from the directory you launch `konfai` in** — keep the custom `.py` next to
+the YAML and run the command from that directory.
 
 ## General rules
 
@@ -375,9 +381,11 @@ outputs_criterions:
 - `@config("...")` points to a different subtree than the one you edited in
   YAML.
 
-## See also
+## Next steps
 
-- :doc:`../concepts/configuration`
-- :doc:`../concepts/model-graph`
-- :doc:`../reference/api/extension-points`
-- :doc:`../examples/synthesis`
+- {doc}`../concepts/configuration` — how `classpath` and `apply_config()` bind
+  YAML keys to constructor arguments.
+- {doc}`../concepts/model-graph` — how `add_module(...)` names become the
+  output paths that `outputs_criterions` points at.
+- {doc}`../reference/api/extension-points` — the full API of the base classes
+  used on this page.

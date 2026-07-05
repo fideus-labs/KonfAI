@@ -2,8 +2,9 @@
 
 Almost everything in a KonfAI config is a **component referenced by name**: a
 model, a loss, a metric, a transform, an augmentation, a scheduler, or a storage
-backend. This section is the catalogue of what ships in the box — the names you
-can drop into a YAML file today and their constructor arguments.
+backend. This section is the catalogue of what ships in the box — **these names
+are exactly what you reference in YAML**: copy them into your config verbatim,
+with the constructor arguments listed alongside.
 
 ```{note}
 These pages are generated from a source-level read of `konfai/`: class names,
@@ -11,6 +12,11 @@ constructor signatures and defaults are taken directly from the code.
 ```
 
 ## The pages
+
+Start with {doc}`models` (the network you train), then {doc}`losses-metrics`
+(what you attach to its named outputs). {doc}`transforms` and
+{doc}`augmentations` cover the data pipeline, {doc}`schedulers` the loss-weight
+and learning-rate schedules, and {doc}`storage-backends` the on-disk formats.
 
 ```{toctree}
 :maxdepth: 1
@@ -56,7 +62,7 @@ ways to get the exhaustive list for any component:
    `konfai/data/transform.py`, `konfai/data/augmentation.py`,
    `konfai/models/**`, and `konfai/metric/schedulers.py`.
 
-## See also
+## Next steps
 
 - {doc}`../../concepts/configuration` — how names and `classpath` are resolved
 - {doc}`../api/extension-points` — writing your own model / loss / transform

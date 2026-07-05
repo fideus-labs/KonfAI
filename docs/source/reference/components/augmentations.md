@@ -67,8 +67,8 @@ a no-op (colour changes don't move voxels).
 only be enabled for single-channel or genuine vector-field groups.
 ```
 
-## See also
+## Next steps
 
 - {doc}`transforms` — deterministic preprocessing (runs every workflow)
-- {doc}`../../concepts/datasets`
+- {doc}`../../concepts/datasets` — where the `augmentations:` block sits in a config
 - {doc}`../api/extension-points` — write your own `DataAugmentation`

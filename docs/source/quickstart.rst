@@ -1,13 +1,11 @@
 Quickstart
 ==========
 
-This quickstart shows the **smallest useful end-to-end KonfAI workflow**:
-install the package, prepare a demo dataset, train a baseline model, run
-prediction, then evaluate the saved outputs.
-
-The example used here is the shipped segmentation baseline in
-``examples/Segmentation`` because it is the simplest starting point in the
-repository.
+This quickstart takes you **from zero to a scored prediction** on the shipped
+``examples/Segmentation`` baseline: install the package, prepare the demo
+dataset, train a model, run prediction, then evaluate the saved outputs. Use it
+for your very first contact with KonfAI — each phase below ends with an
+explicit success signal so you always know whether to continue.
 
 By the end of this page, you should have:
 
@@ -55,6 +53,9 @@ Verify the install:
 
    konfai --help
 
+**Success signal:** ``konfai --help`` prints the CLI help. If it fails with an
+import error instead, revisit the install commands above.
+
 What to keep in mind before you start:
 
 - run the commands from the directory that contains the YAML files
@@ -73,9 +74,10 @@ What to keep in mind before you start:
 Download the demo dataset
 -------------------------
 
-Run these commands from the repository root. The example expects you to work
-from the example directory itself so that local YAML references and Python
-modules resolve correctly.
+Run these commands from the repository root. **From here on, every command
+assumes your working directory is the example directory itself
+(``examples/Segmentation``)** — local YAML references and Python modules
+resolve relative to it.
 
 .. code-block:: bash
 
@@ -106,6 +108,9 @@ After the download, the example expects this layout:
    ├── Prediction.yml
    └── Evaluation.yml
 
+**Success signal:** your ``Dataset/`` tree matches the layout above — one
+directory per case, each containing ``CT.mha`` and ``SEG.mha``.
+
 Train a baseline
 ----------------
 
@@ -118,7 +123,7 @@ it.
 
 If you do not have a GPU available, use ``--cpu 1`` instead of ``--gpu 0``.
 
-Training creates, at minimum:
+**Success signal:** training creates, at minimum:
 
 - ``Checkpoints/SEG_BASELINE/``
 - ``Statistics/SEG_BASELINE/``
@@ -147,7 +152,7 @@ First list what training produced, then substitute a real filename for
 
 Pass several checkpoints to ``--models`` to run an ensemble.
 
-Prediction writes:
+**Success signal:** prediction writes:
 
 - ``Predictions/SEG_BASELINE/``
 
@@ -161,7 +166,7 @@ groups against reference groups on disk.
 
    konfai EVALUATION -y --config Evaluation.yml
 
-Evaluation writes:
+**Success signal:** evaluation writes:
 
 - ``Evaluations/SEG_BASELINE/Metric_TRAIN.json``
 
@@ -216,9 +221,9 @@ Common first issues
 Next steps
 ----------
 
-- :doc:`getting-started/installation`
-- :doc:`concepts/configuration`
-- :doc:`config_guide/index`
-- :doc:`usage/training`
-- :doc:`examples/index`
-- ``examples/Segmentation/Segmentation_demo.ipynb`` if you prefer a notebook walkthrough
+- :doc:`concepts/index` — understand the machinery you just ran: config
+  reflection, lazy patch-based datasets, and the model graph.
+- :doc:`config_guide/index` — the full key-by-key guide to ``Config.yml``,
+  ``Prediction.yml``, and ``Evaluation.yml``.
+- :doc:`examples/index` — the shipped segmentation and synthesis workflows to
+  adapt to your own data.

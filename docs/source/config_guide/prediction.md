@@ -15,6 +15,26 @@ Predictor:
   train_name: SEG_BASELINE
 ```
 
+## Running it
+
+From the directory that contains `Prediction.yml` and the `Checkpoints/`
+folder written by training:
+
+```bash
+konfai PREDICTION -y --gpu 0 --config Prediction.yml \
+  --models Checkpoints/SEG_BASELINE/<checkpoint>.pt
+```
+
+You can also pass multiple checkpoints:
+
+```bash
+konfai PREDICTION -y --gpu 0 --config Prediction.yml \
+  --models ckpt_a.pt ckpt_b.pt ckpt_c.pt
+```
+
+When multiple checkpoints are provided, the predictor combines them using the
+`combine` strategy from the YAML, usually `Mean` or `Median`.
+
 ## Top-level fields
 
 | Field | Type | Default in code | Required | Effect |
@@ -63,6 +83,12 @@ Key fields:
 | `subset` | object | Restricts evaluated cases. |
 | `batch_size` | int | Number of patches per inference batch. |
 
+Use `Dataset.Patch` when:
+
+- the full input does not fit in memory
+- you want slice-wise or sliding-window inference
+- you need the same spatial strategy as training
+
 ## `outputs_dataset`
 
 `outputs_dataset` defines how selected model outputs become files on disk.
@@ -92,6 +118,11 @@ Important nested fields:
 | `reduction` | Combines multiple predictions, usually `Mean` or `Median`. |
 | `patch_combine` | Optional patch reassembly strategy. |
 
+```{note}
+One `Prediction.yml` can be shared between different checkpoints as long as
+the exported output name stays consistent.
+```
+
 ## Examples
 
 See:
@@ -99,9 +130,15 @@ See:
 - `examples/Segmentation/Prediction.yml`
 - `examples/Synthesis/Prediction.yml`
 
-## See also
+## Troubleshooting
 
-- {doc}`training`
-- {doc}`evaluation`
-- {doc}`../concepts/model-graph`
-- {doc}`../usage/prediction`
+- If geometry or intensity range is wrong, review the final transforms in
+  `outputs_dataset`.
+
+## Next steps
+
+- {doc}`evaluation` — to score the written predictions against ground truth.
+- {doc}`../concepts/datasets` — the shared `dataset_filenames`, `groups_src`,
+  and `subset` conventions.
+- {doc}`../concepts/model-graph` — how the model output paths referenced by
+  `outputs_dataset` are named.

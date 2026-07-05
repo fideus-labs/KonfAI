@@ -1,7 +1,9 @@
 # Troubleshooting
 
-This page collects the most common first issues visible in the repository,
-examples, and runtime code.
+Symptom-first fixes for the most common KonfAI failures. Scan the headings for
+what you are seeing — a missing command, a rejected config key, an empty
+metric file — and each entry gives the likely cause and the fix. Come here
+whenever a command fails or an expected output never appears.
 
 ## Installation problems
 
@@ -61,7 +63,7 @@ This usually means one of these:
 - the class name in YAML does not match the Python symbol
 - the YAML points to a local module, but the command is launched from the wrong directory
 
-KonfAI examples assume you run commands from the example directory itself.
+**KonfAI examples assume you run commands from the example directory itself.**
 When in doubt, `cd` into the directory that contains the YAML before launching
 `konfai`.
 
@@ -151,8 +153,11 @@ Check:
 - whether `konfai-apps-server` is actually running
 - whether `/health` is reachable
 
-## See also
+## Next steps
 
-- {doc}`getting-started/installation`
-- {doc}`reference/environment`
-- {doc}`usage/remote-server`
+- {doc}`getting-started/installation` — the extras and verification steps
+  behind most install-time symptoms.
+- {doc}`reference/environment` — the `KONFAI_*` environment variables that
+  drive runtime behavior.
+- {doc}`usage/apps` — running packaged apps locally or against a remote
+  `konfai-apps-server`.

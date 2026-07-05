@@ -14,6 +14,38 @@ Trainer:
   epochs: 100
 ```
 
+## Running it
+
+From the directory that contains `Config.yml`:
+
+```bash
+konfai TRAIN -y --gpu 0 --config Config.yml
+```
+
+If you do not have a GPU available, use `--cpu 1` instead of `--gpu 0`.
+
+Add `-tb` to enable TensorBoard — KonfAI allocates a free local port
+automatically:
+
+```bash
+konfai TRAIN -y --gpu 0 --config Config.yml -tb
+```
+
+Resume from an existing checkpoint with `RESUME`:
+
+```bash
+konfai RESUME -y --config Config.yml \
+  --model Checkpoints/SEG_BASELINE/<checkpoint>.pt
+```
+
+You can also change the output directories:
+
+```bash
+konfai TRAIN -y --config Config.yml \
+  --checkpoints-dir ./Checkpoints \
+  --statistics-dir ./Statistics
+```
+
 ## Top-level fields
 
 | Field | Type | Default in code | Required | Effect |
@@ -144,9 +176,10 @@ The most practical examples in the repository are:
 - `examples/Synthesis/Config.yml`
 - `examples/Synthesis/Config_GAN.yml`
 
-## See also
+## Next steps
 
-- {doc}`patterns`
-- {doc}`prediction`
-- {doc}`../concepts/datasets`
-- {doc}`../usage/training`
+- {doc}`../concepts/datasets` — the shared `dataset_filenames`, `groups_src`,
+  `subset`, and `validation` conventions used above.
+- {doc}`../concepts/model-graph` — how module names become the output paths
+  used in `outputs_criterions`.
+- {doc}`prediction` — to configure inference with the trained model.

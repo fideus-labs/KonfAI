@@ -91,7 +91,7 @@ Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 `†` changes the **channel** dimension, not spatial — no `transform_shape`
 override needed.
 
-## See also
+## Next steps
 
 - {doc}`augmentations` — the random, train-time counterpart
 - {doc}`../../concepts/datasets` — where transforms sit in a dataset config

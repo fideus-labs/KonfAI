@@ -127,9 +127,8 @@ curl -H "Authorization: Bearer $TOKEN" -o result.zip $BASE/jobs/$JOB/result   # 
 curl -X POST -H "Authorization: Bearer $TOKEN" $BASE/jobs/$JOB/kill
 ```
 
-## See also
+## Next steps
 
 - {doc}`python-api` — `KonfAIAppClient` wraps all of this for you
 - {doc}`cli` — `konfai-apps-server` options
-- {doc}`../usage/remote-server` — the operational guide
-- {doc}`../concepts/apps` — what an app is
+- {doc}`../usage/apps` — what an app is and how to run the server day-to-day

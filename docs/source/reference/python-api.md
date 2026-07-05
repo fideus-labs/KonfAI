@@ -37,13 +37,9 @@ a **Hugging Face repo** (`repo_id:app_name`, optionally `repo_id@revision:app_na
 A remote identifier raises — use `KonfAIAppClient` for that. Each call runs inside
 an isolated temporary workspace.
 
-| Method | What it does |
-| --- | --- |
-| `infer(inputs, output, ensemble=0, ensemble_models=[], tta=0, mc=0, patch_size=None, batch_size=None, uncertainty=False, prediction_file="Prediction.yml", gpu=…, cpu=None, quiet=False, tmp_dir=None)` | Build a dataset from `inputs`, run KonfAI prediction, copy results into `output`. |
-| `evaluate(inputs, gt, output, mask=None, evaluation_file="Evaluation.yml", …)` | Evaluate predictions against `gt` (auto ones-mask if `mask is None`). |
-| `uncertainty(inputs, output, uncertainty_file="Uncertainty.yml", …)` | Uncertainty over a multi-channel inference stack. |
-| `pipeline(inputs, gt, output, …, uncertainty=True, …)` | `infer` → (if `gt`) `evaluate` → (if `uncertainty`) `uncertainty`. `gt` is optional locally. |
-| `fine_tune(dataset, name="Finetune", output, epochs=10, it_validation=1000, models=[], config_file="Config.yml", lr=None, …)` | Resume-train the app's checkpoint(s) on a local `dataset`, copy new weights into the output bundle. |
+The full method signatures of `KonfAIApp` and `KonfAIAppClient` (`infer`,
+`evaluate`, `uncertainty`, `pipeline`, `fine_tune`) are single-sourced from the
+docstrings on the autodoc page {doc}`api/apps`.
 
 ```{note}
 `inputs` (and `gt`, `mask`) are a **list of groups**, where each group is a list of
@@ -113,12 +109,13 @@ models (diffusion/StyleGAN/…) do not round-trip. See `konfai/export.py`.
 ## Trust model
 
 ```{danger}
-Resolving/installing an app **copies its `.py` files into the run workspace and
-imports them** — running a model by classpath (`Model:MyNet`) executes the app's
-own Python. **Only resolve apps from sources you trust.** On the server side, the
-`--apps` allowlist is the trust boundary; keep it tightly scoped. (The
-`requirements.txt` auto-install mechanism exists but is currently gated off in the
-shipped CLI paths.)
+Resolving an app **copies its `.py` files into the run workspace and imports
+them** unconditionally — running a model by classpath (`Model:MyNet`) executes
+the app's own Python, i.e. arbitrary code. The `requirements.txt` pip-install,
+by contrast, is **opt-in**: it only runs when you pass
+`install_requirements=True`, and it is off by default. **Only resolve apps from
+sources you trust.** On the server side, the `--apps` allowlist is the trust
+boundary; keep it tightly scoped.
 ```
 
 ## See also

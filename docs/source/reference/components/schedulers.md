@@ -1,7 +1,9 @@
 # Schedulers
 
 KonfAI has **two distinct scheduler families**, resolved by different loaders.
-Don't confuse them.
+Don't confuse them. Use this page when filling in a `schedulers:` block — first
+check *which* of the two blocks you are in, then pick a name from the matching
+table.
 
 ## A. Criterion-weight schedulers
 
@@ -48,7 +50,7 @@ The `optimizer` itself is injected by the framework — you do not write it unde
 `schedulers:`.
 ```
 
-## See also
+## Next steps
 
 - {doc}`losses-metrics` — where the weight schedulers live
 - {doc}`../../config_guide/training` — the `optimizer:` / `schedulers:` blocks

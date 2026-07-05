@@ -192,10 +192,8 @@ The cluster command depends on the optional `cluster` extra.
 `konfai-rs` portable-inference path, but it is a **Python-API-only** feature —
 there is no `konfai export` subcommand. See {doc}`python-api`.
 
-## See also
+## Next steps
 
-- {doc}`components/index` — the components a config can reference
-- {doc}`environment`
-- {doc}`app-server-api` — the `konfai-apps-server` HTTP contract
-- {doc}`python-api` — the `konfai_apps` Python API
-- {doc}`../usage/apps`
+- {doc}`components/index` — the component names those YAML configs can reference
+- {doc}`environment` — the variables these wrappers read and set
+- {doc}`../usage/apps` — the guided workflow behind `konfai-apps`

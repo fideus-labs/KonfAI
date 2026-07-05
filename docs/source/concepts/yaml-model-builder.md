@@ -1,5 +1,10 @@
 # Declarative YAML model graphs
 
+This page documents the YAML model builder — how to describe a complete
+network as a `.yml` file instead of a Python class. Read it when you want a
+model that lives entirely in configuration, with the same named outputs and
+routing as code-defined models.
+
 `konfai.utils.model_builder` builds a full `konfai.network.network.Network`.
 Every YAML entry is installed through `ModuleArgsDict.add_module`, so YAML
 models support the same named outputs, branch routing, aliases, checkpoint
@@ -38,7 +43,9 @@ modules:
 
 `build_model_from_yaml(yaml_path="model.yml")` returns a `YamlNetwork`, not a
 `torch.nn.Sequential`. `ModelLoader` also accepts `.yml` and `.yaml` paths.
-Relative paths are resolved next to the active `KONFAI_config_file`.
+**Relative paths are resolved next to the active `KONFAI_config_file`** — the
+model `.yml` is looked up relative to the config file that references it, not
+the current working directory.
 
 ## Routing and nested graphs
 
@@ -133,8 +140,7 @@ Trainer:
 See `examples/Segmentation/UNet.yml` for a complete routed encoder/decoder with
 skip connections and nested heads.
 
-## See also
+## Next steps
 
-- {doc}`model-graph`
-- {doc}`datasets`
-- {doc}`../examples/segmentation`
+- {doc}`model-graph` — how named module paths are addressed by `outputs_criterions` and `outputs_dataset`.
+- {doc}`../examples/segmentation` — a complete training run driven by `UNet.yml`.

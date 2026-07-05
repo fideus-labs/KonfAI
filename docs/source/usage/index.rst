@@ -1,16 +1,21 @@
 How-to guides
 =============
 
-These guides focus on common developer tasks with KonfAI.
+These guides show how to extend, package, and deploy KonfAI. Running the
+train → predict → evaluate workflows is covered by the
+:doc:`configuration reference <../config_guide/index>` — each of its pages
+starts with the commands that run its workflow.
+
+Start here
+----------
+
+Read :doc:`custom-models` when the built-in models, transforms,
+augmentations, or losses are not enough. :doc:`apps` and :doc:`docker` cover
+packaging and deployment; skip them until you want to ship or serve a model.
 
 .. toctree::
    :maxdepth: 1
 
-   training
-   prediction
-   evaluation
    custom-models
    apps
-   remote-server
    docker
-   testing
