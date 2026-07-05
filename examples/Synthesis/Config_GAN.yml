@@ -55,7 +55,7 @@ Trainer:
                     stop: None
                     accumulation: false
                     reduction: mean
-                  IMPACTSynth:
+                  SAM_Perceptual:
                     is_loss: true
                     schedulers:
                       Constant:
@@ -65,20 +65,12 @@ Trainer:
                     start: 0
                     stop: None
                     accumulation: false
-                    model_name: SAM2.1/SAM2.1_Small.pt
-                    shape:
-                    - 0
-                    - 0
-                    in_channels: 3
-                    losses:
-                      torch:nn:L1Loss:
-                        weights:
-                        - 1
-                        - 1
-                        - 1
-                        size_average: None
-                        reduce: None
-                        reduction: mean
+                    train: true
+                    model_name: SAM2.1_Small.pt
+                    weights:
+                    - 1
+                    - 1
+                    - 1
                   torch:nn:L1Loss:
                     size_average: None
                     reduce: None

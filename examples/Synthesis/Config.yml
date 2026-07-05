@@ -18,7 +18,7 @@ Trainer:
                   stop: None
                   accumulation: false
                   reduction: mean
-                IMPACTSynth:  # IMPACT-Synth perceptual loss based on SAM features
+                SAM_Perceptual:  # Perceptual loss based on SAM2.1 features
                   is_loss: true
                   schedulers:
                     Constant:
@@ -28,20 +28,12 @@ Trainer:
                   start: 0
                   stop: None
                   accumulation: false
-                  model_name: SAM2.1/SAM2.1_Small.pt # Pretrained model from HuggingFace repo VBoussot/impact-torchscript-models used to extract perceptual features
-                  shape: # Optional resize for the perceptual model (0,0 = keep original size)
-                  - 0
-                  - 0
-                  in_channels: 3 # Output is duplicated to 3 channels to match the perceptual model input
-                  losses: # Internal losses used inside IMPACTSynth
-                    torch:nn:L1Loss:  # L1 loss computed on perceptual feature layers
-                      weights: # One weight per feature layer (this model supports up to 4 layers)
-                      - 1
-                      - 1
-                      - 1
-                      size_average: None
-                      reduce: None
-                      reduction: mean
+                  train: true # Loss mode: use the raw SAM2.1 feature extractor (VBoussot/impact-torchscript-models)
+                  model_name: SAM2.1_Small.pt # SAM2.1 backbone; resolved under SAM2.1/ in VBoussot/impact-torchscript-models
+                  weights: # One weight per SAM feature layer (a weight of 0 skips that layer); the list length sets the number of layers
+                  - 1
+                  - 1
+                  - 1
                 torch:nn:L1Loss:
                   size_average: None
                   reduce: None
@@ -109,7 +101,7 @@ Trainer:
                 save_clip_min: true
                 save_clip_max: true
                 mask: None
-              Statistics: {} # Compute dataset statistics (min, max, mean, std) for IMPACT-Synth loss
+              Statistics: {} # Compute dataset statistics (min, max, mean, std) for the SAM_Perceptual loss
               Normalize:
                 lazy: false
                 channels: None
@@ -128,7 +120,7 @@ Trainer:
                 save_clip_min: false
                 save_clip_max: false
                 mask: MASK
-              Statistics: {} # Compute dataset statistics (min, max, mean, std) for IMPACT-Synth loss
+              Statistics: {} # Compute dataset statistics (min, max, mean, std) for the SAM_Perceptual loss
               Standardize: # Standardization using dataset mean and std
                 lazy: false
                 mean: None
