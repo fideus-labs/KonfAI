@@ -1,5 +1,4 @@
 import torch
-
 from konfai.network import network
 
 

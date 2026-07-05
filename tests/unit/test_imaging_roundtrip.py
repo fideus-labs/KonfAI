@@ -72,10 +72,13 @@ def test_dicom_left_handed_direction_normalizes_like_simpleitk(tmp_path: Path) -
     # distinct value per slice so ordering is observable
     vol = np.stack([np.full((4, 5), k, np.float32) for k in range(6)])[np.newaxis]
     dicom.write_dicom_series(
-        root, vol, origin=(0.0, 0.0, 30.0), spacing=(1.0, 1.0, 2.0),
+        root,
+        vol,
+        origin=(0.0, 0.0, 30.0),
+        spacing=(1.0, 1.0, 2.0),
         direction=np.array([1, 0, 0, 0, 1, 0, 0, 0, -1], float),
     )
-    kvol, kog, ksp, kdir = dicom.read_dicom_series(root)
+    kvol, kog, _ksp, kdir = dicom.read_dicom_series(root)
 
     reader = sitk.ImageSeriesReader()
     ids = reader.GetGDCMSeriesIDs(str(root))
@@ -194,8 +197,10 @@ def test_ome_zarr_level_reads_coarser_resolution(tmp_path: Path) -> None:
     root.mkdir()
     data = (np.arange(1 * 16 * 32 * 32).reshape(1, 16, 32, 32) % 50).astype(np.float32)
     image = ngff_zarr.to_ngff_image(
-        data, dims=["c", "z", "y", "x"],
-        scale={"c": 1.0, "z": 2.0, "y": 0.5, "x": 0.5}, translation={"c": 0.0, "z": 0.0, "y": 0.0, "x": 0.0},
+        data,
+        dims=["c", "z", "y", "x"],
+        scale={"c": 1.0, "z": 2.0, "y": 0.5, "x": 0.5},
+        translation={"c": 0.0, "z": 0.0, "y": 0.0, "x": 0.0},
     )
     ngff_zarr.to_ngff_zarr(
         str(root / "CASE0.ome.zarr"), ngff_zarr.to_multiscales(image, scale_factors=[2]), overwrite=True, version="0.4"

@@ -21,12 +21,11 @@ import inspect
 import sys
 from pathlib import Path
 
-import pytest
-
 import konfai.evaluator as evaluator_module
 import konfai.main as main_module
 import konfai.predictor as predictor_module
 import konfai.trainer as trainer_module
+import pytest
 
 
 def test_konfai_help_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Smoke tests verifying package-level import contracts and public API surface."""
 
-import pytest
-
 import konfai
+import pytest
 from konfai.utils.errors import KonfAIError, TransformError
 
 

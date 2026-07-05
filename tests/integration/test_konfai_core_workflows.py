@@ -9,10 +9,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
 from konfai.evaluator import build_evaluate
 from konfai.predictor import build_predict
 from konfai.trainer import build_train
+
+pytestmark = pytest.mark.integration
 
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets" / "Workflows"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -219,9 +220,7 @@ def test_konfai_api_user_path(tmp_path: Path) -> None:
 
             if __name__ == "__main__":
                 main()
-            """.replace(
-                "__TRAIN_NAME__", train_name
-            )
+            """.replace("__TRAIN_NAME__", train_name)
         ),
         encoding="utf-8",
     )

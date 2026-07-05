@@ -22,11 +22,10 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
 
+import konfai.network.network as network_module
 import numpy as np
 import pytest
 import torch
-
-import konfai.network.network as network_module
 from konfai.metric.schedulers import Constant
 from konfai.network.blocks import Add
 from konfai.network.network import Measure, ModuleArgsDict, Network
