@@ -146,6 +146,48 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self.attributes: dict[int, dict[int, dict[int, Attribute]]] = {}
         self.names: dict[int, str] = {}
         self.nb_data_augmentation = 0
+        # Reusable page-locked staging buffer for the per-patch GPU->CPU offload. Prediction
+        # accumulators keep every patch of a case until assembly, so patches cannot share one CPU
+        # tensor; a single pinned buffer (one patch) stages each device patch instead, which is
+        # copied into a fresh pageable tensor for storage. See ``_offload_to_cpu``.
+        self._pin_buffer: torch.Tensor | None = None
+
+    # A pageable D2H copy on a large multi-class patch is a slow, fully synchronous PCIe transfer;
+    # staging through page-locked memory only pays off once the patch is large enough that the copy,
+    # not the buffer bookkeeping, dominates. Small patches (e.g. single-channel synthesis) take the
+    # plain path unchanged.
+    _PINNED_OFFLOAD_MIN_BYTES = 64 * 1024 * 1024
+
+    def _offload_to_cpu(self, layer: torch.Tensor) -> torch.Tensor:
+        """Move a device patch to CPU, staging through a reusable pinned buffer for a faster copy.
+
+        Prediction accumulators hold every patch of a case until assembly, so patches cannot reuse a
+        single CPU tensor. A pageable ``layer.detach().cpu()`` on a large multi-class patch is a slow,
+        fully synchronous PCIe copy; a page-locked staging buffer makes it DMA-fast, and the result is
+        copied into a fresh pageable tensor so the one-patch pinned buffer can be reused (capping pinned
+        host RAM at a single patch). Bit-identical to ``layer.detach().cpu()``; falls back to it for
+        non-CUDA or small patches, or when the host cannot allocate page-locked memory.
+        """
+        detached = layer.detach()
+        if (
+            detached.device.type != "cuda"
+            or detached.numel() * detached.element_size() < self._PINNED_OFFLOAD_MIN_BYTES
+        ):
+            return detached.cpu()
+        buffer = self._pin_buffer
+        if buffer is None or buffer.shape != detached.shape or buffer.dtype != detached.dtype:
+            try:
+                buffer = torch.empty(detached.shape, dtype=detached.dtype, pin_memory=True)
+            except RuntimeError:  # host cannot lock this much memory -> plain pageable copy
+                self._pin_buffer = None
+                return detached.cpu()
+            self._pin_buffer = buffer
+        # Blocking copy into page-locked memory (fast DMA), then a CPU->CPU copy into a fresh pageable
+        # tensor so the pinned buffer is free to stage the next patch.
+        buffer.copy_(detached)
+        out = torch.empty(detached.shape, dtype=detached.dtype)
+        out.copy_(buffer)
+        return out
 
     def prepare(self, name_layer: str) -> None:
         self.before_reduction_transforms = []
@@ -332,7 +374,7 @@ class OutSameAsGroupDataset(OutputDataset):
         # Prediction accumulators can span many patches; keep them on CPU so
         # each GPU patch output is released as soon as it has been post-processed.
         if layer.device.type != "cpu":
-            layer = layer.detach().cpu()
+            layer = self._offload_to_cpu(layer)
         self.output_layer_accumulator[index_dataset][index_augmentation].add_layer(index_patch, layer)
 
     def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
