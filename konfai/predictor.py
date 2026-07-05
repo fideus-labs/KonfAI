@@ -124,6 +124,11 @@ class OutputDataset(Dataset, NeedDevice, ABC):
     ) -> None:
         filename, _, file_format = split_path_spec(filename)
         super().__init__(filename, file_format)
+        # ``Dataset.__init__`` does not forward ``super().__init__()``, so the ``NeedDevice`` mixin is
+        # never initialised through the MRO; call it explicitly so ``self.device`` always has its CPU
+        # default. Otherwise an output writer that is never moved (e.g. a CPU-only PREDICTION run, whose
+        # device propagation is CUDA-gated) reads ``self.device`` and raises ``AttributeError``.
+        NeedDevice.__init__(self)
         self.group = group
         self._before_reduction_transforms = before_reduction_transforms
         self._after_reduction_transforms = after_reduction_transforms

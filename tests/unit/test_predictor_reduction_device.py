@@ -16,7 +16,6 @@
 
 import pytest
 import torch
-
 from konfai.predictor import OutSameAsGroupDataset
 
 
@@ -24,6 +23,17 @@ def _dataset(device: torch.device | int) -> OutSameAsGroupDataset:
     ds = OutSameAsGroupDataset.__new__(OutSameAsGroupDataset)
     ds.device = device  # NeedDevice stores a torch.device on CPU and a CUDA ordinal (int) on GPU
     return ds
+
+
+def test_output_dataset_device_defaults_to_cpu_without_to(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: ``Dataset.__init__`` does not forward ``super().__init__()``, so ``NeedDevice.__init__``
+    # is skipped through the MRO. A real (not ``__new__``) construction must still leave ``self.device``
+    # set, otherwise a CPU-only PREDICTION run (device propagation is CUDA-gated) raises AttributeError.
+    monkeypatch.setenv("KONFAI_config_file", "unused.yml")
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    ds = OutSameAsGroupDataset(same_as_group="default:default", dataset_filename="default|./Dataset:mha")
+    assert ds.device == torch.device("cpu")
+    assert ds._reduction_device(torch.zeros(4, 8, dtype=torch.float16)).type == "cpu"
 
 
 def test_reduction_device_is_cpu_for_a_cpu_dataset() -> None:
