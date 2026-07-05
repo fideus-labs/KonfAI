@@ -34,7 +34,7 @@ Three pillars run through the codebase:
 | `PREDICTION` | `Prediction.yml` | `Predictor:` | Load model(s), patch/TTA/ensemble inference, output post-processing |
 | `EVALUATION` | `Evaluation.yml` | `Evaluator:` | Predictions vs ground truth → per-case + aggregate metric JSON |
 
-Each run writes a **workspace** keyed by `train_name`: `Checkpoints/`, `Setups/` (resolved config snapshot), `Statistics/` (TensorBoard), `Predictions/`, `Evaluations/` (metric JSON), `Dataset/`.
+Each run writes a **workspace** keyed by `train_name`: `Checkpoints/`, `Statistics/` (TensorBoard + the resolved-config snapshot), `Predictions/`, `Evaluations/` (metric JSON). `Dataset/` is the *input* data directory, not a run output.
 
 **Conventions.** Arrays are **channel-first** `[C,(Z),Y,X]`; geometry/spacing is **`(x,y,z)`** (SimpleITK). `Attribute` geometry keys are `Origin`/`Spacing`/`Direction`.
 
@@ -62,7 +62,7 @@ Every extension point is **"subclass a base, reference it by classpath in YAML"*
 
 A separate package layered on KonfAI's **public** API (core never imports it). An "app" bundles a config + custom `.py` + `.pt` weights, resolved from a Local dir, a HuggingFace repo, or a Remote server; the `apps/*` bundles are thin CLI wrappers.
 
-> ⚠️ **Trust model.** Resolving an app **copies and imports its `.py` files** and **pip-installs its `requirements.txt`** → it runs arbitrary code and dependency installs. **Only resolve apps from sources you trust.**
+> ⚠️ **Trust model.** Resolving an app **copies and imports its `.py` files** → it **runs arbitrary code**. It can also **pip-install its `requirements.txt`**, but that is **opt-in** (`install_requirements=True`; off by default). **Only resolve apps from sources you trust.**
 
 ## 6. Running things
 
