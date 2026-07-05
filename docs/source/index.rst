@@ -3,120 +3,186 @@ KonfAI
 
 .. raw:: html
 
-   <div class="konfai-landing">
-     <section class="konfai-hero">
-       <p class="konfai-eyebrow">YAML-driven deep learning for medical imaging &middot; built on PyTorch</p>
-       <p class="konfai-tagline">
-         Describe an entire pipeline &mdash; data, model, losses, metrics,
-         augmentations, and the train / predict / evaluate workflow &mdash; in
-         <strong>configuration</strong>, not orchestration scripts. The config
-         <em>is</em> the experiment: reproducible, inspectable, shareable.
-       </p>
-       <div class="konfai-cta">
-         <a class="konfai-btn konfai-btn-primary" href="quickstart.html">Get started &rarr;</a>
-         <a class="konfai-btn konfai-btn-ghost" href="reference/components/index.html">Browse components</a>
-         <a class="konfai-btn konfai-btn-ghost" href="https://github.com/vboussot/KonfAI">GitHub</a>
+   <div class="kf-landing">
+
+     <!-- ======================= HERO ======================= -->
+     <section class="kf-hero">
+       <div class="kf-hero-grid">
+         <div>
+           <p class="kf-eyebrow">YAML-driven deep learning &middot; medical imaging &middot; PyTorch</p>
+           <h2 class="kf-title" style="border:0; padding:0;">The config <em>is</em> the experiment.</h2>
+           <p class="kf-lede">
+             Describe the whole pipeline &mdash; data, model, losses, metrics, augmentations, and the
+             train&nbsp;/&nbsp;predict&nbsp;/&nbsp;evaluate workflow &mdash; in configuration, not orchestration
+             scripts. KonfAI builds Python objects from that YAML by reflection, and writes the
+             fully-resolved config back to disk. Reproducible, inspectable, shareable.
+           </p>
+           <div class="kf-cta">
+             <a class="kf-btn kf-btn-primary" href="quickstart.html">Run it in 5 minutes &rarr;</a>
+             <a class="kf-btn kf-btn-ghost" href="#mental-model">See the mental model</a>
+             <a class="kf-btn kf-btn-ghost" href="https://github.com/vboussot/KonfAI">GitHub</a>
+           </div>
+           <div class="kf-herometa">
+             <span><b>pip</b> install "konfai[imaging]"</span>
+             <span><b>Apache-2.0</b></span>
+             <span><b>Python</b> 3.10+</span>
+           </div>
+         </div>
+
+         <div>
+           <div class="kf-codecard">
+             <div class="kf-chead"><span class="kf-dots"><i></i><i></i><i></i></span><span>Config.yml</span></div>
+             <pre><span class="k">Trainer:</span>
+     <span class="k">train_name:</span> <span class="s">SEG_BASELINE</span>
+     <span class="k">Model:</span>
+       <span class="k">classpath:</span> <span class="s">UNet.yml</span>   <span class="c"># routed graph</span>
+     <span class="k">Dataset:</span>
+       <span class="k">dataset_filenames:</span> <span class="s">[ ./Dataset:mha ]</span>
+       <span class="k">groups_src:</span> <span class="s">{ CT: {...}, SEG: {...} }</span>
+     <span class="k">epochs:</span> <span class="s">100</span></pre>
+           </div>
+           <div class="kf-flowdown"><span>reflection builds the object graph</span></div>
+           <div class="kf-codecard">
+             <div class="kf-chead"><span class="kf-dots"><i></i><i></i><i></i></span><span>terminal</span></div>
+             <pre><span class="p">$</span> <span class="cmd">konfai TRAIN</span>      <span class="fl">-y --gpu 0 --config Config.yml</span>
+   <span class="p">$</span> <span class="cmd">konfai PREDICTION</span> <span class="fl">--config Prediction.yml --models &hellip;/best.pt</span>
+   <span class="p">$</span> <span class="cmd">konfai EVALUATION</span> <span class="fl">--config Evaluation.yml</span></pre>
+           </div>
+         </div>
        </div>
      </section>
 
-     <section class="konfai-cards">
-       <a class="konfai-card" href="quickstart.html">
-         <span class="konfai-card-ico">🚀</span>
-         <span class="konfai-card-title">Quickstart</span>
-         <span class="konfai-card-desc">Install, train, predict and evaluate the demo in one sitting.</span>
-       </a>
-       <a class="konfai-card" href="concepts/index.html">
-         <span class="konfai-card-ico">🧩</span>
-         <span class="konfai-card-title">Core concepts</span>
-         <span class="konfai-card-desc">How YAML becomes Python objects, and the patch-based data model.</span>
-       </a>
-       <a class="konfai-card" href="reference/components/index.html">
-         <span class="konfai-card-ico">📚</span>
-         <span class="konfai-card-title">Component catalogue</span>
-         <span class="konfai-card-desc">Every model, loss, metric, transform and backend you can name in YAML.</span>
-       </a>
-       <a class="konfai-card" href="examples/index.html">
-         <span class="konfai-card-ico">🧪</span>
-         <span class="konfai-card-title">Examples</span>
-         <span class="konfai-card-desc">Runnable Segmentation &amp; Synthesis workflows to copy and adapt.</span>
-       </a>
-       <a class="konfai-card" href="concepts/apps.html">
-         <span class="konfai-card-ico">📦</span>
-         <span class="konfai-card-title">Apps &amp; API</span>
-         <span class="konfai-card-desc">Ship a workflow behind a CLI, an HTTP server, or the Python API.</span>
-       </a>
-       <a class="konfai-card" href="ecosystem/index.html">
-         <span class="konfai-card-ico">🗺️</span>
-         <span class="konfai-card-title">Ecosystem</span>
-         <span class="konfai-card-desc">konfai-apps, SlicerKonfAI, KonfAI-MCP &mdash; what is shipped.</span>
-       </a>
+     <!-- ================== MENTAL MODEL ==================== -->
+     <section class="kf-block" id="mental-model">
+       <div class="kf-sechead">
+         <p class="kf-eyebrow">The 20-second mental model</p>
+         <h2 style="border:0; padding:0;">One config, built once, run three ways.</h2>
+         <p>Three YAML files, one root key each, three commands. Each command reads <em>its</em> file,
+            builds the object graph by reflection, and writes its outputs. That's the whole mapping
+            to remember:</p>
+       </div>
+
+       <div class="kf-lanes">
+         <div class="kf-lrow kf-lhead">
+           <span class="c1">Your YAML &middot; root key</span>
+           <span></span>
+           <span class="c3">One command</span>
+           <span></span>
+           <span class="c5">Writes to the workspace</span>
+         </div>
+         <div class="kf-lrow">
+           <div class="kf-lfile"><span class="fname">Config.yml</span><span class="rootkey">Trainer:</span></div>
+           <span class="kf-larrow">&rarr;</span>
+           <span class="kf-lcmd"><span class="p">$</span> konfai TRAIN</span>
+           <span class="kf-larrow">&rarr;</span>
+           <div class="kf-lout"><b>Checkpoints/</b>&lt;train_name&gt;/ &middot; <b>Statistics/</b>&lt;train_name&gt;/</div>
+         </div>
+         <div class="kf-lrow">
+           <div class="kf-lfile"><span class="fname">Prediction.yml</span><span class="rootkey">Predictor:</span></div>
+           <span class="kf-larrow">&rarr;</span>
+           <span class="kf-lcmd"><span class="p">$</span> konfai PREDICTION</span>
+           <span class="kf-larrow">&rarr;</span>
+           <div class="kf-lout"><b>Predictions/</b>&lt;train_name&gt;/</div>
+         </div>
+         <div class="kf-lrow">
+           <div class="kf-lfile"><span class="fname">Evaluation.yml</span><span class="rootkey">Evaluator:</span></div>
+           <span class="kf-larrow">&rarr;</span>
+           <span class="kf-lcmd"><span class="p">$</span> konfai EVALUATION</span>
+           <span class="kf-larrow">&rarr;</span>
+           <div class="kf-lout"><b>Evaluations/</b>&lt;train_name&gt;/Metric_TRAIN.json</div>
+         </div>
+         <div class="kf-lfoot">
+           <span>Same engine underneath: reflection reads the root key and builds
+                 <code>Model &middot; Dataset &middot; Losses &middot; Optimizer</code>.</span>
+           <span>Every output folder is keyed by <code>train_name</code> &mdash; keep it consistent
+                 across the three files.</span>
+         </div>
+       </div>
+
+       <div class="kf-pillars">
+         <div class="kf-pillar kf-h-teal">
+           <span class="tag">Reflection</span>
+           <h3>Config by reflection</h3>
+           <p>A callable's signature is read and its arguments are built from the YAML it owns
+              &mdash; recursively. Reading a config resolves and rewrites it, so a run leaves a
+              complete record.</p>
+         </div>
+         <div class="kf-pillar kf-h-steel">
+           <span class="tag">Imaging</span>
+           <h3>Lazy, patch-based</h3>
+           <p>Volumes are never loaded whole. Data is read as overlapping patches and predictions
+              are reassembled with overlap blending &mdash; large 3D scans on modest hardware.</p>
+         </div>
+         <div class="kf-pillar kf-h-violet">
+           <span class="tag">Models</span>
+           <h3>Declarative graphs</h3>
+           <p>Networks are routed <code>add_module</code> graphs &mdash; a Python class, or an
+              entire model written as a <code>.yml</code>. Named outputs are addressable from YAML.</p>
+         </div>
+       </div>
      </section>
 
-     <figure class="konfai-arch">
-       <svg viewBox="0 0 864 196" role="img" aria-label="KonfAI architecture: one YAML config is built into an object graph by reflection and run as train, prediction or evaluation workflows." preserveAspectRatio="xMidYMid meet">
-         <defs>
-           <marker id="kf-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-             <path d="M0,0 L10,5 L0,10 z" fill="#14b8a6"/>
-           </marker>
-           <style>
-             .k-t{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
-             .k-lbl{fill:#14b8a6;font-weight:700;font-size:12px;letter-spacing:.09em;text-transform:uppercase}
-             .k-card{fill:none;stroke:currentColor;stroke-opacity:.22;stroke-width:1.4}
-             .k-code{fill:currentColor;opacity:.6;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
-             .k-chip{fill:#14b8a6;fill-opacity:.10;stroke:#14b8a6;stroke-opacity:.45;stroke-width:1.3}
-             .k-chip-t{fill:currentColor;opacity:.88;font-weight:600;font-size:13px}
-             .k-pill{fill:currentColor;fill-opacity:.04;stroke:currentColor;stroke-opacity:.3;stroke-width:1.3}
-             .k-pill-t{fill:currentColor;font-weight:700;font-size:13px;letter-spacing:.03em}
-             .k-arrow{stroke:#14b8a6;stroke-width:2}
-           </style>
-         </defs>
+     <!-- ================== WHERE TO GO ===================== -->
+     <section class="kf-block">
+       <div class="kf-sechead">
+         <p class="kf-eyebrow">Where to go next</p>
+         <h2 style="border:0; padding:0;">Pick the path that matches your goal.</h2>
+       </div>
 
-         <!-- Stage 1: YAML config -->
-         <text class="k-t k-lbl" x="106" y="22" text-anchor="middle">YAML config</text>
-         <rect class="k-card" x="8" y="34" width="196" height="120" rx="12"/>
-         <text class="k-t k-code" x="26" y="66">Trainer:</text>
-         <text class="k-t k-code" x="26" y="90">  Model: UNet.yml</text>
-         <text class="k-t k-code" x="26" y="114">  Dataset: {…}</text>
-         <text class="k-t k-code" x="26" y="138">  epochs: 100</text>
+       <div class="kf-nextgrid">
+         <a class="kf-nextcard kf-h-teal" href="quickstart.html">
+           <span class="intent">Start</span>
+           <h3>Your first run</h3>
+           <p>Install, download the demo dataset, then train, predict and evaluate the shipped
+              segmentation baseline &mdash; step by step.</p>
+           <span class="go">Quickstart &rarr;</span>
+         </a>
+         <a class="kf-nextcard kf-h-violet" href="concepts/index.html">
+           <span class="intent">Understand</span>
+           <h3>The config model</h3>
+           <p>How YAML becomes Python objects, classpaths, named module outputs, and the
+              rewrite-on-read behaviour.</p>
+           <span class="go">Core concepts &rarr;</span>
+         </a>
+         <a class="kf-nextcard kf-h-coral" href="usage/apps.html">
+           <span class="intent">Ship</span>
+           <h3>As an app</h3>
+           <p>Package a stable workflow behind <code>konfai-apps</code> &mdash; local, HuggingFace,
+              or an HTTP server.</p>
+           <span class="go">Apps &amp; API &rarr;</span>
+         </a>
+       </div>
 
-         <line class="k-arrow" x1="210" y1="94" x2="250" y2="94" marker-end="url(#kf-arrow)"/>
+       <div class="kf-docindex">
+         <div class="dhead">
+           <h3>Or browse the full documentation</h3>
+           <span>Every page stays one click away &mdash; this landing is a map, not a wall.</span>
+         </div>
+         <div class="kf-doclinks">
+           <a class="kf-h-violet" href="concepts/index.html">Core concepts</a>
+           <a class="kf-h-teal" href="config_guide/index.html">Config guide</a>
+           <a class="kf-h-teal" href="reference/components/index.html">Component catalogue</a>
+           <a class="kf-h-steel" href="reference/cli.html">CLI reference</a>
+           <a class="kf-h-violet" href="examples/index.html">Examples</a>
+           <a class="kf-h-coral" href="usage/apps.html">Apps &amp; API server</a>
+           <a class="kf-h-steel" href="reference/python-api.html">Python API</a>
+           <a class="kf-h-amber" href="troubleshooting.html">Troubleshooting</a>
+         </div>
+       </div>
 
-         <!-- Stage 2: config-by-reflection -->
-         <text class="k-t k-lbl" x="454" y="22" text-anchor="middle">config-by-reflection</text>
-         <rect class="k-card" x="258" y="34" width="392" height="140" rx="12"/>
-         <rect class="k-chip" x="276" y="52" width="172" height="46" rx="9"/>
-         <text class="k-t k-chip-t" x="362" y="80" text-anchor="middle">Model</text>
-         <rect class="k-chip" x="460" y="52" width="172" height="46" rx="9"/>
-         <text class="k-t k-chip-t" x="546" y="80" text-anchor="middle">Data · patches</text>
-         <rect class="k-chip" x="276" y="110" width="172" height="46" rx="9"/>
-         <text class="k-t k-chip-t" x="362" y="138" text-anchor="middle">Losses · Metrics</text>
-         <rect class="k-chip" x="460" y="110" width="172" height="46" rx="9"/>
-         <text class="k-t k-chip-t" x="546" y="138" text-anchor="middle">Optimizer · LR</text>
+       <div class="kf-proof">
+         <span class="label">Proven at MICCAI</span>
+         <div class="chips">
+           <span class="chip kf-h-teal"><b>SynthRAD</b></span>
+           <span class="chip kf-h-steel"><b>TrackRAD</b></span>
+           <span class="chip kf-h-violet"><b>CURVAS</b></span>
+           <span class="chip kf-h-coral"><b>PANTHER</b></span>
+         </div>
+         <span class="label label-right">segmentation &middot; registration &middot; synthesis</span>
+       </div>
+     </section>
 
-         <line class="k-arrow" x1="656" y1="94" x2="696" y2="94" marker-end="url(#kf-arrow)"/>
-
-         <!-- Stage 3: workflows -->
-         <text class="k-t k-lbl" x="780" y="22" text-anchor="middle">workflows</text>
-         <rect class="k-pill" x="704" y="42" width="152" height="34" rx="17"/>
-         <text class="k-t k-pill-t" x="780" y="64" text-anchor="middle">TRAIN</text>
-         <rect class="k-pill" x="704" y="90" width="152" height="34" rx="17"/>
-         <text class="k-t k-pill-t" x="780" y="112" text-anchor="middle">PREDICTION</text>
-         <rect class="k-pill" x="704" y="138" width="152" height="34" rx="17"/>
-         <text class="k-t k-pill-t" x="780" y="160" text-anchor="middle">EVALUATION</text>
-       </svg>
-       <figcaption>
-         KonfAI reads one YAML file, builds the object graph by reflection, and runs it as a
-         reproducible workflow &mdash; writing checkpoints, predictions and evaluations to a workspace.
-       </figcaption>
-     </figure>
    </div>
-
-.. note::
-
-   New here? The fastest path is :doc:`quickstart`, then copy
-   ``examples/Segmentation`` and run ``konfai TRAIN``. Come back to
-   :doc:`concepts/index` when you want to adapt the YAML, and to
-   :doc:`reference/components/index` to see what ships in the box.
 
 .. toctree::
    :maxdepth: 2
@@ -156,6 +222,4 @@ KonfAI
    examples/index
    ecosystem/index
    troubleshooting
-   contributing
    development
-   architecture
