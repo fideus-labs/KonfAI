@@ -678,6 +678,29 @@ class _Predictor:
                     )
 
 
+def _colocate_loaded_modules(model: torch.nn.Module) -> None:
+    """Move any still-CPU leaf module onto the model's device.
+
+    A custom :meth:`Network.load` may append modules after the model was already placed on its
+    device — e.g. a head sized from the checkpoint's class count — and those default to CPU, which
+    then raises a device mismatch on the forward pass. This re-homes any fully-CPU leaf onto the
+    device the rest of the model already lives on. Modules already on a device (including
+    model-parallel splits across several GPUs) are left untouched.
+    """
+    target = next((p.device for p in model.parameters() if p.device.type != "cpu"), None)
+    if target is None:
+        return
+    for sub in model.modules():
+        # ModuleArgsDict overrides parameters()/buffers() without a ``recurse`` kwarg, so use the
+        # base nn.Module methods to read each module's own (non-recursive) tensors.
+        own = [
+            *torch.nn.Module.parameters(sub, recurse=False),
+            *torch.nn.Module.buffers(sub, recurse=False),
+        ]
+        if own and all(t.device.type == "cpu" for t in own):
+            sub.to(target)
+
+
 class ModelComposite(Network):
     """
     A composite model that replicates a given base network multiple times and combines their outputs.
@@ -744,6 +767,9 @@ class ModelComposite(Network):
             # ensemble suffix added after the previous load.
             model.set_name(self._base_model_name)
             model.load(state, init=False)
+            # A custom load() may append checkpoint-sized modules (e.g. the head) on CPU; co-locate
+            # them with the already device-placed model so the forward pass doesn't hit a mismatch.
+            _colocate_loaded_modules(model)
             model.set_name(f"{self._base_model_name}_{index}")
             self._loaded_state_index = index
         return model
