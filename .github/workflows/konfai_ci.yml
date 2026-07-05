@@ -59,7 +59,7 @@ jobs:
         run: pip install ruff==0.15.2
 
       - name: Run ruff lint
-        run: ruff check konfai konfai-apps/konfai_apps
+        run: ruff check konfai konfai-apps/konfai_apps tests
 
   format:
     runs-on: ubuntu-latest
@@ -75,7 +75,7 @@ jobs:
         run: pip install ruff==0.15.2
 
       - name: Check formatting
-        run: ruff format --check konfai konfai-apps/konfai_apps
+        run: ruff format --check konfai konfai-apps/konfai_apps tests
 
   build:
     runs-on: ubuntu-latest
