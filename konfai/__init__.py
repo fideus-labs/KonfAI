@@ -22,7 +22,6 @@ from importlib import metadata
 from pathlib import Path
 
 import psutil
-import requests
 
 try:
     import pynvml
@@ -30,8 +29,10 @@ try:
     _PYNVML_AVAILABLE = True
 except ImportError:
     _PYNVML_AVAILABLE = False
-from torch.cuda import get_device_name
 
+# ``requests`` (remote-server helpers only) and ``torch`` (device-name lookup only) are imported lazily
+# at their point of use so that ``import konfai`` stays light — in particular it no longer forces the
+# ~1s torch import for CLI paths that never touch a GPU (``--help``/``--version``, light apps helpers).
 from konfai.utils.errors import KonfAIError
 
 try:
@@ -137,6 +138,8 @@ def get_available_devices(
         Available device indices and the corresponding device names.
     """
     if remote_server is not None:
+        import requests
+
         r = requests.get(
             f"{remote_server.get_url()}/available_devices", headers=remote_server.get_headers(), timeout=timeout_s
         )
@@ -144,6 +147,8 @@ def get_available_devices(
         data = r.json()
         return data["devices_index"], data["devices_name"]
     else:
+        from torch.cuda import get_device_name
+
         devices_index = cuda_visible_devices()
         # Torch reindexes devices after CUDA_VISIBLE_DEVICES masking, so the
         # visible names must be resolved through local ordinals (0..N-1) while
@@ -168,6 +173,8 @@ def get_ram(remote_server: RemoteServer | None = None, timeout_s: float = 2.0) -
         Used RAM and total RAM in gigabytes.
     """
     if remote_server is not None:
+        import requests
+
         r = requests.get(
             f"{remote_server.get_url()}/ram",
             headers=remote_server.get_headers(),
@@ -204,6 +211,8 @@ def get_vram(
         Used VRAM and total VRAM in gigabytes.
     """
     if remote_server is not None:
+        import requests
+
         r = requests.get(
             f"{remote_server.get_url()}/vram",
             params=[("devices", device_index) for device_index in devices],
@@ -281,6 +290,8 @@ def check_server(remote_server: RemoteServer, timeout_s: float = 2.0) -> tuple[b
     tuple[bool, str]
         A boolean success flag and a human-readable status message.
     """
+    import requests
+
     try:
         r = requests.get(
             f"{remote_server.get_url()}/health",
