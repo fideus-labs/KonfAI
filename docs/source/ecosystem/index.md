@@ -29,7 +29,7 @@ in-progress or external**, so you know what you can rely on today.
 | Piece | Status | What it is |
 | --- | --- | --- |
 | **`konfai`** | ✅ Shipped (PyPI) | The core framework: config-by-reflection, lazy patch-based data, model graphs, and the three YAML workflows. This is what the rest of this documentation is about. |
-| **`konfai-apps`** | ✅ Shipped (PyPI, own CI) | A separate package that turns a mature workflow into a reusable **app** with a clean CLI, a Python API ({doc}`../reference/python-api`), and an HTTP server ({doc}`../reference/app-server-api`). |
+| **`konfai-apps`** | ✅ Shipped (PyPI, own CI) | Packages a mature workflow as a reusable **app** — see {doc}`../usage/apps`. |
 | **App bundles** (`apps/`) | ✅ Shipped (thin wrappers) | Ready-to-use CLI shims: `impact-synth-konfai`, `impact-seg-konfai`, `mrsegmentator-konfai`, `totalsegmentator-konfai`. Config + weights live on Hugging Face and download on first run. |
 | **`impact-reg-konfai`** | 🟡 Shipped, heaviest | A full multi-preset registration orchestrator (Elastix + the IMPACT semantic metric), **not** a thin wrapper. The most moving parts of the five. |
 | **Demo data & models (HF)** | ✅ Published | `VBoussot/konfai-demo` (demo dataset), plus per-app model repos (`ImpactSynth`, `ImpactSeg`, `TotalSegmentator-KonfAI`, `MRSegmentator-KonfAI`, `ImpactReg`) and `impact-torchscript-models` (the SAM2.1 backbone behind `IMPACTSynth`). |
@@ -58,12 +58,13 @@ wrappers add `pipeline`. See {doc}`../usage/apps` for how to run them and
 | **ONNX export → `konfai-rs`** | 🧪 Experimental | `konfai/export.py` produces ONNX + a manifest for a planned portable (native/WASM) inference engine. Python-API-only, single static-shape head, feed-forward models only. See {doc}`../reference/python-api`. |
 
 ```{note}
-**Trust model.** Resolving a `konfai-apps` app copies and imports its `.py` files
-(and can install its dependencies). Only resolve apps from sources you trust — see
-{doc}`../reference/python-api` and {doc}`../concepts/apps`.
+**Trust model.** Resolving a `konfai-apps` app copies and imports its `.py`
+files (arbitrary code; the `requirements.txt` pip-install is opt-in via
+`install_requirements=True` and off by default), so only resolve apps from
+sources you trust — see {doc}`../reference/python-api`.
 ```
 
 ## See also
 
-- {doc}`../concepts/apps` — what an app is and when to package one
-- {doc}`../usage/apps` — running apps from the CLI
+- {doc}`../usage/apps` — what an app is and how to run apps from the CLI
+- {doc}`../reference/cli` — the full flag reference for the app CLIs

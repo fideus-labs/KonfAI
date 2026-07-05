@@ -1,5 +1,8 @@
 # Installation
 
+This page covers every supported way to install KonfAI — PyPI, Pixi, and from
+source — plus the optional extras and how to verify the result. Read it before
+your first run, or come back when a format reader or CLI entrypoint is missing.
 KonfAI targets **Python 3.10+** and depends on PyTorch, SimpleITK, TensorBoard,
 and a set of medical-imaging utilities.
 
@@ -26,13 +29,17 @@ python -m pip install "konfai[dev]"       # test, docs, lint, and server tooling
 
 ### Optional extras
 
+**A bare `pip install konfai` includes no imaging backend** — reading `.mha`,
+HDF5, DICOM, or OME-Zarr data requires the matching extra below (`[imaging]`
+covers all four).
+
 | Extra | Pulls in | Use it for |
 | --- | --- | --- |
 | `itk` | `SimpleITK` | reading/writing ITK formats (`.mha`, `.nii.gz`, …) |
 | `hdf5` | `h5py` | HDF5-backed datasets |
 | `imaging` | `SimpleITK`, `h5py`, `pydicom`, `zarr`, `ngff-zarr` | **all four storage backends at once** (ITK + HDF5 + DICOM + OME-Zarr) — the common medical-imaging stack |
-| `dicom` | `pydicom` | DICOM series input — see {doc}`../concepts/imaging-formats` |
-| `omezarr` | `zarr`, `ngff-zarr` | OME-Zarr / OME-NGFF input — see {doc}`../concepts/imaging-formats` |
+| `dicom` | `pydicom` | DICOM series input — see {doc}`../reference/components/storage-backends` |
+| `omezarr` | `zarr`, `ngff-zarr` | OME-Zarr / OME-NGFF input — see {doc}`../reference/components/storage-backends` |
 | `tensorboard` | `tensorboard` | TensorBoard logging |
 | `monitoring` | `nvidia-ml-py` | GPU monitoring |
 | `vtk` | `vtk` | VTK-dependent rendering and mesh features |
@@ -131,7 +138,7 @@ konfai-apps-server --help
 konfai-cluster --help
 ```
 
-For a first real run after installation, go to :doc:`../quickstart`.
+For a first real run after installation, go to {doc}`../quickstart`.
 
 ## Common installation issues
 
@@ -170,8 +177,10 @@ Install the `cluster` extra:
 python -m pip install "konfai[cluster]"
 ```
 
-## See also
+## Next steps
 
-- {doc}`../quickstart`
-- {doc}`../usage/docker`
-- {doc}`../reference/cli`
+- {doc}`../quickstart` — run the full train → predict → evaluate loop on the
+  shipped segmentation example.
+- {doc}`../usage/docker` — containerized installs when you cannot manage the
+  host environment.
+- {doc}`../reference/cli` — every `konfai` command and flag in one place.

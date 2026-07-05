@@ -82,9 +82,8 @@ reusable pieces are the vocabulary:
 They are for graph debugging; do not leave them in a trained model.
 ```
 
-## See also
+## Next steps
 
 - {doc}`../../concepts/model-graph` — named outputs, `outputs_criterions`, patching
-- {doc}`../../concepts/yaml-model-builder` — build a model from YAML
-- {doc}`../../usage/custom-models` — subclass `Network` yourself
 - {doc}`losses-metrics` — attach losses/metrics to a model's named outputs
+- {doc}`../../usage/custom-models` — subclass `Network` yourself

@@ -45,15 +45,9 @@ OmeDataset/CASE_001/CT.ome.zarr/
 Data handling is split across two packages with distinct responsibilities.
 
 **`konfai/utils/` — format readers.** These modules turn an on-disk file into a
-channel-first array plus its physical geometry. They are the only place that
-knows about file formats:
-
-| Module | Reads |
-| --- | --- |
-| `konfai/utils/ITK.py` | SimpleITK formats (`.mha`, `.nii.gz`, `.nrrd`, …) |
-| `konfai/utils/dataset.py` | the dataset abstraction over the readers (including HDF5) and the `Attribute` geometry container |
-| `konfai/utils/dicom.py` | DICOM series — see {doc}`imaging-formats` |
-| `konfai/utils/ome_zarr.py` | OME-Zarr / OME-NGFF stores — see {doc}`imaging-formats` |
+channel-first array plus its physical geometry; they are the only place that
+knows about file formats, and the per-backend table (format tokens, optional
+extras, API details) lives in {doc}`../reference/components/storage-backends`.
 
 **`konfai/data/` — PyTorch datasets and dataloaders.** These modules build the
 `torch.utils.data.Dataset` / `DataLoader` machinery on top of the readers:
@@ -169,6 +163,12 @@ From the dataset code, `validation` may be:
 - a list of case names
 - a list mixing case names and case-list files
 
+Three semantics are worth remembering:
+
+- `subset: None` keeps the full dataset;
+- `validation: None` disables the split;
+- `~` exclusion applies to `subset` but **not** to `validation`.
+
 The `subset` object is applied before validation splitting and can exclude or
 include items. The exact logic is implemented by `TrainSubset` and
 `PredictionSubset`.
@@ -198,10 +198,8 @@ Use `Dataset.Patch` when:
 Dataset patching is separate from **model patching**, which applies inside the
 network itself. See {doc}`model-graph`.
 
-## See also
+## Next steps
 
-- {doc}`configuration`
-- {doc}`model-graph`
-- {doc}`imaging-formats`
-- {doc}`../config_guide/training`
-- {doc}`../config_guide/prediction`
+- {doc}`model-graph` — to attach losses and metrics that target these groups
+- {doc}`../reference/components/storage-backends` — format tokens, optional extras, and the DICOM / OME-Zarr APIs
+- {doc}`../config_guide/training` — the `Dataset` keys in the context of a full training config

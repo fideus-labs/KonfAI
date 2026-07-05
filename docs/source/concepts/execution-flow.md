@@ -1,5 +1,15 @@
 # Execution flow
 
+This page walks through what happens when you launch the three KonfAI
+workflows — `TRAIN`, `PREDICTION`, and `EVALUATION` — from config parsing to
+the files each one writes. Read it to know where a run's outputs land and how
+the distributed runtime wraps every command.
+
+**All three workflows write into a single workspace keyed by `train_name` —
+`Checkpoints/<train_name>/`, `Predictions/<train_name>/`,
+`Evaluations/<train_name>/` — so the `train_name` in each config file must name
+the run you intend to touch.**
+
 KonfAI ships three low-level workflows and one higher-level app layer.
 
 ## Low-level workflows
@@ -99,11 +109,10 @@ bootstrap logic.
 `konfai-apps` is the higher-level interface. It packages low-level prediction,
 evaluation, uncertainty, and fine-tuning workflows into reusable app bundles.
 
-See {doc}`apps`.
+See {doc}`../usage/apps`.
 
-## See also
+## Next steps
 
-- {doc}`../usage/training`
-- {doc}`../usage/prediction`
-- {doc}`../usage/evaluation`
-- {doc}`../usage/apps`
+- {doc}`../config_guide/training` — every `Config.yml` key the training workflow reads.
+- {doc}`../config_guide/prediction` — configuring checkpoints, patch inference, and `outputs_dataset`.
+- {doc}`../config_guide/evaluation` — turning predictions and ground truth into metric JSON.

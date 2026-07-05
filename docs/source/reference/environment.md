@@ -1,7 +1,9 @@
 # Environment variables
 
-KonfAI uses a mix of **user-facing** and **internal runtime** environment
-variables.
+This page catalogues the environment variables KonfAI reads or sets — the
+user-facing ones you may set yourself, and the `KONFAI_*` runtime variables the
+CLI wrappers manage. Reach for it when a run behaves differently across shells
+or machines, or when you are debugging the runtime wrappers themselves.
 
 ## User-facing variables
 
@@ -26,8 +28,8 @@ relevant in practice, but they are not KonfAI-specific.
 
 ## Runtime variables set by KonfAI
 
-These variables are normally set by the CLI wrappers and are not expected to be
-managed manually in day-to-day usage.
+**These variables are normally set by the CLI wrappers and are not expected to
+be managed manually in day-to-day usage.**
 
 | Variable | Set by | Purpose |
 | --- | --- | --- |
@@ -57,7 +59,7 @@ The codebase also references internal variables such as:
 These are part of KonfAI's internal execution model and are best treated as
 implementation details unless you are actively extending the framework.
 
-## See also
+## Next steps
 
-- {doc}`cli`
-- {doc}`../concepts/execution-flow`
+- {doc}`cli` — the wrappers that set the `KONFAI_*` runtime variables
+- {doc}`../concepts/execution-flow` — where in the launch sequence they are set

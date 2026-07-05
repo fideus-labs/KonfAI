@@ -137,9 +137,8 @@ Imported lazily; a missing package raises a `MeasureError` with an install hint.
 run on CUDA device 0.
 ```
 
-## See also
+## Next steps
 
 - {doc}`schedulers` — the weight schedulers used in the `schedulers:` subtree
 - {doc}`../../concepts/model-graph` — the named outputs criteria attach to
-- {doc}`../../config_guide/training` and {doc}`../../config_guide/evaluation`
 - {doc}`../api/extension-points` — write your own `Criterion`

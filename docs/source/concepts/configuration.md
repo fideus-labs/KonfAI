@@ -1,5 +1,18 @@
 # Configuration model
 
+This page explains how KonfAI turns a YAML file into live Python objects — the
+reflection engine behind every `Trainer`, `Predictor`, and `Evaluator`. Read it
+when a config key is not binding the way you expect, or before you expose a
+custom class to YAML.
+
+```{note}
+Reading a config **mutates it**: loading a run resolves every default and
+rewrites the YAML file in place, so the file on disk becomes the fully-resolved
+record of the experiment. One consequence: a `None` value round-trips as the
+literal string `"None"` — it is written back as `"None"` and reparsed to
+`None` on the next read.
+```
+
 KonfAI is fundamentally a **configuration-driven object builder**.
 
 The YAML file does not just pass values into a fixed script. It determines
@@ -188,9 +201,8 @@ The `examples/Synthesis` workflow is the clearest repository example:
 - `UnNormalize.py` defines a local transform
 - the YAML references them with `Model:...` and `UnNormalize:...`
 
-## See also
+## Next steps
 
-- {doc}`datasets`
-- {doc}`model-graph`
-- {doc}`../config_guide/index`
-- {doc}`../usage/custom-models`
+- {doc}`datasets` — how the configured dataset sections map onto lazy, patch-based storage.
+- {doc}`model-graph` — how `Model` sections address named module outputs for losses and metrics.
+- {doc}`../config_guide/index` — the key-by-key reference for the three workflow config files.

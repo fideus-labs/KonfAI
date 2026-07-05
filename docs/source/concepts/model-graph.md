@@ -1,5 +1,10 @@
 # Model graph and output naming
 
+This page explains the naming scheme behind every `outputs_criterions` and
+`outputs_dataset` key — how KonfAI addresses individual modules inside a model
+graph. Read it before attaching a loss, metric, or exported prediction to a
+model output.
+
 KonfAI models are not treated as opaque single-output blocks. A model is a
 **named module graph**, and KonfAI lets you attach losses, metrics, and exported
 datasets to specific named outputs.
@@ -45,8 +50,12 @@ outputs_criterions:
             is_loss: true
 ```
 
-If an output key does not match any module path, KonfAI raises a configuration
-error at runtime.
+```{note}
+An `outputs_criterions` or `outputs_dataset` key must match a module's dotted
+path **exactly** — the `:` separators between graph levels are load-bearing. A
+key that does not match any module path raises a configuration error at
+runtime.
+```
 
 ## Targets and metrics
 
@@ -120,10 +129,8 @@ This lets you control:
 - how multiple predictions are reduced
 - what final transforms are applied before writing files
 
-## See also
+## Next steps
 
-- {doc}`configuration`
-- {doc}`yaml-model-builder`
-- {doc}`datasets`
-- {doc}`../config_guide/prediction`
-- {doc}`../usage/custom-models`
+- {doc}`yaml-model-builder` — define the same named graphs entirely in YAML.
+- {doc}`../usage/custom-models` — write your own `Network` subclass and wire it with `add_module`.
+- {doc}`../config_guide/prediction` — the full `outputs_dataset` reference for inference runs.

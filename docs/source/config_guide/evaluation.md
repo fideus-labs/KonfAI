@@ -16,6 +16,17 @@ Evaluator:
   train_name: SEG_BASELINE
 ```
 
+## Running it
+
+From the directory that contains `Evaluation.yml`:
+
+```bash
+konfai EVALUATION -y --config Evaluation.yml
+```
+
+The output directory is controlled by `Evaluator.train_name` in the YAML and
+`--evaluations-dir` on the CLI.
+
 ## Top-level fields
 
 | Field | Type | Default in code | Required | Effect |
@@ -72,7 +83,8 @@ Evaluation writes JSON files, not CSV files. The main outputs are:
 The JSON structure contains:
 
 - per-case values under `case`
-- aggregated statistics under `aggregates`
+- aggregated statistics under `aggregates`, such as mean, std, percentiles,
+  min, max, and count
 
 This behavior comes from `konfai.evaluator.Statistics.write()`.
 
@@ -83,9 +95,15 @@ See:
 - `examples/Segmentation/Evaluation.yml`
 - `examples/Synthesis/Evaluation.yml`
 
-## See also
+## Troubleshooting
 
-- {doc}`training`
-- {doc}`prediction`
-- {doc}`../usage/evaluation`
-- {doc}`../reference/app-server-api`
+Common evaluation mistakes:
+
+- the evaluation file still points to an old prediction folder
+- label definitions in the metric do not match the dataset encoding
+
+## Next steps
+
+- {doc}`../concepts/datasets` — the `dataset_filenames` merge flags and the
+  `validation` selector used here.
+- {doc}`prediction` — to produce the prediction dataset this file scores.

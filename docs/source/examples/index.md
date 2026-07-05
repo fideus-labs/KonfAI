@@ -15,8 +15,8 @@ including Google Colab.
 ```{toctree}
 :maxdepth: 1
 
-synthesis
 segmentation
+synthesis
 ```
 
 ## Choosing an example
@@ -46,8 +46,8 @@ A good adoption pattern is:
 
 ## Working from the repository
 
-All example commands in this documentation assume you are running from the
-example directory itself, for example:
+**All example commands in this documentation assume you are running from the
+example directory itself**, for example:
 
 ```bash
 cd examples/Segmentation
@@ -62,8 +62,8 @@ cd examples/Synthesis
 That matters because the shipped YAML files refer to local modules and dataset
 paths relative to the current working directory.
 
-## See also
+## Next steps
 
-- {doc}`../quickstart`
-- {doc}`../concepts/configuration`
-- {doc}`../usage/custom-models`
+- {doc}`segmentation` — the smallest end-to-end run; start here
+- {doc}`../concepts/configuration` — understand the YAML the examples are built from
+- {doc}`../usage/custom-models` — the step after Synthesis's local `classpath` modules

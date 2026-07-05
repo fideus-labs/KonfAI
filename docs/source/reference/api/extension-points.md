@@ -132,6 +132,6 @@ examples and package code.
 
 ## See also
 
-- {doc}`public-api`
+- {doc}`index`
 - {doc}`../../usage/custom-models`
 - {doc}`../../examples/synthesis`
