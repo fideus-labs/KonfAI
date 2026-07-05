@@ -144,6 +144,14 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
         def detach(self):
             return self
 
+        # A tiny patch stays under the pinned-staging threshold, so the offload takes the plain
+        # ``.cpu()`` path (16 bytes here); the pinned path is covered in test_predictor_offload.py.
+        def numel(self) -> int:
+            return 4
+
+        def element_size(self) -> int:
+            return 4
+
         def cpu(self) -> torch.Tensor:
             self.cpu_calls += 1
             return torch.ones(1, 2, 2)
