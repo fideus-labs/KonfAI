@@ -584,11 +584,29 @@ def _write_app_with_requirements(app_root: Path, requirements: str) -> None:
     (app_root / "requirements.txt").write_text(requirements, encoding="utf-8")
 
 
-def test_install_requirements_is_a_noop_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_requirements_runs_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app_root = tmp_path / "repo" / "demo_app"
     _write_app_with_requirements(app_root, "konfai-nonexistent-xyz==1.2.3\n")
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
 
+    monkeypatch.delenv("KONFAI_APPS_INSTALL_REQUIREMENTS", raising=False)
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        app_repository_module.subprocess, "check_call", lambda cmd, *args, **kwargs: captured.append(cmd)
+    )
+
+    repo._install_requirements(repo._get_filenames())
+
+    assert len(captured) == 1
+    assert captured[0][:5] == [sys.executable, "-m", "pip", "install", "konfai-nonexistent-xyz==1.2.3"]
+
+
+def test_install_requirements_opt_out_is_a_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_app_with_requirements(app_root, "konfai-nonexistent-xyz==1.2.3\n")
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+
+    monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
     calls: list[object] = []
     monkeypatch.setattr(app_repository_module.subprocess, "check_call", lambda *args, **kwargs: calls.append(args))
 
@@ -618,12 +636,13 @@ def test_install_requirements_skips_protected_and_non_pep508_lines(
     )
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
 
+    monkeypatch.delenv("KONFAI_APPS_INSTALL_REQUIREMENTS", raising=False)
     captured: list[list[str]] = []
     monkeypatch.setattr(
         app_repository_module.subprocess, "check_call", lambda cmd, *args, **kwargs: captured.append(cmd)
     )
 
-    repo._install_requirements(repo._get_filenames(), install_requirements=True)
+    repo._install_requirements(repo._get_filenames())
 
     assert len(captured) == 1
     cmd = captured[0]

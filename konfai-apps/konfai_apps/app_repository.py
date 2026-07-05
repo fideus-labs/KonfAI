@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import os
 import re
 import shutil
 import subprocess  # nosec B404
@@ -215,6 +216,26 @@ class AppRepositoryInfo(ABC):
         """The app's default inference patch size (per-dim), for UI patch controls; None if undeclared."""
         return self._patch_size
 
+    def resolve_vram_plan(self, available_vram: float | None) -> tuple[list[int], int] | None:
+        """Return the ``(patch_size, batch_size)`` the app's VRAM plan would select for ``available_vram``
+        (the largest declared threshold, in GB, that fits the free VRAM), or ``None`` when the app declares
+        no VRAM plan or the free VRAM is unknown.
+
+        This is the exact selection inference uses; UIs call it to preview/seed the plan that will actually
+        run on the current machine.
+        """
+        if self._vram_plan is None or available_vram is None:
+            return None
+        thresholds = sorted(self._vram_plan.keys())
+        selected_t = thresholds[0]
+        for threshold in thresholds:
+            if threshold <= available_vram:
+                selected_t = threshold
+            else:
+                break
+        entry = self._vram_plan[selected_t]
+        return list(entry.patch_size), entry.batch_size
+
     def get_mc_dropout(self) -> int:
         return self._mc_dropout
 
@@ -388,6 +409,26 @@ class LocalAppRepository(AppRepositoryInfo):
             raise AppRepositoryError(f"File '{requested_filename}' was not found in app '{self._app_name}'.")
         return resolved
 
+    def get_patch_size(self) -> list[int] | None:
+        """The app's default inference patch size. Uses the app.json value when declared; otherwise reads
+        ``Predictor.Dataset.Patch.patch_size`` straight from the prediction config (the source of truth),
+        so it need not be duplicated in app.json."""
+        if self._patch_size is not None:
+            return self._patch_size
+        try:
+            filenames = self._all_repo_filenames()
+            path = self._download(self._require_repo_filename("Prediction.yml", filenames))
+            with open(path) as file:
+                data = YAML().load(file)
+            patch = (data or {}).get("Predictor", {}).get("Dataset", {}).get("Patch")
+            patch_size = patch.get("patch_size") if hasattr(patch, "get") else None
+            if isinstance(patch_size, list) and patch_size:
+                return [int(x) for x in patch_size]
+        except Exception:
+            # Best-effort: patch size is an optional UI hint; any read/parse failure falls back to None.
+            return None
+        return None
+
     def _set_number_of_augmentation(self, inference_file_path: str, new_value: int) -> None:
         new_value = int(np.clip(new_value, 0, self._maximum_tta))
         yaml = YAML()
@@ -505,7 +546,6 @@ class LocalAppRepository(AppRepositoryInfo):
         number_of_model: int,
         name_of_models: list[str],
         prediction_file: str,
-        install_requirements: bool = False,
     ) -> tuple[list[Path], Path, list[tuple[str, Path]]]:
         filenames = self._all_repo_filenames()
         models_path: list[Path] = []
@@ -543,18 +583,21 @@ class LocalAppRepository(AppRepositoryInfo):
             if not filename.endswith(".pt"):
                 codes_path.append((filename, self._download(filename)))
 
-        self._install_requirements(filenames, install_requirements)
+        self._install_requirements(filenames)
 
         return models_path, inference_file_path, codes_path
 
-    def _install_requirements(self, filenames: list[str], install_requirements: bool = False) -> None:
+    def _install_requirements(self, filenames: list[str]) -> None:
         """Install missing/outdated packages listed in the app's requirements.txt.
 
-        Installation is opt-in (``install_requirements=True``) and defaults to a no-op. Core
-        packages (torch, konfai, …) are never installed or altered, and lines that are not
-        PEP 508 requirements (``-r``, ``--extra-index-url``, ``git+https``…) are skipped.
+        Runs on every local app resolution: resolving an app pip-installs the extra dependencies
+        its custom code needs (the documented trust model — only resolve apps you trust). Set
+        ``KONFAI_APPS_INSTALL_REQUIREMENTS=0`` to opt out (offline / CI / reproducible
+        environments). Only missing or version-mismatched packages are installed, so repeat runs
+        are a no-op. Core packages (torch, konfai, …) are never installed or altered, and lines
+        that are not PEP 508 requirements (``-r``, ``--extra-index-url``, ``git+https``…) are skipped.
         """
-        if not install_requirements:
+        if os.environ.get("KONFAI_APPS_INSTALL_REQUIREMENTS", "1").strip().lower() in {"0", "false", "no"}:
             return
         requirements_filename = self._find_repo_filename("requirements.txt", filenames)
         if requirements_filename is None:
@@ -606,6 +649,7 @@ class LocalAppRepository(AppRepositoryInfo):
         for filename in filenames:
             if filename != config_filename and not filename.endswith(".pt"):
                 codes_path.append((filename, self._download(filename)))
+        self._install_requirements(filenames)
         return evaluation_file_path, codes_path
 
     def download_uncertainty(self, uncertainty_file: str) -> tuple[Path, list[tuple[str, Path]]]:
@@ -616,6 +660,7 @@ class LocalAppRepository(AppRepositoryInfo):
         for filename in filenames:
             if filename != config_filename and not filename.endswith(".pt"):
                 codes_path.append((filename, self._download(filename)))
+        self._install_requirements(filenames)
         return uncertainty_file_path, codes_path
 
     def install_inference(
@@ -627,7 +672,6 @@ class LocalAppRepository(AppRepositoryInfo):
         uncertainty: bool,
         prediction_file: str,
         available_vram: float | None,
-        install_requirements: bool = False,
         forced_patch_size: list[int] | None = None,
         forced_batch_size: int | None = None,
     ) -> list[Path]:
@@ -635,7 +679,7 @@ class LocalAppRepository(AppRepositoryInfo):
             number_of_model = len(self._checkpoints_name)
 
         models_path, inference_file_path, codes_path = self.download_inference(
-            number_of_model, name_of_models, prediction_file, install_requirements
+            number_of_model, name_of_models, prediction_file
         )
         # Copy every bundle asset into the workspace first, then write (and tweak) the prediction config
         # last so its modifications are never clobbered by a raw copy of the same file.
@@ -653,18 +697,8 @@ class LocalAppRepository(AppRepositoryInfo):
             self._disable_uncertainty(prediction_file)
         # Patch/batch precedence: an explicit override wins; otherwise the app's VRAM plan (largest
         # threshold that fits the detected free VRAM); otherwise the config's own defaults are left as-is.
-        plan_patch_size: list[int] | None = None
-        plan_batch_size: int | None = None
-        if self._vram_plan is not None and available_vram is not None:
-            thresholds = sorted(self._vram_plan.keys())
-            selected_t = thresholds[0]
-            for threshold in thresholds:
-                if threshold <= available_vram:
-                    selected_t = threshold
-                else:
-                    break
-            plan_patch_size = self._vram_plan[selected_t].patch_size
-            plan_batch_size = self._vram_plan[selected_t].batch_size
+        plan = self.resolve_vram_plan(available_vram)
+        plan_patch_size, plan_batch_size = plan if plan is not None else (None, None)
         self._set_patch_size_and_batch_size(
             prediction_file,
             forced_patch_size if forced_patch_size is not None else plan_patch_size,
@@ -733,7 +767,6 @@ class LocalAppRepository(AppRepositoryInfo):
         epochs: int,
         it_validation: int | None,
         name_of_models: list[str],
-        install_requirements: bool = False,
     ) -> list[tuple[str, Path]]:
         """
         Install the app assets needed for fine-tuning and resolve the selected checkpoint(s).
@@ -754,7 +787,7 @@ class LocalAppRepository(AppRepositoryInfo):
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self._download(filename), dest)
 
-        self._install_requirements(filenames, install_requirements)
+        self._install_requirements(filenames)
 
         metadata_file = path / "app.json"
         config_file_path = path / config_file
