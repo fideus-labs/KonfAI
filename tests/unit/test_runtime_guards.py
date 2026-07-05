@@ -202,7 +202,8 @@ def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
         queried_indices.append(index)
         return f"GPU{index}"
 
-    monkeypatch.setattr(konfai_module, "get_device_name", fake_get_device_name)
+    # get_available_devices imports get_device_name lazily from torch.cuda, so patch it at the source.
+    monkeypatch.setattr("torch.cuda.get_device_name", fake_get_device_name)
 
     devices_index, devices_name = konfai_module.get_available_devices()
 
