@@ -76,6 +76,11 @@ class Mean(Reduction):
         pass
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        # A single element (no TTA / a lone model) is its own mean; skip the float32 clone + accumulate,
+        # which for a whole-volume multi-class output is a large no-op allocation (fp16->fp32 round-trips
+        # to the same values). Returns the same values as the general path.
+        if len(tensors) == 1:
+            return tensors[0]
         acc = tensors[0].float().clone()
         for t in tensors[1:]:
             acc.add_(t.float())
@@ -90,6 +95,9 @@ class Median(Reduction):
         pass
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        # A single element is its own median; skip the float32 stack (a large no-op for whole volumes).
+        if len(tensors) == 1:
+            return tensors[0]
         return torch.median(torch.stack(tensors, dim=0).float(), dim=0).values.to(tensors[0].dtype)
 
 
@@ -438,7 +446,9 @@ class OutSameAsGroupDataset(OutputDataset):
             layer = layer.to(reduce_device)
             for transform in self.before_reduction_transforms:
                 layer = transform(self.names[index], layer, Attribute(attr))
-            results.append(layer.cpu() if layer.device.type != "cpu" else layer)
+            # Keep the chunk on its current device; ``get_output`` decides once (via the GPU-finalize
+            # gate) whether the whole finalize chain stays on the GPU or moves back to the host.
+            results.append(layer)
 
         # Mean, Median -> [1, C, ...] | Concat -> [M, C, ...]
         return torch.stack(results, dim=0)
@@ -494,6 +504,9 @@ class OutSameAsGroupDataset(OutputDataset):
         for augmentation in list(self._accum_device):
             if augmentation[0] == index:
                 del self._accum_device[augmentation]
+        # The volume stays on whatever device it was blended on (GPU when it fit VRAM, else CPU): the
+        # reduction and every finalize transform are device- and dtype-transparent, so the whole finalize
+        # simply runs where the volume already is. Only the final result is returned to the host.
         result = self.reduction(results).squeeze(0)
         if isinstance(self.reduction, Mean) or isinstance(self.reduction, Median):
             result = result.squeeze(0)
@@ -545,7 +558,7 @@ class OutSameAsGroupDataset(OutputDataset):
         for transform in self.final_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
-        return result
+        return result.cpu() if result.device.type != "cpu" else result
 
 
 @config("OutputDataset")
