@@ -33,37 +33,22 @@ Pretrained models are automatically downloaded from [Hugging Face Hub](https://h
 
 ## ⚡ Efficient inference
 
-### 🔬 Performance comparison (single CT volume)
+### 🔬 Performance comparison
 
-**Experimental setup**
-- **Input volume size:** `512 × 512 × 366`
-- **GPU:** NVIDIA RTX 6000
-- **CPU:** Intel® Xeon® w5-3425
+**Setup**
+- **Input:** real whole-body MR, `295 × 259 × 219` (2 mm)
+- **GPU:** single NVIDIA RTX PRO 5000 (24 GB)
 
----
-
-### Original MRSegmentator
-
-| Configuration | Time | Peak RAM | Peak VRAM |
-|---------------|------|----------|------------|
-| **1 fold** | 160.3 s | 82.3 GB | ~3.5 GB |
-| **5 folds** | 166.4 s | 82.8 GB | ~5.1 GB |
-
----
-
-### MRSegmentator-KonfAI
-
-| Configuration | Time | Peak RAM | Peak VRAM |
-|---------------|------|----------|------------|
-| **1 fold** | 42.6 s | 29.7 GB | ~2.2 GB |
-| **5 folds (ensemble)** | 49.0 s | 29.7 GB | ~3.7 GB |
-
----
+| Tool (5-fold ensemble) | Time | Peak RAM | Peak VRAM |
+|---|------|----------|-----------|
+| **MRSegmentator-KonfAI** | **~27 s** | **~2 GB** | ~18 GB |
+| Original MRSegmentator | ~35 s | ~11 GB | ~5 GB |
 
 ### 📈 Key observations
 
-- **~3–4× faster inference** compared to the original MRSegmentator  
-- **~2.8× lower RAM usage** (≈ 30 GB vs ≈ 83 GB)  
+- **Faster** whole-body inference at equal accuracy
+- **~5× lower system RAM** — the accumulator stays on the GPU, not in host memory
+- **Byte-identical** segmentation to the CPU reassembly path  
 
 ---
 
@@ -146,15 +131,15 @@ If you use **MRSegmentator-KonfAI** in your work, please cite the original MRSeg
 
 ## ⚡ Performance & VRAM
 
-Benchmarked on an **NVIDIA RTX PRO 5000 (24 GB)**, synthetic data, patch `[96, 128, 160]`, 5-model ensemble (`Concat`), half precision (autocast). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body MR (295 × 259 × 219, 2 mm), patch `[96, 128, 160]`, 5-fold ensemble, half precision (autocast). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
 
-| Free VRAM | Batch (auto) | Peak VRAM |
-|:--|:--|:--|
-| 8 GB  | 4  | ~8 GB |
-| 16 GB | 8  | ~15 GB |
-| 24 GB | 12 | ~23 GB |
+| Free VRAM | Batch (auto) | Peak VRAM | Time / case |
+|:--|:--|:--|:--|
+| 8 GB  | 4 | ~8 GB  | — |
+| 16 GB | 8 | ~15 GB | — |
+| 24 GB | 8 | ~22 GB | **~27 s** |
 
-Measured peak VRAM (single model, half): batch 4 → 6.9 GB · 8 → 13.3 GB · 12 → 19.7 GB — the full 5-model ensemble adds ~15 %. Inference ≈ 25 s/model → **~125 s / case** for the full ensemble (scales with the case size).
+On a 24 GB card the accumulator stays **on the GPU**, keeping **system RAM ~2 GB** with a **byte-identical** result. The plan stops short of filling the card — a still-larger batch (12 → ~24 GB) saturates the allocator and *slows* inference ~2× without running faster. Inference scales with the case size.
 
 ---
 

@@ -110,15 +110,15 @@ If you use **IMPACT-Synth-KonfAI** in your work, please cite:
 
 ## ⚡ Performance & VRAM
 
-Benchmarked on an **NVIDIA RTX PRO 5000 (24 GB)**, synthetic data, patch `[1, 512, 512]`, 5-model ensemble (`Concat`). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body MR (295 × 259 × 219, 2 mm), patch `[1, 512, 512]`. The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
 
-| Free VRAM | Batch (auto) | Peak VRAM |
-|:--|:--|:--|
-| 8 GB  | 16 | ~7.6 GB |
-| 16 GB | 28 | ~15 GB |
-| 24 GB | 48 | ~21.7 GB |
+| Free VRAM | Batch (auto) | Peak VRAM | Time / case |
+|:--|:--|:--|:--|
+| 8 GB  | 16 | ~7.6 GB | — |
+| 16 GB | 28 | ~15 GB  | — |
+| 24 GB | 32 | ~16 GB  | **~24 s** |
 
-Measured peak VRAM: batch 8 → 4.0 GB · 16 → 7.6 GB · 24 → 12.8 GB · 32 → 17.5 GB · 48 → 21.7 GB. Inference ≈ **25 s / case** on the benchmark volume (scales with the case size).
+Single-model sCT keeps **system RAM ~2 GB**. The plan leaves memory headroom — a larger batch saturates the card and slows inference (batch 48 → ~22 GB). A full **5-model ensemble** runs in ~82 s. Inference scales with the case size.
 
 ---
 

@@ -175,6 +175,11 @@ def is_an_image(attributes: Attribute) -> bool:
 
 def data_to_image(data: np.ndarray, attributes: Attribute) -> sitk.Image:
     """Convert a NumPy array and KonfAI attributes into a SimpleITK image."""
+    if isinstance(data, torch.Tensor):
+        # Accept a torch tensor on any device: SimpleITK works on host arrays, so a SITK-backed transform
+        # fed a CUDA-resident volume converts here and naturally returns on the CPU (the pipeline then
+        # continues on the CPU). This keeps every transform usable regardless of the volume's device.
+        data = data.detach().cpu().numpy()
     if not is_an_image(attributes):
         raise NameError("Data is not an image")
     if data.shape[0] == 1:

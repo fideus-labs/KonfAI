@@ -139,16 +139,16 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
             self.device = torch.device("cuda:0")
             self.cpu_calls = 0
 
-        def detach(self):
-            return self
-
-        # A tiny patch stays under the pinned-staging threshold, so the offload takes the plain
-        # ``.cpu()`` path (16 bytes here); the pinned path is covered in test_predictor_offload.py.
+        # Small enough to stay under the pinned-offload threshold, so ``_offload_to_cpu`` takes the
+        # plain ``detach().cpu()`` path this test asserts on.
         def numel(self) -> int:
             return 4
 
         def element_size(self) -> int:
             return 4
+
+        def detach(self):
+            return self
 
         def cpu(self) -> torch.Tensor:
             self.cpu_calls += 1
@@ -172,10 +172,12 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
         attribute=Attribute(),
     )
 
-    stored_layer = output_dataset.output_layer_accumulator[0][0]._layer_accumulator[0]
+    # The accumulator now blends each patch straight into a running CPU buffer (no per-patch list), so
+    # the offloaded patch must have been moved to CPU exactly once before being blended.
+    accumulator = output_dataset.output_layer_accumulator[0][0]
     assert fake_layer.cpu_calls == 1
-    assert isinstance(stored_layer, torch.Tensor)
-    assert stored_layer.device.type == "cpu"
+    assert accumulator._result is not None
+    assert accumulator._result.device.type == "cpu"
 
 
 def test_predict_log_skips_measure_sync_when_tensorboard_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

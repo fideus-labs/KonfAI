@@ -406,12 +406,14 @@ class Resample(TransformInverse, ABC):
         else:
             mode = "trilinear"
 
-        return (
-            F.interpolate(tensor.type(torch.float32).unsqueeze(0), size=tuple(size), mode=mode)
-            .squeeze(0)
-            .type(tensor.dtype)
-            .cpu()
-        )
+        # Interpolate in the tensor's own float dtype. The model output is float16, and F.interpolate
+        # supports float16 on both CPU and CUDA (all modes) — upcasting the whole (channels x volume)
+        # tensor to float32 doubled the memory of a multi-class output resample for no argmax benefit.
+        # Integer inputs (uint8 labels) still need a float grid for interpolation.
+        work = tensor if tensor.is_floating_point() else tensor.type(torch.float32)
+        # Return on the input's device (interpolate preserves it): a CPU input stays on the CPU, a
+        # GPU-resident output volume stays on the GPU so the whole finalize runs where the volume is.
+        return F.interpolate(work.unsqueeze(0), size=tuple(size), mode=mode).squeeze(0).type(tensor.dtype)
 
     @abstractmethod
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -596,7 +598,9 @@ class Mask(Transform):
                     break
             if mask is None:
                 raise NameError(f"Mask : {self.path}/{name} not found")
-        tensor[torch.tensor(mask) == 0] = self.value_outside
+        # Index on the tensor's own device so the mask works whether the volume is on CPU or GPU
+        # (``torch.as_tensor`` keeps a torch mask as-is and wraps a numpy one, moving it to the device).
+        tensor[torch.as_tensor(mask, device=tensor.device) == 0] = self.value_outside
         return tensor
 
 
@@ -651,6 +655,36 @@ class Sum(Transform):
             return result
         else:
             return torch.sum(tensor, dim=self.dim).to(tensor.dtype)
+
+
+class MergeLabels(Transform):
+    """Merge the per-model argmax label maps of a ``combine: Concat`` ensemble into one global map.
+
+    Each model's ``Argmax`` produces a LOCAL class index (``0`` = background). A model's
+    non-background labels are shifted past every earlier model's foreground classes -- by the
+    CUMULATIVE sum of the earlier models' foreground counts (``nb_class - 1``) -- so the models'
+    disjoint label ranges tile a single global label space.
+
+    This is the label-space counterpart of ``InferenceStack`` (which averages *same-class*
+    probability ensembles): use ``MergeLabels`` when the models segment DIFFERENT structures, e.g.
+    the 5-task TotalSegmentator ensemble (organs / vertebrae / cardiac / muscles / ribs). Requires
+    ``number_of_channels_per_model`` in the attribute (written by the ``Concat`` reduction).
+    """
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "number_of_channels_per_model" not in cache_attribute:
+            raise TransformError(
+                "MergeLabels expects a multi-model 'combine: Concat' output: "
+                "'number_of_channels_per_model' is missing from the attribute.",
+            )
+        number_of_channels = cache_attribute.pop_tensor("number_of_channels_per_model")
+        result = tensor[0]
+        offset = int(number_of_channels[0]) - 1
+        for i, t in enumerate(tensor[1:]):
+            t[t != 0] += offset
+            result += t
+            offset += int(number_of_channels[i + 1]) - 1
+        return result
 
 
 class Gradient(Transform):
@@ -793,14 +827,20 @@ class Canonical(TransformInverse):
             mode = "nearest"
         else:
             mode = "bilinear"
+        # Sample in the data's own device and float dtype: the model output is float16 on the GPU, and
+        # affine_grid/grid_sample support float16 on CPU and CUDA. Building the grid on the data's device
+        # (instead of a CPU float32 grid) keeps the whole reorientation on-device — no host round-trip and
+        # no float32 upcast of the (channels x volume) tensor. Integer inputs still need a float grid.
+        work = data if data.is_floating_point() else data.type(torch.float32)
+        grid = torch.nn.functional.affine_grid(
+            matrix[:, :-1, ...].to(device=work.device, dtype=work.dtype),
+            [1, *list(data.shape)],
+            align_corners=True,
+        )
         return (
             torch.nn.functional.grid_sample(
-                data.unsqueeze(0).type(torch.float32),
-                torch.nn.functional.affine_grid(
-                    matrix[:, :-1, ...].type(torch.float32),
-                    [1, *list(data.shape)],
-                    align_corners=True,
-                ),
+                work.unsqueeze(0),
+                grid,
                 align_corners=True,
                 mode=mode,
                 padding_mode="reflection",
@@ -948,11 +988,11 @@ class KonfAIInference(Transform):
             dataset_path = Path(tmpdir) / "Dataset"
             if self.per_channel:
                 for i, channel in enumerate(tensor):
-                    image = data_to_image(channel.unsqueeze(0).numpy(), cache_attribute)
+                    image = data_to_image(channel.unsqueeze(0), cache_attribute)
                     (dataset_path / f"P{i:03d}").mkdir(parents=True, exist_ok=True)
                     sitk.WriteImage(image, str(dataset_path / f"P{i:03d}" / "Volume.mha"))
             else:
-                image = data_to_image(tensor.numpy(), cache_attribute)
+                image = data_to_image(tensor, cache_attribute)
 
                 (dataset_path / "P000").mkdir(parents=True, exist_ok=True)
                 sitk.WriteImage(image, str(dataset_path / "P000" / "Volume.mha"))
@@ -1153,7 +1193,7 @@ class Crop(TransformInverse):
                 origin[-dim - 1] += box[dim][0] * cache_attribute.get_np_array("Spacing")[-dim - 1]
             cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
 
-        image = data_to_image(tensor.numpy(), cache_attribute)
+        image = data_to_image(tensor, cache_attribute)
         result = crop_with_mask(image, box)
         data, _ = image_to_data(result)
         return torch.from_numpy(data)

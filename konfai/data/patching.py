@@ -129,7 +129,6 @@ class Accumulator:
         patch_combine: PathCombine | None = None,
         batch: bool = True,
     ) -> None:
-        self._layer_accumulator: list[torch.Tensor | None] = [None] * len(patch_slices)
         self.patch_slices: list[tuple[slice, ...]] = []
 
         if patch_size is not None and not all(p == 0 for p in patch_size):
@@ -145,68 +144,85 @@ class Accumulator:
         self.patch_size = patch_size
         self.patch_combine = patch_combine
         self.batch = batch
+        self._n = 2 if batch else 1
+        self._count = len(patch_slices)
         self._filled = 0
+        self._done = [False] * self._count
+        # Patches are blended into these running buffers as they arrive (see add_layer), instead of
+        # being kept until assembly: holding every patch of a large multi-class case (e.g. ~70 patches
+        # of a 122-channel whole-body segmentation ≈ tens of GB) was the dominant reassembly RAM cost.
+        self._result: torch.Tensor | None = None
+        self._weight_sum: torch.Tensor | None = None
+        self._weight_patch: torch.Tensor | None = None
 
     def add_layer(self, index: int, layer: torch.Tensor) -> None:
-        if self._layer_accumulator[index] is None:
-            self._filled += 1
-        self._layer_accumulator[index] = layer
+        # Blend each patch straight into the running accumulator and drop the patch, rather than
+        # storing all patches for a single assemble() at the end. The overlap blend is a weighted sum,
+        # so accumulating incrementally is equivalent; re-adding an index is a no-op (last-write wins is
+        # not possible once blended, and the prediction pipeline adds each patch exactly once).
+        if self._done[index]:
+            return
+        n = self._n
+        if self._result is None:
+            # Allocate to the ACTUAL volume extent (self.shape), not the patch-size-extended grid. The
+            # last patch of each axis is padded up to patch_size for the model, but that padded tail lies
+            # OUTSIDE the volume; blending it would over-allocate the accumulator by up to
+            # (patch_size - overlap) per axis (then get cropped away). We crop each patch to its in-volume
+            # part at blend time instead, so nothing outside the volume is ever allocated.
+            self._result = torch.zeros(list(layer.shape[:n]) + list(self.shape), dtype=layer.dtype, device=layer.device)
+            if self.patch_combine is not None:
+                # Match the result dtype so the final ``result / weight_sum`` does not promote the whole
+                # (channels x volume) accumulator to float32.
+                self._weight_sum = torch.zeros(list(self.shape), dtype=layer.dtype, device=layer.device)
+        patch_slice = self.patch_slices[index]
+        data = layer
+        for dim, s in enumerate(patch_slice):
+            if s.stop - s.start == 1:
+                data = data.unsqueeze(dim=dim + n)
+        # Clamp each spatial destination to the volume, and crop the patch (and its weight window) to the
+        # matching in-volume extent so the padded tail of border patches is discarded, not stored.
+        dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
+        crop = tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])
+        slices_dest = tuple([slice(self._result.shape[i]) for i in range(n)] + dest)
+        # Overlap blending weights each patch (edge bands < 1 so interior overlaps sum to unity).
+        # A voxel covered by fewer patches (a volume border without whole-image padding) would sum
+        # to < 1 and come out darkened (x0.5 edges, x0.25 corners), so divide by the accumulated weight.
+        if self.patch_combine is not None and self._weight_sum is not None:
+            self._result[slices_dest] += self.patch_combine(data)[crop]
+            if self._weight_patch is None:
+                self._weight_patch = self.patch_combine(torch.ones_like(data))[(0,) * n]
+            self._weight_sum[tuple(dest)] += self._weight_patch[crop[n:]]
+        else:
+            self._result[slices_dest] = data[crop]
+        self._done[index] = True
+        self._filled += 1
 
     def is_full(self) -> bool:
         # O(1): a running counter avoids re-scanning every slot after each added patch
         # (the completion check ran once per patch, i.e. O(P^2) per case).
-        return self._filled == len(self.patch_slices)
+        return self._filled == self._count
 
     def assemble(self) -> torch.Tensor:
-        n = 2 if self.batch else 1
-        reference = next((layer for layer in self._layer_accumulator if layer is not None), None)
-        if reference is None:
+        if self._result is None:
             raise PatchError(
                 "Accumulator.assemble() was called before any patch was added.",
-                f"Expected up to {len(self.patch_slices)} patch(es) via add_layer() before assembling.",
+                f"Expected up to {self._count} patch(es) via add_layer() before assembling.",
                 "Add at least one patch (and check is_full()) before calling assemble().",
             )
-        result = torch.zeros(
-            (list(reference.shape[:n]) + list(max([[v.stop for v in patch] for patch in self.patch_slices]))),
-            dtype=reference.dtype,
-            device=reference.device,
-        )
-        # Overlap blending weights each patch (edge bands < 1 so interior overlaps sum to unity).
-        # A voxel covered by fewer patches (a volume border without whole-image padding) would sum
-        # to < 1 and come out darkened (x0.5 edges, x0.25 corners), so divide by the accumulated
-        # weight. The weight map is identical for every patch and constant across batch/channels, so
-        # it is computed once and accumulated spatially only; with padding weight_sum is ~1 and the
-        # division is a near no-op.
-        combine = self.patch_combine
-        # Match the result dtype so the final ``result / weight_sum`` does not promote the whole
-        # (channels x volume) accumulator to float32 — a default float32 weight_sum silently doubled the
-        # peak memory of large multi-class reassemblies (e.g. a 118-class whole-body segmentation).
-        weight_sum = (
-            torch.zeros(result.shape[n:], dtype=result.dtype, device=result.device)
-            if combine is not None
-            else torch.empty(0)
-        )
-        weight_patch: torch.Tensor | None = None
-        for patch_slice, data in zip(self.patch_slices, self._layer_accumulator, strict=False):
-            if data is not None:
-                slices_dest = tuple([slice(result.shape[i]) for i in range(n)] + list(patch_slice))
+        result = self._result
+        # With padding weight_sum is ~1 and the division is a near no-op; the clamp guards borders
+        # that no patch (fully) covered. In-place so we do not materialise a second
+        # (channels x volume) tensor; weight_sum already matches result.dtype (fp16), so the division
+        # stays in fp16 with no float32 promotion (same values as the out-of-place form).
+        if self.patch_combine is not None and self._weight_sum is not None:
+            result.div_(self._weight_sum.clamp(min=1e-8))
+        # No final crop: patches are cropped to the volume at blend time, so result is already self.shape.
 
-                for dim, s in enumerate(patch_slice):
-                    if s.stop - s.start == 1:
-                        data = data.unsqueeze(dim=dim + n)
-                if combine is not None:
-                    result[slices_dest] += combine(data)
-                    if weight_patch is None:
-                        weight_patch = combine(torch.ones_like(data))[(0,) * n]
-                    weight_sum[patch_slice] += weight_patch
-                else:
-                    result[slices_dest] = data
-        if combine is not None:
-            result = result / weight_sum.clamp(min=1e-8)
-        result = result[tuple([slice(None, None)] + [slice(0, s) for s in self.shape])]
-
-        self._layer_accumulator.clear()
+        self._result = None
+        self._weight_sum = None
+        self._weight_patch = None
         self._filled = 0
+        self._done = [False] * self._count
         return result
 
 
