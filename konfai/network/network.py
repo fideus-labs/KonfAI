@@ -1202,6 +1202,10 @@ class Network(ModuleArgsDict, ABC):
                             self.patch.patch_combine,
                         )
                     accumulators[buffer[0][0]].add_layer(i, buffer[0][1])
+                # The leftover entry must not leak into the next patch iteration: the name-transition
+                # branch above would re-add patch i's end-module output at index i+1, and Accumulator
+                # blends incrementally so a spurious first add can no longer be overwritten.
+                buffer.clear()
             for name, accumulator in accumulators.items():
                 yield name, accumulator.assemble()
         else:

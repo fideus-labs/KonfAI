@@ -363,3 +363,30 @@ def test_network_criterion_loader_resets_scheduler_state(monkeypatch: pytest.Mon
     assert attr.isTorchCriterion is True
     assert len(attr.schedulers) == 1
     assert attr.schedulers == first_schedulers
+
+
+# --------------------------------------------------------------------------------------
+# Model-level patching (Network.patch): each patch must land at its own index
+# --------------------------------------------------------------------------------------
+
+
+def test_model_patch_reassembles_each_patch_with_its_own_prediction() -> None:
+    # Regression: the per-patch buffer leaked its end-module output into the next iteration, where the
+    # name-transition branch re-added it at index i+1. The incremental-blend Accumulator ignores
+    # re-added indices (a blended patch cannot be overwritten), so every slot > 0 silently received the
+    # PREVIOUS patch's prediction: identity over [0..7] with patch 4 reassembled as [0,1,2,3,0,1,2,3].
+    from konfai.data.patching import ModelPatch
+
+    class _PatchNet(Network):
+        def __init__(self) -> None:
+            super().__init__(patch=ModelPatch(patch_size=[4]))
+            self.add_module("Body", torch.nn.Identity())
+            self.add_module("Head", torch.nn.Identity())
+
+    net = _PatchNet()
+    net._modulesArgs["Head"]._isEnd = True
+
+    x = torch.arange(8, dtype=torch.float32).reshape(1, 1, 8)
+    outputs = dict(net.named_forward(x))
+
+    assert torch.equal(outputs["Head"], x)
