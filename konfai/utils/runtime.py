@@ -726,6 +726,10 @@ def execute_distributed_object(
                 if world_size == 0:
                     world_size = cpu_workers
                 configured_object.setup(world_size)
+                # Share tensors through /dev/shm files instead of one file descriptor per tensor:
+                # spawning a worker that pickles a loaded model can otherwise exhaust the process
+                # open-file limit ("Too many open files"), e.g. under Slicer's embedded Python.
+                mp.set_sharing_strategy("file_system")
                 with TensorBoard(configured_object.name):
                     mp.spawn(configured_object, nprocs=world_size)
     finally:
