@@ -125,7 +125,9 @@ class Clip(Transform):
             elif self.min_value.startswith("percentile:"):
                 try:
                     percentile = float(self.min_value.split(":")[1])
-                    min_value = np.percentile(tensor_masked, percentile)
+                    # ``np.percentile`` cannot coerce a CUDA tensor (finalize slots may hand Clip a
+                    # GPU-resident volume); ``.cpu()`` is a no-op view on a host tensor.
+                    min_value = np.percentile(tensor_masked.detach().cpu(), percentile)
                 except (IndexError, ValueError) as exc:
                     raise ValueError(
                         f"Invalid format for min_value: '{self.min_value}'. Expected 'percentile:<float>'"
@@ -144,7 +146,7 @@ class Clip(Transform):
             elif self.max_value.startswith("percentile:"):
                 try:
                     percentile = float(self.max_value.split(":")[1])
-                    max_value = np.percentile(tensor_masked, percentile)
+                    max_value = np.percentile(tensor_masked.detach().cpu(), percentile)
                 except (IndexError, ValueError) as exc:
                     raise ValueError(
                         f"Invalid format for max_value: '{self.max_value}'. Expected 'percentile:<float>'"

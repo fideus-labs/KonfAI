@@ -431,3 +431,14 @@ def test_finalize_transforms_accept_a_cuda_resident_volume() -> None:
     attr = Attribute()
     Statistics()("case", volume, attr)  # writes ImageMin/Max/Mean/Std from CUDA tensors
     assert "ImageMin" in attr
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="cross-device finalize only applies on CUDA")
+def test_clip_percentile_bounds_accept_a_cuda_resident_volume() -> None:
+    # ``np.percentile`` cannot coerce a CUDA tensor; percentile bounds must sample from a host view
+    # while the clip itself stays on-device.
+    tensor = torch.arange(0, 100, dtype=torch.float16, device="cuda")
+    out = Clip(min_value="percentile:10", max_value="percentile:90")("case", tensor, Attribute())
+    assert out.device.type == "cuda"
+    assert float(out.min()) == pytest.approx(9.9, abs=0.1)
+    assert float(out.max()) == pytest.approx(89.1, abs=0.1)
