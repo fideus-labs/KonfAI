@@ -121,6 +121,7 @@ class ImpactRegKonfAIApp:
         cpu: int | None,
         quiet: bool,
         tta: int = 0,
+        config_overrides: list[str] | None = None,
     ) -> Path:
         """Run one preset app on the fixed/moving pair (+ masks); return the displacement-field path.
 
@@ -147,6 +148,9 @@ class ImpactRegKonfAIApp:
         ]
         if tta:
             command += ["--tta", str(tta)]
+        # Preset-parameter tuning: forwarded verbatim to `konfai-apps infer --set` (applies to every preset).
+        for override in config_overrides or []:
+            command += ["--set", override]
         if gpu:
             command += ["--gpu", *(str(g) for g in gpu)]
         elif cpu is not None:
@@ -173,6 +177,7 @@ class ImpactRegKonfAIApp:
         quiet: bool = False,
         tta: int = 0,
         keep_dvf: bool = False,
+        config_overrides: list[str] | None = None,
     ) -> None:
         """Register each fixed/moving pair with the selected presets and ensemble their DVFs.
 
@@ -198,7 +203,17 @@ class ImpactRegKonfAIApp:
                 dvf_paths = []
                 for preset in presets:
                     dvf = self._infer_preset(
-                        preset, fixed_image, moving_image, fixed_mask, moving_mask, work, gpu, cpu, quiet, tta
+                        preset,
+                        fixed_image,
+                        moving_image,
+                        fixed_mask,
+                        moving_mask,
+                        work,
+                        gpu,
+                        cpu,
+                        quiet,
+                        tta,
+                        config_overrides,
                     )
                     if keep_dvf:
                         member = case_out / _ENSEMBLE_DIR / f"{preset}.mha"
