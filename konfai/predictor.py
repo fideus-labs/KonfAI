@@ -398,7 +398,18 @@ class OutSameAsGroupDataset(OutputDataset):
                 layer = self._offload_to_cpu(layer)
         elif str(layer.device) != str(target):
             layer = layer.to(target)
-        accumulator.add_layer(index_patch, layer)
+        try:
+            accumulator.add_layer(index_patch, layer)
+        except torch.cuda.OutOfMemoryError:
+            # The gate samples free VRAM once per case: another process can reclaim it before this
+            # volume-sized first allocation lands. Nothing is blended yet, so fall back to the
+            # memory-safe CPU blend for the rest of the case; ``get_output`` reconciles augmentations
+            # already blended on the GPU. A mid-blend OOM (buffer already resident) stays fatal.
+            if layer.device.type == "cpu" or not accumulator.is_empty():
+                raise
+            self._accum_device[index_dataset] = torch.device("cpu")
+            torch.cuda.empty_cache()
+            accumulator.add_layer(index_patch, self._offload_to_cpu(layer))
 
     def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
         super().setup(datasets, groups)

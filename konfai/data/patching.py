@@ -203,6 +203,10 @@ class Accumulator:
         self._done[index] = True
         self._filled += 1
 
+    def is_empty(self) -> bool:
+        """True until the first patch has been blended in (no volume-sized buffer allocated yet)."""
+        return self._result is None
+
     def is_full(self) -> bool:
         # O(1): a running counter avoids re-scanning every slot after each added patch
         # (the completion check ran once per patch, i.e. O(P^2) per case).
