@@ -48,6 +48,10 @@ jobs:
             pkg: "konfai-apps"
           - name: impact-synth-konfai
             pkg: "apps/impact_synth"
+          - name: impact-seg-konfai
+            pkg: "apps/impact_seg"
+          - name: impact-reg-konfai
+            pkg: "apps/impact_reg"
           - name: mrsegmentator-konfai
             pkg: "apps/mrsegmentator"
           - name: totalsegmentator-konfai
