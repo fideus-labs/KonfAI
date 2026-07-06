@@ -390,3 +390,25 @@ def test_model_patch_reassembles_each_patch_with_its_own_prediction() -> None:
     outputs = dict(net.named_forward(x))
 
     assert torch.equal(outputs["Head"], x)
+
+
+def test_model_patch_deep_supervision_heads_each_reassemble_their_own_patches() -> None:
+    # Two end modules (deep supervision): the mid-stream name-transition add and the trailing add must
+    # each receive the CURRENT patch's output for their own module, across every patch iteration.
+    from konfai.data.patching import ModelPatch
+
+    class _DeepNet(Network):
+        def __init__(self) -> None:
+            super().__init__(patch=ModelPatch(patch_size=[4]))
+            self.add_module("Aux", torch.nn.Identity())
+            self.add_module("Head", _MulConst(2.0))
+
+    net = _DeepNet()
+    net._modulesArgs["Aux"]._isEnd = True
+    net._modulesArgs["Head"]._isEnd = True
+
+    x = torch.arange(8, dtype=torch.float32).reshape(1, 1, 8)
+    outputs = dict(net.named_forward(x))
+
+    assert torch.equal(outputs["Aux"], x)
+    assert torch.equal(outputs["Head"], x * 2.0)

@@ -309,3 +309,121 @@ def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_out
     assert model_composite.eval_calls == 1
     assert outputs_dataset["out_a"].writes == 1
     assert outputs_dataset["out_b"].writes == 1
+
+
+def test_gate_approved_blend_falls_back_to_cpu_when_the_allocation_fails() -> None:
+    # The gate samples free VRAM once per case; another process can reclaim it before the
+    # volume-sized first allocation lands. The blend must retry on the memory-safe CPU path instead
+    # of killing the run (``get_output`` reconciles mixed devices afterwards).
+    class DummyGroupTransform:
+        patch_transforms: ClassVar[list[object]] = []
+
+    class DummyDatasetIter:
+        groups_src: ClassVar[dict[str, dict[str, object]]] = {"src": {"dest": DummyGroupTransform()}}
+
+    class OOMThenRecordAccumulator:
+        def __init__(self) -> None:
+            self.devices: list[str] = []
+
+        def is_empty(self) -> bool:
+            return True
+
+        def add_layer(self, index: int, layer: torch.Tensor) -> None:
+            if not self.devices and layer.device.type != "cpu":
+                self.devices.append("oom")
+                raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+            self.devices.append(layer.device.type)
+
+    class FakeCudaTensor:
+        def __init__(self) -> None:
+            self.device = torch.device("cuda:0")
+
+        def numel(self) -> int:
+            return 4
+
+        def element_size(self) -> int:
+            return 4
+
+        def detach(self):
+            return self
+
+        def cpu(self) -> torch.Tensor:
+            return torch.ones(1, 2, 2)
+
+    output_dataset = OutSameAsGroupDataset(
+        same_as_group="src:dest",
+        dataset_filename="./Output:mha",
+        group="out",
+        patch_combine=None,
+        reduction="Mean",
+    )
+    accumulator = OOMThenRecordAccumulator()
+    output_dataset.output_layer_accumulator[0] = {0: cast(Any, accumulator)}
+    output_dataset.attributes[0] = {0: {0: Attribute()}}
+    output_dataset.names[0] = "CASE_000"
+    output_dataset._accum_device[0] = torch.device("cuda", 0)
+
+    output_dataset.add_layer(
+        index_dataset=0,
+        index_augmentation=0,
+        index_patch=0,
+        layer=cast(torch.Tensor, FakeCudaTensor()),
+        dataset=cast(DatasetIter, DummyDatasetIter()),
+        attribute=Attribute(),
+    )
+
+    assert accumulator.devices == ["oom", "cpu"]
+    assert output_dataset._accum_device[0].type == "cpu"
+
+
+def test_mid_blend_oom_stays_fatal() -> None:
+    # Only the volume-sized FIRST allocation may retry on CPU: once patches are blended into a
+    # GPU-resident buffer, a CPU retry would mix devices inside one accumulator — re-raise instead.
+    class DummyGroupTransform:
+        patch_transforms: ClassVar[list[object]] = []
+
+    class DummyDatasetIter:
+        groups_src: ClassVar[dict[str, dict[str, object]]] = {"src": {"dest": DummyGroupTransform()}}
+
+    class MidBlendOOMAccumulator:
+        @staticmethod
+        def is_empty() -> bool:
+            return False  # a previous patch is already blended in
+
+        @staticmethod
+        def add_layer(index: int, layer: torch.Tensor) -> None:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    class FakeCudaTensor:
+        device = torch.device("cuda:0")
+
+        @staticmethod
+        def numel() -> int:
+            return 4
+
+        @staticmethod
+        def element_size() -> int:
+            return 4
+
+    output_dataset = OutSameAsGroupDataset(
+        same_as_group="src:dest",
+        dataset_filename="./Output:mha",
+        group="out",
+        patch_combine=None,
+        reduction="Mean",
+    )
+    output_dataset.output_layer_accumulator[0] = {0: cast(Any, MidBlendOOMAccumulator())}
+    output_dataset.attributes[0] = {0: {0: Attribute()}}
+    output_dataset.names[0] = "CASE_000"
+    output_dataset._accum_device[0] = torch.device("cuda", 0)
+
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        output_dataset.add_layer(
+            index_dataset=0,
+            index_augmentation=0,
+            index_patch=1,
+            layer=cast(torch.Tensor, FakeCudaTensor()),
+            dataset=cast(DatasetIter, DummyDatasetIter()),
+            attribute=Attribute(),
+        )
+    assert output_dataset._accum_device[0].type == "cuda"

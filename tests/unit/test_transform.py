@@ -428,6 +428,12 @@ def test_finalize_transforms_accept_a_cuda_resident_volume() -> None:
     denormalized = Standardize().inverse("case", volume.clone(), stats)
     assert denormalized.device.type == "cuda"
 
+    stats_forward = Attribute()
+    stats_forward["Mean"] = torch.tensor([0.5])
+    stats_forward["Std"] = torch.tensor([0.25])
+    standardized = Standardize()("case", volume.clone(), stats_forward)  # get_tensor stats follow the device
+    assert standardized.device.type == "cuda"
+
     attr = Attribute()
     Statistics()("case", volume, attr)  # writes ImageMin/Max/Mean/Std from CUDA tensors
     assert "ImageMin" in attr

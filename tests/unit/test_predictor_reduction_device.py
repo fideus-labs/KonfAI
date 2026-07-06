@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import cast
+
 import pytest
 import torch
 from konfai.predictor import OutSameAsGroupDataset
@@ -97,9 +99,9 @@ def test_accumulate_device_falls_back_when_free_vram_is_low(monkeypatch: pytest.
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda *a, **k: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (1024, 25 * 1024**3))  # ~1 KiB free
     assert ds._accumulate_device(patch, accumulator).type == "cpu"
-# with plenty of free VRAM the very same accumulator blends on the GPU
+    # with plenty of free VRAM the very same accumulator blends on the GPU
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (25 * 1024**3, 25 * 1024**3))
-        assert ds._accumulate_device(patch, accumulator).type == "cuda"
+    assert ds._accumulate_device(patch, accumulator).type == "cuda"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU accumulation only applies on CUDA")
@@ -115,3 +117,26 @@ def test_accumulate_device_budgets_every_tta_augmentation(monkeypatch: pytest.Mo
     # T=1: 2 GiB x 2 < 12 GiB x 0.56 -> GPU; T=3: 6 GiB x 2 >= 6.72 GiB -> whole case on CPU
     assert _dataset(0, nb_data_augmentation=1)._accumulate_device(patch, _FakeAccumulator([voxels])).type == "cuda"
     assert _dataset(0, nb_data_augmentation=3)._accumulate_device(patch, _FakeAccumulator([voxels])).type == "cpu"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU reduction only applies on CUDA")
+def test_reduction_device_budgets_every_parked_chunk() -> None:
+    # A combine:Concat ensemble parks M transformed chunks on the reduce device before the stack: the
+    # budget must scale with the chunk count, not assume a single resident chunk.
+    ds = _dataset(0)
+    free, _ = torch.cuda.mem_get_info(0)
+
+    class _Chunk:
+        def __init__(self, numel: int) -> None:
+            self._numel = numel
+
+        def numel(self) -> int:
+            return self._numel
+
+        def element_size(self) -> int:
+            return 2
+
+    fits_alone = int(free / 8)  # (2*1+1) x chunk fits free VRAM...
+    assert ds._reduction_device(cast(torch.Tensor, _Chunk(fits_alone)), 1).type == "cuda"
+    # ...but (2*8+1) x chunk does not: eight parked chunks must fall back to the CPU reduction.
+    assert ds._reduction_device(cast(torch.Tensor, _Chunk(fits_alone)), 8).type == "cpu"
