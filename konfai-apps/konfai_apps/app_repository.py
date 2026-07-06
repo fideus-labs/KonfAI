@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import importlib.metadata
+import importlib.util
+import inspect
 import json
 import os
 import re
@@ -29,17 +31,57 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal, get_args, get_origin
 
 import numpy as np
 import requests
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
+from konfai.utils.config import Choices, Range
 from konfai.utils.errors import AppMetadataError, AppRepositoryError, ConfigError
 from konfai.utils.utils import is_windows_absolute_path
 from packaging.requirements import InvalidRequirement, Requirement
 from ruamel.yaml import YAML
+
+
+def _plain(value: Any) -> Any:
+    """ruamel scalars/containers -> plain python, recursively (so the returned tree is JSON-clean)."""
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _constraint_of_annotation(annotation: Any) -> dict[str, Any] | None:
+    """UI constraint for one type: ``Literal`` -> ``{choices}``, ``Annotated[.., Range|Choices]`` ->
+    ``{min,max}`` / ``{choices}``, ``dict[str, <class>]`` -> ``{"*": <class constraints>}``. Else ``None``."""
+    if get_origin(annotation) is Literal:
+        return {"choices": list(get_args(annotation))}
+    for meta in getattr(annotation, "__metadata__", ()):  # Annotated[T, *metas]
+        if isinstance(meta, Range):
+            return {"min": meta.min, "max": meta.max}
+        if isinstance(meta, Choices):
+            return {"choices": meta.resolve()}
+    if get_origin(annotation) is dict:
+        args = get_args(annotation)
+        if len(args) == 2 and inspect.isclass(args[1]):
+            inner = _constraints_of_class(args[1])
+            return {"*": inner} if inner else None
+    return None
+
+
+def _constraints_of_class(cls: type) -> dict[str, Any]:
+    """Constraints of every configurable arg of ``cls.__init__`` (recursing into nested ``@config`` classes)."""
+    out: dict[str, Any] = {}
+    for name, param in inspect.signature(cls.__init__).parameters.items():
+        if name == "self":
+            continue
+        constraint = _constraint_of_annotation(param.annotation)
+        if constraint:
+            out[name] = constraint
+    return out
 
 
 def get_available_apps_on_remote_server(remote_server: RemoteServer) -> list[str]:
@@ -501,6 +543,170 @@ class LocalAppRepository(AppRepositoryInfo):
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
 
+    def _apply_config_overrides(self, inference_file_path: str, overrides: list[str] | None) -> None:
+        """Apply ``--set NAME=VALUE`` overrides to the resolved prediction config before it runs.
+
+        A bare ``NAME`` is a **model parameter** (the common case): it resolves inside
+        ``Predictor.Model.<ClassName>``, so ``--set iterations=300`` tunes the model directly. A dotted
+        ``NAME`` (e.g. ``Predictor.Dataset.batch_size``) is a full path from the config root, for any other
+        key. Either way the key must already exist — the resolved config lists every parameter, so a typo
+        raises here instead of silently adding a dead key. ``VALUE`` is parsed as YAML: ``300`` is an int,
+        ``2.0`` a float, ``true`` a bool, ``[1, 2, 3]`` a list, and ``L1`` a string (KonfAI's literal ``None``
+        string is preserved). This is the generic override the UI (SlicerKonfAI) drives to tune a preset.
+        """
+        if not overrides:
+            return
+        yaml = YAML()
+        value_parser = YAML(typ="safe")
+        with open(inference_file_path) as file:
+            data = yaml.load(file)
+        _, model_params = self._model_param_block(data)
+
+        for override in overrides:
+            key_path, sep, raw_value = override.partition("=")
+            if not sep:
+                raise AppRepositoryError(f"Invalid --set '{override}': expected NAME=VALUE (e.g. iterations=300).")
+            key_path = key_path.strip()
+            if not key_path:
+                raise AppRepositoryError(f"Invalid --set '{override}': empty parameter name.")
+            if "." in key_path:
+                # Full dotted path from the config root (any key, for advanced overrides).
+                keys = [key for key in key_path.split(".") if key]
+                node = data
+                for key in keys[:-1]:
+                    if not isinstance(node, dict) or key not in node:
+                        raise AppRepositoryError(
+                            f"Cannot apply --set '{override}': config path '{key_path}' has no key '{key}'."
+                        )
+                    node = node[key]
+                target, leaf = node, keys[-1]
+            else:
+                # A bare name is a model parameter: resolve it in Predictor.Model.<ClassName>.
+                if model_params is None:
+                    raise AppRepositoryError(
+                        f"Cannot apply --set '{override}': the config has no model parameter block "
+                        "(use a full dotted path for non-model keys)."
+                    )
+                target, leaf = model_params, key_path
+            if not isinstance(target, dict) or leaf not in target:
+                raise AppRepositoryError(
+                    f"Cannot apply --set '{override}': parameter '{key_path}' does not exist in the config."
+                )
+            target[leaf] = value_parser.load(raw_value)
+
+        with open(inference_file_path, "w") as file:
+            yaml.dump(data, file)
+
+    def get_parameters(self, prediction_file: str = "Prediction.yml") -> dict[str, Any]:
+        """The model's configurable parameters + their constraints — the single reader a UI needs.
+
+        Returns ``{"values": <nested dict>, "constraints": <parallel sparse dict>}``. ``values`` is the model
+        block of the resolved config (scalars / lists / nested dicts / dict-of-objects) minus structural
+        wiring — a clean tree the CLI edits directly via ``--set``. ``constraints`` is read from the model's
+        TYPES: ``Literal`` / ``Annotated[.., Choices]`` -> ``{"choices"}`` (a ``Choices`` resolver is run by
+        the app, so nothing is fetched here), ``Annotated[.., Range]`` -> ``{"min","max"}``. It mirrors
+        ``values``; ``"*"`` holds the per-entry constraints of a ``dict[str, <@config>]``. Interpreting the
+        structure (widgets, add/remove) is the UI's job; the meaning of any field is never assumed here.
+        """
+        filenames = self._all_repo_filenames()
+        config_filename = self._find_repo_filename(prediction_file, filenames)
+        if config_filename is None:
+            return {"values": {}, "constraints": {}}
+        with open(self._download(config_filename), encoding="utf-8") as file:
+            data = YAML().load(file)
+        _, params = self._model_param_block(data)
+        structural = {"outputs_criterions", "optimizer", "schedulers", "engine", "parameter_maps", "classpath"}
+        values = {name: _plain(value) for name, value in (params or {}).items() if name not in structural}
+
+        constraints: dict[str, Any] = {}
+        model = ((data or {}).get("Predictor") or {}).get("Model") or {}
+        classpath = model.get("classpath") if isinstance(model, dict) else None
+        if isinstance(classpath, str) and ":" in classpath:
+            stem, class_name = (part.strip() for part in classpath.split(":", 1))
+            try:
+                constraints = _constraints_of_class(self._import_model_class(stem, class_name, filenames))
+            except Exception:  # constraints are an optional UI hint — a load/inspect failure just omits them
+                constraints = {}
+        return {"values": values, "constraints": constraints}
+
+    def _import_model_class(self, module_stem: str, class_name: str, filenames: list[str]) -> type:
+        """Import the app's model module (the ``classpath`` stem) and return the CLASS without instantiating
+        it — only its typed signature is read. The bundle dir is on ``sys.path`` so its sibling imports load."""
+        path = Path(self._download(self._require_repo_filename(f"{module_stem}.py", filenames)))
+        sys.path.insert(0, str(path.parent))
+        try:
+            spec = importlib.util.spec_from_file_location(f"_konfai_app_model_{module_stem}", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return getattr(module, class_name)
+        finally:
+            if str(path.parent) in sys.path:
+                sys.path.remove(str(path.parent))
+
+    @staticmethod
+    def _model_param_block(data: Any) -> tuple[str | None, Any]:
+        """Return ``(class_name, params_mapping)`` for ``Predictor.Model.<ClassName>``, or ``(None, None)``.
+
+        The model's constructor arguments live under a single ``<ClassName>`` mapping next to ``classpath``;
+        this is both the source of the tunable list and the target a bare ``--set NAME=VALUE`` resolves into.
+        """
+        model = ((data or {}).get("Predictor") or {}).get("Model") or {}
+        for key, value in model.items():
+            if key != "classpath" and isinstance(value, dict):
+                return key, value
+        return None, None
+
+    def save_default_parameters(self, overrides: list[str] | None, prediction_file: str = "Prediction.yml") -> None:
+        """Persist ``--set`` overrides into the app config so they become its defaults for the next run.
+
+        Only local-directory apps support this (their config file is edited in place). An app resolved from a
+        shared source such as the Hugging Face cache raises, because edits there are overwritten on refresh
+        and shared across every user of the cache — copy it into a local folder to keep tuned defaults.
+        """
+        raise AppRepositoryError(
+            f"Saving parameters as defaults is only supported for local-directory apps. App '{self._app_name}' "
+            "is resolved from a shared source (e.g. the Hugging Face cache), where edits are not durable — "
+            "copy it into a local folder and run against that to keep tuned defaults."
+        )
+
+    def export_app(
+        self,
+        path: Path,
+        display_name: str | None = None,
+        config_overrides: list[str] | None = None,
+        prediction_file: str = "Prediction.yml",
+    ) -> None:
+        """Materialise this app into the local folder ``path`` as a self-contained, editable copy.
+
+        Every app file (config, code, checkpoints, ``app.json``, ``requirements.txt``) is copied into
+        ``path``, so it can be reopened as a :class:`LocalAppRepositoryFromDirectory`. With
+        ``config_overrides`` the tuned ``--set`` values are written into the copied ``prediction_file`` so the
+        new local app runs with them as its defaults — the inference-side "save as a local app" that mirrors
+        :meth:`install_fine_tune`. ``display_name`` renames the copy in ``app.json``.
+        """
+        filenames = self._get_filenames()
+        if not is_app_repo(filenames):
+            raise AppRepositoryError(f"'{self._app_name}' is not a valid KonfAI app (no app.json); cannot export.")
+        path.mkdir(parents=True, exist_ok=True)
+        for filename in filenames:
+            dest = path / filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self._download(filename), dest)
+
+        if display_name is not None:
+            metadata_file = path / "app.json"
+            with open(metadata_file, encoding="utf-8") as file:
+                metadata = json.load(file)
+            metadata["display_name"] = display_name
+            with open(metadata_file, "w", encoding="utf-8") as file:
+                json.dump(metadata, file, indent=2, ensure_ascii=False)
+
+        if config_overrides:
+            config = path / prediction_file
+            if not config.is_file():
+                raise AppRepositoryError(f"Cannot apply tuned defaults: '{prediction_file}' not found in the export.")
+            self._apply_config_overrides(str(config), config_overrides)
+
     @abstractmethod
     def _get_filenames(self) -> list[str]:
         raise NotImplementedError()
@@ -674,6 +880,7 @@ class LocalAppRepository(AppRepositoryInfo):
         available_vram: float | None,
         forced_patch_size: list[int] | None = None,
         forced_batch_size: int | None = None,
+        config_overrides: list[str] | None = None,
     ) -> list[Path]:
         if len(name_of_models) == 0 and number_of_model == 0:
             number_of_model = len(self._checkpoints_name)
@@ -704,6 +911,8 @@ class LocalAppRepository(AppRepositoryInfo):
             forced_patch_size if forced_patch_size is not None else plan_patch_size,
             forced_batch_size if forced_batch_size is not None else plan_batch_size,
         )
+        # Applied last, after the VRAM plan / patch-batch override, so an explicit --set always wins.
+        self._apply_config_overrides(prediction_file, config_overrides)
 
         return models_path
 
@@ -844,6 +1053,20 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
 
     def get_name(self) -> str:
         return str(self._app_directory / self._app_name)
+
+    def save_default_parameters(self, overrides: list[str] | None, prediction_file: str = "Prediction.yml") -> None:
+        """Edit the app-folder config in place so the tuned ``--set`` values become its defaults.
+
+        The config file lives in the app directory, so applying the overrides to it persists them: the next
+        run of this local app uses the tuned values as its defaults. ``overrides`` use the same
+        ``PATH=VALUE`` syntax as ``--set`` / :meth:`_apply_config_overrides`.
+        """
+        if not overrides:
+            return
+        config = self._app_directory / self._app_name / prediction_file
+        if not config.is_file():
+            raise AppRepositoryError(f"Cannot save defaults: '{prediction_file}' not found in app '{self._app_name}'.")
+        self._apply_config_overrides(str(config), overrides)
 
 
 class LocalAppRepositoryFromHF(LocalAppRepository):

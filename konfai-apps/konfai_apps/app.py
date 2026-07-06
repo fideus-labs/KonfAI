@@ -937,6 +937,7 @@ class KonfAIApp(AbstractKonfAIApp):
         mc: int = 0,
         patch_size: list[int] | None = None,
         batch_size: int | None = None,
+        config_overrides: list[str] | None = None,
         uncertainty: bool = False,
         prediction_file: str = "Prediction.yml",
         gpu: list[int] = cuda_visible_devices(),
@@ -977,6 +978,7 @@ class KonfAIApp(AbstractKonfAIApp):
             available_vram,
             forced_patch_size=patch_size,
             forced_batch_size=batch_size,
+            config_overrides=config_overrides,
         )
         from konfai.predictor import predict
 
@@ -1066,6 +1068,7 @@ class KonfAIApp(AbstractKonfAIApp):
         mc: int = 0,
         patch_size: list[int] | None = None,
         batch_size: int | None = None,
+        config_overrides: list[str] | None = None,
         prediction_file: str = "Prediction.yml",
         mask: list[list[Path]] | None = None,
         evaluation_file: str = "Evaluation.yml",
@@ -1101,6 +1104,7 @@ class KonfAIApp(AbstractKonfAIApp):
             mc=mc,
             patch_size=patch_size,
             batch_size=batch_size,
+            config_overrides=config_overrides,
             uncertainty=uncertainty,
             prediction_file=prediction_file,
             gpu=gpu,

@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from konfai.utils.errors import AppMetadataError
+from konfai.utils.errors import AppMetadataError, AppRepositoryError
 from konfai_apps import app_repository as app_repository_module
 
 
@@ -650,3 +650,200 @@ def test_install_requirements_skips_protected_and_non_pep508_lines(
     assert "torch==1.0.0" not in cmd
     assert "konfai==0.0.1" not in cmd
     assert not any(part.startswith(("-r", "--extra-index-url", "git+")) for part in cmd[4:])
+
+
+def _local_repo_with_config(tmp_path: Path, config: str) -> tuple[object, Path]:
+    app_root = tmp_path / "repo" / "demo_app"
+    app_root.mkdir(parents=True)
+    (app_root / "app.json").write_text(
+        json.dumps(
+            {"display_name": "Demo", "description": "Demo", "short_description": "Demo", "tta": 0, "mc_dropout": 0}
+        ),
+        encoding="utf-8",
+    )
+    prediction = app_root / "Prediction.yml"
+    prediction.write_text(config, encoding="utf-8")
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    return repo, prediction
+
+
+_CONFIG = (
+    "Predictor:\n"
+    "  Model:\n"
+    "    RegistrationNet:\n"
+    "      iterations: 150\n"
+    "      learning_rate: 0.2\n"
+    "      linear: true\n"
+    "      subset_features: []\n"
+)
+
+
+def test_apply_config_overrides_patches_typed_values(tmp_path: Path) -> None:
+    from ruamel.yaml import YAML
+
+    repo, prediction = _local_repo_with_config(tmp_path, _CONFIG)
+    repo._apply_config_overrides(
+        str(prediction),
+        [
+            "iterations=300",  # bare model-parameter name (the common form)
+            "Predictor.Model.RegistrationNet.learning_rate=0.05",  # full dotted path still works
+            "linear=false",
+            "subset_features=[0, 1, 2]",
+        ],
+    )
+    net = YAML().load(prediction.read_text())["Predictor"]["Model"]["RegistrationNet"]
+    assert net["iterations"] == 300 and isinstance(net["iterations"], int)
+    assert float(net["learning_rate"]) == 0.05
+    assert net["linear"] is False
+    assert list(net["subset_features"]) == [0, 1, 2]
+
+
+def test_apply_config_overrides_noop_when_empty(tmp_path: Path) -> None:
+    repo, prediction = _local_repo_with_config(tmp_path, _CONFIG)
+    before = prediction.read_text()
+    repo._apply_config_overrides(str(prediction), None)
+    repo._apply_config_overrides(str(prediction), [])
+    assert prediction.read_text() == before
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "does_not_exist=1",  # unknown bare model parameter
+        "Predictor.Model.RegistrationNet.does_not_exist=1",  # unknown leaf key (dotted)
+        "Predictor.Missing.iterations=1",  # unknown intermediate key (dotted)
+        "no_equals_sign",  # not NAME=VALUE
+    ],
+)
+def test_apply_config_overrides_rejects_bad_override(tmp_path: Path, override: str) -> None:
+    repo, prediction = _local_repo_with_config(tmp_path, _CONFIG)
+    with pytest.raises(AppRepositoryError):
+        repo._apply_config_overrides(str(prediction), [override])
+
+
+_MODEL_CONFIG = (
+    "Predictor:\n"
+    "  Model:\n"
+    "    classpath: Model:RegistrationNet\n"
+    "    RegistrationNet:\n"
+    "      iterations: 150\n"  # int -> tunable
+    "      learning_rate: 0.2\n"  # float -> tunable
+    "      linear: true\n"  # bool -> tunable
+    "      voxel_size: [3.0, 3.0, 3.0]\n"  # list[float] -> tunable
+    "      pca: [0]\n"  # list[int] -> tunable
+    "      subset_features: []\n"  # empty list -> tunable ("list"; compound name, not locked)
+    "      distance: [L1]\n"  # list[str] -> tunable
+    "      models: [repo:MIND.pt]\n"  # list[str] -> tunable (feature-model choice)
+    "      mode: bilinear\n"  # str -> tunable
+    "      num_channels: 1\n"  # int -> tunable (config exposes it; hardcode in Model.py to hide it)
+    "      channels: [1, 32, 64]\n"  # list[int] -> tunable (idem: hardcode the architecture to hide it)
+    "      layers_mask: [true, false]\n"  # list[bool] -> tunable (which model layers to use)
+    "      outputs_criterions: None\n"  # structural + KonfAI None string -> excluded
+    "      disabled_option: None\n"  # KonfAI None string -> excluded
+    "      optimizer:\n"  # structural nested mapping -> excluded
+    "        AdamW: {}\n"
+)
+
+
+# A typed model module: the constructor's annotations ARE the constraint declaration.
+# No `from __future__ import annotations` — get_parameters reads runtime annotation objects.
+_TYPED_MODEL_PY = (
+    "from typing import Annotated, Literal\n"
+    "from konfai.utils.config import Choices, Range\n"
+    "\n\n"
+    "class RegistrationNet:\n"
+    "    def __init__(\n"
+    "        self,\n"
+    "        mode: Literal['Static', 'Jacobian'] = 'Static',\n"
+    "        spatial_samples: Annotated[int, Range(0, 100000)] = 0,\n"
+    "        ref: Annotated[str, Choices(lambda: ['a:x.pt', 'b:y.pt'])] = '',\n"
+    "        note: str = '',\n"
+    "    ) -> None:\n"
+    "        pass\n"
+)
+
+_TYPED_MODEL_CONFIG = (
+    "Predictor:\n"
+    "  Model:\n"
+    "    classpath: Model:RegistrationNet\n"
+    "    RegistrationNet:\n"
+    "      mode: Jacobian\n"
+    "      spatial_samples: 2000\n"
+    "      ref: a:x.pt\n"
+    "      note: hello\n"
+)
+
+
+def test_get_parameters_values_are_the_clean_model_block(tmp_path: Path) -> None:
+    # `values` is the model block minus structural wiring — a JSON-clean tree the CLI edits via --set.
+    repo, _prediction = _local_repo_with_config(tmp_path, _MODEL_CONFIG)
+    result = repo.get_parameters()
+
+    values = result["values"]
+    assert values["iterations"] == 150 and isinstance(values["iterations"], int)
+    assert values["voxel_size"] == [3.0, 3.0, 3.0]  # nested list -> plain python
+    assert values["mode"] == "bilinear"
+    assert values["disabled_option"] == "None"  # generic: no value is filtered, only structural KEYS are
+    for structural in ("outputs_criterions", "optimizer"):
+        assert structural not in values
+    # No typed Model.py present -> constraints degrade to empty (an optional UI hint, never fatal).
+    assert result["constraints"] == {}
+
+
+def test_get_parameters_constraints_read_from_model_types(tmp_path: Path) -> None:
+    repo, prediction = _local_repo_with_config(tmp_path, _TYPED_MODEL_CONFIG)
+    (prediction.parent / "Model.py").write_text(_TYPED_MODEL_PY, encoding="utf-8")
+    result = repo.get_parameters()
+
+    assert result["values"] == {"mode": "Jacobian", "spatial_samples": 2000, "ref": "a:x.pt", "note": "hello"}
+    # Constraints come from the constructor TYPES: Literal -> choices, Range -> min/max, Choices resolver run
+    # by the app (so nothing is fetched here); an untyped field (`note`) simply carries no constraint.
+    assert result["constraints"] == {
+        "mode": {"choices": ["Static", "Jacobian"]},
+        "spatial_samples": {"min": 0, "max": 100000},
+        "ref": {"choices": ["a:x.pt", "b:y.pt"]},
+    }
+
+
+def test_save_default_parameters_persists_to_local_config(tmp_path: Path) -> None:
+    from ruamel.yaml import YAML
+
+    repo, prediction = _local_repo_with_config(tmp_path, _MODEL_CONFIG)
+    repo.save_default_parameters(["iterations=999"])  # bare model-parameter name
+    data = YAML().load(prediction.read_text())
+    assert data["Predictor"]["Model"]["RegistrationNet"]["iterations"] == 999  # persisted on disk
+
+
+def test_save_default_parameters_noop_when_empty(tmp_path: Path) -> None:
+    repo, prediction = _local_repo_with_config(tmp_path, _MODEL_CONFIG)
+    before = prediction.read_text()
+    repo.save_default_parameters(None)
+    repo.save_default_parameters([])
+    assert prediction.read_text() == before
+
+
+def test_save_default_parameters_missing_config_raises(tmp_path: Path) -> None:
+    repo, prediction = _local_repo_with_config(tmp_path, _MODEL_CONFIG)
+    prediction.unlink()
+    with pytest.raises(AppRepositoryError):
+        repo.save_default_parameters(["iterations=1"])
+
+
+def test_export_app_materialises_local_copy_with_overrides(tmp_path: Path) -> None:
+    repo, prediction = _local_repo_with_config(tmp_path, _MODEL_CONFIG)
+    (prediction.parent / "model.pt").write_text("weights", encoding="utf-8")
+
+    dest = tmp_path / "exported" / "MyTunedApp"
+    repo.export_app(
+        dest,
+        display_name="My Tuned App",
+        config_overrides=["iterations=777"],  # bare model-parameter name
+    )
+
+    assert (dest / "Prediction.yml").is_file()
+    assert (dest / "model.pt").is_file()  # checkpoints come along
+    assert json.loads((dest / "app.json").read_text())["display_name"] == "My Tuned App"
+
+    # Reopen the export as a local app: the tuned default is baked in.
+    exported = app_repository_module.LocalAppRepositoryFromDirectory(dest.parent, dest.name)
+    assert exported.get_parameters()["values"]["iterations"] == 777
