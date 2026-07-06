@@ -99,6 +99,15 @@ def main() -> None:
         help="Keep each preset's displacement field (under Ensemble/) so the ensemble spread can be "
         "measured afterwards by 'uncertainty'.",
     )
+    reg.add_argument(
+        "--set",
+        dest="config_overrides",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help="Tune a preset parameter, forwarded to 'konfai-apps infer --set' (applies to every preset), "
+        "e.g. --set iterations=300 (repeatable).",
+    )
     _add_device(reg)
 
     # eval -------------------------------------------------------------------
@@ -177,6 +186,7 @@ def main() -> None:
             quiet=args.quiet,
             tta=args.tta,
             keep_dvf=args.uncertainty,
+            config_overrides=args.config_overrides,
         )
 
     elif args.command == "eval":

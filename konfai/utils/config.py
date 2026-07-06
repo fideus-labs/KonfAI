@@ -24,6 +24,7 @@ import types
 import typing
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
@@ -35,6 +36,35 @@ from konfai.utils.errors import ConfigError
 
 yaml = ruamel.yaml.YAML()
 _log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Range:
+    """UI hint attached to a parameter's type — its inclusive numeric bounds.
+
+    Use ``Annotated[int, Range(0, 100)]`` (or ``float``) in a config-bound signature: the binder ignores the
+    metadata and validates the base type, while a UI reads the bounds to size a spinbox. Introspection-only.
+    """
+
+    min: float
+    max: float
+
+
+class Choices:
+    """UI hint attached to a parameter's type — its allowed values.
+
+    Use ``Annotated[str, Choices([...])]`` for a fixed list, or ``Annotated[str, Choices(resolver)]`` where
+    ``resolver`` is a zero-arg callable the app owns (e.g. one that lists a model registry it already
+    fetches). ``resolve()`` returns the list — a reader calls it lazily, so the app resolves its own values
+    and no tool re-fetches. Introspection-only; the binder ignores it (a value outside the list is still
+    accepted, e.g. a local path). For a small FIXED, binder-validated set, prefer ``Literal[...]``.
+    """
+
+    def __init__(self, values) -> None:
+        self.values = values
+
+    def resolve(self) -> list:
+        return list(self.values() if callable(self.values) else self.values)
 
 
 def _escape_key_component(component: str) -> str:
@@ -404,6 +434,8 @@ def apply_config(konfai_args: str | None = None):
                                 continue
 
                             annotation = _resolve_annotation(function, param.annotation)
+                            if hasattr(annotation, "__metadata__"):  # Annotated[T, meta]: bind on T, meta is a UI hint
+                                annotation = get_args(annotation)[0]
                             if get_origin(annotation) is Literal:
                                 allowed_values = get_args(annotation)
                                 default_value = param.default if param.default != inspect._empty else allowed_values[0]

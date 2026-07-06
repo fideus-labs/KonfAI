@@ -187,6 +187,23 @@ def _add_patch_overrides(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_config_overrides(parser: argparse.ArgumentParser) -> None:
+    """Add the generic config override (``--set NAME=VALUE``, repeatable).
+
+    A bare ``NAME`` tunes a model parameter (e.g. ``--set iterations=300``); a dotted ``NAME`` is a full
+    path from the config root (e.g. ``Predictor.Dataset.batch_size=2``). The value is parsed as YAML (int /
+    float / bool / list / string). This is the generic mechanism a UI drives to tune a preset's parameters.
+    """
+    parser.add_argument(
+        "--set",
+        dest="config_overrides",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help="Tune a model parameter, e.g. --set iterations=300 (repeatable; a dotted NAME targets any config key).",
+    )
+
+
 def build_app_cli(
     prog: str,
     description: str,
@@ -228,6 +245,7 @@ def build_app_cli(
         _add_app_io(run_p)
         knobs(run_p)
         _add_patch_overrides(run_p)
+        _add_config_overrides(run_p)
         if with_uncertainty:
             run_p.add_argument("-uncertainty", action="store_true", help="Also write the inference stack.")
         run_p.add_argument(
@@ -270,6 +288,7 @@ def build_app_cli(
         _add_app_io(pipe_p)
         knobs(pipe_p)
         _add_patch_overrides(pipe_p)
+        _add_config_overrides(pipe_p)
         _add_gt(pipe_p, required=False)
         _add_mask(pipe_p)
         pipe_p.add_argument(
@@ -312,6 +331,7 @@ def build_app_cli(
                 prediction_file=args.prediction_file,
                 patch_size=args.patch_size,
                 batch_size=args.batch_size,
+                config_overrides=args.config_overrides,
                 **infer_kwargs(args),
             )
         elif args.command == "eval":
@@ -352,6 +372,7 @@ def build_app_cli(
                 quiet=args.quiet,
                 patch_size=args.patch_size,
                 batch_size=args.batch_size,
+                config_overrides=args.config_overrides,
                 **infer_kwargs(args),
             )
 
@@ -475,6 +496,7 @@ def main_apps() -> None:
     infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
     infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
     _add_patch_overrides(infer_p)
+    _add_config_overrides(infer_p)
     infer_p.add_argument("-uncertainty", action="store_true", help="If enabled, inference write the inference stack")
     infer_p.add_argument(
         "--prediction-file",
@@ -535,6 +557,7 @@ def main_apps() -> None:
     pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
     pipe_p.add_argument("--mc", type=int, default=0, help="Number of Monte Carlo dropout samples.")
     _add_patch_overrides(pipe_p)
+    _add_config_overrides(pipe_p)
     pipe_p.add_argument(
         "--prediction-file",
         "--prediction_file",
