@@ -140,15 +140,15 @@ the model release you use.
 
 ## ⚡ Performance & VRAM
 
-Benchmarked on an **NVIDIA RTX PRO 5000 (24 GB)**, synthetic data, patch `[1, 192, 192]`, single model (`Mean`). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body CT (295 × 259 × 219, 2 mm), patch `[1, 192, 192]`, single model. The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
 
-| Free VRAM | Batch (auto) | Peak VRAM |
-|:--|:--|:--|
-| 8 GB  | 160 | ~7 GB |
-| 16 GB | 320 | ~14 GB |
-| 24 GB | 512 | ~22 GB |
+| Free VRAM | Batch (auto) | Peak VRAM | Time / case |
+|:--|:--|:--|:--|
+| 8 GB  | 160 | ~7 GB  | — |
+| 16 GB | 320 | ~14 GB | — |
+| 24 GB | 512 | ~10 GB | **~7 s** |
 
-Measured peak VRAM: batch 64 → 3.1 GB · 128 → 5.8 GB · 256 → 8.5 GB · 512 → 22.4 GB. Inference ≈ **16 s / case** on the benchmark volume (scales with the case size).
+Single-model body segmentation keeps **system RAM ~1.6 GB**. The thin 2-D patches never fill the card, so inference stays compute-bound (~7 s, largely batch-independent). Inference scales with the case size.
 
 ---
 

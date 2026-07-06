@@ -34,37 +34,21 @@ It provides **fast and efficient inference** for segmentation tasks, including o
 
 ## ⚡ Efficient inference
 
-### 🔬 Performance comparison (single CT volume)
+### 🔬 Performance comparison
 
-**Experimental setup**
-- **Input volume size:** `512 × 512 × 366`
-- **GPU:** NVIDIA RTX 6000
-- **CPU:** Intel® Xeon® w5-3425
+**Setup**
+- **Input:** real whole-body CT, `295 × 259 × 219` (2 mm)
+- **GPU:** single NVIDIA RTX PRO 5000 (24 GB)
 
----
-
-### Original TotalSegmentator
-
-| Configuration | Time | Peak RAM | Peak VRAM |
-|---------------|------|----------|------------|
-| **Total – 5 models** | 82.37 s | 33.1 GB | ~4.7 GB |
-| **Total 3 mm – 1 model** | 30.07 s | 30.6 GB | ~3.4 GB |
-
----
-
-### TotalSegmentator-KonfAI
-
-| Configuration | Time | Peak RAM | Peak VRAM |
-|---------------|------|----------|------------|
-| **Total – 5 models** | 61.55 s | 32.5 GB | ~4.3 GB |
-| **Total 3 mm – 1 model** | 22.85 s | 10.5 GB | ~3.4 GB |
-
----
+| Tool (`total`, 5-model) | Time | Peak RAM | Peak VRAM |
+|---|------|----------|-----------|
+| **TotalSegmentator-KonfAI** | **~42 s** | ~19 GB | ~20 GB |
+| Original TotalSegmentator | ~76 s | ~9 GB | ~7 GB |
 
 ### 📈 Key observations
 
-- **Faster inference times** compared to the original TotalSegmentator  
-- **Significantly lower RAM usage for 3 mm models** (≈ 10.5 GB vs ≈ 30.6 GB)
+- **~1.8× faster** whole-body inference (`total`, 5-model ensemble)
+- The 117-class head keeps the accumulator on the host, so KonfAI trades higher system RAM for the speed-up
 
 ---
 
@@ -151,15 +135,15 @@ If you use **TotalSegmentator-KonfAI** in your work, please cite the original To
 
 ## ⚡ Performance & VRAM
 
-Benchmarked on an **NVIDIA RTX PRO 5000 (24 GB)**, synthetic data, patch `[96, 128, 160]`, 5-model ensemble (`Concat`), half precision (autocast). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body CT (295 × 259 × 219, 2 mm), patch `[96, 128, 160]`, 5-model ensemble (`total`), half precision (autocast). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
 
-| Free VRAM | Batch (auto) | Peak VRAM |
-|:--|:--|:--|
-| 8 GB  | 4  | ~8 GB |
-| 16 GB | 8  | ~15 GB |
-| 24 GB | 12 | ~23 GB |
+| Free VRAM | Batch (auto) | Peak VRAM | Time / case |
+|:--|:--|:--|:--|
+| 8 GB  | 2 | — | — |
+| 16 GB | 4 | — | — |
+| 24 GB | 4 | ~20 GB | **~42 s** |
 
-Measured peak VRAM (single model, half): batch 4 → 5.6 GB · 8 → 10.6 GB · 12 → 15.6 GB — the full 5-model ensemble adds ~15 %. Inference ≈ 20 s/model → **~110 s / case** for the full ensemble (scales with the case size).
+The 5-model `total` head (117 classes) needs **~20 GB** for its forward, so the ensemble targets a **24 GB card** — on smaller cards use **`total-3mm`** (1 model, 3 mm). Its whole-volume accumulator is too large for the GPU, so reassembly runs on the host (~19 GB RAM). A larger batch saturates the card and *slows* inference. Inference scales with the case size.
 
 ---
 
