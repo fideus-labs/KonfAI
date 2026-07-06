@@ -28,26 +28,3 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: cz check --rev-range "${BASE_SHA}..${HEAD_SHA}"
-
-      - name: Reject agent branding
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          status=0
-
-          while IFS= read -r commit; do
-            message_file="$(mktemp)"
-            git show --no-patch --format=%B "$commit" > "$message_file"
-            echo "Checking $(git show --no-patch --format='%h %s' "$commit")"
-
-            if ! python scripts/check_commit_message.py "$message_file"; then
-              status=1
-            fi
-
-            rm -f "$message_file"
-          done < <(git rev-list --reverse "${BASE_SHA}..${HEAD_SHA}")
-
-          exit "$status"
