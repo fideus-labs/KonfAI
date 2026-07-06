@@ -71,7 +71,13 @@ class PathCombine(ABC):
         if key not in self._data_per_device:
             # Match the tensor dtype: the weight has no reason to carry more precision than the data it
             # scales, and a float64 weight would upcast the whole (channels x volume) blend.
-            self._data_per_device[key] = self.data.to(device=tensor.device, dtype=tensor.dtype)
+            weight = self.data.to(device=tensor.device, dtype=tensor.dtype)
+            if weight.is_floating_point():
+                # A Gaussian tail can underflow the target dtype (a 96^3 patch corner is ~6e-11 — zero in
+                # fp16), and a voxel covered only by such a corner then divides 0 by 0 at assembly. Floor
+                # the weight at the dtype's smallest normal so single-coverage voxels stay recoverable.
+                weight = weight.clamp(min=torch.finfo(weight.dtype).tiny)
+            self._data_per_device[key] = weight
         return self._data_per_device[key] * tensor
 
     @abstractmethod
@@ -214,8 +220,10 @@ class Accumulator:
         # that no patch (fully) covered. In-place so we do not materialise a second
         # (channels x volume) tensor; weight_sum already matches result.dtype (fp16), so the division
         # stays in fp16 with no float32 promotion (same values as the out-of-place form).
+        # The floor must be representable in the accumulation dtype: 1e-8 rounds to zero in fp16
+        # (divide-by-zero -> NaN), so clamp at the dtype's smallest normal instead.
         if self.patch_combine is not None and self._weight_sum is not None:
-            result.div_(self._weight_sum.clamp(min=1e-8))
+            result.div_(self._weight_sum.clamp(min=torch.finfo(self._weight_sum.dtype).tiny))
         # No final crop: patches are cropped to the volume at blend time, so result is already self.shape.
 
         self._result = None

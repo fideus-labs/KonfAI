@@ -217,3 +217,22 @@ def test_blended_reassembly_preserves_patch_dtype() -> None:
 
     assert out.dtype == torch.float16
     torch.testing.assert_close(out[0], torch.ones(5, 14, 14, dtype=torch.float16), rtol=0, atol=1e-2)
+
+
+def test_gaussian_blend_in_fp16_has_no_nan_at_single_coverage_corners() -> None:
+    # The 3-D Gaussian corner weight (~7e-10 for a 16^3 patch) underflows fp16 — and the 1e-8 division
+    # floor itself rounds to zero in fp16 — so corner voxels covered by a single patch reassembled as
+    # 0/0 = NaN. Weights are floored at the dtype's smallest normal instead, keeping the weighted
+    # average exact wherever the true weight is representable and recoverable at the corners.
+    gaussian = Gaussian()
+    gaussian.set_patch_config([16, 16, 16], 8)
+    accumulator = Accumulator(
+        [(slice(0, 16), slice(0, 16), slice(0, 16))], patch_size=[16, 16, 16], patch_combine=gaussian, batch=True
+    )
+    accumulator.add_layer(0, torch.full((1, 1, 16, 16, 16), 3.0, dtype=torch.float16))
+
+    out = accumulator.assemble()[0, 0]
+
+    assert not torch.isnan(out).any()
+    # Single coverage: dividing by the accumulated weight must recover the raw value, corners included.
+    torch.testing.assert_close(out.float(), torch.full((16, 16, 16), 3.0), rtol=0.02, atol=0.02)
