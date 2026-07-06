@@ -34,10 +34,12 @@ from konfai.data.transform import (
     InferenceStack,
     KonfAIInference,
     Norm,
+    Normalize,
     Padding,
     ResampleToResolution,
     ResampleToShape,
     Standardize,
+    Statistics,
 )
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
@@ -393,3 +395,39 @@ def test_konfai_inference_forwards_configured_repo_and_model(monkeypatch):
     transform.infer_entry(Path("dataset"), Path("output"), [])
 
     assert captured["spec"] == "acme/Custom-KonfAI:CustomModel"
+
+
+# --------------------------------------------------------------------------------------
+# Finalize transforms are device-transparent (the volume may be blended on the GPU)
+# --------------------------------------------------------------------------------------
+
+
+def test_standardize_inverse_stats_follow_the_volume_and_stay_float32() -> None:
+    # The cached stats parse back as float64: without the float32 cast, denormalizing a whole fp16
+    # volume would promote it to a float64 copy (4x the memory of the fp16 finalize path).
+    attr = Attribute()
+    attr["Mean"] = torch.tensor([10.0])
+    attr["Std"] = torch.tensor([2.0])
+    out = Standardize().inverse("case", torch.ones(1, 4, dtype=torch.float16), attr)
+    assert out.dtype == torch.float32
+    torch.testing.assert_close(out, torch.full((1, 4), 12.0))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="cross-device finalize only applies on CUDA")
+def test_finalize_transforms_accept_a_cuda_resident_volume() -> None:
+    # GPU accumulation keeps the assembled volume on the device through the whole finalize chain:
+    # every default finalize transform must accept a CUDA volume (1.5.8 always handed them CPU tensors).
+    volume = torch.rand(1, 4, 4, device="cuda", dtype=torch.float16)
+
+    normalized = Normalize()("case", volume.clone(), Attribute())  # writes Min/Max from CUDA tensors
+    assert normalized.device.type == "cuda"
+
+    stats = Attribute()
+    stats["Mean"] = torch.tensor([10.0])
+    stats["Std"] = torch.tensor([2.0])
+    denormalized = Standardize().inverse("case", volume.clone(), stats)
+    assert denormalized.device.type == "cuda"
+
+    attr = Attribute()
+    Statistics()("case", volume, attr)  # writes ImageMin/Max/Mean/Std from CUDA tensors
+    assert "ImageMin" in attr

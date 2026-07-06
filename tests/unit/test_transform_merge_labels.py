@@ -65,3 +65,42 @@ def test_merge_labels_background_stays_zero() -> None:
 def test_merge_labels_requires_number_of_channels() -> None:
     with pytest.raises(TransformError):
         MergeLabels()("case", torch.zeros(2, 3, dtype=torch.long), Attribute())
+
+
+def test_merge_labels_overlap_takes_the_last_model_label() -> None:
+    # Task-split models disagree at structure boundaries: a voxel claimed by two models must take the
+    # LAST model's global label. Adding the global ids (the pre-fix behaviour) fabricated 5 + 26 = 31,
+    # a valid-looking label belonging to neither model.
+    nb = [25, 27]
+    tensor = torch.zeros(2, 3, dtype=torch.long)
+    tensor[0, 0] = 5  # model 0 -> global 5
+    tensor[1, 0] = 2  # model 1 -> global 26, same voxel
+    tensor[0, 1] = 7  # model 0 alone
+
+    out = MergeLabels()("case", tensor, _attr(nb))
+
+    assert out.tolist() == [26, 7, 0]
+
+
+def test_merge_labels_does_not_mutate_its_input() -> None:
+    tensor = torch.zeros(2, 2, dtype=torch.long)
+    tensor[1, 0] = 2
+    original = tensor.clone()
+
+    MergeLabels()("case", tensor, _attr([25, 27]))
+
+    assert torch.equal(tensor, original)
+
+
+def test_merge_labels_preserves_dtype_with_the_production_suffixed_key() -> None:
+    # The predictor writes the layer-suffixed key (``number_of_channels_per_model_0``); the merge must
+    # resolve it through Attribute's suffix logic exactly as in production, and keep the label dtype.
+    attr = Attribute()
+    attr["number_of_channels_per_model_0"] = torch.tensor([25, 27])
+    tensor = torch.zeros(2, 3, dtype=torch.uint8)
+    tensor[1, 1] = 2
+
+    out = MergeLabels()("case", tensor, attr)
+
+    assert out.dtype == torch.uint8
+    assert out.tolist() == [0, 26, 0]

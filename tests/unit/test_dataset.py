@@ -298,3 +298,15 @@ def test_sitkfile_get_infos_2d_matches_read_data(tmp_path: Path) -> None:
     data, _ = file.file_to_data("", "case0")
 
     assert list(size) == list(data.shape)  # [1, 4, 10]
+
+
+def test_attribute_setitem_accepts_0d_and_autograd_tensors() -> None:
+    # Finalize transforms (Normalize, Statistics) store stats computed from the prediction volume,
+    # which arrive as 0-d tensors — possibly CUDA-resident and/or still attached to a graph. The
+    # host-side string conversion must detach and move them itself.
+    attribute = Attribute()
+    attribute["ImageMin"] = torch.tensor(3.5)
+    attribute["Weight"] = torch.tensor(2.0, requires_grad=True)
+
+    assert float(attribute["ImageMin"]) == 3.5
+    assert float(attribute["Weight"]) == 2.0

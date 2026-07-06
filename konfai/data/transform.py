@@ -305,8 +305,8 @@ class Standardize(TransformInverse):
         if self.lazy:
             return tensor
         else:
-            mean = self._broadcast(cache_attribute.get_tensor("Mean"), tensor)
-            std = self._broadcast(cache_attribute.get_tensor("Std"), tensor)
+            mean = self._broadcast(cache_attribute.get_tensor("Mean").to(tensor.device), tensor)
+            std = self._broadcast(cache_attribute.get_tensor("Std").to(tensor.device), tensor)
             return (tensor - mean) / std
 
     @staticmethod
@@ -320,8 +320,11 @@ class Standardize(TransformInverse):
         if self.lazy:
             return tensor
         else:
-            mean = self._broadcast(cache_attribute.pop_tensor("Mean"), tensor)
-            std = self._broadcast(cache_attribute.pop_tensor("Std"), tensor)
+            # The stats parse back as float64 on the CPU; move them to the volume's device (the finalize
+            # chain runs where the volume was blended, possibly CUDA) and compute in float32 so a
+            # whole-volume fp16 output is not promoted to a float64 copy.
+            mean = self._broadcast(cache_attribute.pop_tensor("Mean").to(tensor.device, torch.float32), tensor)
+            std = self._broadcast(cache_attribute.pop_tensor("Std").to(tensor.device, torch.float32), tensor)
             return tensor * std + mean
 
 
@@ -406,11 +409,18 @@ class Resample(TransformInverse, ABC):
         else:
             mode = "trilinear"
 
-        # Interpolate in the tensor's own float dtype. The model output is float16, and F.interpolate
-        # supports float16 on both CPU and CUDA (all modes) — upcasting the whole (channels x volume)
-        # tensor to float32 doubled the memory of a multi-class output resample for no argmax benefit.
-        # Integer inputs (uint8 labels) still need a float grid for interpolation.
-        work = tensor if tensor.is_floating_point() else tensor.type(torch.float32)
+        # Interpolate in the tensor's own float dtype on CUDA. The model output is float16 and CUDA has
+        # had Half kernels for every mode for years — upcasting the whole (channels x volume) tensor to
+        # float32 doubled the memory of a multi-class output resample for no argmax benefit. On the CPU,
+        # keep the historical float32 compute: Half CPU kernels are missing from older torch releases and
+        # 1.5.8 always computed this path in float32. Integer inputs (uint8 labels) still need a float
+        # grid for interpolation.
+        if not tensor.is_floating_point() or (
+            tensor.device.type == "cpu" and tensor.dtype in (torch.float16, torch.bfloat16)
+        ):
+            work = tensor.type(torch.float32)
+        else:
+            work = tensor
         # Return on the input's device (interpolate preserves it): a CPU input stays on the CPU, a
         # GPU-resident output volume stays on the GPU so the whole finalize runs where the volume is.
         return F.interpolate(work.unsqueeze(0), size=tuple(size), mode=mode).squeeze(0).type(tensor.dtype)
@@ -669,6 +679,10 @@ class MergeLabels(Transform):
     probability ensembles): use ``MergeLabels`` when the models segment DIFFERENT structures, e.g.
     the 5-task TotalSegmentator ensemble (organs / vertebrae / cardiac / muscles / ribs). Requires
     ``number_of_channels_per_model`` in the attribute (written by the ``Concat`` reduction).
+
+    Models are assumed to segment disjoint structures, but boundaries disagree in practice: a voxel
+    claimed by several models takes the label of the LAST model in ensemble order (adding the global
+    ids instead would fabricate a label belonging to neither model).
     """
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -678,11 +692,11 @@ class MergeLabels(Transform):
                 "'number_of_channels_per_model' is missing from the attribute.",
             )
         number_of_channels = cache_attribute.pop_tensor("number_of_channels_per_model")
-        result = tensor[0]
+        result = tensor[0].clone()
         offset = int(number_of_channels[0]) - 1
         for i, t in enumerate(tensor[1:]):
-            t[t != 0] += offset
-            result += t
+            foreground = t != 0
+            result[foreground] = (t[foreground] + offset).to(result.dtype)
             offset += int(number_of_channels[i + 1]) - 1
         return result
 
@@ -831,6 +845,8 @@ class Canonical(TransformInverse):
         # affine_grid/grid_sample support float16 on CPU and CUDA. Building the grid on the data's device
         # (instead of a CPU float32 grid) keeps the whole reorientation on-device — no host round-trip and
         # no float32 upcast of the (channels x volume) tensor. Integer inputs still need a float grid.
+        # Accepted trade-off: an fp16 grid quantizes the sampling coordinates (up to ~0.1 voxel at 512^3),
+        # chosen over the ~2x transient memory of a float32 grid + volume upcast.
         work = data if data.is_floating_point() else data.type(torch.float32)
         grid = torch.nn.functional.affine_grid(
             matrix[:, :-1, ...].to(device=work.device, dtype=work.dtype),

@@ -81,22 +81,16 @@ class Attribute(dict[str, Any]):
         raise NameError(f"{key} not in cache_attribute")
 
     def __setitem__(self, key: str, value: Any) -> None:
-        if "_" not in key:
-            i = self._count_key(key)
-            result = None
-            if isinstance(value, torch.Tensor):
-                result = str(value.numpy())
-            else:
-                result = str(value)
-            result = result.replace("\n", "")
-            super().__setitem__(f"{key}_{i}", result)
+        if isinstance(value, torch.Tensor):
+            # Accept a tensor from any device: attributes are host-side strings, and finalize transforms
+            # (Normalize, Statistics, ...) may hand over stats computed on a CUDA-resident volume.
+            result = str(value.detach().cpu().numpy())
         else:
-            result = None
-            if isinstance(value, torch.Tensor):
-                result = str(value.numpy())
-            else:
-                result = str(value)
-            result = result.replace("\n", "")
+            result = str(value)
+        result = result.replace("\n", "")
+        if "_" not in key:
+            super().__setitem__(f"{key}_{self._count_key(key)}", result)
+        else:
             super().__setitem__(key, result)
 
     def pop(self, key: str, default: Any = None) -> Any:
