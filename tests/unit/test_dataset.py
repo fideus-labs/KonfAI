@@ -14,31 +14,22 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for the dataset-file audit fixes in ``konfai.utils.dataset``."""
+"""Tests for ``konfai.utils.dataset``: the ``Attribute`` sidecar, the SITK/HDF5 storage
+backends (modes, locking, transforms, path resolution), and ``get_infos`` shape order."""
 
 import os
+import stat
+import threading
 from pathlib import Path
-
-os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
-os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
 
 import numpy as np
 import pytest
 import torch
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import Attribute, Dataset, _get_h5_file_lock, get_infos, image_to_data
 from konfai.utils.errors import DatasetManagerError
 
 sitk = pytest.importorskip("SimpleITK")
 h5py = pytest.importorskip("h5py")
-
-
-def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray(origin, dtype=np.float64)
-    attributes["Spacing"] = np.asarray(spacing, dtype=np.float64)
-    attributes["Direction"] = np.eye(len(origin), dtype=np.float64).reshape(-1)
-    return attributes
-
 
 # --------------------------------------------------------------------------------------
 # B13 - Attribute keys containing '_' are stored raw and must be readable/poppable
@@ -82,18 +73,67 @@ def test_attribute_repeated_set_returns_latest_version() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# B19 - HDF5 parent directory is created with pathlib (nested paths, OS separators)
+# HDF5 backend — directories, modes, and per-file locking
 # --------------------------------------------------------------------------------------
 
 
-def test_h5_dataset_creates_nested_parent_directories(tmp_path: Path) -> None:
+def test_h5_dataset_creates_nested_parent_directories(tmp_path: Path, image_attributes) -> None:
+    # B19 - the parent directory is created with pathlib (nested paths, OS separators).
     dataset = Dataset(tmp_path / "runs" / "exp" / "Volumes", "h5")
     volume = np.arange(1 * 2 * 2, dtype=np.float32).reshape(1, 2, 2)
-    dataset.write("CT", "CASE_000", volume, _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    dataset.write("CT", "CASE_000", volume, image_attributes([0.0, 0.0], [1.0, 1.0]))
 
     assert (tmp_path / "runs" / "exp" / "Volumes.h5").exists()
     data, _ = dataset.read_data("CT", "CASE_000")
     np.testing.assert_array_equal(data, volume)
+
+
+def test_read_data_opens_hdf5_read_only(tmp_path: Path, image_attributes) -> None:
+    # read_data used to open HDF5 in r+ (stamping a Date attribute on every read), which mutates
+    # the file and breaks concurrent access across DataLoader/DDP processes. On a read-only file an
+    # r+ open raises PermissionError, so a successful read here proves the mode is now "r".
+    volume = np.arange(1 * 3 * 4 * 5, dtype=np.int16).reshape(1, 3, 4, 5)
+    dataset = Dataset(tmp_path / "H5DS", "h5")
+    dataset.write("CT", "CASE_001", volume, image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
+
+    h5_files = list(tmp_path.rglob("*.h5"))
+    assert h5_files, "the write did not create an .h5 file"
+    for h5_file in h5_files:
+        os.chmod(h5_file, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+
+    try:
+        full, _ = dataset.read_data("CT", "CASE_001")
+        np.testing.assert_array_equal(full, volume)
+    finally:
+        for h5_file in h5_files:
+            os.chmod(h5_file, stat.S_IRUSR | stat.S_IWUSR)
+
+
+def test_h5_writes_are_serialised_per_file(tmp_path: Path, image_attributes) -> None:
+    # B6 - concurrent HDF5 access is serialised per file.
+    dataset = Dataset(str(tmp_path / "Volumes"), "h5")
+    attrs = image_attributes([0.0, 0.0], [1.0, 1.0])
+    dataset.write("CT", "CASE_000", np.zeros((1, 2, 2), dtype=np.float32), attrs)
+
+    lock = _get_h5_file_lock(str(tmp_path / "Volumes") + ".h5")
+    started = threading.Event()
+    finished = threading.Event()
+
+    def writer() -> None:
+        started.set()
+        dataset.write("CT", "CASE_001", np.ones((1, 2, 2), dtype=np.float32), attrs)
+        finished.set()
+
+    with lock:  # holding the file lock must block any other writer on the same file
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert started.wait(1.0)
+        assert not finished.wait(0.2), "a second writer proceeded while the file lock was held"
+
+    thread.join(5.0)
+    assert finished.is_set()
+    data, _ = dataset.read_data("CT", "CASE_001")
+    np.testing.assert_array_equal(data, np.ones((1, 2, 2), dtype=np.float32))
 
 
 # --------------------------------------------------------------------------------------
@@ -180,14 +220,14 @@ def test_xml_file_to_data_returns_tuple_with_parsed_values(tmp_path: Path) -> No
 # --------------------------------------------------------------------------------------
 
 
-def test_resolve_data_path_prefers_special_format_like_full_read(tmp_path: Path) -> None:
+def test_resolve_data_path_prefers_special_format_like_full_read(tmp_path: Path, image_attributes) -> None:
     root = tmp_path / "Dataset"
     dataset = Dataset(root, "mha")
     dataset.write(
         "Transf",
         "CASE_000",
         np.arange(1 * 2 * 3 * 4, dtype=np.float32).reshape(1, 2, 3, 4),
-        _image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+        image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
     )
     euler = sitk.Euler3DTransform()
     euler.SetParameters((0.1, 0.2, 0.3, 4.0, 5.0, 6.0))
@@ -201,3 +241,60 @@ def test_resolve_data_path_prefers_special_format_like_full_read(tmp_path: Path)
     assert resolved is not None and resolved.endswith(".itk.txt")
     full, _ = dataset.read_data("Transf", "CASE_000")
     assert full.shape == (1, 6)
+
+
+# --------------------------------------------------------------------------------------
+# get_infos returns numpy channel-first order for every rank
+#
+# Patch planning strips the channel from get_infos' shape and feeds the spatial shape to
+# transform_shape and the patch reader; the actual pixel reads (image_to_data /
+# _file_to_image_slice) are numpy-order [C, (T), (Z), Y, X]. The pre-fix code reversed sitk
+# GetSize() only when len == 3, so 2-D and 4-D images kept sitk (x, y, ...) order and were
+# transposed against their own pixel data.
+# --------------------------------------------------------------------------------------
+
+
+def test_get_infos_2d_matches_pixel_data(tmp_path: Path) -> None:
+    # Non-square 2-D: sitk GetSize() = (x=10, y=4); numpy pixel data is (y=4, x=10).
+    path = tmp_path / "img2d.nii.gz"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((4, 10), dtype=np.float32)), str(path))
+
+    size, _ = get_infos(path)
+    data, _ = image_to_data(sitk.ReadImage(str(path)))
+
+    assert list(size) == list(data.shape)  # [1, 4, 10], not [1, 10, 4]
+
+
+def test_get_infos_4d_matches_pixel_data(tmp_path: Path) -> None:
+    # Genuine 4-D scalar: sitk GetSize() = (5, 4, 3, 2); numpy pixel data is (2, 3, 4, 5).
+    path = tmp_path / "img4d.nii.gz"
+    sitk.WriteImage(sitk.Image([5, 4, 3, 2], sitk.sitkFloat32), str(path))
+
+    size, _ = get_infos(path)
+    data = sitk.GetArrayFromImage(sitk.ReadImage(str(path)))
+
+    assert list(size) == [1, *data.shape]  # [1, 2, 3, 4, 5]
+
+
+def test_get_infos_3d_unchanged(tmp_path: Path) -> None:
+    # Regression guard: the already-correct 3-D path must stay reversed.
+    path = tmp_path / "img3d.nii.gz"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((6, 4, 10), dtype=np.float32)), str(path))
+
+    size, _ = get_infos(path)
+    data, _ = image_to_data(sitk.ReadImage(str(path)))
+
+    assert list(size) == list(data.shape) == [1, 6, 4, 10]
+
+
+def test_sitkfile_get_infos_2d_matches_read_data(tmp_path: Path) -> None:
+    # Same defect in SitkFile.get_infos, reached through the public Dataset API.
+    ds_dir = str(tmp_path / "ds") + "/"
+    Path(ds_dir).mkdir(parents=True, exist_ok=True)
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((4, 10), dtype=np.float32)), ds_dir + "case0.mha")
+
+    file = Dataset.SitkFile(ds_dir, read=True, file_format="mha")
+    size, _ = file.get_infos("", "case0")
+    data, _ = file.file_to_data("", "case0")
+
+    assert list(size) == list(data.shape)  # [1, 4, 10]

@@ -444,7 +444,7 @@ def test_konfai_inference_raises_clear_error_inside_daemon_workers(monkeypatch: 
 
     monkeypatch.setattr("konfai.data.transform.current_process", lambda: DaemonProcess())
 
-    with pytest.raises(RuntimeError, match="Dataset.num_workers: 0"):
+    with pytest.raises(RuntimeError, match=r"Dataset\.num_workers: 0"):
         transform("CASE_000", torch.zeros(1, 4, 4), Attribute())
 
 

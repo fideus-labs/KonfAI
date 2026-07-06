@@ -16,20 +16,14 @@
 
 """Regression tests for the performance hot-path fixes (see AUDIT.md — Performance backlog)."""
 
-import os
+from pathlib import Path
+from unittest.mock import MagicMock
 
-os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
-os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
-
-from pathlib import Path  # noqa: E402
-from unittest.mock import MagicMock  # noqa: E402
-
-import torch  # noqa: E402
-
-import konfai.utils.dataset as dataset_module  # noqa: E402
-from konfai.data.patching import Accumulator  # noqa: E402
-from konfai.predictor import ModelComposite  # noqa: E402
-from konfai.utils.dataset import Attribute, Dataset  # noqa: E402
+import konfai.utils.dataset as dataset_module
+import torch
+from konfai.data.patching import Accumulator
+from konfai.predictor import ModelComposite
+from konfai.utils.dataset import Attribute, Dataset
 
 
 def test_accumulator_is_full_counts_without_rescanning():
@@ -148,7 +142,7 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
     ref = dicom.read_dicom_series_slice(root, sl)
     info = dicom.get_dicom_info(root)
     got = dicom.read_dicom_series_slice(root, sl, series_uid=info["series_uid"], info=info)
-    for a, b in zip(ref, got):
+    for a, b in zip(ref, got, strict=False):
         assert np.array_equal(np.asarray(a), np.asarray(b))
 
     assert len(info["sorted_files"]) == vol.shape[1]
@@ -165,8 +159,14 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
     # (b) redundant work is gone: spy discover_series / sort_series call counts
     calls = {"discover": 0, "sort": 0}
     real_discover, real_sort = dicom.discover_series, dicom.sort_series
-    monkeypatch.setattr(dicom, "discover_series", lambda *a, **k: (calls.__setitem__("discover", calls["discover"] + 1), real_discover(*a, **k))[1])
-    monkeypatch.setattr(dicom, "sort_series", lambda *a, **k: (calls.__setitem__("sort", calls["sort"] + 1), real_sort(*a, **k))[1])
+    monkeypatch.setattr(
+        dicom,
+        "discover_series",
+        lambda *a, **k: (calls.__setitem__("discover", calls["discover"] + 1), real_discover(*a, **k))[1],
+    )
+    monkeypatch.setattr(
+        dicom, "sort_series", lambda *a, **k: (calls.__setitem__("sort", calls["sort"] + 1), real_sort(*a, **k))[1]
+    )
 
     dataset_file = Dataset.DicomFile(str(tmp_path), read=True)
 
@@ -208,7 +208,9 @@ def test_clip_clamp_fast_path_is_byte_identical_on_float32_and_safe_on_int():
     lo, hi = -5.0, 5.0
 
     # float32 with the hostile edge cases the red-team flagged: NaN, +/-inf, exact bounds
-    f32 = torch.tensor([-1e9, -5.0, -2.0, 0.0, 2.0, 5.0, 1e9, float("nan"), float("inf"), float("-inf")], dtype=torch.float32)
+    f32 = torch.tensor(
+        [-1e9, -5.0, -2.0, 0.0, 2.0, 5.0, 1e9, float("nan"), float("inf"), float("-inf")], dtype=torch.float32
+    )
     got = clip("x", f32.clone(), Attribute())
     assert _eq_nan(got, _old_clip(f32, lo, hi))
     assert got.dtype == torch.float32

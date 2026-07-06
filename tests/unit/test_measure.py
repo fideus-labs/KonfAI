@@ -14,18 +14,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Numerical behaviour tests for the Dice and SSIM criteria."""
+"""Tests for the criteria in ``konfai.metric.measure`` (Dice, SSIM, Variance,
+PerceptualLoss plumbing, and optional-dependency errors)."""
 
-import os
-
-os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
-os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
-
-import numpy as np  # noqa: E402
-import pytest  # noqa: E402
-import torch  # noqa: E402
-
-from konfai.metric.measure import SSIM, Dice, Variance  # noqa: E402
+import numpy as np
+import pytest
+import torch
+from konfai.metric.measure import SSIM, Dice, PerceptualLoss, Variance, _require_optional
+from konfai.utils.errors import MeasureError
 
 
 def _one_hot(target: torch.Tensor, nb_channels: int) -> torch.Tensor:
@@ -186,3 +182,34 @@ class TestVariance:
         # Unbiased var of [1, 3] = ((1-2)^2 + (3-2)^2) / (2 - 1) = 2.0.
         assert variance.item() == pytest.approx(2.0)
         assert value == pytest.approx(2.0)
+
+
+def test_perceptual_loss_forward_unpacks_targets() -> None:
+    # forward(output, *targets) must hand each target to _compute(output, *targets) as its own
+    # positional tensor; the pre-fix code passed the whole tuple as a single argument, so the
+    # preprocessing/feature-extraction path received a tuple and crashed.
+    loss = object.__new__(PerceptualLoss)
+    loss.shape = [128, 128, 128]  # len != 2 -> the non-slice branch is taken
+    loss.models = {None: object()}  # short-circuit the lazy model placement on device index None
+
+    recorded: dict[str, tuple] = {}
+
+    def fake_compute(output, *targets):
+        recorded["targets"] = targets
+        return torch.zeros(1)
+
+    loss._compute = fake_compute  # type: ignore[method-assign]
+
+    PerceptualLoss.forward(loss, torch.randn(1, 1, 8, 8), torch.randn(1, 1, 8, 8))
+
+    assert len(recorded["targets"]) == 1
+    assert torch.is_tensor(recorded["targets"][0])
+
+
+def test_missing_metric_dependency_raises_actionable_error():
+    """Optional criterion deps must surface an actionable MeasureError, not ImportError."""
+    with pytest.raises(MeasureError) as excinfo:
+        _require_optional("konfai_definitely_missing_pkg_zzz", criterion="SSIM", extra="ssim")
+    message = str(excinfo.value)
+    assert "SSIM" in message
+    assert "konfai[ssim]" in message

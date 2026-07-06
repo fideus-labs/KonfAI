@@ -17,15 +17,10 @@
 """Aggregation, serialization and summary behaviour of :class:`Statistics`."""
 
 import json
-import os
 
-os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
-os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
-
-import numpy as np  # noqa: E402
-import pytest  # noqa: E402
-
-from konfai.evaluator import Statistics  # noqa: E402
+import numpy as np
+import pytest
+from konfai.evaluator import Statistics
 
 
 class TestGetStatisticCount:

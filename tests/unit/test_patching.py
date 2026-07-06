@@ -14,19 +14,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for patch reconstruction and overlap-blending helpers."""
+"""Unit tests for patch reconstruction and overlap-blending (``konfai.data.patching``)."""
 
-import os
-
-os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
-os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
-
-import pytest  # noqa: E402
-import torch  # noqa: E402
-
-from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean  # noqa: E402
-from konfai.utils.errors import PatchError  # noqa: E402
-from konfai.utils.utils import get_patch_slices_from_shape  # noqa: E402
+import pytest
+import torch
+from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean
+from konfai.utils.errors import PatchError
+from konfai.utils.utils import get_patch_slices_from_shape
 
 
 def _tile_2d(full: torch.Tensor, patch_size: list[int], overlap: int):
@@ -34,6 +28,11 @@ def _tile_2d(full: torch.Tensor, patch_size: list[int], overlap: int):
     patch_slices, _ = get_patch_slices_from_shape(patch_size, list(full.shape[2:]), overlap)
     patches = [full[:, :, sl[0], sl[1]].clone() for sl in patch_slices]
     return patch_slices, patches
+
+
+# --------------------------------------------------------------------------------------
+# Accumulator reassembly
+# --------------------------------------------------------------------------------------
 
 
 def test_accumulator_reconstructs_non_overlapping_tiles():
@@ -90,6 +89,11 @@ def test_assemble_with_missing_first_patch_does_not_crash():
     assert torch.equal(out[:, :, 2:4, :], full[:, :, 2:4, :])
 
 
+# --------------------------------------------------------------------------------------
+# Blending windows (Mean / Cosinus)
+# --------------------------------------------------------------------------------------
+
+
 @pytest.mark.parametrize("combine_cls", [Mean, Cosinus])
 def test_path_combine_window_is_bounded_and_unit_at_center(combine_cls):
     """Blending windows weight each voxel in [0, 1] and reach 1 at the patch centre."""
@@ -122,6 +126,22 @@ def test_path_combine_call_applies_window_and_caches_device():
     assert (tensor.device, tensor.dtype) in combine._data_per_device
 
 
+def test_path_combine_overlap_zero_uses_uniform_weights() -> None:
+    """B10: overlap=0 tiles patches without overlap, so the blend window is all ones."""
+    for combine_cls in (Mean, Cosinus):
+        combine = combine_cls()
+        combine.set_patch_config([8, 8, 8], 0)  # must not raise
+        assert combine.data.shape == (8, 8, 8)
+        assert torch.equal(combine.data, torch.ones(8, 8, 8))
+
+
+def test_path_combine_overlap_zero_leaves_tensor_unchanged() -> None:
+    combine = Mean()
+    combine.set_patch_config([4, 4], 0)
+    tensor = torch.arange(16, dtype=torch.float32).reshape(1, 1, 4, 4)
+    assert torch.equal(combine(tensor), tensor)
+
+
 def test_gaussian_window_favours_centre_and_reassembles_to_a_weighted_average():
     gaussian = Gaussian()
     gaussian.set_patch_config([8, 8], 2)
@@ -132,3 +152,68 @@ def test_gaussian_window_favours_centre_and_reassembles_to_a_weighted_average():
     accumulator.add_layer(0, torch.full((1, 1, 8, 8), 3.0))
     out = accumulator.assemble()[0, 0]
     torch.testing.assert_close(out, torch.full((8, 8), 3.0), rtol=0, atol=1e-4)
+
+
+# --------------------------------------------------------------------------------------
+# Overlap-blended reassembly is a partition of unity (no darkened borders)
+# --------------------------------------------------------------------------------------
+
+
+def test_overlap_blend_is_partition_of_unity_at_the_border() -> None:
+    # 1-D volume of 20 tiled with patch 8 / overlap 2 -> patches at 0, 6, 12. The border voxels are
+    # covered by a single patch, whose edge band weights ~0.5, so the pre-fix sum-without-normalise
+    # reassembled them at 0.5 instead of 1.0. Dividing by the accumulated weight restores unity.
+    patch_slices = [(slice(0, 8),), (slice(6, 14),), (slice(12, 20),)]
+    combine = Mean()  # Cosinus needs >=2D (SimpleITK distance map), covered below.
+    combine.set_patch_config([8], 2)
+    accumulator = Accumulator(patch_slices, patch_size=[8], patch_combine=combine, batch=True)
+    for index in range(len(patch_slices)):
+        accumulator.add_layer(index, torch.ones(1, 1, 8))
+
+    out = accumulator.assemble()[0, 0]
+
+    assert out.shape == (20,)
+    torch.testing.assert_close(out, torch.ones(20), rtol=0, atol=1e-5)
+
+
+def test_overlap_blend_corner_not_quartered_in_2d() -> None:
+    # A 2-D corner is covered by one patch on both axes, so the pre-fix output was ~0.25 there.
+    patch_slices = [
+        (slice(0, 8), slice(0, 8)),
+        (slice(0, 8), slice(6, 14)),
+        (slice(6, 14), slice(0, 8)),
+        (slice(6, 14), slice(6, 14)),
+    ]
+    for combine_cls in (Mean, Cosinus):
+        combine = combine_cls()
+        combine.set_patch_config([8, 8], 2)
+        accumulator = Accumulator(patch_slices, patch_size=[8, 8], patch_combine=combine, batch=True)
+        for index in range(len(patch_slices)):
+            accumulator.add_layer(index, torch.ones(1, 1, 8, 8))
+
+        out = accumulator.assemble()[0, 0]
+
+        assert out.shape == (14, 14)
+        torch.testing.assert_close(out, torch.ones(14, 14), rtol=0, atol=1e-5)
+
+
+def test_blended_reassembly_preserves_patch_dtype() -> None:
+    # The weight-normalised reassembly must not promote a float16 accumulator to float32: a default
+    # float32 weight_sum silently doubled the peak memory of large multi-class volumes (the 118-class
+    # whole-body segmentation OOM). Many channels make the effect visible in the assembled shape.
+    patch_slices = [
+        (slice(0, 8), slice(0, 8)),
+        (slice(0, 8), slice(6, 14)),
+        (slice(6, 14), slice(0, 8)),
+        (slice(6, 14), slice(6, 14)),
+    ]
+    combine = Cosinus()
+    combine.set_patch_config([8, 8], 2)
+    accumulator = Accumulator(patch_slices, patch_size=[8, 8], patch_combine=combine, batch=True)
+    for index in range(len(patch_slices)):
+        accumulator.add_layer(index, torch.ones(1, 5, 8, 8, dtype=torch.float16))
+
+    out = accumulator.assemble()
+
+    assert out.dtype == torch.float16
+    torch.testing.assert_close(out[0], torch.ones(5, 14, 14, dtype=torch.float16), rtol=0, atol=1e-2)

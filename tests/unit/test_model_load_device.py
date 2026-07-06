@@ -16,7 +16,6 @@
 
 import pytest
 import torch
-
 from konfai.network.network import Network
 from konfai.predictor import Mean, ModelComposite, _colocate_loaded_modules
 

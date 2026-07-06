@@ -1,9 +1,8 @@
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import pytest
 import torch
-
 from konfai.data.data_manager import BatchDataItem, DatasetIter
 from konfai.network.network import Network
 from konfai.predictor import Mean, ModelComposite, OutSameAsGroupDataset, _Predictor
@@ -11,7 +10,6 @@ from konfai.utils.dataset import Attribute
 
 
 class DummyPredictNetwork(Network):
-
     def __init__(self) -> None:
         super().__init__(in_channels=1)
         self.scale = 1.0
@@ -60,7 +58,7 @@ def test_model_composite_streams_ensemble_through_a_single_loaded_model() -> Non
 
 def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> None:
     class DummyPatch:
-        patch_size = [2, 2]
+        patch_size: ClassVar[list[int]] = [2, 2]
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):
@@ -70,13 +68,13 @@ def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> No
     class DummyManager:
         name = "CASE_000"
         patch = DummyPatch()
-        cache_attributes = [Attribute({"Origin": [0.0, 0.0]})]
+        cache_attributes: ClassVar[list[Attribute]] = [Attribute({"Origin": [0.0, 0.0]})]
 
     class DummyGroupTransform:
-        patch_transforms: list[object] = []
+        patch_transforms: ClassVar[list[object]] = []
 
     class DummyDatasetIter:
-        groups_src = {"src": {"dest": DummyGroupTransform()}}
+        groups_src: ClassVar[dict[str, dict[str, object]]] = {"src": {"dest": DummyGroupTransform()}}
 
         @staticmethod
         def get_dataset_from_index(group_dest: str, index: int):
@@ -112,7 +110,7 @@ def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> No
 
 def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() -> None:
     class DummyPatch:
-        patch_size = [2, 2]
+        patch_size: ClassVar[list[int]] = [2, 2]
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):
@@ -122,13 +120,13 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
     class DummyManager:
         name = "CASE_000"
         patch = DummyPatch()
-        cache_attributes = [Attribute({"Origin": [0.0, 0.0]})]
+        cache_attributes: ClassVar[list[Attribute]] = [Attribute({"Origin": [0.0, 0.0]})]
 
     class DummyGroupTransform:
-        patch_transforms: list[object] = []
+        patch_transforms: ClassVar[list[object]] = []
 
     class DummyDatasetIter:
-        groups_src = {"src": {"dest": DummyGroupTransform()}}
+        groups_src: ClassVar[dict[str, dict[str, object]]] = {"src": {"dest": DummyGroupTransform()}}
 
         @staticmethod
         def get_dataset_from_index(group_dest: str, index: int):

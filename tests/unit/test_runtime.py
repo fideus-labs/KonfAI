@@ -1,18 +1,36 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for ``konfai.utils.runtime``: workflow guards, environment normalisation,
+overwrite confirmation, distributed-launch bookkeeping, and progress/DDP
+synchronisation."""
+
+import contextlib
 import os
+import random
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-import torch
-
 import konfai as konfai_module
-from konfai.data.data_manager import Data
+import konfai.utils.runtime as rt
+import pytest
 from konfai.evaluator import Evaluator
-from konfai.network.blocks import Exit
 from konfai.predictor import Predictor
 from konfai.trainer import Trainer
-from konfai.utils.config import apply_config, config
 from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import (
     DistributedObject,
@@ -21,6 +39,11 @@ from konfai.utils.runtime import (
     confirm_overwrite_or_raise,
     execute_distributed_object,
 )
+
+# ---------------------------------------------------------------------------
+# Workflow guards, environment normalisation, overwrite confirmation, and
+# distributed-launch bookkeeping
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("factory", [Trainer, Predictor, Evaluator])
@@ -53,46 +76,6 @@ def test_configure_workflow_environment_normalizes_paths(monkeypatch: pytest.Mon
     assert Path(os.environ["KONFAI_STATISTICS_DIRECTORY"]).name == "Statistics"
 
 
-def test_apply_config_restores_config_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    config_path = tmp_path / "Config.yml"
-    config_path.write_text("Root:\n  Child:\n    value: 7\n", encoding="utf-8")
-    monkeypatch.setenv("KONFAI_config_file", str(config_path))
-    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
-    monkeypatch.setenv("KONFAI_CONFIG_PATH", "before.path")
-    monkeypatch.setenv("KONFAI_CONFIG_VARIABLE", "before.variable")
-
-    @config("Child")
-    class Child:
-        def __init__(self, value: int = 0) -> None:
-            self.value = value
-
-    child = apply_config("Root")(Child)()
-
-    assert child.value == 7
-    assert os.environ["KONFAI_CONFIG_PATH"] == "before.path"
-    assert os.environ["KONFAI_CONFIG_VARIABLE"] == "before.variable"
-
-
-def test_apply_config_keeps_config_path_during_constructor_call(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    config_path = tmp_path / "Config.yml"
-    config_path.write_text("Root:\n  Child:\n    value: 7\n", encoding="utf-8")
-    monkeypatch.setenv("KONFAI_config_file", str(config_path))
-    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
-
-    @config("Child")
-    class Child:
-        def __init__(self, value: int = 0) -> None:
-            self.value = value
-            self.config_path = os.environ["KONFAI_CONFIG_PATH"]
-
-    child = apply_config("Root")(Child)()
-
-    assert child.value == 7
-    assert child.config_path == "Root.Child"
-
-
 def test_confirm_overwrite_or_raise_requires_flag_in_non_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KONFAI_OVERWRITE", raising=False)
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
@@ -119,27 +102,6 @@ def test_confirm_overwrite_or_raise_rejects_decline(monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(ConfigError, match="Overwrite was declined"):
         confirm_overwrite_or_raise(Path("/tmp/output"), "prediction", ConfigError)
-
-
-def test_debug_exit_block_raises_runtime_error() -> None:
-    with pytest.raises(RuntimeError, match="debug Exit block"):
-        Exit()(torch.ones(1))
-
-
-def test_data_split_does_not_duplicate_tail_samples(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KONFAI_STATE", str(State.TRAIN))
-
-    mapping = [(index, 0, 0) for index in range(5)]
-    shards = Data._split(mapping, 2)
-
-    flattened = [item for shard in shards for item in shard]
-
-    assert len(shards) == 2
-    # drop_last semantics: shards are equal length (DDP needs matching step counts), the tail is
-    # dropped, and no sample is ever duplicated across ranks.
-    assert {len(shard) for shard in shards} == {2}
-    assert len(flattened) == len(set(flattened))
-    assert set(flattened).issubset(set(mapping))
 
 
 def test_execute_distributed_object_sets_shared_master_port_without_forcing_launch_blocking(
@@ -210,3 +172,86 @@ def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
     assert devices_index == [3, 5]
     assert devices_name == ["GPU0", "GPU1"]
     assert queried_indices == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Progress/DDP synchronisation (regression tests for the runtime audit fixes,
+# see AUDIT.md)
+# ---------------------------------------------------------------------------
+
+
+def test_synchronize_data_gathers_on_cpu(monkeypatch):
+    """gloo/CPU multi-process must still all_gather (not fall back to local rank)."""
+    calls = {}
+
+    def fake_all_gather_object(outputs, data):
+        calls["called"] = True
+        for i in range(len(outputs)):
+            outputs[i] = data
+
+    def fail_set_device(*_args, **_kwargs):
+        raise AssertionError("set_device must not be called when CUDA is unavailable")
+
+    monkeypatch.setattr(rt.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(rt.torch.cuda, "set_device", fail_set_device)
+    monkeypatch.setattr(rt.dist, "all_gather_object", fake_all_gather_object)
+
+    result = rt.synchronize_data(3, 0, {"a": 1})
+
+    assert calls.get("called") is True
+    assert result == [{"a": 1}, {"a": 1}, {"a": 1}]
+
+
+def test_synchronize_data_sets_device_on_cuda(monkeypatch):
+    """When CUDA is available the target device is selected before gathering."""
+    seen = {}
+
+    def fake_all_gather_object(outputs, data):
+        for i in range(len(outputs)):
+            outputs[i] = data
+
+    monkeypatch.setattr(rt.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(rt.torch.cuda, "set_device", lambda gpu: seen.setdefault("gpu", gpu))
+    monkeypatch.setattr(rt.dist, "all_gather_object", fake_all_gather_object)
+
+    result = rt.synchronize_data(2, 1, {"b": 2})
+
+    assert seen.get("gpu") == 1
+    assert result == [{"b": 2}, {"b": 2}]
+
+
+def test_synchronize_data_no_dist(monkeypatch):
+    """Without an active process group the local data is returned as-is."""
+    monkeypatch.setattr(rt.dist, "is_initialized", lambda: False)
+    assert rt.synchronize_data(4, 0, {"a": 1}) == [{"a": 1}]
+
+
+def _run_execute(monkeypatch, obj):
+    monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt.mp, "spawn", lambda *a, **k: None)
+    rt.execute_distributed_object(obj, gpu=None, cpu=1)
+
+
+def test_execute_seeds_parent_before_setup(monkeypatch):
+    """The parent process (which runs the train/val split) must be seeded."""
+
+    recorded = []
+
+    class FakeObject(rt.DistributedObject):
+        def __init__(self) -> None:
+            super().__init__("fake-seeded")
+            self.manual_seed = 123
+
+        def setup(self, world_size: int) -> None:
+            recorded.append(random.random())
+
+        def run_process(self, *args, **kwargs) -> None:  # pragma: no cover - not spawned
+            pass
+
+    _run_execute(monkeypatch, FakeObject())
+    _run_execute(monkeypatch, FakeObject())
+
+    assert recorded[0] == recorded[1]
