@@ -56,3 +56,30 @@ def test_reduction_device_uses_gpu_when_it_fits_and_falls_back_when_it_does_not(
             return 2
 
     assert ds._reduction_device(_Oversized()).type == "cpu"
+
+
+class _FakeAccumulator:
+    def __init__(self, shape: list[int]) -> None:
+        self.shape = shape
+
+
+def test_accumulate_device_is_cpu_for_a_cpu_dataset() -> None:
+    ds = _dataset(torch.device("cpu"))
+    # A CPU dataset (or a CPU patch) always blends on the CPU — no GPU accumulation.
+    assert ds._accumulate_device(torch.zeros(4, 8, dtype=torch.float16), _FakeAccumulator([8])).type == "cpu"
+
+
+def test_accumulate_device_is_cpu_when_the_patch_is_on_cpu() -> None:
+    ds = _dataset(0)  # the on-GPU convention: a CUDA ordinal int
+    # The accumulator's device follows the first patch's; a CPU patch can only blend on the CPU.
+    assert ds._accumulate_device(torch.zeros(4, 8, dtype=torch.float16), _FakeAccumulator([8])).type == "cpu"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU accumulation only applies on CUDA")
+def test_accumulate_device_uses_gpu_when_the_volume_fits_and_falls_back_when_it_does_not() -> None:
+    ds = _dataset(0)
+    patch = torch.zeros(4, 8, dtype=torch.float16, device="cuda")
+    # a small combined volume comfortably fits free VRAM -> blend on the dataset's CUDA device
+    assert ds._accumulate_device(patch, _FakeAccumulator([8, 8, 8])).type == "cuda"
+    # a volume larger than free VRAM -> memory-safe CPU fallback (never risk an OOM mid-case)
+    assert ds._accumulate_device(patch, _FakeAccumulator([10**6, 10**6])).type == "cpu"

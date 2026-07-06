@@ -151,6 +151,11 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         # tensor; a single pinned buffer (one patch) stages each device patch instead, which is
         # copied into a fresh pageable tensor for storage. See ``_offload_to_cpu``.
         self._pin_buffer: torch.Tensor | None = None
+        # Per-(case, augmentation) blend device, decided once at the first patch (see
+        # ``_accumulate_device``): the accumulator's device CUDA when the full combined volume fits VRAM
+        # (blend on GPU, no per-patch offload, assembled volume stays on-device for the reduction), else
+        # CPU. All patches of the same accumulator must land on this one device, so the choice is cached.
+        self._accum_device: dict[tuple[int, int], torch.device] = {}
 
     # A pageable D2H copy on a large multi-class patch is a slow, fully synchronous PCIe transfer;
     # staging through page-locked memory only pays off once the patch is large enough that the copy,
@@ -371,11 +376,19 @@ class OutSameAsGroupDataset(OutputDataset):
                     layer,
                     self.attributes[index_dataset][index_augmentation][index_patch],
                 )
-        # Prediction accumulators can span many patches; keep them on CPU so
-        # each GPU patch output is released as soon as it has been post-processed.
-        if layer.device.type != "cpu":
-            layer = self._offload_to_cpu(layer)
-        self.output_layer_accumulator[index_dataset][index_augmentation].add_layer(index_patch, layer)
+        accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
+        key = (index_dataset, index_augmentation)
+        if key not in self._accum_device:
+            self._accum_device[key] = self._accumulate_device(layer, accumulator)
+        target = self._accum_device[key]
+        # When the accumulator lives on the GPU, blend the patch straight in (no host round-trip);
+        # otherwise offload each patch to CPU so its device memory is released after post-processing.
+        if target.type == "cpu":
+            if layer.device.type != "cpu":
+                layer = self._offload_to_cpu(layer)
+        elif str(layer.device) != str(target):
+            layer = layer.to(target)
+        accumulator.add_layer(index_patch, layer)
 
     def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
         super().setup(datasets, groups)
@@ -403,9 +416,6 @@ class OutSameAsGroupDataset(OutputDataset):
                     break
                 i += data_augmentations.nb
 
-        if layer.device.type != "cpu":
-            layer = layer.detach().cpu()
-
         base_attr = self.attributes[index][index_augmentation][0]
         if layer.shape[0] == sum(number_of_channels_per_model):
             base_attr["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
@@ -415,10 +425,13 @@ class OutSameAsGroupDataset(OutputDataset):
 
         # The per-model channel reduction (softmax/argmax over the class dimension of a whole-volume
         # multi-class output) is a strided reduction over billions of elements — slow on CPU, trivial on
-        # the GPU. Blending stays on CPU (patches are never all held in VRAM); only the already-assembled
-        # chunk is moved to the device for the reduction, then the small reduced result comes back. Falls
-        # back to CPU when there is no CUDA device or the chunk does not fit free VRAM.
-        reduce_device = self._reduction_device(chunks[0]) if chunks else torch.device("cpu")
+        # the GPU. If the accumulator blended on the GPU, the volume is already on-device: reduce there
+        # directly (no host round-trip, no ``empty_cache``). Otherwise it is on CPU; move the assembled
+        # chunk to the device only when it fits free VRAM, else keep the whole reduction on CPU.
+        if layer.device.type == "cuda":
+            reduce_device = layer.device
+        else:
+            reduce_device = self._reduction_device(chunks[0]) if chunks else torch.device("cpu")
         results = []
         for i, layer in enumerate(chunks):
             attr = base_attr if (i == len(chunks) - 1) else Attribute(base_attr)
@@ -447,12 +460,40 @@ class OutSameAsGroupDataset(OutputDataset):
         needed = chunk.numel() * chunk.element_size() * 3  # chunk + a same-size softmax temp + headroom
         return device if needed < free else torch.device("cpu")
 
+    def _accumulate_device(self, layer: torch.Tensor, accumulator: Accumulator) -> torch.device:
+        """Device on which to blend a case's patches. Keeping the accumulator on the GPU (nnU-Net style)
+        avoids the per-patch GPU->CPU offload and the CPU blend, and leaves the assembled volume on the
+        device for the reduction (no host round-trip, no ``empty_cache``). Only chosen when the full
+        combined volume, its weight map, and headroom for the ongoing forward passes fit free VRAM;
+        otherwise the memory-safe CPU accumulation is used (unchanged behaviour)."""
+        device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
+        if device.type != "cuda" or layer.device.type != "cuda":
+            return torch.device("cpu")
+        try:
+            # Release the forward pass's reserved-but-unused cache so ``mem_get_info`` reports the memory
+            # actually available, not a pessimistic view where the allocator's cache reads as occupied.
+            # Done once per case (this runs only for the first patch), same budget as the reduction path.
+            torch.cuda.empty_cache()
+            free, _ = torch.cuda.mem_get_info(device)
+        except Exception:  # nosec B110 - any CUDA query failure keeps the blend on CPU
+            return torch.device("cpu")
+        voxels = int(np.prod(accumulator.shape))
+        # result [C, volume] + weight_sum [volume], both at the patch dtype. Keep the accumulator to a
+        # quarter of free VRAM (``needed * 2 < free * 0.5``): the ``* 2`` leaves a same-size reduction
+        # temp, and the remaining half leaves room for every remaining patch's forward while the
+        # accumulator stays resident. Anything larger falls back to the memory-safe CPU blend.
+        needed = (layer.shape[0] + 1) * voxels * layer.element_size()
+        return device if needed * 2 < free * 0.5 else torch.device("cpu")
+
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
         results = [
             self._get_output(index, index_augmentation, number_of_channels_per_model, dataset).unsqueeze(0)
             for index_augmentation in self.output_layer_accumulator[index].keys()
         ]
         self.output_layer_accumulator.pop(index)
+        for augmentation in list(self._accum_device):
+            if augmentation[0] == index:
+                del self._accum_device[augmentation]
         result = self.reduction(results).squeeze(0)
         if isinstance(self.reduction, Mean) or isinstance(self.reduction, Median):
             result = result.squeeze(0)
