@@ -124,6 +124,11 @@ class OutputDataset(Dataset, NeedDevice, ABC):
     ) -> None:
         filename, _, file_format = split_path_spec(filename)
         super().__init__(filename, file_format)
+        # ``Dataset.__init__`` does not forward ``super().__init__()``, so the ``NeedDevice`` mixin is
+        # never initialised through the MRO; call it explicitly so ``self.device`` always has its CPU
+        # default. Otherwise an output writer that is never moved (e.g. a CPU-only PREDICTION run, whose
+        # device propagation is CUDA-gated) reads ``self.device`` and raises ``AttributeError``.
+        NeedDevice.__init__(self)
         self.group = group
         self._before_reduction_transforms = before_reduction_transforms
         self._after_reduction_transforms = after_reduction_transforms
@@ -141,6 +146,48 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self.attributes: dict[int, dict[int, dict[int, Attribute]]] = {}
         self.names: dict[int, str] = {}
         self.nb_data_augmentation = 0
+        # Reusable page-locked staging buffer for the per-patch GPU->CPU offload. Prediction
+        # accumulators keep every patch of a case until assembly, so patches cannot share one CPU
+        # tensor; a single pinned buffer (one patch) stages each device patch instead, which is
+        # copied into a fresh pageable tensor for storage. See ``_offload_to_cpu``.
+        self._pin_buffer: torch.Tensor | None = None
+
+    # A pageable D2H copy on a large multi-class patch is a slow, fully synchronous PCIe transfer;
+    # staging through page-locked memory only pays off once the patch is large enough that the copy,
+    # not the buffer bookkeeping, dominates. Small patches (e.g. single-channel synthesis) take the
+    # plain path unchanged.
+    _PINNED_OFFLOAD_MIN_BYTES = 64 * 1024 * 1024
+
+    def _offload_to_cpu(self, layer: torch.Tensor) -> torch.Tensor:
+        """Move a device patch to CPU, staging through a reusable pinned buffer for a faster copy.
+
+        Prediction accumulators hold every patch of a case until assembly, so patches cannot reuse a
+        single CPU tensor. A pageable ``layer.detach().cpu()`` on a large multi-class patch is a slow,
+        fully synchronous PCIe copy; a page-locked staging buffer makes it DMA-fast, and the result is
+        copied into a fresh pageable tensor so the one-patch pinned buffer can be reused (capping pinned
+        host RAM at a single patch). Bit-identical to ``layer.detach().cpu()``; falls back to it for
+        non-CUDA or small patches, or when the host cannot allocate page-locked memory.
+        """
+        detached = layer.detach()
+        if (
+            detached.device.type != "cuda"
+            or detached.numel() * detached.element_size() < self._PINNED_OFFLOAD_MIN_BYTES
+        ):
+            return detached.cpu()
+        buffer = self._pin_buffer
+        if buffer is None or buffer.shape != detached.shape or buffer.dtype != detached.dtype:
+            try:
+                buffer = torch.empty(detached.shape, dtype=detached.dtype, pin_memory=True)
+            except RuntimeError:  # host cannot lock this much memory -> plain pageable copy
+                self._pin_buffer = None
+                return detached.cpu()
+            self._pin_buffer = buffer
+        # Blocking copy into page-locked memory (fast DMA), then a CPU->CPU copy into a fresh pageable
+        # tensor so the pinned buffer is free to stage the next patch.
+        buffer.copy_(detached)
+        out = torch.empty(detached.shape, dtype=detached.dtype)
+        out.copy_(buffer)
+        return out
 
     def prepare(self, name_layer: str) -> None:
         self.before_reduction_transforms = []
@@ -327,7 +374,7 @@ class OutSameAsGroupDataset(OutputDataset):
         # Prediction accumulators can span many patches; keep them on CPU so
         # each GPU patch output is released as soon as it has been post-processed.
         if layer.device.type != "cpu":
-            layer = layer.detach().cpu()
+            layer = self._offload_to_cpu(layer)
         self.output_layer_accumulator[index_dataset][index_augmentation].add_layer(index_patch, layer)
 
     def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
@@ -366,15 +413,39 @@ class OutSameAsGroupDataset(OutputDataset):
         else:
             chunks = [layer]
 
+        # The per-model channel reduction (softmax/argmax over the class dimension of a whole-volume
+        # multi-class output) is a strided reduction over billions of elements — slow on CPU, trivial on
+        # the GPU. Blending stays on CPU (patches are never all held in VRAM); only the already-assembled
+        # chunk is moved to the device for the reduction, then the small reduced result comes back. Falls
+        # back to CPU when there is no CUDA device or the chunk does not fit free VRAM.
+        reduce_device = self._reduction_device(chunks[0]) if chunks else torch.device("cpu")
         results = []
         for i, layer in enumerate(chunks):
             attr = base_attr if (i == len(chunks) - 1) else Attribute(base_attr)
+            layer = layer.to(reduce_device)
             for transform in self.before_reduction_transforms:
                 layer = transform(self.names[index], layer, Attribute(attr))
-            results.append(layer)
+            results.append(layer.cpu() if layer.device.type != "cpu" else layer)
 
         # Mean, Median -> [1, C, ...] | Concat -> [M, C, ...]
         return torch.stack(results, dim=0)
+
+    def _reduction_device(self, chunk: torch.Tensor) -> torch.device:
+        """Device for the channel-reduction transforms: this dataset's CUDA device when the chunk (plus
+        working headroom) fits free VRAM, else CPU (the memory-safe fallback)."""
+        # NeedDevice stores a CUDA ordinal (int) on GPU and a torch.device on CPU; normalise to a device.
+        device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
+        if device.type != "cuda":
+            return torch.device("cpu")
+        try:
+            # The forward pass leaves the allocator holding a large reserved cache; release the unused part
+            # back to the driver so a genuinely-free GPU is not mistaken for a full one.
+            torch.cuda.empty_cache()
+            free, _ = torch.cuda.mem_get_info(device)
+        except Exception:  # nosec B110 - any CUDA query failure just keeps the reduction on CPU
+            return torch.device("cpu")
+        needed = chunk.numel() * chunk.element_size() * 3  # chunk + a same-size softmax temp + headroom
+        return device if needed < free else torch.device("cpu")
 
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
         results = [
@@ -678,6 +749,29 @@ class _Predictor:
                     )
 
 
+def _colocate_loaded_modules(model: torch.nn.Module) -> None:
+    """Move any still-CPU leaf module onto the model's device.
+
+    A custom :meth:`Network.load` may append modules after the model was already placed on its
+    device — e.g. a head sized from the checkpoint's class count — and those default to CPU, which
+    then raises a device mismatch on the forward pass. This re-homes any fully-CPU leaf onto the
+    device the rest of the model already lives on. Modules already on a device (including
+    model-parallel splits across several GPUs) are left untouched.
+    """
+    target = next((p.device for p in model.parameters() if p.device.type != "cpu"), None)
+    if target is None:
+        return
+    for sub in model.modules():
+        # ModuleArgsDict overrides parameters()/buffers() without a ``recurse`` kwarg, so use the
+        # base nn.Module methods to read each module's own (non-recursive) tensors.
+        own = [
+            *torch.nn.Module.parameters(sub, recurse=False),
+            *torch.nn.Module.buffers(sub, recurse=False),
+        ]
+        if own and all(t.device.type == "cpu" for t in own):
+            sub.to(target)
+
+
 class ModelComposite(Network):
     """
     A composite model that replicates a given base network multiple times and combines their outputs.
@@ -744,6 +838,9 @@ class ModelComposite(Network):
             # ensemble suffix added after the previous load.
             model.set_name(self._base_model_name)
             model.load(state, init=False)
+            # A custom load() may append checkpoint-sized modules (e.g. the head) on CPU; co-locate
+            # them with the already device-placed model so the forward pass doesn't hit a mismatch.
+            _colocate_loaded_modules(model)
             model.set_name(f"{self._base_model_name}_{index}")
             self._loaded_state_index = index
         return model
@@ -1016,6 +1113,10 @@ class Predictor(DistributedObject):
             if len(cuda_visible_devices())
             else self.model_composite
         )
+        if len(cuda_visible_devices()):
+            # Co-locate the output writers with the model so their reduction/transforms know the GPU.
+            for output_dataset in self.outputs_dataset.values():
+                output_dataset.to(local_rank * self.size)
         model_composite = Model(model_composite)
         with _Predictor(
             world_size,
