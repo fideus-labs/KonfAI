@@ -181,9 +181,6 @@ ruff = "==0.15.2"
 pre-commit = "*"
 
 [tool.pixi.feature.lint.tasks]
-lint = { cmd = "ruff check konfai konfai-apps/konfai_apps tests", description = "Lint source code" }
-format = { cmd = "ruff format konfai konfai-apps/konfai_apps tests", description = "Format source code" }
-format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps tests", description = "Check formatting without modifying files" }
 pre-commit-install = { cmd = "pre-commit install --hook-type pre-commit --hook-type commit-msg", description = "Install pre-commit and commit-msg hooks" }
 pre-commit-run = { cmd = "pre-commit run --all-files", description = "Run pre-commit hooks on all repository files" }
 
