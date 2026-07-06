@@ -159,11 +159,14 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         # tensor; a single pinned buffer (one patch) stages each device patch instead, which is
         # copied into a fresh pageable tensor for storage. See ``_offload_to_cpu``.
         self._pin_buffer: torch.Tensor | None = None
-        # Per-(case, augmentation) blend device, decided once at the first patch (see
-        # ``_accumulate_device``): the accumulator's device CUDA when the full combined volume fits VRAM
-        # (blend on GPU, no per-patch offload, assembled volume stays on-device for the reduction), else
-        # CPU. All patches of the same accumulator must land on this one device, so the choice is cached.
-        self._accum_device: dict[tuple[int, int], torch.device] = {}
+        # Per-CASE blend device, decided once at the case's first patch (see ``_accumulate_device``):
+        # CUDA when the full combined volume of EVERY augmentation fits VRAM (blend on GPU, no per-patch
+        # offload, assembled volume stays on-device for the reduction), else CPU. The decision is per case,
+        # not per (case, augmentation): all of a case's augmentations are reduced together in
+        # ``get_output``, and a mid-case flip would hand the reduction a mixed CPU/CUDA tensor list.
+        self._accum_device: dict[int, torch.device] = {}
+        # Same single-decision rule for the CPU-blend reduction device (see ``_reduction_device``).
+        self._reduce_device: dict[int, torch.device] = {}
 
     # A pageable D2H copy on a large multi-class patch is a slow, fully synchronous PCIe transfer;
     # staging through page-locked memory only pays off once the patch is large enough that the copy,
@@ -385,10 +388,9 @@ class OutSameAsGroupDataset(OutputDataset):
                     self.attributes[index_dataset][index_augmentation][index_patch],
                 )
         accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
-        key = (index_dataset, index_augmentation)
-        if key not in self._accum_device:
-            self._accum_device[key] = self._accumulate_device(layer, accumulator)
-        target = self._accum_device[key]
+        if index_dataset not in self._accum_device:
+            self._accum_device[index_dataset] = self._accumulate_device(layer, accumulator)
+        target = self._accum_device[index_dataset]
         # When the accumulator lives on the GPU, blend the patch straight in (no host round-trip);
         # otherwise offload each patch to CPU so its device memory is released after post-processing.
         if target.type == "cpu":
@@ -439,7 +441,13 @@ class OutSameAsGroupDataset(OutputDataset):
         if layer.device.type == "cuda":
             reduce_device = layer.device
         else:
-            reduce_device = self._reduction_device(chunks[0]) if chunks else torch.device("cpu")
+            # One decision per case (cached): deciding per augmentation would let free VRAM shrinking
+            # between augmentations flip the device mid-case and hand the reduction a mixed-device list.
+            if index not in self._reduce_device:
+                self._reduce_device[index] = (
+                    self._reduction_device(chunks[0], len(chunks)) if chunks else torch.device("cpu")
+                )
+            reduce_device = self._reduce_device[index]
         results = []
         for i, layer in enumerate(chunks):
             attr = base_attr if (i == len(chunks) - 1) else Attribute(base_attr)
@@ -453,8 +461,8 @@ class OutSameAsGroupDataset(OutputDataset):
         # Mean, Median -> [1, C, ...] | Concat -> [M, C, ...]
         return torch.stack(results, dim=0)
 
-    def _reduction_device(self, chunk: torch.Tensor) -> torch.device:
-        """Device for the channel-reduction transforms: this dataset's CUDA device when the chunk (plus
+    def _reduction_device(self, chunk: torch.Tensor, nb_chunks: int = 1) -> torch.device:
+        """Device for the channel-reduction transforms: this dataset's CUDA device when every chunk (plus
         working headroom) fits free VRAM, else CPU (the memory-safe fallback)."""
         # NeedDevice stores a CUDA ordinal (int) on GPU and a torch.device on CPU; normalise to a device.
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
@@ -467,15 +475,18 @@ class OutSameAsGroupDataset(OutputDataset):
             free, _ = torch.cuda.mem_get_info(device)
         except Exception:  # nosec B110 - any CUDA query failure just keeps the reduction on CPU
             return torch.device("cpu")
-        needed = chunk.numel() * chunk.element_size() * 3  # chunk + a same-size softmax temp + headroom
+        # Every transformed chunk is parked on the reduce device until the final stack (a combine:Concat
+        # ensemble keeps M of them), so budget all of them plus a same-size working temp per chunk and
+        # one stack copy — not just the single chunk the old ``*3`` heuristic assumed.
+        needed = chunk.numel() * chunk.element_size() * (2 * max(1, nb_chunks) + 1)
         return device if needed < free else torch.device("cpu")
 
     def _accumulate_device(self, layer: torch.Tensor, accumulator: Accumulator) -> torch.device:
         """Device on which to blend a case's patches. Keeping the accumulator on the GPU (nnU-Net style)
         avoids the per-patch GPU->CPU offload and the CPU blend, and leaves the assembled volume on the
         device for the reduction (no host round-trip, no ``empty_cache``). Only chosen when the full
-        combined volume, its weight map, and headroom for the ongoing forward passes fit free VRAM;
-        otherwise the memory-safe CPU accumulation is used (unchanged behaviour)."""
+        combined volume of every augmentation, its weight map, and headroom for the ongoing forward
+        passes fit free VRAM; otherwise the memory-safe CPU accumulation is used (unchanged behaviour)."""
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
         if device.type != "cuda" or layer.device.type != "cuda":
             return torch.device("cpu")
@@ -487,8 +498,10 @@ class OutSameAsGroupDataset(OutputDataset):
         except Exception:  # nosec B110 - any CUDA query failure keeps the blend on CPU
             return torch.device("cpu")
         voxels = int(np.prod(accumulator.shape))
-        # result [C, volume] + weight_sum [volume], both at the patch dtype.
-        needed = (layer.shape[0] + 1) * voxels * layer.element_size()
+        # result [C, volume] + weight_sum [volume] at the patch dtype, for EVERY augmentation of the
+        # case: ``is_done`` requires all augmentations complete before ``get_output``, so their
+        # accumulators are resident simultaneously and the per-case device decision must budget them all.
+        needed = (layer.shape[0] + 1) * voxels * layer.element_size() * max(1, self.nb_data_augmentation)
         # Keep the accumulator to a bit over a quarter of free VRAM (``needed * 2 < free * 0.56``): the
         # ``* 2`` reserves a same-size reduction temp, and the rest leaves room for every remaining
         # patch's forward while the accumulator stays resident. ``free`` is read after the first batch's
@@ -503,12 +516,15 @@ class OutSameAsGroupDataset(OutputDataset):
             for index_augmentation in self.output_layer_accumulator[index].keys()
         ]
         self.output_layer_accumulator.pop(index)
-        for augmentation in list(self._accum_device):
-            if augmentation[0] == index:
-                del self._accum_device[augmentation]
+        self._accum_device.pop(index, None)
+        self._reduce_device.pop(index, None)
         # The volume stays on whatever device it was blended on (GPU when it fit VRAM, else CPU): the
         # reduction and every finalize transform are device- and dtype-transparent, so the whole finalize
         # simply runs where the volume already is. Only the final result is returned to the host.
+        # The per-case device decisions above make the list single-device; if VRAM pressure ever mixes
+        # devices anyway, fall back to the host — the one device guaranteed to fit everything.
+        if len({r.device for r in results}) > 1:
+            results = [r.cpu() if r.device.type != "cpu" else r for r in results]
         result = self.reduction(results).squeeze(0)
         if isinstance(self.reduction, Mean) or isinstance(self.reduction, Median):
             result = result.squeeze(0)

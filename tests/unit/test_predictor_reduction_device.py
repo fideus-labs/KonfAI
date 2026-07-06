@@ -19,9 +19,10 @@ import torch
 from konfai.predictor import OutSameAsGroupDataset
 
 
-def _dataset(device: torch.device | int) -> OutSameAsGroupDataset:
+def _dataset(device: torch.device | int, nb_data_augmentation: int = 1) -> OutSameAsGroupDataset:
     ds = OutSameAsGroupDataset.__new__(OutSameAsGroupDataset)
     ds.device = device  # NeedDevice stores a torch.device on CPU and a CUDA ordinal (int) on GPU
+    ds.nb_data_augmentation = nb_data_augmentation
     return ds
 
 
@@ -96,6 +97,21 @@ def test_accumulate_device_falls_back_when_free_vram_is_low(monkeypatch: pytest.
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda *a, **k: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (1024, 25 * 1024**3))  # ~1 KiB free
     assert ds._accumulate_device(patch, accumulator).type == "cpu"
-    # with plenty of free VRAM the very same accumulator blends on the GPU
+# with plenty of free VRAM the very same accumulator blends on the GPU
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (25 * 1024**3, 25 * 1024**3))
-    assert ds._accumulate_device(patch, accumulator).type == "cuda"
+        assert ds._accumulate_device(patch, accumulator).type == "cuda"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU accumulation only applies on CUDA")
+def test_accumulate_device_budgets_every_tta_augmentation(monkeypatch: pytest.MonkeyPatch) -> None:
+    # All of a case's TTA accumulators are resident simultaneously (``is_done`` requires every
+    # augmentation complete before ``get_output``), so the per-case decision budgets accumulator x T:
+    # a volume where one copy fits but T copies do not must take the CPU path for the WHOLE case —
+    # a per-augmentation flip would hand the reduction a mixed CPU/CUDA list and crash it.
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda *a, **k: None)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (12 * 1024**3, 25 * 1024**3))
+    patch = torch.zeros(1, 8, dtype=torch.float16, device="cuda")
+    voxels = 512 * 1024**2  # (C+1)=2 x 2 bytes x voxels = 2 GiB per augmentation
+    # T=1: 2 GiB x 2 < 12 GiB x 0.56 -> GPU; T=3: 6 GiB x 2 >= 6.72 GiB -> whole case on CPU
+    assert _dataset(0, nb_data_augmentation=1)._accumulate_device(patch, _FakeAccumulator([voxels])).type == "cuda"
+    assert _dataset(0, nb_data_augmentation=3)._accumulate_device(patch, _FakeAccumulator([voxels])).type == "cpu"
