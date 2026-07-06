@@ -653,6 +653,36 @@ class Sum(Transform):
             return torch.sum(tensor, dim=self.dim).to(tensor.dtype)
 
 
+class MergeLabels(Transform):
+    """Merge the per-model argmax label maps of a ``combine: Concat`` ensemble into one global map.
+
+    Each model's ``Argmax`` produces a LOCAL class index (``0`` = background). A model's
+    non-background labels are shifted past every earlier model's foreground classes -- by the
+    CUMULATIVE sum of the earlier models' foreground counts (``nb_class - 1``) -- so the models'
+    disjoint label ranges tile a single global label space.
+
+    This is the label-space counterpart of ``InferenceStack`` (which averages *same-class*
+    probability ensembles): use ``MergeLabels`` when the models segment DIFFERENT structures, e.g.
+    the 5-task TotalSegmentator ensemble (organs / vertebrae / cardiac / muscles / ribs). Requires
+    ``number_of_channels_per_model`` in the attribute (written by the ``Concat`` reduction).
+    """
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "number_of_channels_per_model" not in cache_attribute:
+            raise TransformError(
+                "MergeLabels expects a multi-model 'combine: Concat' output: "
+                "'number_of_channels_per_model' is missing from the attribute.",
+            )
+        number_of_channels = cache_attribute.pop_tensor("number_of_channels_per_model")
+        result = tensor[0]
+        offset = int(number_of_channels[0]) - 1
+        for i, t in enumerate(tensor[1:]):
+            t[t != 0] += offset
+            result += t
+            offset += int(number_of_channels[i + 1]) - 1
+        return result
+
+
 class Gradient(Transform):
     def __init__(self, per_dim: bool = False):
         super().__init__()
