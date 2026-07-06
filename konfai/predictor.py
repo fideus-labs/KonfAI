@@ -481,19 +481,21 @@ class OutSameAsGroupDataset(OutputDataset):
             return torch.device("cpu")
         try:
             # Release the forward pass's reserved-but-unused cache so ``mem_get_info`` reports the memory
-            # actually available, not a pessimistic view where the allocator's cache reads as occupied.
-            # Done once per case (this runs only for the first patch), same budget as the reduction path.
+            # actually available (this runs once, on the first patch of the case).
             torch.cuda.empty_cache()
             free, _ = torch.cuda.mem_get_info(device)
         except Exception:  # nosec B110 - any CUDA query failure keeps the blend on CPU
             return torch.device("cpu")
         voxels = int(np.prod(accumulator.shape))
-        # result [C, volume] + weight_sum [volume], both at the patch dtype. Keep the accumulator to a
-        # quarter of free VRAM (``needed * 2 < free * 0.5``): the ``* 2`` leaves a same-size reduction
-        # temp, and the remaining half leaves room for every remaining patch's forward while the
-        # accumulator stays resident. Anything larger falls back to the memory-safe CPU blend.
+        # result [C, volume] + weight_sum [volume], both at the patch dtype.
         needed = (layer.shape[0] + 1) * voxels * layer.element_size()
-        return device if needed * 2 < free * 0.5 else torch.device("cpu")
+        # Keep the accumulator to a bit over a quarter of free VRAM (``needed * 2 < free * 0.56``): the
+        # ``* 2`` reserves a same-size reduction temp, and the rest leaves room for every remaining
+        # patch's forward while the accumulator stays resident. ``free`` is read after the first batch's
+        # forward, so a larger batch (which leaves less free) is rejected here -- exactly when the
+        # forward + resident accumulator would otherwise OOM mid-case. A many-channel volume whose
+        # accumulator dwarfs free (e.g. a 100+ class head) also falls back to the memory-safe CPU blend.
+        return device if needed * 2 < free * 0.56 else torch.device("cpu")
 
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
         results = [
