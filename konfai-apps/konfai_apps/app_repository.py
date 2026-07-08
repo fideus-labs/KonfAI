@@ -150,6 +150,24 @@ def is_app_repo(filenames: list[str]) -> bool:
     return "app.json" in filenames
 
 
+def current_free_vram(devices: list[int], remote_server: RemoteServer | None = None) -> float | None:
+    """Free VRAM (GB) available on ``devices`` — the minimum across them, mirroring how inference picks
+    its VRAM plan. Returns ``None`` on CPU (no devices) or when VRAM cannot be read; a device whose VRAM
+    query fails is skipped rather than failing the whole measurement. UIs pair it with
+    :meth:`AppRepositoryInfo.resolve_vram_plan` to preview the plan for the current machine."""
+    from konfai import get_vram
+
+    frees = []
+    for device in devices:
+        # A device whose VRAM query fails (NVML/remote hiccup) is skipped, not fatal.
+        try:
+            used_gb, total_gb = get_vram([int(device)], remote_server)
+            frees.append(total_gb - used_gb)
+        except Exception:  # nosec B112
+            continue
+    return min(frees) if frees else None
+
+
 class VolumeType(Enum):
     SEGMENTATION = "SEGMENTATION"
     VOLUME = "VOLUME"
