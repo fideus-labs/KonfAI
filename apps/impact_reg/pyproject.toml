@@ -27,3 +27,11 @@ impact-reg-konfai = "impact_reg_konfai.cli:main"
 root = "../.."
 tag_regex = "^v(?P<version>.*)$"
 local_scheme = "no-local-version"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: end-to-end tests that run a real KonfAI preset (heavy).",
+  "gpu: requires a CUDA device.",
+  "slow: takes more than a few seconds.",
+]

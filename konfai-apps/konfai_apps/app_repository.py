@@ -187,11 +187,28 @@ class TerminologyEntry:
     color: str
 
 
+# Values an optional input may declare in app.json under "default": how konfai-apps synthesises the
+# volume when the caller omits it (all-ones = whole-image, e.g. a no-restriction mask; all-zeros = empty).
+INPUT_DEFAULTS = ("ones", "zeros")
+
+
+def _parse_input_default(key: str, default: Any) -> str | None:
+    """Validate an input's ``default`` field from app.json (one of ``INPUT_DEFAULTS`` or omitted)."""
+    if default is not None and default not in INPUT_DEFAULTS:
+        raise AppMetadataError(
+            f"Input '{key}': 'default' must be one of {list(INPUT_DEFAULTS)} or omitted, got {default!r}."
+        )
+    return default
+
+
 @dataclass
 class DataEntry:
     display_name: str
     volume_type: VolumeType
     required: bool
+    # Only meaningful for optional inputs: how to synthesise the volume when it is not provided
+    # (one of INPUT_DEFAULTS, or None to leave it absent). See KonfAIApp._fill_optional_inputs.
+    default: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +381,7 @@ class LocalAppRepository(AppRepositoryInfo):
                     display_name=value["display_name"],
                     volume_type=VolumeType(value["volume_type"]),
                     required=bool(value["required"]),
+                    default=_parse_input_default(key, value.get("default")),
                 )
                 for key, value in app_repository_metadata["inputs"].items()
             }

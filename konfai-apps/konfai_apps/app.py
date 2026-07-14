@@ -943,6 +943,32 @@ class KonfAIApp(AbstractKonfAIApp):
             for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(input_path)):
                 KonfAIApp.symlink(source, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
 
+    def _fill_optional_inputs(self, provided: int) -> None:
+        """Synthesise declared defaults for optional inputs the caller did not provide.
+
+        Inputs map positionally to ``Volume_0..N-1`` in ``app.json`` declaration order, so only trailing
+        inputs can be omitted. An optional input may declare a ``default`` in app.json (``"ones"`` /
+        ``"zeros"``); konfai-apps then creates that ``Volume_i`` for every case, shaped and geo-referenced
+        like ``Volume_0`` but read from its header only (no pixel load) — so an app runs from its required
+        inputs alone. The registration mask branches use ``"ones"`` (a whole-image mask restricts nothing).
+        Optional inputs with no ``default`` are left absent; a genuinely-missing required input still fails
+        downstream.
+        """
+        declared = list(self.app_repository.get_inputs().items())
+        fills = {
+            i: entry.default
+            for i, (_, entry) in enumerate(declared)
+            if i >= provided and not entry.required and entry.default is not None
+        }
+        if not fills:
+            return
+        fill_value = {"ones": 1, "zeros": 0}
+        dataset = Dataset("Dataset", KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0"))
+        for name in dataset.get_names("Volume_0"):
+            shape, attributes = dataset.get_infos("Volume_0", name)  # header only, no pixel read
+            for i, default in fills.items():
+                dataset.write(f"Volume_{i}", name, np.full(shape, fill_value[default], dtype=np.uint8), attributes)
+
     def _write_inference_stack_to_dataset(self, inputs: list[list[Path]]) -> None:
         """
         Build the Dataset/ structure for uncertainty estimation.
@@ -1050,6 +1076,7 @@ class KonfAIApp(AbstractKonfAIApp):
         - GPU defaults to `cuda_visible_devices()`.
         """
         self._write_inputs_to_dataset(inputs)
+        self._fill_optional_inputs(len(inputs))
         available_vram = None
         if len(gpu):
             available_vram_per_device: list[float] = []

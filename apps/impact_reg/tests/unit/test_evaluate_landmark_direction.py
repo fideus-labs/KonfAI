@@ -28,13 +28,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import SimpleITK as sitk
-
-sys_path_test_dir = Path(__file__).resolve().parents[2]
-if str(sys_path_test_dir) not in __import__("sys").path:
-    __import__("sys").path.insert(0, str(sys_path_test_dir))
-
-from impact_reg_konfai import impact_reg as impact_reg_module  # noqa: E402
-from konfai.utils.dataset import read_landmarks, write_landmarks  # noqa: E402
+from impact_reg_konfai import impact_reg as impact_reg_module
+from konfai.utils.dataset import read_landmarks, write_landmarks
 
 
 def test_evaluate_warps_fixed_fiducials_onto_moving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

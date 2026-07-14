@@ -20,7 +20,11 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import konfai_apps.app as app_module
+import numpy as np
 import pytest
+import SimpleITK as sitk
+from konfai.utils.errors import AppMetadataError
+from konfai_apps.app_repository import DataEntry, VolumeType, _parse_input_default
 
 
 def test_run_distributed_app_uses_requested_workspace_and_restores_cwd(
@@ -187,6 +191,80 @@ def test_dataset_writer_preserves_registered_extension_for_multidot_names(
     volume = tmp_path / "Dataset" / "P000" / "Volume_0.nii.gz"
     assert volume.is_symlink() or volume.exists()
     assert Path(os.readlink(volume)).name == "patient.1.nii.gz"
+
+
+def _write_volume(path: Path, shape: tuple[int, int, int] = (4, 5, 6), value: int = 7) -> None:
+    sitk.WriteImage(sitk.GetImageFromArray(np.full(shape, value, dtype=np.int16)), str(path))
+
+
+def _app_with_inputs(inputs: dict[str, DataEntry]) -> "app_module.KonfAIApp":
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app.app_repository = types.SimpleNamespace(get_inputs=lambda: inputs)  # type: ignore[attr-defined]
+    return app
+
+
+def test_fill_optional_inputs_generates_declared_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_volume(data / "fixed.mha")
+    _write_volume(data / "moving.mha", shape=(3, 3, 3))
+    monkeypatch.chdir(tmp_path)
+
+    app = _app_with_inputs(
+        {
+            "Fixed": DataEntry("Fixed", VolumeType.VOLUME, True),
+            "Moving": DataEntry("Moving", VolumeType.VOLUME, True),
+            "FixedMask": DataEntry("Fixed mask", VolumeType.SEGMENTATION, False, default="ones"),
+            "EmptyMask": DataEntry("Empty mask", VolumeType.SEGMENTATION, False, default="zeros"),
+        }
+    )
+    app._write_inputs_to_dataset([[data / "fixed.mha"], [data / "moving.mha"]])
+    app._fill_optional_inputs(2)
+
+    case = tmp_path / "Dataset" / "P000"
+    fixed_shape = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "Volume_0.mha"))).shape
+    # each optional input is synthesised per its declared default, shaped/geo-referenced like Volume_0
+    for i, expected in ((2, 1), (3, 0)):
+        volume = case / f"Volume_{i}.mha"
+        assert volume.exists()
+        arr = sitk.GetArrayFromImage(sitk.ReadImage(str(volume)))
+        assert arr.shape == fixed_shape
+        assert np.array_equal(arr, np.full_like(arr, expected))
+
+
+@pytest.mark.parametrize("value", [None, "ones", "zeros"])
+def test_parse_input_default_accepts_known_values(value: str | None) -> None:
+    assert _parse_input_default("FixedMask", value) == value
+
+
+def test_parse_input_default_rejects_unknown_value() -> None:
+    with pytest.raises(AppMetadataError, match="default"):
+        _parse_input_default("FixedMask", "whole")
+
+
+def test_fill_optional_inputs_leaves_input_without_default_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_volume(data / "fixed.mha")
+    monkeypatch.chdir(tmp_path)
+
+    # An optional input that declares no `default` must NOT be synthesised (it is simply left absent).
+    app = _app_with_inputs(
+        {
+            "Fixed": DataEntry("Fixed", VolumeType.VOLUME, True),
+            "Prior": DataEntry("Optional prior", VolumeType.VOLUME, False),
+        }
+    )
+    app._write_inputs_to_dataset([[data / "fixed.mha"]])
+    app._fill_optional_inputs(1)
+
+    assert not (tmp_path / "Dataset" / "P000" / "Volume_1.mha").exists()
 
 
 class _FakeSseResponse:
