@@ -23,6 +23,7 @@ examples/Synthesis/
 ├── Prediction.yml
 ├── Evaluation.yml
 ├── Model.py
+├── UNetpp.yml
 ├── README.md
 ├── Synthesis_demo.ipynb
 └── UnNormalize.py
@@ -33,7 +34,28 @@ examples/Synthesis/
 - `Prediction.yml`: shared inference workflow for both the baseline checkpoint and the generator extracted from a GAN checkpoint
 - `Evaluation.yml`: shared evaluation workflow for both synthesis variants
 - `Model.py`: local model module defining the baseline `UNetpp5`, the `Discriminator`, and the full `Gan`
+- `UNetpp.yml`: the baseline `UNetpp5` generator as a declarative YAML (weight-identical)
 - `UnNormalize.py`: example of a local custom postprocessing transform
+
+## Two ways to define the model
+
+The **baseline generator** ships in both forms, like the Segmentation UNet — swap the
+`classpath` in `Config.yml`, they are weight-identical and both expose the `Head:Tanh` output:
+
+```yaml
+Model:
+  classpath: Model:UNetpp5  # Python form (Model.py)
+  # classpath: UNetpp.yml   # declarative form — the same smp UNet++ + Tanh, node-for-node
+```
+
+`UNetpp5` wraps `segmentation_models_pytorch.UnetPlusPlus` (a ResNet-34-encoder UNet++, ~117
+conv layers) with a `Tanh` head, so `UNetpp.yml` is large — it shows that **even an
+encoder-backed model can be fully declarative**. In practice `classpath: segmentation.smp.SMP`
+(with `arch`/`encoder_name` as parameters) is the compact way to declare the smp backbone.
+
+The **GAN** (`Config_GAN.yml`) stays Python: `Gan` composes a generator and a discriminator
+with a bespoke adversarial `forward`, which a feed-forward graph cannot express. Rule of thumb:
+**feed-forward graph → YAML; custom `forward` / multi-network training loop → Python.**
 
 ## Recommended way to start
 

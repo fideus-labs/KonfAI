@@ -25,6 +25,7 @@ The current baseline uses:
 examples/Segmentation/
 ├── Config.yml
 ├── UNet.yml
+├── Model.py
 ├── Prediction.yml
 ├── Evaluation.yml
 ├── README.md
@@ -33,9 +34,28 @@ examples/Segmentation/
 
 - `Config.yml`: training workflow
 - `UNet.yml`: UNet modules, nested skip connections, parameters, and routing
+- `Model.py`: the **same** UNet written as a Python class
 - `Prediction.yml`: inference workflow
 - `Evaluation.yml`: evaluation workflow
 - `Segmentation_demo.ipynb`: guided onboarding notebook
+
+## Two ways to define the model
+
+KonfAI accepts a model as a declarative **YAML graph** or as a **Python class**, and this
+example ships both — they build the same network, so they are interchangeable. Pick one in
+`Config.yml`/`Prediction.yml`:
+
+```yaml
+Model:
+  classpath: UNet.yml      # declarative form (this is the default here)
+  # classpath: Model:UNet  # the Python form in Model.py — same architecture
+```
+
+Use the **YAML form** for a no-code, shareable model (safe by construction — it can only
+reference a curated set of block types). Reach for the **Python form** when a model needs a
+custom `forward` or logic a declarative graph cannot express (the Synthesis example is such a
+case). Because both expose the same named output `UNetBlock_0:Head`, `outputs_criterions` in
+`Config.yml` is unchanged when you swap between them.
 
 The notebook is designed to work from a **fresh environment**, including **Google Colab**. Its setup cells can:
 

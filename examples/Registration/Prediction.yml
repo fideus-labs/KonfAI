@@ -1,0 +1,85 @@
+Predictor:
+  Model:
+    classpath: registration.registration.VoxelMorph
+    VoxelMorph:
+      dim: 2
+      channels:
+      - 2
+      - 8
+      - 16
+      - 16
+      shape:
+      - 64
+      - 64
+      int_steps: 7
+      int_downsize: 2
+      outputs_criterions: None  # No losses at prediction time; metrics are computed in Evaluation.yml
+      ModelPatch: None
+      BlockConfig:
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: true
+        activation: ReLU
+        norm_mode: NONE
+      nb_conv_per_stage: 2
+      downsample_mode: MAXPOOL
+      upsample_mode: CONV_TRANSPOSE
+      attention: false
+      rigid: false
+  Dataset:
+    groups_src:  # Both images are inputs: FIXED = branch 0, MOVING = branch 1
+      FIXED:
+        groups_dest:
+          FIXED:
+            transforms: None
+            patch_transforms: None
+            is_input: true
+      MOVING:
+        groups_dest:
+          MOVING:
+            transforms: None
+            patch_transforms: None
+            is_input: true
+    augmentations: None
+    Patch:
+      patch_size:
+      - 1
+      - 64
+      - 64
+      overlap: None
+      mask: None
+      pad_value: 0
+      extend_slice: 0
+    subset: None
+    filter: None
+    dataset_filenames:
+    - ./Dataset:a:mha
+    use_cache: false
+    batch_size: 4
+    num_workers: None
+    pin_memory: false
+    prefetch_factor: None
+    persistent_workers: None
+  outputs_dataset:
+    MovingImageResample:  # Model output = MOVING warped into FIXED space
+      OutputDataset:
+        name_class: OutSameAsGroupDataset
+        before_reduction_transforms: None
+        after_reduction_transforms: None
+        final_transforms:
+          TensorCast:
+            dtype: float32
+            inverse: false
+        dataset_filename: Dataset:mha
+        group: MOVED  # Name of the predicted modality (the registered image)
+        same_as_group: FIXED:FIXED  # The moved image lives in FIXED geometry
+        patch_combine: None
+        reduction: Mean
+        Mean: {}
+  train_name: REG_BASELINE
+  manual_seed: 32
+  gpu_checkpoints: None
+  autocast: false
+  combine: Mean
+  data_log: None

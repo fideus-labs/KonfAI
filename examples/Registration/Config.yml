@@ -1,0 +1,115 @@
+Trainer:
+  Model:
+    classpath: registration.registration.VoxelMorph  # Built-in diffeomorphic VoxelMorph (2D)
+    VoxelMorph:
+      dim: 2  # VoxelMorph's warping components are 2D-only; keep dim=2
+      channels:  # UNet feature channels; channels[0] = 2 = FIXED + MOVING concatenated as input
+      - 2
+      - 8
+      - 16
+      - 16
+      shape:  # Spatial size of the warped grid; must match the (Y, X) of the training patch
+      - 64
+      - 64
+      int_steps: 7  # Scaling-and-squaring steps for the diffeomorphic velocity field integration
+      int_downsize: 2  # Integrate the flow at half resolution, then upsample (VoxelMorph default)
+      outputs_criterions:
+        MovingImageResample:  # Model output = MOVING warped into FIXED space
+          targets_criterions:
+            FIXED:  # Similarity term: warped MOVING should match FIXED
+              criterions_loader:
+                MSE:  # Mean Squared Error image-matching loss
+                  is_loss: true
+                  schedulers:  # The loss weight stays constant during training
+                    Constant:
+                      nb_step: 0
+                      value: 1
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
+                  reduction: mean
+      optimizer:  # Optimizer used to update model weights during training
+        name: AdamW
+        lr: 0.001
+        weight_decay: 0.0001
+        betas:
+        - 0.9
+        - 0.999
+        eps: 1e-08
+        amsgrad: false
+        maximize: false
+        foreach: None
+        capturable: false
+        differentiable: false
+        fused: None
+      schedulers:  # Learning rate scheduler: multiply LR by gamma every step_size epochs
+        StepLR:
+          step_size: 20
+          gamma: 0.5
+          nb_step: 0
+          last_epoch: -1
+      BlockConfig:
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: true
+        activation: ReLU
+        norm_mode: NONE
+      nb_conv_per_stage: 2
+      downsample_mode: MAXPOOL
+      upsample_mode: CONV_TRANSPOSE
+      attention: false
+      nb_batch_per_step: 1
+      rigid: false
+  Dataset:
+    groups_src:  # Mapping between dataset modalities and how the model consumes them.
+      # Order matters: the first is_input group is branch 0, the second is branch 1.
+      FIXED:  # Reference image (branch 0) and target of the similarity loss
+        groups_dest:
+          FIXED:
+            transforms: None  # Data is already generated in [0, 1], no normalization needed
+            patch_transforms: None
+            is_input: true
+      MOVING:  # Image to warp onto FIXED (branch 1)
+        groups_dest:
+          MOVING:
+            transforms: None
+            patch_transforms: None
+            is_input: true
+    augmentations: None  # Keep the example deterministic; the task is a pure translation
+    Patch:  # Patch extraction parameters used during training
+      patch_size:  # [slice, height, width]; one 64x64 slice per case
+      - 1
+      - 64
+      - 64
+      overlap: None
+      mask: None
+      pad_value: 0
+      extend_slice: 0
+    subset: None
+    shuffle: true
+    filter: None
+    dataset_filenames:  # Dataset source (format: folder_path:mode:image_format)
+    - ./Dataset:a:mha
+    inline_augmentations: false
+    use_cache: true
+    batch_size: 4
+    validation: 0.25  # Hold out 25% of the cases for validation
+    validation_augmentations: false
+    num_workers: None
+    pin_memory: false
+    prefetch_factor: None
+    persistent_workers: None
+  train_name: REG_BASELINE  # Training name; drives the output folder structure
+  manual_seed: 32
+  epochs: 60
+  it_validation: None  # Validate once per epoch
+  autocast: false
+  gradient_checkpoints: None
+  gpu_checkpoints: None
+  ema_decay: 0
+  data_log: None
+  save_checkpoint_mode: BEST  # Keep the best checkpoint (plus the last one)
+  EarlyStopping: None
+  it_lr_update: None

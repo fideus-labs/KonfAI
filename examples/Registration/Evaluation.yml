@@ -1,0 +1,55 @@
+Evaluator:
+  metrics:  # Two comparisons against FIXED so the JSON shows the before/after of registration
+    MOVED:  # Registered image (network output): error AFTER registration
+      targets_criterions:
+        FIXED:
+          criterions_loader:
+            MAE:  # Mean Absolute Error between MOVED and FIXED
+              reduction: mean
+            MSE:  # Mean Squared Error between MOVED and FIXED
+              reduction: mean
+    MOVING:  # Un-registered input: error BEFORE registration (baseline)
+      targets_criterions:
+        FIXED:
+          criterions_loader:
+            MAE:
+              reduction: mean
+            MSE:
+              reduction: mean
+  Dataset:
+    groups_src:
+      FIXED:  # Reference image (ground truth for both comparisons)
+        groups_dest:
+          FIXED:
+            transforms:
+              TensorCast:
+                dtype: float32
+                inverse: true
+            is_input: true
+      MOVING:  # Un-registered moving image (baseline)
+        groups_dest:
+          MOVING:
+            transforms:
+              TensorCast:
+                dtype: float32
+                inverse: true
+            is_input: true
+      MOVED:  # Registered image produced by PREDICTION
+        groups_dest:
+          MOVED:
+            transforms:
+              TensorCast:
+                dtype: float32
+                inverse: true
+            is_input: true
+    subset: None
+    validation: None
+    filter: None
+    dataset_filenames:  # Ground-truth pair + predicted registered image
+    - ./Dataset:a:mha
+    - ./Predictions/REG_BASELINE/Dataset:i:mha
+    num_workers: None
+    pin_memory: false
+    prefetch_factor: None
+    persistent_workers: None
+  train_name: REG_BASELINE

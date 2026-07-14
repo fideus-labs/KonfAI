@@ -1,6 +1,7 @@
 Trainer:
   Model:
-    classpath: Model:UNetpp5  # Local model definition from Model.py, implementing a 5-channel 2.5D UNet++
+    classpath: Model:UNetpp5  # The baseline generator in Python form (Model.py). Same model as UNetpp.yml
+    # classpath: UNetpp.yml   # ...its declarative YAML form (weight-identical; exposes the same Head:Tanh)
     UNetpp5:
       outputs_criterions:
         Head:Tanh: # Model output layer used for loss computation
