@@ -46,6 +46,8 @@ jobs:
             pkg: "."
           - name: konfai-apps
             pkg: "konfai-apps"
+          - name: konfai-mcp
+            pkg: "konfai-mcp"
           - name: impact-synth-konfai
             pkg: "apps/impact_synth"
           - name: impact-seg-konfai
