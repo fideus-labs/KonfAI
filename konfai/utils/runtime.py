@@ -66,6 +66,7 @@ class ClusterKwargs(TypedDict):
     memory: int
     num_nodes: int
     time_limit: int
+    resubmit: bool
 
 
 def description(model, model_ema=None, show_memory: bool = True, train: bool = True) -> str:
@@ -628,6 +629,7 @@ def run_distributed_app(
                         "memory": kwargs["memory"],
                         "num_nodes": kwargs["num_nodes"],
                         "time_limit": kwargs["time_limit"],
+                        "resubmit": bool(kwargs.get("resubmit", False)),
                     }
                     if is_cluster
                     else None
@@ -705,6 +707,13 @@ def execute_distributed_object(
                     random.seed(configured_object.manual_seed)
                     torch.manual_seed(configured_object.manual_seed)
                 if cluster_config is not None:
+                    if cluster_config["resubmit"]:
+                        # Auto-requeue is not implemented; warn instead of silently dropping the flag.
+                        print(
+                            "[KonfAI] WARNING: --resubmit is not implemented yet; this job will NOT "
+                            "auto-requeue at the time limit. Relaunch manually with the RESUME command "
+                            "pointing at the latest checkpoint to continue training."
+                        )
                     configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
                     import submitit
 
@@ -751,9 +760,16 @@ def setup_gpu(world_size: int, rank: int | None = None) -> tuple[int | None, int
         scontrol_path = shutil.which("scontrol")
         if scontrol_path is None:
             raise FileNotFoundError("scontrol not found in PATH")
-        host_name = subprocess.check_output(
-            [scontrol_path, "show", "hostnames", nodelist], text=True, stderr=subprocess.DEVNULL
-        ).strip()  # nosec B603
+        # `scontrol show hostnames` prints one host per line; for a multi-node job take only the FIRST
+        # (the rendezvous master). Without this the whole newline-joined list leaks into init_method
+        # (tcp://node001\nnode002:port) and init_process_group can never rendezvous.
+        host_name = (
+            subprocess.check_output(  # nosec B603
+                [scontrol_path, "show", "hostnames", nodelist], text=True, stderr=subprocess.DEVNULL
+            )
+            .strip()
+            .splitlines()[0]
+        )
     except Exception:
         host_name = "localhost"
     if rank is None:

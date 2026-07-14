@@ -147,7 +147,6 @@ def apply_to_image_rigid_transform(image: sitk.Image, transform_files: dict[str 
 def apply_to_data_transform(data: np.ndarray, transform_files: dict[str | sitk.Transform, bool]) -> np.ndarray:
     transforms = compose_transform(transform_files)
     result = np.copy(data)
-    # _LPS = lambda matrix: np.array([-matrix[0], -matrix[1], matrix[2]], dtype=np.double)
     for i in range(data.shape[0]):
         result[i, :] = transforms.TransformPoint(np.asarray(data[i, :], dtype=np.double))
     return result

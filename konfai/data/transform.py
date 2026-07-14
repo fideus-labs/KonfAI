@@ -24,15 +24,19 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import SimpleITK as sitk
 import torch
+
+try:
+    import SimpleITK as sitk
+except ImportError:
+    sitk = None  # type: ignore[assignment]
 import torch.nn.functional as F
 
 from konfai import cuda_visible_devices
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
 from konfai.utils.errors import TransformError
-from konfai.utils.ITK import box_with_mask, crop_with_mask
+from konfai.utils.ITK import _require_simpleitk, box_with_mask, crop_with_mask
 from konfai.utils.runtime import NeedDevice
 from konfai.utils.utils import get_module, split_path_spec
 
@@ -533,6 +537,7 @@ class ResampleTransform(TransformInverse):
         grid = torch.stack(grids)
         grid = torch.unsqueeze(grid, 0)
 
+        _require_simpleitk()
         transforms = []
         for transform_group, invert in self.transforms.items():
             transform = None
@@ -586,8 +591,10 @@ class ResampleTransform(TransformInverse):
         return result.type(torch.uint8) if tensor.dtype == torch.uint8 else result
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        # TODO
-        return tensor
+        raise NotImplementedError(
+            "ResampleTransform.inverse is not implemented; set `inverse: false` on this transform "
+            "(it defaults to true)."
+        )
 
 
 class Mask(Transform):
@@ -599,6 +606,7 @@ class Mask(Transform):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if self.path.endswith(".mha"):
+            _require_simpleitk()
             if self._cached_mask is None:
                 self._cached_mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
             mask = self._cached_mask
@@ -907,6 +915,7 @@ class HistogramMatching(Transform):
                 image_ref = dataset.read_image(self.reference_group, name)
         if image_ref is None:
             raise NameError(f"Image : {self.reference_group}/{name} not found")
+        _require_simpleitk()
         matcher = sitk.HistogramMatchingImageFilter()
         matcher.SetNumberOfHistogramLevels(256)
         matcher.SetNumberOfMatchPoints(1)
@@ -942,7 +951,12 @@ class OneHot(TransformInverse):
         return result
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return torch.argmax(tensor, dim=1).unsqueeze(1)
+        # Argmax the CLASS axis (the one sized num_classes) and re-insert it, restoring a [.., 1, *spatial]
+        # label map. The predictor feeds this per-sample output[i] = [num_classes, *spatial] (class axis 0),
+        # but a batched [B, num_classes, *spatial] (class axis 1) is also handled, so it never argmaxes a
+        # batch or spatial axis.
+        class_dim = 0 if tensor.shape[0] == self.num_classes else 1
+        return torch.argmax(tensor, dim=class_dim).unsqueeze(class_dim)
 
 
 # Published app used by KonfAIInference when the configuration leaves repo/model unset.
@@ -1002,6 +1016,7 @@ class KonfAIInference(Transform):
                 "KonfAIInference cannot run inside daemon DataLoader workers. "
                 "Use 'Dataset.num_workers: 0' for pipelines that include this transform."
             )
+        _require_simpleitk()
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_path = Path(tmpdir) / "Dataset"
             if self.per_channel:
@@ -1095,7 +1110,11 @@ class Variance(Transform):
         super().__init__()
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensors.float().var(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0])
+        # Keep the leading member axis in BOTH branches: the N>1 var(0) drops it and re-adds it via
+        # unsqueeze(0), so the single-member zeros must unsqueeze too or the output rank is off by one.
+        return (
+            tensors.float().var(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0]).unsqueeze(0)
+        )
 
 
 class SegmentationDisagreement(Transform):
@@ -1147,7 +1166,9 @@ class StandardDeviation(Transform):
         super().__init__()
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensors.float().std(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0])
+        return (
+            tensors.float().std(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0]).unsqueeze(0)
+        )
 
 
 class Statistics(Transform):

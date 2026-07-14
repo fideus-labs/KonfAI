@@ -39,16 +39,20 @@ from konfai.utils.runtime import State
 
 @pytest.mark.parametrize("state", [State.TRAIN, State.RESUME])
 def test_train_split_equalises_indivisible_shards(monkeypatch: pytest.MonkeyPatch, state: State) -> None:
-    # DDP(static_graph=True) needs every rank to run the same number of backward all-reduces per
-    # epoch. A contiguous split of 7 patches over 3 ranks gives [2, 2, 3] and hangs NCCL on the
-    # extra step; drop_last equalises to [2, 2, 2].
+    # DDP(static_graph=True) needs every rank to run the same number of backward all-reduces per epoch,
+    # so shards must be equal length. They are equalised by PADDING (wrapping the shard's own head), not
+    # truncating: 7 patches over 3 ranks -> [3, 3, 3]. Every original sample still trains (truncation
+    # would permanently drop the tail sample, which _split runs once so no epoch shuffle recovers it).
     monkeypatch.setenv("KONFAI_STATE", str(state))
 
-    shards = Data._split([(index, 0, 0) for index in range(7)], 3)
+    mapping = [(index, 0, 0) for index in range(7)]
+    shards = Data._split(mapping, 3)
 
-    assert [len(shard) for shard in shards] == [2, 2, 2]
+    lengths = [len(shard) for shard in shards]
+    assert len(set(lengths)) == 1  # equal length -> no NCCL desync
     flattened = [item for shard in shards for item in shard]
-    assert len(flattened) == len(set(flattened))  # never duplicated across ranks
+    assert set(flattened) == set(mapping)  # nothing permanently dropped
+    assert len(flattened) - len(set(flattened)) <= 3  # only minimal padding duplicates (<= world_size)
 
 
 def test_train_split_two_ranks_indivisible(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,11 +61,11 @@ def test_train_split_two_ranks_indivisible(monkeypatch: pytest.MonkeyPatch) -> N
     mapping = [(i, 0, 0) for i in range(5)]
     shards = Data._split(mapping, 2)
 
-    # drop_last semantics: equal-length shards, the tail is dropped, no sample duplicated.
-    assert [len(shard) for shard in shards] == [2, 2]
+    # Equal-length shards via padding; every sample is still present (no tail dropped).
+    lengths = [len(shard) for shard in shards]
+    assert len(set(lengths)) == 1
     flattened = [item for shard in shards for item in shard]
-    assert len(flattened) == len(set(flattened))
-    assert set(flattened).issubset(set(mapping))
+    assert set(flattened) == set(mapping)
 
 
 def test_train_split_single_process_keeps_everything(monkeypatch: pytest.MonkeyPatch) -> None:

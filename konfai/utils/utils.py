@@ -142,7 +142,7 @@ SUPPORTED_EXTENSIONS = [
     "gipl.gz",  # GIPL
     "hdr",
     "img",  # Analyze
-    "dcm",  # DICOM (si GDCM activé)
+    "dcm",  # DICOM (if GDCM enabled)
     "dicom",  # DICOM series directory backend
     "omezarr",
     "ome-zarr",

@@ -42,6 +42,33 @@ from konfai.utils.errors import AugmentationError
 # --------------------------------------------------------------------------------------
 
 
+def test_hue_axis_rotation_preserves_luma() -> None:
+    # Hue rotation is a rotation of RGB about the luma axis: it must be identity at theta=0 and leave a
+    # grey pixel unchanged for any angle (an Euler XYZ rotation about the coordinate axes would recolour it).
+    from konfai.data.augmentation import _axis_rotation_matrix
+
+    v = torch.tensor([1.0, 1.0, 1.0]) / torch.sqrt(torch.tensor(3.0))
+    assert torch.allclose(_axis_rotation_matrix(torch.tensor(0.0), v), torch.eye(4), atol=1e-6)
+    grey = torch.tensor([0.5, 0.5, 0.5, 1.0])
+    for theta in (0.3, 0.7, 1.5):
+        assert torch.allclose(_axis_rotation_matrix(torch.tensor(theta), v) @ grey, grey, atol=1e-5)
+
+
+def test_saturation_matrix_scales_chroma_not_luma() -> None:
+    # v vT + (I - v vT) * s : s=1 is identity, s=0 collapses a colour to its luma (greyscale), and luma is
+    # preserved for any s, unlike the old (v vT + (I - v vT)) * s = I * s which was a uniform gain.
+    v = torch.tensor([1.0, 1.0, 1.0, 0.0]) / torch.sqrt(torch.tensor(3.0))
+    colour = torch.tensor([0.8, 0.2, 0.5, 0.0])
+    luma = colour[:3].mean()
+    for s in (1.0, 0.0, 2.0):
+        matrix = v.ger(v) + (torch.eye(4) - v.ger(v)) * s
+        out = matrix @ colour
+        assert torch.allclose(out[:3].mean(), luma, atol=1e-5)
+    assert torch.allclose((v.ger(v) + (torch.eye(4) - v.ger(v)) * 1.0) @ colour, colour, atol=1e-5)
+    grey = (v.ger(v) + (torch.eye(4) - v.ger(v)) * 0.0) @ colour
+    assert torch.allclose(grey[:3], torch.full((3,), luma), atol=1e-5)
+
+
 def test_augmentation_resamples_after_reset_state():
     """#1 Augmentation parameters must be re-sampled each epoch via reset_state.
 

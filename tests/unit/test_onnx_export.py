@@ -32,7 +32,7 @@ def test_export_to_onnx_parity(tmp_path, monkeypatch):
     ort = pytest.importorskip("onnxruntime")
 
     from konfai.export import _NamedHead, export_to_onnx, list_output_modules
-    from konfai.models.segmentation.UNet import UNet
+    from konfai.models.python.segmentation.UNet import UNet
 
     model = UNet(dim=2, channels=[1, 8, 16], nb_class=2).eval()
     example = torch.randn(1, 1, 64, 64)
@@ -69,7 +69,7 @@ def test_export_unknown_head_raises(tmp_path, monkeypatch):
     pytest.importorskip("onnxscript")
 
     from konfai.export import export_to_onnx
-    from konfai.models.segmentation.UNet import UNet
+    from konfai.models.python.segmentation.UNet import UNet
     from konfai.utils.errors import PredictorError
 
     model = UNet(dim=2, channels=[1, 8, 16], nb_class=2).eval()

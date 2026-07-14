@@ -546,7 +546,14 @@ class Dataset:
             if os.path.exists(direct):
                 return direct
 
-            matches = glob.glob(f"{base}.*")
+            # Deprioritize sidecar halves of paired formats: .raw/.zraw (detached MetaImage/NRRD data,
+            # unreadable standalone) and .img (readable via its paired .hdr, but prefer the header half).
+            # glob order is unsorted, so a bare matches[0] could hand the .raw half of a .mhd+.raw pair
+            # to the reader.
+            matches = sorted(
+                glob.glob(f"{base}.*"),
+                key=lambda candidate: candidate.lower().endswith((".raw", ".zraw", ".img")),
+            )
             return matches[0] if matches else None
 
         def _file_to_image_slice(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
@@ -635,11 +642,21 @@ class Dataset:
             elif os.path.exists(f"{self.filename}{name}.npy"):
                 data = np.load(f"{self.filename}{name}.npy")
             else:
-                pattern = f"{self.filename}{name}.*"
-                matches = glob.glob(pattern)
-                if not matches:
-                    raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
-                path = matches[0]
+                # Prefer the declared format's own extension; otherwise deprioritize the sidecar halves of
+                # paired formats (.raw/.zraw are unreadable standalone; .img reads only via its paired .hdr,
+                # so prefer the header). glob order is unsorted, so without this a '.mhd'+'.raw' pair could
+                # hand the '.raw' to ReadImage.
+                direct = f"{self.filename}{name}.{self.file_format}"
+                if os.path.exists(direct):
+                    path = direct
+                else:
+                    matches = sorted(
+                        glob.glob(f"{self.filename}{name}.*"),
+                        key=lambda candidate: candidate.lower().endswith((".raw", ".zraw", ".img")),
+                    )
+                    if not matches:
+                        raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
+                    path = matches[0]
                 image = sitk.ReadImage(path)
                 data, attributes_tmp = image_to_data(image)
                 attributes.update(attributes_tmp)
@@ -756,9 +773,7 @@ class Dataset:
                         if attribute != "path":
                             node.set(attribute, attributes[attribute])
                 if data.size > 0:
-                    node.text = ", ".join(
-                        map(str, data.flatten())
-                    )  # np.array2string(data, separator=',')[1:-1].replace('\n','')
+                    node.text = ", ".join(map(str, data.flatten()))
                 with open(f"{self.filename}{name}.xml", "wb") as f:
                     f.write(etree.tostring(root, pretty_print=True, encoding="utf-8"))
                     f.close()
@@ -786,7 +801,7 @@ class Dataset:
                 attributes["Direction"] = np.asarray(file_reader.GetDirection())
                 for k in file_reader.GetMetaDataKeys():
                     attributes[k] = file_reader.GetMetaData(k)
-                # Reverse for every rank (see the module-level get_infos): 2-D/4-D used to be transposed.
+                # Reverse the spatial size for every rank (see the module-level get_infos).
                 size = list(reversed(file_reader.GetSize()))
                 size = [file_reader.GetNumberOfComponents(), *size]
             else:
@@ -1337,7 +1352,6 @@ class Dataset:
             mean_ = data.mean()
             std_ = data.std()
 
-            # Percentiles in ONE call
             p25, p50, p75 = np.percentile(data, (25, 50, 75))
 
             stats[name] = {

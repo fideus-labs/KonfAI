@@ -65,7 +65,7 @@ def _date_sequence(values: list[str]) -> Iterator[str]:
         yield values[-1]
 
 
-def _build_trainer(tmp_path: Path, monkeypatch, date_values: list[str]) -> _Trainer:
+def _build_trainer(tmp_path: Path, monkeypatch, date_values: list[str], early_stopping=None) -> _Trainer:
     checkpoints_dir = tmp_path / "Checkpoints"
     statistics_dir = tmp_path / "Statistics"
     date_iter = _date_sequence(date_values)
@@ -81,7 +81,7 @@ def _build_trainer(tmp_path: Path, monkeypatch, date_values: list[str]) -> _Trai
         local_rank=0,
         size=1,
         train_name="RUN",
-        early_stopping=None,
+        early_stopping=early_stopping,
         data_log=None,
         save_checkpoint_mode="BEST",
         epochs=1,
@@ -113,6 +113,25 @@ def test_best_checkpoint_save_keeps_only_best_without_rescanning(tmp_path: Path,
     checkpoints = sorted((tmp_path / "Checkpoints" / "RUN").glob("*.pt"))
     assert [path.name for path in checkpoints] == ["ckpt_b.pt"]
     assert original_load(checkpoints[0], map_location="cpu", weights_only=False)["loss"] == 1.0
+
+
+def test_best_checkpoint_keeps_highest_score_when_mode_is_max(tmp_path: Path, monkeypatch) -> None:
+    # With a maximize-metric monitor (e.g. Dice), BEST retention must keep the HIGHEST score, not the
+    # lowest. Regression guard for retention hardcoding "lower is better" and keeping the worst model.
+    trainer = _build_trainer(
+        tmp_path,
+        monkeypatch,
+        ["ckpt_a", "ckpt_b", "ckpt_c"],
+        early_stopping=EarlyStopping(monitor=["Dice"], mode="max"),
+    )
+
+    trainer.checkpoint_save(0.60)
+    trainer.checkpoint_save(0.85)  # best (highest)
+    trainer.checkpoint_save(0.70)
+
+    checkpoints = sorted((tmp_path / "Checkpoints" / "RUN").glob("*.pt"))
+    assert [path.name for path in checkpoints] == ["ckpt_b.pt"]
+    assert torch.load(checkpoints[0], map_location="cpu", weights_only=False)["loss"] == 0.85
 
 
 def test_best_checkpoint_bootstrap_scans_existing_files_once_and_prunes_stale_ones(

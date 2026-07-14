@@ -51,7 +51,7 @@ def test_wheel_excludes_sibling_packages_but_keeps_namespace_subpackages() -> No
     # Namespace subpackages (no __init__.py) must still ship, or model loading breaks.
     assert "konfai" in packages
     assert "konfai.data" in packages
-    assert "konfai.models.segmentation" in packages
+    assert "konfai.models.python.segmentation" in packages
 
 
 def test_konfai_models_have_no_init_and_need_namespace_discovery() -> None:

@@ -18,12 +18,13 @@
 
 import pytest
 import torch
-from konfai.models.generation.ddpm import DDPM
-from konfai.models.generation.diffusionGan import CycleGanDiscriminator
-from konfai.models.generation.vae import LinearVAE
-from konfai.models.registration.registration import VoxelMorph
-from konfai.models.representation.representation import Adaptation
-from konfai.models.segmentation.UNet import UNet
+from konfai.models.python.classification.convNeXt import LayerScaler
+from konfai.models.python.generation.ddpm import DDPM
+from konfai.models.python.generation.diffusionGan import CycleGanDiscriminator
+from konfai.models.python.generation.vae import LinearVAE
+from konfai.models.python.registration.registration import VoxelMorph
+from konfai.models.python.representation.representation import Adaptation
+from konfai.models.python.segmentation.UNet import UNet
 
 # --------------------------------------------------------------------------------------
 # UNet
@@ -34,6 +35,21 @@ def _unet_forward_last(attention: bool) -> torch.Tensor:
     net = UNet(dim=2, channels=[1, 8, 16], nb_class=2, attention=attention)
     outputs = list(net.named_forward(torch.randn(1, 1, 32, 32)))
     return outputs[-1][1]
+
+
+def test_layer_scaler_broadcasts_over_2d_and_3d() -> None:
+    # gamma must scale per channel over ANY spatial rank. For 3-D [B, C, D, H, W] with D != C the old
+    # (C, 1, 1) gamma paired C against the depth axis and crashed; sizing it for `dim` fixes it while
+    # keeping the 2-D (C, 1, 1) shape (checkpoint-compatible).
+    scaler_3d = LayerScaler(init_value=1e-6, dimensions=4, dim=3)
+    assert tuple(scaler_3d.gamma.shape) == (4, 1, 1, 1)
+    x3 = torch.randn(2, 4, 3, 5, 5)  # C=4 != D=3
+    assert torch.allclose(scaler_3d(x3), x3 * 1e-6)
+
+    scaler_2d = LayerScaler(init_value=1e-6, dimensions=4, dim=2)
+    assert tuple(scaler_2d.gamma.shape) == (4, 1, 1)  # unchanged 2-D layout
+    x2 = torch.randn(2, 4, 5, 5)
+    assert torch.allclose(scaler_2d(x2), x2 * 1e-6)
 
 
 def test_unet_attention_forwards_without_branch_collision() -> None:

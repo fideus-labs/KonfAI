@@ -166,6 +166,22 @@ def test_apply_config_accepts_literal_value(write_config) -> None:
     assert root.mode == "eval"
 
 
+def test_apply_config_materializes_non_string_literal_default(write_config) -> None:
+    # A non-string Literal default is written back as the "default|X" marker; on re-bind it must
+    # recover the correctly-typed member (int/bool), not fail the membership check on a string "X".
+    write_config("Root:\n  level: default|2\n  flag: default|True\n")
+
+    class Root:
+        def __init__(self, level: Literal[1, 2, 3] = 1, flag: Literal[True, False] = True) -> None:
+            self.level = level
+            self.flag = flag
+
+    root = apply_config("Root")(Root)()
+
+    assert root.level == 2 and isinstance(root.level, int)
+    assert root.flag is True
+
+
 def test_apply_config_rejects_invalid_literal_value(write_config) -> None:
     write_config("Root:\n  mode: invalid\n")
 

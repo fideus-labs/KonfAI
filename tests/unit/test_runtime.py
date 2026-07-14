@@ -153,6 +153,52 @@ def test_execute_distributed_object_sets_shared_master_port_without_forcing_laun
     assert spawn_calls["nprocs"] == 2
 
 
+def test_cluster_resubmit_flag_warns_that_auto_requeue_is_not_wired(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    class DummyContext:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, value, traceback) -> None:
+            return None
+
+    class DummyExecutor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def update_parameters(self, *_args, **_kwargs) -> None:
+            pass
+
+        def submit(self, *_args, **_kwargs) -> None:
+            pass
+
+    class DummyDistributed(DistributedObject):
+        def __init__(self) -> None:
+            super().__init__("dummy")
+
+        def setup(self, world_size: int):
+            self.dataloader = [[] for _ in range(world_size)]
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders):
+            raise AssertionError("run_process should not be called on the submitting side")
+
+    monkeypatch.setattr("konfai.utils.runtime.Log", DummyContext)
+    monkeypatch.setattr("konfai.utils.runtime.TensorBoard", DummyContext)
+    monkeypatch.setitem(sys.modules, "submitit", SimpleNamespace(AutoExecutor=DummyExecutor))
+
+    cluster_kwargs = {"name": "job", "memory": 8, "num_nodes": 1, "time_limit": 60, "resubmit": True}
+    execute_distributed_object(DummyDistributed(), gpu=[0], cpu=1, quiet=True, cluster_kwargs=cluster_kwargs)
+
+    assert "--resubmit is not implemented" in capsys.readouterr().out
+
+
 def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
