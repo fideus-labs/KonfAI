@@ -219,6 +219,7 @@ class AppRepositoryInfo(ABC):
         terminology: dict[int, TerminologyEntry] | None = None,
         vram_plan: dict[int, VRAMPlanEntry] | None = None,
         patch_size: list[int] | None = None,
+        task: str | None = None,
     ) -> None:
         super().__init__()
         self._app_name = app_name
@@ -235,6 +236,7 @@ class AppRepositoryInfo(ABC):
         self._terminology = terminology
         self._vram_plan = vram_plan
         self._patch_size = patch_size
+        self._task = task
 
     def __str__(self) -> str:
         return (
@@ -275,6 +277,16 @@ class AppRepositoryInfo(ABC):
     def get_patch_size(self) -> list[int] | None:
         """The app's default inference patch size (per-dim), for UI patch controls; None if undeclared."""
         return self._patch_size
+
+    def get_task(self) -> str | None:
+        """The app's declared task family (e.g. ``segmentation``/``registration``/``synthesis``), a free-form
+        hint straight from ``app.json``; None when the manifest omits it. Not validated against an enum."""
+        return self._task
+
+    def is_finetunable(self) -> bool:
+        """Whether the app can be fine-tuned from its bundled train config. Conservative default for
+        adapters that cannot know; local/HF check the bundle, the remote adapter relays the server's answer."""
+        return False
 
     def resolve_vram_plan(self, available_vram: float | None) -> tuple[list[int], int] | None:
         """Return the ``(patch_size, batch_size)`` the app's VRAM plan would select for ``available_vram``
@@ -429,6 +441,7 @@ class LocalAppRepository(AppRepositoryInfo):
             terminology=terminology,
             vram_plan=vram_plan,
             patch_size=patch_size,
+            task=app_repository_metadata.get("task"),
         )
 
     def _get_available_checkpoint_names(self, checkpoints_name: list[str], filenames: list[str]) -> list[str]:
@@ -756,6 +769,16 @@ class LocalAppRepository(AppRepositoryInfo):
         evaluation_support = len(self.get_evaluations_inputs()) > 0
         uncertainty_support = self._find_repo_filename("Uncertainty.yml", filenames) is not None
         return inference_support, evaluation_support, uncertainty_support
+
+    def is_finetunable(self) -> bool:
+        """True when the app bundles a root-level train ``Config.yml`` -- the exact path the default
+        ``install_fine_tune`` invocation resolves (``path / config_file``) -- so a Prediction-only
+        inference app reports False. Root-level membership on purpose: a nested ``x/Config.yml`` would
+        match the basename fallback but fail fine-tune's flat lookup. Best-effort on error."""
+        try:
+            return "Config.yml" in self._all_repo_filenames()
+        except Exception:
+            return False
 
     def download_config_file(self) -> list[Path]:
         filenames = self._get_filenames()
@@ -1272,6 +1295,9 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
         if not data.get("available", False):
             raise AppRepositoryError(f"App '{app_name}' is not available on remote server.")
         self._has_capabilities = data["has_capabilities"]
+        # Servers older than the 'finetunable' field: fall back to the inference capability, which
+        # matches the historical behavior (fine-tune offered for any inference-capable app).
+        self._finetunable = bool(data.get("finetunable", self._has_capabilities[0]))
 
         inputs = {
             key: DataEntry(
@@ -1327,6 +1353,9 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
 
     def has_capabilities(self) -> tuple[bool, bool, bool]:
         return self._has_capabilities
+
+    def is_finetunable(self) -> bool:
+        return self._finetunable
 
     def get_name(self) -> str:
         return self._app_name

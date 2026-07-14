@@ -181,6 +181,13 @@ def save_uploads(
             if not f.filename:
                 continue
 
+            if f.filename.endswith(".konfaidir.zip"):
+                # A directory volume (DICOM series / OME-Zarr store) uploaded whole -> re-extract it.
+                volume_dir, written = _save_directory_volume(f, dst, max_file_bytes, max_total_bytes - total)
+                total += written
+                out.append(volume_dir)
+                continue
+
             p = dst / Path(f.filename).name
             if p.exists():
                 # Two uploads in the same group can share a basename (e.g. every case named the same);
@@ -215,7 +222,10 @@ def save_uploads(
             out.append(p.resolve())
     except Exception:
         for path in out:
-            path.unlink(missing_ok=True)
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
         raise
 
     return out
@@ -272,6 +282,56 @@ def extract_zip_safely(upload: UploadFile, dest: Path) -> Path:
         archive_path.unlink(missing_ok=True)
 
     return dest
+
+
+def _save_directory_volume(
+    upload: UploadFile, dst: Path, max_file_bytes: int, max_total_bytes: int
+) -> tuple[Path, int]:
+    """Extract a ``<name>.konfaidir.zip`` upload into a single directory volume.
+
+    The client zips a DICOM series / OME-Zarr store whole and marks the filename; here it is
+    re-materialised as one directory (``dst/<name>``) so the KonfAI dataset backend reads it as a
+    single volume rather than a bag of slices/chunks. Returns the directory and the bytes written.
+    """
+    dir_name = Path(upload.filename).name[: -len(".konfaidir.zip")] if upload.filename else ""
+    if not dir_name or "/" in dir_name or "\\" in dir_name:
+        raise HTTPException(400, f"Invalid directory-volume name: {upload.filename}")
+    dst.mkdir(parents=True, exist_ok=True)
+    target_dir = (dst / dir_name).resolve()
+    if target_dir != dst.resolve() and dst.resolve() not in target_dir.parents:
+        raise HTTPException(400, f"Unsafe directory-volume name: {upload.filename}")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".zip", dir=dst)
+    archive_path = Path(tmp_name)
+    written = 0
+    try:
+        with os.fdopen(fd, "wb") as w:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_file_bytes:
+                    raise HTTPException(413, f"File too large: {upload.filename}")
+                if written > max_total_bytes:
+                    raise HTTPException(413, "Total upload too large")
+                w.write(chunk)
+        try:
+            with zipfile.ZipFile(archive_path) as zf:
+                for member in zf.namelist():
+                    resolved = (target_dir / member).resolve()
+                    if resolved != target_dir and target_dir not in resolved.parents:
+                        raise HTTPException(400, f"Unsafe path in archive: {member}")
+                zf.extractall(target_dir)
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(400, f"Uploaded volume is not a valid zip: {upload.filename}") from exc
+    except Exception:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise
+    finally:
+        archive_path.unlink(missing_ok=True)
+    return target_dir, written
 
 
 @dataclass
@@ -570,6 +630,7 @@ def get_app_info(app_id: str):
         "mc_dropout": app.get_mc_dropout(),
         "patch_size": app.get_patch_size(),
         "has_capabilities": app.has_capabilities(),
+        "finetunable": app.is_finetunable(),
     }
     terminology = app.get_terminology()
     if terminology is not None:
@@ -609,7 +670,6 @@ def download_app_repository_configs(app_id: str, background_tasks: BackgroundTas
     zip_path = tmp_dir / f"{app_id}_configs.zip"
     shutil.make_archive(str(zip_path.with_suffix("")), "zip", zip_root)
 
-    # Planifie le nettoyage après l'envoi
     background_tasks.add_task(shutil.rmtree, tmp_dir, ignore_errors=True)
 
     return FileResponse(
@@ -1344,7 +1404,6 @@ def job_result(job_id: str):
         return JSONResponse(status_code=500, content={"job_id": job.job_id, "status": job.status, "error": job.error})
 
     if job.status != "done" or not job.zip_path.exists():
-        # Not ready yet
         return JSONResponse(status_code=202, content={"job_id": job.job_id, "status": job.status})
 
     return FileResponse(str(job.zip_path), media_type="application/zip", filename="result.zip")
@@ -1381,10 +1440,9 @@ def kill_job(job_id: str):
         return {"job_id": job.job_id, "status": job.status, "message": "Job not running"}
 
     try:
-        # SIGTERM au groupe
         os.killpg(proc.pid, signal.SIGTERM)
 
-        # petite attente + SIGKILL si besoin
+        # brief grace period, then SIGKILL
         deadline = time.time() + 3.0
         while time.time() < deadline:
             if proc.poll() is not None:

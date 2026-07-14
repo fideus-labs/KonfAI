@@ -16,7 +16,7 @@
 
 """Assemble a KonfAI app bundle (the HuggingFace layout) from trained artifacts.
 
-App bundles were previously assembled by hand. :func:`assemble_bundle` builds the
+:func:`assemble_bundle` builds the
 standard bundle folder (``app.json`` + configs + checkpoints + optional ``Model.py`` /
 ``requirements.txt``) and validates the metadata. With ``--onnx``,
 :func:`export_onnx_into_bundle` also emits the portable contract (``model.onnx`` +

@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import importlib.util
 import io
@@ -643,3 +659,91 @@ def test_submit_job_without_dataset_emits_no_dataset_flag(
 
     assert "--dataset" not in cmd
     assert cmd.count("--inputs") == 1
+
+
+def _make_directory_volume_upload(tmp_path: Path, filename: str) -> SimpleNamespace:
+    store = tmp_path / "src_store"
+    store.mkdir()
+    (store / ".zgroup").write_text("{}", encoding="utf-8")
+    (store / "0.0.0").write_bytes(b"chunk")
+    zip_path = shutil.make_archive(str(tmp_path / "unit"), "zip", root_dir=str(store))
+    upload = SimpleNamespace(filename=filename, file=io.BytesIO(Path(zip_path).read_bytes()))
+    shutil.rmtree(store)
+    return upload
+
+
+def test_save_uploads_extracts_directory_volume(tmp_path: Path) -> None:
+    upload = _make_directory_volume_upload(tmp_path, "unit_0.ome.zarr.konfaidir.zip")
+
+    saved = app_server.save_uploads([upload], tmp_path / "inputs")
+
+    assert len(saved) == 1
+    volume = saved[0]
+    assert volume.is_dir()
+    assert volume.name == "unit_0.ome.zarr"
+    assert (volume / ".zgroup").exists()
+    assert (volume / "0.0.0").read_bytes() == b"chunk"
+
+
+def test_save_upload_groups_maps_zip_unit_to_directory(tmp_path: Path) -> None:
+    upload = _make_directory_volume_upload(tmp_path, "unit_0.konfaidir.zip")  # DICOM-style bare name
+
+    groups = app_server.save_upload_groups([upload], "1", tmp_path / "inputs")
+
+    assert len(groups) == 1
+    assert len(groups[0]) == 1
+    assert groups[0][0].is_dir()
+    assert groups[0][0].name == "unit_0"
+
+
+def test_get_app_info_reports_finetunable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The server resolves the actual bundle, so it is the source of truth for remote clients:
+    # the /repo_apps payload must carry the answer the remote adapter relays.
+    class _FakeApp:
+        def get_display_name(self) -> str:
+            return "Demo"
+
+        def get_description(self) -> str:
+            return "demo"
+
+        def get_short_description(self) -> str:
+            return "demo"
+
+        def get_checkpoints_name(self) -> list[str]:
+            return ["m.pt"]
+
+        def get_checkpoints_name_available(self) -> list[str]:
+            return ["m.pt"]
+
+        def get_maximum_tta(self) -> int:
+            return 0
+
+        def get_mc_dropout(self) -> int:
+            return 0
+
+        def get_patch_size(self) -> None:
+            return None
+
+        def has_capabilities(self) -> tuple[bool, bool, bool]:
+            return (True, False, False)
+
+        def is_finetunable(self) -> bool:
+            return True
+
+        def get_terminology(self) -> None:
+            return None
+
+        def get_inputs(self) -> dict:
+            return {}
+
+        def get_outputs(self) -> dict:
+            return {}
+
+        def get_evaluations_inputs(self) -> dict:
+            return {}
+
+    monkeypatch.setattr(app_server, "_APPS", ["demo/app"])
+    monkeypatch.setattr(app_server, "get_app_repository_info", lambda *args, **kwargs: _FakeApp())
+
+    result = app_server.get_app_info("demo/app")
+    assert result["finetunable"] is True

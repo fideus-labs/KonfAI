@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import sys
 from pathlib import Path
@@ -847,3 +863,131 @@ def test_export_app_materialises_local_copy_with_overrides(tmp_path: Path) -> No
     # Reopen the export as a local app: the tuned default is baked in.
     exported = app_repository_module.LocalAppRepositoryFromDirectory(dest.parent, dest.name)
     assert exported.get_parameters()["values"]["iterations"] == 777
+
+
+def _remote_info_payload(**overrides) -> dict:
+    payload = {
+        "app": "demo/app",
+        "available": True,
+        "display_name": "Demo",
+        "description": "demo",
+        "short_description": "demo",
+        "checkpoints_name": ["m.pt"],
+        "checkpoints_name_available": ["m.pt"],
+        "maximum_tta": 0,
+        "mc_dropout": 0,
+        "has_capabilities": [True, False, False],
+        "inputs": {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
+        "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
+        "inputs_evaluations": {},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _remote_repo_from_payload(monkeypatch: pytest.MonkeyPatch, payload: dict):
+    class _Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return payload
+
+    monkeypatch.setattr(app_repository_module.requests, "get", lambda *args, **kwargs: _Response())
+
+    class _Server:
+        timeout = 5
+
+        def get_url(self) -> str:
+            return "http://127.0.0.1:1"
+
+        def get_headers(self) -> dict:
+            return {}
+
+    return app_repository_module.AppRepositoryInfoFromRemoteServer(_Server(), "demo/app")
+
+
+def test_remote_repository_relays_the_server_reported_finetunable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Remote fine-tune runs on the user's server, so the server (which resolves the actual bundle)
+    # is the source of truth; the adapter must relay its answer, not hardcode False.
+    repo = _remote_repo_from_payload(monkeypatch, _remote_info_payload(finetunable=False))
+    assert repo.is_finetunable() is False
+
+    repo = _remote_repo_from_payload(monkeypatch, _remote_info_payload(finetunable=True))
+    assert repo.is_finetunable() is True
+
+
+def test_remote_repository_finetunable_falls_back_to_inference_for_older_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A server predating the 'finetunable' field omits it; fall back to the inference capability,
+    # which matches the historical behavior (fine-tune offered for any inference-capable app).
+    repo = _remote_repo_from_payload(monkeypatch, _remote_info_payload())
+    assert repo.is_finetunable() is True
+
+    payload = _remote_info_payload()
+    payload["has_capabilities"] = [False, False, False]
+    repo = _remote_repo_from_payload(monkeypatch, payload)
+    assert repo.is_finetunable() is False
+
+
+def test_local_finetunable_requires_a_root_level_config_yml(tmp_path: Path) -> None:
+    # install_fine_tune resolves 'path / Config.yml' flat, so a nested training/Config.yml must NOT
+    # report finetunable (it would advertise a fine-tune that fails at install).
+    app_dir = tmp_path / "flat"
+    app_dir.mkdir()
+    (app_dir / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Flat",
+                "description": "d",
+                "short_description": "d",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": ["m.pt"],
+                "inputs": {},
+                "outputs": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_dir / "m.pt").write_bytes(b"")
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_dir.parent, app_dir.name)
+    assert repo.is_finetunable() is False
+
+    (app_dir / "training").mkdir()
+    (app_dir / "training" / "Config.yml").write_text("Trainer: {}\n", encoding="utf-8")
+    assert repo.is_finetunable() is False
+
+    (app_dir / "Config.yml").write_text("Trainer: {}\n", encoding="utf-8")
+    assert repo.is_finetunable() is True
+
+
+def test_export_copies_a_yaml_model_and_it_resolves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An app whose model is a declarative `.yml` (classpath: X.yml) instead of a Model.py must
+    # carry that .yml through export, and the copied config must still resolve+build the model
+    # (the .yml is looked up next to Prediction.yml). Locks the "apps handle YAML models" path.
+    repo, prediction = _local_repo_with_config(tmp_path, "Predictor:\n  Model:\n    classpath: UNetSeg.yml\n")
+    (prediction.parent / "UNetSeg.yml").write_text(
+        "name: UNetSeg\n"
+        "network:\n  in_channels: 1\n  dim: 2\n"
+        "modules:\n  - name: Conv\n    type: Conv\n"
+        "    args: {dim: 2, in_channels: 1, out_channels: 3, kernel_size: 1}\n",
+        encoding="utf-8",
+    )
+
+    dest = tmp_path / "exported" / "SegApp"
+    repo.export_app(dest, display_name="Seg App")
+
+    # The model .yml travels with the bundle and the classpath is unchanged.
+    assert (dest / "UNetSeg.yml").is_file()
+    assert "UNetSeg.yml" in (dest / "Prediction.yml").read_text(encoding="utf-8")
+
+    # The exported config resolves and builds the model (relative to the copied Prediction.yml).
+    from konfai.network.network import ModelLoader, Network
+
+    monkeypatch.setenv("KONFAI_config_file", str(dest / "Prediction.yml"))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    model = ModelLoader("UNetSeg.yml").get_model(train=False)
+    assert isinstance(model, Network)

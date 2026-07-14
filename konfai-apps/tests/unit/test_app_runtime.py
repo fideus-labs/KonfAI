@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import types
 from contextlib import nullcontext
@@ -344,7 +360,7 @@ def test_run_remote_job_encodes_group_boundaries_and_preserves_order(
     assert captured["data"]["inputs_groups"] == "1,1"
     field_names = [key for key, _ in captured["files"]]
     assert field_names == ["inputs", "inputs"]
-    sent_names = [Path(handle.name).name for _, handle in captured["files"]]
+    sent_names = [name for _, (name, _handle) in captured["files"]]
     assert sent_names == ["a.nii.gz", "b.nii.gz"]
 
 
@@ -366,8 +382,28 @@ def test_run_remote_job_counts_directory_expansion_in_group_sizes(
     assert captured["data"]["inputs_groups"] == "2"
     field_names = [key for key, _ in captured["files"]]
     assert field_names == ["inputs", "inputs"]
-    sent_names = sorted(Path(handle.name).name for _, handle in captured["files"])
+    sent_names = sorted(name for _, (name, _handle) in captured["files"])
     assert sent_names == ["case_a.nii.gz", "case_b.nii.gz"]
+
+
+def test_run_remote_job_packs_directory_volume_as_single_unit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    series = tmp_path / "series"
+    series.mkdir()
+    (series / "s0.dcm").write_bytes(b"")
+    (series / "s1.dcm").write_bytes(b"")
+
+    captured = _stub_remote_submission(monkeypatch)
+    client = captured["client"]
+
+    # A DICOM series directory travels as ONE zipped unit, not two slice files.
+    client.infer(inputs=[[series]], output=tmp_path / "out")
+
+    assert captured["data"]["inputs_groups"] == "1"
+    sent_names = [name for _, (name, _handle) in captured["files"]]
+    assert sent_names == ["unit_0.konfaidir.zip"]
 
 
 def test_run_remote_job_encodes_gpu_ids_as_csv(
