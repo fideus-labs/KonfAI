@@ -310,3 +310,56 @@ def test_attribute_setitem_accepts_0d_and_autograd_tensors() -> None:
 
     assert float(attribute["ImageMin"]) == 3.5
     assert float(attribute["Weight"]) == 2.0
+
+
+# --------------------------------------------------------------------------------------
+# Directory store-format auto-detection: the read backend is chosen from what is on disk
+# (an OME-Zarr/Zarr store or a DICOM series directory), so a ``:mha`` token no longer
+# forces a store to be mis-read. Plain per-file volumes keep the SitkFile path.
+# --------------------------------------------------------------------------------------
+
+
+def _make_case(root: Path, entry: str, *, is_dir: bool = True, marker: str | None = None, files=()) -> Path:
+    case = root / "P000"
+    case.mkdir(parents=True, exist_ok=True)
+    target = case / entry
+    if is_dir:
+        target.mkdir()
+        if marker:
+            (target / marker).write_text("{}", encoding="utf-8")
+        for name in files:
+            (target / name).write_bytes(b"")
+    else:
+        target.write_bytes(b"")
+    return root
+
+
+def test_autodetect_ome_zarr_by_suffix(tmp_path: Path) -> None:
+    root = _make_case(tmp_path / "ds", "Volume_0.ome.zarr")
+    assert Dataset._detect_directory_store_format(str(root)) == "omezarr"
+
+
+def test_autodetect_zarr_by_group_marker(tmp_path: Path) -> None:
+    root = _make_case(tmp_path / "ds", "Volume_0", marker=".zgroup")
+    assert Dataset._detect_directory_store_format(str(root)) == "omezarr"
+
+
+def test_autodetect_dicom_series_directory(tmp_path: Path) -> None:
+    root = _make_case(tmp_path / "ds", "Volume_0", files=("000000.dcm",))
+    assert Dataset._detect_directory_store_format(str(root)) == "dicom"
+
+
+def test_autodetect_plain_files_return_none(tmp_path: Path) -> None:
+    root = _make_case(tmp_path / "ds", "Volume_0.mha", is_dir=False)
+    assert Dataset._detect_directory_store_format(str(root)) is None
+
+
+def test_init_overrides_mha_token_for_ome_zarr_store(tmp_path: Path) -> None:
+    root = _make_case(tmp_path / "ds", "Volume_0.ome.zarr")
+    # the token says mha, but the store on disk is OME-Zarr -> the read backend follows the disk
+    assert Dataset(str(root), "mha").file_format == "omezarr"
+
+
+def test_init_keeps_token_for_plain_file_dataset(tmp_path: Path) -> None:
+    root = _make_case(tmp_path / "ds", "Volume_0.mha", is_dir=False)
+    assert Dataset(str(root), "mha").file_format == "mha"

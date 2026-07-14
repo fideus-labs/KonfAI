@@ -829,6 +829,7 @@ class IMPACTReg(CriterionWithAttribute):
         in_channels: int = 3,
         loss: str = "torch:nn:L1Loss",
         weights: list[float] = [0, 1],
+        pca: int = 0,
     ) -> None:
         super().__init__()
         if model_name is None:
@@ -840,6 +841,7 @@ class IMPACTReg(CriterionWithAttribute):
         self.loss = apply_config(os.environ["KONFAI_CONFIG_PATH"])(getattr(module, name))()
 
         self.weights = weights
+        self.pca = int(pca)
         self.model_path = hf_hub_download(
             repo_id="VBoussot/impact-torchscript-models", filename=model_name, repo_type="model", revision=None
         )  # nosec B615
@@ -891,6 +893,32 @@ class IMPACTReg(CriterionWithAttribute):
     def get_name(self):
         return self.name
 
+    @staticmethod
+    def _pca_transform(feature: torch.Tensor, basis: torch.Tensor) -> torch.Tensor:
+        """Project a feature map ``[B, C, spatial...]`` onto a PCA basis ``[C, K]`` -> ``[B, K, spatial...]``,
+        centring the input by its own per-channel mean first (itk-impact ``pca_transform``)."""
+        shape = feature.shape
+        flat = feature.reshape(shape[0], shape[1], -1)
+        flat = flat - flat.mean(dim=2, keepdim=True)
+        projected = torch.einsum("bcn,ck->bkn", flat, basis)
+        return projected.reshape(shape[0], basis.shape[1], *shape[2:])
+
+    def _pca_project(
+        self, output_feature: torch.Tensor, target_feature: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Reduce both feature maps to their top-``pca`` principal components. The basis is fitted on the
+        TARGET (reference) features and reused for the output — the channel-covariance eigendecomposition of
+        itk-impact's ``pca_fit`` (``eigh`` is ascending, so the largest components live at the end) — so the
+        torch metric is behaviourally identical to the itk-impact PCA."""
+        channels = target_feature.shape[1]
+        k = min(self.pca, channels)
+        flat = target_feature.detach().reshape(target_feature.shape[0], channels, -1)[0].float()
+        centered = flat - flat.mean(dim=1, keepdim=True)
+        covariance = centered @ centered.t() / max(flat.shape[1] - 1, 1)
+        _, eigenvectors = torch.linalg.eigh(covariance)
+        basis = eigenvectors[:, channels - k :].to(target_feature.dtype)  # {C, K}, largest-eigenvalue components
+        return self._pca_transform(output_feature, basis), self._pca_transform(target_feature, basis)
+
     def _compute(
         self,
         output: torch.Tensor,
@@ -924,6 +952,8 @@ class IMPACTReg(CriterionWithAttribute):
                             continue
                         output_feature = zipped_output[0]
                         target_feature = zipped_output[1]
+                        if self.pca > 0:
+                            output_feature, target_feature = self._pca_project(output_feature, target_feature)
                         if mask is not None:
                             if mask_patch is None:
                                 raise RuntimeError("LPIPS mask patch is unexpectedly missing.")
@@ -957,6 +987,8 @@ class IMPACTReg(CriterionWithAttribute):
                         continue
                     output_feature = zipped_output[0]
                     target_feature = zipped_output[1]
+                    if self.pca > 0:
+                        output_feature, target_feature = self._pca_project(output_feature, target_feature)
                     if mask is not None:
                         mask_index_resampled = (
                             torch.nn.functional.interpolate(

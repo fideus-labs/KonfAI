@@ -238,3 +238,57 @@ def test_missing_metric_dependency_raises_actionable_error():
     message = str(excinfo.value)
     assert "SSIM" in message
     assert "konfai[ssim]" in message
+
+
+class TestImpactRegPCA:
+    """The IMPACT registration loss can reduce its deep features to their top-``pca`` principal
+    components (itk-impact parity). The basis is fitted on the TARGET features and reused for the
+    output, so both feature maps live in the same reduced space before the per-layer distance."""
+
+    @staticmethod
+    def _core(pca: int):
+        from konfai.metric.measure import IMPACTReg
+
+        core = IMPACTReg.__new__(IMPACTReg)
+        torch.nn.Module.__init__(core)
+        core.pca = pca
+        return core
+
+    def test_transform_reduces_channels(self):
+        core = self._core(3)
+        basis = torch.linalg.qr(torch.randn(8, 3))[0]  # orthonormal [8, 3]
+        out = core._pca_transform(torch.randn(2, 8, 4, 5, 6), basis)
+        assert out.shape == (2, 3, 4, 5, 6)
+
+    def test_transform_centres_by_own_channel_mean(self):
+        core = self._core(2)
+        basis = torch.linalg.qr(torch.randn(6, 2))[0]
+        const = torch.ones(1, 6, 3, 3, 3) * 7.0  # per-channel constant -> centres to 0 -> projects to 0
+        out = core._pca_transform(const, basis)
+        assert torch.allclose(out, torch.zeros_like(out), atol=1e-5)
+
+    def test_project_reduces_both_maps_to_top_k(self):
+        core = self._core(2)
+        moved, fixed = torch.randn(1, 6, 3, 3, 3), torch.randn(1, 6, 3, 3, 3)
+        mp, fp = core._pca_project(moved, fixed)
+        assert mp.shape == (1, 2, 3, 3, 3) and fp.shape == (1, 2, 3, 3, 3)
+        assert torch.isfinite(mp).all() and torch.isfinite(fp).all()
+
+    def test_project_clamps_k_to_channel_count(self):
+        core = self._core(99)  # more components than channels
+        moved, fixed = torch.randn(1, 4, 2, 2, 2), torch.randn(1, 4, 2, 2, 2)
+        mp, fp = core._pca_project(moved, fixed)
+        assert mp.shape[1] == 4 and fp.shape[1] == 4  # k clamped to C
+
+    def test_project_first_component_recovers_dominant_channel(self):
+        """Correctness: the basis is the top eigenvector of the TARGET channel-covariance, so with a
+        single dominant channel the reduced component is (up to sign) that channel's centred signal."""
+        core = self._core(1)
+        fixed = torch.zeros(1, 4, 4, 4, 4)
+        fixed[0, 0] = torch.randn(4, 4, 4) * 10.0  # channel 0 carries almost all the variance
+        fixed[0, 1:] = torch.randn(3, 4, 4, 4) * 0.01
+        _mp, fp = core._pca_project(fixed.clone(), fixed)
+        proj = fp[0, 0].flatten()
+        centred_ch0 = (fixed[0, 0] - fixed[0, 0].mean()).flatten()
+        corr = torch.corrcoef(torch.stack([proj, centred_ch0]))[0, 1].abs()
+        assert corr > 0.99
