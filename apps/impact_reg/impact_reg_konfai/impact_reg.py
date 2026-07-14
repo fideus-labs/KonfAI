@@ -92,11 +92,16 @@ def _displacement_transform(dvf_path: Path) -> sitk.Transform:
     return sitk.DisplacementFieldTransform(sitk.ReadImage(str(dvf_path), sitk.sitkVectorFloat64))
 
 
-def _full_mask(image: sitk.Image, out_path: Path) -> Path:
-    """Write a whole-image (all-ones) mask matching ``image`` — the neutral default when none is supplied."""
-    mask = sitk.GetImageFromArray(np.ones([int(s) for s in reversed(image.GetSize())], dtype=np.uint8))
-    mask.CopyInformation(image)
-    sitk.WriteImage(mask, str(out_path))
+def _neutral_mask(out_path: Path) -> Path:
+    """Write a tiny all-ones sentinel — a no-op mask used only to fill the positional gap when the caller
+    gives a moving mask but no fixed mask (inputs map positionally, so the fixed-mask slot must be present).
+
+    A whole-image all-ones mask restricts nothing (the model's ``_is_partial_mask`` treats it as absent),
+    and in whole-volume mode a mask branch need not share the image grid, so a 2x2x2 sentinel yields a
+    byte-identical registration (verified) without reading — or even sizing to — the input. (The common
+    no-mask path passes no mask at all; konfai-apps fills both branches with an all-ones default.)
+    """
+    sitk.WriteImage(sitk.GetImageFromArray(np.ones((2, 2, 2), dtype=np.uint8)), str(out_path))
     return out_path
 
 
@@ -114,38 +119,30 @@ class ImpactRegKonfAIApp:
         preset: str,
         fixed_image: Path,
         moving_image: Path,
-        fixed_mask: Path,
-        moving_mask: Path,
+        fixed_mask: Path | None,
+        moving_mask: Path | None,
         work: Path,
         gpu: list[int],
         cpu: int | None,
         quiet: bool,
         tta: int = 0,
         config_overrides: list[str] | None = None,
-    ) -> Path:
-        """Run one preset app on the fixed/moving pair (+ masks); return the displacement-field path.
+    ) -> tuple[Path, Path]:
+        """Run one preset app on the fixed/moving pair (+ optional masks); return its (moved, displacement) paths.
 
         Each preset runs through the ``konfai-apps`` CLI in its own subprocess: konfai keeps
         process-global state (its ``Config`` singleton, the ``KONFAI_*`` environment), so several preset
-        inferences in one process would clash. The repeated ``-i`` maps the four registration inputs to
-        the app's input groups; stdout/stderr are inherited so progress streams through to the caller.
+        inferences in one process would clash. The ``-i`` inputs map positionally to the app's input groups.
+        Masks are optional: konfai-apps fills any we omit with an all-ones default, so with no mask we pass
+        only fixed+moving. Because the mapping is positional, a lone moving mask still needs the fixed-mask
+        slot present, so send the pair (defaulting the absent one to an all-ones sentinel) once either is given.
         """
         out = work / preset
-        command = [
-            "konfai-apps",
-            "infer",
-            _app_id(preset),
-            "-i",
-            str(fixed_image),
-            "-i",
-            str(moving_image),
-            "-i",
-            str(fixed_mask),
-            "-i",
-            str(moving_mask),
-            "-o",
-            str(out),
-        ]
+        command = ["konfai-apps", "infer", _app_id(preset), "-i", str(fixed_image), "-i", str(moving_image)]
+        if fixed_mask is not None or moving_mask is not None:
+            command += ["-i", str(fixed_mask or _neutral_mask(work / "FixedMask.mha"))]
+            command += ["-i", str(moving_mask or _neutral_mask(work / "MovingMask.mha"))]
+        command += ["-o", str(out)]
         if tta:
             command += ["--tta", str(tta)]
         # Preset-parameter tuning: forwarded verbatim to `konfai-apps infer --set` (applies to every preset).
@@ -162,7 +159,9 @@ class ImpactRegKonfAIApp:
         if self._force_update:
             command.append("--force_update")
         subprocess.run(command, check=True)  # nosec B603
-        return _find_output(out, "DVF.mha")
+        # The model emits both the moved image and the displacement field on the fixed grid; reusing them
+        # (rather than re-resampling here) keeps the single-preset path free of any extra image read/write.
+        return _find_output(out, "Moved.mha"), _find_output(out, "DVF.mha")
 
     def register(
         self,
@@ -193,16 +192,14 @@ class ImpactRegKonfAIApp:
                 (case_out / _ENSEMBLE_DIR).mkdir(parents=True, exist_ok=True)
             work = Path(tempfile.mkdtemp(prefix="impact_reg_"))
             try:
-                fixed = sitk.ReadImage(str(fixed_image))
-                moving = sitk.ReadImage(str(moving_image))
-                fixed_mask = fixed_masks[index] if index < len(fixed_masks) else _full_mask(fixed, work / "FMask.mha")
-                moving_mask = (
-                    moving_masks[index] if index < len(moving_masks) else _full_mask(moving, work / "MMask.mha")
-                )
+                # Masks are optional (they restrict the metric region); pass only those the caller gave and
+                # let konfai-apps fill the rest with an all-ones default — no input read on the no-mask path.
+                fixed_mask = fixed_masks[index] if index < len(fixed_masks) else None
+                moving_mask = moving_masks[index] if index < len(moving_masks) else None
 
-                dvf_paths = []
+                moved_paths, dvf_paths = [], []
                 for preset in presets:
-                    dvf = self._infer_preset(
+                    moved, dvf = self._infer_preset(
                         preset,
                         fixed_image,
                         moving_image,
@@ -219,33 +216,40 @@ class ImpactRegKonfAIApp:
                         member = case_out / _ENSEMBLE_DIR / f"{preset}.mha"
                         shutil.copy2(dvf, member)
                         dvf = member
+                    moved_paths.append(moved)
                     dvf_paths.append(dvf)
 
-                transform = self._ensemble(dvf_paths, fixed)
-                sitk.WriteImage(sitk.Resample(moving, fixed, transform, sitk.sitkLinear), str(case_out / "Moved.mha"))
-                sitk.WriteImage(
-                    sitk.TransformToDisplacementField(
-                        transform,
-                        sitk.sitkVectorFloat64,
-                        fixed.GetSize(),
-                        fixed.GetOrigin(),
-                        fixed.GetSpacing(),
-                        fixed.GetDirection(),
-                    ),
-                    str(case_out / "DVF.mha"),
-                )
-                sitk.WriteTransform(transform, str(case_out / "Transform.h5"))
+                if len(presets) == 1:
+                    # One preset: the model already produced the moved image AND the displacement field on
+                    # the fixed grid — reuse them verbatim. No input re-read, no re-resample, and the input
+                    # format is whatever the model handled (OME-Zarr included).
+                    shutil.copy2(moved_paths[0], case_out / "Moved.mha")
+                    shutil.copy2(dvf_paths[0], case_out / "DVF.mha")
+                else:
+                    # Ensemble: average the presets' displacement fields (all on the fixed grid) and warp the
+                    # moving image once with that averaged field — the one output no single preset produced.
+                    avg_dvf = self._average_displacement(dvf_paths)
+                    sitk.WriteImage(avg_dvf, str(case_out / "DVF.mha"))
+                    transform = sitk.DisplacementFieldTransform(sitk.Cast(avg_dvf, sitk.sitkVectorFloat64))
+                    moving = sitk.ReadImage(str(moving_image))
+                    sitk.WriteImage(
+                        sitk.Resample(moving, avg_dvf, transform, sitk.sitkLinear, 0.0, moving.GetPixelID()),
+                        str(case_out / "Moved.mha"),
+                    )
+
+                # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid displacement
+                # field as a SimpleITK transform.
+                sitk.WriteTransform(_displacement_transform(case_out / "DVF.mha"), str(case_out / "Transform.h5"))
             finally:
                 shutil.rmtree(work, ignore_errors=True)
 
-    def _ensemble(self, dvf_paths: list[Path], fixed: sitk.Image) -> sitk.Transform:
-        """Average the presets' displacement fields into a single transform on the fixed grid."""
-        if len(dvf_paths) == 1:
-            return _displacement_transform(dvf_paths[0])
+    def _average_displacement(self, dvf_paths: list[Path]) -> sitk.Image:
+        """Average several presets' displacement fields (all on the same fixed grid) into one field."""
+        reference = sitk.ReadImage(str(dvf_paths[0]))
         stack = np.stack([sitk.GetArrayFromImage(sitk.ReadImage(str(p))) for p in dvf_paths], axis=0)
         avg = sitk.GetImageFromArray(stack.mean(axis=0), isVector=True)
-        avg.CopyInformation(fixed)
-        return sitk.DisplacementFieldTransform(sitk.Cast(avg, sitk.sitkVectorFloat64))
+        avg.CopyInformation(reference)
+        return avg
 
     # ------------------------------------------------------------------ evaluate
 

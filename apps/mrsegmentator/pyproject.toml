@@ -27,3 +27,6 @@ mrsegmentator-konfai = "mrsegmentator_konfai.cli:main"
 root = "../.."
 tag_regex = "^v(?P<version>.*)$"
 local_scheme = "no-local-version"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
