@@ -53,7 +53,7 @@ wrappers add `pipeline`. See {doc}`../usage/apps` for how to run them and
 
 | Piece | Status | Notes |
 | --- | --- | --- |
-| **`konfai-mcp`** | 🧪 Working, not yet published | A `fastmcp` server that exposes KonfAI to LLM agents: dataset inspection, config authoring/validation, launching training/prediction/evaluation runs, and reading live metrics. Working and tested, but not yet published. |
+| **`konfai-mcp`** | ✅ In-repo &amp; tested · PyPI publish pending | A `fastmcp` server that exposes KonfAI to LLM agents: dataset inspection, config authoring/validation, launching training/prediction/evaluation runs, reading live metrics, comparing runs. Fully working, tested, and documented ({doc}`../usage/mcp`); packaged in `konfai-mcp/`, PyPI release pending. |
 | **SlicerKonfAI** | 🧪 External GUI | A [3D Slicer](https://github.com/vboussot/SlicerKonfAI) client of the `konfai-apps` CLI/server. Real and useful, but coupled to `konfai-apps` through a **brittle byte-level contract** (progress format, `InferenceStack.mha`, `app.json`, checkpoint schema) that can break on a release without a contract test. |
 | **ONNX export → `konfai-rs`** | 🧪 Experimental | `konfai/export.py` produces ONNX + a manifest for a planned portable (native/WASM) inference engine. Python-API-only, single static-shape head, feed-forward models only. See {doc}`../reference/python-api`. |
 

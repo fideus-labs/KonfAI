@@ -4,6 +4,7 @@
 [![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml)
 [![Documentation Status](https://readthedocs.org/projects/konfai/badge/?version=latest)](https://konfai.readthedocs.io/en/latest/?badge=latest)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://www.arxiv.org/abs/2508.09823)
+[![Agent-ready (MCP)](https://img.shields.io/badge/🤖%20Agent--ready-MCP-8A2BE2)](https://konfai.readthedocs.io/en/latest/usage/mcp.html)
 
 # 🧠 KonfAI
 
@@ -38,6 +39,11 @@ registration, and synthesis:
 [CURVAS](https://github.com/vboussot/CURVAS)
 
 > 📄 **Paper:** [KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging](https://www.arxiv.org/abs/2508.09823) (Boussot & Dillenseger, 2025)
+
+> 🤖 **Agent-native.** KonfAI ships an **[MCP server](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
+> so an LLM agent can drive the *entire* experiment loop — inspect a dataset, author & validate YAML,
+> launch train / predict / evaluate, monitor jobs, and compare runs — always grounded in the same
+> reproducible configs a human would run. → **[Agents & MCP](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
 
 ---
 
