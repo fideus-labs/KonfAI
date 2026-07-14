@@ -94,7 +94,6 @@ def ensure_finally_on_signals():
     old_term = signal.getsignal(signal.SIGTERM)
 
     def _handler(signum, frame):
-        # On déclenche une exception -> remonte -> finally exécuté
         raise CancelProcess(f"Received signal {signum}")
 
     signal.signal(signal.SIGINT, _handler)
@@ -102,7 +101,6 @@ def ensure_finally_on_signals():
     try:
         yield
     finally:
-        # On restaure les handlers d'origine
         signal.signal(signal.SIGINT, old_int)
         signal.signal(signal.SIGTERM, old_term)
 
@@ -489,6 +487,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
             files = []
             data = {}
             dataset_zip_dir: str | None = None
+            unit_zip_dirs: list[str] = []
             finished = False
             with ensure_finally_on_signals():
                 try:
@@ -499,12 +498,20 @@ class KonfAIAppClient(AbstractKonfAIApp):
                                 group_sizes: list[int] = []
                                 for group in v:
                                     count = 0
-                                    for p in group:
-                                        p = Path(p)
-                                        group_files = KonfAIApp._list_supported_files([p]) if p.is_dir() else [p]
-                                        for file_path in group_files:
-                                            files.append((k, open(file_path, "rb")))
-                                            count += 1
+                                    for source, unit_suffix in KonfAIApp._list_input_units([Path(p) for p in group]):
+                                        source = Path(source)
+                                        if source.is_dir():
+                                            # A DICOM series / OME-Zarr store must travel whole: zip it and mark
+                                            # the filename so the server re-extracts it as one directory volume.
+                                            unit_dir = tempfile.mkdtemp(prefix="konfai_unit_")
+                                            unit_zip_dirs.append(unit_dir)
+                                            zip_base = os.path.join(unit_dir, "unit")
+                                            shutil.make_archive(zip_base, "zip", root_dir=str(source))
+                                            filename = f"unit_{count}{unit_suffix}.konfaidir.zip"
+                                            files.append((k, (filename, open(f"{zip_base}.zip", "rb"))))
+                                        else:
+                                            files.append((k, (source.name, open(source, "rb"))))
+                                        count += 1
                                     group_sizes.append(count)
                                 data[f"{k}_groups"] = ",".join(str(c) for c in group_sizes)
                         elif k == "dataset":
@@ -555,10 +562,14 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     raise RuntimeError(f"Failed to submit job to remote KonfAI server: {e}") from e
                 finally:
                     for _, fh in files:
+                        handle = fh[1] if isinstance(fh, tuple) else fh
                         try:
-                            fh.close()
+                            handle.close()
                         except (OSError, ValueError):
                             pass
+
+                    for unit_dir in unit_zip_dirs:
+                        shutil.rmtree(unit_dir, ignore_errors=True)
 
                     if dataset_zip_dir is not None:
                         shutil.rmtree(dataset_zip_dir, ignore_errors=True)
@@ -791,6 +802,88 @@ class KonfAIApp(AbstractKonfAIApp):
         return files
 
     @staticmethod
+    def _directory_volume_suffix(path: Path) -> str | None:
+        """Return the staging suffix if ``path`` is a directory that is ITSELF one volume.
+
+        A DICOM series and an OME-Zarr store are directories, not files, so they must be staged
+        whole (not fragmented into their slices/chunks). Returns the extension the KonfAI dataset
+        backend resolves the staged volume under -- ``.ome.zarr``/``.zarr`` for an OME-Zarr store,
+        ``""`` for a DICOM series directory (read as a bare ``Volume_i`` directory) -- or ``None``
+        for a plain directory that holds separate per-case files.
+        """
+        if not path.is_dir():
+            return None
+        lower = path.name.lower()
+        if lower.endswith(".ome.zarr"):
+            return ".ome.zarr"
+        if lower.endswith(".zarr"):
+            return ".zarr"
+        names = {entry.name for entry in path.iterdir()}
+        if names & {".zgroup", ".zattrs", "zarr.json"}:
+            return ".ome.zarr"
+        if any(name.lower().endswith((".dcm", ".dicom")) for name in names):
+            return ""
+        return None
+
+    @staticmethod
+    def _list_input_units(paths: list[Path]) -> list[tuple[Path, str]]:
+        """Expand input paths into ordered ``(source, staged_suffix)`` units for the ``Dataset/`` layout.
+
+        A unit is either a single supported file, or a directory that is itself one volume (an
+        OME-Zarr store or a DICOM series directory -- see :meth:`_directory_volume_suffix`). A plain
+        directory is walked so each contained file / store / series becomes its own case, in sorted
+        order so cases pair consistently across input groups.
+
+        Raises
+        ------
+        FileNotFoundError
+            If a path does not exist, is an unsupported file, or yields no volume.
+        """
+        units: list[tuple[Path, str]] = []
+
+        def walk(path: Path) -> None:
+            directory_suffix = KonfAIApp._directory_volume_suffix(path)
+            if path.is_file():
+                if KonfAIApp._match_supported(path):
+                    units.append((path, KonfAIApp._supported_suffix(path)))
+            elif directory_suffix is not None:
+                units.append((path, directory_suffix))
+            else:
+                for child in sorted(path.iterdir(), key=lambda entry: entry.name):
+                    walk(child)
+
+        for path in paths:
+            if not path.exists():
+                raise FileNotFoundError(f"Path does not exist: '{path}'")
+            if path.is_file() and not KonfAIApp._match_supported(path):
+                raise FileNotFoundError(f"No supported file found: '{path.name}' is not a supported format.")
+            before = len(units)
+            walk(path)
+            if len(units) == before:
+                raise FileNotFoundError(f"No supported inputs found in: '{path}'.")
+        return units
+
+    @staticmethod
+    def _detect_group_format(dataset_dir: Path, group: str) -> str:
+        """Detect the on-disk format token of a staged group, for reading it back.
+
+        Directory-volume inputs (a DICOM series or an OME-Zarr store) need their real backend token
+        (``dicom`` / ``omezarr``); single-file inputs keep the historical ``mha`` default so existing
+        behaviour is unchanged.
+        """
+        root = Path(dataset_dir)
+        if root.is_dir():
+            for case in sorted(path for path in root.iterdir() if path.is_dir()):
+                matches = sorted(case.glob(f"{group}*"))
+                if not matches:
+                    continue
+                suffix = KonfAIApp._directory_volume_suffix(matches[0])
+                if suffix is not None:
+                    return "omezarr" if suffix in (".ome.zarr", ".zarr") else "dicom"
+                return "mha"
+        return "mha"
+
+    @staticmethod
     def symlink(src: Path, dst: Path) -> None:
         """
         Create a symlink from `dst` pointing to `src`, with safe replacement.
@@ -847,9 +940,8 @@ class KonfAIApp(AbstractKonfAIApp):
         if dataset_path.exists():
             shutil.rmtree(dataset_path)
         for i, input_path in enumerate(inputs):
-            for idx, file in enumerate(KonfAIApp._list_supported_files(input_path)):
-                suffix = KonfAIApp._supported_suffix(file)
-                KonfAIApp.symlink(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
+            for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(input_path)):
+                KonfAIApp.symlink(source, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
 
     def _write_inference_stack_to_dataset(self, inputs: list[list[Path]]) -> None:
         """
@@ -894,9 +986,8 @@ class KonfAIApp(AbstractKonfAIApp):
             Ground truth file paths grouped similarly to inputs.
         """
         for i, gt_path in enumerate(gt):
-            for idx, file in enumerate(KonfAIApp._list_supported_files(gt_path)):
-                suffix = KonfAIApp._supported_suffix(file)
-                KonfAIApp.symlink(file, Path(f"./Dataset/P{idx:03d}/Reference_{i}{suffix}"))
+            for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(gt_path)):
+                KonfAIApp.symlink(source, Path(f"./Dataset/P{idx:03d}/Reference_{i}{suffix}"))
 
     def _write_mask_or_default(self, mask: list[list[Path]] | None) -> None:
         """
@@ -915,16 +1006,15 @@ class KonfAIApp(AbstractKonfAIApp):
             Optional mask paths.
         """
         if mask is None:
-            dataset = Dataset("Dataset", "mha")
+            dataset = Dataset("Dataset", KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0"))
             names = dataset.get_names("Volume_0")
             for name in names:
                 data, attr = dataset.read_data("Volume_0", name)
                 dataset.write("Mask_0", name, np.ones_like(data), attr)
         else:
             for i, mask_path in enumerate(mask):
-                for idx, file in enumerate(KonfAIApp._list_supported_files(mask_path)):
-                    suffix = KonfAIApp._supported_suffix(file)
-                    KonfAIApp.symlink(file, Path(f"./Dataset/P{idx:03d}/Mask_{i}{suffix}"))
+                for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(mask_path)):
+                    KonfAIApp.symlink(source, Path(f"./Dataset/P{idx:03d}/Mask_{i}{suffix}"))
 
     @run_distributed_app
     def infer(
@@ -982,7 +1072,19 @@ class KonfAIApp(AbstractKonfAIApp):
         )
         from konfai.predictor import predict
 
-        predict(models_path, True, gpu, cpu, quiet, False, Path(prediction_file).resolve())
+        # predictions_dir is passed explicitly: predict()'s default is resolved when konfai.predictor is
+        # first imported, so a host that imports it before this chdir'd workspace (e.g. the konfai-mcp
+        # job runner) would silently write predictions outside ./Predictions and break collection below.
+        predict(
+            models_path,
+            True,
+            gpu,
+            cpu,
+            quiet,
+            False,
+            Path(prediction_file).resolve(),
+            predictions_dir=Path("./Predictions").resolve(),
+        )
         if Path("./Predictions").absolute().exists():
             shutil.copytree(Path("./Predictions").absolute(), output, dirs_exist_ok=True)
 
@@ -1020,7 +1122,16 @@ class KonfAIApp(AbstractKonfAIApp):
         self.app_repository.install_evaluation(evaluation_file)
         from konfai.evaluator import evaluate
 
-        evaluate(True, gpu, cpu, quiet, False, Path(evaluation_file).resolve())
+        # evaluations_dir passed explicitly for the same import-time-default reason as predict() above.
+        evaluate(
+            True,
+            gpu,
+            cpu,
+            quiet,
+            False,
+            Path(evaluation_file).resolve(),
+            evaluations_dir=Path("./Evaluations").resolve(),
+        )
         if Path("./Evaluations").exists():
             shutil.copytree("./Evaluations", output, dirs_exist_ok=True)
 
@@ -1112,14 +1223,24 @@ class KonfAIApp(AbstractKonfAIApp):
             quiet=quiet,
             tmp_dir=tmp_dir,
         )
-        outputs = []
-        inference_stacks = []
-        for f in sorted((output / "Predictions").rglob("*")):
-            if f.is_file() and KonfAIApp._match_supported(f):
-                if f.name == "InferenceStack.mha":
-                    inference_stacks.append(f)
-                else:
-                    outputs.append(f)
+        outputs: list[Path] = []
+        inference_stacks: list[Path] = []
+
+        def _collect(path: Path) -> None:
+            # Treat a directory that is itself one volume (DICOM series / OME-Zarr store) as a single
+            # output unit instead of descending into its slices/chunks.
+            if path.is_file():
+                if KonfAIApp._match_supported(path):
+                    (inference_stacks if path.name == "InferenceStack.mha" else outputs).append(path)
+            elif KonfAIApp._directory_volume_suffix(path) is not None:
+                outputs.append(path)
+            else:
+                for child in sorted(path.iterdir(), key=lambda entry: entry.name):
+                    _collect(child)
+
+        predictions_dir = output / "Predictions"
+        if predictions_dir.exists():
+            _collect(predictions_dir)
         if gt is not None:
             self.evaluate([outputs], gt, output / "Evaluations", mask, evaluation_file, gpu, cpu, quiet, tmp_dir)
         if uncertainty:
@@ -1173,7 +1294,8 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Notes
         -----
-        - Runs inside an isolated workspace (run_distributed_app); the workspace is the output dir.
+        - Runs inside an isolated workspace (run_distributed_app). The CLI passes ``tmp_dir=output``
+          (the workspace IS the output dir); other callers get the bundle files copied into ``output``.
         - Fine-tuning requires a CUDA GPU when the loss relies on GPU-only components.
         - `models` selects which checkpoint(s) to fine-tune (default: the first available).
         """
@@ -1189,6 +1311,13 @@ class KonfAIApp(AbstractKonfAIApp):
         # Keep training artifacts (Checkpoints/Statistics) outside the output so it stays a clean app.
         work_dir = Path(tempfile.mkdtemp(prefix="konfai_finetune_")).resolve()
         config_path = Path(config_file)
+        # Relative classpaths (e.g. 'classpath: UNet.yml') resolve against the config file's parent, so
+        # the app's support files must sit next to the per-model config copies written into work_dir.
+        for support in Path(".").glob("*.py"):
+            shutil.copy2(support, work_dir / support.name)
+        for support in [*Path(".").glob("*.yml"), *Path(".").glob("*.yaml")]:
+            if support.resolve() != config_path.resolve():
+                shutil.copy2(support, work_dir / support.name)
         try:
             for checkpoint_name, checkpoint_src in selected_models:
                 stem = Path(checkpoint_name).stem
@@ -1226,6 +1355,16 @@ class KonfAIApp(AbstractKonfAIApp):
                         f"Fine-tuning of '{checkpoint_name}' produced no checkpoint in '{produced_dir}'."
                     )
                 shutil.copy2(produced[-1], Path(checkpoint_name).name)
+            # Honour `output` for every caller: the CLI passes tmp_dir=output (workspace IS the output
+            # dir, nothing to do), but any other caller runs in a throwaway workspace that the decorator
+            # deletes -- so collect the resulting bundle files (app.json + configs + code + fine-tuned
+            # checkpoints) into `output`, mirroring how infer collects ./Predictions.
+            output_dir = Path(output).resolve()
+            if Path.cwd().resolve() != output_dir:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                for artifact in Path(".").iterdir():
+                    if artifact.is_file():
+                        shutil.copy2(artifact, output_dir / artifact.name)
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
             dataset_link = Path("./Dataset")
