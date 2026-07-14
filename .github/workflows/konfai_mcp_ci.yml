@@ -1,0 +1,66 @@
+name: konfai_mcp_ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/konfai_mcp_ci.yml"
+      - "konfai-mcp/**"
+      - "konfai-apps/**"
+      - "konfai/**"
+      - "examples/**"
+      - "pyproject.toml"
+  pull_request:
+    paths:
+      - ".github/workflows/konfai_mcp_ci.yml"
+      - "konfai-mcp/**"
+      - "konfai-apps/**"
+      - "konfai/**"
+      - "examples/**"
+      - "pyproject.toml"
+
+jobs:
+  konfai_mcp_ci:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install core package (with imaging backends)
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev,imaging]"
+
+      - name: Install standalone apps package
+        run: |
+          pip install -e ./konfai-apps
+
+      - name: Install standalone MCP package
+        run: |
+          pip install -e ./konfai-mcp
+
+      - name: Lint and format check
+        run: |
+          ruff check konfai-mcp/konfai_mcp
+          ruff format --check konfai-mcp/konfai_mcp
+
+      - name: Build standalone MCP package
+        run: |
+          python -m build konfai-mcp
+
+      - name: Smoke import
+        run: |
+          python -c "import konfai_mcp, konfai_mcp.server; print('konfai_mcp import OK')"
+
+      - name: Run MCP tests
+        run: |
+          python -m pytest -q konfai-mcp/tests

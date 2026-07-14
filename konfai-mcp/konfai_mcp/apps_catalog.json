@@ -1,0 +1,9 @@
+{
+  "apps": [
+    "VBoussot/ImpactSynth",
+    "VBoussot/ImpactReg",
+    "VBoussot/ImpactSeg",
+    "VBoussot/MRSegmentator-KonfAI",
+    "VBoussot/TotalSegmentator-KonfAI"
+  ]
+}
