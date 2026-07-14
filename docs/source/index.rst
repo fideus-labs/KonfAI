@@ -151,6 +151,13 @@ KonfAI
               or an HTTP server.</p>
            <span class="go">Apps &amp; API &rarr;</span>
          </a>
+         <a class="kf-nextcard kf-h-amber" href="usage/mcp.html">
+           <span class="intent">Automate</span>
+           <h3>Drive it with an agent</h3>
+           <p>An MCP server lets an LLM inspect data, write &amp; validate configs, run
+              train/predict/evaluate &mdash; and <em>use, fine-tune, or package apps</em>.</p>
+           <span class="go">Agents &amp; MCP &rarr;</span>
+         </a>
        </div>
 
        <div class="kf-docindex">
@@ -165,6 +172,7 @@ KonfAI
            <a class="kf-h-steel" href="reference/cli.html">CLI reference</a>
            <a class="kf-h-violet" href="examples/index.html">Examples</a>
            <a class="kf-h-coral" href="usage/apps.html">Apps &amp; API server</a>
+           <a class="kf-h-amber" href="usage/mcp.html">Agents &amp; MCP</a>
            <a class="kf-h-steel" href="reference/python-api.html">Python API</a>
            <a class="kf-h-amber" href="troubleshooting.html">Troubleshooting</a>
          </div>
