@@ -21,6 +21,7 @@ import importlib
 import warnings
 from collections.abc import Callable
 from enum import Enum
+from typing import Any
 
 import torch
 
@@ -299,6 +300,318 @@ class ResidualBlockD(network.ModuleArgsDict):
         # ----- Residual sum + final activation --------------------------------------------- #
         self.add_module("Add", Add(), in_branch=[0, 1])
         self.add_module("Nonlin2", torch.nn.LeakyReLU(negative_slope=negative_slope, inplace=False))
+
+
+class ResNetBasicBlock(network.ModuleArgsDict):
+    """torchvision ResNet ``BasicBlock`` reproduced as a routed KonfAI graph (the ResNet-18/34 block).
+
+    Module-for-module and in forward-execution order equal to
+    ``torchvision.models.resnet.BasicBlock`` (the block the ``resnet18``/``resnet34`` encoders of
+    ``segmentation_models_pytorch`` stack). It reproduces the post-activation residual block of He et al.,
+    *Deep Residual Learning* (CVPR 2016):
+
+    * **Main path first** (matching ``BasicBlock.forward``, which computes the residual branch before it
+      evaluates ``self.downsample(x)``): on branch ``1`` ``Conv(stride) -> Norm -> ReLU -> Conv(stride 1)
+      -> Norm`` (the second conv carries no activation), keeping the block input untouched on branch ``0``.
+    * **Projection skip** on branch ``2``, evaluated *after* the main path (exactly as ``BasicBlock`` calls
+      ``self.downsample(x)`` only after ``bn2``): a ``1x1`` ``Conv(stride) -> Norm``. It is built when the
+      block is strided or changes channel count; otherwise the residual is the identity (block input).
+    * The two paths are summed onto branch ``0`` and a final ``ReLU`` is applied.
+
+    Evaluating the main-path convs before the downsample projection is what makes the block transparent to
+    the execution-order weight bridge (``konfai.utils.pretrained``): its weighted leaves fire in the same
+    order as ``BasicBlock`` (conv1, bn1, conv2, bn2, downsample.0, downsample.1). ``conv_bias`` defaults to
+    ``False`` (torchvision/timm ResNets never bias their convs) and the norm is ``BatchNorm`` (running stats,
+    so a checkpoint's BN buffers travel through the bridge and the ``eval()`` forward matches).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        dim: int,
+        stride: int | list[int] = 1,
+        conv_bias: bool = False,
+        downsample: bool | None = None,
+        norm_mode: str | NormMode = "BATCH",
+    ) -> None:
+        super().__init__()
+        stride_list = list(stride) if isinstance(stride, (list, tuple)) else [stride] * dim
+        has_stride = any(value != 1 for value in stride_list)
+        if downsample is None:
+            downsample = has_stride or in_channels != out_channels
+        norm = NormMode[norm_mode] if isinstance(norm_mode, str) else norm_mode
+
+        # ----- Main path on branch 1 (block input preserved on branch 0) ------------------- #
+        self.add_module(
+            "Conv1",
+            get_torch_module("Conv", dim)(
+                in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=conv_bias
+            ),
+            in_branch=[0],
+            out_branch=[1],
+        )
+        self.add_module("Norm1", get_norm(norm, out_channels, dim), in_branch=[1], out_branch=[1])
+        self.add_module("Nonlin1", torch.nn.ReLU(inplace=False), in_branch=[1], out_branch=[1])
+        self.add_module(
+            "Conv2",
+            get_torch_module("Conv", dim)(
+                out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=conv_bias
+            ),
+            in_branch=[1],
+            out_branch=[1],
+        )
+        self.add_module("Norm2", get_norm(norm, out_channels, dim), in_branch=[1], out_branch=[1])
+
+        # ----- Projection skip on branch 2 (evaluated after the main path, ResNet style) --- #
+        if downsample:
+            self.add_module(
+                "SkipConv",
+                get_torch_module("Conv", dim)(
+                    in_channels, out_channels, kernel_size=1, stride=stride, padding=0, bias=conv_bias
+                ),
+                in_branch=[0],
+                out_branch=[2],
+            )
+            self.add_module("SkipNorm", get_norm(norm, out_channels, dim), in_branch=[2], out_branch=[2])
+            self.add_module("Add", Add(), in_branch=[1, 2], out_branch=[0])
+        else:
+            self.add_module("Add", Add(), in_branch=[1, 0], out_branch=[0])
+
+        # ----- Final activation on branch 0 ------------------------------------------------ #
+        self.add_module("Nonlin2", torch.nn.ReLU(inplace=False), in_branch=[0], out_branch=[0])
+
+
+def _same_padding(kernel_size: int | list[int]) -> int | list[int]:
+    """Same-padding for an odd kernel: ``(k - 1) // 2`` per axis (isotropic int or per-axis list)."""
+    if isinstance(kernel_size, (list, tuple)):
+        return [(value - 1) // 2 for value in kernel_size]
+    return (kernel_size - 1) // 2
+
+
+class ResidualStage(network.ModuleArgsDict):
+    """One encoder resolution stage: a stack of ``n_blocks`` :class:`ResidualBlockD` as a single node.
+
+    A generic, reusable building block for residual encoders (e.g. nnU-Net's ``ResidualEncoder``): the
+    **first** block carries ``stride`` and the ``in_channels -> out_channels`` change (nnU-Net strided-conv
+    downsampling), and the remaining ``n_blocks - 1`` blocks are stride 1 at ``out_channels``. The blocks
+    are wired sequentially (each on branch ``0``), so the whole stage is a drop-in single node with one
+    input and one output whose weighted leaves fire in the same order as the equivalent flat stack -- it
+    stays transparent to the execution-order weight bridge (``konfai.utils.pretrained``).
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        in_channels: int,
+        out_channels: int,
+        n_blocks: int,
+        stride: int | list[int] = 1,
+        kernel_size: int | list[int] = 3,
+        conv_bias: bool = True,
+        negative_slope: float = 1e-2,
+        norm_mode: str | NormMode = "INSTANCE_AFFINE",
+    ) -> None:
+        super().__init__()
+        if n_blocks < 1:
+            raise ValueError(f"ResidualStage needs at least one block, got n_blocks={n_blocks}.")
+        for i in range(n_blocks):
+            self.add_module(
+                f"Block_{i}",
+                ResidualBlockD(
+                    in_channels=in_channels if i == 0 else out_channels,
+                    out_channels=out_channels,
+                    dim=dim,
+                    kernel_size=kernel_size,
+                    stride=stride if i == 0 else 1,
+                    conv_bias=conv_bias,
+                    negative_slope=negative_slope,
+                    norm_mode=norm_mode,
+                ),
+            )
+
+
+class DecoderStage(network.ModuleArgsDict):
+    """One U-Net decoder resolution stage as a single two-input node: upsample, concat skip, conv block.
+
+    A generic, reusable building block for U-Net decoders (nnU-Net's ``UNetDecoder`` shares it between the
+    plain and residual encoders). It is a **two-input** node -- ``in_branch: [coarser, skip]`` -- that runs
+    ``ConvTranspose(in_channels -> skip_channels, kernel = stride = upsample_stride)`` on the coarser input,
+    concatenates the encoder ``skip`` (transpose output first, then skip), then a :class:`ConvBlock` of
+    ``n_conv`` convs mapping ``2 * skip_channels -> skip_channels`` -- each Conv -> InstanceNorm(affine) ->
+    LeakyReLU with same-padding. It yields one output. ``upsample_stride`` sets both the transpose kernel and
+    stride so anisotropic plans (per-axis lists) upsample exactly the axes their encoder downsampled.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        in_channels: int,
+        skip_channels: int,
+        n_conv: int,
+        kernel_size: int | list[int] = 3,
+        conv_bias: bool = True,
+        negative_slope: float = 1e-2,
+        upsample_stride: int | list[int] = 2,
+        norm_mode: str | NormMode = "INSTANCE_AFFINE",
+    ) -> None:
+        super().__init__()
+        if n_conv < 1:
+            raise ValueError(f"DecoderStage needs at least one conv, got n_conv={n_conv}.")
+        # Upsample the coarser input (branch 0) to the skip resolution/width; kernel = stride = upsample.
+        self.add_module(
+            "Up",
+            get_torch_module("ConvTranspose", dim)(
+                in_channels=in_channels,
+                out_channels=skip_channels,
+                kernel_size=upsample_stride,
+                stride=upsample_stride,
+                padding=0,
+                bias=conv_bias,
+            ),
+            in_branch=[0],
+            out_branch=[0],
+        )
+        # Concatenate the encoder skip (branch 1); transpose output FIRST, then skip -- nnU-Net order.
+        self.add_module("Skip", Concat(), in_branch=[0, 1], out_branch=[0])
+        # Conv block: 2 * skip_channels -> skip_channels, then skip_channels -> skip_channels for the rest.
+        # ``kernel_size``/``padding`` pass through as Any so a per-axis (anisotropic) list is accepted.
+        kernel_value: Any = kernel_size
+        padding_value: Any = _same_padding(kernel_size)
+        conv_config = BlockConfig(
+            kernel_size=kernel_value,
+            stride=1,
+            padding=padding_value,
+            bias=conv_bias,
+            activation=f"LeakyReLU;{negative_slope}",
+            norm_mode=norm_mode,
+        )
+        self.add_module(
+            "Conv",
+            ConvBlock(
+                in_channels=2 * skip_channels,
+                out_channels=skip_channels,
+                block_configs=[conv_config for _ in range(n_conv)],
+                dim=dim,
+            ),
+            in_branch=[0],
+            out_branch=[0],
+        )
+
+
+class ResNetStage(network.ModuleArgsDict):
+    """One torchvision ResNet encoder stage: a stack of ``n_blocks`` :class:`ResNetBasicBlock` as a single node.
+
+    A generic, reusable building block for the ResNet-18/34 encoders that ``segmentation_models_pytorch``
+    stacks under its U-Net / UNet++ decoders (each is torchvision's ``ResNet`` ``layer1..layer4``). The
+    **first** block carries the stage ``stride`` and the ``in_channels -> out_channels`` change -- its ``1x1``
+    projection ``downsample`` skip is built automatically when the stride or the channel count changes -- and
+    the remaining ``n_blocks - 1`` blocks are stride 1 at ``out_channels`` with identity skips. The blocks run
+    sequentially on branch ``0``, so the whole stage is a drop-in single node with one input and one output
+    whose weighted leaves fire in the same order as the equivalent flat ``BasicBlock`` stack: it stays
+    transparent to the execution-order weight bridge (``konfai.utils.pretrained``). ``conv_bias`` defaults to
+    ``False`` and the norm to ``BatchNorm`` -- the torchvision/timm ResNet convention.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        in_channels: int,
+        out_channels: int,
+        n_blocks: int,
+        stride: int | list[int] = 1,
+        conv_bias: bool = False,
+        norm_mode: str | NormMode = "BATCH",
+    ) -> None:
+        super().__init__()
+        if n_blocks < 1:
+            raise ValueError(f"ResNetStage needs at least one block, got n_blocks={n_blocks}.")
+        for i in range(n_blocks):
+            self.add_module(
+                f"Block_{i}",
+                ResNetBasicBlock(
+                    in_channels=in_channels if i == 0 else out_channels,
+                    out_channels=out_channels,
+                    dim=dim,
+                    stride=stride if i == 0 else 1,
+                    conv_bias=conv_bias,
+                    norm_mode=norm_mode,
+                ),
+            )
+
+
+class UNetPlusPlusNode(network.ModuleArgsDict):
+    """One UNet++ dense-decoder node as a single multi-input node: upsample, dense concat, then Conv-Norm-ReLU.
+
+    A generic, reusable building block for the nested (dense) UNet++ decoder of
+    ``segmentation_models_pytorch`` (``UnetPlusPlusDecoder``). It is a **multi-input** node --
+    ``in_branch: [coarser, skip_0, skip_1, ...]`` -- that reproduces one grid node ``x_{d}_{l}``:
+
+    * ``Upsample(scale_factor=2, mode='nearest')`` on the shallower-column predecessor (branch ``0``);
+    * a :class:`Concat` of the upsampled feature FIRST, then every same-resolution dense skip and the matching
+      encoder skip (smp order), when any skip is provided;
+    * a :class:`ConvBlock` of ``n_conv`` ``Conv -> BatchNorm -> ReLU`` blocks (smp's ``Conv2dReLU``) mapping the
+      concatenated width ``up_channels + sum(skip_channels)`` to ``out_channels``.
+
+    ``skip_channels`` is the list of per-skip channel widths in ``in_branch`` order: its length wires the
+    concat (``n_skip + 1`` inputs) and its sum fixes the conv's input width, so the node self-describes the
+    dense fusion. An empty ``skip_channels`` (the final full-resolution ``x_0_depth`` node) drops the concat and
+    convolves the upsampled feature alone. The weighted leaves fire in ``ConvBlock`` order, so the node stays
+    transparent to the execution-order weight bridge (``konfai.utils.pretrained``).
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        up_channels: int,
+        skip_channels: list[int],
+        out_channels: int,
+        n_conv: int = 2,
+        kernel_size: int | list[int] = 3,
+        conv_bias: bool = False,
+        norm_mode: str | NormMode = "BATCH",
+    ) -> None:
+        super().__init__()
+        if n_conv < 1:
+            raise ValueError(f"UNetPlusPlusNode needs at least one conv, got n_conv={n_conv}.")
+        # Branch 0 = the shallower-column predecessor to upsample; branches 1.. = the dense / encoder skips.
+        self.add_module(
+            "Up",
+            torch.nn.Upsample(scale_factor=2.0, mode="nearest"),
+            in_branch=[0],
+            out_branch=[0],
+        )
+        conv_in = up_channels
+        if skip_channels:
+            # Nearest-upsampled feature FIRST, then every same-resolution dense skip and the encoder skip.
+            self.add_module(
+                "Cat",
+                Concat(),
+                in_branch=list(range(len(skip_channels) + 1)),
+                out_branch=[0],
+            )
+            conv_in = up_channels + sum(skip_channels)
+        kernel_value: Any = kernel_size
+        padding_value: Any = _same_padding(kernel_size)
+        conv_config = BlockConfig(
+            kernel_size=kernel_value,
+            stride=1,
+            padding=padding_value,
+            bias=conv_bias,
+            activation="ReLU",
+            norm_mode=norm_mode,
+        )
+        self.add_module(
+            "Conv",
+            ConvBlock(
+                in_channels=conv_in,
+                out_channels=out_channels,
+                block_configs=[conv_config for _ in range(n_conv)],
+                dim=dim,
+            ),
+            in_branch=[0],
+            out_branch=[0],
+        )
 
 
 def downsample(in_channels: int, out_channels: int, downsample_mode: DownsampleMode, dim: int) -> torch.nn.Module:

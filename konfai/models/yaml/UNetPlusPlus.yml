@@ -1,0 +1,233 @@
+# Declarative KonfAI UNetPlusPlus -- weight- and forward-exact with smp.UnetPlusPlus (ResNet encoder).
+#
+# This graph reproduces, block-for-block and in forward-execution order, the network built by
+# `segmentation_models_pytorch.UnetPlusPlus(encoder_name="resnet34", encoder_weights=None,
+# in_channels=5, classes=1, activation=None)` -- the exact ImpactSynth "MR" backbone: a torchvision
+# ResNet-34 encoder feeding a UNet++ nested (dense) decoder. It is the declarative twin of the
+# parametric `konfai.models.python.segmentation.unetplusplus.UNetPlusPlus`. Because the weighted
+# leaves execute in exactly the same sequence as the reference, a REAL smp checkpoint of this
+# topology loads straight into this KonfAI model through the execution-order bridge
+# `konfai.utils.pretrained.transfer_weights_by_execution_order`, and the KonfAI logits are
+# `torch.allclose` with the reference output (see tests/unit/test_unetplusplus_yaml.py, which
+# transfers the parametric UNetPlusPlus's weights in and checks maxdiff < 1e-4).
+#
+# It is authored at the BLOCK level from two generic, registry-backed composite blocks -- so the
+# whole graph reads as the architecture's topology (encoder stages + the UNet++ decoder grid + head),
+# not a conv-by-conv unroll:
+#
+#   * `ResNetStage` = one encoder resolution stage: a stack of `n_blocks` torchvision `BasicBlock`
+#     (`ResNetBasicBlock`). Its FIRST block carries the stage stride (strided-conv downsampling; the
+#     `1x1` projection skip is built automatically when stride or channels change) and the channel
+#     change; the rest are stride 1. conv_bias=False, BatchNorm -- the torchvision ResNet convention.
+#   * `UNetPlusPlusNode` = one UNet++ dense-grid node `x_{d}_{l}`, a MULTI-input node
+#     `in_branch: [coarser, skip_0, skip_1, ...]`: nearest-neighbour upsample of the shallower-column
+#     predecessor, a Concat of the upsampled feature FIRST then every same-resolution dense skip and the
+#     encoder skip (smp order), then two `Conv(3x3) -> BatchNorm -> ReLU` blocks (smp's `Conv2dReLU`).
+#     `skip_channels` lists the per-skip widths in `in_branch` order: its length wires the concat and its
+#     sum fixes the conv input width `up_channels + sum(skip_channels)`. The final full-resolution node
+#     has no skip.
+#
+# ENCODER (ResNet-34): a stem `Conv(7x7, stride 2) -> BatchNorm -> ReLU` (`enc_c1`, 64ch, 1/2 res) and a
+# `MaxPool(3, stride 2)`, then four `ResNetStage`s with block counts [3, 4, 6, 3] and widths
+# [64, 128, 256, 512] (`enc_l1..enc_l4`, 1/4..1/32 res). The five features consumed by the decoder are
+# `enc_c1` and `enc_l1..enc_l4`. (resnet18 = block counts [2, 2, 2, 2], same widths.)
+#
+# DECODER channel table (smp's UnetPlusPlusDecoder arithmetic for a BasicBlock ResNet encoder). A
+# declarative YAML cannot compute the dense-grid channel recurrence, so the widths are written
+# explicitly per node; `up_channels + sum(skip_channels) -> out_channels` is the node's `Conv2dReLU`
+# input/output. `dx_d_l` is the branch holding node `x_{d}_{l}`:
+#
+#   node    in_branch (coarser, skips...)              up  + skips        = conv_in -> out
+#   x_0_0   enc_l4, enc_l3                             512 + [256]        =   768   -> 256
+#   x_1_1   enc_l3, enc_l2                             256 + [128]        =   384   -> 128
+#   x_2_2   enc_l2, enc_l1                             128 + [64]         =   192   ->  64
+#   x_3_3   enc_l1, enc_c1                              64 + [64]         =   128   ->  64
+#   x_0_1   dx_0_0, dx_1_1, enc_l2                     256 + [128,128]    =   512   -> 128
+#   x_1_2   dx_1_1, dx_2_2, enc_l1                     128 + [64,64]      =   256   ->  64
+#   x_2_3   dx_2_2, dx_3_3, enc_c1                      64 + [64,64]      =   192   ->  64
+#   x_0_2   dx_0_1, dx_1_2, dx_2_2, enc_l1             128 + [64,64,64]   =   320   ->  64
+#   x_1_3   dx_1_2, dx_2_3, dx_3_3, enc_c1              64 + [64,64,64]   =   256   ->  64
+#   x_0_3   dx_0_2, dx_1_3, dx_2_3, dx_3_3, enc_c1      64 + [64,64,64,64]=   320   ->  32
+#   x_0_4   dx_0_3                                       32 + []          =    32   ->  16
+#
+# A `Conv(3x3)` segmentation head emits raw logits (activation=None -> the weight-exact comparison
+# point). The nodes below are declared in smp forward-execution order so the 117 weighted leaves (72
+# encoder + 44 decoder + 1 head) pair one-to-one with the reference.
+#
+# FIXED DEPTH / ENCODER: a declarative YAML cannot loop, so the 4 encoder stages + 11 decoder nodes and
+# the decoder channel table are structural (this file is the resnet18/34 BasicBlock topology). `dim`,
+# `in_channels`, `num_classes`, `stem_channels`, `stage_channels` and `n_blocks_per_stage` stay
+# parametric; retargeting another BasicBlock encoder means editing `n_blocks_per_stage` (e.g. resnet18)
+# and, for different widths, recomputing the decoder table above.
+#
+# Use it as a KonfAI model classpath:
+#   classpath: default|UNetPlusPlus.yml   # shipped catalog copy
+#   classpath: /path/to/UNetPlusPlus.yml  # any local copy
+name: UNetPlusPlus
+
+parameters:
+  dim: 2
+  in_channels: 5
+  num_classes: 1
+  # torchvision ResNet-34 stem width and stage planes (enc_l1..enc_l4).
+  stem_channels: 64
+  stage_channels: [64, 128, 256, 512]
+  # BasicBlock counts per encoder stage (resnet34 = [3, 4, 6, 3]; resnet18 = [2, 2, 2, 2]).
+  n_blocks_per_stage: [3, 4, 6, 3]
+
+network:
+  in_channels: ${in_channels}
+  dim: ${dim}
+
+modules:
+  # ===== Encoder: ResNet-34 stem + four BasicBlock stages =======================
+  # Stem: Conv(7x7, s2) -> BatchNorm -> ReLU (enc_c1, a decoder skip at 1/2 res), then MaxPool.
+  - name: Stem
+    type: ConvBlock
+    in_branch: [0]
+    out_branch: [enc_c1]
+    args:
+      dim: ${dim}
+      in_channels: ${in_channels}
+      out_channels: ${stem_channels}
+      block_configs:
+        - $object: BlockConfig
+          args:
+            kernel_size: 7
+            stride: 2
+            padding: 3
+            bias: false
+            activation: ReLU
+            norm_mode: BATCH
+  - name: StemMaxPool
+    type: MaxPool
+    in_branch: [enc_c1]
+    out_branch: [enc_mp]
+    args:
+      dim: ${dim}
+      kernel_size: 3
+      stride: 2
+      padding: 1
+
+  # Residual stages; each output enc_l1..enc_l4 is a decoder skip. Stage 1 follows the maxpool at
+  # 1/4 and never strides; stages 2-4 stride their first block (downsampling + channel change).
+  - name: Encoder_1
+    type: ResNetStage
+    in_branch: [enc_mp]
+    out_branch: [enc_l1]
+    args:
+      dim: ${dim}
+      in_channels: ${stem_channels}
+      out_channels: ${stage_channels.0}
+      n_blocks: ${n_blocks_per_stage.0}
+      stride: 1
+  - name: Encoder_2
+    type: ResNetStage
+    in_branch: [enc_l1]
+    out_branch: [enc_l2]
+    args:
+      dim: ${dim}
+      in_channels: ${stage_channels.0}
+      out_channels: ${stage_channels.1}
+      n_blocks: ${n_blocks_per_stage.1}
+      stride: 2
+  - name: Encoder_3
+    type: ResNetStage
+    in_branch: [enc_l2]
+    out_branch: [enc_l3]
+    args:
+      dim: ${dim}
+      in_channels: ${stage_channels.1}
+      out_channels: ${stage_channels.2}
+      n_blocks: ${n_blocks_per_stage.2}
+      stride: 2
+  - name: Encoder_4
+    type: ResNetStage
+    in_branch: [enc_l3]
+    out_branch: [enc_l4]
+    args:
+      dim: ${dim}
+      in_channels: ${stage_channels.2}
+      out_channels: ${stage_channels.3}
+      n_blocks: ${n_blocks_per_stage.3}
+      stride: 2
+
+  # ===== UNet++ nested decoder grid (smp forward-execution order) ===============
+  # --- Column l = d (the diagonal): upsample encoder feat[d], concat encoder feat[d+1] ---
+  - name: x_0_0
+    type: UNetPlusPlusNode
+    in_branch: [enc_l4, enc_l3]
+    out_branch: [dx_0_0]
+    args: {dim: "${dim}", up_channels: 512, skip_channels: [256], out_channels: 256}
+  - name: x_1_1
+    type: UNetPlusPlusNode
+    in_branch: [enc_l3, enc_l2]
+    out_branch: [dx_1_1]
+    args: {dim: "${dim}", up_channels: 256, skip_channels: [128], out_channels: 128}
+  - name: x_2_2
+    type: UNetPlusPlusNode
+    in_branch: [enc_l2, enc_l1]
+    out_branch: [dx_2_2]
+    args: {dim: "${dim}", up_channels: 128, skip_channels: [64], out_channels: 64}
+  - name: x_3_3
+    type: UNetPlusPlusNode
+    in_branch: [enc_l1, enc_c1]
+    out_branch: [dx_3_3]
+    args: {dim: "${dim}", up_channels: 64, skip_channels: [64], out_channels: 64}
+
+  # --- Dense column l = d + 1 ---
+  - name: x_0_1
+    type: UNetPlusPlusNode
+    in_branch: [dx_0_0, dx_1_1, enc_l2]
+    out_branch: [dx_0_1]
+    args: {dim: "${dim}", up_channels: 256, skip_channels: [128, 128], out_channels: 128}
+  - name: x_1_2
+    type: UNetPlusPlusNode
+    in_branch: [dx_1_1, dx_2_2, enc_l1]
+    out_branch: [dx_1_2]
+    args: {dim: "${dim}", up_channels: 128, skip_channels: [64, 64], out_channels: 64}
+  - name: x_2_3
+    type: UNetPlusPlusNode
+    in_branch: [dx_2_2, dx_3_3, enc_c1]
+    out_branch: [dx_2_3]
+    args: {dim: "${dim}", up_channels: 64, skip_channels: [64, 64], out_channels: 64}
+
+  # --- Dense column l = d + 2 ---
+  - name: x_0_2
+    type: UNetPlusPlusNode
+    in_branch: [dx_0_1, dx_1_2, dx_2_2, enc_l1]
+    out_branch: [dx_0_2]
+    args: {dim: "${dim}", up_channels: 128, skip_channels: [64, 64, 64], out_channels: 64}
+  - name: x_1_3
+    type: UNetPlusPlusNode
+    in_branch: [dx_1_2, dx_2_3, dx_3_3, enc_c1]
+    out_branch: [dx_1_3]
+    args: {dim: "${dim}", up_channels: 64, skip_channels: [64, 64, 64], out_channels: 64}
+
+  # --- Dense column l = d + 3 ---
+  - name: x_0_3
+    type: UNetPlusPlusNode
+    in_branch: [dx_0_2, dx_1_3, dx_2_3, dx_3_3, enc_c1]
+    out_branch: [dx_0_3]
+    args: {dim: "${dim}", up_channels: 64, skip_channels: [64, 64, 64, 64], out_channels: 32}
+
+  # --- Final full-resolution node (no skip: smp DecoderBlock(in, 0, out)) ---
+  - name: x_0_4
+    type: UNetPlusPlusNode
+    in_branch: [dx_0_3]
+    out_branch: [dx_0_4]
+    args: {dim: "${dim}", up_channels: 32, skip_channels: [], out_channels: 16}
+
+  # ===== Segmentation head (activation=None -> raw logits) =======================
+  - name: SegmentationHead
+    type: Conv
+    in_branch: [dx_0_4]
+    out_branch: [-1]
+    args:
+      dim: ${dim}
+      in_channels: 16
+      out_channels: ${num_classes}
+      kernel_size: 3
+      stride: 1
+      padding: 1
+      bias: true

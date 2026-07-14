@@ -33,12 +33,20 @@ training start. 2D-only (SMP's encoder zoo is 2D); use slice-wise patches or
 | --- | --- | --- | --- | --- | --- |
 | `UNet` | `segmentation.UNet.UNet` | Classic encoder–decoder U-Net; optional attention gates and deep-supervision heads. | `channels=[1,64,128,256,512,1024]`, `nb_class=2`, `dim=3`, `block_config=BlockConfig()`, `nb_conv_per_stage=2`, `downsample_mode="MAXPOOL"`, `upsample_mode="CONV_TRANSPOSE"`, `attention=False`, `block_type="Conv"` | 2D / 3D | Yes |
 | `NestedUNet` | `segmentation.NestedUNet.NestedUNet` | UNet++ with dense nested skips and per-level deep-supervision heads. | as `UNet` + `activation="Softmax"` | 2D / 3D | Yes |
-| `UNetpp` | `segmentation.NestedUNet.UNetpp` | UNet++ on a ResNet-style encoder. | `encoder_channels=[1,64,64,128,256,512]`, `decoder_channels=[256,128,64,32,16,1]`, `layers=[3,4,6,3]`, `dim=2` | 2D | Yes |
+| `UNetPlusPlus` | `segmentation.unetplusplus.UNetPlusPlus` | Parametric UNet++ on a **pretrained ResNet backbone** — **weight-exact vs `smp.UnetPlusPlus`** (resnet18/34). Use this to load an smp / ImpactSynth checkpoint into an addressable KonfAI graph. | `dim=2`, `in_channels=1`, `classes=1`, `encoder_name="resnet34"`, `activation=None` (`"tanh"` for sCT) | 2D | Yes (params) |
+| `ResidualEncoderUNet` | `segmentation.residualencoderunet.ResidualEncoderUNet` | Parametric nnU-Net **residual-encoder** U-Net for any topology — **weight-exact vs `dynamic_network_architectures.ResidualEncoderUNet`**. Loads a real nnU-Net ResEnc / ImpactSeg checkpoint via the bridge. | `dim=3`, `in_channels=1`, `n_stages=6`, `features_per_stage=[32,64,128,256,320,320]`, `strides=[1,2,2,2,2,2]`, `n_blocks_per_stage=[1,3,4,6,6,6]`, `num_classes=2`, `deep_supervision=True` | 2D / 3D | Yes (params) |
+
+```{note}
+Two UNet++ flavours: `NestedUNet` (academic, plain-conv encoder trained from scratch) and
+`UNetPlusPlus` (the **smp-faithful** UNet++ with a real pretrained ResNet backbone — the one
+that loads `smp.UnetPlusPlus` checkpoints). Pick `UNetPlusPlus` when you need smp
+weight-compatibility (e.g. the ImpactSynth app).
+```
 
 ```{note}
 The `Model:UNetpp5` used in the `Synthesis` example is a **local** class in
-`examples/Synthesis/Model.py` wrapping `segmentation_models_pytorch`, **not** the
-built-in `UNetpp` above.
+`examples/Synthesis/Model.py` wrapping `segmentation_models_pytorch`; the built-in
+`UNetPlusPlus` above is the maintained, smp-weight-exact equivalent.
 ```
 
 ## Classification — `konfai.models.python.classification`

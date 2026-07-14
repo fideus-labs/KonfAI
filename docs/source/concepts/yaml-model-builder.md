@@ -156,6 +156,27 @@ with any divergence from the reference documented in the file header:
 | `VGG16` | weight-exact vs torchvision (all 5 feature maps exact) | torchvision ImageNet (via the bridge) |
 | `ViT` | structural + encoder token-features allclose vs MONAI | — (encoder maths verified) |
 | `AttentionUNet`, `UNETR` | structural-strict (graph differs from MONAI, documented) | — |
+| `ResidualEncoderUNet` *(parametric)* | weight-exact vs nnU-Net `dynamic_network_architectures.ResidualEncoderUNet` (`deep_supervision` toggle) | nnU-Net ResEnc / ImpactSeg checkpoints (via the bridge) |
+| `UNetPlusPlus` *(parametric)* | weight-exact vs `segmentation_models_pytorch.UnetPlusPlus` (ResNet-18/34 encoder, `activation` configurable) | smp / ImpactSynth checkpoints (via the bridge) |
+
+`PlainConvUNet`, `ResidualEncoderUNet` and `UNetPlusPlus` are **parametric** models
+(`konfai/models/python/segmentation/`): rather than a fixed-topology `.yml`, you reference
+the class and declare the architecture inline, so one model covers any depth / width / class
+count — e.g.
+
+```yaml
+Model:
+  classpath: segmentation.residualencoderunet.ResidualEncoderUNet
+  ResidualEncoderUNet:
+    dim: 2
+    in_channels: 5
+    n_stages: 6
+    features_per_stage: [24, 48, 96, 192, 256, 256]
+    strides: [1, 2, 2, 2, 2, 2]
+    n_blocks_per_stage: [1, 2, 2, 3, 3, 3]
+    num_classes: 12
+    deep_supervision: false
+```
 
 `VGG16` is the feature-extractor entry: it exposes five named multi-layer outputs
 (`Block_0:Out` … `Block_4:Out`, channels 64/128/256/512/512 — the torchvision

@@ -139,6 +139,7 @@ class ResidualEncoderUNet(network.Network):
         num_classes: int = 2,
         conv_bias: bool = True,
         negative_slope: float = 1e-2,
+        deep_supervision: bool = True,
     ) -> None:
         if dim not in (2, 3):
             raise ConfigError(
@@ -262,22 +263,25 @@ class ResidualEncoderUNet(network.Network):
                 in_branch=[f"up{j}"],
                 out_branch=[f"dec{j}"],
             )
-            # 1x1 seg head at this resolution -- raw logits, a named terminal output. Building every
-            # head (native deep supervision) is what makes the parameter count match the reference
-            # exactly (nnU-Net always builds all seg layers to keep checkpoints loadable).
-            self.add_module(
-                f"SegHead_{j}",
-                blocks.get_torch_module("Conv", dim)(
-                    in_channels=skip_channels,
-                    out_channels=num_classes,
-                    kernel_size=1,
-                    stride=1,
-                    padding=0,
-                    bias=True,
-                ),
-                in_branch=[f"dec{j}"],
-                out_branch=[-1],
-            )
+            # 1x1 seg head at this resolution -- raw logits, a named terminal output. With
+            # ``deep_supervision`` (default) every decoder stage gets a head, matching nnU-Net's
+            # full parameter count. With ``deep_supervision=False`` only the finest (full-resolution,
+            # j == n_stages - 2) head is built and traversed -- the single-output configuration used
+            # e.g. by the ImpactSeg body model, so a checkpoint trained that way pairs leaf-for-leaf.
+            if deep_supervision or j == n_stages - 2:
+                self.add_module(
+                    f"SegHead_{j}",
+                    blocks.get_torch_module("Conv", dim)(
+                        in_channels=skip_channels,
+                        out_channels=num_classes,
+                        kernel_size=1,
+                        stride=1,
+                        padding=0,
+                        bias=True,
+                    ),
+                    in_branch=[f"dec{j}"],
+                    out_branch=[-1],
+                )
 
     def load(
         self,
