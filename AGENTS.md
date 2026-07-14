@@ -1,6 +1,7 @@
 # KonfAI — Agent Guide
 
-Canonical reference for humans and AI agents. Read it before changing code. Known issues and the backlog live in [`AUDIT.md`](AUDIT.md); user-facing detail lives in `docs/` and `examples/`.
+Canonical reference for humans and AI agents. Read it before changing code. User-facing detail lives in
+`docs/` and `examples/`.
 
 ## 1. What KonfAI is
 
@@ -18,6 +19,7 @@ Three pillars run through the codebase:
 |---|---|
 | `konfai/` | Core package (config, data, network, metric, workflows, utils) |
 | `konfai-apps/` | **Independent** package `konfai_apps` (app management, HF repos, FastAPI server) — own `pyproject.toml`, deps, and CI |
+| `konfai-mcp/` | **Independent** package `konfai_mcp` (FastMCP server exposing KonfAI to LLM agents) — own `pyproject.toml`, tests, CI. Lives on the `konfai-mcp` branch (published to `origin/konfai-mcp`); do not push without explicit confirmation. |
 | `apps/` | Ready-to-use model app bundles (excluded from the `konfai` wheel) |
 | `examples/` | Runnable `Segmentation` / `Synthesis` workflows (assume CWD = the example dir) |
 | `docs/` · `tests/` | Sphinx site · core test suite (`tests/unit`, `tests/integration`) |
@@ -56,13 +58,50 @@ Every extension point is **"subclass a base, reference it by classpath in YAML"*
 
 **Classpaths:** a bare name (e.g. `Dice`) resolves inside that kind's package; `module:Class` imports *any* module — a local file (`Loss:MyWrapper`) or an installed library (`monai.losses:DiceLoss`, `torch:nn:L1Loss`).
 
-**YAML model builder** (`utils/model_builder.py`): builds a `Network` from a `.yml`, **safe by construction** (node types must come from two curated registries — no `eval`/import injection). It *complements* `models/` today and can replace the feed-forward subset once the registry grows (`UNet`/`NestedUNet`/`ResNet` are migratable; custom-`forward` models like DDPM/DiffusionGAN/ConvNeXt are not). See AUDIT.md.
+**YAML model builder** (`utils/model_builder.py`): builds a `Network` from a `.yml`, **safe by construction** (node types must come from two curated registries — no `eval`/import injection). It *complements* `models/` today and can replace the feed-forward subset once the registry grows (`UNet`/`NestedUNet`/`ResNet` are migratable; custom-`forward` models like DDPM/DiffusionGAN/ConvNeXt are not).
 
 ## 5. Apps (`konfai-apps`)
 
 A separate package layered on KonfAI's **public** API (core never imports it). An "app" bundles a config + custom `.py` + `.pt` weights, resolved from a Local dir, a HuggingFace repo, or a Remote server; the `apps/*` bundles are thin CLI wrappers.
 
 > ⚠️ **Trust model.** Resolving an app **copies and imports its `.py` files** → it **runs arbitrary code**. It also **pip-installs its `requirements.txt` by default** (only missing/mismatched packages; core packages like `torch`/`konfai` are never touched; opt out with `KONFAI_APPS_INSTALL_REQUIREMENTS=0`). **Only resolve apps from sources you trust.**
+
+## 5b. MCP server (`konfai-mcp`)
+
+A third independent package (depends only on KonfAI's public API) exposing a **FastMCP** server so an LLM agent can inspect a dataset → author YAML → run train/predict/evaluate → monitor jobs → compare runs → iterate. Lives on the `konfai-mcp` branch (published to `origin/konfai-mcp`; do not push without explicit confirmation). Jobs run in a **`spawn`** subprocess (training may init CUDA); `validate_config_semantics` and `run_component_smoke_test` run in a **spawn subprocess** (never in the server process), are side-effect-free (config bytes snapshotted/restored), and re-import edited workspace code; discovery is via `list_components` / `describe_extension_points` / `describe_config_schema` / `check_external_dependency`. Tests: `pip install -e ./konfai-mcp` then `python -m pytest konfai-mcp/tests` (the segmentation E2E needs the imaging extra).
+
+**Working on the MCP server — how to validate a change:**
+
+- **Synthetic fixtures:** `pixi run --environment dev python audit/make_fixtures.py` builds a segmentation
+  dataset, a registration pair with a known translation, a synthesis pair, a 3-level OME-Zarr store, and
+  corrupted/unsupported inputs under `audit/fixtures/` (procedural, no patient data). Reuse these, do not
+  invent ad-hoc data in `/tmp`.
+- **Drive it black-box first, not by tool name.** Formulate a real objective ("segment these CT volumes"),
+  then exercise the loop through a `fastmcp.Client` exactly as `test_mcp_server_segmentation_pipeline.py`
+  does. A new tool is not "done" because it returns without an exception.
+- **Verify outputs, not return codes.** After `run_*` + `wait_for_job`, assert the job `status=="done"`
+  (never trust a green `validate_*` alone — its default level `instantiate` runs no train step; only
+  `level='train_step'` runs one forward+backward), then open the
+  produced files: `read_session_file` the config, check `Predictions/<name>/Dataset` exists, and read the
+  `Metric_*.json` via `get_run_metrics`. Confirm the numbers correspond to the requested task.
+- **Validating a new tool:** (1) its `next_actions` must be registered tool names — the anti-drift test in
+  `test_mcp_server_tool_index.py` enforces this for job payloads only, so if the tool emits `next_actions`
+  in its own payload, assert it in the tool's pytest; (2) if it takes a workspace path, route it through
+  `resolve_workspace_relative_path` (jail); (3) if it imports/executes app or workspace code, run it in the
+  spawn subprocess (`run_api_in_subprocess`) and gate it behind `allow_untrusted_code` where applicable;
+  (4) document per-parameter meaning via `Annotated[..., Field(description=...)]`, not only prose; (5) add a
+  pytest that inspects the output.
+- **Adding a workflow kind touches ~7 registries** (WORKFLOWS, WORKFLOW_CONFIG_FILES/ROOT_KEYS, runner
+  command map, capabilities `_WORKFLOW_ROOTS`, `Job.kind` Literal + retry map, GUIDE). Prefer one descriptor
+  table consumed everywhere over editing each.
+- **Safety invariants to preserve:** validation/smoke-tests never execute in the server process; only
+  `read/write_session_file` are path-jailed (dataset tools read arbitrary host paths by design — keep it
+  that way only for the trusted-local deployment, and never widen writes). `cancel_job` now reaps the whole
+  process group — the job runs `os.setsid()` and cancel sends the signal via `os.killpg`, so `mp.spawn` DDP
+  grandchildren are killed with the middle process (regression test:
+  `test_cancel_reaps_the_whole_process_group_including_grandchildren`).
+- **Regenerate derived docs:** after changing a tool's description run
+  `python konfai-mcp/scripts/generate_tool_reference.py` (the committed skill reference is generated).
 
 ## 6. Running things
 
@@ -78,7 +117,7 @@ The Pixi `dev` env carries the imaging extras; a bare `pip install .[dev]` does 
 ## 7. Invariants — do NOT break
 
 - **Never load a full volume into RAM.** Use lazy/patch/streaming access (`can_stream_patch`, `read_data_slice`).
-- **Channel-first `[C,(Z),Y,X]`; spacing `(x,y,z)`.** `Attribute` stringifies every value and reparses geometry via `np.fromstring` — only flat scalars / 1-D arrays round-trip (see #5 in AUDIT.md). Read via `__getitem__`/`get_np_array`.
+- **Channel-first `[C,(Z),Y,X]`; spacing `(x,y,z)`.** `Attribute` stringifies every value and reparses geometry via `np.fromstring` — only flat scalars / 1-D arrays round-trip. Read via `__getitem__`/`get_np_array`.
 - **`KONFAI_config_file` + `KONFAI_CONFIG_MODE` must be set before any `Config()`** (tests must `monkeypatch.setenv` both); workflows require `KONFAI_CONFIG_MODE='Done'`. Reading a config rewrites it on disk.
 - **Patch ordering** must match between read (`disassemble`) and write (`Accumulator`); for PREDICTION/EVALUATION all patches of a case stay on the same DDP rank.
 - **`outputs_criterions` keys equal a module's dotted path**; the `:`/`.` separators are load-bearing.
