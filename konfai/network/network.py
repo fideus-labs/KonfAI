@@ -405,7 +405,11 @@ class Measure:
                         )
                         == 1
                     ):
-                        if criterions_attr.is_loss:
+                        # Only the accumulation loss that completes the group's per-patch set may fire the
+                        # accumulated backward. Without the `accumulation` guard, a plain (non-accumulation)
+                        # loss added later in the SAME numeric group re-satisfies the uniform-count test and
+                        # re-runs backward over the already-freed accumulation graph (double gradient / crash).
+                        if criterions_attr.accumulation and criterions_attr.is_loss:
                             loss = torch.zeros((1), requires_grad=True)
                             for v in [
                                 loss_value
@@ -901,7 +905,6 @@ class Network(ModuleArgsDict, ABC):
     def state_dict(self) -> dict[str, OrderedDict]:
         destination: OrderedDict[str, Any] = OrderedDict()
         local_metadata = {"version": self._version}
-        # destination["_metadata"] = OrderedDict({"": local_metadata})
         self._save_to_state_dict(destination, "", False)
         for name, module in self._modules.items():
             if module is not None:
@@ -953,10 +956,15 @@ class Network(ModuleArgsDict, ABC):
                                 ModuleArgsDict.init_func(child, self.init_type, self.init_gain)
 
                                 bias_key = prefix + name + ".bias"
+                                # Copy the overlap only. Slicing both sides by min(current, last) keeps the
+                                # GROW case (checkpoint smaller -> fill the top rows) working AND fixes the
+                                # SHRINK case (checkpoint larger): `weight[:last_size] = ckpt` would pair the
+                                # smaller current tensor against the larger checkpoint and crash.
+                                overlap = min(current_size, last_size)
                                 with torch.no_grad():
-                                    child.weight[:last_size] = state_dict[weight_key]
+                                    child.weight[:overlap] = state_dict[weight_key][:overlap]
                                     if child.bias is not None and bias_key in state_dict:
-                                        child.bias[:last_size] = state_dict[bias_key]
+                                        child.bias[:overlap] = state_dict[bias_key][:overlap]
                                 # Skip the normal load for this resized leaf, but keep
                                 # loading its siblings (was an early `return` that aborted them).
                                 continue
@@ -1453,7 +1461,24 @@ class Network(ModuleArgsDict, ABC):
 
 
 class MinimalModel(Network):
-    """Small wrapper exposing a single network as a full KonfAI model graph."""
+    """Small wrapper exposing a single network as a full KonfAI model graph.
+
+    The wrapped model arrives fully constructed — possibly carrying pretrained weights (a
+    torchvision/MONAI/SMP class with ``weights=...``). ``load`` therefore never re-initialises:
+    ``load(init=True)`` at training start applies ``init_func`` over every descendant and would
+    silently destroy those weights with ``init_type`` noise. Models built from scratch keep
+    KonfAI's init behaviour; checkpoint loading is unaffected.
+    """
+
+    def load(
+        self,
+        state_dict: dict[str, dict[str, torch.Tensor] | int],
+        init: bool = True,
+        ema: bool = False,
+        override_lr: float | None = None,
+    ):
+        del init  # the wrapped model owns its initialisation (possibly pretrained)
+        super().load(state_dict, init=False, ema=ema, override_lr=override_lr)
 
     def __init__(
         self,
@@ -1493,7 +1518,18 @@ class ModelLoader:
         if Path(raw_path).suffix.lower() not in {".yaml", ".yml"}:
             return None
         if self.classpath.startswith("default|"):
-            path = Path(konfai_root()) / "models" / raw_path
+            # 'default|<Name>.yml' selects a model from the shipped catalog (konfai/models/yaml),
+            # the declarative counterpart of 'default|segmentation.UNet.UNet' for Python classes.
+            import konfai.models.yaml as yaml_catalog
+
+            path = Path(str(yaml_catalog.__file__)).parent / raw_path
+            if not path.is_file():
+                available = sorted(entry.name for entry in path.parent.glob("*.yml"))
+                raise ConfigError(
+                    f"Unknown catalog model '{raw_path}'.",
+                    f"Available catalog models: {available}. "
+                    "Use 'default|<Name>.yml' for a shipped model or a plain path for your own file.",
+                )
         else:
             path = Path(raw_path)
             config_file = os.environ.get("KONFAI_config_file")
@@ -1540,7 +1576,7 @@ class ModelLoader:
             model = apply_config(f"{konfai_args}.{name}")(builder)(konfai_without=konfai_without if not train else [])
             return model
 
-        module, name = get_module(self.classpath, "konfai.models")
+        module, name = get_module(self.classpath, "konfai.models.python")
         cls = getattr(module, name)
         if not hasattr(cls, "_key"):
             konfai_args += "." + name

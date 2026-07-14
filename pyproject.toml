@@ -59,6 +59,7 @@ tensorboard = ["tensorboard"]
 imaging = ["SimpleITK", "h5py", "pydicom", "zarr", "ngff-zarr"]
 vtk = ["vtk"]
 lpips = ["lpips"]
+smp = ["segmentation-models-pytorch"]
 ssim = ["scikit-image"]
 fid = ["scipy", "torchvision"]
 cluster = ["submitit"]
@@ -120,6 +121,10 @@ local_scheme = "no-local-version"
 # published wheel. Keep the default namespaces=true so PEP 420 packages (konfai/models) ship.
 include = ["konfai", "konfai.*"]
 exclude = ["apps*", "konfai-apps*"]
+
+[tool.setuptools.package-data]
+# Ship the declarative model catalog (konfai/models/yaml/*.yml) in the wheel.
+"konfai.models.yaml" = ["*.yml"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]

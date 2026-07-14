@@ -1,0 +1,272 @@
+# Torchvision-exact VGG-16 feature extractor as a declarative KonfAI graph.
+#
+# This entry reproduces the convolutional trunk of `torchvision.models.vgg16(...).features`
+# **weight-for-weight**. It is built only from the curated model-builder registry
+# (Conv/ReLU/MaxPool -- no BatchNorm, this is `vgg16`, not `vgg16_bn`, and no classifier
+# head: it is a pure feature extractor). Its 13 convolutions execute in exactly
+# torchvision's forward order, so a real ImageNet checkpoint loads straight in through the
+# pretrained bridge:
+#
+#     import torchvision
+#     from konfai.utils.model_builder import build_model_from_yaml
+#     from konfai.utils.pretrained import transfer_weights_by_execution_order
+#
+#     source = torchvision.models.vgg16(weights="IMAGENET1K_V1").features[:31]
+#     target = build_model_from_yaml(yaml_path=".../VGG16.yml")
+#     transfer_weights_by_execution_order(
+#         target=target, source=source,
+#         target_forward=lambda: list(target.named_forward(x)),
+#         source_forward=lambda: source(x),
+#     )
+#
+# WHY IT LIVES IN THE CATALOG: this is the canonical backbone for perceptual / feature /
+# IMPACT losses. Rather than importing a black-box `vgg16`, KonfAI's named-output graph
+# exposes the five block-boundary feature maps as addressable terminal outputs, so a user
+# can attach a feature/perceptual loss to ANY subset of them via `outputs_criterions`:
+#
+#     Model:
+#       outputs_criterions:
+#         Block_0:Out: { ... }   # 64-channel, full resolution
+#         Block_2:Out: { ... }   # 256-channel, 1/4 resolution
+#         Block_4:Out: { ... }   # 512-channel, 1/16 resolution
+#
+# The five outputs correspond exactly to the ImpactLoss VGG-16 `results` list -- the block
+# boundaries are torchvision's `features[:4] / [4:9] / [9:16] / [16:23] / [23:30]`
+# (the conv+ReLU stacks separated by the max-pools). The final max-pool (index 30) carries
+# no weights and is intentionally omitted, matching the ImpactLoss slice indices
+# [4, 9, 16, 23, 30]; the ImageNet weights transferred are the 13 convolutions of
+# `features[:31]` (14,714,688 parameters).
+#
+# The layout is fixed to VGG-16's [2, 2, 3, 3, 3] conv-per-block schedule; only `dim`,
+# `in_channels` and the block `widths` are tunable (keep exactly 5 width entries). The
+# defaults build the real VGG-16 feature trunk so ImageNet weights fit.
+name: VGG16
+
+parameters:
+  dim: 2
+  in_channels: 3
+  widths: [64, 128, 256, 512, 512]
+
+network:
+  in_channels: ${in_channels}
+  dim: ${dim}
+
+modules:
+  # Block 0 -- features[0:4]: conv(3->64), relu, conv(64->64), relu. No max-pool (full
+  # resolution). `Out` exposes the 64-channel feature map as a terminal named output.
+  - name: Block_0
+    out_branch: [0, -1]
+    modules:
+      - name: Conv_0
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${in_channels}
+          out_channels: ${widths.0}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_0
+        type: ReLU
+      - name: Conv_1
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.0}
+          out_channels: ${widths.0}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_1
+        type: ReLU
+      - name: Out
+        type: Identity
+
+  # Block 1 -- features[4:9]: maxpool, conv(64->128), relu, conv(128->128), relu.
+  - name: Block_1
+    out_branch: [0, -1]
+    modules:
+      - name: Pool
+        type: MaxPool
+        args:
+          dim: ${dim}
+          kernel_size: 2
+          stride: 2
+      - name: Conv_0
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.0}
+          out_channels: ${widths.1}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_0
+        type: ReLU
+      - name: Conv_1
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.1}
+          out_channels: ${widths.1}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_1
+        type: ReLU
+      - name: Out
+        type: Identity
+
+  # Block 2 -- features[9:16]: maxpool, conv(128->256), relu, conv(256->256), relu,
+  # conv(256->256), relu.
+  - name: Block_2
+    out_branch: [0, -1]
+    modules:
+      - name: Pool
+        type: MaxPool
+        args:
+          dim: ${dim}
+          kernel_size: 2
+          stride: 2
+      - name: Conv_0
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.1}
+          out_channels: ${widths.2}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_0
+        type: ReLU
+      - name: Conv_1
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.2}
+          out_channels: ${widths.2}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_1
+        type: ReLU
+      - name: Conv_2
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.2}
+          out_channels: ${widths.2}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_2
+        type: ReLU
+      - name: Out
+        type: Identity
+
+  # Block 3 -- features[16:23]: maxpool, conv(256->512), relu, conv(512->512), relu,
+  # conv(512->512), relu.
+  - name: Block_3
+    out_branch: [0, -1]
+    modules:
+      - name: Pool
+        type: MaxPool
+        args:
+          dim: ${dim}
+          kernel_size: 2
+          stride: 2
+      - name: Conv_0
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.2}
+          out_channels: ${widths.3}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_0
+        type: ReLU
+      - name: Conv_1
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.3}
+          out_channels: ${widths.3}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_1
+        type: ReLU
+      - name: Conv_2
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.3}
+          out_channels: ${widths.3}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_2
+        type: ReLU
+      - name: Out
+        type: Identity
+
+  # Block 4 -- features[23:30]: maxpool, conv(512->512), relu, conv(512->512), relu,
+  # conv(512->512), relu. The trailing max-pool (features index 30) is intentionally dropped.
+  - name: Block_4
+    out_branch: [0, -1]
+    modules:
+      - name: Pool
+        type: MaxPool
+        args:
+          dim: ${dim}
+          kernel_size: 2
+          stride: 2
+      - name: Conv_0
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.3}
+          out_channels: ${widths.4}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_0
+        type: ReLU
+      - name: Conv_1
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.4}
+          out_channels: ${widths.4}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_1
+        type: ReLU
+      - name: Conv_2
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${widths.4}
+          out_channels: ${widths.4}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: true
+      - name: ReLU_2
+        type: ReLU
+      - name: Out
+        type: Identity

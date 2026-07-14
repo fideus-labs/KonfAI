@@ -1,0 +1,159 @@
+# Declarative KonfAI Vision Transformer (ViT) encoder + classification head.
+#
+# Architecture: Dosovitskiy et al., "An Image Is Worth 16x16 Words: Transformers for Image Recognition
+# at Scale", ICLR 2021 (arXiv:2010.11929), in the pre-norm variant used by MONAI's ViT / UNETR encoder.
+# The image is cut into non-overlapping patches by a strided convolution (patch embedding), flattened into
+# a token sequence, augmented with a learnable positional embedding, processed by a stack of pre-norm
+# Transformer encoder layers (multi-head self-attention + MLP, each with a residual connection), and finally
+# layer-normalised. A classification head (global-average-pool over tokens + Linear) turns the normalised
+# token features into class logits shaped [B, num_classes, 1] (the KonfAI classifier convention).
+#
+# Built entirely from the curated model-builder registry (no code execution / no eval): a strided ``Conv``
+# patch embedding, ``Flatten`` + ``Permute`` to form the token sequence, the ``PositionalEmbedding`` and
+# ``MultiHeadSelfAttention`` blocks (konfai.network.blocks), ``LayerNorm`` / ``Linear`` / ``GELU`` /
+# ``AdaptiveAvgPool`` / ``Unsqueeze``. Works for 2D and 3D images (override ``dim`` and ``num_tokens``).
+#
+# Usage: ``classpath: default|ViT.yml`` (or a local path to this file). Tunable via ``parameters`` overrides:
+# ``dim``, ``in_channels``, ``patch_size``, ``num_tokens`` (= product of img_size/patch_size over the spatial
+# dims), ``hidden_size``, ``num_heads``, ``mlp_dim``, ``num_classes``. Depth is fixed to 4 encoder layers by
+# the topology (add/remove ``EncoderLayer_i`` entries to change it), mirroring the fixed-depth convention of
+# the other catalog entries. ``num_tokens`` must equal the number of patches produced by the patch embedding.
+#
+# VALIDATION LEVEL: structural-strict, plus verified NUMERICAL EQUIVALENCE of the encoder to MONAI 1.4.0
+# ``ViT(classification=False)`` — after transferring MONAI's weights into this graph in forward-execution
+# order (and copying the single positional-embedding parameter), the normalised token features match MONAI
+# to ``torch.allclose`` (see tests/unit/test_yaml_model_vit.py). Documented divergences from MONAI's ViT:
+#   * the learnable positional embedding is a standalone ``PositionalEmbedding`` leaf here, whereas MONAI
+#     stores it as a parameter on the (non-leaf) ``PatchEmbeddingBlock``; because of this, the shipped
+#     ``transfer_weights_by_execution_order`` bridge (which pairs weighted *leaf* modules) cannot pair the
+#     two graphs directly — the equivalence test transfers the shared leaves and copies the positional
+#     embedding explicitly;
+#   * classification uses global-average-pooling over the token sequence, not a prepended ``cls`` token
+#     (MONAI's ``classification=True`` default); the encoder itself is token-for-token identical;
+#   * MONAI 1.4.0's transformer block also allocates unused cross-attention parameters that this graph omits.
+
+name: ViT
+
+parameters:
+  dim: 3
+  in_channels: 1
+  patch_size: 16
+  num_tokens: 8
+  hidden_size: 64
+  num_heads: 8
+  mlp_dim: 128
+  num_classes: 2
+
+network:
+  in_channels: ${in_channels}
+  dim: ${dim}
+
+modules:
+  - name: PatchEmbedding
+    modules:
+      - name: PatchConv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${in_channels}
+          out_channels: ${hidden_size}
+          kernel_size: ${patch_size}
+          stride: ${patch_size}
+          padding: 0
+      - name: Flatten
+        type: Flatten
+        args:
+          start_dim: 2
+      - name: Tokenize
+        type: Permute
+        args:
+          dims: [0, 2, 1]
+      - name: PositionalEmbedding
+        type: PositionalEmbedding
+        args:
+          num_tokens: ${num_tokens}
+          embedding_dim: ${hidden_size}
+
+  - name: Encoder
+    modules:
+      - name: EncoderLayer_0
+        modules: &encoder_layer
+          - name: Norm1
+            type: LayerNorm
+            in_branch: [0]
+            out_branch: [1]
+            args:
+              normalized_shape: ${hidden_size}
+          - name: Attention
+            type: MultiHeadSelfAttention
+            in_branch: [1]
+            out_branch: [1]
+            args:
+              hidden_size: ${hidden_size}
+              num_heads: ${num_heads}
+          - name: Residual1
+            type: Add
+            in_branch: [0, 1]
+            out_branch: [0]
+          - name: Norm2
+            type: LayerNorm
+            in_branch: [0]
+            out_branch: [1]
+            args:
+              normalized_shape: ${hidden_size}
+          - name: Mlp
+            in_branch: [1]
+            out_branch: [1]
+            modules:
+              - name: Linear1
+                type: Linear
+                args:
+                  in_features: ${hidden_size}
+                  out_features: ${mlp_dim}
+              - name: Activation
+                type: GELU
+              - name: Linear2
+                type: Linear
+                args:
+                  in_features: ${mlp_dim}
+                  out_features: ${hidden_size}
+          - name: Residual2
+            type: Add
+            in_branch: [0, 1]
+            out_branch: [0]
+      - name: EncoderLayer_1
+        modules: *encoder_layer
+      - name: EncoderLayer_2
+        modules: *encoder_layer
+      - name: EncoderLayer_3
+        modules: *encoder_layer
+      - name: Norm
+        type: LayerNorm
+        args:
+          normalized_shape: ${hidden_size}
+
+  - name: Head
+    out_branch: [-1]
+    modules:
+      - name: ToChannels
+        type: Permute
+        args:
+          dims: [0, 2, 1]
+      - name: Pool
+        type: AdaptiveAvgPool
+        args:
+          dim: 1
+          output_size: 1
+      - name: Flatten
+        type: Flatten
+        args:
+          start_dim: 1
+      - name: Linear
+        type: Linear
+        args:
+          in_features: ${hidden_size}
+          out_features: ${num_classes}
+      - name: Unsqueeze
+        type: Unsqueeze
+        args:
+          dim: 2

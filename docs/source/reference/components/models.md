@@ -15,7 +15,19 @@ VoxelMorph, …) are written as Python classes. The registry is deliberately sma
 — see {doc}`../../concepts/yaml-model-builder`.
 ```
 
-## Segmentation — `konfai.models.segmentation`
+## Segmentation — `konfai.models.python.segmentation`
+
+`PlainConvUNet` is the parametric nnU-Net backbone (n_stages / features_per_stage /
+strides / n_conv_per_stage as real arguments), weight-exact to
+`dynamic_network_architectures.PlainConvUNet` for any topology — a real nnU-Net /
+TotalSegmentator / MRSeg checkpoint loads into it through the pretrained bridge. Every
+decoder resolution has a deep-supervision head as a named output.
+
+`SMP` wraps any `segmentation_models_pytorch` architecture/encoder pair (Unet,
+UnetPlusPlus, FPN, DeepLabV3Plus, … × resnet/efficientnet/timm encoders), with
+optional ImageNet encoder weights (`encoder_weights: imagenet`) that survive
+training start. 2D-only (SMP's encoder zoo is 2D); use slice-wise patches or
+2.5D channels on volumes. Requires `pip install konfai[smp]`.
 
 | Model | Classpath | Purpose | Key args (defaults) | Dims | YAML-buildable |
 | --- | --- | --- | --- | --- | --- |
@@ -29,14 +41,14 @@ The `Model:UNetpp5` used in the `Synthesis` example is a **local** class in
 built-in `UNetpp` above.
 ```
 
-## Classification — `konfai.models.classification`
+## Classification — `konfai.models.python.classification`
 
 | Model | Classpath | Purpose | Key args (defaults) | Dims | YAML-buildable |
 | --- | --- | --- | --- | --- | --- |
 | `ResNet` | `classification.resnet.ResNet` | ResNet-18/34/50/101/152 family with torchvision-compatible weight aliases. | `dim=3`, `in_channels=1`, `depths=[2,2,2,2]`, `widths=[64,64,128,256,512]`, `num_classes=10`, `use_bottleneck=False` | 2D / 3D | Yes |
 | `ConvNeXt` | `classification.convNeXt.ConvNeXt` | ConvNeXt (tiny→xlarge presets) with a multi-head classifier (`num_classes` is a list). | `dim=3`, `in_channels=1`, `depths=[3,3,27,3]`, `widths=[128,256,512,1024]`, `drop_p=0.1`, `num_classes=[4,7]` | 2D | No (custom `forward`) |
 
-## Generation — `konfai.models.generation`
+## Generation — `konfai.models.python.generation`
 
 | Model | Classpath | Purpose | Dims | YAML-buildable |
 | --- | --- | --- | --- | --- |
@@ -47,13 +59,13 @@ built-in `UNetpp` above.
 | `DiffusionGan`, `DiffusionGanV2`, `DiffusionCycleGan`, `CycleGan*` | `generation.diffusionGan.*` | Adversarial + diffusion + CycleGAN family. | 2D / 3D | No |
 | `cStyleGan.Generator` | `generation.cStyleGan.Generator` | Conditional StyleGAN-style generator with weight-modulated convs. | 2D / 3D | No |
 
-## Registration — `konfai.models.registration`
+## Registration — `konfai.models.python.registration`
 
 | Model | Classpath | Purpose | Dims | YAML-buildable |
 | --- | --- | --- | --- | --- |
 | `VoxelMorph` | `registration.registration.VoxelMorph` | Learning-based deformable/rigid registration (U-Net flow field + spatial-transformer warp + scaling-and-squaring integration). Pass `dim: 2`. | 2D | No |
 
-## Representation — `konfai.models.representation`
+## Representation — `konfai.models.python.representation`
 
 | Model | Classpath | Purpose | Dims | YAML-buildable |
 | --- | --- | --- | --- | --- |

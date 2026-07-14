@@ -31,8 +31,8 @@ except ImportError:
     _PYNVML_AVAILABLE = False
 
 # ``requests`` (remote-server helpers only) and ``torch`` (device-name lookup only) are imported lazily
-# at their point of use so that ``import konfai`` stays light — in particular it no longer forces the
-# ~1s torch import for CLI paths that never touch a GPU (``--help``/``--version``, light apps helpers).
+# at their point of use so that ``import konfai`` stays light: CLI paths that never touch a GPU
+# (``--help``/``--version``, light apps helpers) avoid the ~1s torch import.
 from konfai.utils.errors import KonfAIError
 
 try:

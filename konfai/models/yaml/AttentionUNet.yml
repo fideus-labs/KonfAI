@@ -1,0 +1,219 @@
+# Declarative KonfAI Attention U-Net (Oktay et al., 2018,
+# "Attention U-Net: Learning Where to Look for the Pancreas", arXiv:1804.03999).
+#
+# A symmetric encoder/decoder U-Net whose every skip connection is filtered by an
+# additive attention gate before it is concatenated with the upsampled decoder
+# feature. The gate is KonfAI's shipped `blocks.Attention` (registry name
+# "Attention", signature f_g/f_l/f_int/dim), built precisely for this design:
+# it downsamples the skip (stride-2 W_x) to the resolution of the coarse gating
+# signal g, learns per-voxel attention coefficients (W_g + W_x -> ReLU -> 1x1 ->
+# Sigmoid), upsamples them back, and multiplies the ORIGINAL full-resolution
+# skip by them. The gating signal g is the coarser decoder feature taken BEFORE
+# its transpose-convolution upsampling (Oktay's original half-resolution gating).
+#
+# Built entirely from the curated model-builder registry (ConvBlock / MaxPool /
+# ConvTranspose / Attention / Concat / Conv / Softmax / ArgMax) -- no code
+# execution, no eval/import injection.
+#
+# Use: `classpath: default|AttentionUNet.yml` (shipped catalog) or a local path.
+#
+# VALIDATION LEVEL: structural-strict, documented divergence from MONAI 1.4.0
+# `monai.networks.nets.AttentionUnet`. It is NOT weight-exact with MONAI because
+# the two graphs differ by construction:
+#   * gate resolution: KonfAI/Oktay gate the skip against the COARSER decoder
+#     feature (g at 1/2 the skip resolution; W_x stride 2 + Upsample x2), whereas
+#     MONAI's AttentionBlock gates at the SAME resolution (stride-1 W_g and W_x);
+#   * normalization: KonfAI's Attention gate and this file's ConvBlock stages use
+#     no norm (norm_mode NONE), whereas MONAI inserts BatchNorm after every conv;
+#   * down/up sampling: this file uses MaxPool + ConvTranspose (as UNet.yml),
+#     whereas MONAI uses strided-convolution down and up sampling;
+#   * output head: a single 1x1 conv -> Softmax -> ArgMax at the finest level
+#     (Oktay and MONAI both emit one head; no deep supervision).
+# Validated structurally: builds as a Network, forwards on 2D and 3D inputs with
+# the correct segmentation output shape (nb_class channels, spatial preserved),
+# and the three attention gates appear as named modules in the built graph.
+name: AttentionUNet
+
+parameters:
+  dim: 2
+  channels: [1, 16, 32, 64, 128]
+  nb_class: 2
+  block_configs:
+    - $object: BlockConfig
+      args: &block_config
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: true
+        activation: ReLU
+        norm_mode: NONE
+    - $object: BlockConfig
+      args: *block_config
+
+network:
+  in_channels: ${channels.0}
+  dim: ${dim}
+
+modules:
+  - name: UNetBlock_0
+    modules:
+      - name: DownConvBlock
+        type: ConvBlock
+        args:
+          in_channels: ${channels.0}
+          out_channels: ${channels.1}
+          block_configs: ${block_configs}
+          dim: ${dim}
+
+      - name: UNetBlock_1
+        modules:
+          - name: MAXPOOL
+            type: MaxPool
+            args:
+              dim: ${dim}
+              kernel_size: 2
+              stride: 2
+          - name: DownConvBlock
+            type: ConvBlock
+            args:
+              in_channels: ${channels.1}
+              out_channels: ${channels.2}
+              block_configs: ${block_configs}
+              dim: ${dim}
+
+          - name: UNetBlock_2
+            modules:
+              - name: MAXPOOL
+                type: MaxPool
+                args:
+                  dim: ${dim}
+                  kernel_size: 2
+                  stride: 2
+              - name: DownConvBlock
+                type: ConvBlock
+                args:
+                  in_channels: ${channels.2}
+                  out_channels: ${channels.3}
+                  block_configs: ${block_configs}
+                  dim: ${dim}
+
+              - name: UNetBlock_3
+                modules:
+                  - name: MAXPOOL
+                    type: MaxPool
+                    args:
+                      dim: ${dim}
+                      kernel_size: 2
+                      stride: 2
+                  - name: DownConvBlock
+                    type: ConvBlock
+                    args:
+                      in_channels: ${channels.3}
+                      out_channels: ${channels.4}
+                      block_configs: ${block_configs}
+                      dim: ${dim}
+                  - name: AttentionGate
+                    type: Attention
+                    in_branch: [1, 0]
+                    out_branch: [att3]
+                    args:
+                      f_g: ${channels.4}
+                      f_l: ${channels.3}
+                      f_int: ${channels.3}
+                      dim: ${dim}
+                  - name: CONV_TRANSPOSE
+                    type: ConvTranspose
+                    args:
+                      dim: ${dim}
+                      in_channels: ${channels.4}
+                      out_channels: ${channels.3}
+                      kernel_size: 2
+                      stride: 2
+                  - name: SkipConnection
+                    type: Concat
+                    in_branch: [0, att3]
+
+              - name: UpConvBlock
+                type: ConvBlock
+                args:
+                  in_channels:
+                    $multiply: ["${channels.3}", 2]
+                  out_channels: ${channels.3}
+                  block_configs: ${block_configs}
+                  dim: ${dim}
+              - name: AttentionGate
+                type: Attention
+                in_branch: [1, 0]
+                out_branch: [att2]
+                args:
+                  f_g: ${channels.3}
+                  f_l: ${channels.2}
+                  f_int: ${channels.2}
+                  dim: ${dim}
+              - name: CONV_TRANSPOSE
+                type: ConvTranspose
+                args:
+                  dim: ${dim}
+                  in_channels: ${channels.3}
+                  out_channels: ${channels.2}
+                  kernel_size: 2
+                  stride: 2
+              - name: SkipConnection
+                type: Concat
+                in_branch: [0, att2]
+
+          - name: UpConvBlock
+            type: ConvBlock
+            args:
+              in_channels:
+                $multiply: ["${channels.2}", 2]
+              out_channels: ${channels.2}
+              block_configs: ${block_configs}
+              dim: ${dim}
+          - name: AttentionGate
+            type: Attention
+            in_branch: [1, 0]
+            out_branch: [att1]
+            args:
+              f_g: ${channels.2}
+              f_l: ${channels.1}
+              f_int: ${channels.1}
+              dim: ${dim}
+          - name: CONV_TRANSPOSE
+            type: ConvTranspose
+            args:
+              dim: ${dim}
+              in_channels: ${channels.2}
+              out_channels: ${channels.1}
+              kernel_size: 2
+              stride: 2
+          - name: SkipConnection
+            type: Concat
+            in_branch: [0, att1]
+
+      - name: UpConvBlock
+        type: ConvBlock
+        args:
+          in_channels:
+            $multiply: ["${channels.1}", 2]
+          out_channels: ${channels.1}
+          block_configs: ${block_configs}
+          dim: ${dim}
+      - name: Head
+        out_branch: [-1]
+        modules:
+          - name: Conv
+            type: Conv
+            args:
+              dim: ${dim}
+              in_channels: ${channels.1}
+              out_channels: ${nb_class}
+              kernel_size: 1
+          - name: Softmax
+            type: Softmax
+            args:
+              dim: 1
+          - name: Argmax
+            type: ArgMax
+            args:
+              dim: 1

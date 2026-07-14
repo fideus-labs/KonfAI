@@ -156,7 +156,7 @@ class LinearVAE(network.Network):
     Encoder → variational bottleneck (``LatentDistribution``: reparameterised
     sampling with addressable ``Latent.mu`` / ``Latent.log_std`` outputs for the
     KL term) → decoder. Dimensions are parameterised; the variational sampling
-    (previously absent) is provided by ``LatentDistribution``.
+    is provided by ``LatentDistribution``.
     """
 
     class LinearVAEDenseLayer(network.ModuleArgsDict):

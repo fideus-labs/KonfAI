@@ -1,0 +1,432 @@
+# Declarative KonfAI NestedUNet (UNet++) graph-equivalent to
+# konfai.models.python.segmentation.NestedUNet.NestedUNet with its default
+# hyperparameters (MAXPOOL downsampling, CONV_TRANSPOSE upsampling,
+# ConvBlock stages, Softmax heads, nb_conv_per_stage: 2).
+# The nesting depth is fixed: `channels` must keep exactly 6 entries.
+name: NestedUNet
+
+parameters:
+  dim: 3
+  channels: [1, 64, 128, 256, 512, 1024]
+  nb_class: 2
+  block_configs:
+    - $object: BlockConfig
+      args: &block_config
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: true
+        activation: ReLU
+        norm_mode: NONE
+    - $object: BlockConfig
+      args: *block_config
+
+network:
+  in_channels: ${channels.0}
+  dim: ${dim}
+
+modules:
+  - name: UNetBlock_0
+    out_branch: [X_0_1, X_0_2, X_0_3, X_0_4]
+    modules:
+      - name: X_0_0
+        type: ConvBlock
+        out_branch: [X_0_0]
+        args:
+          in_channels: ${channels.0}
+          out_channels: ${channels.1}
+          block_configs: ${block_configs}
+          dim: ${dim}
+
+      - name: UNetBlock_1
+        in_branch: [X_0_0]
+        out_branch: [X_1_0, X_1_1, X_1_2, X_1_3]
+        modules:
+          - name: MAXPOOL
+            type: MaxPool
+            args:
+              dim: ${dim}
+              kernel_size: 2
+          - name: X_1_0
+            type: ConvBlock
+            out_branch: [X_1_0]
+            args:
+              in_channels: ${channels.1}
+              out_channels: ${channels.2}
+              block_configs: ${block_configs}
+              dim: ${dim}
+
+          - name: UNetBlock_2
+            in_branch: [X_1_0]
+            out_branch: [X_2_0, X_2_1, X_2_2]
+            modules:
+              - name: MAXPOOL
+                type: MaxPool
+                args:
+                  dim: ${dim}
+                  kernel_size: 2
+              - name: X_2_0
+                type: ConvBlock
+                out_branch: [X_2_0]
+                args:
+                  in_channels: ${channels.2}
+                  out_channels: ${channels.3}
+                  block_configs: ${block_configs}
+                  dim: ${dim}
+
+              - name: UNetBlock_3
+                in_branch: [X_2_0]
+                out_branch: [X_3_0, X_3_1]
+                modules:
+                  - name: MAXPOOL
+                    type: MaxPool
+                    args:
+                      dim: ${dim}
+                      kernel_size: 2
+                  - name: X_3_0
+                    type: ConvBlock
+                    out_branch: [X_3_0]
+                    args:
+                      in_channels: ${channels.3}
+                      out_channels: ${channels.4}
+                      block_configs: ${block_configs}
+                      dim: ${dim}
+
+                  - name: UNetBlock_4
+                    in_branch: [X_3_0]
+                    out_branch: [X_4_0]
+                    modules:
+                      - name: MAXPOOL
+                        type: MaxPool
+                        args:
+                          dim: ${dim}
+                          kernel_size: 2
+                      - name: X_4_0
+                        type: ConvBlock
+                        out_branch: [X_4_0]
+                        args:
+                          in_channels: ${channels.4}
+                          out_channels: ${channels.5}
+                          block_configs: ${block_configs}
+                          dim: ${dim}
+
+                  - name: X_3_1_CONV_TRANSPOSE
+                    type: ConvTranspose
+                    in_branch: [X_4_0]
+                    out_branch: [X_4_0]
+                    args:
+                      dim: ${dim}
+                      in_channels: ${channels.5}
+                      out_channels: ${channels.4}
+                      kernel_size: 2
+                      stride: 2
+                  - name: SkipConnection_3_1
+                    type: Concat
+                    in_branch: [X_4_0, X_3_0]
+                    out_branch: [X_3_1]
+                  - name: X_3_1
+                    type: ConvBlock
+                    in_branch: [X_3_1]
+                    out_branch: [X_3_1]
+                    args:
+                      in_channels:
+                        $multiply: ["${channels.4}", 2]
+                      out_channels: ${channels.4}
+                      block_configs: ${block_configs}
+                      dim: ${dim}
+
+              - name: X_2_1_CONV_TRANSPOSE
+                type: ConvTranspose
+                in_branch: [X_3_0]
+                out_branch: [X_3_0]
+                args:
+                  dim: ${dim}
+                  in_channels: ${channels.4}
+                  out_channels: ${channels.3}
+                  kernel_size: 2
+                  stride: 2
+              - name: SkipConnection_2_1
+                type: Concat
+                in_branch: [X_3_0, X_2_0]
+                out_branch: [X_2_1]
+              - name: X_2_1
+                type: ConvBlock
+                in_branch: [X_2_1]
+                out_branch: [X_2_1]
+                args:
+                  in_channels:
+                    $multiply: ["${channels.3}", 2]
+                  out_channels: ${channels.3}
+                  block_configs: ${block_configs}
+                  dim: ${dim}
+              - name: X_2_2_CONV_TRANSPOSE
+                type: ConvTranspose
+                in_branch: [X_3_1]
+                out_branch: [X_3_1]
+                args:
+                  dim: ${dim}
+                  in_channels: ${channels.4}
+                  out_channels: ${channels.3}
+                  kernel_size: 2
+                  stride: 2
+              - name: SkipConnection_2_2
+                type: Concat
+                in_branch: [X_3_1, X_2_0, X_2_1]
+                out_branch: [X_2_2]
+              - name: X_2_2
+                type: ConvBlock
+                in_branch: [X_2_2]
+                out_branch: [X_2_2]
+                args:
+                  in_channels:
+                    $multiply: ["${channels.3}", 3]
+                  out_channels: ${channels.3}
+                  block_configs: ${block_configs}
+                  dim: ${dim}
+
+          - name: X_1_1_CONV_TRANSPOSE
+            type: ConvTranspose
+            in_branch: [X_2_0]
+            out_branch: [X_2_0]
+            args:
+              dim: ${dim}
+              in_channels: ${channels.3}
+              out_channels: ${channels.2}
+              kernel_size: 2
+              stride: 2
+          - name: SkipConnection_1_1
+            type: Concat
+            in_branch: [X_2_0, X_1_0]
+            out_branch: [X_1_1]
+          - name: X_1_1
+            type: ConvBlock
+            in_branch: [X_1_1]
+            out_branch: [X_1_1]
+            args:
+              in_channels:
+                $multiply: ["${channels.2}", 2]
+              out_channels: ${channels.2}
+              block_configs: ${block_configs}
+              dim: ${dim}
+          - name: X_1_2_CONV_TRANSPOSE
+            type: ConvTranspose
+            in_branch: [X_2_1]
+            out_branch: [X_2_1]
+            args:
+              dim: ${dim}
+              in_channels: ${channels.3}
+              out_channels: ${channels.2}
+              kernel_size: 2
+              stride: 2
+          - name: SkipConnection_1_2
+            type: Concat
+            in_branch: [X_2_1, X_1_0, X_1_1]
+            out_branch: [X_1_2]
+          - name: X_1_2
+            type: ConvBlock
+            in_branch: [X_1_2]
+            out_branch: [X_1_2]
+            args:
+              in_channels:
+                $multiply: ["${channels.2}", 3]
+              out_channels: ${channels.2}
+              block_configs: ${block_configs}
+              dim: ${dim}
+          - name: X_1_3_CONV_TRANSPOSE
+            type: ConvTranspose
+            in_branch: [X_2_2]
+            out_branch: [X_2_2]
+            args:
+              dim: ${dim}
+              in_channels: ${channels.3}
+              out_channels: ${channels.2}
+              kernel_size: 2
+              stride: 2
+          - name: SkipConnection_1_3
+            type: Concat
+            in_branch: [X_2_2, X_1_0, X_1_1, X_1_2]
+            out_branch: [X_1_3]
+          - name: X_1_3
+            type: ConvBlock
+            in_branch: [X_1_3]
+            out_branch: [X_1_3]
+            args:
+              in_channels:
+                $multiply: ["${channels.2}", 4]
+              out_channels: ${channels.2}
+              block_configs: ${block_configs}
+              dim: ${dim}
+
+      - name: X_0_1_CONV_TRANSPOSE
+        type: ConvTranspose
+        in_branch: [X_1_0]
+        out_branch: [X_1_0]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.2}
+          out_channels: ${channels.1}
+          kernel_size: 2
+          stride: 2
+      - name: SkipConnection_0_1
+        type: Concat
+        in_branch: [X_1_0, X_0_0]
+        out_branch: [X_0_1]
+      - name: X_0_1
+        type: ConvBlock
+        in_branch: [X_0_1]
+        out_branch: [X_0_1]
+        args:
+          in_channels:
+            $multiply: ["${channels.1}", 2]
+          out_channels: ${channels.1}
+          block_configs: ${block_configs}
+          dim: ${dim}
+      - name: X_0_2_CONV_TRANSPOSE
+        type: ConvTranspose
+        in_branch: [X_1_1]
+        out_branch: [X_1_1]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.2}
+          out_channels: ${channels.1}
+          kernel_size: 2
+          stride: 2
+      - name: SkipConnection_0_2
+        type: Concat
+        in_branch: [X_1_1, X_0_0, X_0_1]
+        out_branch: [X_0_2]
+      - name: X_0_2
+        type: ConvBlock
+        in_branch: [X_0_2]
+        out_branch: [X_0_2]
+        args:
+          in_channels:
+            $multiply: ["${channels.1}", 3]
+          out_channels: ${channels.1}
+          block_configs: ${block_configs}
+          dim: ${dim}
+      - name: X_0_3_CONV_TRANSPOSE
+        type: ConvTranspose
+        in_branch: [X_1_2]
+        out_branch: [X_1_2]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.2}
+          out_channels: ${channels.1}
+          kernel_size: 2
+          stride: 2
+      - name: SkipConnection_0_3
+        type: Concat
+        in_branch: [X_1_2, X_0_0, X_0_1, X_0_2]
+        out_branch: [X_0_3]
+      - name: X_0_3
+        type: ConvBlock
+        in_branch: [X_0_3]
+        out_branch: [X_0_3]
+        args:
+          in_channels:
+            $multiply: ["${channels.1}", 4]
+          out_channels: ${channels.1}
+          block_configs: ${block_configs}
+          dim: ${dim}
+      - name: X_0_4_CONV_TRANSPOSE
+        type: ConvTranspose
+        in_branch: [X_1_3]
+        out_branch: [X_1_3]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.2}
+          out_channels: ${channels.1}
+          kernel_size: 2
+          stride: 2
+      - name: SkipConnection_0_4
+        type: Concat
+        in_branch: [X_1_3, X_0_0, X_0_1, X_0_2, X_0_3]
+        out_branch: [X_0_4]
+      - name: X_0_4
+        type: ConvBlock
+        in_branch: [X_0_4]
+        out_branch: [X_0_4]
+        args:
+          in_channels:
+            $multiply: ["${channels.1}", 5]
+          out_channels: ${channels.1}
+          block_configs: ${block_configs}
+          dim: ${dim}
+
+  - name: Head_0
+    in_branch: [X_0_1]
+    out_branch: [-1]
+    modules:
+      - name: Conv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${channels.1}
+          out_channels: ${nb_class}
+          kernel_size: 1
+      - name: Softmax
+        type: Softmax
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        args:
+          dim: 1
+  - name: Head_1
+    in_branch: [X_0_2]
+    out_branch: [-1]
+    modules:
+      - name: Conv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${channels.1}
+          out_channels: ${nb_class}
+          kernel_size: 1
+      - name: Softmax
+        type: Softmax
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        args:
+          dim: 1
+  - name: Head_2
+    in_branch: [X_0_3]
+    out_branch: [-1]
+    modules:
+      - name: Conv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${channels.1}
+          out_channels: ${nb_class}
+          kernel_size: 1
+      - name: Softmax
+        type: Softmax
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        args:
+          dim: 1
+  - name: Head_3
+    in_branch: [X_0_4]
+    out_branch: [-1]
+    modules:
+      - name: Conv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${channels.1}
+          out_channels: ${nb_class}
+          kernel_size: 1
+      - name: Softmax
+        type: Softmax
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        args:
+          dim: 1
