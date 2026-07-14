@@ -1108,8 +1108,40 @@ class Dataset:
         self.is_directory = str(filename).endswith("/")
         self.filename = str(filename)
         self.file_format = file_format
+        # The store backend is auto-detected from what is actually on disk (like SitkFile already probes
+        # every supported extension) — an OME-Zarr / Zarr / DICOM store is a directory whose type is
+        # knowable from its structure, so a ``:mha`` token never forces it to be mis-read. The token then
+        # only carries the WRITE format and the OME-Zarr pyramid level (``@N``).
+        detected = Dataset._detect_directory_store_format(self.filename) if self.is_directory else None
+        if detected is not None:
+            self.file_format = detected
         self._names_cache: dict[str, list[str]] = {}
         self._infos_cache: dict[tuple[str, str], tuple[list[int], Attribute]] = {}
+
+    @staticmethod
+    def _detect_directory_store_format(root: str) -> str | None:
+        """Detect a directory dataset's store backend from disk (``omezarr`` / ``dicom``), independent of the
+        format token; ``None`` when it is plain per-file volumes (the SitkFile path, which auto-detects the
+        extension itself). Probes the first case's entries only — cheap, and cases share one layout."""
+        base = Path(root)
+        if not base.is_dir():
+            return None
+        for case in sorted(base.iterdir()):
+            if not case.is_dir():
+                continue
+            for entry in sorted(case.iterdir()):
+                if entry.is_dir():
+                    name = entry.name.lower()
+                    if (
+                        name.endswith((".ome.zarr", ".zarr"))
+                        or (entry / ".zgroup").exists()
+                        or (entry / "zarr.json").exists()
+                    ):
+                        return "omezarr"
+                    if any(child.suffix.lower() in (".dcm", ".dicom") for child in entry.iterdir() if child.is_file()):
+                        return "dicom"
+            return None  # first case is representative of the whole dataset's layout
+        return None
 
     def _exists_on_disk(self) -> bool:
         if os.path.exists(self.filename):
