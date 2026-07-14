@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "konfai-mcp"
+dynamic = ["version"]
+description = "Standalone MCP server package for KonfAI experimentation workflows"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+
+authors = [
+  { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
+]
+
+dependencies = [
+  "konfai",
+  "konfai-apps",
+  "fastmcp",
+  "ruamel.yaml",
+  "numpy"
+]
+
+[project.urls]
+Homepage = "https://github.com/vboussot/KonfAI"
+Repository = "https://github.com/vboussot/KonfAI"
+Issues = "https://github.com/vboussot/KonfAI/issues"
+License = "https://www.apache.org/licenses/LICENSE-2.0"
+
+[project.scripts]
+konfai-mcp = "konfai_mcp:main"
+
+[tool.setuptools_scm]
+root = ".."
+tag_regex = "^v(?P<version>.*)$"
+local_scheme = "no-local-version"
+
+[tool.setuptools.packages.find]
+include = ["konfai_mcp*"]
