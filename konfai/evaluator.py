@@ -46,15 +46,10 @@ from konfai.utils.utils import split_path_spec
 
 class CriterionsAttr:
     """
-    Container for additional metadata or configuration attributes related to a loss criterion.
+    Empty placeholder attribute object attached to each evaluation criterion.
 
-    This class is currently empty but acts as a placeholder for future extension.
-    It is passed along with each loss function to allow parameterization or inspection of its behavior.
-
-    Use cases may include:
-    - Weighting of individual loss terms
-    - Conditional activation
-    - Logging preferences
+    Reserved for future extension (per-criterion weighting, conditional activation, logging
+    preferences); currently carries no attributes and nothing reads instances of it.
     """
 
     def __init__(self) -> None:
@@ -142,6 +137,9 @@ class Statistics:
     def __init__(self, filename: Path) -> None:
         self.measures: dict[str, dict[str, float]] = {}
         self.filename = filename
+        # Per-metric optimisation direction ("max"/"min"), declared by each criterion's `maximize`
+        # property, so downstream ranking (the MCP leaderboard) reads it instead of guessing from names.
+        self.directions: dict[str, str] = {}
 
     def add(self, values: dict[str, float], name_dataset: str) -> None:
         """
@@ -217,7 +215,9 @@ class Statistics:
         measures = {}
         for output in outputs:
             measures.update(output)
-        result: dict[str, dict[str, dict[str, Any]]] = {}
+        # JSON payload with heterogeneous blocks: "case"/"aggregates" are nested dicts, "directions"
+        # maps metric-name -> "max"/"min".
+        result: dict[str, Any] = {}
         result["case"] = {}
         for name, v in measures.items():
             for metric_name, value in v.items():
@@ -234,6 +234,11 @@ class Statistics:
                 tmp[metric_name].append(v[metric_name])
         for metric_name, values in tmp.items():
             result["aggregates"][metric_name] = Statistics.get_statistic(values)
+
+        # Declare each metric's optimisation direction so consumers rank without guessing.
+        directions = {name: self.directions[name] for name in result["aggregates"] if name in self.directions}
+        if directions:
+            result["directions"] = directions
 
         with open(self.filename, "w") as f:
             f.write(json.dumps(Statistics._to_serializable(result), indent=4, allow_nan=False))
@@ -418,17 +423,24 @@ class Evaluator(DistributedObject):
                     else:
                         true_loss = loss.item()
 
+                    direction = "max" if getattr(metric, "maximize", False) else "min"
                     if isinstance(true_loss, dict):
                         loss = 0
                         c = 0
                         for k, v in true_loss.items():
-                            result[f"{output_group}:{target_group}:{metric.get_name()}:{k}"] = v
+                            component_key = f"{output_group}:{target_group}:{metric.get_name()}:{k}"
+                            result[component_key] = v
+                            statistics.directions[component_key] = direction
                             if not np.isnan(v):
                                 loss += v
                                 c += 1
-                        result[f"{output_group}:{target_group}:{metric.get_name()}"] = loss / c if c > 0 else np.nan
+                        base_key = f"{output_group}:{target_group}:{metric.get_name()}"
+                        result[base_key] = loss / c if c > 0 else np.nan
+                        statistics.directions[base_key] = direction
                     else:
-                        result[f"{output_group}:{target_group}:{metric.get_name()}"] = true_loss
+                        base_key = f"{output_group}:{target_group}:{metric.get_name()}"
+                        result[base_key] = true_loss
+                        statistics.directions[base_key] = direction
         if len(self.metrics) > 0:
             statistics.add(result, name)
         return result

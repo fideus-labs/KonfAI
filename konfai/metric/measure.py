@@ -61,6 +61,12 @@ def _require_optional(module: str, *, criterion: str, extra: str) -> ModuleType:
 
 
 class Criterion(torch.nn.Module, ABC):
+    # Natural optimisation direction of this criterion's reported value: False = lower-is-better
+    # (the default -- losses and distances), True = higher-is-better (score-style metrics like Dice).
+    # It is a property of the criterion, not a global mode: consumers (leaderboard ranking, best-metric
+    # selection) read it via getattr instead of guessing the direction from the metric's name.
+    maximize: bool = False
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -312,6 +318,8 @@ class TRE(Criterion):
 
 
 class Dice(Criterion):
+    maximize = True  # reported value is the Dice coefficient (higher-is-better); DiceSaveMap inherits it
+
     @staticmethod
     def flatten(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.permute((1, 0, *tuple(range(2, tensor.dim())))).contiguous().view(tensor.size(1), -1)
@@ -534,13 +542,6 @@ class PerceptualLoss(Criterion):
         self.models: dict[int, torch.nn.Module] = {}
 
     def preprocessing(self, tensor: torch.Tensor) -> torch.Tensor:
-        # if not all([tensor.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
-        #    tensor = F.interpolate(tensor, mode=self.mode,
-        # size=tuple(self.shape), align_corners=False).type(torch.float32)
-        # if tensor.shape[1] != self.model.in_channels:
-        #    tensor = tensor.repeat(tuple([1,self.model.in_channels] + [1 for _ in range(len(self.shape))]))
-        # tensor = (tensor - torch.min(tensor))/(torch.max(tensor)-torch.min(tensor))
-        # tensor = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(tensor)
         return tensor
 
     def _compute(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
@@ -630,6 +631,8 @@ class KLDivergence(CriterionWithInit):
 
 
 class Accuracy(Criterion):
+    maximize = True  # reported value is the accuracy fraction (higher-is-better)
+
     def __init__(self) -> None:
         super().__init__()
         self.n: int = 0
@@ -685,7 +688,10 @@ class FocalLoss(Criterion):
         logpt = logpt.gather(1, target)
         pt = pt.gather(1, target)
 
-        at = self.alpha.to(target.device)[target].unsqueeze(1)
+        # alpha[target] is already [B, 1, *spatial] (matching pt/logpt); a spurious unsqueeze here made
+        # it [B, 1, 1, *spatial], which broadcasts against pt to [B, B, *spatial] and cross-pairs samples
+        # for any batch > 1 -- silently corrupting the loss. Index without the extra axis.
+        at = self.alpha.to(target.device)[target]
         loss = -at * ((1 - pt) ** self.gamma) * logpt
 
         if self.reduction == "mean":

@@ -61,6 +61,11 @@ from konfai.utils.runtime import (
 class EarlyStoppingBase:
     """Minimal protocol for early stopping strategies used by :class:`Trainer`."""
 
+    # Single source of truth for the optimisation direction of the monitored score. The default
+    # (no configured EarlyStopping) monitors the summed loss, so lower is better; EarlyStopping
+    # overrides this from its `mode` config. Both early stopping and BEST-checkpoint retention read it.
+    mode: str = "min"
+
     def __init__(self):
         self.early_stop = False
 
@@ -69,6 +74,15 @@ class EarlyStoppingBase:
 
     def get_score(self, values: dict[str, float]):
         return sum(list(values.values()))
+
+    def is_better(self, score: float, reference: float) -> bool:
+        """True if `score` is strictly better than `reference` under this monitor's direction."""
+        return score > reference if self.mode == "max" else score < reference
+
+    @property
+    def worst_score(self) -> float:
+        """The worst possible score for this direction (a starting sentinel for best-tracking)."""
+        return float("-inf") if self.mode == "max" else float("inf")
 
     def __call__(self, current_score: float) -> bool:
         return False
@@ -201,6 +215,7 @@ class _Trainer:
         self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
         self._best_checkpoint_path: Path | None = None
         self._best_checkpoint_loss: float | None = None
+        self._loss_keys: set[str] = set()
         if self.global_rank == 0 and self.save_checkpoint_mode == "BEST":
             self._initialize_best_checkpoint_state()
         self.data_log: dict[str, tuple[DataLog, int]] = {}
@@ -227,12 +242,12 @@ class _Trainer:
             return
 
         all_checkpoints = sorted(path.glob("*.pt"))
-        best_loss = float("inf")
+        best_loss = self.early_stopping.worst_score
         best_ckpt: Path | None = None
         for checkpoint_path in all_checkpoints:
             state_dict = safe_torch_load(checkpoint_path, torch.device("cpu"))
-            checkpoint_loss = float(state_dict.get("loss", float("inf")))
-            if checkpoint_loss < best_loss:
+            checkpoint_loss = float(state_dict.get("loss", self.early_stopping.worst_score))
+            if self.early_stopping.is_better(checkpoint_loss, best_loss):
                 best_loss = checkpoint_loss
                 best_ckpt = checkpoint_path
 
@@ -245,7 +260,9 @@ class _Trainer:
 
     def _update_best_checkpoint(self, checkpoint_path: Path, loss: float) -> None:
         """Keep only the current best checkpoint without rescanning all saves."""
-        is_new_best = self._best_checkpoint_loss is None or loss < self._best_checkpoint_loss
+        is_new_best = self._best_checkpoint_loss is None or self.early_stopping.is_better(
+            loss, self._best_checkpoint_loss
+        )
         if is_new_best:
             previous_best = self._best_checkpoint_path
             self._best_checkpoint_loss = loss
@@ -321,7 +338,15 @@ class _Trainer:
 
                         stop = False
                         if self.global_rank == 0:
-                            score = self.early_stopping.get_score(loss)
+                            # Default selection scores on the losses only (always lower-is-better).
+                            # An explicit monitor may reference a metric; then use the full dict, and
+                            # its direction comes from EarlyStopping.mode (is_better).
+                            if isinstance(self.early_stopping, EarlyStopping) and self.early_stopping.monitor:
+                                score = self.early_stopping.get_score(loss)
+                            else:
+                                score = self.early_stopping.get_score(
+                                    {key: loss[key] for key in self._loss_keys if key in loss}
+                                )
                             self.checkpoint_save(score)
                             stop = self.early_stopping(score)
 
@@ -543,10 +568,17 @@ class _Trainer:
 
         if self.global_rank == 0:
             loss = {}
+            loss_keys: set[str] = set()
             for name, network in self.model.module.get_networks().items():
                 if network.measure is not None:
-                    loss.update({k: v[1] for k, v in measures[name][0].items()})
+                    losses = {k: v[1] for k, v in measures[name][0].items()}
+                    loss_keys.update(losses)
+                    loss.update(losses)
                     loss.update({k: v[1] for k, v in measures[name][1].items()})
+            # Remember which keys are losses (always minimise) vs metrics (direction varies), so
+            # default checkpoint/early-stop selection scores on the losses only -- summing a
+            # maximise-metric (e.g. Dice) into a minimised score would keep the worst model.
+            self._loss_keys = loss_keys
             return loss
         return None
 

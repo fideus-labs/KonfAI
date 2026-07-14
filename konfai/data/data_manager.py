@@ -1007,11 +1007,13 @@ class Data(ABC):
                 mappings.append(mapping[start:end])
             # TRAIN/RESUME wraps the model in DDP(static_graph=True): every rank must run the same
             # number of backward all-reduces per epoch. Contiguous shards can differ by one sample,
-            # which desynchronises the collective and hangs NCCL, so drop the tail to equal length
-            # (DistributedSampler drop_last). The sampler reshuffles each epoch, so nothing is lost
-            # permanently. world_size == 1 keeps every sample (min_len == full length).
-            min_len = min(len(shard) for shard in mappings)
-            mappings = [shard[:min_len] for shard in mappings]
+            # which desynchronises the collective and hangs NCCL, so equalise their length. PAD the
+            # shorter shards (wrapping their own head) rather than truncating: truncation permanently
+            # drops the tail sample of the longer shards (it is outside every rank's shard, and _split
+            # runs once at setup so the sampler's per-epoch shuffle never reaches it), whereas padding
+            # keeps every sample training with only a harmless duplicate. world_size == 1 is a no-op.
+            max_len = max(len(shard) for shard in mappings)
+            mappings = [shard + shard[: max_len - len(shard)] if shard else shard for shard in mappings]
         return mappings
 
     @staticmethod

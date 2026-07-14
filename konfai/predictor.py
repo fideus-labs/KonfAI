@@ -232,7 +232,9 @@ class OutputDataset(Dataset, NeedDevice, ABC):
             )()
 
         module, name = get_module(self.reduction_classpath, "konfai.predictor")
-        if module == "konfai.predictor":
+        # get_module returns the module OBJECT: compare its dotted name, not the module against the string
+        # (a ``module == "konfai.predictor"`` comparison is always False and takes the custom branch).
+        if module.__name__ == "konfai.predictor":
             self.reduction = getattr(module, name)()
         else:
             self.reduction = apply_config(
@@ -425,7 +427,7 @@ class OutSameAsGroupDataset(OutputDataset):
     def _get_output(
         self, index: int, index_augmentation: int, number_of_channels_per_model: list[int], dataset: DatasetIter
     ) -> torch.Tensor:
-        layer = self.output_layer_accumulator[index][index_augmentation].assemble()  # Si concat alors [N*C] sinon [C]
+        layer = self.output_layer_accumulator[index][index_augmentation].assemble()  # if concat then [N*C] else [C]
 
         if index_augmentation > 0:
             i = 0
@@ -488,7 +490,7 @@ class OutSameAsGroupDataset(OutputDataset):
             return torch.device("cpu")
         # Every transformed chunk is parked on the reduce device until the final stack (a combine:Concat
         # ensemble keeps M of them), so budget all of them plus a same-size working temp per chunk and
-        # one stack copy — not just the single chunk the old ``*3`` heuristic assumed.
+        # one stack copy.
         needed = chunk.numel() * chunk.element_size() * (2 * max(1, nb_chunks) + 1)
         return device if needed < free else torch.device("cpu")
 
@@ -497,7 +499,7 @@ class OutSameAsGroupDataset(OutputDataset):
         avoids the per-patch GPU->CPU offload and the CPU blend, and leaves the assembled volume on the
         device for the reduction (no host round-trip, no ``empty_cache``). Only chosen when the full
         combined volume of every augmentation, its weight map, and headroom for the ongoing forward
-        passes fit free VRAM; otherwise the memory-safe CPU accumulation is used (unchanged behaviour)."""
+        passes fit free VRAM; otherwise the memory-safe CPU accumulation is used."""
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
         if device.type != "cuda" or layer.device.type != "cuda":
             return torch.device("cpu")

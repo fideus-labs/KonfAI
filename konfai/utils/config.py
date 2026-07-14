@@ -443,6 +443,16 @@ def apply_config(konfai_args: str | None = None):
                                     param.name,
                                     f"default|{default_value}",
                                 )
+                                # get_value can hand back the raw "default|X" marker or the stringified
+                                # "X"; recover the correctly-typed Literal member so NON-string Literals
+                                # (Literal[1, 2], Literal[True, False]) bind and round-trip through the
+                                # resolved-config write-back instead of failing the membership check.
+                                if isinstance(value, str) and value.startswith("default|"):
+                                    value = value.split("|", 1)[1]
+                                if value not in allowed_values:
+                                    matched = [allowed for allowed in allowed_values if str(allowed) == str(value)]
+                                    if matched:
+                                        value = matched[0]
                                 if value not in allowed_values:
                                     raise ConfigError(
                                         f"Invalid value '{value}' for "

@@ -20,7 +20,7 @@ PerceptualLoss plumbing, and optional-dependency errors)."""
 import numpy as np
 import pytest
 import torch
-from konfai.metric.measure import SSIM, Dice, PerceptualLoss, Variance, _require_optional
+from konfai.metric.measure import SSIM, Dice, FocalLoss, PerceptualLoss, Variance, _require_optional
 from konfai.utils.errors import MeasureError
 
 
@@ -29,6 +29,31 @@ def _one_hot(target: torch.Tensor, nb_channels: int) -> torch.Tensor:
     for label in range(nb_channels):
         output[0, label] = (target[0, 0] == label).float()
     return output
+
+
+class TestFocalLoss:
+    def test_does_not_cross_pair_samples_for_batch_greater_than_one(self):
+        # The alpha weighting must stay per-voxel: the per-element loss shape must match the gathered
+        # log-prob shape [B, 1, *spatial], NOT broadcast to a [B, B, *spatial] cross-product between
+        # samples. Regression guard for the spurious unsqueeze that corrupted any batch > 1.
+        import torch.nn.functional as F
+
+        torch.manual_seed(0)
+        batch, num_classes, height, width = 2, 3, 4, 4
+        output = torch.randn(batch, num_classes, height, width)
+        target = torch.randint(0, num_classes, (batch, 1, height, width)).float()
+
+        focal = FocalLoss(alpha=[0.5, 2.0, 0.5], reduction="none")
+        loss = focal(output, target)
+        assert tuple(loss.shape[:2]) == (batch, 1)  # not (batch, batch)
+
+        # Value equals the correct per-voxel reference.
+        tgt = target.long()
+        log_pt = F.log_softmax(output, dim=1).gather(1, tgt)
+        pt = torch.exp(F.log_softmax(output, dim=1)).gather(1, tgt)
+        at = focal.alpha[tgt]
+        reference = -at * ((1 - pt) ** focal.gamma) * log_pt
+        assert torch.allclose(loss, reference)
 
 
 class TestDice:

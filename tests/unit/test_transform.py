@@ -35,11 +35,14 @@ from konfai.data.transform import (
     KonfAIInference,
     Norm,
     Normalize,
+    OneHot,
     Padding,
     ResampleToResolution,
     ResampleToShape,
+    StandardDeviation,
     Standardize,
     Statistics,
+    Variance,
 )
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
@@ -47,6 +50,34 @@ from konfai.utils.errors import TransformError
 # --------------------------------------------------------------------------------------
 # Clip
 # --------------------------------------------------------------------------------------
+
+
+def test_onehot_inverse_argmaxes_the_class_axis_batched_and_unbatched() -> None:
+    # The inverse must argmax the axis sized num_classes -- the channel axis -- never a batch or spatial
+    # axis. The predictor feeds a per-sample [num_classes, *spatial] (output[i]); a batched
+    # [B, num_classes, *spatial] must work too.
+    one_hot = OneHot(num_classes=4)
+
+    unbatched = torch.randn(4, 5, 6, 7)  # [num_classes, *spatial]
+    decoded = one_hot.inverse("seg", unbatched, Attribute())
+    assert tuple(decoded.shape) == (1, 5, 6, 7)
+    assert torch.equal(decoded, unbatched.argmax(0).unsqueeze(0))
+
+    batched = torch.randn(2, 4, 5, 6, 7)  # [B, num_classes, *spatial]
+    decoded_b = one_hot.inverse("seg", batched, Attribute())
+    assert tuple(decoded_b.shape) == (2, 1, 5, 6, 7)
+    assert torch.equal(decoded_b, batched.argmax(1).unsqueeze(1))
+
+
+@pytest.mark.parametrize("cls", [Variance, StandardDeviation])
+def test_ensemble_dispersion_keeps_member_axis_for_single_member(cls) -> None:
+    # The N>1 branch does .var/.std(0).unsqueeze(0) -> [1, C, *spatial]; the single-member branch must
+    # unsqueeze too, or a 1-member ensemble yields an output one rank short of the multi-member case.
+    transform = cls()
+    multi = transform("x", torch.randn(3, 2, 4, 4), Attribute())
+    single = transform("x", torch.randn(1, 2, 4, 4), Attribute())
+    assert single.ndim == multi.ndim
+    assert tuple(single.shape) == tuple(multi.shape)
 
 
 def test_clip_resolves_min_and_percentile_bounds() -> None:

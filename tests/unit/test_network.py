@@ -304,6 +304,39 @@ def test_accumulation_backward_without_scaler_is_plain_backward():
     assert torch.count_nonzero(output.grad) > 0
 
 
+class _PlainLossAttr(_CriterionAttr):
+    def __init__(self) -> None:
+        super().__init__()
+        self.accumulation = False  # a normal, non-accumulation loss in the SAME numeric group
+
+
+def test_accumulation_backward_not_refired_by_plain_loss_in_same_group():
+    """A plain (non-accumulation) loss sharing the numeric group must NOT re-fire the accumulation
+    backward: the accumulated backward runs exactly once, for the accumulation loss itself."""
+    scaler = MagicMock()
+    scaler.scale.return_value = MagicMock()
+
+    measure = Measure.__new__(Measure)
+    acc_crit = torch.nn.MSELoss()
+    plain_crit = torch.nn.L1Loss()
+    measure.outputs_criterions = {"out": {"tgt": {acc_crit: _CriterionAttr(), plain_crit: _PlainLossAttr()}}}
+    measure._loss = {
+        0: {
+            f"out:tgt:{acc_crit.__class__.__name__}": Measure.Loss("MSELoss", "out", "tgt", 0, True, True),
+            f"out:tgt:{plain_crit.__class__.__name__}": Measure.Loss("L1Loss", "out", "tgt", 0, True, False),
+        }
+    }
+    measure.scaler = scaler
+    output = torch.zeros(1, 1, 2, 2, requires_grad=True)
+    target = torch.ones(1, 1, 2, 2)
+
+    measure.update("out", output, {"tgt": (target, [Attribute()])}, it=0, nb_patch=1, training=True)
+
+    # Exactly one accumulated backward (for the accumulation loss). Before the fix, adding the plain
+    # loss re-satisfied the uniform-count test and fired a second backward over the freed graph.
+    assert scaler.scale.call_count == 1
+
+
 # --------------------------------------------------------------------------------------
 # Measure.update_scheduler — loss-weight window selection
 # --------------------------------------------------------------------------------------

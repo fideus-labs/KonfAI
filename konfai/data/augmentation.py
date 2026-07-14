@@ -124,6 +124,25 @@ def _rotation_3d_matrix(rotation: torch.Tensor, center: torch.Tensor | None = No
     return rotation_matrix
 
 
+def _axis_rotation_matrix(theta: torch.Tensor, axis: torch.Tensor) -> torch.Tensor:
+    """Rodrigues rotation of a colour vector about ``axis`` by ``theta``, as a 4x4 homogeneous matrix.
+
+    Hue rotation is a rotation of the RGB vector about the luma axis (1, 1, 1)/sqrt(3): it preserves luma
+    (a grey pixel stays grey) and is identity at theta = 0. The 4th (alpha) channel is left untouched.
+    Using Euler XYZ angles about the coordinate axes instead — as ``_rotation_3d_matrix(theta.repeat(3), v)``
+    did — is not a rotation about the luma axis and recolours grey pixels.
+    """
+    k = (axis[:3] / torch.linalg.norm(axis[:3])).to(torch.float32)
+    cross = torch.zeros((3, 3))
+    cross[0, 1], cross[0, 2] = -k[2], k[1]
+    cross[1, 0], cross[1, 2] = k[2], -k[0]
+    cross[2, 0], cross[2, 1] = -k[1], k[0]
+    rot3 = torch.eye(3) * torch.cos(theta) + (1 - torch.cos(theta)) * torch.outer(k, k) + torch.sin(theta) * cross
+    matrix = torch.eye(4)
+    matrix[:3, :3] = rot3
+    return matrix
+
+
 def _rotation_2d_matrix(rotation: torch.Tensor, center: torch.Tensor | None = None) -> torch.Tensor:
     return torch.cat(
         (
@@ -492,7 +511,7 @@ class HUE(ColorTransform):
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         theta = (torch.rand([len(shapes)]) * 2 - 1) * np.pi * self.hue_max
-        self.matrix[index] = [torch.unsqueeze(_rotation_3d_matrix(value.repeat(3), self.v), dim=0) for value in theta]
+        self.matrix[index] = [torch.unsqueeze(_axis_rotation_matrix(value, self.v), dim=0) for value in theta]
         return shapes
 
 
@@ -504,8 +523,12 @@ class Saturation(ColorTransform):
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         saturation = torch.exp2(torch.randn(len(shapes)) * self.s_std)
+        # Keep the luma component (v vT) at unit gain and scale only the orthogonal chroma component
+        # (I - v vT) by the saturation factor. The previous parenthesisation scaled the whole matrix,
+        # i.e. (v vT + (I - v vT)) * s = I * s, a uniform per-channel gain (contrast) that never mixes
+        # toward luma. With this form s=1 is identity, s=0 collapses to greyscale, s>1 boosts saturation.
         self.matrix[index] = [
-            (self.v.ger(self.v) + (torch.eye(4) - self.v.ger(self.v))).unsqueeze(0) * value for value in saturation
+            (self.v.ger(self.v) + (torch.eye(4) - self.v.ger(self.v)) * value).unsqueeze(0) for value in saturation
         ]
         return shapes
 
@@ -719,7 +742,7 @@ class Elastix(DataAugmentation):
         return results
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        pass
+        raise NotImplementedError("Elastix augmentation has no inverse; do not use it for invertible TTA.")
 
 
 class Permute(DataAugmentation):
@@ -832,4 +855,4 @@ class Mask(DataAugmentation):
         return results
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        pass
+        raise NotImplementedError("Mask augmentation has no inverse; do not use it for invertible TTA.")
