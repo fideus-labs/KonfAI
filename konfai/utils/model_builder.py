@@ -85,6 +85,7 @@ _MODULE_REGISTRY: dict[str, ModuleFactory] = {
     "Attention": blocks.Attention,
     "ConvBlock": blocks.ConvBlock,
     "ResBlock": blocks.ResBlock,
+    "ResidualBlockD": blocks.ResidualBlockD,
     "Concat": blocks.Concat,
     "Permute": blocks.Permute,
     "Select": blocks.Select,

@@ -215,6 +215,92 @@ class ResBlock(network.ModuleArgsDict):
         self.add_module(f"Norm_{i + 1}", torch.nn.ReLU(inplace=True))
 
 
+class ResidualBlockD(network.ModuleArgsDict):
+    """nnU-Net ResNet-D basic residual block, reproduced as a routed KonfAI graph.
+
+    Module-for-module and in forward-execution order equal to
+    ``dynamic_network_architectures.building_blocks.residual.BasicBlockD`` (the block the
+    nnU-Net ``ResidualEncoderUNet`` stacks). It reproduces the ResNet-D structure of He et al.,
+    *Bag of Tricks for Image Classification with CNNs* (CVPR 2019):
+
+    * **Skip path first** (matching ``BasicBlockD.forward``, which evaluates ``self.skip(x)``
+      before the main path): when the block is strided, the residual is downsampled with an
+      ``AvgPool`` of kernel = stride (never a strided conv); when the channel count changes, it is
+      then projected with a ``1x1`` conv whose ``bias`` is **always** ``False`` -- independent of
+      ``conv_bias`` -- followed by a norm. When neither applies the skip is the identity (no extra
+      module, the residual falls back to the block input branch).
+    * **Main path** on branch ``0``: ``Conv(stride) -> Norm -> LeakyReLU -> Conv(stride 1) -> Norm``
+      (the second conv carries no activation, exactly as ``BasicBlockD``).
+    * The two paths are summed and a final ``LeakyReLU`` is applied.
+
+    Executing the skip modules before the main-path convs is what makes the block transparent to
+    the execution-order weight bridge (``konfai.utils.pretrained``): its weighted leaves fire in
+    the same order as ``BasicBlockD`` (skip conv/norm, then conv1, then conv2).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        dim: int,
+        kernel_size: int | list[int] = 3,
+        stride: int | list[int] = 1,
+        conv_bias: bool = True,
+        negative_slope: float = 1e-2,
+        norm_mode: str | NormMode = "INSTANCE_AFFINE",
+    ) -> None:
+        super().__init__()
+        stride_list = list(stride) if isinstance(stride, (list, tuple)) else [stride] * dim
+        has_stride = any(value != 1 for value in stride_list)
+        requires_projection = in_channels != out_channels
+        norm = NormMode[norm_mode] if isinstance(norm_mode, str) else norm_mode
+        padding = (
+            [(value - 1) // 2 for value in kernel_size]
+            if isinstance(kernel_size, (list, tuple))
+            else (kernel_size - 1) // 2
+        )
+
+        # ----- Skip path (evaluated first, ResNet-D style) --------------------------------- #
+        if has_stride:
+            self.add_module(
+                "SkipPool",
+                get_torch_module("AvgPool", dim)(kernel_size=stride, stride=stride),
+                in_branch=[0],
+                out_branch=[1],
+            )
+        if requires_projection:
+            self.add_module(
+                "SkipConv",
+                get_torch_module("Conv", dim)(
+                    in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False
+                ),
+                in_branch=[1 if has_stride else 0],
+                out_branch=[1],
+            )
+            self.add_module("SkipNorm", get_norm(norm, out_channels, dim), in_branch=[1], out_branch=[1])
+
+        # ----- Main path ------------------------------------------------------------------- #
+        self.add_module(
+            "Conv1",
+            get_torch_module("Conv", dim)(
+                in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=conv_bias
+            ),
+        )
+        self.add_module("Norm1", get_norm(norm, out_channels, dim))
+        self.add_module("Nonlin1", torch.nn.LeakyReLU(negative_slope=negative_slope, inplace=False))
+        self.add_module(
+            "Conv2",
+            get_torch_module("Conv", dim)(
+                out_channels, out_channels, kernel_size=kernel_size, stride=1, padding=padding, bias=conv_bias
+            ),
+        )
+        self.add_module("Norm2", get_norm(norm, out_channels, dim))
+
+        # ----- Residual sum + final activation --------------------------------------------- #
+        self.add_module("Add", Add(), in_branch=[0, 1])
+        self.add_module("Nonlin2", torch.nn.LeakyReLU(negative_slope=negative_slope, inplace=False))
+
+
 def downsample(in_channels: int, out_channels: int, downsample_mode: DownsampleMode, dim: int) -> torch.nn.Module:
     """Return the downsampling module matching the requested strategy."""
     if downsample_mode == DownsampleMode.MAXPOOL:
