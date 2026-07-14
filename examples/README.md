@@ -39,6 +39,20 @@ Use this example if you want a simple and conservative starting point for:
 - prediction export
 - Dice-based evaluation
 
+### `Registration`
+
+Deformable image registration baseline based on the built-in diffeomorphic `VoxelMorph`.
+
+Use this example if you want a simple starting point for:
+
+- a two-input (`FIXED` / `MOVING`) model
+- patch-based training with an image-similarity loss
+- exporting the registered image
+- checking the registration numerically against a reference
+
+It ships a `make_dataset.py` that builds a fully synthetic dataset locally, so it runs end to end
+without any download.
+
 ## Demo data
 
 The public demo dataset is available on Hugging Face:

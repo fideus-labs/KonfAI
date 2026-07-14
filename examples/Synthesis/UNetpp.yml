@@ -1,0 +1,2081 @@
+# The YAML form of this example's baseline generator (Model.py:UNetpp5): a
+# segmentation_models_pytorch UnetPlusPlus (resnet34 encoder, 5 input channels, 1 output)
+# followed by a Tanh head, reproduced node-for-node from the curated registry only.
+# It exposes the same 'Head:Tanh' output as UNetpp5, so Config.yml works unchanged with
+# either 'classpath: Model:UNetpp5' or 'classpath: UNetpp.yml'. Large because an smp UNet++
+# is genuinely ~117 conv layers -- this proves even an encoder-backed model can be declarative;
+# in practice 'classpath: segmentation.smp.SMP' is the compact alternative for the smp backbone.
+# The GAN training loop (Config_GAN.yml) stays Python: its adversarial forward is not a graph.
+name: UNetpp
+network:
+  in_channels: 5
+  dim: 2
+modules:
+- name: enc_conv1
+  type: Conv
+  out_branch:
+  - e_c1
+  args:
+    dim: 2
+    in_channels: 5
+    out_channels: 64
+    kernel_size: 7
+    stride: 2
+    padding: 3
+    bias: false
+- name: enc_bn1
+  type: BatchNorm
+  in_branch:
+  - e_c1
+  out_branch:
+  - e_c1
+  args:
+    dim: 2
+    num_features: 64
+- name: enc_relu
+  type: ReLU
+  in_branch:
+  - e_c1
+  out_branch:
+  - e_c1
+  args: {}
+- name: enc_maxpool
+  type: MaxPool
+  in_branch:
+  - e_c1
+  out_branch:
+  - mp
+  args:
+    dim: 2
+    kernel_size: 3
+    stride: 2
+    padding: 1
+- name: l1_b0_conv1
+  type: Conv
+  in_branch:
+  - mp
+  out_branch:
+  - l1_b0_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l1_b0_bn1
+  type: BatchNorm
+  in_branch:
+  - l1_b0_m
+  out_branch:
+  - l1_b0_m
+  args:
+    dim: 2
+    num_features: 64
+- name: l1_b0_relu1
+  type: ReLU
+  in_branch:
+  - l1_b0_m
+  out_branch:
+  - l1_b0_m
+  args: {}
+- name: l1_b0_conv2
+  type: Conv
+  in_branch:
+  - l1_b0_m
+  out_branch:
+  - l1_b0_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l1_b0_bn2
+  type: BatchNorm
+  in_branch:
+  - l1_b0_m
+  out_branch:
+  - l1_b0_m
+  args:
+    dim: 2
+    num_features: 64
+- name: l1_b0_add
+  type: Add
+  in_branch:
+  - l1_b0_m
+  - mp
+  out_branch:
+  - l1_b0_m
+  args: {}
+- name: l1_b0_relu2
+  type: ReLU
+  in_branch:
+  - l1_b0_m
+  out_branch:
+  - l1_0
+  args: {}
+- name: l1_b1_conv1
+  type: Conv
+  in_branch:
+  - l1_0
+  out_branch:
+  - l1_b1_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l1_b1_bn1
+  type: BatchNorm
+  in_branch:
+  - l1_b1_m
+  out_branch:
+  - l1_b1_m
+  args:
+    dim: 2
+    num_features: 64
+- name: l1_b1_relu1
+  type: ReLU
+  in_branch:
+  - l1_b1_m
+  out_branch:
+  - l1_b1_m
+  args: {}
+- name: l1_b1_conv2
+  type: Conv
+  in_branch:
+  - l1_b1_m
+  out_branch:
+  - l1_b1_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l1_b1_bn2
+  type: BatchNorm
+  in_branch:
+  - l1_b1_m
+  out_branch:
+  - l1_b1_m
+  args:
+    dim: 2
+    num_features: 64
+- name: l1_b1_add
+  type: Add
+  in_branch:
+  - l1_b1_m
+  - l1_0
+  out_branch:
+  - l1_b1_m
+  args: {}
+- name: l1_b1_relu2
+  type: ReLU
+  in_branch:
+  - l1_b1_m
+  out_branch:
+  - l1_1
+  args: {}
+- name: l1_b2_conv1
+  type: Conv
+  in_branch:
+  - l1_1
+  out_branch:
+  - l1_b2_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l1_b2_bn1
+  type: BatchNorm
+  in_branch:
+  - l1_b2_m
+  out_branch:
+  - l1_b2_m
+  args:
+    dim: 2
+    num_features: 64
+- name: l1_b2_relu1
+  type: ReLU
+  in_branch:
+  - l1_b2_m
+  out_branch:
+  - l1_b2_m
+  args: {}
+- name: l1_b2_conv2
+  type: Conv
+  in_branch:
+  - l1_b2_m
+  out_branch:
+  - l1_b2_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l1_b2_bn2
+  type: BatchNorm
+  in_branch:
+  - l1_b2_m
+  out_branch:
+  - l1_b2_m
+  args:
+    dim: 2
+    num_features: 64
+- name: l1_b2_add
+  type: Add
+  in_branch:
+  - l1_b2_m
+  - l1_1
+  out_branch:
+  - l1_b2_m
+  args: {}
+- name: l1_b2_relu2
+  type: ReLU
+  in_branch:
+  - l1_b2_m
+  out_branch:
+  - e_l1
+  args: {}
+- name: l2_b0_conv1
+  type: Conv
+  in_branch:
+  - e_l1
+  out_branch:
+  - l2_b0_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 128
+    kernel_size: 3
+    stride: 2
+    padding: 1
+    bias: false
+- name: l2_b0_bn1
+  type: BatchNorm
+  in_branch:
+  - l2_b0_m
+  out_branch:
+  - l2_b0_m
+  args:
+    dim: 2
+    num_features: 128
+- name: l2_b0_relu1
+  type: ReLU
+  in_branch:
+  - l2_b0_m
+  out_branch:
+  - l2_b0_m
+  args: {}
+- name: l2_b0_conv2
+  type: Conv
+  in_branch:
+  - l2_b0_m
+  out_branch:
+  - l2_b0_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l2_b0_bn2
+  type: BatchNorm
+  in_branch:
+  - l2_b0_m
+  out_branch:
+  - l2_b0_m
+  args:
+    dim: 2
+    num_features: 128
+- name: l2_b0_dsconv
+  type: Conv
+  in_branch:
+  - e_l1
+  out_branch:
+  - l2_b0_s
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 128
+    kernel_size: 1
+    stride: 2
+    padding: 0
+    bias: false
+- name: l2_b0_dsbn
+  type: BatchNorm
+  in_branch:
+  - l2_b0_s
+  out_branch:
+  - l2_b0_s
+  args:
+    dim: 2
+    num_features: 128
+- name: l2_b0_add
+  type: Add
+  in_branch:
+  - l2_b0_m
+  - l2_b0_s
+  out_branch:
+  - l2_b0_m
+  args: {}
+- name: l2_b0_relu2
+  type: ReLU
+  in_branch:
+  - l2_b0_m
+  out_branch:
+  - l2_0
+  args: {}
+- name: l2_b1_conv1
+  type: Conv
+  in_branch:
+  - l2_0
+  out_branch:
+  - l2_b1_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l2_b1_bn1
+  type: BatchNorm
+  in_branch:
+  - l2_b1_m
+  out_branch:
+  - l2_b1_m
+  args:
+    dim: 2
+    num_features: 128
+- name: l2_b1_relu1
+  type: ReLU
+  in_branch:
+  - l2_b1_m
+  out_branch:
+  - l2_b1_m
+  args: {}
+- name: l2_b1_conv2
+  type: Conv
+  in_branch:
+  - l2_b1_m
+  out_branch:
+  - l2_b1_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l2_b1_bn2
+  type: BatchNorm
+  in_branch:
+  - l2_b1_m
+  out_branch:
+  - l2_b1_m
+  args:
+    dim: 2
+    num_features: 128
+- name: l2_b1_add
+  type: Add
+  in_branch:
+  - l2_b1_m
+  - l2_0
+  out_branch:
+  - l2_b1_m
+  args: {}
+- name: l2_b1_relu2
+  type: ReLU
+  in_branch:
+  - l2_b1_m
+  out_branch:
+  - l2_1
+  args: {}
+- name: l2_b2_conv1
+  type: Conv
+  in_branch:
+  - l2_1
+  out_branch:
+  - l2_b2_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l2_b2_bn1
+  type: BatchNorm
+  in_branch:
+  - l2_b2_m
+  out_branch:
+  - l2_b2_m
+  args:
+    dim: 2
+    num_features: 128
+- name: l2_b2_relu1
+  type: ReLU
+  in_branch:
+  - l2_b2_m
+  out_branch:
+  - l2_b2_m
+  args: {}
+- name: l2_b2_conv2
+  type: Conv
+  in_branch:
+  - l2_b2_m
+  out_branch:
+  - l2_b2_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l2_b2_bn2
+  type: BatchNorm
+  in_branch:
+  - l2_b2_m
+  out_branch:
+  - l2_b2_m
+  args:
+    dim: 2
+    num_features: 128
+- name: l2_b2_add
+  type: Add
+  in_branch:
+  - l2_b2_m
+  - l2_1
+  out_branch:
+  - l2_b2_m
+  args: {}
+- name: l2_b2_relu2
+  type: ReLU
+  in_branch:
+  - l2_b2_m
+  out_branch:
+  - l2_2
+  args: {}
+- name: l2_b3_conv1
+  type: Conv
+  in_branch:
+  - l2_2
+  out_branch:
+  - l2_b3_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l2_b3_bn1
+  type: BatchNorm
+  in_branch:
+  - l2_b3_m
+  out_branch:
+  - l2_b3_m
+  args:
+    dim: 2
+    num_features: 128
+- name: l2_b3_relu1
+  type: ReLU
+  in_branch:
+  - l2_b3_m
+  out_branch:
+  - l2_b3_m
+  args: {}
+- name: l2_b3_conv2
+  type: Conv
+  in_branch:
+  - l2_b3_m
+  out_branch:
+  - l2_b3_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l2_b3_bn2
+  type: BatchNorm
+  in_branch:
+  - l2_b3_m
+  out_branch:
+  - l2_b3_m
+  args:
+    dim: 2
+    num_features: 128
+- name: l2_b3_add
+  type: Add
+  in_branch:
+  - l2_b3_m
+  - l2_2
+  out_branch:
+  - l2_b3_m
+  args: {}
+- name: l2_b3_relu2
+  type: ReLU
+  in_branch:
+  - l2_b3_m
+  out_branch:
+  - e_l2
+  args: {}
+- name: l3_b0_conv1
+  type: Conv
+  in_branch:
+  - e_l2
+  out_branch:
+  - l3_b0_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 256
+    kernel_size: 3
+    stride: 2
+    padding: 1
+    bias: false
+- name: l3_b0_bn1
+  type: BatchNorm
+  in_branch:
+  - l3_b0_m
+  out_branch:
+  - l3_b0_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b0_relu1
+  type: ReLU
+  in_branch:
+  - l3_b0_m
+  out_branch:
+  - l3_b0_m
+  args: {}
+- name: l3_b0_conv2
+  type: Conv
+  in_branch:
+  - l3_b0_m
+  out_branch:
+  - l3_b0_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b0_bn2
+  type: BatchNorm
+  in_branch:
+  - l3_b0_m
+  out_branch:
+  - l3_b0_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b0_dsconv
+  type: Conv
+  in_branch:
+  - e_l2
+  out_branch:
+  - l3_b0_s
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 256
+    kernel_size: 1
+    stride: 2
+    padding: 0
+    bias: false
+- name: l3_b0_dsbn
+  type: BatchNorm
+  in_branch:
+  - l3_b0_s
+  out_branch:
+  - l3_b0_s
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b0_add
+  type: Add
+  in_branch:
+  - l3_b0_m
+  - l3_b0_s
+  out_branch:
+  - l3_b0_m
+  args: {}
+- name: l3_b0_relu2
+  type: ReLU
+  in_branch:
+  - l3_b0_m
+  out_branch:
+  - l3_0
+  args: {}
+- name: l3_b1_conv1
+  type: Conv
+  in_branch:
+  - l3_0
+  out_branch:
+  - l3_b1_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b1_bn1
+  type: BatchNorm
+  in_branch:
+  - l3_b1_m
+  out_branch:
+  - l3_b1_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b1_relu1
+  type: ReLU
+  in_branch:
+  - l3_b1_m
+  out_branch:
+  - l3_b1_m
+  args: {}
+- name: l3_b1_conv2
+  type: Conv
+  in_branch:
+  - l3_b1_m
+  out_branch:
+  - l3_b1_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b1_bn2
+  type: BatchNorm
+  in_branch:
+  - l3_b1_m
+  out_branch:
+  - l3_b1_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b1_add
+  type: Add
+  in_branch:
+  - l3_b1_m
+  - l3_0
+  out_branch:
+  - l3_b1_m
+  args: {}
+- name: l3_b1_relu2
+  type: ReLU
+  in_branch:
+  - l3_b1_m
+  out_branch:
+  - l3_1
+  args: {}
+- name: l3_b2_conv1
+  type: Conv
+  in_branch:
+  - l3_1
+  out_branch:
+  - l3_b2_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b2_bn1
+  type: BatchNorm
+  in_branch:
+  - l3_b2_m
+  out_branch:
+  - l3_b2_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b2_relu1
+  type: ReLU
+  in_branch:
+  - l3_b2_m
+  out_branch:
+  - l3_b2_m
+  args: {}
+- name: l3_b2_conv2
+  type: Conv
+  in_branch:
+  - l3_b2_m
+  out_branch:
+  - l3_b2_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b2_bn2
+  type: BatchNorm
+  in_branch:
+  - l3_b2_m
+  out_branch:
+  - l3_b2_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b2_add
+  type: Add
+  in_branch:
+  - l3_b2_m
+  - l3_1
+  out_branch:
+  - l3_b2_m
+  args: {}
+- name: l3_b2_relu2
+  type: ReLU
+  in_branch:
+  - l3_b2_m
+  out_branch:
+  - l3_2
+  args: {}
+- name: l3_b3_conv1
+  type: Conv
+  in_branch:
+  - l3_2
+  out_branch:
+  - l3_b3_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b3_bn1
+  type: BatchNorm
+  in_branch:
+  - l3_b3_m
+  out_branch:
+  - l3_b3_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b3_relu1
+  type: ReLU
+  in_branch:
+  - l3_b3_m
+  out_branch:
+  - l3_b3_m
+  args: {}
+- name: l3_b3_conv2
+  type: Conv
+  in_branch:
+  - l3_b3_m
+  out_branch:
+  - l3_b3_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b3_bn2
+  type: BatchNorm
+  in_branch:
+  - l3_b3_m
+  out_branch:
+  - l3_b3_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b3_add
+  type: Add
+  in_branch:
+  - l3_b3_m
+  - l3_2
+  out_branch:
+  - l3_b3_m
+  args: {}
+- name: l3_b3_relu2
+  type: ReLU
+  in_branch:
+  - l3_b3_m
+  out_branch:
+  - l3_3
+  args: {}
+- name: l3_b4_conv1
+  type: Conv
+  in_branch:
+  - l3_3
+  out_branch:
+  - l3_b4_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b4_bn1
+  type: BatchNorm
+  in_branch:
+  - l3_b4_m
+  out_branch:
+  - l3_b4_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b4_relu1
+  type: ReLU
+  in_branch:
+  - l3_b4_m
+  out_branch:
+  - l3_b4_m
+  args: {}
+- name: l3_b4_conv2
+  type: Conv
+  in_branch:
+  - l3_b4_m
+  out_branch:
+  - l3_b4_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b4_bn2
+  type: BatchNorm
+  in_branch:
+  - l3_b4_m
+  out_branch:
+  - l3_b4_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b4_add
+  type: Add
+  in_branch:
+  - l3_b4_m
+  - l3_3
+  out_branch:
+  - l3_b4_m
+  args: {}
+- name: l3_b4_relu2
+  type: ReLU
+  in_branch:
+  - l3_b4_m
+  out_branch:
+  - l3_4
+  args: {}
+- name: l3_b5_conv1
+  type: Conv
+  in_branch:
+  - l3_4
+  out_branch:
+  - l3_b5_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b5_bn1
+  type: BatchNorm
+  in_branch:
+  - l3_b5_m
+  out_branch:
+  - l3_b5_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b5_relu1
+  type: ReLU
+  in_branch:
+  - l3_b5_m
+  out_branch:
+  - l3_b5_m
+  args: {}
+- name: l3_b5_conv2
+  type: Conv
+  in_branch:
+  - l3_b5_m
+  out_branch:
+  - l3_b5_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l3_b5_bn2
+  type: BatchNorm
+  in_branch:
+  - l3_b5_m
+  out_branch:
+  - l3_b5_m
+  args:
+    dim: 2
+    num_features: 256
+- name: l3_b5_add
+  type: Add
+  in_branch:
+  - l3_b5_m
+  - l3_4
+  out_branch:
+  - l3_b5_m
+  args: {}
+- name: l3_b5_relu2
+  type: ReLU
+  in_branch:
+  - l3_b5_m
+  out_branch:
+  - e_l3
+  args: {}
+- name: l4_b0_conv1
+  type: Conv
+  in_branch:
+  - e_l3
+  out_branch:
+  - l4_b0_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 512
+    kernel_size: 3
+    stride: 2
+    padding: 1
+    bias: false
+- name: l4_b0_bn1
+  type: BatchNorm
+  in_branch:
+  - l4_b0_m
+  out_branch:
+  - l4_b0_m
+  args:
+    dim: 2
+    num_features: 512
+- name: l4_b0_relu1
+  type: ReLU
+  in_branch:
+  - l4_b0_m
+  out_branch:
+  - l4_b0_m
+  args: {}
+- name: l4_b0_conv2
+  type: Conv
+  in_branch:
+  - l4_b0_m
+  out_branch:
+  - l4_b0_m
+  args:
+    dim: 2
+    in_channels: 512
+    out_channels: 512
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l4_b0_bn2
+  type: BatchNorm
+  in_branch:
+  - l4_b0_m
+  out_branch:
+  - l4_b0_m
+  args:
+    dim: 2
+    num_features: 512
+- name: l4_b0_dsconv
+  type: Conv
+  in_branch:
+  - e_l3
+  out_branch:
+  - l4_b0_s
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 512
+    kernel_size: 1
+    stride: 2
+    padding: 0
+    bias: false
+- name: l4_b0_dsbn
+  type: BatchNorm
+  in_branch:
+  - l4_b0_s
+  out_branch:
+  - l4_b0_s
+  args:
+    dim: 2
+    num_features: 512
+- name: l4_b0_add
+  type: Add
+  in_branch:
+  - l4_b0_m
+  - l4_b0_s
+  out_branch:
+  - l4_b0_m
+  args: {}
+- name: l4_b0_relu2
+  type: ReLU
+  in_branch:
+  - l4_b0_m
+  out_branch:
+  - l4_0
+  args: {}
+- name: l4_b1_conv1
+  type: Conv
+  in_branch:
+  - l4_0
+  out_branch:
+  - l4_b1_m
+  args:
+    dim: 2
+    in_channels: 512
+    out_channels: 512
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l4_b1_bn1
+  type: BatchNorm
+  in_branch:
+  - l4_b1_m
+  out_branch:
+  - l4_b1_m
+  args:
+    dim: 2
+    num_features: 512
+- name: l4_b1_relu1
+  type: ReLU
+  in_branch:
+  - l4_b1_m
+  out_branch:
+  - l4_b1_m
+  args: {}
+- name: l4_b1_conv2
+  type: Conv
+  in_branch:
+  - l4_b1_m
+  out_branch:
+  - l4_b1_m
+  args:
+    dim: 2
+    in_channels: 512
+    out_channels: 512
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l4_b1_bn2
+  type: BatchNorm
+  in_branch:
+  - l4_b1_m
+  out_branch:
+  - l4_b1_m
+  args:
+    dim: 2
+    num_features: 512
+- name: l4_b1_add
+  type: Add
+  in_branch:
+  - l4_b1_m
+  - l4_0
+  out_branch:
+  - l4_b1_m
+  args: {}
+- name: l4_b1_relu2
+  type: ReLU
+  in_branch:
+  - l4_b1_m
+  out_branch:
+  - l4_1
+  args: {}
+- name: l4_b2_conv1
+  type: Conv
+  in_branch:
+  - l4_1
+  out_branch:
+  - l4_b2_m
+  args:
+    dim: 2
+    in_channels: 512
+    out_channels: 512
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l4_b2_bn1
+  type: BatchNorm
+  in_branch:
+  - l4_b2_m
+  out_branch:
+  - l4_b2_m
+  args:
+    dim: 2
+    num_features: 512
+- name: l4_b2_relu1
+  type: ReLU
+  in_branch:
+  - l4_b2_m
+  out_branch:
+  - l4_b2_m
+  args: {}
+- name: l4_b2_conv2
+  type: Conv
+  in_branch:
+  - l4_b2_m
+  out_branch:
+  - l4_b2_m
+  args:
+    dim: 2
+    in_channels: 512
+    out_channels: 512
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: l4_b2_bn2
+  type: BatchNorm
+  in_branch:
+  - l4_b2_m
+  out_branch:
+  - l4_b2_m
+  args:
+    dim: 2
+    num_features: 512
+- name: l4_b2_add
+  type: Add
+  in_branch:
+  - l4_b2_m
+  - l4_1
+  out_branch:
+  - l4_b2_m
+  args: {}
+- name: l4_b2_relu2
+  type: ReLU
+  in_branch:
+  - l4_b2_m
+  out_branch:
+  - e_l4
+  args: {}
+- name: x00_up
+  type: Upsample
+  in_branch:
+  - e_l4
+  out_branch:
+  - x00_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x00_cat
+  type: Concat
+  in_branch:
+  - x00_up
+  - e_l3
+  out_branch:
+  - x00_c
+  args: {}
+- name: x00_conv1
+  type: Conv
+  in_branch:
+  - x00_c
+  out_branch:
+  - x00_m
+  args:
+    dim: 2
+    in_channels: 768
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x00_bn1
+  type: BatchNorm
+  in_branch:
+  - x00_m
+  out_branch:
+  - x00_m
+  args:
+    dim: 2
+    num_features: 256
+- name: x00_relu1
+  type: ReLU
+  in_branch:
+  - x00_m
+  out_branch:
+  - x00_m
+  args: {}
+- name: x00_conv2
+  type: Conv
+  in_branch:
+  - x00_m
+  out_branch:
+  - x00_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 256
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x00_bn2
+  type: BatchNorm
+  in_branch:
+  - x00_m
+  out_branch:
+  - x00_m
+  args:
+    dim: 2
+    num_features: 256
+- name: x00_relu2
+  type: ReLU
+  in_branch:
+  - x00_m
+  out_branch:
+  - x00
+  args: {}
+- name: x11_up
+  type: Upsample
+  in_branch:
+  - e_l3
+  out_branch:
+  - x11_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x11_cat
+  type: Concat
+  in_branch:
+  - x11_up
+  - e_l2
+  out_branch:
+  - x11_c
+  args: {}
+- name: x11_conv1
+  type: Conv
+  in_branch:
+  - x11_c
+  out_branch:
+  - x11_m
+  args:
+    dim: 2
+    in_channels: 384
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x11_bn1
+  type: BatchNorm
+  in_branch:
+  - x11_m
+  out_branch:
+  - x11_m
+  args:
+    dim: 2
+    num_features: 128
+- name: x11_relu1
+  type: ReLU
+  in_branch:
+  - x11_m
+  out_branch:
+  - x11_m
+  args: {}
+- name: x11_conv2
+  type: Conv
+  in_branch:
+  - x11_m
+  out_branch:
+  - x11_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x11_bn2
+  type: BatchNorm
+  in_branch:
+  - x11_m
+  out_branch:
+  - x11_m
+  args:
+    dim: 2
+    num_features: 128
+- name: x11_relu2
+  type: ReLU
+  in_branch:
+  - x11_m
+  out_branch:
+  - x11
+  args: {}
+- name: x22_up
+  type: Upsample
+  in_branch:
+  - e_l2
+  out_branch:
+  - x22_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x22_cat
+  type: Concat
+  in_branch:
+  - x22_up
+  - e_l1
+  out_branch:
+  - x22_c
+  args: {}
+- name: x22_conv1
+  type: Conv
+  in_branch:
+  - x22_c
+  out_branch:
+  - x22_m
+  args:
+    dim: 2
+    in_channels: 192
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x22_bn1
+  type: BatchNorm
+  in_branch:
+  - x22_m
+  out_branch:
+  - x22_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x22_relu1
+  type: ReLU
+  in_branch:
+  - x22_m
+  out_branch:
+  - x22_m
+  args: {}
+- name: x22_conv2
+  type: Conv
+  in_branch:
+  - x22_m
+  out_branch:
+  - x22_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x22_bn2
+  type: BatchNorm
+  in_branch:
+  - x22_m
+  out_branch:
+  - x22_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x22_relu2
+  type: ReLU
+  in_branch:
+  - x22_m
+  out_branch:
+  - x22
+  args: {}
+- name: x33_up
+  type: Upsample
+  in_branch:
+  - e_l1
+  out_branch:
+  - x33_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x33_cat
+  type: Concat
+  in_branch:
+  - x33_up
+  - e_c1
+  out_branch:
+  - x33_c
+  args: {}
+- name: x33_conv1
+  type: Conv
+  in_branch:
+  - x33_c
+  out_branch:
+  - x33_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x33_bn1
+  type: BatchNorm
+  in_branch:
+  - x33_m
+  out_branch:
+  - x33_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x33_relu1
+  type: ReLU
+  in_branch:
+  - x33_m
+  out_branch:
+  - x33_m
+  args: {}
+- name: x33_conv2
+  type: Conv
+  in_branch:
+  - x33_m
+  out_branch:
+  - x33_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x33_bn2
+  type: BatchNorm
+  in_branch:
+  - x33_m
+  out_branch:
+  - x33_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x33_relu2
+  type: ReLU
+  in_branch:
+  - x33_m
+  out_branch:
+  - x33
+  args: {}
+- name: x01_up
+  type: Upsample
+  in_branch:
+  - x00
+  out_branch:
+  - x01_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x01_cat
+  type: Concat
+  in_branch:
+  - x01_up
+  - x11
+  - e_l2
+  out_branch:
+  - x01_c
+  args: {}
+- name: x01_conv1
+  type: Conv
+  in_branch:
+  - x01_c
+  out_branch:
+  - x01_m
+  args:
+    dim: 2
+    in_channels: 512
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x01_bn1
+  type: BatchNorm
+  in_branch:
+  - x01_m
+  out_branch:
+  - x01_m
+  args:
+    dim: 2
+    num_features: 128
+- name: x01_relu1
+  type: ReLU
+  in_branch:
+  - x01_m
+  out_branch:
+  - x01_m
+  args: {}
+- name: x01_conv2
+  type: Conv
+  in_branch:
+  - x01_m
+  out_branch:
+  - x01_m
+  args:
+    dim: 2
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x01_bn2
+  type: BatchNorm
+  in_branch:
+  - x01_m
+  out_branch:
+  - x01_m
+  args:
+    dim: 2
+    num_features: 128
+- name: x01_relu2
+  type: ReLU
+  in_branch:
+  - x01_m
+  out_branch:
+  - x01
+  args: {}
+- name: x12_up
+  type: Upsample
+  in_branch:
+  - x11
+  out_branch:
+  - x12_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x12_cat
+  type: Concat
+  in_branch:
+  - x12_up
+  - x22
+  - e_l1
+  out_branch:
+  - x12_c
+  args: {}
+- name: x12_conv1
+  type: Conv
+  in_branch:
+  - x12_c
+  out_branch:
+  - x12_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x12_bn1
+  type: BatchNorm
+  in_branch:
+  - x12_m
+  out_branch:
+  - x12_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x12_relu1
+  type: ReLU
+  in_branch:
+  - x12_m
+  out_branch:
+  - x12_m
+  args: {}
+- name: x12_conv2
+  type: Conv
+  in_branch:
+  - x12_m
+  out_branch:
+  - x12_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x12_bn2
+  type: BatchNorm
+  in_branch:
+  - x12_m
+  out_branch:
+  - x12_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x12_relu2
+  type: ReLU
+  in_branch:
+  - x12_m
+  out_branch:
+  - x12
+  args: {}
+- name: x23_up
+  type: Upsample
+  in_branch:
+  - x22
+  out_branch:
+  - x23_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x23_cat
+  type: Concat
+  in_branch:
+  - x23_up
+  - x33
+  - e_c1
+  out_branch:
+  - x23_c
+  args: {}
+- name: x23_conv1
+  type: Conv
+  in_branch:
+  - x23_c
+  out_branch:
+  - x23_m
+  args:
+    dim: 2
+    in_channels: 192
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x23_bn1
+  type: BatchNorm
+  in_branch:
+  - x23_m
+  out_branch:
+  - x23_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x23_relu1
+  type: ReLU
+  in_branch:
+  - x23_m
+  out_branch:
+  - x23_m
+  args: {}
+- name: x23_conv2
+  type: Conv
+  in_branch:
+  - x23_m
+  out_branch:
+  - x23_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x23_bn2
+  type: BatchNorm
+  in_branch:
+  - x23_m
+  out_branch:
+  - x23_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x23_relu2
+  type: ReLU
+  in_branch:
+  - x23_m
+  out_branch:
+  - x23
+  args: {}
+- name: x02_up
+  type: Upsample
+  in_branch:
+  - x01
+  out_branch:
+  - x02_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x02_cat
+  type: Concat
+  in_branch:
+  - x02_up
+  - x12
+  - x22
+  - e_l1
+  out_branch:
+  - x02_c
+  args: {}
+- name: x02_conv1
+  type: Conv
+  in_branch:
+  - x02_c
+  out_branch:
+  - x02_m
+  args:
+    dim: 2
+    in_channels: 320
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x02_bn1
+  type: BatchNorm
+  in_branch:
+  - x02_m
+  out_branch:
+  - x02_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x02_relu1
+  type: ReLU
+  in_branch:
+  - x02_m
+  out_branch:
+  - x02_m
+  args: {}
+- name: x02_conv2
+  type: Conv
+  in_branch:
+  - x02_m
+  out_branch:
+  - x02_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x02_bn2
+  type: BatchNorm
+  in_branch:
+  - x02_m
+  out_branch:
+  - x02_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x02_relu2
+  type: ReLU
+  in_branch:
+  - x02_m
+  out_branch:
+  - x02
+  args: {}
+- name: x13_up
+  type: Upsample
+  in_branch:
+  - x12
+  out_branch:
+  - x13_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x13_cat
+  type: Concat
+  in_branch:
+  - x13_up
+  - x23
+  - x33
+  - e_c1
+  out_branch:
+  - x13_c
+  args: {}
+- name: x13_conv1
+  type: Conv
+  in_branch:
+  - x13_c
+  out_branch:
+  - x13_m
+  args:
+    dim: 2
+    in_channels: 256
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x13_bn1
+  type: BatchNorm
+  in_branch:
+  - x13_m
+  out_branch:
+  - x13_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x13_relu1
+  type: ReLU
+  in_branch:
+  - x13_m
+  out_branch:
+  - x13_m
+  args: {}
+- name: x13_conv2
+  type: Conv
+  in_branch:
+  - x13_m
+  out_branch:
+  - x13_m
+  args:
+    dim: 2
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x13_bn2
+  type: BatchNorm
+  in_branch:
+  - x13_m
+  out_branch:
+  - x13_m
+  args:
+    dim: 2
+    num_features: 64
+- name: x13_relu2
+  type: ReLU
+  in_branch:
+  - x13_m
+  out_branch:
+  - x13
+  args: {}
+- name: x03_up
+  type: Upsample
+  in_branch:
+  - x02
+  out_branch:
+  - x03_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x03_cat
+  type: Concat
+  in_branch:
+  - x03_up
+  - x13
+  - x23
+  - x33
+  - e_c1
+  out_branch:
+  - x03_c
+  args: {}
+- name: x03_conv1
+  type: Conv
+  in_branch:
+  - x03_c
+  out_branch:
+  - x03_m
+  args:
+    dim: 2
+    in_channels: 320
+    out_channels: 32
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x03_bn1
+  type: BatchNorm
+  in_branch:
+  - x03_m
+  out_branch:
+  - x03_m
+  args:
+    dim: 2
+    num_features: 32
+- name: x03_relu1
+  type: ReLU
+  in_branch:
+  - x03_m
+  out_branch:
+  - x03_m
+  args: {}
+- name: x03_conv2
+  type: Conv
+  in_branch:
+  - x03_m
+  out_branch:
+  - x03_m
+  args:
+    dim: 2
+    in_channels: 32
+    out_channels: 32
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x03_bn2
+  type: BatchNorm
+  in_branch:
+  - x03_m
+  out_branch:
+  - x03_m
+  args:
+    dim: 2
+    num_features: 32
+- name: x03_relu2
+  type: ReLU
+  in_branch:
+  - x03_m
+  out_branch:
+  - x03
+  args: {}
+- name: x04_up
+  type: Upsample
+  in_branch:
+  - x03
+  out_branch:
+  - x04_up
+  args:
+    scale_factor: 2.0
+    mode: nearest
+- name: x04_conv1
+  type: Conv
+  in_branch:
+  - x04_up
+  out_branch:
+  - x04_m
+  args:
+    dim: 2
+    in_channels: 32
+    out_channels: 16
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x04_bn1
+  type: BatchNorm
+  in_branch:
+  - x04_m
+  out_branch:
+  - x04_m
+  args:
+    dim: 2
+    num_features: 16
+- name: x04_relu1
+  type: ReLU
+  in_branch:
+  - x04_m
+  out_branch:
+  - x04_m
+  args: {}
+- name: x04_conv2
+  type: Conv
+  in_branch:
+  - x04_m
+  out_branch:
+  - x04_m
+  args:
+    dim: 2
+    in_channels: 16
+    out_channels: 16
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: false
+- name: x04_bn2
+  type: BatchNorm
+  in_branch:
+  - x04_m
+  out_branch:
+  - x04_m
+  args:
+    dim: 2
+    num_features: 16
+- name: x04_relu2
+  type: ReLU
+  in_branch:
+  - x04_m
+  out_branch:
+  - x04
+  args: {}
+- name: seg_conv
+  type: Conv
+  in_branch:
+  - x04
+  out_branch:
+  - seg
+  args:
+    dim: 2
+    in_channels: 16
+    out_channels: 1
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: true
+- name: Head
+  in_branch:
+  - seg
+  out_branch:
+  - -1
+  modules:
+  - name: Tanh
+    type: Tanh
+    args: {}
