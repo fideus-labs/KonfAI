@@ -95,10 +95,13 @@ class DropPath(torch.nn.Module):
 
 
 class LayerScaler(torch.nn.Module):
-    def __init__(self, init_value: float, dimensions: int):
+    def __init__(self, init_value: float, dimensions: int, dim: int = 2):
         super().__init__()
         self.init_value = init_value
-        self.gamma = torch.nn.Parameter(torch.ones(dimensions, 1, 1) * init_value)
+        # Per-channel scale broadcast over `dim` spatial axes: (C, 1, ..., 1). Sizing it for `dim`
+        # keeps 2-D behaviour (C, 1, 1) identical while making 3-D (C, 1, 1, 1) broadcast against
+        # [B, C, D, H, W] instead of pairing C against the depth axis and crashing when D != C.
+        self.gamma = torch.nn.Parameter(torch.ones((dimensions,) + (1,) * dim) * init_value)
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         return self.gamma * tensor
@@ -123,7 +126,7 @@ class BottleNeckBlock(network.ModuleArgsDict):
         self.add_module("ToChannels", blocks.ToChannels(dim))
         self.add_module(
             "LayerScaler",
-            LayerScaler(init_value=layer_scaler_init_value, dimensions=features),
+            LayerScaler(init_value=layer_scaler_init_value, dimensions=features, dim=dim),
             alias=[""],
         )
         self.add_module("StochasticDepth", DropPath(drop_p))

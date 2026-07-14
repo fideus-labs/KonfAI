@@ -19,7 +19,7 @@
 This locks the key "declarative models can replace Python models" property for
 the feed-forward subset: the shipped example ``examples/Segmentation/UNet.yml``
 must produce a graph with the same parameter count and forward behaviour as the
-hand-written ``konfai.models.segmentation.UNet`` configured identically.
+hand-written ``konfai.models.python.segmentation.UNet`` configured identically.
 """
 
 from pathlib import Path
@@ -45,7 +45,7 @@ def test_example_unet_yaml_builds_and_forwards():
 
 
 def test_example_unet_yaml_matches_python_unet_param_count():
-    from konfai.models.segmentation.UNet import UNet
+    from konfai.models.python.segmentation.UNet import UNet
 
     yaml_net = _build_yaml_unet()
     block_config = BlockConfig(kernel_size=3, stride=1, padding=1, bias=True, activation="ReLU", norm_mode="NONE")

@@ -22,8 +22,8 @@ import numpy as np
 import torch
 from konfai.data import augmentation
 from konfai.data.patching import Attribute, ModelPatch
-from konfai.models.generation.ddpm import DDPM
-from konfai.models.segmentation import NestedUNet, UNet
+from konfai.models.python.generation.ddpm import DDPM
+from konfai.models.python.segmentation import NestedUNet, UNet
 from konfai.network import blocks, network
 
 
@@ -58,8 +58,6 @@ class Discriminator(network.Network):
                     padding=1,
                 ),
             )
-            # self.add_module("AdaptiveAvgPool", blocks.get_torch_module("AdaptiveAvgPool", dim)(tuple([1]*dim)))
-            # self.add_module("Flatten", torch.nn.Flatten(1))
 
     class DiscriminatorBlock(network.ModuleArgsDict):
         def __init__(
@@ -153,8 +151,6 @@ class DiscriminatorADA(network.Network):
                     padding=1,
                 ),
             )
-            # self.add_module("AdaptiveAvgPool", blocks.get_torch_module("AdaptiveAvgPool", dim)(tuple([1]*dim)))
-            # self.add_module("Flatten", torch.nn.Flatten(1))
 
     class UpdateP(torch.nn.Module):
         """Adaptive-augmentation (ADA) probability controller.
@@ -393,7 +389,6 @@ class GeneratorV1(network.Network):
             )
             self.add_module("Norm_0", torch.nn.SyncBatchNorm(channels))
             self.add_module("Activation_0", torch.nn.LeakyReLU(0.2, inplace=True))
-            # self.add_module("Norm", torch.nn.LeakyReLU(0.2, inplace=True))
 
             self.add_module(
                 "Conv_1",

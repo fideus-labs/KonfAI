@@ -1,0 +1,348 @@
+# Declarative KonfAI ResNet classifier graph-equivalent to
+# konfai.models.python.classification.resnet.ResNet with its default hyperparameters
+# (basic residual blocks, depths: [2, 2, 2, 2] -- the ResNet-18 layout).
+# The stage layout is fixed: `widths` must keep exactly 5 entries and each
+# stage contains two blocks; only the channel widths and classes are tunable.
+name: ResNet
+
+parameters:
+  dim: 3
+  in_channels: 1
+  widths: [64, 64, 128, 256, 512]
+  num_classes: 10
+  stem_configs:
+    - $object: BlockConfig
+      args:
+        kernel_size: 7
+        stride: 2
+        padding: 3
+        bias: false
+        activation: ReLU
+        norm_mode: BATCH
+  conv3_relu_stride1:
+    - $object: BlockConfig
+      args:
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: false
+        activation: ReLU
+        norm_mode: BATCH
+  conv3_relu_stride2:
+    - $object: BlockConfig
+      args:
+        kernel_size: 3
+        stride: 2
+        padding: 1
+        bias: false
+        activation: ReLU
+        norm_mode: BATCH
+  conv3_linear_stride1:
+    - $object: BlockConfig
+      args:
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: false
+        activation: "None"
+        norm_mode: BATCH
+  shortcut_configs:
+    - $object: BlockConfig
+      args:
+        kernel_size: 1
+        stride: 2
+        padding: 0
+        bias: false
+        activation: "None"
+        norm_mode: BATCH
+
+network:
+  in_channels: ${in_channels}
+  dim: ${dim}
+  init_type: trunc_normal
+  init_gain: 0.02
+
+modules:
+  - name: ResNetEncoder
+    modules:
+      - name: ResNetStem
+        modules:
+          - name: ConvBlock
+            type: ConvBlock
+            args:
+              in_channels: ${in_channels}
+              out_channels: ${widths.0}
+              block_configs: ${stem_configs}
+              dim: ${dim}
+              alias: [["conv1"], ["bn1"], []]
+          - name: MaxPool
+            type: MaxPool
+            args:
+              dim: ${dim}
+              kernel_size: 3
+              stride: 2
+              padding: 1
+
+      - name: ResNetStage_0
+        alias: [layer1]
+        modules:
+          - name: BottleNeckBlock_0
+            alias: ["0"]
+            modules:
+              - name: ConvBlock_0
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.0}
+                  out_channels: ${widths.1}
+                  block_configs: ${conv3_relu_stride1}
+                  dim: ${dim}
+                  alias: [["conv1"], ["bn1"], []]
+              - name: ConvBlock_1
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.1}
+                  out_channels: ${widths.1}
+                  block_configs: ${conv3_linear_stride1}
+                  dim: ${dim}
+                  alias: [["conv2"], ["bn2"], []]
+              - name: Residual
+                type: Add
+                in_branch: [0, 1]
+              - name: ReLU
+                type: ReLU
+          - name: BottleNeckBlock_1
+            alias: ["1"]
+            modules:
+              - name: ConvBlock_0
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.1}
+                  out_channels: ${widths.1}
+                  block_configs: ${conv3_relu_stride1}
+                  dim: ${dim}
+                  alias: [["conv1"], ["bn1"], []]
+              - name: ConvBlock_1
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.1}
+                  out_channels: ${widths.1}
+                  block_configs: ${conv3_linear_stride1}
+                  dim: ${dim}
+                  alias: [["conv2"], ["bn2"], []]
+              - name: Residual
+                type: Add
+                in_branch: [0, 1]
+              - name: ReLU
+                type: ReLU
+
+      - name: ResNetStage_1
+        alias: [layer2]
+        modules:
+          - name: BottleNeckBlock_0
+            alias: ["0"]
+            modules:
+              - name: Shortcut
+                type: ConvBlock
+                in_branch: [1]
+                out_branch: [1]
+                alias: [downsample]
+                args:
+                  in_channels: ${widths.1}
+                  out_channels: ${widths.2}
+                  block_configs: ${shortcut_configs}
+                  dim: ${dim}
+                  alias: [["0"], ["1"], []]
+              - name: ConvBlock_0
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.1}
+                  out_channels: ${widths.2}
+                  block_configs: ${conv3_relu_stride2}
+                  dim: ${dim}
+                  alias: [["conv1"], ["bn1"], []]
+              - name: ConvBlock_1
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.2}
+                  out_channels: ${widths.2}
+                  block_configs: ${conv3_linear_stride1}
+                  dim: ${dim}
+                  alias: [["conv2"], ["bn2"], []]
+              - name: Residual
+                type: Add
+                in_branch: [0, 1]
+              - name: ReLU
+                type: ReLU
+          - name: BottleNeckBlock_1
+            alias: ["1"]
+            modules:
+              - name: ConvBlock_0
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.2}
+                  out_channels: ${widths.2}
+                  block_configs: ${conv3_relu_stride1}
+                  dim: ${dim}
+                  alias: [["conv1"], ["bn1"], []]
+              - name: ConvBlock_1
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.2}
+                  out_channels: ${widths.2}
+                  block_configs: ${conv3_linear_stride1}
+                  dim: ${dim}
+                  alias: [["conv2"], ["bn2"], []]
+              - name: Residual
+                type: Add
+                in_branch: [0, 1]
+              - name: ReLU
+                type: ReLU
+
+      - name: ResNetStage_2
+        alias: [layer3]
+        modules:
+          - name: BottleNeckBlock_0
+            alias: ["0"]
+            modules:
+              - name: Shortcut
+                type: ConvBlock
+                in_branch: [1]
+                out_branch: [1]
+                alias: [downsample]
+                args:
+                  in_channels: ${widths.2}
+                  out_channels: ${widths.3}
+                  block_configs: ${shortcut_configs}
+                  dim: ${dim}
+                  alias: [["0"], ["1"], []]
+              - name: ConvBlock_0
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.2}
+                  out_channels: ${widths.3}
+                  block_configs: ${conv3_relu_stride2}
+                  dim: ${dim}
+                  alias: [["conv1"], ["bn1"], []]
+              - name: ConvBlock_1
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.3}
+                  out_channels: ${widths.3}
+                  block_configs: ${conv3_linear_stride1}
+                  dim: ${dim}
+                  alias: [["conv2"], ["bn2"], []]
+              - name: Residual
+                type: Add
+                in_branch: [0, 1]
+              - name: ReLU
+                type: ReLU
+          - name: BottleNeckBlock_1
+            alias: ["1"]
+            modules:
+              - name: ConvBlock_0
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.3}
+                  out_channels: ${widths.3}
+                  block_configs: ${conv3_relu_stride1}
+                  dim: ${dim}
+                  alias: [["conv1"], ["bn1"], []]
+              - name: ConvBlock_1
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.3}
+                  out_channels: ${widths.3}
+                  block_configs: ${conv3_linear_stride1}
+                  dim: ${dim}
+                  alias: [["conv2"], ["bn2"], []]
+              - name: Residual
+                type: Add
+                in_branch: [0, 1]
+              - name: ReLU
+                type: ReLU
+
+      - name: ResNetStage_3
+        alias: [layer4]
+        modules:
+          - name: BottleNeckBlock_0
+            alias: ["0"]
+            modules:
+              - name: Shortcut
+                type: ConvBlock
+                in_branch: [1]
+                out_branch: [1]
+                alias: [downsample]
+                args:
+                  in_channels: ${widths.3}
+                  out_channels: ${widths.4}
+                  block_configs: ${shortcut_configs}
+                  dim: ${dim}
+                  alias: [["0"], ["1"], []]
+              - name: ConvBlock_0
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.3}
+                  out_channels: ${widths.4}
+                  block_configs: ${conv3_relu_stride2}
+                  dim: ${dim}
+                  alias: [["conv1"], ["bn1"], []]
+              - name: ConvBlock_1
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.4}
+                  out_channels: ${widths.4}
+                  block_configs: ${conv3_linear_stride1}
+                  dim: ${dim}
+                  alias: [["conv2"], ["bn2"], []]
+              - name: Residual
+                type: Add
+                in_branch: [0, 1]
+              - name: ReLU
+                type: ReLU
+          - name: BottleNeckBlock_1
+            alias: ["1"]
+            modules:
+              - name: ConvBlock_0
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.4}
+                  out_channels: ${widths.4}
+                  block_configs: ${conv3_relu_stride1}
+                  dim: ${dim}
+                  alias: [["conv1"], ["bn1"], []]
+              - name: ConvBlock_1
+                type: ConvBlock
+                args:
+                  in_channels: ${widths.4}
+                  out_channels: ${widths.4}
+                  block_configs: ${conv3_linear_stride1}
+                  dim: ${dim}
+                  alias: [["conv2"], ["bn2"], []]
+              - name: Residual
+                type: Add
+                in_branch: [0, 1]
+              - name: ReLU
+                type: ReLU
+
+  - name: Head
+    modules:
+      - name: AdaptiveAvgPool
+        type: AdaptiveAvgPool
+        args:
+          dim: ${dim}
+          output_size: 1
+      - name: Flatten
+        type: Flatten
+        args:
+          start_dim: 1
+      - name: Linear
+        type: Linear
+        pretrained: false
+        alias: [fc]
+        args:
+          in_features: ${widths.4}
+          out_features: ${num_classes}
+      - name: Unsqueeze
+        type: Unsqueeze
+        args:
+          dim: 2

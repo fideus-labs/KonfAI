@@ -1,0 +1,494 @@
+# Declarative KonfAI SegResNet (plain, without the VAE branch).
+#
+# Architecture: SegResNet, the residual encoder-decoder that won the BraTS 2018
+# challenge (Myronenko, "3D MRI brain tumor segmentation using autoencoder
+# regularization", MICCAI BrainLes 2018, arXiv:1810.11654). A ResNet-style
+# encoder (stages of pre-activation residual blocks, GroupNorm + ReLU, strided
+# convolution for downsampling) feeds a decoder that halves the channels with a
+# 1x1 conv, upsamples, ADDS the matching encoder skip (element-wise, not
+# concat), and refines with a residual block; a GroupNorm + ReLU + 1x1 conv
+# segmentation head produces the logits. This is the plain SegResNet, NOT
+# SegResNetVAE: the autoencoder regularization branch is intentionally omitted.
+#
+# This graph is assembled entirely from KonfAI's curated model-builder registry
+# (Conv / GroupNorm / ReLU / Upsample / Add / Softmax / ArgMax) - no code is
+# imported or executed. Use it with `classpath: default|SegResNet.yml` (or point
+# a ModelLoader at this file directly).
+#
+# Fixed topology (matches MONAI's SegResNet defaults): init_filters 8, feature
+# widths [8, 16, 32, 64], blocks_down (1, 2, 2, 4), blocks_up (1, 1, 1),
+# GroupNorm(num_groups=8), non-trainable interpolation upsampling. The tree is
+# written out explicitly, so `channels` must keep exactly 4 entries and the
+# per-stage residual-block counts are structural (not a parameter).
+#
+# VALIDATION LEVEL: weight-exact vs MONAI 1.4.0 SegResNet. The registry graph
+# reproduces MONAI's pre-activation ResBlock (norm-act-conv, norm-act-conv, then
+# +identity), its bias-free convolutions, its GroupNorm(num_groups=8) and its
+# align_corners=False linear upsampling exactly; transferring MONAI's state_dict
+# by shape yields torch.allclose logits in 2D and 3D. KonfAI additionally appends
+# a Softmax + ArgMax inference head after the logits conv (KonfAI segmentation
+# convention); equivalence with MONAI is asserted at the logits conv, before that
+# head. See tests/unit/test_yaml_model_segresnet.py.
+name: SegResNet
+
+parameters:
+  dim: 3
+  in_channels: 1
+  channels: [8, 16, 32, 64]
+  num_groups: 8
+  nb_class: 2
+  # Non-trainable interpolation mode for the decoder upsampling: use "trilinear"
+  # for dim 3 and "bilinear" for dim 2 (MONAI's UpSample NONTRAINABLE default).
+  upsample_mode: trilinear
+
+network:
+  in_channels: ${in_channels}
+  dim: ${dim}
+
+modules:
+  # ----- Stem -------------------------------------------------------------
+  - name: ConvInit
+    type: Conv
+    in_branch: [0]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${in_channels}
+      out_channels: ${channels.0}
+      kernel_size: 3
+      stride: 1
+      padding: 1
+      bias: false
+
+  # ----- Encoder ----------------------------------------------------------
+  # Stage 0 (width 8, 1 residual block, no downsampling). Output -> skip0.
+  - name: Enc0_ResBlock0
+    in_branch: [m]
+    out_branch: [skip0]
+    modules: &resblock8
+      - name: Norm1
+        type: GroupNorm
+        in_branch: [0]
+        out_branch: [1]
+        args:
+          num_groups: ${num_groups}
+          num_channels: ${channels.0}
+      - name: Act1
+        type: ReLU
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          inplace: false
+      - name: Conv1
+        type: Conv
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.0}
+          out_channels: ${channels.0}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: false
+      - name: Norm2
+        type: GroupNorm
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          num_groups: ${num_groups}
+          num_channels: ${channels.0}
+      - name: Act2
+        type: ReLU
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          inplace: false
+      - name: Conv2
+        type: Conv
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.0}
+          out_channels: ${channels.0}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: false
+      - name: Add
+        type: Add
+        in_branch: [0, 1]
+        out_branch: [0]
+
+  # Stage 1 (width 16, 2 residual blocks, strided-conv downsampling). -> skip1.
+  - name: Enc1_Down
+    type: Conv
+    in_branch: [skip0]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.0}
+      out_channels: ${channels.1}
+      kernel_size: 3
+      stride: 2
+      padding: 1
+      bias: false
+  - name: Enc1_ResBlock0
+    in_branch: [m]
+    out_branch: [m]
+    modules: &resblock16
+      - name: Norm1
+        type: GroupNorm
+        in_branch: [0]
+        out_branch: [1]
+        args:
+          num_groups: ${num_groups}
+          num_channels: ${channels.1}
+      - name: Act1
+        type: ReLU
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          inplace: false
+      - name: Conv1
+        type: Conv
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.1}
+          out_channels: ${channels.1}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: false
+      - name: Norm2
+        type: GroupNorm
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          num_groups: ${num_groups}
+          num_channels: ${channels.1}
+      - name: Act2
+        type: ReLU
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          inplace: false
+      - name: Conv2
+        type: Conv
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.1}
+          out_channels: ${channels.1}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: false
+      - name: Add
+        type: Add
+        in_branch: [0, 1]
+        out_branch: [0]
+  - name: Enc1_ResBlock1
+    in_branch: [m]
+    out_branch: [skip1]
+    modules: *resblock16
+
+  # Stage 2 (width 32, 2 residual blocks, strided-conv downsampling). -> skip2.
+  - name: Enc2_Down
+    type: Conv
+    in_branch: [skip1]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.1}
+      out_channels: ${channels.2}
+      kernel_size: 3
+      stride: 2
+      padding: 1
+      bias: false
+  - name: Enc2_ResBlock0
+    in_branch: [m]
+    out_branch: [m]
+    modules: &resblock32
+      - name: Norm1
+        type: GroupNorm
+        in_branch: [0]
+        out_branch: [1]
+        args:
+          num_groups: ${num_groups}
+          num_channels: ${channels.2}
+      - name: Act1
+        type: ReLU
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          inplace: false
+      - name: Conv1
+        type: Conv
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.2}
+          out_channels: ${channels.2}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: false
+      - name: Norm2
+        type: GroupNorm
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          num_groups: ${num_groups}
+          num_channels: ${channels.2}
+      - name: Act2
+        type: ReLU
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          inplace: false
+      - name: Conv2
+        type: Conv
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.2}
+          out_channels: ${channels.2}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: false
+      - name: Add
+        type: Add
+        in_branch: [0, 1]
+        out_branch: [0]
+  - name: Enc2_ResBlock1
+    in_branch: [m]
+    out_branch: [skip2]
+    modules: *resblock32
+
+  # Stage 3 / bottleneck (width 64, 4 residual blocks, strided-conv down). -> m.
+  - name: Enc3_Down
+    type: Conv
+    in_branch: [skip2]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.2}
+      out_channels: ${channels.3}
+      kernel_size: 3
+      stride: 2
+      padding: 1
+      bias: false
+  - name: Enc3_ResBlock0
+    in_branch: [m]
+    out_branch: [m]
+    modules: &resblock64
+      - name: Norm1
+        type: GroupNorm
+        in_branch: [0]
+        out_branch: [1]
+        args:
+          num_groups: ${num_groups}
+          num_channels: ${channels.3}
+      - name: Act1
+        type: ReLU
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          inplace: false
+      - name: Conv1
+        type: Conv
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.3}
+          out_channels: ${channels.3}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: false
+      - name: Norm2
+        type: GroupNorm
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          num_groups: ${num_groups}
+          num_channels: ${channels.3}
+      - name: Act2
+        type: ReLU
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          inplace: false
+      - name: Conv2
+        type: Conv
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.3}
+          out_channels: ${channels.3}
+          kernel_size: 3
+          stride: 1
+          padding: 1
+          bias: false
+      - name: Add
+        type: Add
+        in_branch: [0, 1]
+        out_branch: [0]
+  - name: Enc3_ResBlock1
+    in_branch: [m]
+    out_branch: [m]
+    modules: *resblock64
+  - name: Enc3_ResBlock2
+    in_branch: [m]
+    out_branch: [m]
+    modules: *resblock64
+  - name: Enc3_ResBlock3
+    in_branch: [m]
+    out_branch: [m]
+    modules: *resblock64
+
+  # ----- Decoder ----------------------------------------------------------
+  # Up stage 0: 64 -> 32, upsample, + skip2, 1 residual block.
+  - name: Dec0_UpConv
+    type: Conv
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.3}
+      out_channels: ${channels.2}
+      kernel_size: 1
+      stride: 1
+      padding: 0
+      bias: false
+  - name: Dec0_Up
+    type: Upsample
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      scale_factor: 2
+      mode: ${upsample_mode}
+      align_corners: false
+  - name: Dec0_Add
+    type: Add
+    in_branch: [m, skip2]
+    out_branch: [m]
+  - name: Dec0_ResBlock0
+    in_branch: [m]
+    out_branch: [m]
+    modules: *resblock32
+
+  # Up stage 1: 32 -> 16, upsample, + skip1, 1 residual block.
+  - name: Dec1_UpConv
+    type: Conv
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.2}
+      out_channels: ${channels.1}
+      kernel_size: 1
+      stride: 1
+      padding: 0
+      bias: false
+  - name: Dec1_Up
+    type: Upsample
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      scale_factor: 2
+      mode: ${upsample_mode}
+      align_corners: false
+  - name: Dec1_Add
+    type: Add
+    in_branch: [m, skip1]
+    out_branch: [m]
+  - name: Dec1_ResBlock0
+    in_branch: [m]
+    out_branch: [m]
+    modules: *resblock16
+
+  # Up stage 2: 16 -> 8, upsample, + skip0, 1 residual block.
+  - name: Dec2_UpConv
+    type: Conv
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.1}
+      out_channels: ${channels.0}
+      kernel_size: 1
+      stride: 1
+      padding: 0
+      bias: false
+  - name: Dec2_Up
+    type: Upsample
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      scale_factor: 2
+      mode: ${upsample_mode}
+      align_corners: false
+  - name: Dec2_Add
+    type: Add
+    in_branch: [m, skip0]
+    out_branch: [m]
+  - name: Dec2_ResBlock0
+    in_branch: [m]
+    out_branch: [m]
+    modules: *resblock8
+
+  # ----- Segmentation head ------------------------------------------------
+  # GroupNorm + ReLU + 1x1 conv logits (MONAI conv_final), then KonfAI's
+  # Softmax + ArgMax inference head. `Head:Conv` is the logits module.
+  - name: Head
+    in_branch: [m]
+    out_branch: [-1]
+    modules:
+      - name: Norm
+        type: GroupNorm
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          num_groups: ${num_groups}
+          num_channels: ${channels.0}
+      - name: Act
+        type: ReLU
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          inplace: false
+      - name: Conv
+        type: Conv
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          dim: ${dim}
+          in_channels: ${channels.0}
+          out_channels: ${nb_class}
+          kernel_size: 1
+          stride: 1
+          padding: 0
+          bias: true
+      - name: Softmax
+        type: Softmax
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          dim: 1

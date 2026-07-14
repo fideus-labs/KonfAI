@@ -16,7 +16,7 @@
 
 import torch
 import torch.nn.functional as F
-from konfai.models.segmentation import UNet
+from konfai.models.python.segmentation import UNet
 from konfai.network import blocks, network
 from torch.nn.parameter import Parameter
 
@@ -43,7 +43,7 @@ class VoxelMorph(network.Network):
         rigid: bool = False,
     ):
         if dim != 2:
-            # Experimental: SpatialTransformer / ResizeTransform / VecInt are 2-D-hardcoded, so the
+            # SpatialTransformer / ResizeTransform / VecInt are 2-D-hardcoded, so the
             # 3-D default (dim=3, shape=[192, 192, 192]) crashes at forward. Fail fast with a clear
             # message until the warping components are made ndim-generic.
             raise NotImplementedError(

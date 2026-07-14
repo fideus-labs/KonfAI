@@ -1,0 +1,410 @@
+# Declarative KonfAI UNETR (UNEt TRansformer) for volumetric segmentation.
+#
+# Architecture: Hatamizadeh et al., "UNETR: Transformers for 3D Medical Image Segmentation", WACV 2022
+# (arXiv:2103.10504). A ViT encoder tokenises the volume into 16^3 patches and processes them with a stack of
+# pre-norm Transformer layers; the token sequences produced after selected layers (here layers 3, 6, 9 and the
+# final normalised output) are reshaped back into feature volumes and fed, through a CNN decoder with
+# transpose-convolution upsampling and skip connections, into a segmentation map at the input resolution.
+#
+# Built entirely from the curated model-builder registry (no code execution / no eval): the ViT patch
+# embedding (strided ``Conv`` + ``Flatten`` + ``Permute`` + ``PositionalEmbedding``), the transformer layers
+# (``LayerNorm`` + ``MultiHeadSelfAttention`` + ``Linear``/``GELU`` MLP + ``Add`` residuals), token<->volume
+# reshapes (``View`` + ``Permute``, the exact analogue of MONAI's ``proj_feat``), transpose-convolution
+# upsampling (``ConvTranspose``), skip fusion (``Concat``) and residual convolution blocks (``ResBlock``).
+#
+# Usage: ``classpath: default|UNETR.yml`` (or a local path). Default hyperparameters are deliberately small
+# and 3D: img 32^3, patch 16 (grid 2^3, 8 tokens), hidden_size 64, 4 heads worth of width (num_heads 8),
+# feature_size 16, 12 transformer layers, out_channels 2. Tunable via ``parameters`` (``in_channels``,
+# ``out_channels``, ``hidden_size``, ``num_heads``, ``mlp_dim``, ``feature_size`` widths f1/f2/f4/f8). For a
+# 2D model override ``dim``, ``num_tokens``, ``proj_shape`` and ``proj_axes`` (see the test for the values).
+#
+# VALIDATION LEVEL: structural-strict (this file is NOT weight-exact to MONAI's UNETR). The graph builds as a
+# KonfAI ``Network`` and a forward on a fixed 3D (and 2D) input returns a segmentation map at the input
+# resolution with ``out_channels`` channels, and the encoder/skip topology matches MONAI's UNETR
+# (skips taken after transformer layers 3/6/9 and the final norm; four upsampling decoder stages). Its OUTPUT
+# SHAPE is checked equal to MONAI 1.4.0 ``UNETR`` at matching hyperparameters (tests/unit/test_yaml_model_unetr.py).
+# Documented divergences from MONAI's UNETR:
+#   * the residual convolution blocks are KonfAI ``ResBlock`` (Conv-Norm-Act x2 + projected residual + ReLU),
+#     which differ from MONAI's ``UnetResBlock`` in the position of the second activation and in using ReLU
+#     rather than LeakyReLU; normalisation is affine ``InstanceNorm``;
+#   * as with ViT.yml, the learnable positional embedding is a standalone leaf module and the transformer
+#     attention is the ``MultiHeadSelfAttention`` block, so the model is topology-faithful but not a
+#     byte-for-byte weight match of MONAI's checkpoint.
+
+name: UNETR
+
+parameters:
+  dim: 3
+  in_channels: 1
+  out_channels: 2
+  patch_size: 16
+  num_tokens: 8
+  hidden_size: 64
+  num_heads: 8
+  mlp_dim: 128
+  f1: 16
+  f2: 32
+  f4: 64
+  f8: 128
+  cat8: 256
+  proj_shape: [-1, 2, 2, 2, 64]
+  proj_axes: [0, 4, 1, 2, 3]
+  res_configs:
+    - $object: BlockConfig
+      args: &res_block_config
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: false
+        activation: LeakyReLU
+        norm_mode: INSTANCE_AFFINE
+    - $object: BlockConfig
+      args: *res_block_config
+
+network:
+  in_channels: ${in_channels}
+  dim: ${dim}
+
+modules:
+  # ---- preserve the raw input volume for the shallowest skip (encoder1) ----
+  - name: PreserveInput
+    type: Identity
+    in_branch: [0]
+    out_branch: [10]
+
+  # ---- ViT patch embedding: volume -> token sequence ----
+  - name: PatchEmbedding
+    modules:
+      - name: PatchConv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${in_channels}
+          out_channels: ${hidden_size}
+          kernel_size: ${patch_size}
+          stride: ${patch_size}
+          padding: 0
+      - name: Flatten
+        type: Flatten
+        args:
+          start_dim: 2
+      - name: Tokenize
+        type: Permute
+        args:
+          dims: [0, 2, 1]
+      - name: PositionalEmbedding
+        type: PositionalEmbedding
+        args:
+          num_tokens: ${num_tokens}
+          embedding_dim: ${hidden_size}
+
+  # ---- transformer encoder layers (12), tapping the hidden states after layers 3, 6 and 9 ----
+  - name: EncoderLayer_0
+    modules: &encoder_layer
+      - name: Norm1
+        type: LayerNorm
+        in_branch: [0]
+        out_branch: [1]
+        args:
+          normalized_shape: ${hidden_size}
+      - name: Attention
+        type: MultiHeadSelfAttention
+        in_branch: [1]
+        out_branch: [1]
+        args:
+          hidden_size: ${hidden_size}
+          num_heads: ${num_heads}
+      - name: Residual1
+        type: Add
+        in_branch: [0, 1]
+        out_branch: [0]
+      - name: Norm2
+        type: LayerNorm
+        in_branch: [0]
+        out_branch: [1]
+        args:
+          normalized_shape: ${hidden_size}
+      - name: Mlp
+        in_branch: [1]
+        out_branch: [1]
+        modules:
+          - name: Linear1
+            type: Linear
+            args:
+              in_features: ${hidden_size}
+              out_features: ${mlp_dim}
+          - name: Activation
+            type: GELU
+          - name: Linear2
+            type: Linear
+            args:
+              in_features: ${mlp_dim}
+              out_features: ${hidden_size}
+      - name: Residual2
+        type: Add
+        in_branch: [0, 1]
+        out_branch: [0]
+  - name: EncoderLayer_1
+    modules: *encoder_layer
+  - name: EncoderLayer_2
+    modules: *encoder_layer
+  - name: EncoderLayer_3
+    modules: *encoder_layer
+  - name: Skip3
+    in_branch: [0]
+    out_branch: [11]
+    modules: &proj_feat
+      - name: ViewTokens
+        type: View
+        args:
+          size: ${proj_shape}
+      - name: ToVolume
+        type: Permute
+        args:
+          dims: ${proj_axes}
+  - name: EncoderLayer_4
+    modules: *encoder_layer
+  - name: EncoderLayer_5
+    modules: *encoder_layer
+  - name: EncoderLayer_6
+    modules: *encoder_layer
+  - name: Skip6
+    in_branch: [0]
+    out_branch: [12]
+    modules: *proj_feat
+  - name: EncoderLayer_7
+    modules: *encoder_layer
+  - name: EncoderLayer_8
+    modules: *encoder_layer
+  - name: EncoderLayer_9
+    modules: *encoder_layer
+  - name: Skip9
+    in_branch: [0]
+    out_branch: [13]
+    modules: *proj_feat
+  - name: EncoderLayer_10
+    modules: *encoder_layer
+  - name: EncoderLayer_11
+    modules: *encoder_layer
+  - name: Norm
+    type: LayerNorm
+    args:
+      normalized_shape: ${hidden_size}
+  - name: Bottleneck
+    in_branch: [0]
+    out_branch: [0]
+    modules: *proj_feat
+
+  # ---- CNN projection encoders on the tapped hidden states ----
+  - name: Encoder1
+    type: ResBlock
+    in_branch: [10]
+    out_branch: [20]
+    args:
+      in_channels: ${in_channels}
+      out_channels: ${f1}
+      block_configs: ${res_configs}
+      dim: ${dim}
+  - name: Encoder2
+    in_branch: [11]
+    out_branch: [21]
+    modules:
+      - name: TranspInit
+        type: ConvTranspose
+        args:
+          dim: ${dim}
+          in_channels: ${hidden_size}
+          out_channels: ${f2}
+          kernel_size: 2
+          stride: 2
+      - name: Up0_Transp
+        type: ConvTranspose
+        args:
+          dim: ${dim}
+          in_channels: ${f2}
+          out_channels: ${f2}
+          kernel_size: 2
+          stride: 2
+      - name: Up0_Res
+        type: ResBlock
+        args:
+          in_channels: ${f2}
+          out_channels: ${f2}
+          block_configs: ${res_configs}
+          dim: ${dim}
+      - name: Up1_Transp
+        type: ConvTranspose
+        args:
+          dim: ${dim}
+          in_channels: ${f2}
+          out_channels: ${f2}
+          kernel_size: 2
+          stride: 2
+      - name: Up1_Res
+        type: ResBlock
+        args:
+          in_channels: ${f2}
+          out_channels: ${f2}
+          block_configs: ${res_configs}
+          dim: ${dim}
+  - name: Encoder3
+    in_branch: [12]
+    out_branch: [22]
+    modules:
+      - name: TranspInit
+        type: ConvTranspose
+        args:
+          dim: ${dim}
+          in_channels: ${hidden_size}
+          out_channels: ${f4}
+          kernel_size: 2
+          stride: 2
+      - name: Up0_Transp
+        type: ConvTranspose
+        args:
+          dim: ${dim}
+          in_channels: ${f4}
+          out_channels: ${f4}
+          kernel_size: 2
+          stride: 2
+      - name: Up0_Res
+        type: ResBlock
+        args:
+          in_channels: ${f4}
+          out_channels: ${f4}
+          block_configs: ${res_configs}
+          dim: ${dim}
+  - name: Encoder4
+    in_branch: [13]
+    out_branch: [23]
+    modules:
+      - name: TranspInit
+        type: ConvTranspose
+        args:
+          dim: ${dim}
+          in_channels: ${hidden_size}
+          out_channels: ${f8}
+          kernel_size: 2
+          stride: 2
+
+  # ---- CNN decoder: upsample + skip-concat + residual block ----
+  - name: Decoder5
+    in_branch: [0, 23]
+    out_branch: [0]
+    modules:
+      - name: Transp
+        type: ConvTranspose
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          dim: ${dim}
+          in_channels: ${hidden_size}
+          out_channels: ${f8}
+          kernel_size: 2
+          stride: 2
+      - name: Skip
+        type: Concat
+        in_branch: [0, 1]
+        out_branch: [0]
+      - name: Res
+        type: ResBlock
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          in_channels: ${cat8}
+          out_channels: ${f8}
+          block_configs: ${res_configs}
+          dim: ${dim}
+  - name: Decoder4
+    in_branch: [0, 22]
+    out_branch: [0]
+    modules:
+      - name: Transp
+        type: ConvTranspose
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          dim: ${dim}
+          in_channels: ${f8}
+          out_channels: ${f4}
+          kernel_size: 2
+          stride: 2
+      - name: Skip
+        type: Concat
+        in_branch: [0, 1]
+        out_branch: [0]
+      - name: Res
+        type: ResBlock
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          in_channels: ${f8}
+          out_channels: ${f4}
+          block_configs: ${res_configs}
+          dim: ${dim}
+  - name: Decoder3
+    in_branch: [0, 21]
+    out_branch: [0]
+    modules:
+      - name: Transp
+        type: ConvTranspose
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          dim: ${dim}
+          in_channels: ${f4}
+          out_channels: ${f2}
+          kernel_size: 2
+          stride: 2
+      - name: Skip
+        type: Concat
+        in_branch: [0, 1]
+        out_branch: [0]
+      - name: Res
+        type: ResBlock
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          in_channels: ${f4}
+          out_channels: ${f2}
+          block_configs: ${res_configs}
+          dim: ${dim}
+  - name: Decoder2
+    in_branch: [0, 20]
+    out_branch: [0]
+    modules:
+      - name: Transp
+        type: ConvTranspose
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          dim: ${dim}
+          in_channels: ${f2}
+          out_channels: ${f1}
+          kernel_size: 2
+          stride: 2
+      - name: Skip
+        type: Concat
+        in_branch: [0, 1]
+        out_branch: [0]
+      - name: Res
+        type: ResBlock
+        in_branch: [0]
+        out_branch: [0]
+        args:
+          in_channels: ${f2}
+          out_channels: ${f1}
+          block_configs: ${res_configs}
+          dim: ${dim}
+
+  # ---- 1x1 output convolution -> segmentation logits ----
+  - name: Out
+    type: Conv
+    out_branch: [-1]
+    args:
+      dim: ${dim}
+      in_channels: ${f1}
+      out_channels: ${out_channels}
+      kernel_size: 1
+      stride: 1
+      padding: 0

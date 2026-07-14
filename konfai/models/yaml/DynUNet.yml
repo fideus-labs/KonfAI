@@ -1,0 +1,263 @@
+# Declarative KonfAI DynUNet (nnU-Net-style dynamic U-Net).
+#
+# Architecture: an encoder-decoder U-Net in the nnU-Net family. Its signature
+# choices are the ones that dominate medical-segmentation challenges:
+#   * every stage is Conv -> InstanceNorm -> LeakyReLU (NOT BatchNorm+ReLU);
+#   * downsampling is done by a strided 3x3(x3) convolution (stride 2), not a
+#     pooling layer (the first conv of each encoder stage carries the stride);
+#   * upsampling is done by a transpose convolution (stride 2);
+#   * DEEP SUPERVISION: auxiliary 1x1 segmentation heads are attached at the
+#     coarser decoder resolutions and marked terminal with `out_branch: [-1]`,
+#     in addition to the full-resolution head.
+# Canonical reference: Isensee et al., "nnU-Net: a self-configuring method for
+# deep learning-based biomedical image segmentation", Nature Methods 18 (2021);
+# oracle implementation `monai.networks.nets.DynUNet`.
+#
+# Built entirely from KonfAI's curated model-builder registry (ConvBlock with a
+# BlockConfig list driving InstanceNorm + LeakyReLU, Conv, ConvTranspose, Concat,
+# Softmax, ArgMax). No code is executed and no module is imported: the file is
+# safe by construction. InstanceNorm + LeakyReLU is reachable directly through
+# BlockConfig, so no explicit norm/activation modules are needed:
+#   `norm_mode: INSTANCE`  -> InstanceNorm(affine=False, track_running_stats=False)
+#   `activation: LeakyReLU` -> LeakyReLU(negative_slope=0.01)
+# which is exactly MONAI's `norm_name="instance"` / default leakyrelu block.
+#
+# Use it as a KonfAI model classpath:
+#   classpath: default|DynUNet.yml           # shipped catalog copy
+#   classpath: /path/to/DynUNet.yml          # any local copy
+# and override `dim` / `channels` / `nb_class` through the model `parameters`.
+# `channels` is [in, f0, f1, f2, f3]: one input channel count followed by the
+# four encoder feature widths (4 encoder stages -> 3 decoder stages -> 2 deep
+# supervision heads + 1 full-resolution head).
+#
+# VALIDATION LEVEL: weight-exact vs MONAI DynUNet.
+# The backbone parameter list matches MONAI's DynUNet position-by-position
+# (same conv shapes, same order), so MONAI's trained weights transfer into this
+# graph and every segmentation head's logits are `torch.allclose` with MONAI's
+# (see tests/unit/test_yaml_model_dynunet.py). Two deliberate, documented
+# convention differences do NOT affect the logits:
+#   * KonfAI heads append Softmax + ArgMax after the 1x1 logit conv (the catalog
+#     convention, see UNet.yml / NestedUNet.yml); the weight-exact comparison is
+#     made on the head's `Conv` output (the logits), exactly MONAI's UnetOutBlock.
+#   * KonfAI emits each deep-supervision head at its native decoder resolution
+#     (a terminal `out_branch: [-1]`); MONAI upsamples+stacks them in train mode
+#     and drops them in eval. The comparison uses MONAI's pre-upsampling
+#     `heads[i]` tensors, which are byte-identical to the native-resolution heads.
+name: DynUNet
+
+parameters:
+  dim: 3
+  channels: [1, 32, 64, 128, 256]
+  nb_class: 2
+  # Stride-1 pair: Conv(k3,s1) -> InstanceNorm -> LeakyReLU, twice.
+  # Used by the input encoder stage and by every decoder stage.
+  block_configs:
+    - $object: BlockConfig
+      args: &conv_s1
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: false
+        activation: LeakyReLU
+        norm_mode: INSTANCE
+    - $object: BlockConfig
+      args: *conv_s1
+  # Downsampling pair: the FIRST conv is strided (s2) to halve the resolution,
+  # the second is stride-1. This is nnU-Net's strided-conv downsampling.
+  block_configs_down:
+    - $object: BlockConfig
+      args: &conv_s2
+        kernel_size: 3
+        stride: 2
+        padding: 1
+        bias: false
+        activation: LeakyReLU
+        norm_mode: INSTANCE
+    - $object: BlockConfig
+      args: *conv_s1
+
+network:
+  in_channels: ${channels.0}
+  dim: ${dim}
+
+modules:
+  # ----- Encoder (contracting path) -------------------------------------------
+  - name: Encoder0
+    type: ConvBlock
+    out_branch: [enc0]
+    args:
+      in_channels: ${channels.0}
+      out_channels: ${channels.1}
+      block_configs: ${block_configs}
+      dim: ${dim}
+  - name: Encoder1
+    type: ConvBlock
+    in_branch: [enc0]
+    out_branch: [enc1]
+    args:
+      in_channels: ${channels.1}
+      out_channels: ${channels.2}
+      block_configs: ${block_configs_down}
+      dim: ${dim}
+  - name: Encoder2
+    type: ConvBlock
+    in_branch: [enc1]
+    out_branch: [enc2]
+    args:
+      in_channels: ${channels.2}
+      out_channels: ${channels.3}
+      block_configs: ${block_configs_down}
+      dim: ${dim}
+  - name: Bottleneck
+    type: ConvBlock
+    in_branch: [enc2]
+    out_branch: [bottleneck]
+    args:
+      in_channels: ${channels.3}
+      out_channels: ${channels.4}
+      block_configs: ${block_configs_down}
+      dim: ${dim}
+
+  # ----- Decoder (expanding path) ---------------------------------------------
+  # Level 0 (coarsest decoder stage): upsample bottleneck, skip Encoder2.
+  - name: Up0
+    type: ConvTranspose
+    in_branch: [bottleneck]
+    out_branch: [up0]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.4}
+      out_channels: ${channels.3}
+      kernel_size: 2
+      stride: 2
+      bias: false
+  - name: Skip0
+    type: Concat
+    in_branch: [up0, enc2]
+    out_branch: [up0]
+  - name: Decoder0
+    type: ConvBlock
+    in_branch: [up0]
+    out_branch: [dec0]
+    args:
+      in_channels:
+        $multiply: ["${channels.3}", 2]
+      out_channels: ${channels.3}
+      block_configs: ${block_configs}
+      dim: ${dim}
+
+  # Level 1: upsample Decoder0, skip Encoder1.
+  - name: Up1
+    type: ConvTranspose
+    in_branch: [dec0]
+    out_branch: [up1]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.3}
+      out_channels: ${channels.2}
+      kernel_size: 2
+      stride: 2
+      bias: false
+  - name: Skip1
+    type: Concat
+    in_branch: [up1, enc1]
+    out_branch: [up1]
+  - name: Decoder1
+    type: ConvBlock
+    in_branch: [up1]
+    out_branch: [dec1]
+    args:
+      in_channels:
+        $multiply: ["${channels.2}", 2]
+      out_channels: ${channels.2}
+      block_configs: ${block_configs}
+      dim: ${dim}
+
+  # Level 2 (full resolution): upsample Decoder1, skip Encoder0.
+  - name: Up2
+    type: ConvTranspose
+    in_branch: [dec1]
+    out_branch: [up2]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.2}
+      out_channels: ${channels.1}
+      kernel_size: 2
+      stride: 2
+      bias: false
+  - name: Skip2
+    type: Concat
+    in_branch: [up2, enc0]
+    out_branch: [up2]
+  - name: Decoder2
+    type: ConvBlock
+    in_branch: [up2]
+    out_branch: [dec2]
+    args:
+      in_channels:
+        $multiply: ["${channels.1}", 2]
+      out_channels: ${channels.1}
+      block_configs: ${block_configs}
+      dim: ${dim}
+
+  # ----- Segmentation heads (deep supervision) --------------------------------
+  # Main head at full resolution.
+  - name: Head
+    in_branch: [dec2]
+    out_branch: [-1]
+    modules:
+      - name: Conv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${channels.1}
+          out_channels: ${nb_class}
+          kernel_size: 1
+      - name: Softmax
+        type: Softmax
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        args:
+          dim: 1
+  # Deep-supervision head at 1/2 resolution (Decoder1).
+  - name: DeepSupervisionHead_1
+    in_branch: [dec1]
+    out_branch: [-1]
+    modules:
+      - name: Conv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${channels.2}
+          out_channels: ${nb_class}
+          kernel_size: 1
+      - name: Softmax
+        type: Softmax
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        args:
+          dim: 1
+  # Deep-supervision head at 1/4 resolution (Decoder0).
+  - name: DeepSupervisionHead_2
+    in_branch: [dec0]
+    out_branch: [-1]
+    modules:
+      - name: Conv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${channels.3}
+          out_channels: ${nb_class}
+          kernel_size: 1
+      - name: Softmax
+        type: Softmax
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        args:
+          dim: 1

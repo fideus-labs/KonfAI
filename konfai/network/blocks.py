@@ -22,11 +22,16 @@ import warnings
 from collections.abc import Callable
 from enum import Enum
 
-import SimpleITK as sitk
 import torch
+
+try:
+    import SimpleITK as sitk
+except ImportError:
+    sitk = None  # type: ignore[assignment]
 
 from konfai.network import network
 from konfai.utils.config import config
+from konfai.utils.ITK import _require_simpleitk
 
 
 class NormMode(Enum):
@@ -297,6 +302,26 @@ class Multiply(torch.nn.Module):
         return torch.mul(*tensor)
 
 
+class ClipNormalize(torch.nn.Module):
+    """Clip to a stored intensity range, then standardize: ``(clamp(x, min, max) - mean) / std``.
+
+    The four scalars are buffers restored from the checkpoint, not config values, so a
+    per-checkpoint input normalization (e.g. a CT window baked into a trained model) travels
+    with its weights. It has no learnable parameters. Used as a declarative model's first node
+    so that normalization stays part of the model rather than a separate preprocessing step.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("clip_min", torch.empty(1))
+        self.register_buffer("clip_max", torch.empty(1))
+        self.register_buffer("mean", torch.empty(1))
+        self.register_buffer("std", torch.empty(1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (torch.clamp(x, self.clip_min, self.clip_max) - self.mean) / self.std
+
+
 class Concat(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -342,6 +367,7 @@ class Write(torch.nn.Module):
             "remove it from production models.",
             stacklevel=2,
         )
+        _require_simpleitk()
         sitk.WriteImage(sitk.GetImageFromArray(tensor.clone()[0][0].cpu().numpy()), self.path)
         return tensor
 
@@ -518,3 +544,58 @@ class Attention(network.ModuleArgsDict):
         self.add_module("Sigmoid", torch.nn.Sigmoid())
         self.add_module("Upsample", torch.nn.Upsample(scale_factor=2))
         self.add_module("Multiply", Multiply(), in_branch=[2, 0])
+
+
+class PositionalEmbedding(torch.nn.Module):
+    """Add a learnable positional embedding to a token sequence.
+
+    The input is a token sequence shaped ``[B, num_tokens, embedding_dim]`` (batch, sequence, feature),
+    the layout produced by a patch embedding. A single learnable parameter of shape
+    ``[1, num_tokens, embedding_dim]`` is broadcast over the batch and added, giving every token position a
+    trainable offset. This is the ``learnable`` positional encoding of the Vision Transformer; the parameter
+    is registered directly on the module so it is a self-contained, single-purpose building block.
+    """
+
+    def __init__(self, num_tokens: int, embedding_dim: int) -> None:
+        super().__init__()
+        self.positional_embedding = torch.nn.Parameter(torch.zeros(1, num_tokens, embedding_dim))
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor + self.positional_embedding
+
+    def extra_repr(self) -> str:
+        _, num_tokens, embedding_dim = self.positional_embedding.shape
+        return f"num_tokens={num_tokens}, embedding_dim={embedding_dim}"
+
+
+class MultiHeadSelfAttention(torch.nn.Module):
+    """Multi-head self-attention over a token sequence (the Transformer encoder attention).
+
+    Mirrors the self-attention of MONAI's ``SABlock``/ViT in its default configuration: a single packed
+    ``qkv`` linear projects the ``[B, num_tokens, hidden_size]`` sequence into queries, keys and values,
+    scaled dot-product attention is computed per head with scale ``head_dim ** -0.5``, and an ``out_proj``
+    linear mixes the concatenated heads back to ``hidden_size``. ``qkv_bias`` toggles the bias of the packed
+    projection (the ViT default is ``False``); ``out_proj`` always carries a bias. Both projections are child
+    ``Linear`` leaves, so the module is transparent to execution-order weight transfer.
+    """
+
+    def __init__(self, hidden_size: int, num_heads: int, qkv_bias: bool = False) -> None:
+        super().__init__()
+        if hidden_size % num_heads != 0:
+            raise ValueError(f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads}).")
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        self.scale = self.head_dim**-0.5
+        self.qkv = torch.nn.Linear(hidden_size, hidden_size * 3, bias=qkv_bias)
+        self.out_proj = torch.nn.Linear(hidden_size, hidden_size)
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        batch, tokens, hidden = tensor.shape
+        qkv = self.qkv(tensor).reshape(batch, tokens, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        query, key, value = qkv[0], qkv[1], qkv[2]
+        attention = ((query @ key.transpose(-2, -1)) * self.scale).softmax(dim=-1)
+        output = (attention @ value).permute(0, 2, 1, 3).reshape(batch, tokens, hidden)
+        return self.out_proj(output)
+
+    def extra_repr(self) -> str:
+        return f"num_heads={self.num_heads}, head_dim={self.head_dim}"

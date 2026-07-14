@@ -1,0 +1,647 @@
+# Declarative KonfAI V-Net.
+#
+# Architecture: V-Net (Milletari, Navab & Ahmadi, 2016, "V-Net: Fully
+# Convolutional Neural Networks for Volumetric Medical Image Segmentation",
+# arXiv:1606.04797). A 3D residual encoder-decoder for volumetric segmentation:
+# a 16-channel stem, four strided-convolution downsampling stages that double
+# the channel width (16 -> 32 -> 64 -> 128 -> 256), four transpose-convolution
+# upsampling stages, concatenated skip connections, and a residual `Add` around
+# each stage (input repeated to match the stem, and the post-first-activation
+# tensor for the deeper stages). Every stage is a run of 5x5x5 convolutions with
+# BatchNorm and a channel-wise PReLU; the number of convolutions per stage is
+# 1 / 2 / 3 / 2 down and 2 / 2 / 1 / 1 up; the two deepest encoder stages and the
+# two shallowest decoder stages carry dropout (identity at inference).
+#
+# This file is assembled from the curated KonfAI model-builder registry only
+# (Conv / ConvTranspose / BatchNorm / PReLU / Dropout / Concat / Add / ConvBlock
+# / Softmax / ArgMax) — it executes no arbitrary Python.
+#
+# Use it as a model classpath:  `classpath: default|VNet.yml`  (or VNet.yml).
+#
+# VALIDATION LEVEL: weight-exact vs MONAI 1.4.0 `monai.networks.nets.VNet`
+# (spatial_dims=3, act='prelu', bias=False). The two graphs carry the identical
+# 81 parametric leaves in the same execution order; transferring MONAI's weights
+# leaf-by-leaf reproduces its forward output to `torch.allclose` in eval mode.
+# See tests/unit/test_yaml_model_vnet.py. V-Net is inherently 3D but the graph is
+# `dim`-parametrized, so a 2D build also runs for a fast smoke test.
+name: VNet
+
+parameters:
+  dim: 3
+  # [in, stem, /2, /4, /8, /16] channel widths. The stem is fixed at 16 and the
+  # input-repeat residual below hard-codes a 16-way concat, so keep channels[0]=1
+  # and channels[1]=16 for the canonical V-Net (weight-exact vs MONAI).
+  channels: [1, 16, 32, 64, 128, 256]
+  out_channels: 2
+  conv5:
+    - $object: BlockConfig
+      args:
+        kernel_size: 5
+        stride: 1
+        padding: 2
+        bias: false
+        activation: null
+        norm_mode: BATCH
+  conv_down:
+    - $object: BlockConfig
+      args:
+        kernel_size: 2
+        stride: 2
+        padding: 0
+        bias: false
+        activation: null
+        norm_mode: BATCH
+
+network:
+  in_channels: ${channels.0}
+  dim: ${dim}
+
+modules:
+  # --- InputTransition: 1 -> 16, residual add of the input repeated 16x -------
+  - name: in_conv
+    type: ConvBlock
+    in_branch: [0]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.0}
+      out_channels: ${channels.1}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: in_repeat
+    type: Concat
+    in_branch: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    out_branch: [r]
+  - name: in_add
+    type: Add
+    in_branch: [m, r]
+    out_branch: [m]
+  - name: in_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [e16]
+    args:
+      num_parameters: ${channels.1}
+
+  # --- DownTransition 16 -> 32 (1 conv, no dropout) ---------------------------
+  - name: d32_down
+    type: ConvBlock
+    in_branch: [e16]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.1}
+      out_channels: ${channels.2}
+      block_configs: ${conv_down}
+      dim: ${dim}
+  - name: d32_act1
+    type: PReLU
+    in_branch: [m]
+    out_branch: [r]
+    args:
+      num_parameters: ${channels.2}
+  - name: d32_op0_conv
+    type: ConvBlock
+    in_branch: [r]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.2}
+      out_channels: ${channels.2}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: d32_op0_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.2}
+  - name: d32_add
+    type: Add
+    in_branch: [m, r]
+    out_branch: [m]
+  - name: d32_act2
+    type: PReLU
+    in_branch: [m]
+    out_branch: [e32]
+    args:
+      num_parameters: ${channels.2}
+
+  # --- DownTransition 32 -> 64 (2 convs, no dropout) --------------------------
+  - name: d64_down
+    type: ConvBlock
+    in_branch: [e32]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.2}
+      out_channels: ${channels.3}
+      block_configs: ${conv_down}
+      dim: ${dim}
+  - name: d64_act1
+    type: PReLU
+    in_branch: [m]
+    out_branch: [r]
+    args:
+      num_parameters: ${channels.3}
+  - name: d64_op0_conv
+    type: ConvBlock
+    in_branch: [r]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.3}
+      out_channels: ${channels.3}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: d64_op0_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.3}
+  - name: d64_op1_conv
+    type: ConvBlock
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.3}
+      out_channels: ${channels.3}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: d64_op1_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.3}
+  - name: d64_add
+    type: Add
+    in_branch: [m, r]
+    out_branch: [m]
+  - name: d64_act2
+    type: PReLU
+    in_branch: [m]
+    out_branch: [e64]
+    args:
+      num_parameters: ${channels.3}
+
+  # --- DownTransition 64 -> 128 (3 convs, dropout) ----------------------------
+  - name: d128_down
+    type: ConvBlock
+    in_branch: [e64]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.3}
+      out_channels: ${channels.4}
+      block_configs: ${conv_down}
+      dim: ${dim}
+  - name: d128_act1
+    type: PReLU
+    in_branch: [m]
+    out_branch: [r]
+    args:
+      num_parameters: ${channels.4}
+  - name: d128_drop
+    type: Dropout
+    in_branch: [r]
+    out_branch: [m]
+    args:
+      p: 0.5
+  - name: d128_op0_conv
+    type: ConvBlock
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.4}
+      out_channels: ${channels.4}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: d128_op0_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.4}
+  - name: d128_op1_conv
+    type: ConvBlock
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.4}
+      out_channels: ${channels.4}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: d128_op1_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.4}
+  - name: d128_op2_conv
+    type: ConvBlock
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.4}
+      out_channels: ${channels.4}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: d128_op2_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.4}
+  - name: d128_add
+    type: Add
+    in_branch: [m, r]
+    out_branch: [m]
+  - name: d128_act2
+    type: PReLU
+    in_branch: [m]
+    out_branch: [e128]
+    args:
+      num_parameters: ${channels.4}
+
+  # --- DownTransition 128 -> 256 (2 convs, dropout) ---------------------------
+  - name: d256_down
+    type: ConvBlock
+    in_branch: [e128]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.4}
+      out_channels: ${channels.5}
+      block_configs: ${conv_down}
+      dim: ${dim}
+  - name: d256_act1
+    type: PReLU
+    in_branch: [m]
+    out_branch: [r]
+    args:
+      num_parameters: ${channels.5}
+  - name: d256_drop
+    type: Dropout
+    in_branch: [r]
+    out_branch: [m]
+    args:
+      p: 0.5
+  - name: d256_op0_conv
+    type: ConvBlock
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.5}
+      out_channels: ${channels.5}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: d256_op0_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.5}
+  - name: d256_op1_conv
+    type: ConvBlock
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.5}
+      out_channels: ${channels.5}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: d256_op1_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.5}
+  - name: d256_add
+    type: Add
+    in_branch: [m, r]
+    out_branch: [m]
+  - name: d256_act2
+    type: PReLU
+    in_branch: [m]
+    out_branch: [e256]
+    args:
+      num_parameters: ${channels.5}
+
+  # --- UpTransition 256 -> 256 (up_conv 256->128, cat skip 128, 2 convs) ------
+  - name: u256_drop_x
+    type: Dropout
+    in_branch: [e256]
+    out_branch: [m]
+    args:
+      p: 0.5
+  - name: u256_drop_skip
+    type: Dropout
+    in_branch: [e128]
+    out_branch: [k]
+    args:
+      p: 0.5
+  - name: u256_up
+    type: ConvTranspose
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.5}
+      out_channels: ${channels.4}
+      kernel_size: 2
+      stride: 2
+      bias: true
+  - name: u256_bn
+    type: BatchNorm
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      num_features: ${channels.4}
+  - name: u256_act1
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.4}
+  - name: u256_cat
+    type: Concat
+    in_branch: [m, k]
+    out_branch: [r]
+  - name: u256_op0_conv
+    type: ConvBlock
+    in_branch: [r]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.5}
+      out_channels: ${channels.5}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: u256_op0_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.5}
+  - name: u256_op1_conv
+    type: ConvBlock
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.5}
+      out_channels: ${channels.5}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: u256_op1_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.5}
+  - name: u256_add
+    type: Add
+    in_branch: [m, r]
+    out_branch: [m]
+  - name: u256_act2
+    type: PReLU
+    in_branch: [m]
+    out_branch: [d256]
+    args:
+      num_parameters: ${channels.5}
+
+  # --- UpTransition 256 -> 128 (up_conv 256->64, cat skip 64, 2 convs) --------
+  - name: u128_drop_x
+    type: Dropout
+    in_branch: [d256]
+    out_branch: [m]
+    args:
+      p: 0.5
+  - name: u128_drop_skip
+    type: Dropout
+    in_branch: [e64]
+    out_branch: [k]
+    args:
+      p: 0.5
+  - name: u128_up
+    type: ConvTranspose
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.5}
+      out_channels: ${channels.3}
+      kernel_size: 2
+      stride: 2
+      bias: true
+  - name: u128_bn
+    type: BatchNorm
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      num_features: ${channels.3}
+  - name: u128_act1
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.3}
+  - name: u128_cat
+    type: Concat
+    in_branch: [m, k]
+    out_branch: [r]
+  - name: u128_op0_conv
+    type: ConvBlock
+    in_branch: [r]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.4}
+      out_channels: ${channels.4}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: u128_op0_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.4}
+  - name: u128_op1_conv
+    type: ConvBlock
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.4}
+      out_channels: ${channels.4}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: u128_op1_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.4}
+  - name: u128_add
+    type: Add
+    in_branch: [m, r]
+    out_branch: [m]
+  - name: u128_act2
+    type: PReLU
+    in_branch: [m]
+    out_branch: [d128]
+    args:
+      num_parameters: ${channels.4}
+
+  # --- UpTransition 128 -> 64 (up_conv 128->32, cat skip 32, 1 conv) ----------
+  - name: u64_drop_skip
+    type: Dropout
+    in_branch: [e32]
+    out_branch: [k]
+    args:
+      p: 0.5
+  - name: u64_up
+    type: ConvTranspose
+    in_branch: [d128]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.4}
+      out_channels: ${channels.2}
+      kernel_size: 2
+      stride: 2
+      bias: true
+  - name: u64_bn
+    type: BatchNorm
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      num_features: ${channels.2}
+  - name: u64_act1
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.2}
+  - name: u64_cat
+    type: Concat
+    in_branch: [m, k]
+    out_branch: [r]
+  - name: u64_op0_conv
+    type: ConvBlock
+    in_branch: [r]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.3}
+      out_channels: ${channels.3}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: u64_op0_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.3}
+  - name: u64_add
+    type: Add
+    in_branch: [m, r]
+    out_branch: [m]
+  - name: u64_act2
+    type: PReLU
+    in_branch: [m]
+    out_branch: [d64]
+    args:
+      num_parameters: ${channels.3}
+
+  # --- UpTransition 64 -> 32 (up_conv 64->16, cat skip 16, 1 conv) ------------
+  - name: u32_drop_skip
+    type: Dropout
+    in_branch: [e16]
+    out_branch: [k]
+    args:
+      p: 0.5
+  - name: u32_up
+    type: ConvTranspose
+    in_branch: [d64]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      in_channels: ${channels.3}
+      out_channels: ${channels.1}
+      kernel_size: 2
+      stride: 2
+      bias: true
+  - name: u32_bn
+    type: BatchNorm
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      dim: ${dim}
+      num_features: ${channels.1}
+  - name: u32_act1
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.1}
+  - name: u32_cat
+    type: Concat
+    in_branch: [m, k]
+    out_branch: [r]
+  - name: u32_op0_conv
+    type: ConvBlock
+    in_branch: [r]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.2}
+      out_channels: ${channels.2}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: u32_op0_act
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${channels.2}
+  - name: u32_add
+    type: Add
+    in_branch: [m, r]
+    out_branch: [m]
+  - name: u32_act2
+    type: PReLU
+    in_branch: [m]
+    out_branch: [d32]
+    args:
+      num_parameters: ${channels.2}
+
+  # --- OutputTransition: 32 -> out_channels, 1x1 head, softmax ----------------
+  - name: out_conv
+    type: ConvBlock
+    in_branch: [d32]
+    out_branch: [m]
+    args:
+      in_channels: ${channels.2}
+      out_channels: ${out_channels}
+      block_configs: ${conv5}
+      dim: ${dim}
+  - name: out_act1
+    type: PReLU
+    in_branch: [m]
+    out_branch: [m]
+    args:
+      num_parameters: ${out_channels}
+  - name: out_conv2
+    type: Conv
+    in_branch: [m]
+    out_branch: [logits]
+    args:
+      dim: ${dim}
+      in_channels: ${out_channels}
+      out_channels: ${out_channels}
+      kernel_size: 1
+  - name: Head
+    in_branch: [logits]
+    out_branch: [-1]
+    modules:
+      - name: Softmax
+        type: Softmax
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        args:
+          dim: 1

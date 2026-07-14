@@ -1,0 +1,290 @@
+# Declarative KonfAI PlainConvUNet -- weight-exact with nnU-Net's plain U-Net.
+#
+# This graph reproduces, module-for-module and in forward-execution order, the
+# reference `dynamic_network_architectures.architectures.unet.PlainConvUNet`
+# (the "plain conv" nnU-Net backbone). This is the architecture family used by
+# nnU-Net, TotalSegmentator and MRSeg -- they are all PlainConvUNet instances,
+# differing only in depth / feature widths / strides / class count. Because the
+# weighted leaves (Conv + InstanceNorm + ConvTranspose) execute in exactly the
+# same sequence as the reference, a REAL nnU-Net checkpoint loads straight into
+# this KonfAI model through the execution-order bridge
+# `konfai.utils.pretrained.transfer_weights_by_execution_order` (see
+# tests/unit/test_yaml_model_plainconvunet.py, which transfers a real
+# PlainConvUNet's weights in and checks the logits are `torch.allclose`).
+#
+# nnU-Net signature reproduced here (Isensee et al., Nature Methods 18, 2021):
+#   * every conv block is Conv -> InstanceNorm(affine=True) -> LeakyReLU(0.01),
+#     with conv_bias=True -- i.e. `norm_mode: INSTANCE_AFFINE`, `bias: true`,
+#     `activation: LeakyReLU`. INSTANCE_AFFINE maps to
+#     InstanceNorm(affine=True, track_running_stats=False), byte-for-byte
+#     nnU-Net's `norm_op=InstanceNorm3d, norm_op_kwargs={"affine": True}`;
+#   * downsampling is a STRIDED convolution (the first conv of each encoder
+#     stage carries that stage's stride; stage 0 keeps stride 1 = full res) --
+#     never a pooling layer;
+#   * upsampling is a transpose convolution whose kernel size AND stride both
+#     equal the matching encoder stride (nnU-Net's
+#     `transpconv_op(c_in, c_out, stride, stride, bias=conv_bias)`), followed by
+#     a concat of the encoder skip (transpose output FIRST, then skip), then the
+#     decoder conv blocks;
+#   * a single 1x1 segmentation head at full resolution (deep_supervision=False:
+#     nnU-Net returns only the highest-resolution head, raw logits).
+#
+# ANISOTROPIC STRIDES: `strides` accepts BOTH isotropic ints (e.g. 2) AND
+# per-axis lists (e.g. [1, 2, 2] or [2, 1, 2]) per stage, so real
+# TotalSegmentator / MRSeg configs (which downsample anisotropically) load
+# unchanged. A stride entry is passed straight through to the Conv / transpose,
+# so `strides: [1, [1, 2, 2], [2, 2, 2], [2, 2, 2]]` is valid.
+#
+# FIXED TOPOLOGY: this template is a 4-stage PlainConvUNet with 2 conv blocks
+# per encoder stage and 2 per decoder stage (`n_conv_per_stage = 2`,
+# `n_conv_per_stage_decoder = 2` -- nnU-Net's default for 3D full-res, and the
+# value used by TotalSegmentator and MRSeg). A declarative YAML cannot loop, so
+# the number of stages and the per-stage conv count are structural: the two
+# `n_conv_per_stage*` parameters are listed for documentation and MUST stay 2
+# for this file. To load a checkpoint with a different depth, replicate the
+# encoder/decoder stage pattern below (the block wiring is identical at every
+# depth); everything else (feature widths, strides, classes) is parametric.
+#
+# Use it as a KonfAI model classpath:
+#   classpath: default|PlainConvUNet.yml     # shipped catalog copy
+#   classpath: /path/to/PlainConvUNet.yml    # any local copy
+# and override `dim` / `in_channels` / `features_per_stage` / `strides` /
+# `num_classes` through the model `parameters`.
+#
+# VALIDATION LEVEL: weight-exact vs dynamic_network_architectures PlainConvUNet.
+# The 32 weighted leaves (16 encoder + 15 decoder + 1 head) pair one-to-one with
+# the reference in forward-execution order and with identical shapes, so an
+# nnU-Net checkpoint transfers in and the KonfAI logits are `torch.allclose`
+# with the reference output (tests cover both isotropic and anisotropic
+# strides). Following the catalog convention (UNet.yml / NestedUNet.yml /
+# DynUNet.yml), the head appends Softmax + ArgMax after the 1x1 logit conv; the
+# weight-exact comparison point is the head's `Conv` output (the raw logits),
+# which is exactly nnU-Net's segmentation output.
+name: PlainConvUNet
+
+parameters:
+  dim: 3
+  in_channels: 1
+  # Encoder feature width per stage [f0, f1, f2, f3]; f3 is the bottleneck.
+  features_per_stage: [8, 16, 32, 64]
+  # Per-stage stride. Entry 0 is the full-resolution stage (stride 1). Each entry
+  # may be an int (isotropic) or a per-axis list (anisotropic), e.g.
+  # [1, [1, 2, 2], [2, 2, 2], [2, 2, 2]] for TotalSegmentator/MRSeg-style configs.
+  strides: [1, 2, 2, 2]
+  num_classes: 2
+  # Documentation only -- this fixed-topology template implements nnU-Net's
+  # default of 2 conv blocks per encoder and decoder stage. Must stay 2.
+  n_conv_per_stage: 2
+  n_conv_per_stage_decoder: 2
+
+  # Conv -> InstanceNorm(affine=True) -> LeakyReLU(0.01), conv_bias=True.
+  # Stride-1 variant, reused by every second encoder conv and by both decoder
+  # convs of each stage.
+  conv_block_s1: &conv_block_s1
+    kernel_size: 3
+    stride: 1
+    padding: 1
+    bias: true
+    activation: LeakyReLU
+    norm_mode: INSTANCE_AFFINE
+
+  # Encoder stage block lists. The FIRST conv of each stage carries that stage's
+  # stride (nnU-Net strided-conv downsampling); the second conv is stride 1.
+  enc_blocks_0:
+    - $object: BlockConfig
+      args:
+        kernel_size: 3
+        stride: ${strides.0}
+        padding: 1
+        bias: true
+        activation: LeakyReLU
+        norm_mode: INSTANCE_AFFINE
+    - $object: BlockConfig
+      args: *conv_block_s1
+  enc_blocks_1:
+    - $object: BlockConfig
+      args:
+        kernel_size: 3
+        stride: ${strides.1}
+        padding: 1
+        bias: true
+        activation: LeakyReLU
+        norm_mode: INSTANCE_AFFINE
+    - $object: BlockConfig
+      args: *conv_block_s1
+  enc_blocks_2:
+    - $object: BlockConfig
+      args:
+        kernel_size: 3
+        stride: ${strides.2}
+        padding: 1
+        bias: true
+        activation: LeakyReLU
+        norm_mode: INSTANCE_AFFINE
+    - $object: BlockConfig
+      args: *conv_block_s1
+  enc_blocks_3:
+    - $object: BlockConfig
+      args:
+        kernel_size: 3
+        stride: ${strides.3}
+        padding: 1
+        bias: true
+        activation: LeakyReLU
+        norm_mode: INSTANCE_AFFINE
+    - $object: BlockConfig
+      args: *conv_block_s1
+  # Decoder conv blocks: both stride 1 (upsampling is done by the transpose).
+  dec_blocks:
+    - $object: BlockConfig
+      args: *conv_block_s1
+    - $object: BlockConfig
+      args: *conv_block_s1
+
+network:
+  in_channels: ${in_channels}
+  dim: ${dim}
+
+modules:
+  # ----- Encoder (contracting path) -------------------------------------------
+  - name: Encoder0
+    type: ConvBlock
+    out_branch: [enc0]
+    args:
+      in_channels: ${in_channels}
+      out_channels: ${features_per_stage.0}
+      block_configs: ${enc_blocks_0}
+      dim: ${dim}
+  - name: Encoder1
+    type: ConvBlock
+    in_branch: [enc0]
+    out_branch: [enc1]
+    args:
+      in_channels: ${features_per_stage.0}
+      out_channels: ${features_per_stage.1}
+      block_configs: ${enc_blocks_1}
+      dim: ${dim}
+  - name: Encoder2
+    type: ConvBlock
+    in_branch: [enc1]
+    out_branch: [enc2]
+    args:
+      in_channels: ${features_per_stage.1}
+      out_channels: ${features_per_stage.2}
+      block_configs: ${enc_blocks_2}
+      dim: ${dim}
+  - name: Bottleneck
+    type: ConvBlock
+    in_branch: [enc2]
+    out_branch: [bottleneck]
+    args:
+      in_channels: ${features_per_stage.2}
+      out_channels: ${features_per_stage.3}
+      block_configs: ${enc_blocks_3}
+      dim: ${dim}
+
+  # ----- Decoder (expanding path) ---------------------------------------------
+  # Stage 0 (coarsest): upsample bottleneck with the bottleneck stride, skip Encoder2.
+  - name: Up0
+    type: ConvTranspose
+    in_branch: [bottleneck]
+    out_branch: [up0]
+    args:
+      dim: ${dim}
+      in_channels: ${features_per_stage.3}
+      out_channels: ${features_per_stage.2}
+      kernel_size: ${strides.3}
+      stride: ${strides.3}
+      bias: true
+  - name: Skip0
+    type: Concat
+    in_branch: [up0, enc2]
+    out_branch: [up0]
+  - name: Decoder0
+    type: ConvBlock
+    in_branch: [up0]
+    out_branch: [dec0]
+    args:
+      in_channels:
+        $multiply: ["${features_per_stage.2}", 2]
+      out_channels: ${features_per_stage.2}
+      block_configs: ${dec_blocks}
+      dim: ${dim}
+
+  # Stage 1: upsample Decoder0, skip Encoder1.
+  - name: Up1
+    type: ConvTranspose
+    in_branch: [dec0]
+    out_branch: [up1]
+    args:
+      dim: ${dim}
+      in_channels: ${features_per_stage.2}
+      out_channels: ${features_per_stage.1}
+      kernel_size: ${strides.2}
+      stride: ${strides.2}
+      bias: true
+  - name: Skip1
+    type: Concat
+    in_branch: [up1, enc1]
+    out_branch: [up1]
+  - name: Decoder1
+    type: ConvBlock
+    in_branch: [up1]
+    out_branch: [dec1]
+    args:
+      in_channels:
+        $multiply: ["${features_per_stage.1}", 2]
+      out_channels: ${features_per_stage.1}
+      block_configs: ${dec_blocks}
+      dim: ${dim}
+
+  # Stage 2 (full resolution): upsample Decoder1, skip Encoder0.
+  - name: Up2
+    type: ConvTranspose
+    in_branch: [dec1]
+    out_branch: [up2]
+    args:
+      dim: ${dim}
+      in_channels: ${features_per_stage.1}
+      out_channels: ${features_per_stage.0}
+      kernel_size: ${strides.1}
+      stride: ${strides.1}
+      bias: true
+  - name: Skip2
+    type: Concat
+    in_branch: [up2, enc0]
+    out_branch: [up2]
+  - name: Decoder2
+    type: ConvBlock
+    in_branch: [up2]
+    out_branch: [dec2]
+    args:
+      in_channels:
+        $multiply: ["${features_per_stage.0}", 2]
+      out_channels: ${features_per_stage.0}
+      block_configs: ${dec_blocks}
+      dim: ${dim}
+
+  # ----- Segmentation head ----------------------------------------------------
+  # Single full-resolution head (deep_supervision=False). The `Conv` output is
+  # the raw logits and the weight-exact comparison point; Softmax + ArgMax follow
+  # the catalog convention for a ready-to-use segmentation output.
+  - name: Head
+    in_branch: [dec2]
+    out_branch: [-1]
+    modules:
+      - name: Conv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${features_per_stage.0}
+          out_channels: ${num_classes}
+          kernel_size: 1
+      - name: Softmax
+        type: Softmax
+        args:
+          dim: 1
+      - name: Argmax
+        type: ArgMax
+        args:
+          dim: 1
