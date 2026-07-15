@@ -994,10 +994,11 @@ class DatasetManager:
         # throwaway scope, and write the case-level answer once from the FULL source shape below
         # (write_stream_cache_attribute). A CROP's remap IS its action: the region read is already the
         # target patch, so the stage is not re-applied.
+        scoped = Attribute(cache_attribute)
         if region_loc.kind is LocalityKind.CROP:
             tensor = sub
         else:
-            tensor = region_stage(self.name, sub, Attribute(cache_attribute))
+            tensor = region_stage(self.name, sub, scoped)
         if crop_offsets is not None:
             n_channel_axes = tensor.dim() - len(target_slices)
             crop = tuple(
@@ -1015,8 +1016,32 @@ class DatasetManager:
             # where the case gets them: computed once, from the FULL source shape, against the attribute
             # that still describes the whole volume.
             region_stage.write_stream_cache_attribute(self.cache_attributes[a], source_spatial)
+            self._check_region_geometry_reaches_the_case(region_stage, scoped, cache_attribute)
             self._persist_stream_attributes(a, cache_attribute, keys_before)
         return tensor, cache_attribute
+
+    def _check_region_geometry_reaches_the_case(
+        self, region_stage: Stage, scoped: Attribute, cache_attribute: Attribute
+    ) -> None:
+        """Refuse a region stage that records geometry nowhere the case can read it.
+
+        A region stage is handed a patch, so what it records about the extent is one patch's answer:
+        the scope it records into is thrown away, and ``write_stream_cache_attribute`` is what reaches
+        the case. A stage that records in ``__call__`` alone streams a whole run and leaves the case
+        the geometry it was stored with. Recording in both is what a reorientation does -- the check
+        is on recording in neither.
+        """
+        recorded = {key for key in scoped.keys() if key not in cache_attribute or scoped[key] != cache_attribute[key]}
+        if not recorded:
+            return
+        if type(region_stage).write_stream_cache_attribute is not Transform.write_stream_cache_attribute:
+            return
+        raise PatchError(
+            f"'{type(region_stage).__name__}' recorded {sorted(recorded)} on the scope a streamed region"
+            " is handed, which is dropped, and implements no write_stream_cache_attribute().",
+            "Record the case's answer in write_stream_cache_attribute(): it is given the whole volume's"
+            " shape, where a patch's extent cannot say it.",
+        )
 
     def _get_streamed_resample_data(
         self,
