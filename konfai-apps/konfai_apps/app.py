@@ -36,7 +36,7 @@ from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import AppRepositoryError, KonfAIAppClientError
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load
-from konfai.utils.utils import SUPPORTED_EXTENSIONS
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_format_level, split_path_spec
 from ruamel.yaml import YAML
 
 from .app_repository import LocalAppRepository, get_app_repository_info
@@ -943,7 +943,42 @@ class KonfAIApp(AbstractKonfAIApp):
             for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(input_path)):
                 KonfAIApp.symlink(source, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
 
-    def _fill_optional_inputs(self, provided: int) -> None:
+    @staticmethod
+    def _dataset_level(prediction_file: str, dataset_dir: Path) -> int:
+        """The level ``dataset_dir`` will be read at, per the resolved config's ``dataset_filenames``.
+
+        ``@N`` is a property of a dataset ENTRY: every group of that entry is read at that one level. So a
+        synthesised default must be readable at the same level as the inputs it stands in for, and the
+        config is the only place that level is declared.
+
+        Format-neutral by construction: ``split_format_level`` knows nothing about any backend, and an
+        entry that declares no ``@N`` — which is every non-pyramid format — yields 0, the level those
+        backends have always been read at.
+
+        Only the entry pointing at ``dataset_dir`` counts; a config listing several sources may read each
+        at its own level, and the staged inputs live in exactly one of them.
+        """
+        path = Path(prediction_file)
+        if not path.is_file():
+            return 0
+        from ruamel.yaml import YAML
+
+        with open(path, encoding="utf-8") as file:
+            data = YAML().load(file)
+        dataset = ((data or {}).get("Predictor") or {}).get("Dataset") or {}
+        target = dataset_dir.resolve()
+        for entry in dataset.get("dataset_filenames") or []:
+            filename, _, file_format = split_path_spec(
+                str(entry),
+                default_format="mha",
+                allowed_flags={"a", "i"},
+                supported_extensions=SUPPORTED_EXTENSIONS,
+            )
+            if Path(filename).resolve() == target:
+                return split_format_level(file_format)[1]
+        return 0
+
+    def _fill_optional_inputs(self, provided: int, prediction_file: str = "Prediction.yml") -> None:
         """Synthesise declared defaults for optional inputs the caller did not provide.
 
         Inputs map positionally to ``Volume_0..N-1`` in ``app.json`` declaration order, so only trailing
@@ -953,6 +988,12 @@ class KonfAIApp(AbstractKonfAIApp):
         inputs alone. The registration mask branches use ``"ones"`` (a whole-image mask restricts nothing).
         Optional inputs with no ``default`` are left absent; a genuinely-missing required input still fails
         downstream.
+
+        "Like ``Volume_0``" has to include the LEVEL it is read at. On a multiscale input, level 1 is not
+        the shape of level 0, so a default sized from level 0 is both the wrong shape and unopenable at
+        ``@1`` — the store has one level and the reader asks for the second. Taking the level from the
+        config keeps this one code path for every format: a flat input reports level 0 and behaves exactly
+        as before.
         """
         declared = list(self.app_repository.get_inputs().items())
         fills = {
@@ -963,7 +1004,10 @@ class KonfAIApp(AbstractKonfAIApp):
         if not fills:
             return
         fill_value = {"ones": 1, "zeros": 0}
-        dataset = Dataset("Dataset", KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0"))
+        dataset_dir = Path("Dataset")
+        file_format = KonfAIApp._detect_group_format(dataset_dir, "Volume_0")
+        level = KonfAIApp._dataset_level(prediction_file, dataset_dir)
+        dataset = Dataset("Dataset", f"{file_format}@{level}" if level else file_format)
         for name in dataset.get_names("Volume_0"):
             shape, attributes = dataset.get_infos("Volume_0", name)  # header only, no pixel read
             for i, default in fills.items():
@@ -1076,7 +1120,6 @@ class KonfAIApp(AbstractKonfAIApp):
         - GPU defaults to `cuda_visible_devices()`.
         """
         self._write_inputs_to_dataset(inputs)
-        self._fill_optional_inputs(len(inputs))
         available_vram = None
         if len(gpu):
             available_vram_per_device: list[float] = []
@@ -1097,6 +1140,9 @@ class KonfAIApp(AbstractKonfAIApp):
             forced_batch_size=batch_size,
             config_overrides=config_overrides,
         )
+        # After install_inference, not before: the defaults are sized from the level the config asks for,
+        # and that config only exists here -- installation is what writes it out with any --set applied.
+        self._fill_optional_inputs(len(inputs), prediction_file)
         from konfai.predictor import predict
 
         # predictions_dir is passed explicitly: predict()'s default is resolved when konfai.predictor is
