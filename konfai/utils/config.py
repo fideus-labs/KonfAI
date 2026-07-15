@@ -25,6 +25,7 @@ import typing
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
@@ -274,7 +275,7 @@ class Config:
                     value_config[key] = value_tmp if isinstance(value_tmp, int | float | str | bool) else None
                     dict_value[key] = value_tmp
                 value = dict_value
-        self.config[name] = value_config if value_config is not None else "None"
+        self.config[name] = _recordable(value_config) if value_config is not None else "None"
         if value == "None":
             value = None
         return value
@@ -316,6 +317,34 @@ _CONFIG_SUPPORTED_TYPES_MESSAGE = (
 )
 
 
+def _recordable(value):
+    """The form of a default the config can hold, and the callable takes back.
+
+    A resolved default is written to the file, so the file is the run. Two forms a callable states a
+    default in are not YAML's, and each names itself: an enumeration carries its value, and a dtype
+    or any other type carries its name. Both are what the parameter that declared them accepts --
+    ``LossReduction | str``, ``numpy.dtype | type | str`` -- so the file reads back as the run.
+    """
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, type):
+        return value.__name__
+    return value
+
+
+def _annotation_namespace(function) -> dict[str, Any]:
+    """The module names an annotation was written against.
+
+    A module under ``from __future__ import annotations`` hands every annotation over as the source
+    text, so the names in it are resolved against the module that wrote them. A class carries no
+    ``__globals__`` of its own: the signature bound here is its ``__init__``'s, and so are the names.
+    """
+    namespace = getattr(function, "__globals__", None)
+    if namespace is None:
+        namespace = getattr(getattr(function, "__init__", None), "__globals__", None)
+    return dict(namespace) if namespace else {}
+
+
 def _resolve_annotation(function, annotation):
     if annotation in {"int", "float", "bool", "str"}:
         return {"int": int, "float": float, "bool": bool, "str": str}[annotation]
@@ -327,7 +356,7 @@ def _resolve_annotation(function, annotation):
         return eval(  # nosec B307
             annotation,
             {
-                **getattr(function, "__globals__", {}),
+                **_annotation_namespace(function),
                 "Any": Any,
                 "Literal": Literal,
                 "Sequence": Sequence,
@@ -436,6 +465,12 @@ def apply_config(konfai_args: str | None = None):
                         params = list(inspect.signature(function).parameters.values())
                         for param in params[len(args) :]:
                             if param.name in without:
+                                continue
+
+                            # ``*args`` and ``**kwargs`` name no parameter: they stand for the ones a
+                            # caller passes. There is nothing to bind them to, and binding them hands
+                            # the callable a parameter called "kwargs".
+                            if param.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
                                 continue
 
                             annotation = _resolve_annotation(function, param.annotation)
