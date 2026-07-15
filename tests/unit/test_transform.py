@@ -28,17 +28,20 @@ import torch.nn.functional as F
 from konfai.data.transform import (
     DEFAULT_INFERENCE_MODEL_NAME,
     DEFAULT_INFERENCE_REPO_ID,
+    Canonical,
     Clip,
     Crop,
     Dilate,
     InferenceStack,
     KonfAIInference,
+    LocalityKind,
     Norm,
     Normalize,
     OneHot,
     Padding,
     ResampleToResolution,
     ResampleToShape,
+    Squeeze,
     StandardDeviation,
     Standardize,
     Statistics,
@@ -187,6 +190,29 @@ def test_norm_reduces_trailing_component_axis_and_geometry() -> None:
 
 def test_norm_transform_shape_drops_trailing_axis() -> None:
     assert Norm().transform_shape("group", "case", [4, 5, 6, 3], Attribute()) == [4, 5, 6]
+
+
+# --------------------------------------------------------------------------------------
+# Squeeze — transform_shape must track which axis squeeze() drops, so the patch grid folds it
+# --------------------------------------------------------------------------------------
+
+
+def test_squeeze_channel_axis_leaves_spatial_shape_untouched() -> None:
+    # ``shape`` is the channel-stripped spatial shape, so the runtime tensor is [C, 4, 5, 6] and
+    # dim 0 squeezes the channel: the spatial grid the patches tile is unchanged.
+    assert Squeeze(0).transform_shape("group", "case", [4, 5, 6], Attribute()) == [4, 5, 6]
+
+
+def test_squeeze_singleton_spatial_axis_is_dropped_from_the_grid() -> None:
+    # Runtime tensor [C, 1, 5, 6]; dim 1 is the leading spatial axis (size 1), which squeeze() removes.
+    assert Squeeze(1).transform_shape("group", "case", [1, 5, 6], Attribute()) == [5, 6]
+    # A negative dim indexes from the back: -1 is the trailing spatial axis.
+    assert Squeeze(-1).transform_shape("group", "case", [4, 5, 1], Attribute()) == [4, 5]
+
+
+def test_squeeze_non_singleton_axis_is_a_no_op() -> None:
+    # squeeze() leaves a size>1 axis in place, so the grid must not drop it either.
+    assert Squeeze(1).transform_shape("group", "case", [4, 5, 6], Attribute()) == [4, 5, 6]
 
 
 # --------------------------------------------------------------------------------------
@@ -479,3 +505,211 @@ def test_clip_percentile_bounds_accept_a_cuda_resident_volume() -> None:
     assert out.device.type == "cuda"
     assert float(out.min()) == pytest.approx(9.9, abs=0.1)
     assert float(out.max()) == pytest.approx(89.1, abs=0.1)
+
+
+# --------------------------------------------------------------------------------------
+# Canonical. A reorientation between orthogonal direction cosines is a bijection on the
+# voxels, so the property to hold it to is not closeness but exactness.
+# --------------------------------------------------------------------------------------
+
+# Deliberately non-cubic on every axis: a cube hides an axis swap, and equal extents make a
+# wrong permutation look right.
+_CANONICAL_SPATIAL = (9, 10, 11)
+
+# LPS is what Canonical reorients ONTO, so it is the one direction that asks for no flip at all.
+_LPS = np.diag([-1.0, -1.0, 1.0])
+_RAS = np.eye(3)
+# Orthogonal, and neither the identity nor a mirroring: it swaps physical x and z.
+_PERMUTING = np.asarray([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+_OBLIQUE = np.asarray(
+    [
+        [np.cos(np.deg2rad(20.0)), -np.sin(np.deg2rad(20.0)), 0.0],
+        [np.sin(np.deg2rad(20.0)), np.cos(np.deg2rad(20.0)), 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+)
+# A direction is orthonormal by definition, not by construction. None of these is, so none of them
+# is a bijection on the voxels -- and each wears one half of a signed permutation's disguise.
+# Mixes two axes at unit weight: the column sums to 1 exactly as a permutation's does, and only its
+# flattened peak refuses it.
+_SHEARING = _LPS @ np.linalg.inv(np.asarray([[0.5, 0.0, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 1.0]]))
+# Averages all three axes into each output. Its ROWS sum to unit weight too, so every sum a
+# permutation's matrix satisfies, this one satisfies: again only the peak is not there.
+_AVERAGING = _LPS @ np.linalg.inv(np.asarray([[0.5, 0.25, 0.25], [0.25, 0.5, 0.25], [0.25, 0.25, 0.5]]))
+# Reads a whole axis and a fraction of another on top: the peak IS a permutation's, and only the
+# weight the column carries besides it refuses it.
+_SUPERPOSING = _LPS @ np.linalg.inv(np.asarray([[1.0, 0.0, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 1.0]]))
+
+
+def _canonical_attributes(direction: np.ndarray) -> Attribute:
+    # Deliberately anisotropic on every axis, for the reason the extents are non-cubic: a spacing an
+    # axis shares with another is a spacing a wrong permutation can carry onto it and look right.
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([-3.0, 5.0, 11.0])
+    attributes["Spacing"] = np.asarray([1.5, 1.75, 2.0])
+    attributes["Direction"] = direction.reshape(-1)
+    return attributes
+
+
+def _ct_like_volume() -> torch.Tensor:
+    # Distinct values everywhere: a repeated value could survive a wrong remap by coincidence, and
+    # the multiset check below is only as strict as the volume is varied.
+    rng = np.random.default_rng(0)
+    return torch.from_numpy(rng.standard_normal(_CANONICAL_SPATIAL).astype(np.float32) * 500.0)[None]
+
+
+@pytest.mark.parametrize(
+    "direction, expected",
+    [
+        # LPS is what Canonical reorients ONTO: the one direction that asks for nothing at all.
+        (_LPS, lambda volume: volume),
+        # RAS mirrors physical x and y, and physical axis k is array axis dim - 1 - k: array axes 3 and 2.
+        (_RAS, lambda volume: volume.flip((3, 2))),
+        # Swapping physical x and z transposes the array axes carrying them (3 and 1), and mirrors the
+        # two axes the canonical direction is negative on.
+        (_PERMUTING, lambda volume: volume.permute(0, 3, 2, 1).flip((2, 3))),
+    ],
+    ids=["LPS", "RAS", "permuting"],
+)
+def test_canonical_is_the_exact_index_remap_bit_for_bit(direction: np.ndarray, expected) -> None:
+    volume = _ct_like_volume()
+
+    out = Canonical()("case", volume, _canonical_attributes(direction))
+
+    assert torch.equal(out, expected(volume)), "an orthogonal reorientation must be the remap, not near it"
+
+
+@pytest.mark.parametrize("direction", [_RAS, _LPS, _PERMUTING], ids=["RAS", "LPS", "permuting"])
+def test_canonical_is_a_bijection_on_the_voxels(direction: np.ndarray) -> None:
+    # The whole claim, stated as strongly as it can be: reorienting only moves values, so the sorted
+    # multiset of them is bit-for-bit the input's. This is what LocalityKind.preserves_statistics lets a
+    # later GLOBAL_STAT trust, and it is strictly stronger than comparing statistics -- a sampled
+    # reorientation can leave a statistic looking right while having moved the values under it.
+    volume = _ct_like_volume()
+
+    out = Canonical()("case", volume, _canonical_attributes(direction))
+
+    assert torch.equal(torch.sort(out.flatten())[0], torch.sort(volume.flatten())[0])
+    # Reductions that do not depend on the order the voxels are visited in follow bit for bit.
+    assert torch.min(out) == torch.min(volume)
+    assert torch.max(out) == torch.max(volume)
+    assert torch.std(out) == torch.std(volume)
+    # A mean does depend on it: float addition is not associative, so summing the SAME multiset along a
+    # mirrored axis can land an ulp from summing it along the original one. That is the reduction's
+    # traversal, not the remap -- reduced in one order, or in a width the order cannot reach, it is 0.
+    assert torch.mean(out.double()) == torch.mean(volume.double())
+
+
+@pytest.mark.parametrize("direction", [_RAS, _LPS, _PERMUTING], ids=["RAS", "LPS", "permuting"])
+def test_canonical_round_trips_exactly(direction: np.ndarray) -> None:
+    # inverse() undoes a remap with a remap: an exact forward paired with a sampled inverse would put
+    # the interpolation error back at prediction time, where the inverse is what the user is handed.
+    # It restores the source EXTENT as well as the values -- a permutation transposed it on the way out.
+    volume = _ct_like_volume()
+    attributes = _canonical_attributes(direction)
+    transform = Canonical()
+
+    restored = transform.inverse("case", transform("case", volume, attributes), attributes)
+
+    assert restored.shape == volume.shape
+    assert torch.equal(restored, volume)
+    # And the geometry it popped is the source's, so a chain's stack comes back to the depth it started.
+    np.testing.assert_allclose(attributes.get_np_array("Origin"), [-3.0, 5.0, 11.0])
+    np.testing.assert_allclose(attributes.get_np_array("Spacing"), [1.5, 1.75, 2.0])
+    np.testing.assert_allclose(attributes.get_np_array("Direction"), direction.reshape(-1))
+
+
+def test_canonical_records_the_canonical_geometry_from_the_volume_extent() -> None:
+    # The new origin is the corner the reorientation mirrors onto, so it is the far end of the extent
+    # on each mirrored axis and untouched on the others. A mirroring moves no axis, so the spacing stays.
+    attributes = _canonical_attributes(_RAS)
+
+    Canonical()("case", _ct_like_volume(), attributes)
+
+    np.testing.assert_allclose(attributes.get_np_array("Direction"), np.diag([-1.0, -1.0, 1.0]).reshape(-1))
+    np.testing.assert_allclose(attributes.get_np_array("Spacing"), [1.5, 1.75, 2.0])
+    # Origin (x, y, z) = (-3, 5, 11); spacing (1.5, 1.75, 2.0); extents (x, y, z) = (11, 10, 9).
+    np.testing.assert_allclose(
+        attributes.get_np_array("Origin"),
+        [-3.0 + (11 - 1) * 1.5, 5.0 + (10 - 1) * 1.75, 11.0],
+    )
+
+
+def test_canonical_permuting_records_the_grid_the_remap_lands_on() -> None:
+    # An extent and a spacing travel with the axis they belong to, so swapping physical x and z carries
+    # the z spacing onto x. What the reorientation preserves is the physical extent -- the volume's
+    # centre is fixed -- so the origin is that centre stepped back by the TARGET half-extent.
+    attributes = _canonical_attributes(_PERMUTING)
+
+    Canonical()("case", _ct_like_volume(), attributes)
+
+    np.testing.assert_allclose(attributes.get_np_array("Direction"), np.diag([-1.0, -1.0, 1.0]).reshape(-1))
+    # Spacing (x, y, z) = (1.5, 1.75, 2.0) with x and z swapped.
+    np.testing.assert_allclose(attributes.get_np_array("Spacing"), [2.0, 1.75, 1.5])
+    # Centre = D @ half_extent_in + origin = (8, 7.875, 7.5) + (-3, 5, 11) = (5, 12.875, 18.5); target
+    # half-extent = (8, 7.875, 7.5); LPS steps back negatively on x and y, positively on z.
+    np.testing.assert_allclose(attributes.get_np_array("Origin"), [13.0, 20.75, 11.0])
+
+
+@pytest.mark.parametrize(
+    "direction, expected",
+    [
+        (_LPS, list(_CANONICAL_SPATIAL)),
+        (_RAS, list(_CANONICAL_SPATIAL)),
+        # Swapping physical x and z transposes the extents they carry: array (9, 10, 11) -> (11, 10, 9).
+        (_PERMUTING, [11, 10, 9]),
+        # An oblique direction is resampled onto the input's own grid, so it keeps its extent.
+        (_OBLIQUE, list(_CANONICAL_SPATIAL)),
+    ],
+    ids=["LPS", "RAS", "permuting", "oblique"],
+)
+def test_canonical_folds_the_patch_grid_onto_the_extent_it_produces(direction: np.ndarray, expected: list[int]) -> None:
+    # The patch grid is folded from transform_shape, so a permuting case's patches are cut on the grid
+    # this returns -- which is only the right grid if it is the extent __call__ actually produces.
+    transform = Canonical()
+    attributes = _canonical_attributes(direction)
+
+    folded = transform.transform_shape("Group", "case", list(_CANONICAL_SPATIAL), attributes)
+
+    assert folded == expected
+    assert list(transform("case", _ct_like_volume(), attributes).shape[1:]) == expected
+
+
+def test_canonical_shape_fold_leaves_the_case_metadata_alone() -> None:
+    # The attribute folded through transform_shape is the case's own, before a voxel has been read, and
+    # it is what the streamed chain is later seeded from: writing the target geometry here would hand
+    # every patch the reorientation's own result as the description of its input.
+    attributes = _canonical_attributes(_PERMUTING)
+    before = dict(attributes)
+
+    Canonical().transform_shape("Group", "case", list(_CANONICAL_SPATIAL), attributes)
+
+    assert dict(attributes) == before
+
+
+@pytest.mark.parametrize(
+    "direction, kind",
+    [
+        (_RAS, LocalityKind.ORIENTATION),
+        (_LPS, LocalityKind.ORIENTATION),
+        # Permuting is an exact remap too -- onto a grid of its own, which the patch grid is folded onto.
+        (_PERMUTING, LocalityKind.ORIENTATION),
+        # Genuinely mixes axes: no remap reproduces it, so it is resampled from the whole volume.
+        (_OBLIQUE, LocalityKind.WHOLE_VOLUME),
+        # Not orthonormal: no remap is a bijection on the voxels, whatever their columns attest.
+        (_SHEARING, LocalityKind.WHOLE_VOLUME),
+        (_AVERAGING, LocalityKind.WHOLE_VOLUME),
+        (_SUPERPOSING, LocalityKind.WHOLE_VOLUME),
+    ],
+    ids=["RAS", "LPS", "permuting", "oblique", "shearing", "averaging", "superposing"],
+)
+def test_canonical_declares_orientation_only_where_it_is_an_exact_index_remap(
+    direction: np.ndarray, kind: LocalityKind
+) -> None:
+    assert Canonical().patch_locality(_canonical_attributes(direction)).kind is kind
+
+
+def test_canonical_declaration_is_total_on_absent_metadata() -> None:
+    # The config-time checks probe with an empty Attribute, and a group carries only what its writer
+    # stored: a missing direction must fall to the safe kind rather than raise.
+    assert Canonical().patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME

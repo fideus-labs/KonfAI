@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import warnings
 from pathlib import Path
 from typing import cast
 
@@ -29,10 +30,33 @@ from konfai.data.data_manager import (
     Group,
     GroupTransform,
     PredictionSubset,
+    _check_patch_transform_invertible,
+    _check_patch_transform_locality,
+    _check_patch_transform_shape,
 )
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import KonfAIInference, Mask, Normalize, Standardize, TransformLoader
+from konfai.data.transform import (
+    Clip,
+    Dilate,
+    Flip,
+    Gradient,
+    KonfAIInference,
+    LocalityKind,
+    Mask,
+    Normalize,
+    OneHot,
+    PatchLocality,
+    Permute,
+    ResampleToShape,
+    Softmax,
+    Standardize,
+    TensorCast,
+    Transform,
+    TransformLoader,
+)
+from konfai.utils import dataset as dataset_module
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import State
 
 SimpleITK = pytest.importorskip("SimpleITK")
@@ -89,23 +113,147 @@ def test_dataset_read_data_slice_sitk_reads_requested_patch_and_updates_origin(t
     )
 
 
+def _write_image(path: Path, compress: bool) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = SimpleITK.ImageFileWriter()
+    writer.SetFileName(str(path))
+    writer.SetUseCompression(compress)
+    writer.Execute(SimpleITK.GetImageFromArray(np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)))
+    return path
+
+
+def _reject_whole_volume_read(*args: object, **kwargs: object) -> None:
+    pytest.fail("statistics must be accumulated slab by slab, never by reading the whole volume")
+
+
+@pytest.mark.parametrize(
+    ("filename", "compress", "streams"),
+    [
+        ("volume.mha", False, True),
+        ("volume.mha", True, False),
+        ("volume.mhd", False, True),
+        ("volume.nii", False, True),
+        ("volume.nii.gz", True, False),
+        # NrrdImageIO serves no region at all, compressed or not: a slab loop would decode the whole
+        # volume once per slab, so it stays on the single whole-volume read.
+        ("volume.nrrd", False, False),
+        ("volume.nrrd", True, False),
+    ],
+)
+def test_sitk_supports_region_read_matches_itk_streaming_capability(
+    tmp_path: Path, filename: str, compress: bool, streams: bool
+) -> None:
+    path = _write_image(tmp_path / filename, compress)
+
+    assert Dataset.SitkFile._supports_region_read(str(path)) is streams
+
+
+@pytest.mark.parametrize(
+    ("file_format", "compress", "warns"),
+    [("nrrd", False, True), ("mha", True, True), ("mha", False, False)],
+)
+def test_patch_stream_warns_once_per_format_that_cannot_serve_a_disk_region(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_format: str, compress: bool, warns: bool
+) -> None:
+    """A format serving no region re-decodes the whole volume per patch: say so, once for the dataset.
+
+    Two cases x three patches: the warning is about the format, so it must survive neither the patch
+    loop nor the second case. Streaming an uncompressed .mha is a win and must stay silent.
+    """
+    monkeypatch.setattr(dataset_module, "_unstreamed_formats_warned", set())
+    dataset = Dataset(tmp_path / "Dataset", file_format)
+    volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
+    for name in ("CASE_000", "CASE_001"):
+        dataset.write("CT", name, volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
+        _write_image(tmp_path / "Dataset" / name / f"CT.{file_format}", compress)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for name in ("CASE_000", "CASE_001"):
+            for plane in range(3):
+                patch, _ = dataset.read_data_slice(
+                    "CT",
+                    name,
+                    (slice(None), slice(plane, plane + 1), slice(None), slice(None)),
+                )
+                np.testing.assert_array_equal(patch, volume[:, plane : plane + 1])
+
+    messages = [str(w.message) for w in caught if "cannot serve a disk region" in str(w.message)]
+    assert len(messages) == (1 if warns else 0)
+    if warns:
+        assert f"'.{file_format}' files" in messages[0]
+        assert "OME-Zarr or HDF5" in messages[0]
+
+
+def test_dataset_read_data_statistics_sitk_accumulates_slabs_without_loading_full_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+    volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
+    dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
+
+    # One slab per plane, so the running merge spans several reads on a volume this small.
+    monkeypatch.setattr(dataset_module, "_STATISTICS_CHUNK_ELEMENTS", 1)
+    monkeypatch.setattr(SimpleITK, "ReadImage", _reject_whole_volume_read)
+
+    stats = dataset.read_data_statistics("CT", "CASE_000")
+
+    assert stats["min"] == pytest.approx(float(volume.min()))
+    assert stats["max"] == pytest.approx(float(volume.max()))
+    assert stats["mean"] == pytest.approx(float(volume.mean()))
+    assert stats["std"] == pytest.approx(float(volume.std(ddof=1)))
+
+
+def test_dataset_read_data_statistics_sitk_selects_channels_while_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+    volume = np.arange(3 * 4 * 5 * 6, dtype=np.float32).reshape(3, 4, 5, 6)
+    dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
+
+    monkeypatch.setattr(dataset_module, "_STATISTICS_CHUNK_ELEMENTS", 1)
+    monkeypatch.setattr(SimpleITK, "ReadImage", _reject_whole_volume_read)
+
+    stats = dataset.read_data_statistics("CT", "CASE_000", [0, 2])
+
+    assert stats["mean"] == pytest.approx(float(volume[[0, 2]].mean()))
+    assert stats["std"] == pytest.approx(float(volume[[0, 2]].std(ddof=1)))
+
+
+def test_dataset_read_data_statistics_sitk_keeps_whole_read_for_compressed_volumes(tmp_path: Path) -> None:
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+    volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
+    dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
+    _write_image(tmp_path / "Dataset" / "CASE_000" / "CT.mha", compress=True)
+
+    stats = dataset.read_data_statistics("CT", "CASE_000")
+
+    compressed = np.arange(4 * 5 * 6, dtype=np.float32)
+    assert stats["mean"] == pytest.approx(float(compressed.mean()))
+    assert stats["std"] == pytest.approx(float(compressed.std(ddof=1)))
+
+
 class StreamingDatasetStub:
     def __init__(self, volume: np.ndarray) -> None:
         self.volume = volume
         self.full_reads = 0
         self.patch_reads = 0
         self.stats_reads = 0
+        # Identity geometry with one origin/spacing entry per spatial axis (channel-first volume),
+        # so geometry-aware transforms (e.g. Resample) get a Spacing matching the volume's rank.
+        spatial = volume.ndim - 1
+        self._geometry = ([0.0] * spatial, [1.0] * spatial)
 
     def get_infos(self, group_src: str, name: str) -> tuple[list[int], Attribute]:
-        return list(self.volume.shape), _image_attributes([0.0, 0.0], [1.0, 1.0])
+        return list(self.volume.shape), _image_attributes(*self._geometry)
 
     def read_data(self, group_src: str, name: str) -> tuple[np.ndarray, Attribute]:
         self.full_reads += 1
-        return self.volume.copy(), _image_attributes([0.0, 0.0], [1.0, 1.0])
+        return self.volume.copy(), _image_attributes(*self._geometry)
 
     def read_data_slice(self, group_src: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         self.patch_reads += 1
-        return self.volume[slices].copy(), _image_attributes([0.0, 0.0], [1.0, 1.0])
+        return self.volume[slices].copy(), _image_attributes(*self._geometry)
 
     def read_data_statistics(
         self,
@@ -631,3 +779,606 @@ def test_dataset_is_dataset_exist_benefits_from_cache(tmp_path: Path) -> None:
     assert dataset.is_dataset_exist("CT", "CASE_000")
     assert "CT" in dataset._names_cache
     assert not dataset.is_dataset_exist("CT", "CASE_999")
+
+
+def _build_streaming_manager(volume: np.ndarray, transforms: list[Transform], patch_size: list[int]) -> DatasetManager:
+    stub = StreamingDatasetStub(volume)
+    return DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, stub),
+        patch=DatasetPatch(patch_size),
+        transforms=transforms,
+        data_augmentations_list=[],
+    )
+
+
+def _assert_stream_matches_whole_volume(
+    volume: np.ndarray,
+    transforms: list[Transform],
+    patch_size: list[int],
+    *,
+    atol: float = 0.0,
+) -> DatasetManager:
+    """Every streamed patch must equal the whole-volume pass sliced on the same grid."""
+    manager = _build_streaming_manager(volume, transforms, patch_size)
+    assert manager.can_stream_patch(0)
+
+    size = manager.patch.get_size(0)
+    streamed = [manager._get_streamed_data(index, 0, True)[0] for index in range(size)]
+
+    reference_tensor = torch.from_numpy(volume.copy())
+    reference_attribute = Attribute()
+    for transform in transforms:
+        reference_tensor = transform("CASE_000", reference_tensor, reference_attribute)
+    reference = [manager.patch.get_data(reference_tensor, index, 0, True) for index in range(size)]
+
+    assert len(streamed) == len(reference) == size
+    for got, expected in zip(streamed, reference, strict=False):
+        assert got.shape == expected.shape
+        if atol == 0.0:
+            assert torch.equal(got, expected)
+        else:
+            np.testing.assert_allclose(got.numpy(), expected.numpy(), atol=atol)
+    return manager
+
+
+def test_stream_halo_dilate_seam_matches_whole_volume() -> None:
+    # Foreground straddling the patch boundary at column 4: a whole-volume dilation spreads across the
+    # seam, so a correct HALO read + crop must reproduce it patch-for-patch.
+    volume = np.zeros((1, 8, 8), dtype=np.float32)
+    volume[0, 3:5, 3:5] = 1.0
+    manager = _assert_stream_matches_whole_volume(volume, [Dilate(2)], [4, 4])
+    # The dispatcher must actually take the region (HALO) path, not fall back.
+    assert manager._resolve_patch_stream_source(0, True).region_index == 0
+
+
+def test_stream_halo_gradient_seam_matches_whole_volume() -> None:
+    rng = np.random.default_rng(0)
+    volume = rng.standard_normal((1, 8, 8)).astype(np.float32)
+    _assert_stream_matches_whole_volume(volume, [Gradient()], [4, 4], atol=1e-6)
+
+
+def test_stream_orientation_flip_remap_matches_whole_volume() -> None:
+    volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
+    _assert_stream_matches_whole_volume(volume, [Flip("0|1")], [4, 4])
+
+
+def test_stream_orientation_permute_remap_matches_whole_volume() -> None:
+    volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
+    manager = _assert_stream_matches_whole_volume(volume, [Permute("1|0")], [4, 4])
+    assert manager._resolve_patch_stream_source(0, True).region_index == 0
+
+
+def test_stream_orientation_permute_border_patch_uses_the_permuted_grid() -> None:
+    # Permute swaps the spatial axes, so the patch grid is cut on the PERMUTED extents (7x8, not 8x7).
+    # The last patch of the 7-long target axis is one voxel short of patch_size: the streamed patch must
+    # be padded against that target grid, not against the source shape, which would leave it short.
+    volume = np.arange(1 * 8 * 7, dtype=np.float32).reshape(1, 8, 7)
+    _assert_stream_matches_whole_volume(volume, [Permute("1|0")], [4, 4])
+
+
+def test_stream_pointwise_border_patch_pads_after_the_chain() -> None:
+    # A 9-long axis leaves the last patch one voxel short of patch_size, so the read plan pads it up.
+    # The whole-volume path transforms the volume and only then pads (with the min of the TRANSFORMED
+    # patch), so the streamed path must apply the read plan after its chain too -- padding the raw patch
+    # first pads in the source domain and then runs the transform over the padding.
+    volume = np.arange(3 * 8 * 9, dtype=np.float32).reshape(3, 8, 9)
+    _assert_stream_matches_whole_volume(volume, [Softmax(0)], [4, 4])
+
+
+def test_stream_global_stat_before_orientation_region_matches_whole_volume() -> None:
+    # GLOBAL_STAT (Normalize, seeded from disk stats) as a pre-pointwise stage in front of an
+    # ORIENTATION region transform: both the stat and the remap must compose byte-identically.
+    volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
+    transforms: list[Transform] = [Normalize(), Flip("0")]
+    manager = _build_streaming_manager(volume, transforms, [4, 4])
+    assert manager.can_stream_patch(0)
+    region_index = manager._resolve_patch_stream_source(0, True).region_index
+    assert region_index == 1  # the Flip, not the Normalize
+
+    size = manager.patch.get_size(0)
+    streamed = [manager._get_streamed_data(index, 0, True)[0] for index in range(size)]
+
+    minimum = float(volume.min())
+    maximum = float(volume.max())
+    normalized = torch.from_numpy((2 * (volume - minimum) / (maximum - minimum) - 1).astype(np.float32)).flip(1)
+    reference = [manager.patch.get_data(normalized, index, 0, True) for index in range(size)]
+    for got, expected in zip(streamed, reference, strict=False):
+        np.testing.assert_allclose(got.numpy(), expected.numpy(), atol=1e-6)
+
+
+def test_stream_pointwise_chain_matches_whole_volume() -> None:
+    # A trailing chain of purely POINTWISE transforms streams the exact patch (region_index is None).
+    volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
+    manager = _assert_stream_matches_whole_volume(volume, [TensorCast("float32"), Flip("0")], [4, 4])
+    assert manager._resolve_patch_stream_source(0, True).region_index == 1
+
+
+def test_softmax_channel_axis_is_pointwise_but_spatial_axis_falls_back() -> None:
+    # A channel-axis softmax (dim 0) is spatially pointwise and streams the exact patch. A softmax over
+    # a SPATIAL axis normalises across the whole extent, so a per-patch softmax would diverge: the
+    # contract must declare it WHOLE_VOLUME and the dispatcher must refuse to stream it.
+    assert Softmax(0).patch_locality(Attribute()).kind is LocalityKind.POINTWISE
+    assert Softmax(1).patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
+    assert Softmax(-1).patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
+
+    volume = np.arange(3 * 8 * 8, dtype=np.float32).reshape(3, 8, 8)
+    _assert_stream_matches_whole_volume(volume, [Softmax(0)], [4, 4], atol=1e-6)
+
+    spatial_manager = _build_streaming_manager(volume, [Softmax(1)], [4, 4])
+    assert spatial_manager.can_stream_patch(0) is False
+
+
+def test_stream_clip_fixed_bounds_is_pointwise_and_matches_whole_volume() -> None:
+    # Fixed float bounds clip each voxel independently: POINTWISE, exact patch, no region transform.
+    rng = np.random.default_rng(0)
+    volume = (rng.standard_normal((1, 8, 8)).astype(np.float32)) * 100.0
+    assert Clip(min_value=-50.0, max_value=50.0).patch_locality(Attribute()).kind is LocalityKind.POINTWISE
+    manager = _assert_stream_matches_whole_volume(volume, [Clip(min_value=-50.0, max_value=50.0)], [4, 4])
+    assert manager._resolve_patch_stream_source(0, True).region_index is None
+
+
+def test_stream_clip_min_max_is_global_stat_and_matches_whole_volume() -> None:
+    # 'min'/'max' bounds clip to the volume extremum -- a no-op on that bound -- so the streamed
+    # per-patch result is byte-identical to the whole-volume pass, and the dispatcher seeds the
+    # global stat from a single read_data_statistics call instead of loading the full volume.
+    rng = np.random.default_rng(1)
+    volume = (rng.standard_normal((1, 8, 8)).astype(np.float32)) * 100.0
+    assert Clip(min_value="min", max_value="max").patch_locality(Attribute()).kind is LocalityKind.GLOBAL_STAT
+
+    stub = StreamingDatasetStub(volume)
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, stub),
+        patch=DatasetPatch([4, 4]),
+        transforms=[Clip(min_value="min", max_value="max")],
+        data_augmentations_list=[],
+    )
+    assert manager.can_stream_patch(0)  # planning reads the stat once
+    size = manager.patch.get_size(0)
+    streamed = [manager._get_streamed_data(index, 0, True)[0] for index in range(size)]
+
+    reference_tensor = Clip(min_value="min", max_value="max")("CASE_000", torch.from_numpy(volume.copy()), Attribute())
+    reference = [manager.patch.get_data(reference_tensor, index, 0, True) for index in range(size)]
+    for got, expected in zip(streamed, reference, strict=False):
+        assert torch.equal(got, expected)
+
+    assert stub.stats_reads == 1  # global stat seeded once from disk, never a full-volume load
+    assert stub.full_reads == 0
+
+
+def test_clip_percentile_and_mask_bounds_fall_back_to_whole_volume() -> None:
+    # A percentile bound needs the whole histogram and a mask reads a second full volume: both
+    # genuinely require the whole volume, so the contract declares WHOLE_VOLUME and streaming is off.
+    assert (
+        Clip(min_value="percentile:1", max_value="percentile:99").patch_locality(Attribute()).kind
+        is LocalityKind.WHOLE_VOLUME
+    )
+    assert Clip(mask="SEG").patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
+    volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
+    manager = _build_streaming_manager(volume, [Clip(min_value="percentile:1", max_value="percentile:99")], [4, 4])
+    assert not manager.can_stream_patch(0)
+
+
+def test_stream_orientation_border_patch_is_padded_to_patch_size() -> None:
+    # A tiling whose last patch is narrower than patch_size (30 with patch 8 -> border width 6): the
+    # whole-volume Patch.get_data pads that border up to patch_size, so the region streamed path must
+    # too, otherwise the border patch comes out one-or-more voxels short and cannot batch/reassemble.
+    volume = np.arange(1 * 30 * 30, dtype=np.float32).reshape(1, 30, 30)
+    manager = _assert_stream_matches_whole_volume(volume, [Flip("0|1")], [8, 8])
+    assert manager._resolve_patch_stream_source(0, True).region_index == 0
+    # Every streamed patch is exactly patch_size, including the borders.
+    size = manager.patch.get_size(0)
+    for index in range(size):
+        assert tuple(manager._get_streamed_data(index, 0, True)[0].shape) == (1, 8, 8)
+
+
+def test_stream_resample_border_patch_matches_padded_whole_volume() -> None:
+    # RESCALE upsample to a grid that tiles unevenly (30 with patch 8 -> border width 6). The whole-
+    # volume path resamples the whole volume then pads border patches to patch_size; the streamed
+    # resample path must reproduce that padding so border patches are shape- and value-consistent.
+    rng = np.random.default_rng(3)
+    volume = (rng.standard_normal((1, 20, 20, 20)).astype(np.float32)) * 100.0
+    shape = [30, 30, 30]
+    patch = [8, 8, 8]
+
+    stream_manager = _build_streaming_manager(volume, [ResampleToShape(shape=shape)], patch)
+    assert stream_manager.can_stream_patch(0)
+    assert stream_manager._resolve_patch_stream_source(0, True).region_index == 0
+
+    reference_manager = _build_streaming_manager(volume, [ResampleToShape(shape=shape)], patch)
+    reference_manager.load(reference_manager.transforms, [], load_augmentations=False)
+
+    size = stream_manager.patch.get_size(0)
+    streamed = [stream_manager._get_streamed_data(index, 0, True)[0] for index in range(size)]
+    reference = [reference_manager.patch.get_data(reference_manager.data[0], index, 0, True) for index in range(size)]
+
+    assert len(streamed) == len(reference) == size
+    for got, expected in zip(streamed, reference, strict=False):
+        assert tuple(got.shape) == tuple(expected.shape) == (1, 8, 8, 8)
+        # Interior values match F.interpolate to float32 interpolation-rounding; the previously
+        # short border patch is now padded to patch_size and byte-consistent in shape.
+        np.testing.assert_allclose(got.numpy(), expected.numpy(), atol=1e-3)
+
+
+# --------------------------------------------------------------------------------------
+# patch_transforms — the per-patch opt-in, guarded by the patch-locality contract
+#
+# A patch transform only ever sees ONE patch, and that is what asking for it there means: a
+# GLOBAL_STAT transform handed a patch derives the PATCH's statistic, deliberately. The volume's
+# statistic is opted into explicitly, by capturing it case-level with `lazy` (which traverses the
+# volume, caches Mean/Std and applies nothing) and letting the patch transform find it. These cover
+# both routes, and that neither one leaks a patch's statistic onto the shared case attribute.
+# --------------------------------------------------------------------------------------
+
+
+def _structured_volume() -> np.ndarray:
+    """A spatially STRUCTURED signal: each patch has a very different local statistic.
+
+    A uniform-noise volume hides the bug (every patch shares the volume's statistic); a ramp
+    makes a patch-local statistic diverge from the volume-global one.
+    """
+    z, y, x = np.meshgrid(np.arange(16), np.arange(16), np.arange(16), indexing="ij")
+    return (100.0 * z + 10.0 * y + 1.0 * x).astype(np.float32)[None]
+
+
+def _patch_manager(volume: np.ndarray, transforms: list[Transform]) -> DatasetManager:
+    return DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, StreamingDatasetStub(volume)),
+        patch=DatasetPatch([8, 8, 8], overlap=4),
+        transforms=transforms,
+        data_augmentations_list=[],
+    )
+
+
+def test_patch_transform_standardize_applies_a_lazily_captured_volume_statistic() -> None:
+    """`Standardize(lazy=True)` case-level + `Standardize()` per patch == case-level Standardize.
+
+    This is the documented way to standardize per patch by the VOLUME's statistic: the lazy pass
+    caches Mean/Std without applying anything, and the patch transform finds them on the attribute.
+    """
+    volume = _structured_volume()
+    case_level = _patch_manager(volume, [Standardize()])
+    per_patch = _patch_manager(volume, [Standardize(lazy=True)])
+
+    size = case_level.patch.get_size(0)
+    assert size > 1
+    for index in range(size):
+        expected = case_level.get_data(index, 0, [], True)
+        got = per_patch.get_data(index, 0, [Standardize()], True)
+        assert torch.equal(got, expected)
+
+
+def test_patch_transform_standardize_uses_the_patch_own_statistic() -> None:
+    """Asked for per-patch, a GLOBAL_STAT transform standardizes the patch by ITS OWN statistic."""
+    volume = _structured_volume()
+    manager = _patch_manager(volume, [])
+
+    patch = manager.get_data(0, 0, [Standardize()], True)
+
+    source = torch.from_numpy(volume[:, 0:8, 0:8, 0:8])
+    expected = (source - source.mean()) / source.std()
+    assert torch.equal(patch, expected)
+    # The patch's own mean is a long way from the volume's, so this really is the local statistic.
+    assert abs(float(source.mean()) - float(torch.from_numpy(volume).mean())) > 100.0
+
+
+def test_patch_transform_statistic_never_leaks_onto_the_case_attribute() -> None:
+    """A patch-local statistic must not reach the attribute the whole case shares.
+
+    Left there, the first patch read would freeze its own Mean/Std for every later patch: neither
+    the volume's statistic nor the patch's, and dependent on the order the patches happen to be read.
+    """
+    volume = _structured_volume()
+    manager = _patch_manager(volume, [])
+
+    manager.get_data(0, 0, [Standardize()], True)
+
+    assert "Mean" not in manager.cache_attributes[0]
+    assert "Std" not in manager.cache_attributes[0]
+
+
+def test_patch_transform_standardize_is_independent_of_patch_order() -> None:
+    """A patch's own statistic is the patch's alone: reading others first cannot change it."""
+    volume = _structured_volume()
+    forward = _patch_manager(volume, [])
+    backward = _patch_manager(volume, [])
+
+    size = forward.patch.get_size(0)
+    first = forward.get_data(0, 0, [Standardize()], True)
+    for index in reversed(range(size)):
+        backward.get_data(index, 0, [Standardize()], True)
+    last = backward.get_data(0, 0, [Standardize()], True)
+
+    assert torch.equal(first, last)
+
+
+def test_patch_transform_is_identical_across_managers() -> None:
+    """A fresh manager per patch -- the per-DataLoader-worker case -- gives the same patch.
+
+    Each worker owns its own cache attribute, so anything a patch records on it makes the result
+    depend on which worker drew which patch. Every patch here must be reproducible on its own.
+    """
+    volume = _structured_volume()
+    shared = _patch_manager(volume, [])
+    size = shared.patch.get_size(0)
+
+    for index in range(size):
+        assert torch.equal(
+            _patch_manager(volume, []).get_data(index, 0, [Standardize()], True),
+            shared.get_data(index, 0, [Standardize()], True),
+        )
+
+
+def test_patch_transform_overlapping_patches_agree_on_shared_voxel() -> None:
+    """With the volume statistic captured lazily, two overlapping patches agree on a shared voxel.
+
+    A fresh manager per patch reproduces the per-DataLoader-worker case: the coefficients come from
+    the case-level lazy pass, so they are the same in every worker.
+    """
+    volume = _structured_volume()
+    size = _patch_manager(volume, []).patch.get_size(0)
+
+    values: dict[tuple[int, int, int], list[float]] = {}
+    for index in range(size):
+        manager = _patch_manager(volume, [Standardize(lazy=True)])
+        patch = manager.get_data(index, 0, [Standardize()], True)
+        slices = manager.patch.get_read_plan([1, 16, 16, 16], index, 0, True).data_slices
+        zs, ys, xs = slices[1], slices[2], slices[3]
+        for z in range(zs.start, zs.stop):
+            for y in range(ys.start, ys.stop):
+                for x in range(xs.start, xs.stop):
+                    voxel = float(patch[0, z - zs.start, y - ys.start, x - xs.start])
+                    values.setdefault((z, y, x), []).append(voxel)
+
+    shared = [v for v in values.values() if len(v) > 1]
+    assert shared, "the patch grid must overlap for this test to mean anything"
+    assert max(max(v) - min(v) for v in shared) == 0.0
+
+
+def test_patch_transform_normalize_applies_a_lazily_captured_volume_range() -> None:
+    volume = _structured_volume()
+    manager = _patch_manager(volume, [Normalize(lazy=True)])
+
+    patch = manager.get_data(0, 0, [Normalize(min_value=-1, max_value=1)], True)
+
+    # Mapped by the volume's range, so the first patch (low corner of the ramp) stays well
+    # below the top of the target interval instead of being stretched onto it.
+    assert float(manager.cache_attributes[0]["Min"]) == pytest.approx(float(volume.min()))
+    assert float(manager.cache_attributes[0]["Max"]) == pytest.approx(float(volume.max()))
+    assert float(patch.max()) < 0.0
+
+
+def test_lazy_capture_reads_volume_statistics_once_per_case() -> None:
+    """The whole-volume statistic is a full disk scan: read it once, not once per patch."""
+    volume = _structured_volume()
+    stub = StreamingDatasetStub(volume)
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, stub),
+        patch=DatasetPatch([8, 8, 8], overlap=4),
+        transforms=[Standardize(lazy=True)],
+        data_augmentations_list=[],
+    )
+
+    for index in range(manager.patch.get_size(0)):
+        manager.get_data(index, 0, [Standardize()], True)
+
+    assert stub.stats_reads == 1
+    assert stub.full_reads == 0
+
+
+def test_patch_transform_reads_no_disk_statistic_when_the_volume_is_loaded() -> None:
+    """A loaded volume already holds the answer: the patch path must not go back to disk for it.
+
+    The lazy pass computes Mean/Std from the tensor in hand -- free, and carrying whatever the
+    preceding chain did to it -- so a `read_data_statistics` scan here would be both wasted and a
+    statistic of the wrong (stored) version of the volume.
+    """
+    volume = _structured_volume()
+    stub = StreamingDatasetStub(volume)
+    lazy: list[Transform] = [Standardize(lazy=True)]
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, stub),
+        patch=DatasetPatch([8, 8, 8], overlap=4),
+        transforms=lazy,
+        data_augmentations_list=[],
+    )
+    manager.load(lazy, [], load_augmentations=False)
+    assert manager.loaded is True
+
+    case_level: list[Transform] = [Standardize()]
+    reference = _patch_manager(volume, case_level)
+    reference.load(case_level, [], load_augmentations=False)
+    for index in range(manager.patch.get_size(0)):
+        assert torch.equal(manager.get_data(index, 0, [Standardize()], True), reference.get_data(index, 0, [], True))
+    assert stub.stats_reads == 0
+
+
+# --------------------------------------------------------------------------------------
+# Seeding a GLOBAL_STAT from disk reads the statistics of the STORED volume, so it is only that
+# transform's own input when nothing before it touched the values.
+# --------------------------------------------------------------------------------------
+
+
+def test_streaming_is_refused_when_a_transform_modifies_values_before_a_global_stat() -> None:
+    """[Clip, Standardize] must not stream: on disk lie the PRE-Clip statistics.
+
+    Clipping moves Mean and Std, so seeding Standardize from `read_data_statistics` would standardize
+    every patch by a statistic of a volume that no longer exists. Refusing sends the case down the
+    whole-volume path, where Standardize computes Mean/Std from the clipped tensor it is handed.
+    """
+    volume = _structured_volume()
+    manager = _patch_manager(volume, [Clip(min_value=200.0, max_value=1000.0), Standardize()])
+
+    assert manager.can_stream_patch(0) is False
+    assert "Mean" not in manager.cache_attributes[0]
+
+
+def test_clip_then_standardize_equals_the_whole_volume_result() -> None:
+    """The value every patch must carry: standardized by the CLIPPED volume's statistic."""
+    volume = _structured_volume()
+    chain: list[Transform] = [Clip(min_value=200.0, max_value=1000.0), Standardize()]
+    manager = _patch_manager(volume, chain)
+    manager.load(chain, [], load_augmentations=False)
+
+    clipped = torch.from_numpy(volume).clip(200.0, 1000.0)
+    expected_volume = (clipped - clipped.mean()) / clipped.std()
+
+    size = manager.patch.get_size(0)
+    assert size > 1
+    for index in range(size):
+        patch = manager.get_data(index, 0, [], True)
+        slices = manager.patch.get_read_plan(list(volume.shape), index, 0, True).data_slices
+        assert torch.equal(patch, expected_volume[slices])
+    # The statistic the rejected seed would have used is a long way from the clipped volume's.
+    assert abs(float(torch.from_numpy(volume).mean()) - float(clipped.mean())) > 100.0
+
+
+def test_streaming_still_seeds_a_global_stat_behind_a_reorientation() -> None:
+    """A flip only moves voxels, so the stored statistics are still Standardize's own input."""
+    volume = _structured_volume()
+    manager = _patch_manager(volume, [Flip(dims="0"), Standardize()])
+
+    assert manager.can_stream_patch(0) is True
+    assert "Mean" in manager.cache_attributes[0]
+
+
+@pytest.mark.parametrize(
+    ("transform", "kind"),
+    [
+        (Standardize(mask="MASK"), LocalityKind.WHOLE_VOLUME),
+        (KonfAIInference(), LocalityKind.WHOLE_VOLUME),
+        (Gradient(), LocalityKind.HALO),
+        (Dilate(dilate=2), LocalityKind.HALO),
+        (Flip(), LocalityKind.ORIENTATION),
+        (Permute(), LocalityKind.ORIENTATION),
+    ],
+)
+def test_patch_transform_rejects_transforms_that_cannot_run_per_patch(
+    monkeypatch: pytest.MonkeyPatch, transform: Transform, kind: LocalityKind
+) -> None:
+    """A transform that cannot be correct per-patch must fail at config time, never silently."""
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    assert transform.patch_locality(Attribute()).kind is kind
+
+    with pytest.raises(ConfigError) as excinfo:
+        _check_patch_transform_locality(transform, "CT", "CT")
+
+    message = str(excinfo.value)
+    assert type(transform).__name__ in message
+    assert "patch_transforms" in message
+    assert "transforms" in message
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [TensorCast(dtype="float32"), Standardize(mean=[0.0], std=[1.0]), Standardize(), Normalize()],
+)
+def test_patch_transform_accepts_pointwise_and_global_stat_transforms(
+    monkeypatch: pytest.MonkeyPatch, transform: Transform
+) -> None:
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+
+    _check_patch_transform_locality(transform, "CT", "CT")
+
+
+class _ShapeChangingPointwise(Transform):
+    """What the locality declaration cannot catch: a custom transform that declares POINTWISE and crops."""
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.POINTWISE)
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        return [size - 1 for size in shape]
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensor[..., :-1, :-1, :-1]
+
+
+def test_patch_transform_rejects_a_transform_that_changes_the_spatial_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A POINTWISE declaration buys a transform past the locality check; the shape it returns does not."""
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    transform = _ShapeChangingPointwise()
+    _check_patch_transform_locality(transform, "CT", "CT")  # the declaration alone lets it through
+
+    with pytest.raises(ConfigError) as excinfo:
+        _check_patch_transform_shape(transform, "CT", "CT")
+
+    message = str(excinfo.value)
+    assert "_ShapeChangingPointwise" in message
+    assert "Trainer.Dataset.groups_src.CT.groups_dest.CT.patch_transforms" in message
+
+
+def test_patch_transform_shape_guard_is_spatial_not_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OneHot expands the CHANNEL axis and keeps the spatial one: the grid is spatial, so it is allowed."""
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    one_hot = OneHot(num_classes=4)
+    labels = torch.zeros((1, 4, 5, 6), dtype=torch.int64)
+    assert list(one_hot("CASE_000", labels, Attribute()).shape) == [4, 4, 5, 6]  # 1 channel -> 4
+
+    _check_patch_transform_shape(one_hot, "CT", "CT")
+
+
+def test_group_transform_prepare_guards_the_shape_of_every_patch_transform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard runs at config time, from prepare() -- not only when someone calls it directly."""
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    monkeypatch.setattr(TransformLoader, "get_transform", lambda *_, **__: _ShapeChangingPointwise())
+    group = GroupTransform(transforms=None, patch_transforms={"_ShapeChangingPointwise": TransformLoader()})
+
+    with pytest.raises(ConfigError):
+        group.prepare("CT", "CT")
+
+
+@pytest.mark.parametrize("state", [State.TRAIN, State.RESUME])
+def test_per_patch_global_stat_is_allowed_when_training(monkeypatch: pytest.MonkeyPatch, state: State) -> None:
+    """Per-patch statistics are a valid, deliberate training use: no forward inverse runs to break."""
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    monkeypatch.setenv("KONFAI_STATE", str(state))
+    _check_patch_transform_invertible(Standardize(), [], "CT", "CT")
+
+
+@pytest.mark.parametrize("transform", [Standardize(), Normalize()])
+def test_per_patch_global_stat_is_refused_at_prediction(monkeypatch: pytest.MonkeyPatch, transform: Transform) -> None:
+    """At prediction the finalize inverse pops a statistic the per-patch scope never left case-level."""
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+
+    with pytest.raises(ConfigError) as excinfo:
+        _check_patch_transform_invertible(transform, [], "CT", "CT")
+
+    message = str(excinfo.value)
+    assert type(transform).__name__ in message
+    assert "Predictor.Dataset.groups_src.CT.groups_dest.CT.patch_transforms" in message
+    assert "lazy=True" in message
+
+
+def test_case_level_lazy_capture_makes_the_patch_statistic_invertible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Standardize(lazy=True) in transforms caches Mean/Std case-level, so the patch consumer inverts."""
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    _check_patch_transform_invertible(Standardize(), [Standardize(lazy=True)], "CT", "CT")
+
+
+def test_per_patch_global_stat_without_inverse_is_allowed_at_prediction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """inverse=False never pops the statistic, so there is nothing to reconstruct and nothing to refuse."""
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    _check_patch_transform_invertible(Standardize(inverse=False), [], "CT", "CT")

@@ -34,6 +34,7 @@ from konfai.data.augmentation import (
     Rotate,
     Translate,
 )
+from konfai.data.transform import LocalityKind
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import AugmentationError
 
@@ -155,7 +156,7 @@ def test_flip_vector_field_round_trip_is_identity() -> None:
     flip = _flip_all_axes(vector_field=True)
     dvf = torch.randn(3, 4, 5, 6)
 
-    augmented = flip._compute("case", 0, [dvf.clone()])[0]
+    augmented = flip._compute("case", 0, 0, dvf.clone())
 
     assert torch.equal(flip._inverse(0, 0, augmented), dvf)
 
@@ -166,7 +167,7 @@ def test_flip_vector_field_negates_flipped_components() -> None:
     flip = _flip_all_axes(vector_field=True)
     dvf = torch.randn(3, 4, 5, 6)
 
-    augmented = flip._compute("case", 0, [dvf.clone()])[0]
+    augmented = flip._compute("case", 0, 0, dvf.clone())
 
     layout_only = torch.flip(dvf, dims=[1, 2, 3])
     assert torch.equal(augmented, -layout_only)
@@ -178,7 +179,7 @@ def test_flip_scalar_data_is_layout_only() -> None:
     flip = _flip_all_axes(vector_field=True)
     volume = torch.randn(1, 4, 5, 6)
 
-    augmented = flip._compute("case", 0, [volume.clone()])[0]
+    augmented = flip._compute("case", 0, 0, volume.clone())
 
     assert torch.equal(augmented, torch.flip(volume, dims=[1, 2, 3]))
     assert torch.equal(flip._inverse(0, 0, augmented), volume)
@@ -189,7 +190,7 @@ def test_flip_default_stays_layout_only_on_vector_data() -> None:
     flip = _flip_all_axes(vector_field=False)
     dvf = torch.randn(3, 4, 5, 6)
 
-    augmented = flip._compute("case", 0, [dvf.clone()])[0]
+    augmented = flip._compute("case", 0, 0, dvf.clone())
 
     assert torch.equal(augmented, torch.flip(dvf, dims=[1, 2, 3]))
 
@@ -240,11 +241,84 @@ def test_rotate_preserves_label_ids_with_nearest() -> None:
     labels[:, 12:20, 12:20] = 3
     rotate._state_init(0, [[32, 32]], [Attribute()])
 
-    out = rotate._compute("case", 0, [labels.clone()])[0]
+    out = rotate._compute("case", 0, 0, labels.clone())
 
     assert out.dtype == torch.uint8
     assert set(out.unique().tolist()).issubset({0, 1, 3})
     assert 2 not in out.unique().tolist()
+
+
+def _rotate_volume(spatial: tuple[int, ...]) -> torch.Tensor:
+    # Distinct values everywhere: a repeated one could survive a wrong remap by coincidence, and the
+    # multiset check below is only as strict as the volume is varied.
+    return torch.from_numpy((np.random.default_rng(0).standard_normal(spatial) * 500.0).astype(np.float32))[None]
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_rotate_quarter_is_an_exact_bijection_on_a_cubic_grid(seed: int) -> None:
+    # A multiple of 90 degrees about each axis composes to a signed permutation of the axes, so it only
+    # moves voxels: the sorted multiset of values must come back bit for bit. This is what
+    # LocalityKind.preserves_statistics lets a later stage trust, and it is strictly stronger than
+    # comparing statistics -- a sampled turn can leave one looking right while moving the values under it.
+    torch.manual_seed(seed)
+    volume = _rotate_volume((12, 12, 12))
+    rotate = Rotate(is_quarter=True)
+    rotate._state_init(0, [[12, 12, 12]], [Attribute()])
+
+    out = rotate._compute("case", 0, 0, volume)
+
+    assert out.shape == volume.shape
+    assert torch.equal(torch.sort(out.flatten())[0], torch.sort(volume.flatten())[0])
+    assert torch.min(out) == torch.min(volume)
+    assert torch.max(out) == torch.max(volume)
+    assert torch.std(out) == torch.std(volume)
+    # And it is the SAME turn the sampler describes, not merely some bijection: a different permutation
+    # would disagree by the data's own range, where interpolating this one disagrees by ~1e-3 of it.
+    sampled = rotate._sample(rotate._grid_matrix(0, 0, [12, 12, 12]), volume)
+    assert (out.double() - sampled.double()).abs().max() < 0.05
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_rotate_quarter_inverse_restores_the_volume_exactly(seed: int) -> None:
+    # An exact turn undone by a sampled one would put the interpolation error back at prediction time.
+    torch.manual_seed(seed)
+    volume = _rotate_volume((12, 12, 12))
+    rotate = Rotate(is_quarter=True)
+    rotate._state_init(0, [[12, 12, 12]], [Attribute()])
+
+    assert torch.equal(rotate._inverse(0, 0, rotate._compute("case", 0, 0, volume)), volume)
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_rotate_quarter_transposes_a_non_cubic_grid_exactly(seed: int) -> None:
+    # A 90 degree turn transposes the two extents it swaps, so the copy it draws is cut on the grid the
+    # turn lands on -- which _state_init announces and the patch grid is loaded from. The remap stays a
+    # bijection on the voxels whatever the extents: only where they sit changes.
+    torch.manual_seed(seed)
+    volume = _rotate_volume((9, 10, 11))
+    rotate = Rotate(is_quarter=True)
+
+    drawn = rotate._state_init(0, [[9, 10, 11]], [Attribute()])
+    out = rotate._compute("case", 0, 0, volume)
+
+    assert list(out.shape[1:]) == drawn[0], "the copy must be cut on the grid its draw announced"
+    assert sorted(drawn[0]) == [9, 10, 11], "a turn permutes the extents, it does not invent them"
+    assert torch.equal(torch.sort(out.flatten())[0], torch.sort(volume.flatten())[0])
+    # And the inverse brings back the source extent as well as the values.
+    assert torch.equal(rotate._inverse(0, 0, out), volume)
+
+
+def test_rotate_declares_orientation_from_the_draw_not_from_the_flag() -> None:
+    # The declaration is about the turn that was drawn, so a free range pinned to a right angle is just
+    # as exact as a quarter draw, and a free angle is not -- whatever the extents it was drawn for.
+    torch.manual_seed(0)
+    right_angle = Rotate(a_min=90.0, a_max=90.0)
+    right_angle._state_init(0, [[9, 10, 11]], [Attribute()])
+    assert right_angle._patch_locality(0, 0, Attribute()).kind is LocalityKind.ORIENTATION
+
+    free = Rotate(a_min=10.0, a_max=10.0)
+    free._state_init(0, [[12, 12, 12]], [Attribute()])
+    assert free._patch_locality(0, 0, Attribute()).kind is LocalityKind.WHOLE_VOLUME
 
 
 # --------------------------------------------------------------------------------------
@@ -261,7 +335,7 @@ def test_translate_scales_voxel_offset_to_normalized_grid():
     """
     aug = Translate(t_min=5.0, t_max=5.0, is_int=False)  # deterministic 5-voxel shift
     aug._state_init(0, [[4, 6, 10]], [Attribute()])  # spatial (z, y, x)
-    column = aug.matrix[0][0][0, :3, 3]  # affine order (x, y, z)
+    column = aug._grid_matrix(0, 0, [4, 6, 10])[0, :3, 3]  # affine order (x, y, z)
     expected = torch.tensor([5.0 * 2 / (10 - 1), 5.0 * 2 / (6 - 1), 5.0 * 2 / (4 - 1)])
     assert torch.allclose(column, expected, atol=1e-6)
 
@@ -270,7 +344,7 @@ def test_translate_is_int_rounds_to_whole_voxels():
     """``is_int`` must round to entire voxels, not to two decimals (0.01)."""
     aug = Translate(t_min=5.3, t_max=5.3, is_int=True)
     aug._state_init(0, [[9, 9, 9]], [Attribute()])
-    column = aug.matrix[0][0][0, :3, 3]
+    column = aug._grid_matrix(0, 0, [9, 9, 9])[0, :3, 3]
     expected = torch.full((3,), 5.0 * 2 / (9 - 1))  # round(5.3) == 5, then normalized
     assert torch.allclose(column, expected, atol=1e-6)
     # Neither the pre-fix 0.01 rounding (5.3) nor raw-voxel units survive.
@@ -311,6 +385,6 @@ def test_mask_reads_pixels_only_on_first_compute(tmp_path: Path, monkeypatch: py
     augmentation._state_init(0, [[2, 2]], [Attribute()])
 
     assert read_count == 0
-    augmentation._compute("case", 0, [torch.ones((1, 2, 2))])
-    augmentation._compute("case", 0, [torch.ones((1, 2, 2))])
+    augmentation._compute("case", 0, 0, torch.ones((1, 2, 2)))
+    augmentation._compute("case", 0, 0, torch.ones((1, 2, 2)))
     assert read_count == 1
