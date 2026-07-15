@@ -28,14 +28,19 @@ from konfai.utils.errors import DatasetManagerError
 
 
 def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]:
+    """Import the module a classpath names and return it with the name to take from it.
+
+    A ``:`` separates the module from the name: everything before the last one is the module, so
+    ``torch:nn:L1Loss`` and ``torch.nn:L1Loss`` name the same class. Without one, the name is taken
+    from the kind's own package, and the dots between them lead there: ``Dice`` is that package's
+    own, ``segmentation.UNet.UNet`` is under two of its subpackages.
+    """
     if len(classpath.split(":")) > 1:
         module_name = ".".join(classpath.split(":")[:-1])
         name = classpath.split(":")[-1]
     else:
-        module_name = (
-            default_classpath + ("." if len(classpath.split(".")) > 2 else "") + ".".join(classpath.split(".")[:-1])
-        )
-        name = classpath.split(".")[-1]
+        *submodules, name = classpath.split(".")
+        module_name = ".".join([default_classpath, *submodules])
     previous_mode = os.environ.get("KONFAI_CONFIG_MODE")
     os.environ["KONFAI_CONFIG_MODE"] = "Import"
     try:
