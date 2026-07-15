@@ -49,7 +49,7 @@ channel axis first). **Inv** flags whether a working `inverse()` exists.
 | `Canonical` | Reorient to canonical direction (3-D); updates Origin/Direction. | `inverse=True` | no | **yes** |
 | `Permute` | Permute spatial axes. `dims` is a pipe-separated axis list. | `dims="1\|0\|2", inverse=True` | **yes** | **yes** |
 | `Flip` | Flip spatial axes. | `dims="1\|0\|2", inverse=True` | no | **yes** (self-inverse) |
-| `Squeeze` | `tensor.squeeze(dim)`. Does not override `transform_shape` — use on the channel axis or in post-processing. | `dim` (required), `inverse=True` | no | **yes** |
+| `Squeeze` | `tensor.squeeze(dim)`. `transform_shape` drops a squeezed spatial axis and leaves a channel-axis squeeze shape-preserving, so the patch grid folds it. | `dim` (required), `inverse=True` | **yes** | **yes** |
 | `Flatten` | Flatten to 1-D. | — | **yes** | no |
 
 ## Labels & masks

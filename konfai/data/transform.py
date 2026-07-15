@@ -16,9 +16,12 @@
 
 """Tensor and image transforms used in KonfAI preprocessing and postprocessing."""
 
+import itertools
 import os
 import tempfile
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from enum import Enum
 from multiprocessing import current_process, get_context
 from pathlib import Path
 from typing import Any
@@ -41,6 +44,73 @@ from konfai.utils.runtime import NeedDevice
 from konfai.utils.utils import get_module, split_path_spec
 
 
+class LocalityKind(Enum):
+    """How a transform's output at one voxel depends on its input (its patch-locality contract).
+
+    A transform DECLARES its contract via :meth:`Transform.patch_locality`; the patch-streaming
+    dispatcher (``konfai.data.patching``) reads the declaration and reads only the source region a
+    target patch actually needs, instead of materialising the whole volume.
+
+    - ``POINTWISE``   -- output voxel depends only on the same voxel (and its channels): read the
+      exact patch.
+    - ``HALO``        -- bounded neighbourhood: read the patch enlarged by ``halo`` per axis, crop after.
+    - ``ORIENTATION`` -- flip/permute: read the index-remapped source region.
+    - ``CROP``        -- the source region is the target region TRANSLATED: reading it IS the answer,
+      so the stage is not re-applied to it. Unlike a reorientation this drops the voxels outside the
+      box, so it is no bijection and the stored volume's statistics are not its output's.
+    - ``GLOBAL_STAT`` -- needs whole-volume stats (``stat_keys`` subset of Min/Max/Mean/Std), obtained
+      once from disk and cached: read the exact patch + the cached stat.
+    - ``RESCALE``     -- resample: source region via the scale mapping + interpolation halo.
+    - ``WHOLE_VOLUME``-- genuinely needs the whole volume: the dispatcher falls back to a full load.
+    """
+
+    POINTWISE = "pointwise"
+    HALO = "halo"
+    ORIENTATION = "orientation"
+    CROP = "crop"
+    GLOBAL_STAT = "global_stat"
+    RESCALE = "rescale"
+    WHOLE_VOLUME = "whole_volume"
+
+    @property
+    def preserves_statistics(self) -> bool:
+        """Whether this kind leaves every whole-volume statistic of its input untouched.
+
+        Only a reorientation does: a flip or a permute is a bijection on the voxels, so the multiset of
+        values -- and therefore Min/Max/Mean/Std over it -- is exactly the input's. Every other kind may
+        map values (``POINTWISE``, ``GLOBAL_STAT``), mix neighbours (``HALO``) or interpolate
+        (``RESCALE``). This is what decides whether the statistics of the STORED volume are still those
+        of a later transform's own input (see ``DatasetManager._plan_stream_region``).
+        """
+        return self is LocalityKind.ORIENTATION
+
+
+@dataclass(frozen=True)
+class PatchLocality:
+    """A transform's declared patch-locality contract (see :class:`LocalityKind`).
+
+    ``halo`` is the per-spatial-axis neighbourhood radius in array order (Z, Y, X); a length-1
+    tuple broadcasts to every axis. ``stat_keys`` are the ``Attribute`` keys a ``GLOBAL_STAT``
+    transform reads before running (a subset of ``Min``/``Max``/``Mean``/``Std``). ``stat_channels``
+    restricts the statistic to those channels (``Normalize.channels``).
+    """
+
+    kind: LocalityKind
+    halo: tuple[int, ...] = ()
+    stat_keys: frozenset[str] = field(default_factory=frozenset)
+    stat_channels: list[int] | None = None
+    # Overrides the kind-level default (see LocalityKind.preserves_statistics): a POINTWISE transform
+    # that maps no value (TensorCast to a float dtype) may declare True so a later GLOBAL_STAT can
+    # still seed from the stored volume.
+    preserves_statistics: bool | None = None
+
+    @property
+    def statistics_preserving(self) -> bool:
+        if self.preserves_statistics is not None:
+            return self.preserves_statistics
+        return self.kind.preserves_statistics
+
+
 class Transform(NeedDevice, ABC):
     """Base class for transforms operating on tensors and cached attributes."""
 
@@ -55,6 +125,66 @@ class Transform(NeedDevice, ABC):
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """Declare how this transform's output depends on its input, for patch streaming.
+
+        Answered from the transform's own ``__init__`` config and, where the honest answer depends on
+        the image, from ``cache_attribute`` -- the case's SOURCE metadata, as the volume is stored.
+        The dispatcher reads the header before any voxel, so a transform whose contract the image
+        decides (a reorientation that is only a flip when the direction cosines are axis-aligned, a
+        resample whose halo is the case's own scale) can still declare it up front.
+
+        The default ``WHOLE_VOLUME`` is the safety net: any transform (including third-party custom
+        ones) that does not override this falls to the whole-volume path, so nothing silently breaks.
+
+        An override is bound by three rules:
+
+        - **READ-ONLY.** Never write to ``cache_attribute``. A declaration is made once, for the whole
+          case, and what it wrote would be one patch's answer imposed on every other -- the
+          first-patch-wins bug the streamed paths are built to avoid. The dispatcher hands over a
+          private copy, so a write cannot reach the case; it is simply lost.
+        - **NO I/O.** Read the attribute already in hand, nothing else. Whether the outside world can
+          honour the declaration (are the disk statistics readable, does a mask group exist) is the
+          dispatcher's call, and it already makes it.
+        - **TOTAL.** Answer for ANY case. The metadata may be absent -- the config-time checks probe
+          with an empty ``Attribute``, and a group carries only what its writer stored -- so a missing
+          key must return ``WHOLE_VOLUME``, never raise.
+        """
+        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+
+    def stream_region_source(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        """Map a target-patch's spatial slices to the source spatial region to read (region kinds).
+
+        Overridden by the kinds whose source region is an index remap of the target's -- ``ORIENTATION``
+        maps it and reorients what it reads, ``CROP`` maps it and is done. ``HALO`` and ``RESCALE`` are
+        handled generically by the dispatcher, so the base raises for any transform that declares a
+        region kind without providing the remap.
+
+        ``cache_attribute`` is the case's SOURCE metadata, under the same rules as
+        :meth:`patch_locality`: a remap the image decides (a reorientation whose mirrored axes are the
+        case's own direction cosines) reads it here, and reads nothing else.
+        """
+        raise TransformError(
+            f"{type(self).__name__} declared a region patch-locality but does not implement stream_region_source().",
+            "Implement stream_region_source() or declare a non-region patch_locality().",
+        )
+
+    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        """Record the geometry a whole-volume ``__call__`` would, given the FULL source shape.
+
+        Called once per case, on the persistent attribute, for the stage that owns a streamed region.
+        A transform whose geometry rewrite depends on the volume's EXTENT (a reorientation's new
+        origin is the corner it mirrors onto) cannot compute it from a patch, which is all its
+        ``__call__`` is handed while streaming: it writes the case-level answer here instead, and the
+        patch-local one it wrote on the way is dropped rather than persisted. The base is a no-op --
+        a transform that leaves geometry alone has nothing to record.
+        """
 
     @abstractmethod
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -105,6 +235,23 @@ class Clip(Transform):
         self.save_clip_min = save_clip_min
         self.save_clip_max = save_clip_max
         self.mask = mask
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # A mask reads a separate full volume, and a percentile bound needs the whole histogram:
+        # both force a whole-volume load. A 'min'/'max' bound needs a global disk statistic
+        # (GLOBAL_STAT); fixed float bounds clip each voxel independently (POINTWISE).
+        if self.mask is not None:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        stat_keys: set[str] = set()
+        for bound, key in ((self.min_value, "Min"), (self.max_value, "Max")):
+            if isinstance(bound, str):
+                if bound.lower() == key.lower():
+                    stat_keys.add(key)
+                else:
+                    return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        if not stat_keys:
+            return PatchLocality(LocalityKind.POINTWISE)
+        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         mask = None
@@ -208,6 +355,11 @@ class Normalize(TransformInverse):
         self.max_value = max_value
         self.channels = channels
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Rescaling uses the volume-global Min/Max (restricted to self.channels); the dispatcher reads
+        # those once from disk and seeds them so every patch (and inverse()) sees the same range.
+        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"Min", "Max"}), stat_channels=self.channels)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Min" not in cache_attribute:
             if self.channels:
@@ -257,6 +409,9 @@ class UnNormalize(Transform):
         self.min_value = min_value
         self.max_value = max_value
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.POINTWISE)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return (tensor + 1) / 2 * (self.max_value - self.min_value) + self.min_value
 
@@ -277,6 +432,21 @@ class Standardize(TransformInverse):
         self.mean = mean
         self.std = std
         self.mask = mask
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # A mask reads a separate full volume (whole-volume). Any of mean/std left unset is taken from
+        # a volume-global disk statistic (GLOBAL_STAT); when both are given, the standardization is a
+        # per-voxel affine map with constant coefficients (POINTWISE).
+        if self.mask is not None:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        stat_keys: set[str] = set()
+        if self.mean is None:
+            stat_keys.add("Mean")
+        if self.std is None:
+            stat_keys.add("Std")
+        if not stat_keys:
+            return PatchLocality(LocalityKind.POINTWISE)
+        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         mask = None
@@ -339,6 +509,12 @@ class TensorCast(TransformInverse):
         super().__init__(inverse)
         self.dtype: torch.dtype = getattr(torch, dtype)
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # A cast to a floating dtype keeps every value (up to fp rounding on a downcast), so the stored
+        # volume's Min/Max/Mean/Std are still a later GLOBAL_STAT's input statistics; an integer cast
+        # truncates and may not preserve them.
+        return PatchLocality(LocalityKind.POINTWISE, preserves_statistics=self.dtype.is_floating_point)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         cache_attribute["dtype"] = str(tensor.dtype).replace("torch.", "")
         return tensor.type(self.dtype)
@@ -396,6 +572,16 @@ class Squeeze(TransformInverse):
         super().__init__(inverse)
         self.dim = dim
 
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        # ``shape`` is the channel-stripped spatial shape (patching strips [C, *spatial] before folding),
+        # so the runtime tensor is [C, *shape] and ``self.dim`` indexes into that. Squeezing the channel
+        # (axis 0) leaves the spatial grid untouched; squeezing a spatial axis drops it from the grid --
+        # but only when it is size 1, exactly as ``torch.squeeze`` does (a non-singleton axis is a no-op).
+        axis = self.dim if self.dim >= 0 else self.dim + len(shape) + 1
+        if 1 <= axis <= len(shape) and shape[axis - 1] == 1:
+            return shape[: axis - 1] + shape[axis:]
+        return shape
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.squeeze(self.dim)
 
@@ -406,6 +592,11 @@ class Squeeze(TransformInverse):
 class Resample(TransformInverse, ABC):
     def __init__(self, inverse: bool) -> None:
         super().__init__(inverse)
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # The source region is derived from the scale mapping (read from cache_attribute['Spacing']
+        # by the dispatcher); a small interpolation halo is added by resample_source_region.
+        return PatchLocality(LocalityKind.RESCALE)
 
     def _resample(self, tensor: torch.Tensor, size: list[int]) -> torch.Tensor:
         if tensor.dtype == torch.uint8:
@@ -446,6 +637,121 @@ class Resample(TransformInverse, ABC):
             cache_attribute.pop_np_array("Spacing")
         return self._resample(tensor, [int(size) for size in size_1])
 
+    # ------------------------------------------------------------------
+    # Patch-native streaming support.
+    #
+    # These methods let the patch pipeline resample ONE output patch by
+    # reading only the corresponding source region (+ a small halo) instead
+    # of materialising the whole volume. They are numerically identical to a
+    # whole-volume F.interpolate down to fp32 weight-rounding, and byte-
+    # identical patch-to-patch (zero seam error) because every patch derives
+    # its source coordinates from the SAME global mapping:
+    #
+    #     scale_k = n_in_k / n_out_k        (integer sizes, align_corners=False)
+    #     src(o)  = clamp(scale_k*(o+0.5) - 0.5, min=0)
+    #
+    # `transform_shape` already returns n_out (array order Z,Y,X), so the scale
+    # is taken from the truncated integer sizes exactly as F.interpolate does.
+    # ------------------------------------------------------------------
+    def _stream_mode(self, tensor: torch.Tensor) -> str:
+        if tensor.dtype == torch.uint8:
+            return "nearest"
+        return "bilinear" if len(tensor.shape) < 4 else "trilinear"
+
+    def resample_source_region(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+        halo: int = 1,
+    ) -> tuple[list[slice], list[int], list[float], list[int], list[int]]:
+        """Map a TARGET-grid patch to the minimal SOURCE region to read.
+
+        Returns ``(source_slices, region_starts, scales, n_in, n_out)`` — all in
+        array axis order (Z, Y, X). The ``halo`` is a pure safety margin (the
+        formula's ``+2`` already captures the i1 neighbour); nearest needs none.
+        """
+        n_in = [int(s) for s in source_spatial_shape]
+        n_out = [int(s) for s in self.transform_shape("", "", list(n_in), cache_attribute)]
+        scales = [n_in[k] / n_out[k] for k in range(len(n_in))]
+        source_slices: list[slice] = []
+        region_starts: list[int] = []
+        for k, sl in enumerate(target_slices):
+            o0, o1 = sl.start, sl.stop
+            smin = int(np.floor(scales[k] * (o0 + 0.5) - 0.5))
+            smax = int(np.floor(scales[k] * ((o1 - 1) + 0.5) - 0.5))
+            a = max(0, smin - halo)
+            b = min(n_in[k], smax + 2 + halo)
+            source_slices.append(slice(a, b))
+            region_starts.append(a)
+        return source_slices, region_starts, scales, n_in, n_out
+
+    def resample_region(
+        self,
+        sub_tensor: torch.Tensor,
+        target_slices: tuple[slice, ...],
+        region_starts: list[int],
+        scales: list[float],
+        n_in: list[int],
+    ) -> torch.Tensor:
+        """Interpolate a source sub-region to the target patch extent.
+
+        ``sub_tensor`` is ``[C, (z, y, x)]`` covering ``source_slices``;
+        ``region_starts`` are the global source indices of its first voxel per
+        axis. Uses the same global coordinate formula as the whole-volume path,
+        indexing the sub-region as ``sub[i - region_start]``.
+        """
+        mode = self._stream_mode(sub_tensor)
+        dev = sub_tensor.device
+        ndim = len(target_slices)
+        if mode == "nearest":
+            out = sub_tensor
+            for k in range(ndim):
+                # Take the axis's index map from F.interpolate itself, so streamed nearest picks the
+                # same source voxel as the whole-volume call for every size ratio.
+                src = torch.arange(n_in[k], device=dev, dtype=torch.float32).reshape(1, 1, -1)
+                n_out_k = round(n_in[k] / scales[k])
+                index = F.interpolate(src, size=n_out_k, mode="nearest").long().flatten()
+                index = index[target_slices[k].start : target_slices[k].stop] - region_starts[k]
+                out = out.index_select(k + 1, index)
+            return out
+
+        if not sub_tensor.is_floating_point() or (
+            sub_tensor.device.type == "cpu" and sub_tensor.dtype in (torch.float16, torch.bfloat16)
+        ):
+            work = sub_tensor.type(torch.float32)
+        else:
+            work = sub_tensor
+        taps: list[tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]] = []
+        for k in range(ndim):
+            o = torch.arange(target_slices[k].start, target_slices[k].stop, device=dev, dtype=work.dtype)
+            src = torch.clamp(scales[k] * (o + 0.5) - 0.5, min=0.0)
+            i0 = torch.floor(src).long()
+            i1 = torch.clamp(i0 + 1, max=n_in[k] - 1)
+            lam = src - i0.to(work.dtype)
+            taps.append(((i0 - region_starts[k], 1 - lam), (i1 - region_starts[k], lam)))
+        out_shape = [work.shape[0]] + [sl.stop - sl.start for sl in target_slices]
+        out = torch.zeros(out_shape, device=dev, dtype=work.dtype)
+        for combo in itertools.product(*taps):
+            gathered = work
+            weight = torch.ones([1] * (ndim + 1), device=dev, dtype=work.dtype)
+            for k, (idx, lam) in enumerate(combo):
+                gathered = gathered.index_select(k + 1, idx)
+                shape = [1] * (ndim + 1)
+                shape[k + 1] = -1
+                weight = weight * lam.reshape(shape)
+            out += gathered * weight
+        return out.type(sub_tensor.dtype)
+
+    @abstractmethod
+    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        """Record the same 'Spacing'/'Size' stack a whole-volume ``__call__`` would.
+
+        Called once per case on the persistent attribute so ``inverse()`` at
+        prediction time pops exactly what the non-streamed path pushed. Uses the
+        FULL source shape, never the halo'd sub-region.
+        """
+
 
 class ResampleToResolution(Resample):
     def __init__(self, spacing: list[float] = [1.0, 1.0, 1.0], inverse: bool = True) -> None:
@@ -483,6 +789,19 @@ class ResampleToResolution(Resample):
         cache_attribute["Size"] = np.asarray(size)
         return self._resample(tensor, size)
 
+    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        image_spacing = cache_attribute.get_tensor("Spacing")
+        spacing = self.spacing
+        resize_factor = torch.tensor(
+            [s / i_s if s > 0 else 1.0 for s, i_s in zip(self.spacing, image_spacing, strict=False)]
+        )
+        cache_attribute["Spacing"] = torch.tensor(
+            [float(s) if s > 0 else float(i_s) for s, i_s in zip(spacing, image_spacing, strict=False)]
+        )
+        cache_attribute["Size"] = np.asarray([int(x) for x in source_spatial_shape])
+        size = [int(x) for x in (torch.tensor([int(s) for s in source_spatial_shape]) * 1 / resize_factor.flip(0))]
+        cache_attribute["Size"] = np.asarray(size)
+
 
 class ResampleToShape(Resample):
     def __init__(self, shape: list[float] = [100, 256, 256], inverse: bool = True) -> None:
@@ -518,8 +837,28 @@ class ResampleToShape(Resample):
         cache_attribute["Size"] = shape
         return self._resample(tensor, shape)
 
+    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        shape = self.shape.clone()
+        image_shape = torch.tensor([int(s) for s in source_spatial_shape])
+        for i, s in enumerate(self.shape):
+            if s == 0:
+                shape[i] = image_shape[i]
+        if "Spacing" in cache_attribute:
+            cache_attribute["Spacing"] = torch.flip(
+                image_shape / shape * torch.flip(cache_attribute.get_tensor("Spacing"), dims=[0]),
+                dims=[0],
+            )
+        cache_attribute["Size"] = image_shape
+        cache_attribute["Size"] = shape
+
 
 class ResampleTransform(TransformInverse):
+    """Resample a volume through stored transforms (a displacement field, an affine).
+
+    Whole-volume: nothing in the format bounds the stored displacement, so no halo can be declared
+    from the header alone.
+    """
+
     def __init__(self, transforms: dict[str, bool], inverse: bool = True) -> None:
         super().__init__(inverse)
         self.transforms = transforms
@@ -598,6 +937,13 @@ class ResampleTransform(TransformInverse):
 
 
 class Mask(Transform):
+    """Set everything outside a mask to a constant.
+
+    Whole-volume: ``__call__`` does not know where its tensor sits, so it cannot read the matching
+    region of the mask (``Clip(mask=)`` and ``Standardize(mask=)`` load whole volumes for the same
+    reason).
+    """
+
     def __init__(self, path: str = "./default.mha", value_outside: int = 0) -> None:
         super().__init__()
         self.path = path
@@ -630,6 +976,14 @@ class Dilate(Transform):
         if dilate < 0:
             raise ValueError(f"[Dilate] 'dilate' must be >= 0, got {dilate}")
         self.dilate = dilate
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # A box dilation of radius ``dilate`` spreads foreground by at most ``dilate`` voxels per axis:
+        # a bounded HALO. At the true border the separable max-pool padding matches the whole-volume
+        # result once the halo clamps, so seams are byte-identical. Radius 0 is a spatial identity.
+        if self.dilate == 0:
+            return PatchLocality(LocalityKind.POINTWISE)
+        return PatchLocality(LocalityKind.HALO, halo=(self.dilate,))
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if self.dilate == 0:
@@ -665,6 +1019,13 @@ class Sum(Transform):
         super().__init__()
         self.dim = dim
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Pointwise only when reducing the leading channel/model axis (dim 0); a spatial sum spans
+        # the whole extent, so it falls back to the whole volume.
+        if self.dim == 0:
+            return PatchLocality(LocalityKind.POINTWISE)
+        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "number_of_channels_per_model" in cache_attribute:
             number_of_channels = cache_attribute.pop_tensor("number_of_channels_per_model")
@@ -695,6 +1056,10 @@ class MergeLabels(Transform):
     ids instead would fabricate a label belonging to neither model).
     """
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Merges the leading model axis per voxel; spatial support is a single voxel.
+        return PatchLocality(LocalityKind.POINTWISE)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "number_of_channels_per_model" not in cache_attribute:
             raise TransformError(
@@ -715,6 +1080,11 @@ class Gradient(Transform):
     def __init__(self, per_dim: bool = False):
         super().__init__()
         self.per_dim = per_dim
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # First-difference gradient: each output voxel reads its immediate neighbour, a HALO of radius
+        # 1. The far-edge ConstantPad reproduces the whole-volume border once the halo clamps there.
+        return PatchLocality(LocalityKind.HALO, halo=(1,))
 
     @staticmethod
     def _image_gradient_2d(image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -753,6 +1123,13 @@ class Argmax(Transform):
         super().__init__()
         self.dim = dim
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Pointwise ONLY when reducing the channel axis (dim 0). Over a spatial axis the argmax spans
+        # the whole extent, so a per-patch argmax would diverge -- fall back to the whole volume.
+        if self.dim == 0:
+            return PatchLocality(LocalityKind.POINTWISE)
+        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.argmax(tensor, dim=self.dim).unsqueeze(self.dim)
 
@@ -762,6 +1139,13 @@ class Softmax(Transform):
         super().__init__()
         self.dim = dim
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Pointwise ONLY when reducing the channel axis (dim 0). Over a spatial axis softmax normalises
+        # across the whole extent, so a per-patch softmax would diverge -- fall back to the whole volume.
+        if self.dim == 0:
+            return PatchLocality(LocalityKind.POINTWISE)
+        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.softmax(tensor, dim=self.dim)
 
@@ -770,6 +1154,9 @@ class FlatLabel(Transform):
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
         self.labels = labels
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         data = torch.zeros_like(tensor)
@@ -786,6 +1173,12 @@ class Save(Transform):
         super().__init__()
         self.dataset = dataset
         self.group = group
+
+    # patch_locality stays the WHOLE_VOLUME default on purpose. Although Save is a spatial identity,
+    # a Save that survives in the trailing chain (its cached dataset does not yet exist) must WRITE
+    # the fully preprocessed volume to disk. The streaming path applies transforms per patch and never
+    # materialises the whole volume, so it has no volume to write: declaring whole-volume is what keeps
+    # the caching side effect. A Save whose cache already exists is handled earlier, as a source boundary.
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor
@@ -810,6 +1203,23 @@ class Permute(TransformInverse):
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return [shape[it - 1] for it in self.dims[1:]]
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.ORIENTATION)
+
+    def stream_region_source(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        # Output spatial axis k comes from input axis ``self.dims[k + 1] - 1`` (self.dims is
+        # channel-inclusive). Placing each target slice at its source axis yields the source region
+        # whose permutation reproduces the target patch exactly.
+        source_slices = [slice(0, n) for n in source_spatial_shape]
+        for k, sl in enumerate(target_slices):
+            source_slices[self.dims[k + 1] - 1] = slice(sl.start, sl.stop)
+        return source_slices
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.permute(tuple(self.dims))
 
@@ -823,6 +1233,26 @@ class Flip(TransformInverse):
 
         self.dims = [int(d) + 1 for d in str(dims).split("|")]
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.ORIENTATION)
+
+    def stream_region_source(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        # A flipped spatial axis reads the mirror region ``[n - stop, n - start)``; applying the flip
+        # to that sub-region reproduces the target patch. Non-flipped axes read the identity region.
+        source_slices: list[slice] = []
+        for k, sl in enumerate(target_slices):
+            n = source_spatial_shape[k]
+            if (k + 1) in self.dims:
+                source_slices.append(slice(n - sl.stop, n - sl.start))
+            else:
+                source_slices.append(slice(sl.start, sl.stop))
+        return source_slices
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.flip(tuple(self.dims))
 
@@ -831,9 +1261,87 @@ class Flip(TransformInverse):
 
 
 class Canonical(TransformInverse):
+    """Reorient a volume onto the canonical (LPS) direction cosines.
+
+    An orthogonal reorientation is a signed permutation of the axes: an exact index remap (values only
+    change place, so whole-volume statistics survive); only an oblique direction is resampled. A remap
+    that permutes axes transposes the extents it swaps, so ``transform_shape`` folds the patch grid
+    onto the reoriented shape.
+    """
+
+    # An orthonormal direction's entries are exactly 0 or +/-1 when it is axis-aligned, but the
+    # reorientation is a product with an inverse, so it lands within a few double ulps of them.
+    _AXIS_ALIGNED_ATOL = 1e-9
+
     def __init__(self, inverse: bool = True) -> None:
         super().__init__(inverse)
         self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
+
+    def _reorientation(self, cache_attribute: Attribute) -> torch.Tensor:
+        """The map taking an output coordinate onto the input it comes from, in (x, y, z).
+
+        A voxel sits at ``D @ (spacing * index) + origin``, so the map is ``D^-1 @ C`` (with the
+        target spacing carried along the permutation, see ``_carried``) -- NOT the rotation
+        ``C @ D^-1``, which only agrees where the two commute.
+        """
+        initial_matrix = cache_attribute.get_tensor("Direction").reshape(3, 3).to(torch.double)
+        return initial_matrix.inverse() @ self.canonical_direction
+
+    @classmethod
+    def _index_remap(cls, reorientation: torch.Tensor) -> list[tuple[int, bool]] | None:
+        """Per output SPATIAL axis, the source axis it reads and whether it reads it mirrored.
+
+        ``reorientation`` maps an output coordinate onto the input it comes from, so it is an exact
+        remap exactly when it is a signed permutation: output physical axis ``c`` then reads input
+        physical axis ``r``, backwards where the sign is negative. Anything else mixes axes. Axes are
+        returned in array order, where physical axis k is array axis ``n - 1 - k``. The test (every
+        column of L1 norm 1 with peak 1) admits exactly the signed permutations: unit column sums
+        alone would also pass an axis-averaging matrix.
+        """
+        n = reorientation.shape[0]
+        unit = torch.ones(n, dtype=reorientation.dtype)
+        columns = reorientation.abs()
+        if not torch.allclose(columns.sum(0), unit, atol=cls._AXIS_ALIGNED_ATOL):
+            return None
+        if not torch.allclose(columns.amax(0), unit, atol=cls._AXIS_ALIGNED_ATOL):
+            return None
+        remap = []
+        for c in reversed(range(n)):
+            r = int(columns[:, c].argmax())
+            remap.append((n - 1 - r, bool(reorientation[r, c] < 0)))
+        return remap
+
+    def _orthogonal_remap(self, cache_attribute: Attribute) -> list[tuple[int, bool]] | None:
+        """The exact index remap this case's reorientation is, or ``None`` where it is not one.
+
+        Total: a case whose header carries no usable direction cosines has no remap to make, and an
+        oblique one has none to make either -- both answer ``None`` rather than raise, and the resample
+        is what answers for them.
+        """
+        if "Direction" not in cache_attribute or cache_attribute.get_np_array("Direction").size != 9:
+            return None
+        return Canonical._index_remap(self._reorientation(cache_attribute))
+
+    @staticmethod
+    def _carried(per_physical_axis: torch.Tensor, remap: list[tuple[int, bool]] | None) -> torch.Tensor:
+        """Carry a per-physical-axis quantity along a remap: output axis c takes the axis it reads.
+
+        A spacing and a half-extent travel with the axis they belong to -- what a reorientation
+        preserves is the volume's physical extent, not which axis carries it. An oblique direction is
+        resampled onto the input's own grid, so without a remap nothing moves.
+        """
+        if remap is None:
+            return per_physical_axis
+        # The remap is in array order and these are (x, y, z): read in array order, gather, restore.
+        return per_physical_axis.flip(0)[[source for source, _ in remap]].flip(0)
+
+    @staticmethod
+    def _half_extent(spatial_shape: list[int], spacing: torch.Tensor) -> torch.Tensor:
+        """Half a grid's physical extent along each axis, in (x, y, z). A shape is in array order."""
+        return torch.tensor(
+            [(spatial_shape[-axis - 1] - 1) * spacing[axis] / 2 for axis in range(len(spatial_shape))],
+            dtype=torch.double,
+        )
 
     @staticmethod
     def _affine_matrix(matrix: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
@@ -875,34 +1383,102 @@ class Canonical(TransformInverse):
             .type(data.dtype)
         )
 
-    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        spacing = cache_attribute.get_tensor("Spacing")
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        # ``shape`` is the channel-stripped SPATIAL shape -- patching strips [C, *spatial] before folding
+        # transform_shape -- and the patch grid is folded from what this returns, so a remap that
+        # transposes extents moves the grid onto the reoriented volume, which is where its patches are.
+        # Read-only, like every answer given from the case metadata: the attribute folded through here is
+        # the case's own, before a single voxel has been read.
+        remap = self._orthogonal_remap(cache_attribute)
+        if remap is None:
+            return shape
+        return [shape[source] for source, _ in remap]
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Only the case can say which reorientation this is, so only the header can answer. An orthogonal
+        # one -- mirroring or permuting -- remaps indices, which is what ORIENTATION streams; an oblique
+        # one is resampled from the whole volume.
+        if self._orthogonal_remap(cache_attribute) is None:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(LocalityKind.ORIENTATION)
+
+    def stream_region_source(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        # Target axis k reads source axis ``source``, so the target slice IS the source's -- taken at the
+        # far end ``[n - stop, n - start)`` where the remap reads that axis backwards. Flipping the region
+        # read reproduces the patch: a flip restricted to a contiguous region is that region reversed.
+        # Both the slices and the remap are in array order, and the remap covers every axis exactly once.
+        remap = self._orthogonal_remap(cache_attribute)
+        if remap is None:
+            raise TransformError(
+                "Canonical declared a region patch-locality for a direction it cannot remap exactly.",
+                "Report this: patch_locality() and stream_region_source() disagree about the case.",
+            )
+        source_slices = [slice(None)] * len(remap)
+        for target, (source, mirrored) in zip(target_slices, remap, strict=False):
+            extent = source_spatial_shape[source]
+            source_slices[source] = (
+                slice(extent - target.stop, extent - target.start) if mirrored else slice(target.start, target.stop)
+            )
+        return source_slices
+
+    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
         initial_matrix = cache_attribute.get_tensor("Direction").reshape(3, 3).to(torch.double)
         initial_origin = cache_attribute.get_tensor("Origin")
-        cache_attribute["Direction"] = (self.canonical_direction).flatten()
-        matrix = Canonical._affine_matrix(self.canonical_direction @ initial_matrix.inverse(), torch.tensor([0, 0, 0]))
-        center_voxel = torch.tensor(
-            [(tensor.shape[-i - 1] - 1) * spacing[i] / 2 for i in range(3)],
-            dtype=torch.double,
-        )
-        center_physical = initial_matrix @ center_voxel + initial_origin
-        cache_attribute["Origin"] = center_physical - (self.canonical_direction @ center_voxel)
-        return Canonical._resample_affine(tensor, matrix.unsqueeze(0))
+        spacing = cache_attribute.get_tensor("Spacing").to(torch.double)
+        remap = self._orthogonal_remap(cache_attribute)
+        half_extent = Canonical._half_extent(source_spatial_shape, spacing)
+        cache_attribute["Direction"] = self.canonical_direction.flatten()
+        cache_attribute["Spacing"] = Canonical._carried(spacing, remap)
+        # The reorientation fixes the volume's centre, so the new origin is that centre stepped back by
+        # the canonical half-extent -- the TARGET grid's, which a permutation has carried onto other
+        # axes. The extent is the VOLUME's, never a patch's: it is an argument rather than the handed
+        # tensor's shape.
+        center = initial_matrix @ half_extent + initial_origin
+        cache_attribute["Origin"] = center - self.canonical_direction @ Canonical._carried(half_extent, remap)
+
+    def _reorient(self, tensor: torch.Tensor, reorientation: torch.Tensor) -> torch.Tensor:
+        """Apply a reorientation: an exact index remap where it is one, a resample where it is not.
+
+        An orthogonal reorientation is a bijection on the voxels, so it must reproduce the input's
+        multiset bit for bit -- which only a permute and a flip do.
+        """
+        remap = Canonical._index_remap(reorientation)
+        if remap is None:
+            matrix = Canonical._affine_matrix(reorientation, torch.tensor([0, 0, 0]))
+            return Canonical._resample_affine(tensor, matrix.unsqueeze(0))
+        # The remap is spatial and the tensor is channel-first, so the channel axes lead it unpermuted.
+        offset = tensor.dim() - len(remap)
+        dims = list(range(offset)) + [offset + source for source, _ in remap]
+        flips = [offset + axis for axis, (_, mirrored) in enumerate(remap) if mirrored]
+        # flip materialises the permuted view, so the result never aliases the tensor it was read from.
+        return tensor.permute(dims).flip(flips)
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        # Read the source geometry before recording the canonical one over it: the attribute stacks.
+        reorientation = self._reorientation(cache_attribute)
+        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]))
+        return self._reorient(tensor, reorientation)
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        # Popping restores the source geometry, which is what the inverse remap is then read from.
         cache_attribute.pop("Direction")
+        cache_attribute.pop("Spacing")
         cache_attribute.pop("Origin")
-        matrix = Canonical._affine_matrix(
-            (
-                self.canonical_direction
-                @ cache_attribute.get_tensor("Direction").to(torch.double).reshape(3, 3).inverse()
-            ).inverse(),
-            torch.tensor([0, 0, 0]),
-        )
-        return Canonical._resample_affine(tensor, matrix.unsqueeze(0))
+        return self._reorient(tensor, self._reorientation(cache_attribute).inverse())
 
 
 class HistogramMatching(Transform):
+    """Match a volume's intensity distribution onto a reference group's.
+
+    Whole-volume: the LUT is built from the volume's 256-bin histogram, which is not a statistic
+    ``GLOBAL_STAT`` names and cannot be read back out of the sitk filter.
+    """
+
     def __init__(self, reference_group: str) -> None:
         super().__init__()
         self.reference_group = reference_group
@@ -929,6 +1505,9 @@ class SelectLabel(Transform):
         super().__init__()
         self.labels = [label[1:-1].split(",") for label in labels]
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.POINTWISE)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         data = torch.zeros_like(tensor)
         for old_label, new_label in self.labels:
@@ -940,6 +1519,10 @@ class OneHot(TransformInverse):
     def __init__(self, num_classes: int, inverse: bool = True) -> None:
         super().__init__(inverse)
         self.num_classes = num_classes
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Expands each voxel's scalar label into a one-hot channel vector (spatially pointwise).
+        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         result = (
@@ -1062,6 +1645,10 @@ class InferenceStack(Transform):
         self.name = name
         self.mode = mode
 
+    # patch_locality stays the WHOLE_VOLUME default: the member reduction is pointwise, but __call__
+    # also WRITES the whole per-member stack to disk (like Save), which a per-patch pass cannot do. It
+    # is an ensemble/finalize transform, never in a streaming input chain, so this costs no streaming.
+
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if tensors.shape[0] == 1:
             return tensors.squeeze(0)
@@ -1109,6 +1696,10 @@ class Variance(Transform):
     def __init__(self) -> None:
         super().__init__()
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Variance across the leading member axis at each voxel -- no spatial neighbour.
+        return PatchLocality(LocalityKind.POINTWISE)
+
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Keep the leading member axis in BOTH branches: the N>1 var(0) drops it and re-adds it via
         # unsqueeze(0), so the single-member zeros must unsqueeze too or the output rank is off by one.
@@ -1121,6 +1712,12 @@ class SegmentationDisagreement(Transform):
     def __init__(self, ignore_background: bool = False) -> None:
         super().__init__()
         self.ignore_background = ignore_background
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Per-voxel majority disagreement across the members. The global torch.unique only widens the
+        # label set with labels absent at a given voxel, which contribute zero counts there and never
+        # change that voxel's majority -- so the result is decided voxel by voxel.
+        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # tensors shape: [N, ...] with N segmentations and integer labels per voxel
@@ -1157,6 +1754,9 @@ class Percentage(Transform):
         super().__init__()
         self.baseline = baseline
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.POINTWISE)
+
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensors / self.baseline * 100.0
 
@@ -1164,6 +1764,10 @@ class Percentage(Transform):
 class StandardDeviation(Transform):
     def __init__(self) -> None:
         super().__init__()
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Standard deviation across the leading member axis at each voxel -- no spatial neighbour.
+        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return (
@@ -1184,8 +1788,54 @@ class Statistics(Transform):
 
 
 class Crop(TransformInverse):
+    """Crop a volume to the bounding box of its foreground.
+
+    The content-dependent box is computed once (``transform_shape``) and kept on the case as ``box``
+    margins; cropping is then the translation ``out[o] = volume[o + start]``, so a target patch reads
+    its shifted source region. Dropped voxels mean the stored volume's statistics are not the output's
+    (hence ``LocalityKind.CROP``).
+    """
+
     def __init__(self, inverse: bool = True) -> None:
         super().__init__(inverse)
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Total: the box is a fact ``transform_shape`` puts on the case before the dispatcher reads any
+        # declaration, but a group carries only what its writer stored, and without it there is no
+        # translation to make -- only the read that would find one.
+        if "box" not in cache_attribute:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(LocalityKind.CROP)
+
+    def stream_region_source(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        # Output index o holds source index o + start, so the region behind a target patch is that
+        # patch's own slices stepped forward by the box's near margin.
+        box = Crop._parse_box(cache_attribute["box"])
+        return [
+            slice(target.start + int(start), target.stop + int(start))
+            for target, (start, _) in zip(target_slices, box, strict=False)
+        ]
+
+    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        if "box" not in cache_attribute:
+            return
+        if not {"Origin", "Spacing", "Direction"} <= set(cache_attribute.keys()):
+            return
+        # The crop keeps the box's near corner, so the new origin is the physical point that corner
+        # already sat on: the old origin stepped along each axis by its own margin. A margin is in
+        # array order and the geometry is in (x, y, z), hence the reversed indexing.
+        box = Crop._parse_box(cache_attribute["box"])
+        origin = torch.tensor(cache_attribute.get_np_array("Origin"))
+        matrix = torch.tensor(cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin))))
+        origin = torch.matmul(origin, matrix)
+        for dim in range(box.shape[0]):
+            origin[-dim - 1] += box[dim][0] * cache_attribute.get_np_array("Spacing")[-dim - 1]
+        cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         # The crop box is content-dependent (foreground bounding box), so the output shape
@@ -1222,16 +1872,10 @@ class Crop(TransformInverse):
         if "box" not in cache_attribute:
             return tensor
         box = self._parse_box(cache_attribute["box"])
+        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]))
+        # The box carries the FAR margin, so the stop it crops at is the one the extent in hand decides.
         for i, ((_, b), s) in enumerate(zip(box, tensor.shape[1:], strict=False)):
             box[i][1] = s - b
-        if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
-            origin = torch.tensor(cache_attribute.get_np_array("Origin"))
-            matrix = torch.tensor(cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin))))
-            origin = torch.matmul(origin, matrix)
-            for dim in range(box.shape[0]):
-                origin[-dim - 1] += box[dim][0] * cache_attribute.get_np_array("Spacing")[-dim - 1]
-            cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
-
         image = data_to_image(tensor, cache_attribute)
         result = crop_with_mask(image, box)
         data, _ = image_to_data(result)
