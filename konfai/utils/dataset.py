@@ -21,10 +21,13 @@ from __future__ import annotations
 import ast
 import copy
 import csv
+import functools
 import glob
 import math
 import os
+import re
 import threading
+import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -122,6 +125,10 @@ class Attribute(dict[str, Any]):
         return key in self and self[key] == value
 
 
+# Elements held in memory at once while accumulating statistics chunk by chunk, whatever the backend.
+_STATISTICS_CHUNK_ELEMENTS = 8_000_000
+
+
 def _update_running_statistics(
     state: dict[str, float] | None,
     array: np.ndarray,
@@ -160,6 +167,30 @@ def _finalize_running_statistics(state: dict[str, float] | None) -> dict[str, fl
         "mean": state["mean"],
         "std": math.sqrt(max(variance, 0.0)),
     }
+
+
+# Formats already reported by _warn_unstreamed_region_read. Keyed by format, not by file: the remedy
+# is dataset-wide, so every case of a dataset would otherwise repeat the same warning.
+_unstreamed_formats_warned: set[str] = set()
+
+
+def _warn_unstreamed_region_read(path: str) -> None:
+    """Warn that `path`'s format decodes the whole volume for every patch region read from it.
+
+    `warnings.warn` dedups per call site, which here is one line in a loop over every patch of every
+    case: the seen-set is what makes this once per format rather than thousands of times.
+    """
+    suffix = Path(path).suffix
+    if suffix in _unstreamed_formats_warned:
+        return
+    _unstreamed_formats_warned.add(suffix)
+    warnings.warn(
+        f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region "
+        "(NRRD, or any compressed file), so every patch decodes the whole volume again -- 10-20x the "
+        "cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI "
+        "streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
+        stacklevel=2,
+    )
 
 
 def is_an_image(attributes: Attribute) -> bool:
@@ -385,8 +416,7 @@ class Dataset:
 
             axis = 1 if dataset.ndim > 1 else 0
             trailing_size = int(np.prod(dataset.shape[axis + 1 :], dtype=np.int64)) if axis + 1 < dataset.ndim else 1
-            max_elements = 8_000_000
-            chunk_length = max(1, max_elements // max(1, trailing_size))
+            chunk_length = max(1, _STATISTICS_CHUNK_ELEMENTS // max(1, trailing_size))
             state: dict[str, float] | None = None
 
             for start in range(0, dataset.shape[axis], chunk_length):
@@ -535,6 +565,29 @@ class Dataset:
         def _supports_direct_slice(slices: tuple[slice, ...]) -> bool:
             return all(item.step in (None, 1) for item in slices)
 
+        @staticmethod
+        @functools.cache
+        def _supports_region_read(path: str) -> bool:
+            """Return whether ITK can serve a region of `path` without decoding the whole volume.
+
+            SimpleITK exposes no equivalent of ImageIOBase::CanStreamRead(), so the streaming IOs are
+            mirrored here: MetaImage and NIfTI stream while their pixel data is uncompressed. A compressed
+            stream is not seekable, and NrrdImageIO never streams, so both decode the whole volume for
+            every region asked of them. Getting this wrong only ever costs speed, never correctness.
+
+            Cached: the patch path asks this per read, and it opens the file to read a header.
+            """
+            image_io = sitk.ImageFileReader.GetImageIOFromFileName(path)
+            if image_io == "MetaImageIO":
+                # MetaImage announces compression in its ASCII header, ahead of ElementDataFile.
+                with open(path, "rb") as file:
+                    header = file.read(4096)
+                return re.search(rb"CompressedData\s*=\s*True", header, re.IGNORECASE) is None
+            if image_io == "NiftiImageIO":
+                with open(path, "rb") as file:
+                    return file.read(2) != b"\x1f\x8b"  # gzip magic: a .nii.gz stream
+            return False
+
         def _resolve_data_path(self, name: str) -> str | None:
             base = f"{self.filename}{name}"
             for suffix in (".itk.txt", ".fcsv", ".xml", ".vtk", ".npy"):
@@ -570,6 +623,9 @@ class Dataset:
                 data, attributes = self.file_to_data("", name)
                 return data[normalized], attributes
 
+            if not self._supports_region_read(path):
+                _warn_unstreamed_region_read(path)
+
             extract_index_xyz = [item.start for item in reversed(normalized[1:])]
             extract_size_xyz = [item.stop - item.start for item in reversed(normalized[1:])]
             reader.SetExtractIndex(extract_index_xyz)
@@ -582,6 +638,26 @@ class Dataset:
             direction = np.asarray(reader.GetDirection(), dtype=np.float64).reshape(len(spacing), len(spacing))
             attributes["Origin"] = origin + direction @ (np.asarray(extract_index_xyz, dtype=np.float64) * spacing)
             return data[normalized[:1] + tuple(slice(None) for _ in normalized[1:])], attributes
+
+        def _file_to_image_statistics(self, name: str, path: str, channels: list[int] | None) -> dict[str, float]:
+            reader = sitk.ImageFileReader()
+            reader.SetFileName(path)
+            reader.ReadImageInformation()
+            data_shape = [reader.GetNumberOfComponents(), *reversed(reader.GetSize())]
+
+            trailing_size = int(np.prod(data_shape[2:], dtype=np.int64))
+            slab_length = max(1, _STATISTICS_CHUNK_ELEMENTS // max(1, trailing_size))
+            state: dict[str, float] | None = None
+
+            for start in range(0, data_shape[1], slab_length):
+                slices: list[slice] = [slice(None)] * len(data_shape)
+                slices[1] = slice(start, min(data_shape[1], start + slab_length))
+                slab, _ = self._file_to_image_slice(name, path, tuple(slices))
+                if channels is not None:
+                    slab = slab[channels]
+                state = _update_running_statistics(state, slab)
+
+            return _finalize_running_statistics(state)
 
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             attributes = Attribute()
@@ -699,6 +775,11 @@ class Dataset:
                     data = data[channels]
                 return _finalize_running_statistics(_update_running_statistics(None, data))
 
+            if self._supports_region_read(path):
+                return self._file_to_image_statistics(name, path, channels)
+
+            # The whole volume lands in memory here, which the streamed path above exists to avoid. Nothing
+            # better is left: a format that cannot serve a region would decode itself once per slab.
             image = sitk.ReadImage(path)
             data = sitk.GetArrayViewFromImage(image)
             if image.GetNumberOfComponentsPerPixel() == 1:
