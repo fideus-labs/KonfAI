@@ -52,6 +52,7 @@ from konfai.data.transform import (
     Dilate,
     FlatLabel,
     Flip,
+    Foreign,
     Gradient,
     HistogramMatching,
     InferenceStack,
@@ -135,6 +136,9 @@ _CASES: dict[str, list[_Case]] = {
     # declare but the read that would find it.
     "Crop": [_Case(Crop(), group="Boxed")],
     "Dilate": [_Case(Dilate(2), group="Labels")],
+    # A class from another framework, as the loader wraps one: callable on a tensor, returning it
+    # transformed. torch.nn is the one such library KonfAI already depends on.
+    "Foreign": [_Case(Foreign(torch.nn.Sigmoid(), "torch.nn:Sigmoid"))],
     "FlatLabel": [_Case(FlatLabel([1, 3]), group="Labels")],
     "Gradient": [_Case(Gradient()), _Case(Gradient(per_dim=True))],
     "HistogramMatching": [_Case(HistogramMatching("Intensity"))],
@@ -453,6 +457,13 @@ _AUGMENTATION_CASES: dict[str, list[_AugmentationCase]] = {
         _AugmentationCase(
             FlipAugmentation(f_prob=[1.0, 1.0, 1.0], vector_field=True), LocalityKind.WHOLE_VOLUME, False
         ),
+    ],
+    # A class from another framework says nothing about where its draw reads from, so no draw of it
+    # streams. torch.nn is the one such library KonfAI already depends on.
+    "Foreign": [
+        _AugmentationCase(
+            augmentation_module.Foreign(torch.nn.Sigmoid(), "torch.nn:Sigmoid"), LocalityKind.WHOLE_VOLUME, False
+        )
     ],
     "HUE": [_AugmentationCase(augmentation_module.HUE(1.0), LocalityKind.POINTWISE, True)],
     "LumaFlip": [_AugmentationCase(augmentation_module.LumaFlip(), LocalityKind.POINTWISE, True)],

@@ -36,7 +36,7 @@ except ImportError:
 import torch.nn.functional as F
 
 from konfai import cuda_visible_devices
-from konfai.utils.config import apply_config
+from konfai.utils.config import _escape_key_component, apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
 from konfai.utils.errors import TransformError
 from konfai.utils.ITK import _require_simpleitk, box_with_mask, crop_with_mask
@@ -211,7 +211,54 @@ class TransformLoader:
 
     def get_transform(self, classpath: str, konfai_args: str) -> Transform:
         module, name = get_module(classpath, "konfai.data.transform")
-        return apply_config(f"{konfai_args}.{classpath}")(getattr(module, name))()
+        # A key is read as a dotted path, and a classpath naming its module carries dots of its own.
+        transform = apply_config(f"{konfai_args}.{_escape_key_component(classpath)}")(getattr(module, name))()
+        if isinstance(transform, Transform):
+            return transform
+        return Foreign(transform, classpath)
+
+
+class Foreign(Transform):
+    """A transform from another framework, as the loader hands it over.
+
+    Name the class where a transform goes and its arguments under it::
+
+        transforms:
+          monai.transforms:ScaleIntensity:
+            minv: 0.0
+            maxv: 1.0
+
+    The class must be callable on one tensor and return the transformed tensor, which is what
+    torchvision's transforms, TorchIO's and MONAI's array transforms all are. MONAI's dictionary
+    transforms (``ScaleIntensityd``) take a dictionary of keys instead: a KonfAI group is the key,
+    so name the array class.
+
+    The class must be DETERMINISTIC: a transform runs on each group of a case in turn, so a random
+    one would draw again for the label and misalign it from the image. Name it under the
+    augmentations instead, where a draw is made once for the case and every group is handed it.
+
+    It reads the whole volume, which is what a class saying nothing about where its output comes
+    from is owed. The shape is checked rather than assumed: the patch grid is planned on the shape a
+    transform announces, and this one announces the shape it was given. Geometry is left as it
+    stands, which a transform of the intensities alone leaves. A class that resamples, crops or
+    reorients owns both, and a ``Transform`` subclass is what states them.
+    """
+
+    def __init__(self, transform, classpath: str) -> None:
+        super().__init__()
+        self.classpath = classpath
+        self.transform = transform
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        result = self.transform(tensor)
+        if not isinstance(result, torch.Tensor):
+            result = torch.as_tensor(np.asarray(result))
+        if list(result.shape) != list(tensor.shape):
+            raise TransformError(
+                f"'{self.classpath}' returned the shape {list(result.shape)} for an input of {list(tensor.shape)}.",
+                "Subclass Transform and implement transform_shape() to declare the shape it returns.",
+            )
+        return result
 
 
 class Clip(Transform):

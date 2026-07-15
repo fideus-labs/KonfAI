@@ -16,7 +16,9 @@
 
 """Data augmentation primitives applied by KonfAI datasets."""
 
+import random
 from abc import ABC, abstractmethod
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +32,7 @@ except ImportError:
 
 from konfai import konfai_root
 from konfai.data.transform import LocalityKind, PatchLocality
-from konfai.utils.config import apply_config
+from konfai.utils.config import _escape_key_component, apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image
 from konfai.utils.errors import AugmentationError
 from konfai.utils.runtime import NeedDevice
@@ -184,10 +186,24 @@ class DataAugmentationsList:
         self.data_augmentations = []
         for augmentation, prob in self.data_augmentationsLoader.items():
             module, name = get_module(augmentation, "konfai.data.augmentation")
-            data_augmentation: DataAugmentation = apply_config(
-                f"{konfai_root()}.Dataset.augmentations.{key}.data_augmentations.{augmentation}"
+            # A key is read as a dotted path, and a classpath naming its module carries dots of its own.
+            drawn = apply_config(
+                f"{konfai_root()}.Dataset.augmentations.{key}.data_augmentations.{_escape_key_component(augmentation)}"
             )(getattr(module, name))()
-            data_augmentation.load(prob.prob)
+            # A foreign class is handed over wrapped, and the wrapper reads its own parameters from
+            # the same subtree the class read its arguments from -- as MinimalModel does for a model.
+            data_augmentation: DataAugmentation = (
+                drawn
+                if isinstance(drawn, DataAugmentation)
+                else apply_config(
+                    f"{konfai_root()}.Dataset.augmentations.{key}"
+                    f".data_augmentations.{_escape_key_component(augmentation)}"
+                )(partial(Foreign, drawn, augmentation))()
+            )
+            # A foreign class brings all of its randomness, including whether it applies at all, and
+            # names that gate itself (`prob`, `p`). A second gate here would compose with it, so a
+            # probability of one half would be one quarter. The one it declares is the one that runs.
+            data_augmentation.load(1.0 if isinstance(data_augmentation, Foreign) else prob.prob)
             self.data_augmentations.append(data_augmentation)
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
@@ -533,6 +549,80 @@ class Scale(EulerTransform):
         )
         self.matrix[index] = [torch.unsqueeze(func(value), dim=0) for value in scale]
         return shapes
+
+
+class Foreign(DataAugmentation):
+    """Draw an augmentation from another framework.
+
+    ``classpath`` is ``module:Class`` and ``args`` are the arguments that class takes::
+
+        augmentations:
+          Foreign:
+            classpath: monai.transforms:RandGaussianNoise
+            args: {prob: 1.0, std: 12.0}
+            groups: [CT]
+
+    The class must be callable on one tensor, return the transformed tensor, and keep its shape --
+    which is what torchvision's transforms, TorchIO's and MONAI's array transforms all do.
+
+    A draw belongs to the case, and each group of the case is handed the same copy of it. The seed
+    of the copy is drawn once and the global state is set from it before every group, so the class
+    draws the same way for the label as for the image.
+
+    ``groups`` is what makes that dependable. Two conditions hold it up: the class must consume its
+    random state the same way whatever it is given, and one draw must suit every group it reaches --
+    a rotation of the image is a rotation of the label, but a rotation SAMPLES, and a label
+    interpolated between two ids is neither. Name the ONE group a foreign draw belongs to. Subclass
+    ``DataAugmentation`` for a draw that spans them: the draw is then a value this framework holds,
+    rather than a random state two libraries agree about.
+    """
+
+    def __init__(self, transform, classpath: str, groups: list[str] | None = None) -> None:
+        super().__init__(groups)
+        self.classpath = classpath
+        self.transform = transform
+        self.seeds: dict[int, list[int]] = {}
+
+    def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        # One seed per copy, drawn once for the case: every group of it is handed these same seeds.
+        self.seeds[index] = torch.randint(0, 2**31 - 1, (len(shapes),)).tolist()
+        return shapes
+
+    def _seed(self, seed: int) -> None:
+        """Put the class's random state where the seed says, by both routes a class draws through.
+
+        A class draws either from the interpreter's global state, which torchvision's transforms and
+        TorchIO's draw from, or from a state of its own, which MONAI's Randomizable holds and reaches
+        through ``set_random_state``. Both are set: which one a class uses is not something the class
+        says.
+        """
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        set_random_state = getattr(self.transform, "set_random_state", None)
+        if callable(set_random_state):
+            set_random_state(seed=seed)
+
+    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        self._seed(self.seeds[index][a])
+        result = self.transform(tensor)
+        if not isinstance(result, torch.Tensor):
+            result = torch.as_tensor(np.asarray(result))
+        if list(result.shape) != list(tensor.shape):
+            raise AugmentationError(
+                f"'{self.classpath}' returned the shape {list(result.shape)} for an input of {list(tensor.shape)}.",
+                "Subclass DataAugmentation and return the shape from _state_init to draw onto another grid.",
+            )
+        return result
+
+    def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        # Undoing a draw is a second thing a class must expose, and the convention this reads covers
+        # applying one alone.
+        raise AugmentationError(
+            f"'{self.classpath}' cannot be undone.",
+            "Subclass DataAugmentation and implement _inverse(), or drop the augmentation from a"
+            " workflow that inverts it.",
+        )
 
 
 class Flip(DataAugmentation):
