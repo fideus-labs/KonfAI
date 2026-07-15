@@ -50,11 +50,21 @@ class StreamingDatasetStub:
     """In-memory dataset serving whole reads, region reads, and statistics, with full geometry."""
 
     def __init__(self, volume: np.ndarray) -> None:
+        """Initialize the dataset stub with the provided volume and zero read counters.
+        
+        Parameters:
+        	volume (np.ndarray): In-memory volume used for full-volume and patch reads.
+        """
         self.volume = volume
         self.full_reads = 0
         self.patch_reads = 0
 
     def _attributes(self) -> Attribute:
+        """Create default spatial attributes for the stored volume.
+        
+        Returns:
+            Attribute: Attributes with zero origin, unit spacing, and an identity direction matrix.
+        """
         attribute = Attribute()
         spatial = self.volume.ndim - 1
         attribute["Origin"] = np.zeros(spatial)
@@ -63,17 +73,50 @@ class StreamingDatasetStub:
         return attribute
 
     def get_infos(self, group_src: str, name: str) -> tuple[list[int], Attribute]:
+        """Return the volume shape and its spatial attributes.
+        
+        Parameters:
+        	group_src (str): Source data group.
+        	name (str): Dataset name.
+        
+        Returns:
+        	tuple[list[int], Attribute]: The volume shape and associated attributes.
+        """
         return list(self.volume.shape), self._attributes()
 
     def read_data(self, group_src: str, name: str) -> tuple[np.ndarray, Attribute]:
+        """
+        Read and return a copy of the complete volume with its attributes.
+        
+        Returns:
+            tuple[np.ndarray, Attribute]: The copied volume and its spatial attributes.
+        """
         self.full_reads += 1
         return self.volume.copy(), self._attributes()
 
     def read_data_slice(self, group_src: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+        """
+        Read and return a copied slice of the dataset volume.
+        
+        Parameters:
+            slices (tuple[slice, ...]): Spatial and channel slices to apply to the volume.
+        
+        Returns:
+            tuple[np.ndarray, Attribute]: The selected volume data and its attributes.
+        """
         self.patch_reads += 1
         return self.volume[slices].copy(), self._attributes()
 
     def read_data_statistics(self, group_src: str, name: str, channels: list[int] | None = None) -> dict[str, float]:
+        """
+        Compute summary statistics for the full volume or selected channels.
+        
+        Parameters:
+            channels (list[int] | None): Channel indices to include. If omitted, all channels are included.
+        
+        Returns:
+            dict[str, float]: Mapping containing the minimum, maximum, mean, and sample standard deviation.
+        """
         data = self.volume if channels is None else self.volume[channels]
         return {
             "min": float(data.min()),
@@ -87,6 +130,19 @@ _GeometryDatasetStub = StreamingDatasetStub
 
 
 def _manager(stub: StreamingDatasetStub, transforms, augmentations=(), patch=(4, 4, 4), group="CT") -> DatasetManager:
+    """
+    Create a dataset manager configured for a streaming regression test.
+    
+    Parameters:
+    	stub (StreamingDatasetStub): In-memory dataset used as the manager's data source.
+    	transforms: Transform sequence applied by the manager.
+    	augmentations: Data augmentation configurations.
+    	patch: Spatial patch dimensions.
+    	group: Source and destination dataset group name.
+    
+    Returns:
+    	DatasetManager: Configured dataset manager.
+    """
     return DatasetManager(
         index=0,
         group_src=group,
@@ -100,6 +156,12 @@ def _manager(stub: StreamingDatasetStub, transforms, augmentations=(), patch=(4,
 
 
 def _flip_augmentations() -> list[DataAugmentationsList]:
+    """
+    Create a single augmentation draw list containing a deterministic flip augmentation.
+    
+    Returns:
+    	list[DataAugmentationsList]: A one-element list configured with one flip augmentation.
+    """
     augmentations = DataAugmentationsList(nb=1, data_augmentations={})
     flip = FlipAugmentation(f_prob=[1.0, 1.0, 1.0])
     flip.load(1.0)
@@ -215,11 +277,30 @@ class _RecordsOnlyInCall(Transform):
     """A region transform recording geometry where a streamed patch throws it away."""
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """Classify this transform's patch locality as orientation-dependent.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached geometry attributes for the transformed data.
+        
+        Returns:
+        	PatchLocality: The orientation locality classification.
+        """
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def stream_region_source(
         self, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
     ) -> list[slice]:
+        """
+        Calculate the source slices required for a target region in the mirrored spatial volume.
+        
+        Parameters:
+        	target_slices (tuple[slice, ...]): Slices defining the target region.
+        	source_spatial_shape (list[int]): Spatial dimensions of the source volume.
+        	cache_attribute (Attribute): Geometry attributes associated with the source volume.
+        
+        Returns:
+        	list[slice]: Source slices corresponding to the mirrored target region.
+        """
         return [
             slice(extent - t.stop, extent - t.start)
             for t, extent in zip(target_slices, source_spatial_shape, strict=False)
@@ -227,6 +308,16 @@ class _RecordsOnlyInCall(Transform):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Mirroring moves the near corner, and this is the only place it says so.
+        """Mirror the tensor across all spatial axes and update its origin.
+        
+        Parameters:
+        	name (str): Transform name associated with the tensor.
+        	tensor (torch.Tensor): Tensor to mirror.
+        	cache_attribute (Attribute): Geometry attributes updated with the mirrored origin.
+        
+        Returns:
+        	torch.Tensor: Tensor flipped along every axis after the channel axis.
+        """
         cache_attribute["Origin"] = np.asarray([0.0, 0.0, 7.0])
         return tensor.flip(tuple(range(1, tensor.dim())))
 

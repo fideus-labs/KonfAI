@@ -544,6 +544,15 @@ _SUPERPOSING = _LPS @ np.linalg.inv(np.asarray([[1.0, 0.0, 0.0], [0.5, 1.0, 0.0]
 def _canonical_attributes(direction: np.ndarray) -> Attribute:
     # Deliberately anisotropic on every axis, for the reason the extents are non-cubic: a spacing an
     # axis shares with another is a spacing a wrong permutation can carry onto it and look right.
+    """
+    Create anisotropic image metadata with the specified direction matrix.
+    
+    Parameters:
+    	direction (np.ndarray): Direction matrix to store in flattened form.
+    
+    Returns:
+    	Attribute: Image metadata containing origin, spacing, and direction.
+    """
     attributes = Attribute()
     attributes["Origin"] = np.asarray([-3.0, 5.0, 11.0])
     attributes["Spacing"] = np.asarray([1.5, 1.75, 2.0])
@@ -554,6 +563,11 @@ def _canonical_attributes(direction: np.ndarray) -> Attribute:
 def _ct_like_volume() -> torch.Tensor:
     # Distinct values everywhere: a repeated value could survive a wrong remap by coincidence, and
     # the multiset check below is only as strict as the volume is varied.
+    """Create a channel-first volume with deterministic, distinct random values for canonicalization tests.
+    
+    Returns:
+    	torch.Tensor: A float32 volume with shape ``[1, *_CANONICAL_SPATIAL]``.
+    """
     rng = np.random.default_rng(0)
     return torch.from_numpy(rng.standard_normal(_CANONICAL_SPATIAL).astype(np.float32) * 500.0)[None]
 

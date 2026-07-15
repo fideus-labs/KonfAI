@@ -38,7 +38,16 @@ _MAX_HALO_FRACTION = 0.5
 
 
 def _halo_radii(halo: tuple[int, ...], n_axes: int) -> list[int]:
-    """The per-axis radius a declared halo means, in array order (one radius covers every axis)."""
+    """
+    Expand a halo specification to one radius per axis.
+    
+    Parameters:
+        halo (tuple[int, ...]): Halo radii, with the final value reused for any remaining axes.
+        n_axes (int): Number of axes to describe.
+    
+    Returns:
+        list[int]: One halo radius for each axis, or zeros when `halo` is empty.
+    """
     if not halo:
         return [0] * n_axes
     return [halo[k] if k < len(halo) else halo[-1] for k in range(n_axes)]
@@ -53,18 +62,56 @@ class Stage(Protocol):
     parameterised per case and per copy, so it answers them bound to one (see :class:`AugmentedStage`).
     """
 
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality: ...
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality: """
+Describe the locality requirements for applying this stage to a patch.
+
+Parameters:
+    cache_attribute (Attribute): Cached metadata used to determine locality.
+
+Returns:
+    PatchLocality: The stage's patch-locality declaration.
+"""
+...
 
     def stream_region_source(
         self,
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
-    ) -> list[slice]: ...
+    ) -> list[slice]: """
+        Map a target patch region to the corresponding source region.
+        
+        Parameters:
+        	target_slices (tuple[slice, ...]): Spatial slices defining the target patch.
+        	source_spatial_shape (list[int]): Spatial dimensions of the source data.
+        	cache_attribute (Attribute): Cached geometry and transform metadata.
+        
+        Returns:
+        	list[slice]: Source-data slices required to produce the target region.
+        """
+        ...
 
-    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None: ...
+    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None: """
+Write geometry or statistics required for streamed execution into the cache attributes.
 
-    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor: ...
+Parameters:
+	cache_attribute (Attribute): Cache attributes to update.
+	source_spatial_shape (list[int]): Spatial shape of the source data.
+"""
+...
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor: """
+Apply the stage to a tensor using the provided cache attributes.
+
+Parameters:
+	name (str): Name of the data item being processed.
+	tensor (torch.Tensor): Tensor to process.
+	cache_attribute (Attribute): Attributes used by the stage.
+
+Returns:
+	torch.Tensor: Processed tensor.
+"""
+...
 
 
 @dataclass(frozen=True)
@@ -80,6 +127,14 @@ class AugmentedStage:
     a: int
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """Return the locality requirements for this augmentation stage.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached attributes used to determine locality.
+        
+        Returns:
+        	PatchLocality: The augmentation's patch locality requirements.
+        """
         return self.augmentation.patch_locality(self.index, self.a, cache_attribute)
 
     def stream_region_source(
@@ -88,12 +143,30 @@ class AugmentedStage:
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
+        """Map a target patch extent to the source region required by this augmentation."""
         return self.augmentation.stream_region_source(self.index, self.a, target_slices, source_spatial_shape)
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
-        """An augmentation draws a copy of the case rather than restating its geometry: nothing to record."""
+        """
+        Do not add stream cache attributes for augmentation stages.
+        
+        Parameters:
+            cache_attribute (Attribute): Cache attributes associated with the streamed case.
+            source_spatial_shape (list[int]): Spatial shape of the source data.
+        """
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Apply the bound augmentation to a tensor.
+        
+        Parameters:
+        	name (str): Name of the data being augmented.
+        	tensor (torch.Tensor): Tensor to augment.
+        	cache_attribute (Attribute): Cached metadata associated with the tensor.
+        
+        Returns:
+        	torch.Tensor: Augmented tensor.
+        """
         return self.augmentation.compute(name, self.index, self.a, tensor)
 
 
@@ -496,6 +569,19 @@ class DatasetManager:
         transforms: list[Transform],
         data_augmentations_list: list[DataAugmentationsList],
     ) -> None:
+        """
+        Initialize a dataset case manager and prepare its transformed patch grids.
+        
+        Parameters:
+            index (int): Case index managed by this instance.
+            group_src (str): Source dataset group.
+            group_dest (str): Destination group used to select applicable augmentations.
+            name (str): Data item name.
+            dataset (Dataset): Dataset containing the case data.
+            patch (DatasetPatch | None): Optional patch configuration.
+            transforms (list[Transform]): Transforms applied before patch extraction.
+            data_augmentations_list (list[DataAugmentationsList]): Augmentation draws used to create additional case copies.
+        """
         self.group_src = group_src
         self.group_dest = group_dest
         self.name = name
@@ -542,6 +628,13 @@ class DatasetManager:
         self.cache_attributes_bak = copy.deepcopy(self.cache_attributes)
 
     def reset_augmentation(self, reset_state: bool = True):
+        """
+        Reset augmentation-derived state and rebuild the augmented copy shapes and cache attributes.
+        
+        Parameters:
+            reset_state (bool): Whether to reset each augmentation's per-case state before
+                rebuilding the augmentation copies.
+        """
         self.cache_attributes[:] = self.cache_attributes[:1]
         self.shapes[:] = self.shapes[:1]
         self.augmented_data.clear()
@@ -643,6 +736,12 @@ class DatasetManager:
         self.augmentationLoaded = len(self.augmented_data) == self.total_augmentations
 
     def _load_augmentation_group(self, start_index: int, data_augmentations: DataAugmentationsList) -> None:
+        """Load and store augmented data for a group of augmentation copies.
+        
+        Parameters:
+        	start_index (int): Index of the first augmentation copy in the group.
+        	data_augmentations (DataAugmentationsList): Augmentation configuration and number of copies to generate.
+        """
         if data_augmentations.nb == 0:
             return
 
@@ -660,7 +759,18 @@ class DatasetManager:
         self.augmentationLoaded = len(self.augmented_data) == self.total_augmentations
 
     def _augmentation_group(self, a: int) -> tuple[int, DataAugmentationsList]:
-        """The augmentation list copy *a* belongs to, and the copy index that list starts at."""
+        """
+        Locate the augmentation list containing a copy index.
+        
+        Parameters:
+            a (int): Augmentation copy index to locate.
+        
+        Returns:
+            tuple[int, DataAugmentationsList]: The starting copy index and containing augmentation list.
+        
+        Raises:
+            IndexError: If the copy index does not correspond to an augmentation.
+        """
         start_index = 1
         for data_augmentations in self.data_augmentations_list:
             if start_index <= a < start_index + data_augmentations.nb:
@@ -685,6 +795,15 @@ class DatasetManager:
         ]
 
     def _get_tensor(self, a: int) -> torch.Tensor:
+        """
+        Retrieve the tensor for an augmentation copy, loading the copy when necessary.
+        
+        Parameters:
+        	a (int): Augmentation copy index, where `0` refers to the base tensor.
+        
+        Returns:
+        	torch.Tensor: The base or augmented tensor associated with the copy.
+        """
         if a == 0:
             return self.data[0]
         if a not in self.augmented_data:
@@ -697,12 +816,16 @@ class DatasetManager:
         source_group: str,
         channels: list[int] | None,
     ) -> dict[str, float]:
-        """Read (and memoise) the whole-volume statistics of one on-disk group for this case.
-
-        ``read_data_statistics`` scans the stored volume without materialising it, but it is still a
-        full pass: memoise it per (dataset, group, channels) so a per-patch consumer -- whose
-        ``inverse()`` pops the seeded keys back out of the cache attribute at prediction time -- does
-        not re-scan the volume once per patch.
+        """
+        Read and cache whole-volume statistics for a source dataset group and channel selection.
+        
+        Parameters:
+            source_dataset (Dataset): Dataset containing the source group.
+            source_group (str): Group whose statistics are requested.
+            channels (list[int] | None): Optional channel indices to include.
+        
+        Returns:
+            dict[str, float]: Statistics for the selected data.
         """
         key = (source_dataset, source_group, tuple(channels) if channels is not None else None)
         if key not in self._disk_statistics:
@@ -717,6 +840,19 @@ class DatasetManager:
         required_stats: set[str],
         channels: list[int] | None = None,
     ) -> bool:
+        """
+        Ensure required statistics are available in the streaming cache attributes.
+        
+        Parameters:
+        	source_dataset (Dataset): Dataset containing the source data.
+        	source_group (str): Group containing the source data.
+        	cache_attribute (Attribute): Attributes to populate with missing statistics.
+        	required_stats (set[str]): Statistic names required for streaming.
+        	channels (list[int] | None): Optional channel indices used when reading statistics.
+        
+        Returns:
+        	bool: True if all required statistics are available, false otherwise.
+        """
         missing_stats = [key for key in required_stats if key not in cache_attribute]
         if not missing_stats:
             return True
@@ -736,14 +872,15 @@ class DatasetManager:
         return all(key in cache_attribute for key in required_stats)
 
     def _affords_halo(self, a: int, halo: tuple[int, ...]) -> bool:
-        """Whether a halo of this radius still buys copy *a* anything over loading the volume.
-
-        Every patch pays the halo on every side and the patches tile the volume, so streaming a case
-        reads ``prod(1 + 2 * halo_k / patch_k)`` times its bytes -- the multiple streaming pays to keep
-        one volume off the heap. Half a patch doubles every axis: 8x the reads in 3D, measured on a
-        160^3 mha at patch 64 as 8.6x the wall-clock of the load it avoids, against 3.0x for a halo of
-        2 (the per-patch read overhead streaming costs whatever the halo). Past that the multiple runs
-        away -- a halo of one whole patch is 27x -- while the saving is still just the one volume.
+        """
+        Determine whether the requested halo is within the supported size limit for a patch copy.
+        
+        Parameters:
+            a (int): Patch copy index used to determine the effective patch extent.
+            halo (tuple[int, ...]): Halo radius for each spatial axis.
+        
+        Returns:
+            bool: `true` if each halo radius is at most half of its corresponding patch extent, `false` otherwise.
         """
         patch_size = self.patch.patch_size
         extent = (
@@ -764,15 +901,19 @@ class DatasetManager:
         source_group: str,
         cache_attribute: Attribute,
     ) -> tuple[bool, int | None]:
-        """Validate a copy's locality declarations and locate the single region stage among them.
-
-        Returns ``(streamable, region_index)``. The chain streams only when it is
-        ``[pre-pointwise*][at most one region: HALO|ORIENTATION|RESCALE][post-pointwise*]`` where
-        ``GLOBAL_STAT`` counts as pointwise (exact patch + a pre-populated stat). Any
-        ``WHOLE_VOLUME`` declaration, more than one region stage, an unreadable ``GLOBAL_STAT``, a
-        ``RESCALE`` without a known source ``Spacing``, or a halo too wide to be worth reading rejects
-        streaming. Nothing here names a stage: each declares its own contract, and this is where the
-        declarations are read -- which is why a transform and an augmentation are planned side by side.
+        """
+        Validate locality declarations and identify the single region stage eligible for streaming.
+        
+        Parameters:
+        	a (int): Augmentation copy index used to validate halo size.
+        	localities (list[PatchLocality]): Locality declarations for the streaming stages.
+        	source_dataset (Dataset): Dataset containing the streaming source.
+        	source_group (str): Group containing the streaming source.
+        	cache_attribute (Attribute): Case attributes used to resolve required statistics and geometry.
+        
+        Returns:
+        	tuple[bool, int | None]: Whether streaming is supported and the index of the region
+        	stage, or ``None`` when no region stage is present.
         """
         if any(loc.kind is LocalityKind.WHOLE_VOLUME for loc in localities):
             return False, None
@@ -807,6 +948,15 @@ class DatasetManager:
 
     @staticmethod
     def _dataset_from_spec(dataset_spec: str) -> Dataset:
+        """
+        Create a dataset from a path specification.
+        
+        Parameters:
+        	dataset_spec (str): Dataset path specification, including an optional format.
+        
+        Returns:
+        	Dataset: Dataset configured for the specified path and format.
+        """
         filename, _, file_format = split_path_spec(
             dataset_spec,
             default_format="mha",
@@ -815,6 +965,16 @@ class DatasetManager:
         return Dataset(filename, file_format)
 
     def _resolve_patch_stream_source(self, a: int, apply_augmentations: bool = True) -> _PatchStreamSource | None:
+        """
+        Resolves and caches the source dataset, transform stages, and region metadata required to stream patches for a copy.
+        
+        Parameters:
+        	a (int): Augmentation copy index.
+        	apply_augmentations (bool): Whether to include the copy's augmentation stages in the streaming plan.
+        
+        Returns:
+        	_PatchStreamSource | None: A streaming source plan when the copy can be streamed; otherwise, `None`.
+        """
         key = (a, apply_augmentations)
         if key in self._patch_stream_sources:
             return self._patch_stream_sources[key]
@@ -868,6 +1028,16 @@ class DatasetManager:
         return self._patch_stream_sources[key]
 
     def can_stream_patch(self, a: int, apply_augmentations: bool = True) -> bool:
+        """
+        Determine whether patches for a copy can be read through the streaming path.
+        
+        Parameters:
+        	a (int): Augmentation copy index.
+        	apply_augmentations (bool): Whether augmentation stages should be included in the streaming plan.
+        
+        Returns:
+        	bool: `true` if the copy has a valid streaming source, `false` otherwise.
+        """
         return self._resolve_patch_stream_source(a, apply_augmentations) is not None
 
     def _get_streamed_data(
@@ -877,6 +1047,21 @@ class DatasetManager:
         is_input: bool,
         apply_augmentations: bool = True,
     ) -> tuple[torch.Tensor, Attribute]:
+        """
+        Retrieve a patch directly from a streamable dataset source and apply its configured stages.
+        
+        Parameters:
+            index (int): Index of the patch to retrieve.
+            a (int): Augmentation-copy index.
+            is_input (bool): Whether to apply input-specific patch extraction behavior.
+            apply_augmentations (bool): Whether to include augmentations in the streaming stage chain.
+        
+        Returns:
+            tuple[torch.Tensor, Attribute]: The streamed patch tensor and its scoped attributes.
+        
+        Raises:
+            RuntimeError: If no streaming source is available for the requested copy.
+        """
         stream_source = self._resolve_patch_stream_source(a, apply_augmentations)
         if stream_source is None:
             raise RuntimeError("Patch streaming requested on a dataset manager without a streaming source.")
@@ -909,15 +1094,16 @@ class DatasetManager:
         return self._get_streamed_region_data(index, a, stream_source, region_index, is_input)
 
     def _finalize_stream_patch(self, tensor: torch.Tensor, index: int, a: int, is_input: bool) -> torch.Tensor:
-        """Pad/format a target-extent streamed patch to ``patch_size`` like the whole-volume path.
-
-        The region and RESCALE streamed paths produce a patch at the raw target-slice extent, but the
-        overlap tiling can leave the last patch narrower than ``patch_size`` (integer-floor stride).
-        The whole-volume ``Patch.get_data`` pads that border patch up to ``patch_size`` via
-        ``apply_read_plan``; running the streamed patch through the SAME read plan makes border patches
-        byte-identical between the two paths instead of one voxel short. The plan is built on
-        ``self.shapes[a]`` -- the spatial grid this copy's patch slices were themselves cut on, which is
-        the source shape reordered by a Permute and resized by a Resample.
+        """
+        Format a streamed patch to match whole-volume patch extraction.
+        
+        Parameters:
+            index (int): Patch index.
+            a (int): Copy index.
+            is_input (bool): Whether the patch is an input patch.
+        
+        Returns:
+            torch.Tensor: The padded and formatted patch.
         """
         plan = self.patch.get_read_plan(self.shapes[a], index, a, is_input)
         return self.patch.apply_read_plan(tensor, plan)
@@ -926,6 +1112,14 @@ class DatasetManager:
         # State a transform records for its own inversion (TensorCast's source dtype) must reach the
         # persistent attribute, as it would on the whole-volume path. Only NEWLY-added keys are copied:
         # a seeded GLOBAL_STAT or a case-level geometry key must not take a patch-local value.
+        """
+        Persist newly created streaming attributes for a copy at case scope.
+        
+        Parameters:
+        	a (int): Augmentation copy index.
+        	cache_attribute (Attribute): Patch-scoped attributes produced during streaming.
+        	keys_before (set[str]): Attribute keys present before streaming began.
+        """
         persistent = self.cache_attributes[a]
         persistent_keys = set(persistent.keys())
         for key, value in cache_attribute.items():
@@ -941,14 +1135,18 @@ class DatasetManager:
         region_index: int,
         is_input: bool,
     ) -> tuple[torch.Tensor, Attribute]:
-        """Patch-native HALO/ORIENTATION: read the source region a target patch maps to.
-
-        The chain is ``[pre-pointwise*][region][post-pointwise*]``. HALO reads the patch enlarged by the
-        declared per-axis radius (clamped to the volume) and crops the halo back after the stage; the
-        stage's own edge padding reproduces the whole-volume border once the clamp reaches the true
-        border, so seams agree. ORIENTATION reads the index-remapped source region
-        (``stream_region_source``) and applies the flip/permute -- same extent, no crop. No whole volume
-        is loaded.
+        """
+        Read and transform the source region corresponding to one patch without loading the full volume.
+        
+        Parameters:
+            index (int): Index of the patch to retrieve.
+            a (int): Augmentation or copy index.
+            stream_source (_PatchStreamSource): Source dataset and stage chain used for streaming.
+            region_index (int): Position of the region-aware stage in the stage chain.
+            is_input (bool): Whether to apply input-specific patch formatting.
+        
+        Returns:
+            tuple[torch.Tensor, Attribute]: The transformed patch and its scoped cache attributes.
         """
         region_stage = stream_source.stages[region_index]
         pre_stages = stream_source.stages[:region_index]
@@ -1023,13 +1221,17 @@ class DatasetManager:
     def _check_region_geometry_reaches_the_case(
         self, region_stage: Stage, scoped: Attribute, cache_attribute: Attribute
     ) -> None:
-        """Refuse a region stage that records geometry nowhere the case can read it.
-
-        A region stage is handed a patch, so what it records about the extent is one patch's answer:
-        the scope it records into is thrown away, and ``write_stream_cache_attribute`` is what reaches
-        the case. A stage that records in ``__call__`` alone streams a whole run and leaves the case
-        the geometry it was stored with. Recording in both is what a reorientation does -- the check
-        is on recording in neither.
+        """
+        Ensure region geometry recorded during streamed patch processing is available at case scope.
+        
+        Parameters:
+            region_stage (Stage): Region-processing stage being validated.
+            scoped (Attribute): Patch-scoped attributes recorded during processing.
+            cache_attribute (Attribute): Case-scoped attributes available for subsequent patches.
+        
+        Raises:
+            PatchError: If geometry attributes are recorded only in the discarded patch scope and
+                the stage does not provide a case-scope persistence method.
         """
         recorded = {key for key in scoped.keys() if key not in cache_attribute or scoped[key] != cache_attribute[key]}
         if not recorded:
@@ -1051,14 +1253,18 @@ class DatasetManager:
         resample_pos: int,
         is_input: bool,
     ) -> tuple[torch.Tensor, Attribute]:
-        """Patch-native resample: read ONLY the source region a target patch maps to.
-
-        The chain is ``[pre-pointwise][Resample][post-pointwise]``. The target-grid
-        patch slices (already on the post-resample shape) are mapped back to a
-        bounded source region via ``resample.resample_source_region``; only that region
-        is read (``read_data_slice``); pre-pointwise stages run on the sub-region,
-        then the gather kernel interpolates to the target extent, then post-pointwise
-        stages run on the patch. No whole volume is loaded.
+        """
+        Read and resample the source region corresponding to a target patch.
+        
+        Parameters:
+            index (int): Index of the target patch.
+            a (int): Augmentation or dataset copy index.
+            stream_source (_PatchStreamSource): Source dataset and transformation stages used for streaming.
+            resample_pos (int): Position of the resampling stage in the transformation chain.
+            is_input (bool): Whether the patch is being read as model input.
+        
+        Returns:
+            tuple[torch.Tensor, Attribute]: The resampled patch and its associated cache attributes.
         """
         source_shape = stream_source.shape
         resample = cast(Resample, stream_source.stages[resample_pos])
@@ -1122,6 +1328,19 @@ class DatasetManager:
         is_input: bool,
         apply_augmentations: bool = True,
     ) -> torch.Tensor:
+        """
+        Retrieve a patch tensor using streaming or whole-volume data access and apply patch-scoped transforms.
+        
+        Parameters:
+            index (int): Index of the patch to retrieve.
+            a (int): Augmentation-copy index.
+            patch_transforms (list[Transform]): Transforms applied to the retrieved patch.
+            is_input (bool): Whether the patch is being retrieved as model input.
+            apply_augmentations (bool): Whether augmentations should be included in streamed retrieval.
+        
+        Returns:
+            torch.Tensor: The retrieved and transformed patch.
+        """
         if not self.loaded and self.can_stream_patch(a, apply_augmentations):
             data, _ = self._get_streamed_data(index, a, is_input, apply_augmentations)
         else:
@@ -1136,4 +1355,12 @@ class DatasetManager:
         return data
 
     def get_size(self, a: int) -> int:
+        """Return the number of patches for a copy.
+        
+        Parameters:
+        	a (int): The copy index.
+        
+        Returns:
+        	int: The number of patches in the copy.
+        """
         return self.patch.get_size(a)

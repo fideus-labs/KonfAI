@@ -114,6 +114,16 @@ def test_dataset_read_data_slice_sitk_reads_requested_patch_and_updates_origin(t
 
 
 def _write_image(path: Path, compress: bool) -> Path:
+    """
+    Write a generated 3D float32 image to the specified path.
+    
+    Parameters:
+        path (Path): Destination path for the image.
+        compress (bool): Whether to enable image compression.
+    
+    Returns:
+        Path: The destination path.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = SimpleITK.ImageFileWriter()
     writer.SetFileName(str(path))
@@ -123,6 +133,7 @@ def _write_image(path: Path, compress: bool) -> Path:
 
 
 def _reject_whole_volume_read(*args: object, **kwargs: object) -> None:
+    """Fail the test if a whole-volume read is attempted."""
     pytest.fail("statistics must be accumulated slab by slab, never by reading the whole volume")
 
 
@@ -188,6 +199,9 @@ def test_patch_stream_warns_once_per_format_that_cannot_serve_a_disk_region(
 def test_dataset_read_data_statistics_sitk_accumulates_slabs_without_loading_full_volume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """
+    Verify that SimpleITK statistics are computed from streamed slabs without reading the full volume.
+    """
     dataset = Dataset(tmp_path / "Dataset", "mha")
     volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
     dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
@@ -235,6 +249,11 @@ def test_dataset_read_data_statistics_sitk_keeps_whole_read_for_compressed_volum
 
 class StreamingDatasetStub:
     def __init__(self, volume: np.ndarray) -> None:
+        """Initialize the stub with a volume, read counters, and identity spatial geometry.
+        
+        Parameters:
+        	volume (np.ndarray): Channel-first volume used by the stub.
+        """
         self.volume = volume
         self.full_reads = 0
         self.patch_reads = 0
@@ -245,13 +264,42 @@ class StreamingDatasetStub:
         self._geometry = ([0.0] * spatial, [1.0] * spatial)
 
     def get_infos(self, group_src: str, name: str) -> tuple[list[int], Attribute]:
+        """Return the volume shape and spatial attributes for a dataset item.
+        
+        Parameters:
+        	group_src (str): Dataset group containing the item.
+        	name (str): Item name.
+        
+        Returns:
+        	tuple[list[int], Attribute]: The volume shape and associated spatial attributes.
+        """
         return list(self.volume.shape), _image_attributes(*self._geometry)
 
     def read_data(self, group_src: str, name: str) -> tuple[np.ndarray, Attribute]:
+        """Read and return a complete dataset volume with its image attributes.
+        
+        Parameters:
+        	group_src (str): Source group containing the dataset.
+        	name (str): Dataset name.
+        
+        Returns:
+        	tuple[np.ndarray, Attribute]: A copy of the volume and its image attributes.
+        """
         self.full_reads += 1
         return self.volume.copy(), _image_attributes(*self._geometry)
 
     def read_data_slice(self, group_src: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+        """
+        Read and return the requested volume region with its image attributes.
+        
+        Parameters:
+        	group_src (str): Source group containing the dataset.
+        	name (str): Dataset name.
+        	slices (tuple[slice, ...]): Region to extract from the volume.
+        
+        Returns:
+        	tuple[np.ndarray, Attribute]: The copied volume region and its image attributes.
+        """
         self.patch_reads += 1
         return self.volume[slices].copy(), _image_attributes(*self._geometry)
 
@@ -261,6 +309,17 @@ class StreamingDatasetStub:
         name: str,
         channels: list[int] | None = None,
     ) -> dict[str, float]:
+        """
+        Compute summary statistics for the selected volume channels.
+        
+        Parameters:
+        	group_src (str): Source group identifier.
+        	name (str): Dataset name.
+        	channels (list[int] | None): Channel indices to include, or `None` to include all channels.
+        
+        Returns:
+        	dict[str, float]: Minimum, maximum, mean, and sample standard deviation of the selected data.
+        """
         self.stats_reads += 1
         data = self.volume if channels is None else self.volume[channels]
         return {
@@ -782,6 +841,17 @@ def test_dataset_is_dataset_exist_benefits_from_cache(tmp_path: Path) -> None:
 
 
 def _build_streaming_manager(volume: np.ndarray, transforms: list[Transform], patch_size: list[int]) -> DatasetManager:
+    """
+    Build a dataset manager configured to stream patches from an in-memory volume.
+    
+    Parameters:
+    	volume (np.ndarray): Volume returned by the streaming dataset stub.
+    	transforms (list[Transform]): Transforms applied when retrieving patches.
+    	patch_size (list[int]): Spatial dimensions of each patch.
+    
+    Returns:
+    	DatasetManager: Manager configured for the specified volume, transforms, and patch size.
+    """
     stub = StreamingDatasetStub(volume)
     return DatasetManager(
         index=0,
@@ -802,7 +872,18 @@ def _assert_stream_matches_whole_volume(
     *,
     atol: float = 0.0,
 ) -> DatasetManager:
-    """Every streamed patch must equal the whole-volume pass sliced on the same grid."""
+    """
+    Verify streamed patch results match patches obtained from whole-volume processing.
+    
+    Parameters:
+    	volume (np.ndarray): Input volume used for streaming and whole-volume processing.
+    	transforms (list[Transform]): Transforms applied to the volume.
+    	patch_size (list[int]): Spatial dimensions of each patch.
+    	atol (float): Absolute tolerance for comparing floating-point results.
+    
+    Returns:
+    	DatasetManager: Manager configured for the streaming comparison.
+    """
     manager = _build_streaming_manager(volume, transforms, patch_size)
     assert manager.can_stream_patch(0)
 
@@ -1019,16 +1100,26 @@ def test_stream_resample_border_patch_matches_padded_whole_volume() -> None:
 
 
 def _structured_volume() -> np.ndarray:
-    """A spatially STRUCTURED signal: each patch has a very different local statistic.
-
-    A uniform-noise volume hides the bug (every patch shares the volume's statistic); a ramp
-    makes a patch-local statistic diverge from the volume-global one.
+    """
+    Create a structured three-dimensional ramp volume with distinct local statistics.
+    
+    Returns:
+        np.ndarray: A float32 array with shape (1, 16, 16, 16).
     """
     z, y, x = np.meshgrid(np.arange(16), np.arange(16), np.arange(16), indexing="ij")
     return (100.0 * z + 10.0 * y + 1.0 * x).astype(np.float32)[None]
 
 
 def _patch_manager(volume: np.ndarray, transforms: list[Transform]) -> DatasetManager:
+    """Create a dataset manager configured for patch-wise transform tests.
+    
+    Parameters:
+        volume (np.ndarray): Volume provided by the streaming dataset stub.
+        transforms (list[Transform]): Transforms applied to each patch.
+    
+    Returns:
+        DatasetManager: Manager configured with overlapping 8 × 8 × 8 patches.
+    """
     return DatasetManager(
         index=0,
         group_src="CT",
@@ -1042,10 +1133,8 @@ def _patch_manager(volume: np.ndarray, transforms: list[Transform]) -> DatasetMa
 
 
 def test_patch_transform_standardize_applies_a_lazily_captured_volume_statistic() -> None:
-    """`Standardize(lazy=True)` case-level + `Standardize()` per patch == case-level Standardize.
-
-    This is the documented way to standardize per patch by the VOLUME's statistic: the lazy pass
-    caches Mean/Std without applying anything, and the patch transform finds them on the attribute.
+    """
+    Verify that lazy case-level statistics produce the same standardized patches as case-level standardization.
     """
     volume = _structured_volume()
     case_level = _patch_manager(volume, [Standardize()])
@@ -1104,10 +1193,8 @@ def test_patch_transform_standardize_is_independent_of_patch_order() -> None:
 
 
 def test_patch_transform_is_identical_across_managers() -> None:
-    """A fresh manager per patch -- the per-DataLoader-worker case -- gives the same patch.
-
-    Each worker owns its own cache attribute, so anything a patch records on it makes the result
-    depend on which worker drew which patch. Every patch here must be reproducible on its own.
+    """
+    Verify that patch-level standardization produces identical results across independent managers.
     """
     volume = _structured_volume()
     shared = _patch_manager(volume, [])
@@ -1253,7 +1340,7 @@ def test_clip_then_standardize_equals_the_whole_volume_result() -> None:
 
 
 def test_streaming_still_seeds_a_global_stat_behind_a_reorientation() -> None:
-    """A flip only moves voxels, so the stored statistics are still Standardize's own input."""
+    """Verify that streaming preserves global-statistic seeding after a reorientation transform."""
     volume = _structured_volume()
     manager = _patch_manager(volume, [Flip(dims="0"), Standardize()])
 
@@ -1304,12 +1391,43 @@ class _ShapeChangingPointwise(Transform):
     """What the locality declaration cannot catch: a custom transform that declares POINTWISE and crops."""
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """
+        Classifies the transform as independently applicable to each patch.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached attributes available for the transform.
+        
+        Returns:
+        	PatchLocality: Pointwise locality classification.
+        """
         return PatchLocality(LocalityKind.POINTWISE)
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        """
+        Compute the output shape by reducing each dimension by one.
+        
+        Parameters:
+            group_src (str): Source group identifier.
+            name (str): Transform name.
+            shape (list[int]): Input shape.
+            cache_attribute (Attribute): Cached transform attributes.
+        
+        Returns:
+            list[int]: Shape with each dimension reduced by one.
+        """
         return [size - 1 for size in shape]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """Crop one element from the end of each spatial dimension.
+        
+        Parameters:
+        	name (str): Case or sample name associated with the tensor.
+        	tensor (torch.Tensor): Input tensor to crop.
+        	cache_attribute (Attribute): Metadata associated with the tensor.
+        
+        Returns:
+        	torch.Tensor: The tensor with the final element removed from each spatial dimension.
+        """
         return tensor[..., :-1, :-1, :-1]
 
 
@@ -1357,7 +1475,7 @@ def test_per_patch_global_stat_is_allowed_when_training(monkeypatch: pytest.Monk
 
 @pytest.mark.parametrize("transform", [Standardize(), Normalize()])
 def test_per_patch_global_stat_is_refused_at_prediction(monkeypatch: pytest.MonkeyPatch, transform: Transform) -> None:
-    """At prediction the finalize inverse pops a statistic the per-patch scope never left case-level."""
+    """Verify that prediction rejects per-patch global-stat transforms that cannot be inverted safely."""
     monkeypatch.setenv("KONFAI_ROOT", "Predictor")
     monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
 

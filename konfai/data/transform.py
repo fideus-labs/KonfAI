@@ -74,13 +74,11 @@ class LocalityKind(Enum):
 
     @property
     def preserves_statistics(self) -> bool:
-        """Whether this kind leaves every whole-volume statistic of its input untouched.
-
-        Only a reorientation does: a flip or a permute is a bijection on the voxels, so the multiset of
-        values -- and therefore Min/Max/Mean/Std over it -- is exactly the input's. Every other kind may
-        map values (``POINTWISE``, ``GLOBAL_STAT``), mix neighbours (``HALO``) or interpolate
-        (``RESCALE``). This is what decides whether the statistics of the STORED volume are still those
-        of a later transform's own input (see ``DatasetManager._plan_stream_region``).
+        """
+        Indicates whether the locality kind preserves whole-volume statistics.
+        
+        Returns:
+            bool: `True` for orientation transforms, which reorder voxels without changing their values; `False` for other locality kinds.
         """
         return self is LocalityKind.ORIENTATION
 
@@ -106,6 +104,11 @@ class PatchLocality:
 
     @property
     def statistics_preserving(self) -> bool:
+        """Indicates whether the locality contract preserves input statistics.
+        
+        Returns:
+        	bool: `True` if statistics are preserved, `False` otherwise.
+        """
         if self.preserves_statistics is not None:
             return self.preserves_statistics
         return self.kind.preserves_statistics
@@ -124,6 +127,15 @@ class Transform(NeedDevice, ABC):
         self.datasets = datasets
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        """
+        Preserve the input spatial shape.
+        
+        Parameters:
+            shape (list[int]): The input tensor shape.
+        
+        Returns:
+            list[int]: The unchanged input shape.
+        """
         return shape
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
@@ -159,16 +171,19 @@ class Transform(NeedDevice, ABC):
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        """Map a target-patch's spatial slices to the source spatial region to read (region kinds).
-
-        Overridden by the kinds whose source region is an index remap of the target's -- ``ORIENTATION``
-        maps it and reorients what it reads, ``CROP`` maps it and is done. ``HALO`` and ``RESCALE`` are
-        handled generically by the dispatcher, so the base raises for any transform that declares a
-        region kind without providing the remap.
-
-        ``cache_attribute`` is the case's SOURCE metadata, under the same rules as
-        :meth:`patch_locality`: a remap the image decides (a reorientation whose mirrored axes are the
-        case's own direction cosines) reads it here, and reads nothing else.
+        """
+        Map target-patch spatial slices to the source region required by the transform.
+        
+        Parameters:
+        	target_slices (tuple[slice, ...]): Spatial slices of the target patch.
+        	source_spatial_shape (list[int]): Spatial shape of the source tensor.
+        	cache_attribute (Attribute): Source metadata used to determine the mapping.
+        
+        Returns:
+        	list[slice]: Spatial slices identifying the source region to read.
+        
+        Raises:
+        	TransformError: If the transform declares a region-based locality but does not provide a mapping.
         """
         raise TransformError(
             f"{type(self).__name__} declared a region patch-locality but does not implement stream_region_source().",
@@ -176,18 +191,30 @@ class Transform(NeedDevice, ABC):
         )
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
-        """Record the geometry a whole-volume ``__call__`` would, given the FULL source shape.
-
-        Called once per case, on the persistent attribute, for the stage that owns a streamed region.
-        A transform whose geometry rewrite depends on the volume's EXTENT (a reorientation's new
-        origin is the corner it mirrors onto) cannot compute it from a patch, which is all its
-        ``__call__`` is handed while streaming: it writes the case-level answer here instead, and the
-        patch-local one it wrote on the way is dropped rather than persisted. The base is a no-op --
-        a transform that leaves geometry alone has nothing to record.
+        """
+        Records any geometry metadata required for inverse processing of a streamed transform.
+        
+        Parameters:
+            cache_attribute (Attribute): Persistent metadata for the transformed volume.
+            source_spatial_shape (list[int]): Full spatial shape of the source volume.
+        
+        Returns:
+            None
         """
 
     @abstractmethod
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Apply the transform to a tensor.
+        
+        Parameters:
+            name (str): Identifier of the tensor within its dataset.
+            tensor (torch.Tensor): Input tensor to transform.
+            cache_attribute (Attribute): Metadata and intermediate values shared with the transform chain.
+        
+        Returns:
+            torch.Tensor: Transformed tensor.
+        """
         pass
 
 
@@ -225,6 +252,19 @@ class Clip(Transform):
         save_clip_max: bool = False,
         mask: str | None = None,
     ) -> None:
+        """
+        Configure intensity clipping bounds and optional bound caching.
+        
+        Parameters:
+            min_value (float | str): Lower clipping bound or a data-dependent bound specification.
+            max_value (float | str): Upper clipping bound or a data-dependent bound specification.
+            save_clip_min (bool): Whether to store the resolved lower bound for later use.
+            save_clip_max (bool): Whether to store the resolved upper bound for later use.
+            mask (str | None): Optional dataset path used to determine data-dependent bounds.
+        
+        Raises:
+            ValueError: If both bounds are numeric and the upper bound is less than or equal to the lower bound.
+        """
         super().__init__()
         if isinstance(min_value, float) and isinstance(max_value, float) and max_value <= min_value:
             raise ValueError(
@@ -240,6 +280,14 @@ class Clip(Transform):
         # A mask reads a separate full volume, and a percentile bound needs the whole histogram:
         # both force a whole-volume load. A 'min'/'max' bound needs a global disk statistic
         # (GLOBAL_STAT); fixed float bounds clip each voxel independently (POINTWISE).
+        """
+        Classify the input region required to apply clipping.
+        
+        Returns:
+            PatchLocality: Whole-volume locality when a mask or unsupported dynamic
+            bound is used, global-statistic locality for minimum or maximum bounds,
+            or pointwise locality for fixed bounds.
+        """
         if self.mask is not None:
             return PatchLocality(LocalityKind.WHOLE_VOLUME)
         stat_keys: set[str] = set()
@@ -254,6 +302,17 @@ class Clip(Transform):
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Clip tensor values to configured or data-derived lower and upper bounds.
+        
+        Parameters:
+            name (str): Dataset item name used to locate the optional mask.
+            tensor (torch.Tensor): Tensor whose values are clipped.
+            cache_attribute (Attribute): Attributes where resolved bounds may be stored.
+        
+        Returns:
+            torch.Tensor: The clipped input tensor.
+        """
         mask = None
         if self.mask is not None:
             for dataset in self.datasets:
@@ -345,6 +404,19 @@ class Normalize(TransformInverse):
         max_value: float = 1,
         inverse: bool = True,
     ) -> None:
+        """
+        Configure intensity normalization to a target range.
+        
+        Parameters:
+            lazy (bool): Whether to store normalization statistics without applying the transform.
+            channels (list[int] | None): Channel indices used for per-channel normalization.
+            min_value (float): Lower bound of the target range.
+            max_value (float): Upper bound of the target range.
+            inverse (bool): Whether inverse transformation is enabled.
+        
+        Raises:
+            ValueError: If `max_value` is less than or equal to `min_value`.
+        """
         super().__init__(inverse)
         if max_value <= min_value:
             raise ValueError(
@@ -358,9 +430,29 @@ class Normalize(TransformInverse):
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Rescaling uses the volume-global Min/Max (restricted to self.channels); the dispatcher reads
         # those once from disk and seeds them so every patch (and inverse()) sees the same range.
+        """
+        Declare the global statistics required to normalize tensor patches.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached transform metadata used to determine the applicable statistics.
+        
+        Returns:
+        	PatchLocality: A global-statistics locality contract for the `Min` and `Max` values, optionally restricted to configured channels.
+        """
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"Min", "Max"}), stat_channels=self.channels)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Normalize tensor values to a configured intensity range.
+        
+        Parameters:
+        	name (str): Identifier used when reporting constant-input cases.
+        	tensor (torch.Tensor): Tensor whose values are normalized.
+        	cache_attribute (Attribute): Stores or provides the input minimum and maximum values.
+        
+        Returns:
+        	torch.Tensor: The normalized tensor, or the original tensor when lazy normalization is enabled.
+        """
         if "Min" not in cache_attribute:
             if self.channels:
                 cache_attribute["Min"] = torch.min(tensor[self.channels])
@@ -405,14 +497,38 @@ class Normalize(TransformInverse):
 
 class UnNormalize(Transform):
     def __init__(self, min_value: int = -1024, max_value: int = 3071) -> None:
+        """
+        Initialize intensity clipping bounds.
+        
+        Parameters:
+            min_value (int): Lower clipping bound.
+            max_value (int): Upper clipping bound.
+        """
         super().__init__()
         self.min_value = min_value
         self.max_value = max_value
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """Describe how the transform maps output patches to input regions.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached metadata used to determine the locality contract.
+        
+        Returns:
+        	PatchLocality: A pointwise locality contract.
+        """
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """Maps values from the interval [-1, 1] to the configured output interval.
+        
+        Parameters:
+        	name (str): Dataset item name.
+        	tensor (torch.Tensor): Input tensor.
+        
+        Returns:
+        	torch.Tensor: Tensor with values linearly mapped to [min_value, max_value].
+        """
         return (tensor + 1) / 2 * (self.max_value - self.min_value) + self.min_value
 
 
@@ -427,6 +543,16 @@ class Standardize(TransformInverse):
         mask: str | None = None,
         inverse: bool = True,
     ) -> None:
+        """
+        Configure standardization using optional statistics, masking, and lazy evaluation.
+        
+        Parameters:
+        	lazy (bool): Whether to defer applying standardization until inverse processing.
+        	mean (list[float] | None): Optional mean values to use instead of computing them.
+        	std (list[float] | None): Optional standard deviation values to use instead of computing them.
+        	mask (str | None): Optional dataset path identifying the mask used to compute statistics.
+        	inverse (bool): Whether inverse processing is enabled.
+        """
         super().__init__(inverse)
         self.lazy = lazy
         self.mean = mean
@@ -437,6 +563,15 @@ class Standardize(TransformInverse):
         # A mask reads a separate full volume (whole-volume). Any of mean/std left unset is taken from
         # a volume-global disk statistic (GLOBAL_STAT); when both are given, the standardization is a
         # per-voxel affine map with constant coefficients (POINTWISE).
+        """
+        Declare the patch-locality requirements for standardization.
+        
+        Parameters:
+            cache_attribute (Attribute): Cached transform metadata used to determine available statistics.
+        
+        Returns:
+            PatchLocality: Whole-volume locality when a mask is configured, global-statistics locality for unset mean or standard deviation values, or pointwise locality when both are configured.
+        """
         if self.mask is not None:
             return PatchLocality(LocalityKind.WHOLE_VOLUME)
         stat_keys: set[str] = set()
@@ -449,6 +584,20 @@ class Standardize(TransformInverse):
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Standardize tensor values using configured or computed mean and standard deviation.
+        
+        Parameters:
+            name (str): Dataset item name used to locate the optional mask.
+            tensor (torch.Tensor): Tensor to standardize.
+            cache_attribute (Attribute): Attributes used to read or store the mean and standard deviation.
+        
+        Returns:
+            torch.Tensor: Standardized tensor, or the original tensor when lazy mode is enabled.
+        
+        Raises:
+            ValueError: If a configured mask cannot be found in any dataset.
+        """
         mask = None
         if self.mask is not None:
             for dataset in self.datasets:
@@ -506,6 +655,13 @@ class Standardize(TransformInverse):
 
 class TensorCast(TransformInverse):
     def __init__(self, dtype: str = "float32", inverse: bool = True) -> None:
+        """
+        Initialize a transform that casts tensors to the specified PyTorch data type and optionally supports inverse casting.
+        
+        Parameters:
+        	dtype (str): Name of the target PyTorch data type.
+        	inverse (bool): Whether inverse casting is enabled.
+        """
         super().__init__(inverse)
         self.dtype: torch.dtype = getattr(torch, dtype)
 
@@ -513,9 +669,19 @@ class TensorCast(TransformInverse):
         # A cast to a floating dtype keeps every value (up to fp rounding on a downcast), so the stored
         # volume's Min/Max/Mean/Std are still a later GLOBAL_STAT's input statistics; an integer cast
         # truncates and may not preserve them.
+        """Describe the patch-locality and statistics-preservation behavior of the cast."""
         return PatchLocality(LocalityKind.POINTWISE, preserves_statistics=self.dtype.is_floating_point)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Cast the tensor to the configured data type while recording its original data type.
+        
+        Parameters:
+            cache_attribute (Attribute): Metadata storage used to preserve the original data type for inversion.
+        
+        Returns:
+            torch.Tensor: The tensor converted to the configured data type.
+        """
         cache_attribute["dtype"] = str(tensor.dtype).replace("torch.", "")
         return tensor.type(self.dtype)
 
@@ -569,6 +735,13 @@ class Padding(TransformInverse):
 
 class Squeeze(TransformInverse):
     def __init__(self, dim: int, inverse: bool = True) -> None:
+        """
+        Configure the dimension to squeeze and whether inverse processing is enabled.
+        
+        Parameters:
+        	dim (int): Dimension to squeeze.
+        	inverse (bool): Whether inverse processing is enabled.
+        """
         super().__init__(inverse)
         self.dim = dim
 
@@ -577,6 +750,18 @@ class Squeeze(TransformInverse):
         # so the runtime tensor is [C, *shape] and ``self.dim`` indexes into that. Squeezing the channel
         # (axis 0) leaves the spatial grid untouched; squeezing a spatial axis drops it from the grid --
         # but only when it is size 1, exactly as ``torch.squeeze`` does (a non-singleton axis is a no-op).
+        """
+        Determine the spatial shape after squeezing a singleton tensor dimension.
+        
+        Parameters:
+        	group_src (str): Source group associated with the tensor.
+        	name (str): Tensor name.
+        	shape (list[int]): Channel-stripped spatial shape.
+        	cache_attribute (Attribute): Cached transform metadata.
+        
+        Returns:
+        	list[int]: The spatial shape with the selected singleton axis removed, or the original shape when the axis is not singleton.
+        """
         axis = self.dim if self.dim >= 0 else self.dim + len(shape) + 1
         if 1 <= axis <= len(shape) and shape[axis - 1] == 1:
             return shape[: axis - 1] + shape[axis:]
@@ -596,9 +781,27 @@ class Resample(TransformInverse, ABC):
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # The source region is derived from the scale mapping (read from cache_attribute['Spacing']
         # by the dispatcher); a small interpolation halo is added by resample_source_region.
+        """
+        Describe the input-region contract for resampling transforms.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached transform metadata used to determine the scale mapping.
+        
+        Returns:
+        	PatchLocality: A rescaling locality contract.
+        """
         return PatchLocality(LocalityKind.RESCALE)
 
     def _resample(self, tensor: torch.Tensor, size: list[int]) -> torch.Tensor:
+        """Resample a tensor to the specified spatial dimensions.
+        
+        Parameters:
+            tensor (torch.Tensor): Tensor to resample.
+            size (list[int]): Target spatial dimensions.
+        
+        Returns:
+            torch.Tensor: Resampled tensor with the input dtype and device.
+        """
         if tensor.dtype == torch.uint8:
             mode = "nearest"
         elif len(tensor.shape) < 4:
@@ -631,6 +834,16 @@ class Resample(TransformInverse, ABC):
         pass
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Restore the tensor to its previously recorded spatial shape.
+        
+        Parameters:
+        	tensor (torch.Tensor): Tensor to resample.
+        	cache_attribute (Attribute): Metadata containing the original size and optional spacing.
+        
+        Returns:
+        	torch.Tensor: Tensor resampled to the recorded original spatial dimensions.
+        """
         cache_attribute.pop_np_array("Size")
         size_1 = cache_attribute.pop_np_array("Size")
         if "Spacing" in cache_attribute:
@@ -641,6 +854,15 @@ class Resample(TransformInverse, ABC):
     # truncated integer sizes F.interpolate itself uses), which is what makes the streamed patches
     # agree with the whole-volume call and with each other across a seam.
     def _stream_mode(self, tensor: torch.Tensor) -> str:
+        """
+        Select the interpolation mode for resampling a tensor.
+        
+        Parameters:
+        	tensor (torch.Tensor): Tensor whose dtype and dimensionality determine the interpolation mode.
+        
+        Returns:
+        	str: `"nearest"` for unsigned 8-bit tensors, `"bilinear"` for tensors with fewer than four dimensions, or `"trilinear"` otherwise.
+        """
         if tensor.dtype == torch.uint8:
             return "nearest"
         return "bilinear" if len(tensor.shape) < 4 else "trilinear"
@@ -652,11 +874,18 @@ class Resample(TransformInverse, ABC):
         cache_attribute: Attribute,
         halo: int = 1,
     ) -> tuple[list[slice], list[int], list[float], list[int], list[int]]:
-        """Map a TARGET-grid patch to the minimal SOURCE region to read.
-
-        Returns ``(source_slices, region_starts, scales, n_in, n_out)`` — all in
-        array axis order (Z, Y, X). The ``halo`` is a pure safety margin (the
-        formula's ``+2`` already captures the i1 neighbour); nearest needs none.
+        """
+        Map a target-grid patch to the source region required for resampling.
+        
+        Parameters:
+            target_slices (tuple[slice, ...]): Target-grid patch slices in array axis order.
+            source_spatial_shape (list[int]): Source spatial dimensions in array axis order.
+            cache_attribute (Attribute): Cached transform metadata used to determine the output shape.
+            halo (int): Additional source-region margin around the resampling footprint.
+        
+        Returns:
+            tuple: Source slices, source-region starting indices, per-axis scale factors,
+            source dimensions, and output dimensions, all in array axis order.
         """
         n_in = [int(s) for s in source_spatial_shape]
         n_out = [int(s) for s in self.transform_shape("", "", list(n_in), cache_attribute)]
@@ -681,12 +910,18 @@ class Resample(TransformInverse, ABC):
         scales: list[float],
         n_in: list[int],
     ) -> torch.Tensor:
-        """Interpolate a source sub-region to the target patch extent.
-
-        ``sub_tensor`` is ``[C, (z, y, x)]`` covering ``source_slices``;
-        ``region_starts`` are the global source indices of its first voxel per
-        axis. Uses the same global coordinate formula as the whole-volume path,
-        indexing the sub-region as ``sub[i - region_start]``.
+        """
+        Interpolate a source sub-region to the requested target patch.
+        
+        Parameters:
+            sub_tensor (torch.Tensor): Source sub-region with channel-first layout.
+            target_slices (tuple[slice, ...]): Target spatial slices to generate.
+            region_starts (list[int]): Global source index of the first voxel in each axis.
+            scales (list[float]): Source-to-target scale for each spatial axis.
+            n_in (list[int]): Full source size along each spatial axis.
+        
+        Returns:
+            torch.Tensor: Interpolated target patch.
         """
         mode = self._stream_mode(sub_tensor)
         dev = sub_tensor.device
@@ -732,16 +967,22 @@ class Resample(TransformInverse, ABC):
 
     @abstractmethod
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
-        """Record the same 'Spacing'/'Size' stack a whole-volume ``__call__`` would.
-
-        Called once per case on the persistent attribute so ``inverse()`` at
-        prediction time pops exactly what the non-streamed path pushed. Uses the
-        FULL source shape, never the halo'd sub-region.
+        """Store spacing and size metadata needed to invert streamed resampling.
+        
+        Parameters:
+            cache_attribute (Attribute): Metadata updated with the resampling state.
+            source_spatial_shape (list[int]): Full spatial shape before resampling.
         """
 
 
 class ResampleToResolution(Resample):
     def __init__(self, spacing: list[float] = [1.0, 1.0, 1.0], inverse: bool = True) -> None:
+        """Initialize a resampling transform with the target voxel spacing.
+        
+        Parameters:
+        	spacing (list[float]): Target voxel spacing for each spatial axis. Negative values are treated as zero.
+        	inverse (bool): Whether inverse transformation support is enabled.
+        """
         super().__init__(inverse)
         self.spacing = torch.tensor([0 if s < 0 else s for s in spacing])
 
@@ -760,6 +1001,17 @@ class ResampleToResolution(Resample):
         return [int(x) for x in (torch.tensor(shape) * 1 / resize_factor.flip(0))]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Resample a tensor to the configured voxel spacing.
+        
+        Parameters:
+        	name (str): Dataset item name associated with the tensor.
+        	tensor (torch.Tensor): Tensor whose spatial dimensions are resampled.
+        	cache_attribute (Attribute): Metadata updated with the resulting spacing and size.
+        
+        Returns:
+        	torch.Tensor: The resampled tensor.
+        """
         image_spacing = cache_attribute.get_tensor("Spacing")
         spacing = self.spacing
         resize_factor = torch.tensor(
@@ -777,6 +1029,13 @@ class ResampleToResolution(Resample):
         return self._resample(tensor, size)
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        """
+        Update cached spacing and original size metadata for streamed resampling.
+        
+        Parameters:
+        	cache_attribute (Attribute): Metadata cache to update.
+        	source_spatial_shape (list[int]): Spatial shape of the untransformed source volume.
+        """
         image_spacing = cache_attribute.get_tensor("Spacing")
         spacing = self.spacing
         resize_factor = torch.tensor(
@@ -792,6 +1051,13 @@ class ResampleToResolution(Resample):
 
 class ResampleToShape(Resample):
     def __init__(self, shape: list[float] = [100, 256, 256], inverse: bool = True) -> None:
+        """
+        Configure resampling to a target spatial shape.
+        
+        Parameters:
+        	shape (list[float]): Target spatial dimensions; values less than zero are treated as zero, which preserves the corresponding input dimension.
+        	inverse (bool): Whether inverse transformation support is enabled.
+        """
         super().__init__(inverse)
         self.shape = torch.tensor([0 if s < 0 else s for s in shape])
 
@@ -810,6 +1076,19 @@ class ResampleToShape(Resample):
         return new_shape
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Resample the tensor to the configured spatial shape.
+        
+        Entries configured as zero retain their corresponding input spatial dimension.
+        Updates cached spacing and size metadata when applicable.
+        
+        Parameters:
+            tensor (torch.Tensor): Tensor to resample.
+            cache_attribute (Attribute): Metadata updated with the resulting size and spacing.
+        
+        Returns:
+            torch.Tensor: Tensor resampled to the target spatial shape.
+        """
         shape = self.shape.clone()
         image_shape = torch.tensor([int(x) for x in torch.tensor(tensor.shape[1:])])
         for i, s in enumerate(self.shape):
@@ -825,6 +1104,12 @@ class ResampleToShape(Resample):
         return self._resample(tensor, shape)
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        """Update cached spatial metadata for streaming resampling to the configured target shape.
+        
+        Parameters:
+        	cache_attribute (Attribute): Metadata updated with the resampled spacing and size.
+        	source_spatial_shape (list[int]): Spatial dimensions of the original image.
+        """
         shape = self.shape.clone()
         image_shape = torch.tensor([int(s) for s in source_spatial_shape])
         for i, s in enumerate(self.shape):
@@ -847,6 +1132,12 @@ class ResampleTransform(TransformInverse):
     """
 
     def __init__(self, transforms: dict[str, bool], inverse: bool = True) -> None:
+        """Initialize the transform inverse with its configured transform settings.
+        
+        Parameters:
+        	transforms (dict[str, bool]): Transform names mapped to their enabled states.
+        	inverse (bool): Whether inverse processing is enabled.
+        """
         super().__init__(inverse)
         self.transforms = transforms
 
@@ -932,6 +1223,12 @@ class Mask(Transform):
     """
 
     def __init__(self, path: str = "./default.mha", value_outside: int = 0) -> None:
+        """Initialize a transform that sets values outside a mask to a specified constant.
+        
+        Parameters:
+        	path (str): Path to the mask image or dataset attribute.
+        	value_outside (int): Value assigned to tensor elements outside the mask.
+        """
         super().__init__()
         self.path = path
         self.value_outside = value_outside
@@ -959,6 +1256,14 @@ class Mask(Transform):
 
 class Dilate(Transform):
     def __init__(self, dilate: int = 1) -> None:
+        """Initialize the dilation transform.
+        
+        Parameters:
+        	dilate (int): Number of voxels by which to expand the mask in each spatial direction. Must be greater than or equal to zero.
+        
+        Raises:
+        	ValueError: If `dilate` is negative.
+        """
         super().__init__()
         if dilate < 0:
             raise ValueError(f"[Dilate] 'dilate' must be >= 0, got {dilate}")
@@ -973,6 +1278,20 @@ class Dilate(Transform):
         return PatchLocality(LocalityKind.HALO, halo=(self.dilate,))
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Expand positive regions in a 2D or 3D tensor by the configured dilation radius.
+        
+        Parameters:
+        	name (str): Tensor identifier used in unsupported-shape error messages.
+        	tensor (torch.Tensor): Channel-first 2D or 3D tensor to dilate.
+        	cache_attribute (Attribute): Transform metadata cache.
+        
+        Returns:
+        	torch.Tensor: Dilated tensor with the original data type.
+        
+        Raises:
+        	ValueError: If the tensor is neither channel-first 2D nor channel-first 3D.
+        """
         if self.dilate == 0:
             return tensor
 
@@ -1003,17 +1322,42 @@ class Dilate(Transform):
 
 class Sum(Transform):
     def __init__(self, dim: int = 0) -> None:
+        """
+        Initialize the dimension used by the transform.
+        
+        Parameters:
+        	dim (int): Dimension along which the transform operates.
+        """
         super().__init__()
         self.dim = dim
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Pointwise only when reducing the leading channel/model axis (dim 0); a spatial sum spans
         # the whole extent, so it falls back to the whole volume.
+        """
+        Classifies the locality of the sum operation based on its reduction dimension.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached transform metadata.
+        
+        Returns:
+        	PatchLocality: Pointwise locality when reducing the leading channel or model axis; whole-volume locality otherwise.
+        """
         if self.dim == 0:
             return PatchLocality(LocalityKind.POINTWISE)
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Sum tensor values along the configured dimension, accounting for per-model label offsets when provided.
+        
+        Parameters:
+            tensor (torch.Tensor): Tensor to aggregate.
+            cache_attribute (Attribute): Cached transform metadata containing optional per-model channel counts.
+        
+        Returns:
+            torch.Tensor: Aggregated tensor with the input dtype.
+        """
         if "number_of_channels_per_model" in cache_attribute:
             number_of_channels = cache_attribute.pop_tensor("number_of_channels_per_model")
             result = tensor[0]
@@ -1048,6 +1392,17 @@ class MergeLabels(Transform):
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Merge per-model segmentation labels into a single global label map.
+        
+        Parameters:
+        	name (str): Identifier for the transformed data.
+        	tensor (torch.Tensor): Per-model label maps to merge.
+        	cache_attribute (Attribute): Metadata containing the channel count for each model.
+        
+        Returns:
+        	torch.Tensor: A label map with foreground labels shifted into a shared label space.
+        """
         if "number_of_channels_per_model" not in cache_attribute:
             raise TransformError(
                 "MergeLabels expects a multi-model 'combine: Concat' output: "
@@ -1065,16 +1420,35 @@ class MergeLabels(Transform):
 
 class Gradient(Transform):
     def __init__(self, per_dim: bool = False):
+        """Initialize gradient computation with optional per-dimension output.
+        
+        Parameters:
+        	per_dim (bool): Whether to retain separate gradient components for each spatial dimension.
+        """
         super().__init__()
         self.per_dim = per_dim
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # First-difference gradient: each output voxel reads its immediate neighbour, a HALO of radius
         # 1. The far-edge ConstantPad reproduces the whole-volume border once the halo clamps there.
+        """
+        Declare that each output voxel requires an immediate neighboring input voxel.
+        
+        Returns:
+            PatchLocality: A halo locality contract with radius one.
+        """
         return PatchLocality(LocalityKind.HALO, halo=(1,))
 
     @staticmethod
     def _image_gradient_2d(image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute first differences along the two spatial dimensions of a 2D image.
+        
+        Parameters:
+        	image (torch.Tensor): A channel-first 2D image tensor.
+        
+        Returns:
+        	tuple[torch.Tensor, torch.Tensor]: The differences along the height and width dimensions, padded to the input spatial shape.
+        """
         dx = image[:, 1:, :] - image[:, :-1, :]
         dy = image[:, :, 1:] - image[:, :, :-1]
         return torch.nn.ConstantPad2d((0, 0, 0, 1), 0)(dx), torch.nn.ConstantPad2d((0, 1, 0, 0), 0)(dy)
@@ -1107,28 +1481,63 @@ class Gradient(Transform):
 
 class Argmax(Transform):
     def __init__(self, dim: int = 0) -> None:
+        """
+        Initialize the dimension used by the transform.
+        
+        Parameters:
+        	dim (int): Dimension along which the transform operates.
+        """
         super().__init__()
         self.dim = dim
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Pointwise ONLY when reducing the channel axis (dim 0). Over a spatial axis the argmax spans
         # the whole extent, so a per-patch argmax would diverge -- fall back to the whole volume.
+        """Declare the patch-locality contract for the argmax operation.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached transform metadata.
+        
+        Returns:
+        	PatchLocality: Pointwise locality when reducing the channel axis; whole-volume locality otherwise.
+        """
         if self.dim == 0:
             return PatchLocality(LocalityKind.POINTWISE)
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Selects the index of the maximum value along the configured dimension while preserving that dimension.
+        
+        Returns:
+        	torch.Tensor: Tensor containing the maximum-value indices with the selected dimension retained.
+        """
         return torch.argmax(tensor, dim=self.dim).unsqueeze(self.dim)
 
 
 class Softmax(Transform):
     def __init__(self, dim: int = 0) -> None:
+        """
+        Initialize the dimension used by the transform.
+        
+        Parameters:
+        	dim (int): Dimension along which the transform operates.
+        """
         super().__init__()
         self.dim = dim
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Pointwise ONLY when reducing the channel axis (dim 0). Over a spatial axis softmax normalises
         # across the whole extent, so a per-patch softmax would diverge -- fall back to the whole volume.
+        """
+        Classifies the softmax operation's patch-locality requirements.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached transform metadata.
+        
+        Returns:
+        	PatchLocality: Pointwise locality when softmax reduces the channel axis; whole-volume locality otherwise.
+        """
         if self.dim == 0:
             return PatchLocality(LocalityKind.POINTWISE)
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
@@ -1143,9 +1552,28 @@ class FlatLabel(Transform):
         self.labels = labels
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """Describe how the transform maps output patches to input regions.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached metadata used to determine the locality contract.
+        
+        Returns:
+        	PatchLocality: A pointwise locality contract.
+        """
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Convert selected label values into a binary mask.
+        
+        Parameters:
+        	name (str): Sample name associated with the tensor.
+        	tensor (torch.Tensor): Tensor containing scalar labels.
+        	cache_attribute (Attribute): Metadata associated with the transformation.
+        
+        Returns:
+        	torch.Tensor: A tensor containing `1` for selected labels and `0` elsewhere.
+        """
         data = torch.zeros_like(tensor)
         if self.labels:
             for label in self.labels:
@@ -1157,6 +1585,12 @@ class FlatLabel(Transform):
 
 class Save(Transform):
     def __init__(self, dataset: str, group: str | None = None) -> None:
+        """Initialize the transform with a dataset path and optional data group.
+        
+        Parameters:
+        	dataset (str): Dataset path or identifier.
+        	group (str | None): Optional group containing the relevant data.
+        """
         super().__init__()
         self.dataset = dataset
         self.group = group
@@ -1185,9 +1619,27 @@ class Permute(TransformInverse):
         self.dims = [0] + [int(d) + 1 for d in dims.split("|")]
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        """
+        Determine the spatial shape after applying the configured permutation.
+        
+        Parameters:
+            shape (list[int]): Input shape including the channel dimension.
+        
+        Returns:
+            list[int]: Spatial shape reordered according to the configured dimensions.
+        """
         return [shape[it - 1] for it in self.dims[1:]]
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """
+        Declare that the transform performs an orientation-only spatial mapping.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached transform metadata.
+        
+        Returns:
+        	PatchLocality: An orientation locality contract.
+        """
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def stream_region_source(
@@ -1199,12 +1651,34 @@ class Permute(TransformInverse):
         # Output spatial axis k comes from input axis ``self.dims[k + 1] - 1`` (self.dims is
         # channel-inclusive). Placing each target slice at its source axis yields the source region
         # whose permutation reproduces the target patch exactly.
+        """
+        Map a target patch to the source region required by the permutation.
+        
+        Parameters:
+        	target_slices (tuple[slice, ...]): Spatial slices defining the target patch.
+        	source_spatial_shape (list[int]): Spatial dimensions of the unpermuted source tensor.
+        	cache_attribute (Attribute): Transform metadata.
+        
+        Returns:
+        	list[slice]: Source spatial slices whose permutation produces the target patch.
+        """
         source_slices = [slice(0, n) for n in source_spatial_shape]
         for k, sl in enumerate(target_slices):
             source_slices[self.dims[k + 1] - 1] = slice(sl.start, sl.stop)
         return source_slices
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Reorders the tensor dimensions according to the configured permutation.
+        
+        Parameters:
+        	name (str): The data item name.
+        	tensor (torch.Tensor): The tensor to reorder.
+        	cache_attribute (Attribute): Metadata associated with the tensor.
+        
+        Returns:
+        	torch.Tensor: The tensor with permuted dimensions.
+        """
         return tensor.permute(tuple(self.dims))
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -1213,11 +1687,27 @@ class Permute(TransformInverse):
 
 class Flip(TransformInverse):
     def __init__(self, dims: str = "1|0|2", inverse: bool = True) -> None:
+        """
+        Initialize a spatial-axis flip transform.
+        
+        Parameters:
+        	dims (str): Pipe-separated spatial axis indices to flip, such as ``"1|0|2"``.
+        	inverse (bool): Whether inverse transformation support is enabled.
+        """
         super().__init__(inverse)
 
         self.dims = [int(d) + 1 for d in str(dims).split("|")]
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """
+        Declare that the transform performs an orientation-only spatial mapping.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached transform metadata.
+        
+        Returns:
+        	PatchLocality: An orientation locality contract.
+        """
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def stream_region_source(
@@ -1228,6 +1718,17 @@ class Flip(TransformInverse):
     ) -> list[slice]:
         # A flipped spatial axis reads the mirror region ``[n - stop, n - start)``; applying the flip
         # to that sub-region reproduces the target patch. Non-flipped axes read the identity region.
+        """
+        Map a target patch to the source region required by the configured spatial flips.
+        
+        Parameters:
+        	target_slices (tuple[slice, ...]): Spatial slices defining the target patch.
+        	source_spatial_shape (list[int]): Spatial dimensions of the unflipped source tensor.
+        	cache_attribute (Attribute): Transform metadata.
+        
+        Returns:
+        	list[slice]: Source spatial slices corresponding to the target patch.
+        """
         source_slices: list[slice] = []
         for k, sl in enumerate(target_slices):
             n = source_spatial_shape[k]
@@ -1238,6 +1739,16 @@ class Flip(TransformInverse):
         return source_slices
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """Flip the tensor along the configured spatial dimensions.
+        
+        Parameters:
+        	name (str): Dataset item name.
+        	tensor (torch.Tensor): Tensor to flip.
+        	cache_attribute (Attribute): Cached transform metadata.
+        
+        Returns:
+        	torch.Tensor: Tensor flipped along the configured dimensions.
+        """
         return tensor.flip(tuple(self.dims))
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -1258,6 +1769,12 @@ class Canonical(TransformInverse):
     _AXIS_ALIGNED_ATOL = 1e-9
 
     def __init__(self, inverse: bool = True) -> None:
+        """
+        Initialize the canonical reorientation transform.
+        
+        Parameters:
+            inverse (bool): Whether to apply the inverse operation.
+        """
         super().__init__(inverse)
         self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
 
@@ -1273,14 +1790,15 @@ class Canonical(TransformInverse):
 
     @classmethod
     def _index_remap(cls, reorientation: torch.Tensor) -> list[tuple[int, bool]] | None:
-        """Per output SPATIAL axis, the source axis it reads and whether it reads it mirrored.
-
-        ``reorientation`` maps an output coordinate onto the input it comes from, so it is an exact
-        remap exactly when it is a signed permutation: output physical axis ``c`` then reads input
-        physical axis ``r``, backwards where the sign is negative. Anything else mixes axes. Axes are
-        returned in array order, where physical axis k is array axis ``n - 1 - k``. The test (every
-        column of L1 norm 1 with peak 1) admits exactly the signed permutations: unit column sums
-        alone would also pass an axis-averaging matrix.
+        """
+        Determine the source axis and orientation for an axis-aligned reorientation.
+        
+        Parameters:
+        	reorientation (torch.Tensor): Coordinate mapping from output axes to input axes.
+        
+        Returns:
+        	list[tuple[int, bool]] | None: A mapping in array-axis order, where each tuple contains
+        	the source axis index and whether it is reversed; `None` if the mapping mixes axes.
         """
         n = reorientation.shape[0]
         unit = torch.ones(n, dtype=reorientation.dtype)
@@ -1296,11 +1814,16 @@ class Canonical(TransformInverse):
         return remap
 
     def _orthogonal_remap(self, cache_attribute: Attribute) -> list[tuple[int, bool]] | None:
-        """The exact index remap this case's reorientation is, or ``None`` where it is not one.
-
-        Total: a case whose header carries no usable direction cosines has no remap to make, and an
-        oblique one has none to make either -- both answer ``None`` rather than raise, and the resample
-        is what answers for them.
+        """
+        Determine whether the cached direction represents an exact axis permutation and reflection.
+        
+        Parameters:
+            cache_attribute (Attribute): Cached image metadata containing the direction cosines.
+        
+        Returns:
+            list[tuple[int, bool]] | None: Axis remapping entries as source-axis and reflection pairs, or
+            `None` when direction metadata is unavailable, has an invalid size, or represents an oblique
+            orientation.
         """
         if "Direction" not in cache_attribute or cache_attribute.get_np_array("Direction").size != 9:
             return None
@@ -1308,11 +1831,15 @@ class Canonical(TransformInverse):
 
     @staticmethod
     def _carried(per_physical_axis: torch.Tensor, remap: list[tuple[int, bool]] | None) -> torch.Tensor:
-        """Carry a per-physical-axis quantity along a remap: output axis c takes the axis it reads.
-
-        A spacing and a half-extent travel with the axis they belong to -- what a reorientation
-        preserves is the volume's physical extent, not which axis carries it. An oblique direction is
-        resampled onto the input's own grid, so without a remap nothing moves.
+        """
+        Reorders a per-physical-axis quantity according to an array-axis remapping.
+        
+        Parameters:
+            per_physical_axis (torch.Tensor): Values ordered by physical axis.
+            remap (list[tuple[int, bool]] | None): Array-axis mapping to source axes, or None when no remapping applies.
+        
+        Returns:
+            torch.Tensor: The quantity reordered for the remapped axes.
         """
         if remap is None:
             return per_physical_axis
@@ -1329,6 +1856,16 @@ class Canonical(TransformInverse):
 
     @staticmethod
     def _affine_matrix(matrix: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
+        """
+        Construct a homogeneous affine transformation matrix.
+        
+        Parameters:
+        	matrix (torch.Tensor): The linear transformation matrix.
+        	translation (torch.Tensor): The translation vector.
+        
+        Returns:
+        	torch.Tensor: A four-by-four affine matrix containing the linear transformation and translation.
+        """
         return torch.cat(
             (
                 torch.cat((matrix, translation.unsqueeze(0).T), dim=1),
@@ -1339,6 +1876,16 @@ class Canonical(TransformInverse):
 
     @staticmethod
     def _resample_affine(data: torch.Tensor, matrix: torch.Tensor):
+        """
+        Resamples tensor data using an affine transformation matrix.
+        
+        Parameters:
+            data (torch.Tensor): Tensor to resample.
+            matrix (torch.Tensor): Homogeneous affine transformation matrix.
+        
+        Returns:
+            torch.Tensor: Affinely resampled tensor with the same dtype as `data`.
+        """
         if data.dtype == torch.uint8:
             mode = "nearest"
         else:
@@ -1370,6 +1917,16 @@ class Canonical(TransformInverse):
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         # ``shape`` is the channel-stripped SPATIAL shape, and the patch grid is folded from what this
         # returns: a remap that transposes extents moves the grid onto the reoriented volume.
+        """
+        Determine the spatial shape after canonical reorientation.
+        
+        Parameters:
+            shape (list[int]): Channel-stripped spatial dimensions.
+            cache_attribute (Attribute): Metadata used to determine the input orientation.
+        
+        Returns:
+            list[int]: The spatial dimensions reordered for an orthogonal reorientation, or the original shape when no such remap applies.
+        """
         remap = self._orthogonal_remap(cache_attribute)
         if remap is None:
             return shape
@@ -1379,6 +1936,15 @@ class Canonical(TransformInverse):
         # Only the case can say which reorientation this is, so only the header can answer. An orthogonal
         # one -- mirroring or permuting -- remaps indices, which is what ORIENTATION streams; an oblique
         # one is resampled from the whole volume.
+        """
+        Determine the patch-locality contract for the current reorientation.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached image geometry used to determine whether the reorientation is orthogonal.
+        
+        Returns:
+        	PatchLocality: An orientation contract for axis permutations or flips, otherwise a whole-volume contract.
+        """
         if self._orthogonal_remap(cache_attribute) is None:
             return PatchLocality(LocalityKind.WHOLE_VOLUME)
         return PatchLocality(LocalityKind.ORIENTATION)
@@ -1393,6 +1959,20 @@ class Canonical(TransformInverse):
         # far end ``[n - stop, n - start)`` where the remap reads that axis backwards. Flipping the region
         # read reproduces the patch: a flip restricted to a contiguous region is that region reversed.
         # Both the slices and the remap are in array order, and the remap covers every axis exactly once.
+        """
+        Map target patch slices to the source regions required for an exact canonical reorientation.
+        
+        Parameters:
+            target_slices (tuple[slice, ...]): Spatial slices of the requested target patch.
+            source_spatial_shape (list[int]): Spatial dimensions of the source tensor.
+            cache_attribute (Attribute): Cached geometry metadata used to determine the axis remapping.
+        
+        Returns:
+            list[slice]: Source-axis slices corresponding to the target patch, including reversed slices for mirrored axes.
+        
+        Raises:
+            TransformError: If the direction cannot be represented as an exact orthogonal axis remapping.
+        """
         remap = self._orthogonal_remap(cache_attribute)
         if remap is None:
             raise TransformError(
@@ -1408,6 +1988,13 @@ class Canonical(TransformInverse):
         return source_slices
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        """
+        Update cached geometry metadata for a canonical reorientation using the full source volume shape.
+        
+        Parameters:
+        	cache_attribute (Attribute): Geometry metadata to update.
+        	source_spatial_shape (list[int]): Full source volume spatial dimensions used to preserve the volume center.
+        """
         initial_matrix = cache_attribute.get_tensor("Direction").reshape(3, 3).to(torch.double)
         initial_origin = cache_attribute.get_tensor("Origin")
         spacing = cache_attribute.get_tensor("Spacing").to(torch.double)
@@ -1423,10 +2010,15 @@ class Canonical(TransformInverse):
         cache_attribute["Origin"] = center - self.canonical_direction @ Canonical._carried(half_extent, remap)
 
     def _reorient(self, tensor: torch.Tensor, reorientation: torch.Tensor) -> torch.Tensor:
-        """Apply a reorientation: an exact index remap where it is one, a resample where it is not.
-
-        An orthogonal reorientation is a bijection on the voxels, so it must reproduce the input's
-        multiset bit for bit -- which only a permute and a flip do.
+        """
+        Reorients a tensor using exact axis remapping when possible and affine resampling otherwise.
+        
+        Parameters:
+            tensor (torch.Tensor): Channel-first tensor to reorient.
+            reorientation (torch.Tensor): Spatial reorientation matrix.
+        
+        Returns:
+            torch.Tensor: The reoriented tensor.
         """
         remap = Canonical._index_remap(reorientation)
         if remap is None:
@@ -1441,12 +2033,32 @@ class Canonical(TransformInverse):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Read the source geometry before recording the canonical one over it: the attribute stacks.
+        """
+        Reorients a tensor to the canonical coordinate system and records the geometry needed for inverse transformation.
+        
+        Parameters:
+        	name (str): Dataset item name.
+        	tensor (torch.Tensor): Tensor to reorient.
+        	cache_attribute (Attribute): Geometry metadata updated with the canonical orientation.
+        
+        Returns:
+        	torch.Tensor: The reoriented tensor.
+        """
         reorientation = self._reorientation(cache_attribute)
         self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]))
         return self._reorient(tensor, reorientation)
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Popping restores the source geometry, which is what the inverse remap is then read from.
+        """
+        Restore the tensor's original orientation and geometry.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached source geometry used to determine the inverse reorientation.
+        
+        Returns:
+        	torch.Tensor: The tensor reoriented to its original coordinate system.
+        """
         cache_attribute.pop("Direction")
         cache_attribute.pop("Spacing")
         cache_attribute.pop("Origin")
@@ -1461,6 +2073,11 @@ class HistogramMatching(Transform):
     """
 
     def __init__(self, reference_group: str) -> None:
+        """Initialize histogram matching with the dataset group containing reference images.
+        
+        Parameters:
+            reference_group (str): Dataset group used to locate reference images.
+        """
         super().__init__()
         self.reference_group = reference_group
 
@@ -1487,9 +2104,28 @@ class SelectLabel(Transform):
         self.labels = [label[1:-1].split(",") for label in labels]
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """Describe how the transform maps output patches to input regions.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached metadata used to determine the locality contract.
+        
+        Returns:
+        	PatchLocality: A pointwise locality contract.
+        """
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Remap configured label identifiers to their corresponding output values.
+        
+        Parameters:
+            name (str): Dataset item name.
+            tensor (torch.Tensor): Tensor containing scalar label identifiers.
+            cache_attribute (Attribute): Transformation metadata cache.
+        
+        Returns:
+            torch.Tensor: Tensor containing the remapped labels, with unmatched positions set to zero.
+        """
         data = torch.zeros_like(tensor)
         for old_label, new_label in self.labels:
             data[tensor == int(old_label)] = int(new_label)
@@ -1503,9 +2139,23 @@ class OneHot(TransformInverse):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Expands each voxel's scalar label into a one-hot channel vector (spatially pointwise).
+        """Declares that the transform operates independently at each spatial position.
+        
+        Returns:
+            PatchLocality: A pointwise locality contract.
+        """
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Convert scalar class labels into a one-hot encoded tensor.
+        
+        Parameters:
+        	tensor (torch.Tensor): Tensor containing integer class labels.
+        
+        Returns:
+        	torch.Tensor: One-hot encoded labels with the class dimension first.
+        """
         result = (
             F.one_hot(tensor.type(torch.int64), num_classes=self.num_classes)
             .permute(0, len(tensor.shape), *[i + 1 for i in range(len(tensor.shape) - 1)])
@@ -1618,6 +2268,14 @@ class KonfAIInference(Transform):
 
 class InferenceStack(Transform):
     def __init__(self, dataset: str, name: str, mode: str = "mean"):
+        """
+        Initialize an inference ensemble stack writer and reducer.
+        
+        Parameters:
+        	dataset (str): Optional dataset path specification for storing the ensemble stack.
+        	name (str): Name used when writing the ensemble stack.
+        	mode (str): Reduction mode: ``"mean"``, ``"median"``, or ``"Seg"``.
+        """
         super().__init__()
         self.dataset = None
         if dataset:
@@ -1631,6 +2289,17 @@ class InferenceStack(Transform):
     # is an ensemble/finalize transform, never in a streaming input chain, so this costs no streaming.
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Reduce an inference ensemble and optionally persist its member predictions.
+        
+        Parameters:
+        	name (str): Identifier used when writing the ensemble stack.
+        	tensors (torch.Tensor): Ensemble predictions with members along the first dimension.
+        	cache_attribute (Attribute): Metadata associated with the predictions.
+        
+        Returns:
+        	torch.Tensor: The single prediction tensor, or the ensemble median or mean cast to the input dtype.
+        """
         if tensors.shape[0] == 1:
             return tensors.squeeze(0)
         if self.mode == "Seg":
@@ -1679,11 +2348,18 @@ class Variance(Transform):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Variance across the leading member axis at each voxel -- no spatial neighbour.
+        """Declare that variance is computed independently at each spatial position."""
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Keep the leading member axis in BOTH branches: the N>1 var(0) drops it and re-adds it via
         # unsqueeze(0), so the single-member zeros must unsqueeze too or the output rank is off by one.
+        """
+        Compute voxel-wise variance across ensemble members.
+        
+        Returns:
+        	torch.Tensor: Variance values with a leading singleton member axis.
+        """
         return (
             tensors.float().var(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0]).unsqueeze(0)
         )
@@ -1702,6 +2378,16 @@ class SegmentationDisagreement(Transform):
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # tensors shape: [N, ...] with N segmentations and integer labels per voxel
+        """Calculate per-voxel disagreement among multiple segmentation label maps.
+        
+        Parameters:
+        	name (str): Sample or volume identifier.
+        	tensors (torch.Tensor): Segmentation maps with ensemble members along the first axis.
+        	cache_attribute (Attribute): Transform metadata.
+        
+        Returns:
+        	torch.Tensor: Disagreement values in the range from 0 to 1 with a leading singleton axis.
+        """
         if tensors.shape[0] <= 1:
             return torch.zeros_like(tensors[0], dtype=torch.float32).unsqueeze(0)
 
@@ -1732,13 +2418,36 @@ class SegmentationDisagreement(Transform):
 
 class Percentage(Transform):
     def __init__(self, baseline: float) -> None:
+        """Initialize the percentage transform with a baseline value.
+        
+        Parameters:
+        	baseline (float): Value used as the reference for percentage calculations.
+        """
         super().__init__()
         self.baseline = baseline
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """Describe how the transform maps output patches to input regions.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached metadata used to determine the locality contract.
+        
+        Returns:
+        	PatchLocality: A pointwise locality contract.
+        """
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """Calculate tensor values as percentages of a baseline.
+        
+        Parameters:
+        	name (str): The associated data item name.
+        	tensors (torch.Tensor): Values to convert to percentages.
+        	cache_attribute (Attribute): Transform metadata.
+        
+        Returns:
+        	torch.Tensor: Values divided by the baseline and multiplied by 100.
+        """
         return tensors / self.baseline * 100.0
 
 
@@ -1748,9 +2457,24 @@ class StandardDeviation(Transform):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Standard deviation across the leading member axis at each voxel -- no spatial neighbour.
+        """
+        Declare voxel-wise locality for standard deviation computation.
+        
+        Returns:
+            PatchLocality: A pointwise locality contract.
+        """
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Compute the standard deviation across ensemble members at each voxel.
+        
+        Parameters:
+            tensors (torch.Tensor): Ensemble predictions with members along the first dimension.
+        
+        Returns:
+            torch.Tensor: Per-voxel standard deviations with a leading singleton dimension, or zeros when only one member is present.
+        """
         return (
             tensors.float().std(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0]).unsqueeze(0)
         )
@@ -1784,6 +2508,15 @@ class Crop(TransformInverse):
         # Total: the box is a fact ``transform_shape`` puts on the case before the dispatcher reads any
         # declaration, but a group carries only what its writer stored, and without it there is no
         # translation to make -- only the read that would find one.
+        """
+        Describe the source-region requirements for cropping based on cached crop geometry.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached transform metadata used to determine whether crop geometry is available.
+        
+        Returns:
+        	PatchLocality: Whole-volume locality when crop geometry is unavailable; crop locality when cached geometry is present.
+        """
         if "box" not in cache_attribute:
             return PatchLocality(LocalityKind.WHOLE_VOLUME)
         return PatchLocality(LocalityKind.CROP)
@@ -1796,6 +2529,17 @@ class Crop(TransformInverse):
     ) -> list[slice]:
         # Output index o holds source index o + start, so the region behind a target patch is that
         # patch's own slices stepped forward by the box's near margin.
+        """
+        Map a cropped target region to the corresponding source region.
+        
+        Parameters:
+        	target_slices (tuple[slice, ...]): Slices defining the target region.
+        	source_spatial_shape (list[int]): Spatial dimensions of the source volume.
+        	cache_attribute (Attribute): Cached crop metadata containing the crop margins.
+        
+        Returns:
+        	list[slice]: Source slices corresponding to the target region.
+        """
         box = Crop._parse_box(cache_attribute["box"])
         return [
             slice(target.start + int(start), target.stop + int(start))
@@ -1803,6 +2547,13 @@ class Crop(TransformInverse):
         ]
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        """
+        Updates cached origin metadata to reflect the near-corner offset of a streamed crop.
+        
+        Parameters:
+        	cache_attribute (Attribute): Cached geometry and crop metadata.
+        	source_spatial_shape (list[int]): Original spatial dimensions; unused.
+        """
         if "box" not in cache_attribute:
             return
         if not {"Origin", "Spacing", "Direction"} <= set(cache_attribute.keys()):
@@ -1826,6 +2577,18 @@ class Crop(TransformInverse):
         # ``shape`` is already the channel-stripped spatial shape (patching strips [C, *spatial]
         # before calling transform_shape), so the crop box — one row per spatial axis — aligns with
         # ``shape`` directly, exactly like ``__call__`` aligns it with ``tensor.shape[1:]``.
+        """
+        Determine the spatial shape after cropping to the detected foreground region.
+        
+        Parameters:
+            group_src (str): Dataset group containing the source volume.
+            name (str): Name of the source volume.
+            shape (list[int]): Channel-stripped spatial dimensions.
+            cache_attribute (Attribute): Metadata used to reuse or store the crop box.
+        
+        Returns:
+            list[int]: Spatial dimensions after applying the crop box, or the input shape when source data is unavailable.
+        """
         if "box" in cache_attribute:
             box = self._parse_box(cache_attribute["box"])
             return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
@@ -1850,6 +2613,17 @@ class Crop(TransformInverse):
         return flat.reshape(-1, 2)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Crop the tensor according to the cached bounding box and update its spatial metadata.
+        
+        Parameters:
+            name (str): Dataset item name.
+            tensor (torch.Tensor): Tensor to crop.
+            cache_attribute (Attribute): Cached transform and spatial metadata.
+        
+        Returns:
+            torch.Tensor: Cropped tensor, or the original tensor when no bounding box is cached.
+        """
         if "box" not in cache_attribute:
             return tensor
         box = self._parse_box(cache_attribute["box"])

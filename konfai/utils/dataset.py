@@ -122,6 +122,15 @@ class Attribute(dict[str, Any]):
         return any(k.startswith(key) for k in super().keys())
 
     def is_info(self, key: str, value: str) -> bool:
+        """Check whether a metadata key has the specified value.
+        
+        Parameters:
+        	key (str): Metadata key to check.
+        	value (str): Expected metadata value.
+        
+        Returns:
+        	bool: `true` if the key exists and matches the value, `false` otherwise.
+        """
         return key in self and self[key] == value
 
 
@@ -133,7 +142,18 @@ def _update_running_statistics(
     state: dict[str, float] | None,
     array: np.ndarray,
 ) -> dict[str, float]:
-    """Update running min/max/mean/std statistics from a NumPy chunk."""
+    """
+    Update cumulative statistics with values from a NumPy array chunk.
+    
+    Parameters:
+        state (dict[str, float] | None): Existing accumulator state, or None to
+            initialize a new state.
+        array (np.ndarray): Values to incorporate into the accumulator.
+    
+    Returns:
+        dict[str, float]: Updated accumulator containing count, mean, sum of
+            squared deviations (`m2`), minimum, and maximum values.
+    """
     values = np.asarray(array, dtype=np.float64).reshape(-1)
     if values.size == 0:
         return state or {"count": 0.0, "mean": 0.0, "m2": 0.0, "min": np.inf, "max": -np.inf}
@@ -157,7 +177,17 @@ def _update_running_statistics(
 
 
 def _finalize_running_statistics(state: dict[str, float] | None) -> dict[str, float]:
-    """Convert a running-statistics state into the public stats dictionary."""
+    """
+    Finalize accumulated running statistics and return summary values.
+    
+    Parameters:
+        state (dict[str, float] | None): Accumulated count, extrema, mean, and
+            variance state, or None when no values were processed.
+    
+    Returns:
+        dict[str, float]: Dictionary containing ``min``, ``max``, ``mean``, and
+            sample ``std`` values. Returns zeros when the state is empty or None.
+    """
     if state is None or state["count"] == 0:
         return {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0}
     variance = state["m2"] / (state["count"] - 1) if state["count"] > 1 else 0.0
@@ -175,10 +205,11 @@ _unstreamed_formats_warned: set[str] = set()
 
 
 def _warn_unstreamed_region_read(path: str) -> None:
-    """Warn that `path`'s format decodes the whole volume for every patch region read from it.
-
-    `warnings.warn` dedups per call site, which here is one line in a loop over every patch of every
-    case: the seen-set is what makes this once per format rather than thousands of times.
+    """
+    Warn that the file format decodes the entire volume for each requested patch region.
+    
+    Parameters:
+        path (str): Path whose file format cannot provide streamed region reads.
     """
     suffix = Path(path).suffix
     if suffix in _unstreamed_formats_warned:
@@ -410,6 +441,20 @@ class Dataset:
             name: str,
             channels: list[int] | None = None,
         ) -> dict[str, float]:
+            """
+            Compute summary statistics for an HDF5 dataset, optionally restricted to selected channels.
+            
+            Parameters:
+            	groups (str): HDF5 group path containing the dataset.
+            	name (str): Dataset name.
+            	channels (list[int] | None): Channel indices to include, or `None` to include all channels.
+            
+            Returns:
+            	dict[str, float]: A mapping containing the minimum, maximum, mean, and standard deviation.
+            
+            Raises:
+            	NameError: If the dataset cannot be found.
+            """
             dataset = self._get_dataset(groups, name)
             if dataset is None:
                 raise NameError(f"Dataset '{groups}/{name}' not found in '{self.filename}'.")
@@ -563,6 +608,14 @@ class Dataset:
 
         @staticmethod
         def _supports_direct_slice(slices: tuple[slice, ...]) -> bool:
+            """Determine whether all slices represent contiguous forward access.
+            
+            Parameters:
+            	slices (tuple[slice, ...]): The slices to evaluate.
+            
+            Returns:
+            	bool: `True` if every slice has no step or a step of 1, `False` otherwise.
+            """
             return all(item.step in (None, 1) for item in slices)
 
         @staticmethod
@@ -589,6 +642,14 @@ class Dataset:
             return False
 
         def _resolve_data_path(self, name: str) -> str | None:
+            """Resolve the filesystem path for a dataset entry, preferring supported sidecar and declared-format files.
+            
+            Parameters:
+                name (str): Dataset entry name relative to the backend base path.
+            
+            Returns:
+                str | None: The matching file path, or `None` when no file exists.
+            """
             base = f"{self.filename}{name}"
             for suffix in (".itk.txt", ".fcsv", ".xml", ".vtk", ".npy"):
                 candidate = f"{base}{suffix}"
@@ -610,6 +671,17 @@ class Dataset:
             return matches[0] if matches else None
 
         def _file_to_image_slice(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+            """
+            Read an image region and return its channel-first data with adjusted spatial metadata.
+            
+            Parameters:
+            	name (str): Name of the image entry.
+            	path (str): Path to the image file.
+            	slices (tuple[slice, ...]): Channel and spatial region slices to read.
+            
+            Returns:
+            	tuple[np.ndarray, Attribute]: The selected image data and metadata for the extracted region.
+            """
             reader = sitk.ImageFileReader()
             reader.SetFileName(path)
             reader.ReadImageInformation()
@@ -640,6 +712,17 @@ class Dataset:
             return data[normalized[:1] + tuple(slice(None) for _ in normalized[1:])], attributes
 
         def _file_to_image_statistics(self, name: str, path: str, channels: list[int] | None) -> dict[str, float]:
+            """
+            Compute image intensity statistics using slab-based reads.
+            
+            Parameters:
+            	name (str): Dataset entry name.
+            	path (str): Image file path.
+            	channels (list[int] | None): Channel indices to include, or `None` to include all channels.
+            
+            Returns:
+            	dict[str, float]: Minimum, maximum, mean, and standard deviation of the selected image data.
+            """
             reader = sitk.ImageFileReader()
             reader.SetFileName(path)
             reader.ReadImageInformation()
@@ -660,6 +743,16 @@ class Dataset:
             return _finalize_running_statistics(state)
 
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
+            """
+            Read a dataset entry and its associated metadata from the supported file formats.
+            
+            Parameters:
+            	group (str): Dataset group containing the entry.
+            	name (str): Entry name to read.
+            
+            Returns:
+            	tuple[np.ndarray, Attribute]: The entry data and associated metadata.
+            """
             attributes = Attribute()
             if os.path.exists(f"{self.filename}{name}.itk.txt"):
                 data = sitk.ReadTransform(f"{self.filename}{name}.itk.txt")
@@ -759,6 +852,20 @@ class Dataset:
             name: str,
             channels: list[int] | None = None,
         ) -> dict[str, float]:
+            """
+            Compute summary statistics for a dataset entry, optionally restricted to selected channels.
+            
+            Parameters:
+            	group (str): Dataset group containing the entry.
+            	name (str): Name of the entry whose statistics are computed.
+            	channels (list[int] | None): Channel indices to include, or `None` to include all channels.
+            
+            Returns:
+            	dict[str, float]: Statistics containing the minimum, maximum, mean, and standard deviation.
+            
+            Raises:
+            	NameError: If the specified entry cannot be found.
+            """
             path = self._resolve_data_path(name)
             if path is None:
                 raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")

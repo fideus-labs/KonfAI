@@ -251,6 +251,14 @@ def test_rotate_preserves_label_ids_with_nearest() -> None:
 def _rotate_volume(spatial: tuple[int, ...]) -> torch.Tensor:
     # Distinct values everywhere: a repeated one could survive a wrong remap by coincidence, and the
     # multiset check below is only as strict as the volume is varied.
+    """Create a single-channel volume with deterministic, distinct random values.
+    
+    Parameters:
+    	spatial (tuple[int, ...]): Spatial dimensions of the volume.
+    
+    Returns:
+    	torch.Tensor: A float32 tensor with shape `(1, *spatial)`.
+    """
     return torch.from_numpy((np.random.default_rng(0).standard_normal(spatial) * 500.0).astype(np.float32))[None]
 
 
@@ -260,6 +268,12 @@ def test_rotate_quarter_is_an_exact_bijection_on_a_cubic_grid(seed: int) -> None
     # moves voxels: the sorted multiset of values must come back bit for bit. This is what
     # LocalityKind.preserves_statistics lets a later stage trust, and it is strictly stronger than
     # comparing statistics -- a sampled turn can leave one looking right while moving the values under it.
+    """
+    Verify that a quarter-turn rotation preserves voxel values and matches the sampled transform on a cubic volume.
+    
+    Parameters:
+    	seed (int): Random seed used to generate the test volume.
+    """
     torch.manual_seed(seed)
     volume = _rotate_volume((12, 12, 12))
     rotate = Rotate(is_quarter=True)

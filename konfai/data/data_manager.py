@@ -74,17 +74,29 @@ _MEMORY_UNIT_BYTES: dict[str, int] = {
 
 
 def _format_gib(num_bytes: float) -> str:
+    """Format a byte count as a string in GiB with two decimal places.
+    
+    Parameters:
+    	num_bytes (float): Number of bytes to format.
+    
+    Returns:
+    	str: The formatted GiB value.
+    """
     return f"{num_bytes / 2**30:.2f} GiB"
 
 
 def _parse_memory_budget_bytes(value: str | float) -> int:
-    """Parse an explicit memory budget to bytes: a bare number is GiB, a string carries its own unit.
-
-    KonfAI reports RAM in GiB throughout, so an unadorned ``24`` reads as ``24 GiB`` -- whether it
-    arrives as a number or, through the YAML binding, as the string ``"24"``. A string may name its
-    unit -- decimal ``GB``/``MB`` (10^n) or binary ``GiB``/``MiB`` (2^n), case-insensitive, optional
-    space (``"24GB"``, ``"32 GiB"``, ``"512mb"``); ``"b"`` means bytes. ``"auto"`` is resolved by the
-    caller, not here.
+    """
+    Parse a memory budget into bytes.
+    
+    Bare numeric values are interpreted as gibibytes. String values may include a case-insensitive
+    decimal or binary memory unit, while a bare numeric string is also interpreted as gibibytes.
+    
+    Parameters:
+        value (str | float): Memory budget as gibibytes or a unit-qualified size string.
+    
+    Returns:
+        int: Memory budget in bytes.
     """
     if not isinstance(value, str):
         if float(value) <= 0:
@@ -118,12 +130,16 @@ def _cache_worker_count(cpu_count: int, device_count: int) -> int:
 
 
 def _check_patch_transform_locality(transform: Transform, group_src: str, group_dest: str) -> None:
-    """Reject a transform whose per-patch result cannot equal its case-level result.
-
-    Only POINTWISE and GLOBAL_STAT are correct on one patch (per-patch GLOBAL_STAT means: derive the
-    statistic from this patch; use ``lazy=True`` case-level to feed it the volume's). The messages in
-    ``reasons`` below say why each other kind is rejected. Probed with an empty ``Attribute`` (config
-    time has no case), so an image-decided kind answers WHOLE_VOLUME -- the right answer here.
+    """
+    Validate that a patch transform can be applied independently to each patch.
+    
+    Parameters:
+    	transform (Transform): Transform to validate.
+    	group_src (str): Source group name used in the configuration path.
+    	group_dest (str): Destination group name used in the configuration path.
+    
+    Raises:
+    	ConfigError: If the transform requires information beyond an individual patch.
     """
     kind = transform.patch_locality(Attribute()).kind
     if kind in (LocalityKind.POINTWISE, LocalityKind.GLOBAL_STAT):
@@ -158,20 +174,16 @@ def _check_patch_transform_locality(transform: Transform, group_src: str, group_
 
 
 def _check_patch_transform_shape(transform: Transform, group_src: str, group_dest: str) -> None:
-    """Reject a patch_transform that resizes the patch it is handed.
-
-    The patch grid is folded from the CASE-level ``transforms`` only (``DatasetManager``), so a
-    patch_transform that changes the spatial shape hands back a patch the batch cannot collate and the
-    ``Accumulator`` cannot write onto the grid. ``_check_patch_transform_locality`` above takes the
-    transform at its word; this is the structural check, and it is asked of ``transform_shape`` -- the
-    contract every transform already owes the patch planner -- with distinct extents, so a swap or a
-    resize of any single axis shows up. Only the SPATIAL shape is at stake: patching hands
-    ``transform_shape`` the channel-stripped shape, so a transform that changes only the channel count
-    (``OneHot``) is not caught here, and must not be -- the grid it feeds is spatial.
-
-    Runs after the locality check, which is what makes the bare probe attribute safe: by here the
-    transform is POINTWISE or GLOBAL_STAT, and the kinds whose ``transform_shape`` needs real geometry
-    (``Resample`` reads ``Spacing``) have already been rejected.
+    """
+    Validate that a patch transform preserves the spatial shape of its input.
+    
+    Parameters:
+        transform (Transform): Patch transform to validate.
+        group_src (str): Source group name.
+        group_dest (str): Destination group name.
+    
+    Raises:
+        ConfigError: If the transform changes the spatial shape of a patch.
     """
     spatial_shape = [7, 11, 13]
     shape = list(transform.transform_shape(group_src, "", list(spatial_shape), Attribute()))
@@ -190,24 +202,14 @@ def _check_patch_transform_shape(transform: Transform, group_src: str, group_des
 def _check_patch_transform_invertible(
     transform: Transform, case_transforms: list[Transform], group_src: str, group_dest: str
 ) -> None:
-    """Reject a per-patch global statistic at prediction, whose inverse cannot be reconstructed.
-
-    A ``GLOBAL_STAT`` transform is allowed in ``patch_transforms`` (see
-    ``_check_patch_transform_locality``): run per patch it standardizes each patch by that patch's OWN
-    statistic, which is what asking for it per-patch means -- correct, and the deliberate training use.
-    But the per-patch statistic lives in the per-patch attribute scope and never reaches the case
-    attribute, so at prediction the finalize inverse -- which seeds every patch from the CASE attribute
-    and pops the statistic -- has nothing to pop. Nor could it: the reassembled volume was normalised
-    patch by patch with different coefficients, so a single case-level inverse cannot un-apply it. Refuse
-    here, at config time, rather than fail deep in the inverse with a bare ``NameError``.
-
-    A case-level ``transforms`` entry that derives the SAME statistic rescues it: run once on the whole
-    volume it caches that statistic on the case attribute (``Standardize(lazy=True)`` caches Mean/Std and
-    applies nothing), which the per-patch inverse then inherits and pops. So the patch transform is only
-    un-invertible when nothing case-level captures its statistic.
-
-    Training-only use stays valid: the check is gated on the prediction state, where the inverse actually
-    runs (``RESUME``/``TRAIN`` never invert patch_transforms, and evaluation drops them entirely).
+    """
+    Validate that an invertible patch-level global statistic can be reconstructed during prediction.
+    
+    Parameters:
+        transform (Transform): Patch-level transform to validate.
+        case_transforms (list[Transform]): Case-level transforms that may capture the required statistic.
+        group_src (str): Source group name used in configuration error messages.
+        group_dest (str): Destination group name used in configuration error messages.
     """
     if konfai_state() != str(State.PREDICTION):
         return
@@ -253,6 +255,13 @@ class GroupTransform:
         self.is_input = is_input
 
     def prepare(self, group_src: str, group_dest: str) -> None:
+        """
+        Prepare the case-level and patch-level transforms for a dataset group.
+        
+        Parameters:
+        	group_src (str): Source group name.
+        	group_dest (str): Destination group name.
+        """
         self.transforms = []
         self.patch_transforms = []
         if self._transforms is not None:
@@ -275,6 +284,11 @@ class GroupTransform:
                 self.patch_transforms.append(transform)
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
+        """Assigns the available datasets to all case-level and patch-level transforms.
+        
+        Parameters:
+        	datasets (list[Dataset]): Datasets to provide to the transforms.
+        """
         for transform in self.transforms:
             transform.set_datasets(datasets)
         for transform in self.patch_transforms:
@@ -323,6 +337,11 @@ class GroupMetric(dict[str, GroupTransformMetric]):
         self,
         groups_dest: dict[str, GroupTransformMetric] = {"default|group_dest": GroupTransformMetric()},
     ):
+        """Initialize a metric transform group configuration.
+        
+        Parameters:
+            groups_dest (dict[str, GroupTransformMetric]): Mapping of destination group names to metric transform pipelines.
+        """
         super().__init__(groups_dest)
 
 
@@ -350,6 +369,15 @@ class WindowedCaseSampler(Sampler[int]):
         batch_size: int,
         num_workers: int,
     ) -> None:
+        """Initialize a sampler that organizes dataset entries by case for locality-aware ordering.
+        
+        Parameters:
+        	mapping (list[tuple[int, int, int]]): Dataset entries represented as case, augmentation, and patch indices.
+        	shuffle (bool): Whether to randomize the sampling order.
+        	window (int | None): Maximum number of cases grouped into a sampling window.
+        	batch_size (int): Number of samples per batch.
+        	num_workers (int): Number of data-loading workers.
+        """
         self.mapping = mapping
         self.shuffle = shuffle
         self.batch_size = max(1, batch_size)
@@ -363,14 +391,31 @@ class WindowedCaseSampler(Sampler[int]):
         self.window = window if window is not None and 0 < window < n_cases and self.num_workers <= n_cases else None
 
     def _partitions(self) -> list[list[int]]:
+        """Partition case indices across workers using round-robin assignment.
+        
+        Returns:
+        	list[list[int]]: Case indices grouped by worker.
+        """
         cases = list(self.case_entries)
         return [cases[worker :: self.num_workers] for worker in range(self.num_workers)]
 
     def _windowed_order(self) -> list[int]:
+        """
+        Build a shuffled, windowed sample order interleaved across worker streams.
+        
+        Returns:
+        	list[int]: Sample indices ordered by shuffled case windows and truncated to the mapping length.
+        """
         generator = torch.Generator().manual_seed(int(torch.randint(0, 2**31 - 1, (1,)).item()))
         window = cast(int, self.window)
 
         def shuffled(items: list[int]) -> list[int]:
+            """
+            Return the items in a randomly shuffled order.
+            
+            Returns:
+            	list[int]: A shuffled copy of the input items.
+            """
             return [items[i] for i in torch.randperm(len(items), generator=generator).tolist()]
 
         streams: list[list[int]] = []
@@ -402,10 +447,20 @@ class WindowedCaseSampler(Sampler[int]):
         return order[: len(self.mapping)]
 
     def _batches_per_worker(self) -> int:
-        """Whole batches each worker is walked through to cover an epoch (the last one is cut back)."""
+        """
+        Determine the number of batches assigned to each worker for an epoch.
+        
+        Returns:
+            int: The ceiling of the mapping length divided by the total batch capacity across workers.
+        """
         return math.ceil(len(self.mapping) / (self.num_workers * self.batch_size))
 
     def __iter__(self) -> Iterator[int]:
+        """Iterate over dataset indices in sequential or shuffled order.
+        
+        Returns:
+        	Iterator[int]: Dataset indices, optionally shuffled within case windows.
+        """
         if not self.shuffle:
             return iter(range(len(self.mapping)))
         if self.window is None:
@@ -417,6 +472,7 @@ class WindowedCaseSampler(Sampler[int]):
         # what keeps the ranks in step: `Data._split` gives them equal-length shards, but not equal
         # cases, so any length read from the per-rank cases (their partitions, or even whether the
         # window engages at all) would differ and hang DDP's collectives.
+        """Return the number of samples in one epoch."""
         return len(self.mapping)
 
 
@@ -671,12 +727,28 @@ class Subset:
         shuffle: bool = True,
         shuffle_window: int | None = None,
     ) -> None:
+        """
+        Configure case selection and training-order shuffling behavior.
+        
+        Parameters:
+        	subset (str | list[int] | list[str] | None): Selector defining the cases to include.
+        	shuffle (bool): Whether selected cases should be shuffled.
+        	shuffle_window (int | None): Number of cases to keep together when shuffling; `None` disables windowed shuffling.
+        """
         self.subset = subset
         self.shuffle = shuffle
         self.shuffle_window = shuffle_window
 
     @staticmethod
     def _read_names_from_file(filename: str) -> list[str]:
+        """Read non-empty, whitespace-trimmed names from a file.
+        
+        Parameters:
+        	filename (str): Path to the file containing one name per line.
+        
+        Returns:
+        	list[str]: Names read from the file.
+        """
         with open(filename) as f:
             return [name.strip() for name in f if name.strip()]
 
@@ -727,6 +799,16 @@ class Subset:
         return sorted(index)
 
     def __call__(self, names: list[str], infos: dict[str, tuple[list[int], Attribute]]) -> set[str]:
+        """
+        Select case names according to the configured subset selectors.
+        
+        Parameters:
+        	names (list[str]): Case names available for selection.
+        	infos (dict[str, tuple[list[int], Attribute]]): Metadata associated with each case name.
+        
+        Returns:
+        	set[str]: The selected case names.
+        """
         names = sorted(names)
         size = len(names)
 
@@ -770,6 +852,14 @@ class TrainSubset(Subset):
         shuffle: bool = True,
         shuffle_window: int | None = None,
     ) -> None:
+        """
+        Configure training case selection and shuffle ordering.
+        
+        Parameters:
+        	subset (str | list[int] | list[str] | None): Case selection definition.
+        	shuffle (bool): Whether to shuffle selected cases.
+        	shuffle_window (int | None): Number of cases grouped in each shuffle window.
+        """
         super().__init__(subset, shuffle, shuffle_window)
 
 
@@ -837,6 +927,25 @@ class Data(ABC):
         persistent_workers: bool | None,
         memory_budget: str | float | None,
     ) -> None:
+        """
+        Initialize dataset preparation and data-loading configuration.
+        
+        Parameters:
+            dataset_filenames (list[str]): Dataset file specifications to load.
+            groups_src (Mapping[str, Group | GroupMetric]): Source-group transformation pipelines.
+            patch (DatasetPatch | None): Patch extraction configuration, or None to disable patching.
+            use_cache (bool): Whether to cache loaded dataset data when no memory budget overrides it.
+            subset (Subset): Case-selection and training-order configuration.
+            validation (float | str | list[int] | list[str] | None): Validation split or case selector.
+            validation_augmentations (bool): Whether to include augmentations in validation data.
+            inline_augmentations (bool): Whether augmentations are applied during data loading.
+            data_augmentations_list (dict[str, DataAugmentationsList]): Configured augmentation lists by group.
+            num_workers (int | None): Requested data-loader worker count.
+            pin_memory (bool): Whether data-loader batches use pinned memory.
+            prefetch_factor (int | None): Number of batches prefetched per worker.
+            persistent_workers (bool | None): Whether workers persist between data-loader iterations.
+            memory_budget (str | float | None): Per-rank cache memory budget, or "auto" to derive it from available memory.
+        """
         self.dataset_filenames = dataset_filenames
         self.subset = subset
         self.groups_src = groups_src
@@ -872,11 +981,11 @@ class Data(ABC):
         self._prepared_validation_names: list[str] = []
 
     def _configure_data_loading(self, use_cache: bool) -> None:
-        """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
-
-        Called once from ``__init__`` with the declared ``use_cache`` and, when a ``memory_budget``
-        overrides it, again from ``get_data`` with the derived value. Caching preloads every case up
-        front, so it defaults to zero DataLoader workers; the streaming/buffer path spins workers up.
+        """
+        Configure dataset iteration and DataLoader settings for the selected cache regime.
+        
+        Parameters:
+            use_cache (bool): Whether dataset items are cached in memory, affecting worker defaults.
         """
         self.use_cache = use_cache
         self.datasetIter = partial(
@@ -906,15 +1015,14 @@ class Data(ABC):
             )
 
     def _estimate_cached_bytes(self) -> int:
-        """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read).
-
-        Sums ``prod(shape) x 4`` over every case of every source group, once per COPY the cache holds:
-        a cached case is its base tensor PLUS one per augmentation draw, which validation only makes
-        when ``validation_augmentations``. See ``_CACHE_ELEMENT_BYTES``: this is an honest header-only
-        estimate that ignores size-changing transforms (an augmentation's ``Mask`` included). It also
-        counts the tensors themselves, not the allocator's arenas around them: those settle about a
-        third higher (measured), which is over the "auto" safety fraction, so a dataset landing within
-        a few percent of an "auto" budget can still be caching more than the budget names.
+        """
+        Estimate the memory required to cache the prepared training and validation datasets.
+        
+        The estimate uses each dataset manager's base shape and accounts for the configured
+        augmentation copies.
+        
+        Returns:
+            int: Estimated cached memory in bytes.
         """
         total = 0
         for prepared, copies in (
@@ -930,14 +1038,11 @@ class Data(ABC):
         return total
 
     def _resolve_cache_regime(self, world_size: int) -> None:
-        """Derive ``use_cache`` from ``memory_budget``, or leave the declared value untouched.
-
-        ``None`` keeps today's behaviour exactly. Otherwise the cache is chosen iff the per-rank
-        dataset (``dataset / world_size`` -- ``Data._split`` shards cases across ranks) fits the
-        per-rank budget: an explicit budget is taken as declared per rank; ``"auto"`` divides the
-        detected node memory (cgroup-capped) by the ranks sharing it, so its ``world_size`` cancels
-        and it reduces to "does the whole dataset fit the node". The decision is logged once here --
-        ``get_data`` runs on the launcher alone, before any worker is spawned.
+        """
+        Selects cache or streaming mode based on the configured memory budget.
+        
+        Parameters:
+            world_size (int): Number of distributed ranks sharing the dataset.
         """
         if self.memory_budget is None:
             return
@@ -971,6 +1076,14 @@ class Data(ABC):
         )
 
     def _get_data_augmentations(self, apply_augmentations: bool = True) -> list[DataAugmentationsList]:
+        """Return the configured data augmentation lists when augmentation is enabled.
+        
+        Parameters:
+            apply_augmentations (bool): Whether to include configured augmentation lists.
+        
+        Returns:
+            list[DataAugmentationsList]: The configured augmentation lists, or an empty list when augmentation is disabled.
+        """
         return list(self.data_augmentations_list.values()) if apply_augmentations else []
 
     @staticmethod
@@ -1396,6 +1509,18 @@ class Data(ABC):
         return local_indices, remapped_mapping
 
     def get_data(self, world_size: int) -> tuple[list[list[DataLoader]], list[str], list[str]]:
+        """
+        Construct rank-specific training and validation data loaders from the prepared dataset.
+        
+        Parameters:
+        	world_size (int): Number of distributed ranks used to partition the dataset.
+        
+        Returns:
+        	tuple: A tuple containing the data loaders grouped by rank, prepared training case names, and prepared validation case names.
+        
+        Raises:
+        	DatasetManagerError: If dataset preparation has not been completed.
+        """
         if self._prepared_data is None or self._prepared_validation_data is None:
             raise DatasetManagerError("Dataset configuration was not prepared before runtime data loading.")
 
@@ -1491,6 +1616,26 @@ class DataTrain(Data):
         prefetch_factor: int | None = None,
         persistent_workers: bool | None = None,
     ) -> None:
+        """
+        Configure training dataset assembly, augmentation, patching, validation, caching, and data loading.
+        
+        Parameters:
+            dataset_filenames (list[str]): Dataset file specifications to use.
+            groups_src (dict[str, Group]): Source groups and their transform pipelines.
+            augmentations (dict[str, DataAugmentationsList] | None): Augmentation lists keyed by name.
+            inline_augmentations (bool): Whether augmentations are applied inline during data loading.
+            patch (DatasetPatch | None): Patch extraction configuration.
+            use_cache (bool): Whether to cache prepared data in memory when permitted.
+            memory_budget (str | float | None): RAM budget used to choose between caching and streaming; `"auto"` derives the budget from available memory.
+            subset (TrainSubset): Training case selection and shuffling configuration.
+            batch_size (int): Number of samples per training batch.
+            validation (float | str | list[int] | list[str] | None): Validation split specification.
+            validation_augmentations (bool): Whether to include augmented samples in validation.
+            num_workers (int | None): Number of data-loading worker processes.
+            pin_memory (bool): Whether loaded tensors use pinned memory.
+            prefetch_factor (int | None): Number of batches prefetched by each worker.
+            persistent_workers (bool | None): Whether workers persist between epochs.
+        """
         super().__init__(
             dataset_filenames,
             groups_src,
@@ -1529,6 +1674,22 @@ class DataPrediction(Data):
         persistent_workers: bool | None = None,
     ) -> None:
 
+        """
+        Configure dataset loading for prediction.
+        
+        Parameters:
+            dataset_filenames (list[str]): Dataset file specifications to load.
+            groups_src (dict[str, Group]): Source groups and their transform pipelines.
+            augmentations (dict[str, DataAugmentationsList] | None): Augmentation lists available during prediction.
+            patch (DatasetPatch | None): Patch extraction configuration.
+            memory_budget (str | float | None): Maximum memory budget used to select caching or streaming.
+            subset (PredictionSubset): Cases selected for prediction.
+            batch_size (int): Number of samples per batch.
+            num_workers (int | None): Number of data-loading worker processes.
+            pin_memory (bool): Whether to pin loaded tensors in host memory.
+            prefetch_factor (int | None): Number of batches prefetched by each worker.
+            persistent_workers (bool | None): Whether workers remain active between iterations.
+        """
         super().__init__(
             dataset_filenames=dataset_filenames,
             groups_src=groups_src,
@@ -1565,6 +1726,20 @@ class DataMetric(Data):
         persistent_workers: bool | None = None,
     ) -> None:
 
+        """
+        Configure metric dataset loading, validation selection, and optional memory-based cache management.
+        
+        Parameters:
+            dataset_filenames: Dataset file specifications to load.
+            groups_src: Source groups and their metric transform pipelines.
+            memory_budget: Maximum cache budget, in GiB or as a unit-suffixed string; use ``"auto"`` to derive it from available memory.
+            subset: Case subset to include.
+            validation: Validation case selector, consisting of a slice, indices, names, or a filename.
+            num_workers: Number of data-loading worker processes.
+            pin_memory: Whether to pin loaded tensors in host memory.
+            prefetch_factor: Number of batches prefetched by each worker.
+            persistent_workers: Whether workers remain active between iterations.
+        """
         super().__init__(
             dataset_filenames=dataset_filenames,
             groups_src=groups_src,

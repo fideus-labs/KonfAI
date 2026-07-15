@@ -67,6 +67,9 @@ def test_parse_memory_budget_bytes_rejects_garbage(value: str) -> None:
 
 
 def _point_cgroup_at(monkeypatch: pytest.MonkeyPatch, *, v2: Path | None, v1: Path | None) -> None:
+    """
+    Point cgroup memory-limit paths to the supplied files for a test.
+    """
     monkeypatch.setattr(runtime, "_CGROUP_V2_MEMORY_MAX", str(v2) if v2 else "/nonexistent/memory.max")
     monkeypatch.setattr(runtime, "_CGROUP_V1_MEMORY_LIMIT", str(v1) if v1 else "/nonexistent/limit_in_bytes")
 
@@ -131,7 +134,15 @@ _DATASET_BYTES = 2 * len(_CASES) * 512 * data_manager._CACHE_ELEMENT_BYTES
 
 
 def _make_train(memory_budget: str | float | None) -> DataTrain:
-    """A DataTrain with an injected, header-free prepared dataset (no disk, no config file)."""
+    """
+    Create a training data object with an injected prepared dataset and no disk or configuration dependencies.
+    
+    Parameters:
+        memory_budget: Memory budget used to configure cache selection.
+    
+    Returns:
+        A configured `DataTrain` instance with prepared training data.
+    """
     data = DataTrain(augmentations=None, memory_budget=memory_budget)
     managers = {group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE)) for _ in _CASES] for group in ("CT", "SEG")}
     data._prepared_data = managers  # type: ignore[assignment]

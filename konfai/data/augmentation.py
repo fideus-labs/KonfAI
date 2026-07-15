@@ -259,22 +259,41 @@ class DataAugmentation(NeedDevice, ABC):
 
     @abstractmethod
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        """
+        Initialize cached augmentation state for the selected copies and update their shapes.
+        
+        Parameters:
+        	index (int): Dataset case index.
+        	shapes (list[list[int]]): Spatial shapes for the copies being initialized.
+        	caches_attribute (list[Attribute]): Cached dataset attributes associated with the copies.
+        
+        Returns:
+        	list[list[int]]: Updated spatial shapes.
+        """
         pass
 
     def patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        """Declare how the draw of copy *a* makes its output depend on its input, for patch streaming.
-
-        The same contract as :meth:`konfai.data.transform.Transform.patch_locality` -- read-only, no
-        I/O, total, ``WHOLE_VOLUME`` by default -- asked of one copy of one case, because that is the
-        grain an augmentation is parameterised at: the halo of a geometric draw is the draw's own, so
-        two copies of the same case answer differently and the same copy answers differently next
-        epoch. A copy the draw did not select is the identity, which the base answers for.
+        """
+        Determine the input locality of an augmentation for a dataset copy.
+        
+        Args:
+            index (int): Case index.
+            a (int): Dataset copy index.
+            cache_attribute (Attribute): Cached attributes for the case.
+        
+        Returns:
+            PatchLocality: The locality of the selected augmentation, or pointwise locality when the copy is unchanged.
         """
         if a not in self.who_index[index]:
             return PatchLocality(LocalityKind.POINTWISE)
         return self._patch_locality(index, self.who_index[index].index(a), cache_attribute)
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
+        """Return the locality classification for a selected augmentation copy.
+        
+        Returns:
+            PatchLocality: Whole-volume locality.
+        """
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
 
     def stream_region_source(
@@ -284,7 +303,18 @@ class DataAugmentation(NeedDevice, ABC):
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
     ) -> list[slice]:
-        """Map a target patch's spatial slices to the source region copy *a* reads (region kinds)."""
+        """
+        Map target patch slices to the source region required to produce them.
+        
+        Parameters:
+            index (int): Case index.
+            a (int): Copy index.
+            target_slices (tuple[slice, ...]): Spatial slices of the target patch.
+            source_spatial_shape (list[int]): Spatial dimensions of the source volume.
+        
+        Returns:
+            list[slice]: Source-region slices corresponding to the target patch.
+        """
         return self._stream_region_source(index, self.who_index[index].index(a), target_slices, source_spatial_shape)
 
     def _stream_region_source(
@@ -294,13 +324,35 @@ class DataAugmentation(NeedDevice, ABC):
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
     ) -> list[slice]:
+        """
+        Map target patch slices to source-region slices for region-local augmentations.
+        
+        Parameters:
+        	index (int): Case index associated with the cached augmentation state.
+        	a (int): Copy index.
+        	target_slices (tuple[slice, ...]): Spatial slices of the requested target patch.
+        	source_spatial_shape (list[int]): Spatial dimensions of the source volume.
+        
+        Raises:
+        	AugmentationError: If the augmentation declares region locality without providing a source-region mapping.
+        """
         raise AugmentationError(
             f"{type(self).__name__} declared a region patch-locality but does not implement _stream_region_source().",
             "Implement _stream_region_source() or declare a non-region _patch_locality().",
         )
 
     def compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        """Apply the draw of copy *a* to one tensor -- the forward counterpart of :meth:`inverse`."""
+        """Apply the augmentation to one tensor for a selected copy.
+        
+        Args:
+            name: Name of the tensor being augmented.
+            index: Dataset case index.
+            a: Copy index.
+            tensor: Input tensor.
+        
+        Returns:
+            The augmented tensor, or the input tensor if the copy is not selected.
+        """
         if a in self.who_index[index]:
             tensor = self._compute(name, index, self.who_index[index].index(a), tensor)
         return tensor
@@ -311,13 +363,46 @@ class DataAugmentation(NeedDevice, ABC):
         index: int,
         tensors: list[torch.Tensor],
     ) -> list[torch.Tensor]:
+        """
+        Apply the augmentation independently to each tensor in a collection.
+        
+        Parameters:
+        	name (str): Name identifying the tensor collection.
+        	index (int): Case or volume index used for cached augmentation state.
+        	tensors (list[torch.Tensor]): Tensors to transform.
+        
+        Returns:
+        	list[torch.Tensor]: Transformed tensors in the original order.
+        """
         return [self.compute(name, index, a, tensor) for a, tensor in enumerate(tensors)]
 
     @abstractmethod
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the augmentation to one selected tensor.
+        
+        Parameters:
+        	name (str): Name of the tensor being augmented.
+        	index (int): Dataset case or volume index.
+        	a (int): Copy index within the case.
+        	tensor (torch.Tensor): Tensor to transform.
+        
+        Returns:
+        	torch.Tensor: Transformed tensor.
+        """
         pass
 
     def inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Apply the inverse transformation to a selected augmentation copy.
+        
+        Parameters:
+        	index (int): Case index whose cached augmentation state is used.
+        	a (int): Copy index to transform.
+        	tensor (torch.Tensor): Tensor to transform.
+        
+        Returns:
+        	torch.Tensor: The inversely transformed tensor, or the input tensor if the copy was not selected.
+        """
         if a in self.who_index[index]:
             tensor = self._inverse(index, self.who_index[index].index(a), tensor)
         return tensor
@@ -333,12 +418,30 @@ class EulerTransform(DataAugmentation):
         self.matrix: dict[int, list[torch.Tensor]] = {}
 
     def _grid_matrix(self, index: int, a: int, shape: list[int]) -> torch.Tensor:
-        """Copy *a*'s affine, in the normalised coordinates ``affine_grid`` spans over ``shape``."""
+        """
+        Retrieve the cached affine transformation matrix for a dataset case and copy.
+        
+        Parameters:
+            index (int): Dataset case index.
+            a (int): Copy index.
+        
+        Returns:
+            torch.Tensor: Cached affine transformation matrix.
+        """
         return self.matrix[index][a]
 
     def _sample(self, matrix: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
         # Integer tensors are label maps: interpolating them blends class ids into
         # non-existent labels, so resample them with nearest-neighbour instead.
+        """Resample a tensor using an affine transformation matrix.
+        
+        Parameters:
+            matrix (torch.Tensor): Homogeneous affine transformation matrix.
+            tensor (torch.Tensor): Tensor to resample.
+        
+        Returns:
+            torch.Tensor: The resampled tensor with the input shape and data type.
+        """
         mode = "nearest" if not tensor.dtype.is_floating_point else "bilinear"
         return (
             F.grid_sample(
@@ -353,14 +456,37 @@ class EulerTransform(DataAugmentation):
         )
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Resample a tensor using the cached transformation for a dataset copy.
+        
+        Returns:
+            torch.Tensor: The transformed tensor.
+        """
         return self._sample(self._grid_matrix(index, a, list(tensor.shape[1:])), tensor)
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Apply the inverse spatial transformation to a tensor.
+        
+        Parameters:
+        	index (int): Case index associated with the cached transformation.
+        	a (int): Copy index associated with the cached transformation.
+        	tensor (torch.Tensor): Tensor to transform.
+        
+        Returns:
+        	torch.Tensor: Tensor resampled using the inverse transformation.
+        """
         return self._sample(self._grid_matrix(index, a, list(tensor.shape[1:])).inverse(), tensor)
 
 
 class Translate(EulerTransform):
     def __init__(self, t_min: float = -10, t_max=10, is_int: bool = False):
+        """Initialize a translation augmentation with the specified displacement range.
+        
+        Parameters:
+        	t_min (float): Minimum translation value for each spatial axis.
+        	t_max (float): Maximum translation value for each spatial axis.
+        	is_int (bool): Whether to restrict sampled translations to integer values.
+        """
         super().__init__()
         self.t_min = t_min
         self.t_max = t_max
@@ -368,6 +494,17 @@ class Translate(EulerTransform):
         self.translate: dict[int, torch.Tensor] = {}
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        """
+        Sample and cache per-copy translation vectors for a dataset case.
+        
+        Parameters:
+            index (int): Case index whose translations are cached.
+            shapes (list[list[int]]): Spatial shapes used to determine the translation dimensionality.
+            caches_attribute (list[Attribute]): Cached attributes associated with the selected copies.
+        
+        Returns:
+            list[list[int]]: The input shapes unchanged.
+        """
         dim = len(shapes[0])
         translate = torch.rand((len(shapes), dim)) * torch.tensor(self.t_max - self.t_min) + torch.tensor(self.t_min)
         self.translate[index] = torch.round(translate) if self.is_int else translate
@@ -377,6 +514,17 @@ class Translate(EulerTransform):
         # The draw is a shift in VOXELS, in (x, y, z). ``affine_grid`` spans [-1, 1] over whatever
         # extent it is given, so the same shift is a different matrix on a patch than on the volume:
         # normalise it against the extent it is about to be applied to, never against a fixed one.
+        """
+        Build the normalized affine translation matrix for a selected augmentation copy.
+        
+        Parameters:
+            index (int): Case index containing the cached translation.
+            a (int): Copy index whose translation is used.
+            shape (list[int]): Spatial extent to which the translation is applied.
+        
+        Returns:
+            torch.Tensor: Batched 2D or 3D affine translation matrix normalized to the given spatial extent.
+        """
         func = _translate_3d_matrix if len(shape) == 3 else _translate_2d_matrix
         sizes = torch.tensor(list(reversed(shape)), dtype=torch.float32)
         return torch.unsqueeze(func(self.translate[index][a] * 2.0 / (sizes - 1)), dim=0)
@@ -385,6 +533,17 @@ class Translate(EulerTransform):
         # A uniform shift sends a target patch to that same patch displaced by the draw, so the source
         # is a bounded neighbourhood of it. One voxel past the ceiling covers the far tap a fractional
         # shift interpolates from. The draw is in (x, y, z); a halo is in array order.
+        """
+        Return the bounded source-region locality for a translated patch.
+        
+        Parameters:
+        	index (int): Case index identifying the cached translation.
+        	a (int): Copy index identifying the translation to use.
+        	cache_attribute (Attribute): Cached dataset attribute associated with the patch.
+        
+        Returns:
+        	PatchLocality: A halo locality whose radius covers the absolute translation and interpolation extent.
+        """
         radius = (torch.ceil(self.translate[index][a].abs()).to(torch.int64) + 1).tolist()
         return PatchLocality(LocalityKind.HALO, halo=tuple(int(r) for r in reversed(radius)))
 
@@ -409,6 +568,17 @@ class Rotate(EulerTransform):
         self.is_quarter = is_quarter
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        """
+        Initialize per-copy rotation matrices and resulting spatial shapes.
+        
+        Parameters:
+        	index (int): Case index used to store the sampled rotation matrices.
+        	shapes (list[list[int]]): Spatial shapes for the selected copies.
+        	caches_attribute (list[Attribute]): Cached attributes associated with the copies.
+        
+        Returns:
+        	list[list[int]]: Spatial shapes after applying the sampled rotations.
+        """
         dim = len(shapes[0])
         func = _rotation_3d_matrix if dim == 3 else _rotation_2d_matrix
         angles = []
@@ -429,14 +599,15 @@ class Rotate(EulerTransform):
 
     @classmethod
     def _index_remap(cls, matrix: torch.Tensor) -> tuple[list[int], list[int]] | None:
-        """The permute dims and flip axes reproducing a rotation exactly, or ``None`` if it must be sampled.
-
-        ``matrix`` maps an output coordinate onto the input it comes from, so it is a signed permutation
-        exactly when every row and column has a single +/-1: output axis ``pi(k)`` then reads input axis
-        ``k``, mirrored where the sign is negative. An orthonormal row of L1 norm 1 has one such entry,
-        which is what separates a quarter turn from any other angle.
-
-        Dims and axes are channel-first, where physical axis ``k`` is dim ``n - k``.
+        """
+        Determine whether a rotation can be represented by axis permutation and reflection.
+        
+        Parameters:
+            matrix (torch.Tensor): Homogeneous rotation matrix to analyze.
+        
+        Returns:
+            tuple[list[int], list[int]] | None: Permutation dimensions and flipped axes
+            when the matrix is an exact signed permutation; otherwise, ``None``.
         """
         linear = matrix[0, :-1, :-1]
         n = linear.shape[0]
@@ -457,11 +628,16 @@ class Rotate(EulerTransform):
 
     @classmethod
     def _draw_shape(cls, matrix: torch.Tensor, shape: list[int]) -> list[int]:
-        """The spatial extents a draw lands on, given the ones it is applied to.
-
-        Output dim ``i`` reads input dim ``dims[i]``, so it carries that axis's extent with it -- what a
-        turn preserves is the volume, not which axis holds an extent. A sampled draw spans the extent it
-        is given. ``dims`` is channel-first, so spatial axis k is dim k + 1.
+        """
+        Determine the spatial shape produced by applying a rotation matrix.
+        
+        Parameters:
+        	matrix (torch.Tensor): Rotation matrix used to determine axis remapping.
+        	shape (list[int]): Input spatial dimensions.
+        
+        Returns:
+        	list[int]: Remapped spatial dimensions for an exact axis permutation, or the
+        		input shape when interpolation is required.
         """
         remap = cls._index_remap(matrix)
         if remap is None:
@@ -470,6 +646,18 @@ class Rotate(EulerTransform):
         return [shape[dim - 1] for dim in dims[1:]]
 
     def _reorient(self, index: int, a: int, matrix: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Apply a rotation to a tensor using exact axis remapping when possible and resampling otherwise.
+        
+        Parameters:
+        	index (int): Case index associated with the cached transformation.
+        	a (int): Copy index associated with the cached transformation.
+        	matrix (torch.Tensor): Rotation matrix to apply.
+        	tensor (torch.Tensor): Tensor to transform.
+        
+        Returns:
+        	torch.Tensor: The reoriented tensor.
+        """
         remap = Rotate._index_remap(matrix)
         if remap is None:
             return self._sample(matrix, tensor)
@@ -478,15 +666,48 @@ class Rotate(EulerTransform):
         return tensor.permute(dims).flip(flips)
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the cached forward spatial transform to a tensor.
+        
+        Parameters:
+            index (int): Case index associated with the cached transform.
+            a (int): Copy index associated with the cached transform.
+        
+        Returns:
+            torch.Tensor: The transformed tensor.
+        """
         return self._reorient(index, a, self._grid_matrix(index, a, list(tensor.shape[1:])), tensor)
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the inverse rotation or spatial reorientation to a tensor.
+        
+        Parameters:
+            index (int): Case index associated with the cached transformation.
+            a (int): Copy index associated with the cached transformation.
+            tensor (torch.Tensor): Tensor to reorient.
+        
+        Returns:
+            torch.Tensor: Tensor transformed using the inverse cached rotation.
+        """
         return self._reorient(index, a, self._grid_matrix(index, a, list(tensor.shape[1:])).inverse(), tensor)
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         # Permuting and mirroring voxels is a bijection on them, which is what ORIENTATION promises and
         # what LocalityKind.preserves_statistics lets a later stage trust. Only the draw can say whether
         # this one is that, and the draw is a property of the copy rather than of the case.
+        """
+        Determine the locality required for a rotation applied to a specific copy.
+        
+        Parameters:
+            index (int): Case index.
+            a (int): Copy index.
+            cache_attribute (Attribute): Cached dataset attribute associated with the copy.
+        
+        Returns:
+            PatchLocality: Orientation locality for exact axis permutations and reflections;
+                whole-volume locality for other rotations.
+        """
         if Rotate._index_remap(self.matrix[index][a]) is None:
             return PatchLocality(LocalityKind.WHOLE_VOLUME)
         return PatchLocality(LocalityKind.ORIENTATION)
@@ -501,6 +722,21 @@ class Rotate(EulerTransform):
         # Output axis o reads input axis dims[o], so placing o's target slice at that input axis yields
         # the region whose remap reproduces the patch; a MIRRORED output axis reads the mirror region
         # ``[n - stop, n - start)`` of it. Dims and flips are channel-first, so spatial axis k is dim k + 1.
+        """
+        Map a target patch to the source slices required for an exactly remappable rotation.
+        
+        Parameters:
+            index (int): Case index for the cached rotation.
+            a (int): Copy index.
+            target_slices (tuple[slice, ...]): Spatial slices of the requested output patch.
+            source_spatial_shape (list[int]): Spatial dimensions of the source tensor.
+        
+        Returns:
+            list[slice]: Source slices that produce the target patch after rotation.
+        
+        Raises:
+            AugmentationError: If the cached rotation cannot be represented as an exact axis permutation and flip.
+        """
         remap = Rotate._index_remap(self.matrix[index][a])
         if remap is None:
             raise AugmentationError(
@@ -549,6 +785,16 @@ class Flip(DataAugmentation):
         return shapes
 
     def _flip(self, tensor: torch.Tensor, dims: list[int]) -> torch.Tensor:
+        """
+        Flip the tensor along the specified spatial dimensions, negating corresponding vector components when enabled.
+        
+        Parameters:
+        	tensor (torch.Tensor): Tensor to transform.
+        	dims (list[int]): Spatial dimensions along which to flip the tensor.
+        
+        Returns:
+        	torch.Tensor: Flipped tensor, with affected vector components negated when `vector_field` is enabled.
+        """
         result = torch.flip(tensor, dims=dims)
         # A displacement/vector field (one channel per spatial axis, channel-first [C=(dx,dy,dz),(D),H,W])
         # is not mirror-invariant: flipping a spatial axis must also negate its component channel
@@ -565,6 +811,12 @@ class Flip(DataAugmentation):
         # A mirror is a bijection on the voxels (ORIENTATION). Negating a component channel is not: it
         # maps values, so a later GLOBAL_STAT could no longer seed from the stored volume -- and only
         # the tensor's channel count says whether it fires, which a header-time declaration cannot see.
+        """Classify the locality required by the flip operation.
+        
+        Returns:
+            PatchLocality: Whole-volume locality when vector-field components are
+                negated; orientation locality otherwise.
+        """
         if self.vector_field:
             return PatchLocality(LocalityKind.WHOLE_VOLUME)
         return PatchLocality(LocalityKind.ORIENTATION)
@@ -579,6 +831,18 @@ class Flip(DataAugmentation):
         # A flipped spatial axis reads the mirror region ``[n - stop, n - start)``; flipping that
         # sub-region reproduces the target patch. Non-flipped axes read the identity region. ``flip``
         # holds channel-first tensor dims, so spatial axis k is dim k + 1.
+        """
+        Map target patch slices to the source regions required by spatial flipping.
+        
+        Parameters:
+            index (int): Case index identifying the cached flip configuration.
+            a (int): Copy index within the case.
+            target_slices (tuple[slice, ...]): Spatial slices of the requested target patch.
+            source_spatial_shape (list[int]): Sizes of the source spatial dimensions.
+        
+        Returns:
+            list[slice]: Source slices, mirrored along flipped axes and unchanged along other axes.
+        """
         dims = self.flip[index][a]
         return [
             (
@@ -590,9 +854,30 @@ class Flip(DataAugmentation):
         ]
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Apply the configured axis flips to a tensor.
+        
+        Parameters:
+        	name (str): Name associated with the tensor.
+        	index (int): Case index for the cached augmentation state.
+        	a (int): Copy index within the case.
+        	tensor (torch.Tensor): Tensor to transform.
+        
+        Returns:
+        	torch.Tensor: Tensor after applying the configured flips.
+        """
         return self._flip(tensor, self.flip[index][a])
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Apply the configured flips to restore the tensor orientation.
+        
+        Parameters:
+        	index (int): Case index associated with the cached flip configuration.
+        	a (int): Copy index within the case.
+        	tensor (torch.Tensor): Tensor to transform.
+        
+        Returns:
+        	torch.Tensor: Tensor with the configured spatial flips applied.
+        """
         return self._flip(tensor, self.flip[index][a])
 
 
@@ -604,9 +889,23 @@ class ColorTransform(DataAugmentation):
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         # The draw is a colour matrix applied to each voxel on its own: no neighbour, no coordinate,
         # no extent. Whatever region a voxel is read in, it comes out the same.
+        """Classifies the augmentation as pointwise because each output voxel depends only on the corresponding input voxel.
+        
+        Returns:
+        	PatchLocality: Pointwise locality.
+        """
         return PatchLocality(LocalityKind.POINTWISE)
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the cached color transformation to an image tensor.
+        
+        Returns:
+            torch.Tensor: The transformed image tensor with the same shape as the input.
+        
+        Raises:
+            AugmentationError: If the input does not have one or three channels.
+        """
         matrix = self.matrix[index][a]
         result = tensor.reshape([*tensor.shape[:1], int(np.prod(tensor.shape[1:]))])
         if tensor.shape[0] == 3:
@@ -730,6 +1029,16 @@ class Noise(DataAugmentation):
         self.max_T = prob * self.noise_step
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        """
+        Initialize a noise timestep for each selected copy.
+        
+        Parameters:
+        	index (int): Dataset case index used to store the sampled timesteps.
+        	shapes (list[list[int]]): Shapes associated with the selected copies.
+        
+        Returns:
+        	list[list[int]]: The input shapes unchanged.
+        """
         if int(self.max_T) == 0:
             self.ts[index] = [0 for _ in shapes]
         else:
@@ -740,6 +1049,17 @@ class Noise(DataAugmentation):
     # overlapping patches would sample unrelated fields and the overlap blend would suppress the
     # variance this exists to add.
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Apply scheduled Gaussian noise to a tensor.
+        
+        Parameters:
+            name (str): Name associated with the computation.
+            index (int): Dataset case index.
+            a (int): Selected copy index.
+            tensor (torch.Tensor): Input tensor to augment.
+        
+        Returns:
+            torch.Tensor: Tensor combined with Gaussian noise according to the cached timestep.
+        """
         alpha_hat_t = self.alpha_hat[self.ts[index][a]].to(tensor.device).reshape(*[1 for _ in tensor.shape])
         return (
             alpha_hat_t.sqrt() * tensor
@@ -765,12 +1085,33 @@ class CutOUT(DataAugmentation):
         self.value = value
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        """
+        Initialize random cutout centers for each selected copy.
+        
+        Parameters:
+            shapes (list[list[int]]): Spatial shapes used to determine the center dimensionality.
+        
+        Returns:
+            list[list[int]]: The input shapes unchanged.
+        """
         self.centers[index] = [torch.rand((3) if len(shape) == 3 else (2)) for shape in shapes]
         return shapes
 
     # WHOLE_VOLUME on purpose: the cutout box is normalised to the extent of the tensor in hand, so
     # applied per patch it would land in every patch instead of once in the volume.
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the configured cutout mask to a tensor.
+        
+        Parameters:
+        	name (str): Name associated with the computation.
+        	index (int): Dataset or case index identifying cached augmentation state.
+        	a (int): Copy index identifying the cached cutout center.
+        	tensor (torch.Tensor): Tensor to transform.
+        
+        Returns:
+        	torch.Tensor: Tensor with values outside the retained region replaced by the configured cutout value.
+        """
         center = self.centers[index][a]
         masks = []
         for i, w in enumerate(tensor.shape[1:]):
@@ -810,6 +1151,17 @@ class Elastix(DataAugmentation):
         return new_locs
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        """
+        Generate and cache a random displacement field for each selected shape.
+        
+        Parameters:
+            index (int): Case index used to identify the cached displacement fields.
+            shapes (list[list[int]]): Spatial shapes for the selected copies.
+            caches_attribute (list[Attribute]): Metadata used to define image spacing, origin, and direction.
+        
+        Returns:
+            list[list[int]]: The input shapes unchanged.
+        """
         print(f"[KonfAI] Compute Displacement Field for index {index}")
         self.displacement_fields[index] = []
         self.displacement_fields_true[index] = []
@@ -864,6 +1216,17 @@ class Elastix(DataAugmentation):
     # resident.
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         # Integer tensors are label maps: nearest-neighbour keeps class ids intact.
+        """Resample a tensor using the cached displacement field for the selected augmentation copy.
+        
+        Parameters:
+            name (str): Name associated with the tensor.
+            index (int): Dataset case index.
+            a (int): Augmentation copy index.
+            tensor (torch.Tensor): Tensor to resample.
+        
+        Returns:
+            torch.Tensor: The resampled tensor with the original shape and data type.
+        """
         mode = "nearest" if not tensor.dtype.is_floating_point else "bilinear"
         return (
             F.grid_sample(
@@ -878,6 +1241,11 @@ class Elastix(DataAugmentation):
         )
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Indicate that Elastix does not support inverse transformation.
+        
+        Raises:
+            NotImplementedError: Always raised because Elastix transformations are not invertible.
+        """
         raise NotImplementedError("Elastix augmentation has no inverse; do not use it for invertible TTA.")
 
 
@@ -889,6 +1257,20 @@ class Permute(DataAugmentation):
         self.permute: dict[int, torch.Tensor] = {}
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        """
+        Initialize permutation choices and update shapes for selected 3D augmentations.
+        
+        Parameters:
+            index (int): Case index used to store the permutation choices.
+            shapes (list[list[int]]): Spatial shapes to update according to the selected axis permutations.
+            caches_attribute (list[Attribute]): Cached dataset attributes associated with the shapes.
+        
+        Returns:
+            list[list[int]]: The shapes after applying the selected axis permutations.
+        
+        Raises:
+            ValueError: If the shapes are not 3D, `prob_permute` does not contain two probabilities, or exactly two augmentation shapes are not provided when probabilities are unset.
+        """
         if len(shapes):
             dim = len(shapes[0])
             if dim != 3:
@@ -908,7 +1290,16 @@ class Permute(DataAugmentation):
         return shapes
 
     def _source_axes(self, index: int, a: int) -> list[int]:
-        """Which source spatial axis each output spatial axis is drawn from, for copy *a*."""
+        """
+        Determine which input spatial axis supplies each output spatial axis.
+        
+        Parameters:
+            index (int): Case index used to select the stored permutation.
+            a (int): Copy index within the case.
+        
+        Returns:
+            list[int]: Input spatial-axis indices corresponding to the three output axes.
+        """
         axes = list(range(3))
         for permute in self._permute_dims[self.permute[index][a]]:
             axes = [axes[dim - 1] for dim in permute[1:]]
@@ -917,6 +1308,11 @@ class Permute(DataAugmentation):
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         # Reordering axes moves every voxel and touches none, so the multiset of values is the input's:
         # a bijection, which is what ORIENTATION promises.
+        """Return the locality classification for an axis-reordering augmentation.
+        
+        Returns:
+        	PatchLocality: Orientation locality, because the transformation reorders voxels without changing their values.
+        """
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def _stream_region_source(
@@ -928,17 +1324,49 @@ class Permute(DataAugmentation):
     ) -> list[slice]:
         # Output axis k is source axis ``_source_axes()[k]``, so placing each target slice back on its
         # source axis gives the region whose permutation is the target patch.
+        """
+        Map a target patch region to the corresponding source region for the selected permutation.
+        
+        Parameters:
+            index (int): Case index identifying the cached permutation.
+            a (int): Copy index.
+            target_slices (tuple[slice, ...]): Spatial slices defining the target patch.
+            source_spatial_shape (list[int]): Spatial dimensions of the source tensor.
+        
+        Returns:
+            list[slice]: Source-axis slices whose permutation produces the target region.
+        """
         source_slices = [slice(0, n) for n in source_spatial_shape]
         for k, sl in enumerate(target_slices):
             source_slices[self._source_axes(index, a)[k]] = slice(sl.start, sl.stop)
         return source_slices
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Apply the configured axis permutation to a tensor.
+        
+        Parameters:
+        	name (str): Name associated with the computation.
+        	index (int): Dataset or case index.
+        	a (int): Copy index.
+        
+        Returns:
+        	torch.Tensor: The tensor with its spatial axes permuted.
+        """
         for permute in self._permute_dims[self.permute[index][a]]:
             tensor = tensor.permute(tuple(permute))
         return tensor
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Restore a tensor to its original axis order after the stored permutation.
+        
+        Parameters:
+            index (int): Case index identifying the cached permutation.
+            a (int): Copy index identifying the permutation to reverse.
+            tensor (torch.Tensor): Permuted tensor.
+        
+        Returns:
+            torch.Tensor: Tensor with the stored axis permutations reversed.
+        """
         for permute in reversed(self._permute_dims[self.permute[index][a]]):
             tensor = tensor.permute(tuple(np.argsort(permute)))
         return tensor
@@ -965,6 +1393,16 @@ class Mask(DataAugmentation):
         return self._mask
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        """
+        Initialize mask placement positions and return the resulting spatial shapes.
+        
+        Parameters:
+        	index (int): Case index used to store the sampled positions.
+        	shapes (list[list[int]]): Input spatial shapes used to determine valid mask positions.
+        
+        Returns:
+        	list[list[int]]: One mask-shaped spatial dimension list for each input shape.
+        """
         self.positions[index] = [
             torch.rand((3) if len(shape) == 3 else (2))
             * (torch.tensor([max(s1 - s2, 0) for s1, s2 in zip(torch.tensor(shape), self.mask_shape, strict=False)]))
@@ -975,6 +1413,18 @@ class Mask(DataAugmentation):
     # WHOLE_VOLUME on purpose: the output grid is the mask's, and the mask volume is already resident
     # at that extent -- there is no whole-volume read left for a declaration to save.
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Overlay the tensor onto the configured mask region.
+        
+        Parameters:
+            name (str): Name of the tensor being transformed.
+            index (int): Dataset case index associated with the cached mask position.
+            a (int): Copy index associated with the cached mask position.
+            tensor (torch.Tensor): Tensor to place within the mask extent.
+        
+        Returns:
+            torch.Tensor: Tensor with original values where the mask equals 1 and the replacement value elsewhere.
+        """
         mask = self._load_mask()
         position = self.positions[index][a]
         slices = [slice(None, None)] + [
@@ -996,4 +1446,14 @@ class Mask(DataAugmentation):
         )
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Raise an error because mask overlay cannot be inverted.
+        
+        Parameters:
+            index (int): Case index associated with the augmentation state.
+            a (int): Copy index associated with the augmentation state.
+            tensor (torch.Tensor): Tensor to be inverse-transformed.
+        
+        Raises:
+            NotImplementedError: Always raised because the mask overlay operation is not invertible.
+        """
         raise NotImplementedError("Mask augmentation has no inverse; do not use it for invertible TTA.")

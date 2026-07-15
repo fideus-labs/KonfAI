@@ -182,7 +182,12 @@ _OBLIQUE = np.asarray(
 
 
 def _volumes() -> dict[str, np.ndarray]:
-    """One volume per input kind the built-in transforms consume, all on the same geometry."""
+    """
+    Create synthetic volumes for each input group used by the transform tests.
+    
+    Returns:
+    	dict[str, np.ndarray]: Volumes sharing the same spatial geometry, including intensity, integer, label, ensemble, direction-dependent, and boxed variants.
+    """
     rng = np.random.default_rng(0)
     axes = np.meshgrid(*[np.linspace(-1, 1, n) for n in _SPATIAL], indexing="ij")
     # A CT-like phantom rather than a smooth field: the bone/air step is what makes an interpolation
@@ -212,7 +217,15 @@ def _volumes() -> dict[str, np.ndarray]:
 
 
 def _attributes(group: str) -> Attribute:
-    """The metadata a group is stored with -- and so what a declaration about it is handed."""
+    """
+    Build the metadata associated with a dataset group.
+    
+    Parameters:
+        group (str): Dataset group whose direction and group-specific metadata to provide.
+    
+    Returns:
+        Attribute: Metadata describing the group's geometry and storage attributes.
+    """
     attributes = Attribute()
     attributes["Origin"] = np.asarray([-3.0, 5.0, 11.0])
     attributes["Spacing"] = np.asarray(_SPACING)
@@ -248,7 +261,15 @@ def _builtin_transforms() -> list[type[Transform]]:
 
 
 def _cases_of(cls: type[Transform]) -> list[_Case]:
-    """The configurations to exercise for one transform: the table's, else the transform's own defaults."""
+    """
+    Selects the test configurations for a transform class.
+    
+    Parameters:
+    	cls (type[Transform]): The transform class to configure.
+    
+    Returns:
+    	list[_Case]: Explicitly configured cases, a default case when the class can be instantiated without required arguments, or an empty list otherwise.
+    """
     if cls.__name__ in _CASES:
         return _CASES[cls.__name__]
     if any(parameter.default is parameter.empty for parameter in inspect.signature(cls).parameters.values()):
@@ -257,11 +278,25 @@ def _cases_of(cls: type[Transform]) -> list[_Case]:
 
 
 def _kind_of(case: _Case) -> LocalityKind:
-    """What a case declares about the group it consumes -- asked exactly as the dispatcher asks it."""
+    """
+    Determine the locality kind declared by a transform for the case's source group.
+    
+    Parameters:
+    	case (_Case): Transform case whose source group metadata is used.
+    
+    Returns:
+    	LocalityKind: Declared locality kind for the case.
+    """
     return case.transform.patch_locality(_attributes(case.group)).kind
 
 
 def _streamable_cases() -> list[_Case]:
+    """Return transform cases whose declared locality allows patch streaming.
+    
+    Returns:
+    	list[_Case]: Transform cases with a locality kind other than
+    		`LocalityKind.WHOLE_VOLUME`.
+    """
     return [
         case
         for cls in _builtin_transforms()
@@ -271,6 +306,16 @@ def _streamable_cases() -> list[_Case]:
 
 
 def _manager(dataset: Dataset, case: _Case) -> DatasetManager:
+    """
+    Create a dataset manager configured to apply the case's transform to the test patch grid.
+    
+    Parameters:
+    	dataset (Dataset): Dataset containing the test case.
+    	case (_Case): Transform configuration and source group to process.
+    
+    Returns:
+    	DatasetManager: Manager configured for the specified transform case.
+    """
     return DatasetManager(
         index=0,
         group_src=case.group,
@@ -305,6 +350,7 @@ def test_no_declaration_writes_to_the_case_metadata() -> None:
 def test_every_locality_kind_is_exercised() -> None:
     # The property below is only as good as the kinds it reaches: every streamable kind must have at
     # least one built-in standing for it, so a regression in one kind's dispatch cannot pass unseen.
+    """Verify that built-in streamable transforms exercise every locality kind except `WHOLE_VOLUME`."""
     kinds = {_kind_of(case) for case in _streamable_cases()}
     assert kinds == set(LocalityKind) - {LocalityKind.WHOLE_VOLUME}
 
@@ -315,6 +361,13 @@ def test_every_locality_kind_is_exercised() -> None:
     ids=lambda case: f"{type(case.transform).__name__}-{_kind_of(case).value}-{case.group}",
 )
 def test_streamed_patch_equals_whole_volume(case: _Case, dataset: Dataset) -> None:
+    """
+    Verify that streamed transform patches match patches extracted from whole-volume processing.
+    
+    Parameters:
+    	case (_Case): Transform configuration and expected comparison tolerance.
+    	dataset (Dataset): Dataset used to create the streamed and reference managers.
+    """
     streamed = _manager(dataset, case)
     reference = _manager(dataset, case)
     # `load` runs the transform over the whole volume; `get_data` then cuts the patch out of the result.
@@ -342,6 +395,15 @@ class _FlipIfAxisAligned(Flip):
     """
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """
+        Determine whether the transform can be applied using orientation-localized patches.
+        
+        Parameters:
+            cache_attribute (Attribute): Case metadata containing the stored direction, when available.
+        
+        Returns:
+            PatchLocality: Orientation locality when the direction has one nonzero entry per spatial dimension; whole-volume locality otherwise.
+        """
         if "Direction" not in cache_attribute:
             return PatchLocality(LocalityKind.WHOLE_VOLUME)
         direction = cache_attribute.get_np_array("Direction")
@@ -353,7 +415,9 @@ class _FlipIfAxisAligned(Flip):
 
 
 def test_a_declaration_reads_the_case_metadata() -> None:
-    """The argument carries the case: one transform, one config, two answers."""
+    """
+    Verify that locality declarations use case metadata to select the appropriate streaming behavior.
+    """
     transform = _FlipIfAxisAligned("0")
     assert transform.patch_locality(_attributes("Intensity")).kind is LocalityKind.ORIENTATION
     assert transform.patch_locality(_attributes("Oblique")).kind is LocalityKind.WHOLE_VOLUME
@@ -483,7 +547,12 @@ _AUGMENTATION_CASES: dict[str, list[_AugmentationCase]] = {
 
 
 def _builtin_augmentations() -> list[type[DataAugmentation]]:
-    """Every concrete augmentation class KonfAI ships."""
+    """
+    Collect all concrete data augmentation classes defined in the augmentation module.
+    
+    Returns:
+        list[type[DataAugmentation]]: The concrete augmentation classes.
+    """
     return [
         cls
         for _, cls in inspect.getmembers(augmentation_module, inspect.isclass)
@@ -494,12 +563,28 @@ def _builtin_augmentations() -> list[type[DataAugmentation]]:
 
 
 def _augmentation_managers(dataset: Dataset, case: _AugmentationCase) -> tuple[DatasetManager, DatasetManager]:
-    """Two managers of the same case, on ONE draw: one that streams copy 1, one that loads it."""
+    """
+    Create managers that apply the same augmentation draw through streaming and whole-volume execution.
+    
+    Parameters:
+    	dataset (Dataset): Dataset containing the case data.
+    	case (_AugmentationCase): Augmentation configuration and source group.
+    
+    Returns:
+    	tuple[DatasetManager, DatasetManager]: The streamed manager and the reference manager.
+    """
     case.augmentation.load(1.0)
     augmentations = DataAugmentationsList(nb=1, data_augmentations={})
     augmentations.data_augmentations = [case.augmentation]
 
     def manager() -> DatasetManager:
+        """
+        Create a dataset manager configured for the augmentation under test.
+        
+        Returns:
+            DatasetManager: A manager using the case's source group, patch grid,
+            dataset, and augmentation list.
+        """
         return DatasetManager(
             index=0,
             group_src=case.group,
@@ -520,6 +605,12 @@ def _augmentation_managers(dataset: Dataset, case: _AugmentationCase) -> tuple[D
 
 
 def _augmentation_cases() -> list[_AugmentationCase]:
+    """
+    Collect configured test cases for all built-in data augmentations.
+    
+    Returns:
+        list[_AugmentationCase]: Augmentation cases defined for the built-in augmentation classes.
+    """
     return [case for cls in _builtin_augmentations() for case in _AUGMENTATION_CASES.get(cls.__name__, [])]
 
 
@@ -544,6 +635,12 @@ def test_an_augmentation_declares_the_kind_its_draw_makes_it(case: _Augmentation
 
 def test_no_augmentation_declaration_writes_to_the_case_metadata(dataset: Dataset) -> None:
     # READ-ONLY, checked -- the same rule, and the same reason, as for a transform.
+    """
+    Verify that augmentation locality declarations leave case metadata unchanged.
+    
+    Parameters:
+    	dataset (Dataset): Dataset used to initialize augmentation managers.
+    """
     for case in _augmentation_cases():
         _augmentation_managers(dataset, case)
         attribute = _attributes(case.group)
@@ -558,6 +655,13 @@ def test_no_augmentation_declaration_writes_to_the_case_metadata(dataset: Datase
     ids=lambda case: f"{type(case.augmentation).__name__}-{case.kind.value}",
 )
 def test_streamed_augmented_patch_equals_whole_volume(case: _AugmentationCase, dataset: Dataset) -> None:
+    """
+    Verify that streamed augmentation patches match patches produced by whole-volume execution.
+    
+    Parameters:
+    	case (_AugmentationCase): Augmentation configuration and comparison tolerance.
+    	dataset (Dataset): Dataset used to create the streaming and reference managers.
+    """
     streamed, reference = _augmentation_managers(dataset, case)
     # `load` runs the draw over the whole volume; `get_data` then cuts the patch out of the result. The
     # other manager never loads, so the same `get_data` call streams instead -- same public entry point,
@@ -587,6 +691,7 @@ def test_a_pointwise_augmentation_streams_the_whole_grid_after_a_transform(datas
     augmentations.data_augmentations = [brightness]
 
     def manager(transform: Transform) -> DatasetManager:
+        """Create a dataset manager configured with the specified transform and augmentations."""
         return DatasetManager(
             index=0,
             group_src="Intensity",

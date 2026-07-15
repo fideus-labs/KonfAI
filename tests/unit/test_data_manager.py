@@ -251,6 +251,17 @@ class _WholeVolumeTransform(Transform):
     """
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """
+        Return the input tensor unchanged.
+        
+        Parameters:
+            name (str): Data item name.
+            tensor (torch.Tensor): Input tensor.
+            cache_attribute (Attribute): Associated cache metadata.
+        
+        Returns:
+            torch.Tensor: The input tensor.
+        """
         return tensor
 
 
@@ -276,17 +287,49 @@ class _CountingOffsetAugmentation(DataAugmentation):
         shapes: list[list[int]],
         caches_attribute: list[Attribute],
     ) -> list[list[int]]:
+        """Preserve the input shapes when initializing augmentation state.
+        
+        Parameters:
+        	index (int): The case or augmentation state index.
+        	shapes (list[list[int]]): Shapes associated with the input tensors.
+        	caches_attribute (list[Attribute]): Cached attributes associated with the input data.
+        
+        Returns:
+        	list[list[int]]: The unchanged input shapes.
+        """
         return shapes
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Apply an offset to the tensor and record the computation.
+        
+        Parameters:
+        	a (int): Offset increment applied after adding one.
+        	tensor (torch.Tensor): Tensor to transform.
+        
+        Returns:
+        	torch.Tensor: The tensor with `a + 1` added to every element.
+        """
         self.compute_calls += 1
         return tensor + (a + 1)
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Return the tensor unchanged during inverse processing."""
         return tensor
 
 
 def _make_manager(dataset: Dataset, augmentations: DataAugmentationsList, group_dest: str = "dest") -> DatasetManager:
+    """
+    Create a dataset manager configured for whole-volume transformation and augmentation tests.
+    
+    Parameters:
+    	dataset (Dataset): Dataset used by the manager.
+    	augmentations (DataAugmentationsList): Augmentations applied by the manager.
+    	group_dest (str): Destination group name.
+    
+    Returns:
+    	DatasetManager: Configured manager for the fixed test case.
+    """
     return DatasetManager(
         index=0,
         group_src="src",
@@ -300,6 +343,12 @@ def _make_manager(dataset: Dataset, augmentations: DataAugmentationsList, group_
 
 
 def test_inline_augmentations_are_loaded_on_demand() -> None:
+    """
+    Loads inline augmentations only when first requested and reuses them for subsequent samples from the same manager.
+    
+    Returns:
+    	None
+    """
     base = np.arange(4, dtype=np.float32).reshape(1, 2, 2)
     dataset = cast(Dataset, _DummyDataset(base))
     augmentation = _CountingOffsetAugmentation()
@@ -385,6 +434,16 @@ class _DrawCountingAugmentation(DataAugmentation):
         self.draws = 0
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        """
+        Draw the next augmentation shape for each input shape.
+        
+        Parameters:
+            shapes (list[list[int]]): Input shape entries to replace.
+            caches_attribute (list[Attribute]): Cache attributes associated with the shapes.
+        
+        Returns:
+            list[list[int]]: A `[2, 4]` shape for the first call and `[4, 4]` for subsequent calls, repeated once per input shape.
+        """
         self.draws += 1
         new_shape = [2, 4] if self.draws == 1 else [4, 4]
         return [list(new_shape) for _ in shapes]
@@ -393,6 +452,7 @@ class _DrawCountingAugmentation(DataAugmentation):
         return tensor
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        """Return the tensor unchanged during inverse processing."""
         return tensor
 
 
@@ -459,10 +519,30 @@ def test_reset_augmentation_shares_one_draw_across_destination_groups() -> None:
 
 
 def _case_major_mapping(n_cases: int, patches_per_case: int) -> list[tuple[int, int, int]]:
+    """Create a case-major mapping of case indices and patch indices.
+    
+    Parameters:
+        n_cases (int): Number of cases to include.
+        patches_per_case (int): Number of patches for each case.
+    
+    Returns:
+        list[tuple[int, int, int]]: Tuples containing the case index, a fixed group index of 0, and the patch index.
+    """
     return [(x, 0, p) for x in range(n_cases) for p in range(patches_per_case)]
 
 
 def _distinct_cases_per_slice(order: list[int], mapping: list[tuple[int, int, int]], slice_len: int) -> int:
+    """
+    Determine the maximum number of distinct cases in any consecutive slice of the specified length.
+    
+    Parameters:
+    	order (list[int]): Sample indices in iteration order.
+    	mapping (list[tuple[int, int, int]]): Sample mapping containing case indices.
+    	slice_len (int): Number of samples in each slice.
+    
+    Returns:
+    	int: Maximum number of distinct cases found in a slice.
+    """
     cases = [mapping[i][0] for i in order]
     return max(len(set(cases[k : k + slice_len])) for k in range(0, len(order) - slice_len + 1, slice_len))
 
@@ -556,16 +636,51 @@ class _WholeVolumeDataset:
     """In-memory dataset whose patches are non-streamable (forces the FIFO case-load path)."""
 
     def __init__(self, volume: np.ndarray) -> None:
+        """Initialize the stub dataset with the provided volume.
+        
+        Parameters:
+        	volume (np.ndarray): Volume data returned by the dataset operations.
+        """
         self.volume = volume
 
     def get_infos(self, group_src: str, name: str) -> tuple[list[int], Attribute]:
+        """Return the volume shape and metadata for a named dataset.
+        
+        Parameters:
+        	group_src (str): Source group identifier.
+        	name (str): Dataset name included in the returned metadata.
+        
+        Returns:
+        	tuple[list[int], Attribute]: The volume shape and metadata containing the dataset name.
+        """
         return list(self.volume.shape), Attribute({"name": name})
 
     def read_data(self, group_src: str, name: str) -> tuple[np.ndarray, Attribute]:
+        """Read and return a copy of the complete volume with its case name attribute.
+        
+        Parameters:
+        	group_src (str): Source group identifier.
+        	name (str): Case name to include in the returned attributes.
+        
+        Returns:
+        	tuple[np.ndarray, Attribute]: The copied volume and attributes containing the case name.
+        """
         return self.volume.copy(), Attribute({"name": name})
 
 
 def _reload_count(order: list[int], mapping: list[tuple[int, int, int]], n_cases: int, buffer_size: int) -> int:
+    """
+    Count data reloads while accessing samples in the specified order.
+    
+    Parameters:
+    	order (list[int]): Sample indices to access.
+    	mapping (list[tuple[int, int, int]]): Dataset sample mapping used by the iterator.
+    	n_cases (int): Number of dataset cases to create.
+    	buffer_size (int): Maximum iterator buffer size.
+    
+    Returns:
+    	int: Number of successful data loads performed.
+    """
     dataset = cast(Dataset, _WholeVolumeDataset(np.zeros((1, 8, 8), dtype=np.float32)))
     augmentations = DataAugmentationsList(nb=0, data_augmentations={})
     augmentation = _CountingOffsetAugmentation()
@@ -600,6 +715,16 @@ def _reload_count(order: list[int], mapping: list[tuple[int, int, int]], n_cases
     original = dataset_iter._load_data
 
     def counting_load(index: int, augmentation_index: int | None = None) -> bool:
+        """
+        Count successful data loads while preserving the original loader's result.
+        
+        Parameters:
+            index (int): Index of the data item to load.
+            augmentation_index (int | None): Optional augmentation index.
+        
+        Returns:
+            bool: Whether the data load succeeded.
+        """
         loaded = original(index, augmentation_index)
         if loaded:
             reloads["n"] += 1
