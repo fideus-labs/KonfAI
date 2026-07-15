@@ -18,6 +18,7 @@
 
 import random
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 
@@ -588,24 +589,35 @@ class Foreign(DataAugmentation):
         self.seeds[index] = torch.randint(0, 2**31 - 1, (len(shapes),)).tolist()
         return shapes
 
-    def _seed(self, seed: int) -> None:
-        """Put the class's random state where the seed says, by both routes a class draws through.
+    @contextmanager
+    def _seeded(self, seed: int):
+        """Put the class's random state where the seed says, and give the process back what it had.
 
         A class draws either from the interpreter's global state, which torchvision's transforms and
         TorchIO's draw from, or from a state of its own, which MONAI's Randomizable holds and reaches
-        through ``set_random_state``. Both are set: which one a class uses is not something the class
-        says.
+        through ``set_random_state``. Both are set: which one a class uses is not something it says.
+
+        The global state belongs to the run, not to this draw. Left where the class stopped, the two
+        groups of one case would leave it in the same place and whatever drew next would draw twice
+        the same -- and torch's seed reaches the devices, where the model draws its own.
         """
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        random.seed(seed)
-        set_random_state = getattr(self.transform, "set_random_state", None)
-        if callable(set_random_state):
-            set_random_state(seed=seed)
+        states = (random.getstate(), np.random.get_state(), torch.random.get_rng_state())
+        try:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            random.seed(seed)
+            set_random_state = getattr(self.transform, "set_random_state", None)
+            if callable(set_random_state):
+                set_random_state(seed=seed)
+            yield
+        finally:
+            random.setstate(states[0])
+            np.random.set_state(states[1])
+            torch.random.set_rng_state(states[2])
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        self._seed(self.seeds[index][a])
-        result = self.transform(tensor)
+        with self._seeded(self.seeds[index][a]):
+            result = self.transform(tensor)
         if not isinstance(result, torch.Tensor):
             result = torch.as_tensor(np.asarray(result))
         if list(result.shape) != list(tensor.shape):
