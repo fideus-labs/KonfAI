@@ -19,6 +19,7 @@
 import math
 import os
 import random
+import re
 import threading
 import traceback
 from abc import ABC, abstractmethod
@@ -38,18 +39,200 @@ from torch.utils.data import DataLoader, Sampler
 from konfai import konfai_root, konfai_state
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import Transform, TransformLoader
+from konfai.data.transform import LocalityKind, Transform, TransformInverse, TransformLoader
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import DatasetManagerError
-from konfai.utils.runtime import State, get_cpu_info, get_memory, get_memory_info, memory_forecast
+from konfai.utils.errors import ConfigError, DatasetManagerError
+from konfai.utils.runtime import (
+    State,
+    available_memory_bytes,
+    get_cpu_info,
+    get_memory,
+    get_memory_info,
+    memory_forecast,
+)
 from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_path_spec
+
+# A cached case is a float32 torch tensor -- torch's default float dtype and the target of the default
+# TensorCast -- so bytes are estimated at 4/element. This models the RAM the cache actually holds rather
+# than the on-disk dtype (an un-cast uint8 mask is over-counted, a rare float64 source under-counted).
+# The estimate reads the raw header shape but no voxels, and deliberately does not model transforms that
+# shrink (resample-down, crop) or grow (pad, one-hot) the cached tensor: an honest over/under-estimate.
+_CACHE_ELEMENT_BYTES = 4
+
+# Fraction of the detected node memory an ``"auto"`` budget offers the cache; the rest is reserved for
+# the model's optimizer/gradient state, DataLoader worker copies, CUDA pinned staging buffers, and
+# allocator slack. Caching runs with zero DataLoader workers, so a fifth of the node held back is ample.
+_AUTO_MEMORY_SAFETY_FRACTION = 0.8
+
+# Decimal (10^n) and binary (2^n) suffixes; "" / "b" are bytes. Case is folded before lookup.
+_MEMORY_UNIT_BYTES: dict[str, int] = {
+    "": 1, "b": 1,
+    "k": 10**3, "kb": 10**3, "kib": 2**10,
+    "m": 10**6, "mb": 10**6, "mib": 2**20,
+    "g": 10**9, "gb": 10**9, "gib": 2**30,
+    "t": 10**12, "tb": 10**12, "tib": 2**40,
+}  # fmt: skip
+
+
+def _format_gib(num_bytes: float) -> str:
+    return f"{num_bytes / 2**30:.2f} GiB"
+
+
+def _parse_memory_budget_bytes(value: str | float) -> int:
+    """Parse an explicit memory budget to bytes: a bare number is GiB, a string carries its own unit.
+
+    KonfAI reports RAM in GiB throughout, so an unadorned ``24`` reads as ``24 GiB`` -- whether it
+    arrives as a number or, through the YAML binding, as the string ``"24"``. A string may name its
+    unit -- decimal ``GB``/``MB`` (10^n) or binary ``GiB``/``MiB`` (2^n), case-insensitive, optional
+    space (``"24GB"``, ``"32 GiB"``, ``"512mb"``); ``"b"`` means bytes. ``"auto"`` is resolved by the
+    caller, not here.
+    """
+    if not isinstance(value, str):
+        if float(value) <= 0:
+            raise ConfigError(
+                f"memory_budget: {value!r} must be a positive size.",
+                "Use a positive number in GiB (e.g. 24), a unit string ('24GB'), 'auto', or None.",
+            )
+        return int(float(value) * 2**30)
+    match = re.fullmatch(r"\s*(?P<number>[0-9]*\.?[0-9]+)\s*(?P<unit>[a-z]*)\s*", value.lower())
+    if match is not None and match.group("unit") in _MEMORY_UNIT_BYTES:
+        if float(match.group("number")) <= 0:
+            raise ConfigError(
+                f"memory_budget: '{value}' must be a positive size.",
+                "Use a positive number in GiB (e.g. 24), a unit string ('24GB'), 'auto', or None.",
+            )
+        unit = match.group("unit")
+        # A bare numeric string is the YAML face of a bare number: GiB, not bytes.
+        factor = 2**30 if unit == "" else _MEMORY_UNIT_BYTES[unit]
+        return int(float(match.group("number")) * factor)
+    raise ConfigError(
+        f"memory_budget: '{value}' is not a valid memory size.",
+        "Use a number in GiB (e.g. 24), a unit string ('24GB', '32GiB', '512MB'), 'auto', or None to "
+        "keep 'use_cache' as given.",
+    )
 
 
 def _cache_worker_count(cpu_count: int, device_count: int) -> int:
     """Number of caching threads: CPUs shared across devices, but never below one."""
     divisor = device_count if device_count > 0 else 1
     return max(1, cpu_count // divisor)
+
+
+def _check_patch_transform_locality(transform: Transform, group_src: str, group_dest: str) -> None:
+    """Reject a transform whose per-patch result cannot equal its case-level result.
+
+    Only POINTWISE and GLOBAL_STAT are correct on one patch (per-patch GLOBAL_STAT means: derive the
+    statistic from this patch; use ``lazy=True`` case-level to feed it the volume's). The messages in
+    ``reasons`` below say why each other kind is rejected. Probed with an empty ``Attribute`` (config
+    time has no case), so an image-decided kind answers WHOLE_VOLUME -- the right answer here.
+    """
+    kind = transform.patch_locality(Attribute()).kind
+    if kind in (LocalityKind.POINTWISE, LocalityKind.GLOBAL_STAT):
+        return
+    name = type(transform).__name__
+    location = f"{konfai_root()}.Dataset.groups_src.{group_src}.groups_dest.{group_dest}"
+    reasons = {
+        LocalityKind.HALO: (
+            f"'{name}' reads a neighbourhood around each voxel, so run per-patch it would see no data"
+            " beyond the patch border and corrupt every patch edge. Running it per-patch is not"
+            " supported yet."
+        ),
+        LocalityKind.ORIENTATION: (
+            f"'{name}' reorients its input: applied to one patch it reorients that patch about its own"
+            " extent, which is not the whole volume reoriented and then cut into patches."
+        ),
+        LocalityKind.CROP: (
+            f"'{name}' crops its input to a box measured on the whole volume: applied to one patch it"
+            " crops that patch about its own extent, and cuts the patch grid predictions are"
+            " reassembled onto down to what is left."
+        ),
+        LocalityKind.RESCALE: (
+            f"'{name}' resamples its input: applied to one patch it rescales that patch about its own"
+            " extent and changes the patch grid predictions are reassembled onto."
+        ),
+        LocalityKind.WHOLE_VOLUME: f"'{name}' needs the whole volume.",
+    }
+    raise ConfigError(
+        f"{location}.patch_transforms: {reasons[kind]}",
+        f"Move '{name}' to {location}.transforms, where it runs once on the whole volume.",
+    )
+
+
+def _check_patch_transform_shape(transform: Transform, group_src: str, group_dest: str) -> None:
+    """Reject a patch_transform that resizes the patch it is handed.
+
+    The patch grid is folded from the CASE-level ``transforms`` only (``DatasetManager``), so a
+    patch_transform that changes the spatial shape hands back a patch the batch cannot collate and the
+    ``Accumulator`` cannot write onto the grid. ``_check_patch_transform_locality`` above takes the
+    transform at its word; this is the structural check, and it is asked of ``transform_shape`` -- the
+    contract every transform already owes the patch planner -- with distinct extents, so a swap or a
+    resize of any single axis shows up. Only the SPATIAL shape is at stake: patching hands
+    ``transform_shape`` the channel-stripped shape, so a transform that changes only the channel count
+    (``OneHot``) is not caught here, and must not be -- the grid it feeds is spatial.
+
+    Runs after the locality check, which is what makes the bare probe attribute safe: by here the
+    transform is POINTWISE or GLOBAL_STAT, and the kinds whose ``transform_shape`` needs real geometry
+    (``Resample`` reads ``Spacing``) have already been rejected.
+    """
+    spatial_shape = [7, 11, 13]
+    shape = list(transform.transform_shape(group_src, "", list(spatial_shape), Attribute()))
+    if shape == spatial_shape:
+        return
+    name = type(transform).__name__
+    location = f"{konfai_root()}.Dataset.groups_src.{group_src}.groups_dest.{group_dest}"
+    raise ConfigError(
+        f"{location}.patch_transforms: '{name}' changes the spatial shape of its input"
+        f" ({spatial_shape} -> {shape}), but a patch must keep the shape the patch grid cut it to.",
+        f"Move '{name}' to {location}.transforms, where the patch grid is folded from its"
+        " transform_shape(); a patch_transform must be spatially shape-preserving.",
+    )
+
+
+def _check_patch_transform_invertible(
+    transform: Transform, case_transforms: list[Transform], group_src: str, group_dest: str
+) -> None:
+    """Reject a per-patch global statistic at prediction, whose inverse cannot be reconstructed.
+
+    A ``GLOBAL_STAT`` transform is allowed in ``patch_transforms`` (see
+    ``_check_patch_transform_locality``): run per patch it standardizes each patch by that patch's OWN
+    statistic, which is what asking for it per-patch means -- correct, and the deliberate training use.
+    But the per-patch statistic lives in the per-patch attribute scope and never reaches the case
+    attribute, so at prediction the finalize inverse -- which seeds every patch from the CASE attribute
+    and pops the statistic -- has nothing to pop. Nor could it: the reassembled volume was normalised
+    patch by patch with different coefficients, so a single case-level inverse cannot un-apply it. Refuse
+    here, at config time, rather than fail deep in the inverse with a bare ``NameError``.
+
+    A case-level ``transforms`` entry that derives the SAME statistic rescues it: run once on the whole
+    volume it caches that statistic on the case attribute (``Standardize(lazy=True)`` caches Mean/Std and
+    applies nothing), which the per-patch inverse then inherits and pops. So the patch transform is only
+    un-invertible when nothing case-level captures its statistic.
+
+    Training-only use stays valid: the check is gated on the prediction state, where the inverse actually
+    runs (``RESUME``/``TRAIN`` never invert patch_transforms, and evaluation drops them entirely).
+    """
+    if konfai_state() != str(State.PREDICTION):
+        return
+    if not (isinstance(transform, TransformInverse) and transform.apply_inverse):
+        return
+    locality = transform.patch_locality(Attribute())
+    if locality.kind is not LocalityKind.GLOBAL_STAT:
+        return
+    if any(
+        (case_locality := case.patch_locality(Attribute())).kind is LocalityKind.GLOBAL_STAT
+        and locality.stat_keys <= case_locality.stat_keys
+        for case in case_transforms
+    ):
+        return
+    name = type(transform).__name__
+    location = f"{konfai_root()}.Dataset.groups_src.{group_src}.groups_dest.{group_dest}"
+    raise ConfigError(
+        f"{location}.patch_transforms: '{name}' derives its statistic from each patch, but prediction"
+        " must invert it and a per-patch statistic cannot be un-applied to the reassembled volume.",
+        f"Capture the volume-global statistic case-level instead: put '{name}(lazy=True)' in"
+        f" {location}.transforms (it traverses the whole volume, caches the statistic and applies"
+        f" nothing), and keep '{name}()' in patch_transforms to consume it.",
+    )
 
 
 class GroupTransform:
@@ -88,6 +271,9 @@ class GroupTransform:
                     konfai_args=f"{konfai_root()}.Dataset.groups_src.{group_src}"
                     f".groups_dest.{group_dest}.patch_transforms",
                 )
+                _check_patch_transform_locality(transform, group_src, group_dest)
+                _check_patch_transform_shape(transform, group_src, group_dest)
+                _check_patch_transform_invertible(transform, self.transforms, group_src, group_dest)
                 self.patch_transforms.append(transform)
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
@@ -142,18 +328,88 @@ class GroupMetric(dict[str, GroupTransformMetric]):
         super().__init__(groups_dest)
 
 
-class CustomSampler(Sampler[int]):
-    """Simple sampler that optionally shuffles indices without distributed logic."""
+class WindowedCaseSampler(Sampler[int]):
+    """Locality-aware training order: shuffle cases, window them, shuffle patches within each window.
 
-    def __init__(self, size: int, shuffle: bool = False) -> None:
-        self.size = size
+    ``DatasetIter`` loads each non-streamable case into a FIFO buffer, so a global patch shuffle
+    reloads a volume once per patch that lands after an eviction (7-56x redundant reads). Keeping only
+    ``window`` cases in play at a time — their patches shuffled together, emitted before advancing —
+    reads each volume ~once. ``window`` is the decorrelation knob: ``1`` is perfect locality, and
+    ``None`` (default) or ``>= n_cases`` is a single all-cases window, i.e. a plain global shuffle,
+    byte for byte.
+
+    A map-style ``DataLoader`` sends batch ``j`` to worker ``j % num_workers`` and gives each worker its
+    own buffer, so the cases are partitioned across workers (``position % num_workers``) and the
+    per-worker windowed batches are round-robin interleaved: batch ``j`` then carries only worker
+    ``j % num_workers``'s cases, and every volume is read by exactly one worker.
+    """
+
+    def __init__(
+        self,
+        mapping: list[tuple[int, int, int]],
+        shuffle: bool,
+        window: int | None,
+        batch_size: int,
+        num_workers: int,
+    ) -> None:
+        self.mapping = mapping
         self.shuffle = shuffle
+        self.batch_size = max(1, batch_size)
+        self.num_workers = max(1, num_workers)
+        self.case_entries: dict[int, list[int]] = {}
+        for index, entry in enumerate(mapping):
+            self.case_entries.setdefault(entry[0], []).append(index)
+        # Windowing bites only when a window is both smaller than the case count and shardable across
+        # the workers; anything else is a single all-cases window, i.e. a plain global shuffle.
+        n_cases = len(self.case_entries)
+        self.window = window if window is not None and 0 < window < n_cases and self.num_workers <= n_cases else None
+
+    def _partitions(self) -> list[list[int]]:
+        cases = list(self.case_entries)
+        return [cases[worker :: self.num_workers] for worker in range(self.num_workers)]
+
+    def _windowed_order(self) -> list[int]:
+        generator = torch.Generator().manual_seed(int(torch.randint(0, 2**31 - 1, (1,)).item()))
+        window = cast(int, self.window)
+
+        def shuffled(items: list[int]) -> list[int]:
+            return [items[i] for i in torch.randperm(len(items), generator=generator).tolist()]
+
+        streams: list[list[int]] = []
+        for partition in self._partitions():
+            cases = shuffled(partition)
+            stream: list[int] = []
+            for start in range(0, len(cases), window):
+                stream += shuffled(
+                    [index for case in cases[start : start + window] for index in self.case_entries[case]]
+                )
+            streams.append(stream)
+
+        # Round-robin interleave equal-length per-worker batches so batch j lands on worker
+        # j % num_workers. The modulo wraps each stream's head to fill its final short batch and to pad
+        # up to the longest worker -- the same bounded duplication the DDP shard split relies on.
+        batch = self.batch_size
+        order: list[int] = []
+        for start in range(0, self._batches_per_worker() * batch, batch):
+            for stream in streams:
+                order += [stream[i % len(stream)] for i in range(start, start + batch)]
+        return order
+
+    def _batches_per_worker(self) -> int:
+        patches = [sum(len(self.case_entries[case]) for case in partition) for partition in self._partitions()]
+        return max((math.ceil(count / self.batch_size) for count in patches), default=0)
 
     def __iter__(self) -> Iterator[int]:
-        return iter(torch.randperm(len(self)).tolist() if self.shuffle else list(range(len(self))))
+        if not self.shuffle:
+            return iter(range(len(self.mapping)))
+        if self.window is None:
+            return iter(torch.randperm(len(self.mapping)).tolist())
+        return iter(self._windowed_order())
 
     def __len__(self) -> int:
-        return self.size
+        if not self.shuffle or self.window is None:
+            return len(self.mapping)
+        return self._batches_per_worker() * self.num_workers * self.batch_size
 
 
 @dataclass(frozen=True)
@@ -405,9 +661,11 @@ class Subset:
         self,
         subset: str | list[int] | list[str] | None = None,
         shuffle: bool = True,
+        shuffle_window: int | None = None,
     ) -> None:
         self.subset = subset
         self.shuffle = shuffle
+        self.shuffle_window = shuffle_window
 
     @staticmethod
     def _read_names_from_file(filename: str) -> list[str]:
@@ -487,7 +745,14 @@ class Subset:
         return {names[i] for i in index}
 
     def __str__(self):
-        return "Subset : " + str(self.subset) + " shuffle : " + str(self.shuffle)
+        return (
+            "Subset : "
+            + str(self.subset)
+            + " shuffle : "
+            + str(self.shuffle)
+            + " shuffle_window : "
+            + str(self.shuffle_window)
+        )
 
 
 class TrainSubset(Subset):
@@ -495,13 +760,14 @@ class TrainSubset(Subset):
         self,
         subset: str | list[int] | list[str] | None = None,
         shuffle: bool = True,
+        shuffle_window: int | None = None,
     ) -> None:
-        super().__init__(subset, shuffle)
+        super().__init__(subset, shuffle, shuffle_window)
 
 
 class PredictionSubset(Subset):
     def __init__(self, subset: str | list[int] | list[str] | None = None) -> None:
-        super().__init__(subset, False)
+        super().__init__(subset, False, None)
 
 
 class Data(ABC):
@@ -561,6 +827,7 @@ class Data(ABC):
         pin_memory: bool,
         prefetch_factor: int | None,
         persistent_workers: bool | None,
+        memory_budget: str | float | None,
     ) -> None:
         self.dataset_filenames = dataset_filenames
         self.subset = subset
@@ -570,32 +837,22 @@ class Data(ABC):
         self.validation_augmentations = validation_augmentations
         self.data_augmentations_list = data_augmentations_list
         self.batch_size = batch_size
-        self.use_cache = use_cache
         self.inline_augmentations = inline_augmentations
+        self.memory_budget = memory_budget
         self.requires_single_process_loading = self._groups_require_single_process_loading(groups_src)
 
-        self.datasetIter = partial(
-            DatasetIter,
-            groups_src=self.groups_src,
-            inline_augmentations=inline_augmentations,
-            patch_size=self.patch.patch_size if self.patch is not None else None,
-            overlap=self.patch.overlap if self.patch is not None else None,
-            buffer_size=batch_size + 1,
-            use_cache=use_cache,
-        )
-        resolved_num_workers = num_workers
-        if self.requires_single_process_loading:
-            resolved_num_workers = 0
-        elif resolved_num_workers is None:
-            resolved_num_workers = max(1, min(os.cpu_count() or 1, 4)) if not use_cache else 0
-        self.dataLoader_args = {
-            "num_workers": resolved_num_workers,
-            "pin_memory": pin_memory,
-            "collate_fn": collate_konfai,
-        }
-        if resolved_num_workers > 0:
-            self.dataLoader_args["prefetch_factor"] = 2 if prefetch_factor is None else prefetch_factor
-            self.dataLoader_args["persistent_workers"] = True if persistent_workers is None else persistent_workers
+        # A window keeps ``shuffle_window`` cases resident, so the FIFO buffer must be at least that
+        # large or a window would evict its own cases before their patches are consumed. Unwindowed,
+        # one batch plus the case being read is all a loader ever holds at once.
+        window = subset.shuffle_window
+        self._buffer_size = batch_size + 1 if window is None else max(batch_size + 1, window)
+        self._num_workers = num_workers
+        self._pin_memory = pin_memory
+        self._prefetch_factor = prefetch_factor
+        self._persistent_workers = persistent_workers
+        # ``memory_budget`` may later override ``use_cache`` (once the dataset size is known, in
+        # ``get_data``), which reshapes the loader; both paths funnel through the same builder.
+        self._configure_data_loading(use_cache)
         self.data: list[list[dict[str, list[DatasetManager]]]] = []
         self.mapping: list[list[list[tuple[int, int, int]]]] = []
         self.datasets: dict[str, Dataset] = {}
@@ -605,6 +862,95 @@ class Data(ABC):
         self._prepared_validation_mapping: list[tuple[int, int, int]] = []
         self._prepared_train_names: list[str] = []
         self._prepared_validation_names: list[str] = []
+
+    def _configure_data_loading(self, use_cache: bool) -> None:
+        """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
+
+        Called once from ``__init__`` with the declared ``use_cache`` and, when a ``memory_budget``
+        overrides it, again from ``get_data`` with the derived value. Caching preloads every case up
+        front, so it defaults to zero DataLoader workers; the streaming/buffer path spins workers up.
+        """
+        self.use_cache = use_cache
+        self.datasetIter = partial(
+            DatasetIter,
+            groups_src=self.groups_src,
+            inline_augmentations=self.inline_augmentations,
+            patch_size=self.patch.patch_size if self.patch is not None else None,
+            overlap=self.patch.overlap if self.patch is not None else None,
+            buffer_size=self._buffer_size,
+            use_cache=use_cache,
+        )
+        resolved_num_workers = self._num_workers
+        if self.requires_single_process_loading:
+            resolved_num_workers = 0
+        elif resolved_num_workers is None:
+            resolved_num_workers = max(1, min(os.cpu_count() or 1, 4)) if not use_cache else 0
+        self.resolved_num_workers: int = resolved_num_workers
+        self.dataLoader_args: dict[str, object] = {
+            "num_workers": resolved_num_workers,
+            "pin_memory": self._pin_memory,
+            "collate_fn": collate_konfai,
+        }
+        if resolved_num_workers > 0:
+            self.dataLoader_args["prefetch_factor"] = 2 if self._prefetch_factor is None else self._prefetch_factor
+            self.dataLoader_args["persistent_workers"] = (
+                True if self._persistent_workers is None else self._persistent_workers
+            )
+
+    def _estimate_cached_bytes(self) -> int:
+        """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read).
+
+        Sums ``prod(shape) x 4`` over every case of every source group (train and validation), taking
+        the raw header shape recorded on each :class:`DatasetManager`. See ``_CACHE_ELEMENT_BYTES``:
+        this is an honest header-only estimate that ignores size-changing transforms.
+        """
+        total = 0
+        for prepared in (self._prepared_data, self._prepared_validation_data):
+            for managers in (prepared or {}).values():
+                for manager in managers:
+                    total += int(np.prod(manager.base_shape, dtype=np.int64)) * _CACHE_ELEMENT_BYTES
+        return total
+
+    def _resolve_cache_regime(self, world_size: int) -> None:
+        """Derive ``use_cache`` from ``memory_budget``, or leave the declared value untouched.
+
+        ``None`` keeps today's behaviour exactly. Otherwise the cache is chosen iff the per-rank
+        dataset (``dataset / world_size`` -- ``Data._split`` shards cases across ranks) fits the
+        per-rank budget: an explicit budget is taken as declared per rank; ``"auto"`` divides the
+        detected node memory (cgroup-capped) by the ranks sharing it, so its ``world_size`` cancels
+        and it reduces to "does the whole dataset fit the node". The decision is logged once here --
+        ``get_data`` runs on the launcher alone, before any worker is spawned.
+        """
+        if self.memory_budget is None:
+            return
+        world_size = max(1, world_size)
+        n_cases = len(self._prepared_train_names) + len(self._prepared_validation_names)
+        dataset_bytes = self._estimate_cached_bytes()
+        per_rank_bytes = dataset_bytes / world_size
+
+        if isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto":
+            node_bytes, source = available_memory_bytes()
+            per_rank_budget = node_bytes * _AUTO_MEMORY_SAFETY_FRACTION / world_size
+            budget_desc = f"auto: {_format_gib(node_bytes)} {source} x {_AUTO_MEMORY_SAFETY_FRACTION:.0%}, per-rank"
+        else:
+            per_rank_budget = float(_parse_memory_budget_bytes(self.memory_budget))
+            budget_desc = f"{self.memory_budget!r}, per-rank"
+
+        use_cache = per_rank_bytes <= per_rank_budget
+        self._configure_data_loading(use_cache)
+
+        decision = f"CACHE the whole dataset in RAM ({self.resolved_num_workers} loader workers)"
+        if not use_cache:
+            case_bytes = dataset_bytes / max(1, n_cases)
+            decision = (
+                f"STREAM/BUFFER, no cache; FIFO working set ~= {self._buffer_size} cases x "
+                f"{_format_gib(case_bytes)} = {_format_gib(self._buffer_size * case_bytes)} per worker"
+            )
+        print(
+            f"[KonfAI] memory_budget: dataset ~= {_format_gib(dataset_bytes)} over {n_cases} cases | "
+            f"per-rank ~= {_format_gib(per_rank_bytes)} across {world_size} rank(s) | "
+            f"budget {_format_gib(per_rank_budget)} ({budget_desc}) -> {decision}"
+        )
 
     def _get_data_augmentations(self, apply_augmentations: bool = True) -> list[DataAugmentationsList]:
         return list(self.data_augmentations_list.values()) if apply_augmentations else []
@@ -1035,6 +1381,7 @@ class Data(ABC):
         if self._prepared_data is None or self._prepared_validation_data is None:
             raise DatasetManagerError("Dataset configuration was not prepared before runtime data loading.")
 
+        self._resolve_cache_regime(world_size)
         self.data = []
         self.mapping = []
         train_mappings = Data._split(self._prepared_mapping, world_size)
@@ -1056,6 +1403,10 @@ class Data(ABC):
         for i, (datas, mappings) in enumerate(zip(self.data, self.mapping, strict=False)):
             data_loaders.append([])
             for loader_index, (dataset_items, mapping) in enumerate(zip(datas, mappings, strict=False)):
+                # Windowing is a training-order knob, so it reaches the shuffled training loader only
+                # (loader_index == 0). Validation is scored over the whole subset whatever the order,
+                # and ``None`` keeps it on the plain global one.
+                window = self.subset.shuffle_window if loader_index == 0 else None
                 data_loaders[i].append(
                     DataLoader(
                         dataset=self.datasetIter(
@@ -1067,7 +1418,13 @@ class Data(ABC):
                             ),
                             apply_augmentations=loader_index == 0 or self.validation_augmentations,
                         ),
-                        sampler=CustomSampler(len(mapping), self.subset.shuffle),
+                        sampler=WindowedCaseSampler(
+                            mapping,
+                            self.subset.shuffle,
+                            window,
+                            self.batch_size,
+                            self.resolved_num_workers,
+                        ),
                         batch_size=self.batch_size,
                         **self.dataLoader_args,
                     )
@@ -1080,6 +1437,7 @@ class Data(ABC):
             "groups_src": self.groups_src,
             "patch": self.patch,
             "use_cache": self.use_cache,
+            "memory_budget": self.memory_budget,
             "subset": self.subset,
             "batch_size": self.batch_size,
             "validation": self.validation,
@@ -1105,6 +1463,7 @@ class DataTrain(Data):
         inline_augmentations: bool = False,
         patch: DatasetPatch | None = DatasetPatch(),
         use_cache: bool = True,
+        memory_budget: str | float | None = None,
         subset: TrainSubset = TrainSubset(),
         batch_size: int = 1,
         validation: float | str | list[int] | list[str] | None = 0.2,
@@ -1129,6 +1488,7 @@ class DataTrain(Data):
             pin_memory,
             prefetch_factor,
             persistent_workers,
+            memory_budget,
         )
 
 
@@ -1142,6 +1502,7 @@ class DataPrediction(Data):
         groups_src: dict[str, Group] = {"default": Group()},
         augmentations: dict[str, DataAugmentationsList] | None = {"DataAugmentation_0": DataAugmentationsList()},
         patch: DatasetPatch | None = DatasetPatch(),
+        memory_budget: str | float | None = None,
         subset: PredictionSubset = PredictionSubset(),
         batch_size: int = 1,
         num_workers: int | None = None,
@@ -1165,6 +1526,7 @@ class DataPrediction(Data):
             pin_memory=pin_memory,
             prefetch_factor=prefetch_factor,
             persistent_workers=False if persistent_workers is None else persistent_workers,
+            memory_budget=memory_budget,
         )
 
 
@@ -1176,6 +1538,7 @@ class DataMetric(Data):
         self,
         dataset_filenames: list[str] = ["default|./Dataset:mha"],
         groups_src: dict[str, GroupMetric] = {"default": GroupMetric()},
+        memory_budget: str | float | None = None,
         subset: PredictionSubset = PredictionSubset(),
         validation: str | list[int] | list[str] | None = None,
         num_workers: int | None = None,
@@ -1199,4 +1562,5 @@ class DataMetric(Data):
             pin_memory=pin_memory,
             prefetch_factor=prefetch_factor,
             persistent_workers=persistent_workers,
+            memory_budget=memory_budget,
         )
