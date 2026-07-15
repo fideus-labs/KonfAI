@@ -26,9 +26,19 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
-from konfai.data.data_manager import Data, DatasetIter, DataTrain, Group, GroupTransform, _cache_worker_count
+from konfai.data.data_manager import (
+    Data,
+    DatasetIter,
+    DataTrain,
+    Group,
+    GroupTransform,
+    PredictionSubset,
+    TrainSubset,
+    WindowedCaseSampler,
+    _cache_worker_count,
+)
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import TensorCast
+from konfai.data.transform import TensorCast, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.runtime import State
 
@@ -233,6 +243,17 @@ def test_streaming_tensorcast_persists_source_dtype_for_inverse() -> None:
 # --------------------------------------------------------------------------------------
 
 
+class _WholeVolumeTransform(Transform):
+    """A spatial identity that declares nothing, so its chain can only run on a whole volume.
+
+    Cases here are about what happens once a volume is resident -- the FIFO buffer, the augmentation
+    draws -- so they need a chain the streamer refuses. Declaring it is how a chain says so.
+    """
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensor
+
+
 class _DummyDataset:
     def __init__(self, array: np.ndarray) -> None:
         self.array = array
@@ -257,14 +278,9 @@ class _CountingOffsetAugmentation(DataAugmentation):
     ) -> list[list[int]]:
         return shapes
 
-    def _compute(
-        self,
-        name: str,
-        index: int,
-        tensors: list[torch.Tensor],
-    ) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         self.compute_calls += 1
-        return [tensor + (offset + 1) for offset, tensor in enumerate(tensors)]
+        return tensor + (a + 1)
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         return tensor
@@ -278,7 +294,7 @@ def _make_manager(dataset: Dataset, augmentations: DataAugmentationsList, group_
         name="case_000",
         dataset=dataset,
         patch=None,
-        transforms=[],
+        transforms=[_WholeVolumeTransform()],
         data_augmentations_list=[augmentations],
     )
 
@@ -313,12 +329,13 @@ def test_inline_augmentations_are_loaded_on_demand() -> None:
     assert torch.equal(base_sample, torch.from_numpy(base))
 
     first_augmented_sample = dataset_iter[1]["dest"].tensor
-    assert augmentation.compute_calls == 1
+    # One call per copy: the group's two copies are drawn together, on first demand.
+    assert augmentation.compute_calls == 2
     assert manager.augmentationLoaded is True
     assert torch.equal(first_augmented_sample, torch.from_numpy(base) + 1)
 
     second_augmented_sample = dataset_iter[2]["dest"].tensor
-    assert augmentation.compute_calls == 1
+    assert augmentation.compute_calls == 2
     assert torch.equal(second_augmented_sample, torch.from_numpy(base) + 2)
 
 
@@ -372,8 +389,8 @@ class _DrawCountingAugmentation(DataAugmentation):
         new_shape = [2, 4] if self.draws == 1 else [4, 4]
         return [list(new_shape) for _ in shapes]
 
-    def _compute(self, name: str, index: int, tensors: list[torch.Tensor]) -> list[torch.Tensor]:
-        return tensors
+    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         return tensor
@@ -434,3 +451,180 @@ def test_reset_augmentation_shares_one_draw_across_destination_groups() -> None:
     assert augmentation.draws == 1
     # Both groups therefore rebuild their augmented patch grid from the same shape.
     assert manager_a.patch.get_size(1) == manager_b.patch.get_size(1)
+
+
+# --------------------------------------------------------------------------------------
+# WindowedCaseSampler - locality-aware training order, worker sharding, buffer hit rate
+# --------------------------------------------------------------------------------------
+
+
+def _case_major_mapping(n_cases: int, patches_per_case: int) -> list[tuple[int, int, int]]:
+    return [(x, 0, p) for x in range(n_cases) for p in range(patches_per_case)]
+
+
+def _distinct_cases_per_slice(order: list[int], mapping: list[tuple[int, int, int]], slice_len: int) -> int:
+    cases = [mapping[i][0] for i in order]
+    return max(len(set(cases[k : k + slice_len])) for k in range(0, len(order) - slice_len + 1, slice_len))
+
+
+def test_windowed_sampler_none_is_exact_global_shuffle() -> None:
+    # window=None is the default and MUST be byte-identical to the historical global randperm so it
+    # never silently changes training statistics.
+    mapping = _case_major_mapping(6, 4)
+    sampler = WindowedCaseSampler(mapping, shuffle=True, window=None, batch_size=2, num_workers=1)
+    torch.manual_seed(2024)
+    got = list(iter(sampler))
+    torch.manual_seed(2024)
+    expected = torch.randperm(len(mapping)).tolist()
+    assert got == expected
+    assert len(sampler) == len(mapping)
+
+
+def test_windowed_sampler_full_window_degenerates_to_global_shuffle() -> None:
+    # window == n_cases is the compat escape hatch: it degenerates EXACTLY to the global shuffle.
+    mapping = _case_major_mapping(6, 4)
+    n_cases = 6
+    sampler = WindowedCaseSampler(mapping, shuffle=True, window=n_cases, batch_size=2, num_workers=1)
+    torch.manual_seed(11)
+    got = list(iter(sampler))
+    torch.manual_seed(11)
+    expected = torch.randperm(len(mapping)).tolist()
+    assert got == expected
+    # An oversized window is also the global shuffle (no windowing).
+    sampler_big = WindowedCaseSampler(mapping, shuffle=True, window=n_cases + 5, batch_size=2, num_workers=1)
+    torch.manual_seed(11)
+    assert list(iter(sampler_big)) == expected
+
+
+def test_windowed_sampler_keeps_a_bounded_set_of_cases_resident() -> None:
+    mapping = _case_major_mapping(12, 5)
+    for window in (1, 2, 3):
+        sampler = WindowedCaseSampler(mapping, shuffle=True, window=window, batch_size=2, num_workers=1)
+        order = list(iter(sampler))
+        # Every original patch is represented and only bounded padding duplicates are added.
+        assert set(order) >= set(range(len(mapping)))
+        assert len(order) - len(set(order)) <= sampler.batch_size
+        # A window slice (window cases * patches_per_case) touches at most `window` distinct cases.
+        assert _distinct_cases_per_slice(order, mapping, window * 5) <= window
+
+
+def test_windowed_sampler_shards_cases_across_workers_without_overlap() -> None:
+    # A map-style DataLoader sends batch j to worker j % num_workers, and each worker holds its own
+    # buffer. The sampler must therefore give each batch only its worker-partition's cases so a case
+    # is never loaded by more than one worker (no num_workers-fold RAM/I/O blow-up).
+    mapping = _case_major_mapping(16, 4)
+    for num_workers in (2, 4):
+        sampler = WindowedCaseSampler(mapping, shuffle=True, window=2, batch_size=2, num_workers=num_workers)
+        order = list(iter(sampler))
+        batches = [order[i : i + 2] for i in range(0, len(order), 2)]
+        cases = list(sampler.case_entries.keys())
+        partition_of = {case: position % num_workers for position, case in enumerate(cases)}
+        worker_cases: dict[int, set[int]] = {w: set() for w in range(num_workers)}
+        for batch_index, batch in enumerate(batches):
+            for sample_index in batch:
+                case = mapping[sample_index][0]
+                # every sample in batch j belongs to partition j % num_workers
+                assert partition_of[case] == batch_index % num_workers
+                worker_cases[batch_index % num_workers].add(case)
+        for a in range(num_workers):
+            for b in range(a + 1, num_workers):
+                assert worker_cases[a].isdisjoint(worker_cases[b])
+
+
+class _WholeVolumeDataset:
+    """In-memory dataset whose patches are non-streamable (forces the FIFO case-load path)."""
+
+    def __init__(self, volume: np.ndarray) -> None:
+        self.volume = volume
+
+    def get_infos(self, group_src: str, name: str) -> tuple[list[int], Attribute]:
+        return list(self.volume.shape), Attribute({"name": name})
+
+    def read_data(self, group_src: str, name: str) -> tuple[np.ndarray, Attribute]:
+        return self.volume.copy(), Attribute({"name": name})
+
+
+def _reload_count(order: list[int], mapping: list[tuple[int, int, int]], n_cases: int, buffer_size: int) -> int:
+    dataset = cast(Dataset, _WholeVolumeDataset(np.zeros((1, 8, 8), dtype=np.float32)))
+    augmentations = DataAugmentationsList(nb=0, data_augmentations={})
+    augmentation = _CountingOffsetAugmentation()
+    augmentation.load(1.0)
+    augmentations.data_augmentations = [augmentation]
+    managers = [
+        DatasetManager(
+            index=i,
+            group_src="src",
+            group_dest="dest",
+            name=f"case_{i:03d}",
+            dataset=dataset,
+            patch=DatasetPatch([4, 4]),
+            transforms=[_WholeVolumeTransform()],
+            data_augmentations_list=[augmentations],
+        )
+        for i in range(n_cases)
+    ]
+    dataset_iter = DatasetIter(
+        rank=0,
+        data={"dest": managers},
+        mapping=mapping,
+        groups_src={"src": Group(groups_dest={"dest": GroupTransform(transforms=None, patch_transforms=None)})},
+        inline_augmentations=False,
+        data_augmentations_list=[augmentations],
+        patch_size=[4, 4],
+        overlap=None,
+        buffer_size=buffer_size,
+        use_cache=False,
+    )
+    reloads = {"n": 0}
+    original = dataset_iter._load_data
+
+    def counting_load(index: int, augmentation_index: int | None = None) -> bool:
+        loaded = original(index, augmentation_index)
+        if loaded:
+            reloads["n"] += 1
+        return loaded
+
+    dataset_iter._load_data = counting_load  # type: ignore[method-assign]
+    for sample_index in order:
+        dataset_iter[sample_index]
+    return reloads["n"]
+
+
+def test_windowed_sampler_reaches_one_read_per_case() -> None:
+    # The whole point: a windowed epoch loads each volume ~once, versus many times for global shuffle.
+    n_cases, patches_per_case = 10, 4
+    mapping = _case_major_mapping(n_cases, patches_per_case)
+
+    torch.manual_seed(0)
+    global_order = WindowedCaseSampler(mapping, shuffle=True, window=None, batch_size=2, num_workers=1)
+    global_reloads = _reload_count(list(iter(global_order)), mapping, n_cases, buffer_size=3)
+
+    windowed = WindowedCaseSampler(mapping, shuffle=True, window=2, batch_size=2, num_workers=1)
+    windowed_reloads = _reload_count(list(iter(windowed)), mapping, n_cases, buffer_size=max(3, 2))
+
+    # Global shuffle thrashes (well above one read per case); the window reads each case exactly once.
+    assert global_reloads > n_cases
+    assert windowed_reloads == n_cases
+
+
+def test_prediction_subset_order_stays_case_major_and_unwindowed() -> None:
+    # The prediction path uses shuffle=False. The sampler must emit the identity (case-major) order and
+    # ignore any window, so the prediction buffer keeps hitting ~100% and stays byte-identical.
+    mapping = _case_major_mapping(5, 3)
+    prediction = PredictionSubset()
+    assert prediction.shuffle is False
+    assert prediction.shuffle_window is None
+    sampler = WindowedCaseSampler(mapping, shuffle=prediction.shuffle, window=None, batch_size=1, num_workers=4)
+    assert list(iter(sampler)) == list(range(len(mapping)))
+    # A window is inert once shuffle is off: still the case-major identity order.
+    windowed = WindowedCaseSampler(mapping, shuffle=False, window=2, batch_size=1, num_workers=4)
+    assert list(iter(windowed)) == list(range(len(mapping)))
+
+
+def test_train_subset_exposes_shuffle_window_knob() -> None:
+    # The knob is a plain constructor argument so the reflection config engine can bind it.
+    default = TrainSubset()
+    assert default.shuffle_window is None
+    configured = TrainSubset(shuffle_window=4)
+    assert configured.shuffle_window == 4
+    assert configured.shuffle is True
