@@ -129,6 +129,7 @@ Common fields:
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
 | `use_cache` | bool | `true` | Cache transformed data in memory. |
+| `memory_budget` | number / string / null | `null` | RAM budget from which `use_cache` is derived. `null` keeps `use_cache` as given; a number is GiB, a string carries a unit (`"24GB"`, `"32GiB"`); `"auto"` reads the available RAM (cgroup-aware). |
 | `subset` | object | `TrainSubset()` | Restricts which cases are used. |
 | `batch_size` | int | `1` | Batch size. |
 | `num_workers` | int or null | `None` | Number of DataLoader workers. When `use_cache: false`, `None` auto-enables worker prefetching. |
@@ -138,8 +139,11 @@ Common fields:
 | `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. |
 | `validation_augmentations` | bool | `true` | Whether validation also iterates over augmented variants. Set `false` to validate only on base (non-augmented) samples. |
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
+| `shuffle_window` | int or null | `null` through subset | Locality-aware shuffle: keeps only this many cases resident at once (their patches shuffled together) before advancing. Bounds the per-case load buffer so each volume is read about once per epoch on the non-streamable path. `null` (default) or a value `>=` the number of cases keeps the historical global shuffle. |
 
-When `use_cache: false`, KonfAI now tries to stream patches directly from disk instead of materializing full volumes in RAM. This path is used automatically when the configured preprocessing chain is compatible with patch-wise loading; otherwise KonfAI falls back to the existing full-volume loading path.
+When `use_cache: false`, KonfAI now tries to stream patches directly from disk instead of materializing full volumes in RAM. This path is used automatically when the configured preprocessing chain is compatible with patch-wise loading; otherwise KonfAI falls back to the existing full-volume loading path. On the non-streamable fallback, a global `shuffle` reloads each volume once per patch that follows a buffer eviction; set `shuffle_window` to keep a bounded set of cases resident and read each volume about once. Cases are also sharded across `num_workers` so a volume is loaded by only one worker.
+
+Instead of hand-picking `use_cache`, declare a `memory_budget` and let KonfAI derive the regime: it estimates the dataset size from image headers alone (no voxel read), caches iff the per-rank share (`dataset_size / world_size`, since cases are sharded across ranks) fits the budget, and otherwise falls back to the streaming/buffer path. A number is read as GiB, a string carries its own unit (`"24GB"` decimal, `"32GiB"` binary), and `"auto"` uses a fraction of the detected RAM — read from the **cgroup limit** when running under a container or SLURM, so it is not fooled by the host's total. The chosen regime, the estimate, and the budget (with its source) are logged once at startup. The estimate is the raw header size and deliberately ignores transforms that shrink (resample-down, crop) or grow (pad, one-hot) the cached tensor, so treat it as an honest approximation rather than an exact footprint.
 
 ### `groups_src`
 

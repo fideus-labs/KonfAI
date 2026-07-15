@@ -128,6 +128,54 @@ def get_memory() -> float:
     return psutil.virtual_memory().used / 2**30
 
 
+# psutil.virtual_memory() always reports the HOST, so inside a container or a SLURM cgroup that grants
+# far less than the node has, a memory budget derived from it would overshoot the real limit and get
+# OOM-killed. The cgroup ceiling is read directly instead. cgroup v2 exposes ``memory.max`` (the literal
+# ``"max"`` means unbounded); cgroup v1 exposes ``memory.limit_in_bytes`` with a page-aligned near
+# INT64_MAX sentinel that means the same. Only Linux has these files; every other host has no cgroup.
+_CGROUP_V2_MEMORY_MAX = "/sys/fs/cgroup/memory.max"
+_CGROUP_V1_MEMORY_LIMIT = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+_CGROUP_UNLIMITED = 1 << 62  # any v1 limit at or above this is the "no limit" sentinel
+
+
+def _read_cgroup_memory_limit() -> int | None:
+    """Return this process's cgroup memory ceiling in bytes, or ``None`` when unbounded or absent.
+
+    Tries cgroup v2 first, then v1. A missing file (non-Linux host, or cgroups disabled), the ``"max"``
+    keyword, the v1 sentinel, or an unparseable value all resolve to ``None`` -- "no cgroup limit".
+    """
+    try:
+        raw = Path(_CGROUP_V2_MEMORY_MAX).read_text().strip()
+    except OSError:
+        raw = ""
+    if raw:
+        if raw == "max":
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    try:
+        limit = int(Path(_CGROUP_V1_MEMORY_LIMIT).read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return None if limit >= _CGROUP_UNLIMITED else limit
+
+
+def available_memory_bytes() -> tuple[int, str]:
+    """Return ``(bytes a process may safely allocate, source label)``, honouring a cgroup limit.
+
+    ``psutil`` sees the host's free RAM, which overshoots a container/cgroup ceiling; the tighter of
+    the cgroup limit and the host figure wins, so the number is safe on a bare host and in a
+    memory-capped container alike. The label names which bound won, for the startup decision log.
+    """
+    host_available = int(psutil.virtual_memory().available)
+    limit = _read_cgroup_memory_limit()
+    if limit is not None and limit < host_available:
+        return limit, "cgroup limit"
+    return host_available, "host available RAM"
+
+
 def configure_workflow_environment(
     *,
     config_path: Path | str,
