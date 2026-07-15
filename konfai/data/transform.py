@@ -637,22 +637,9 @@ class Resample(TransformInverse, ABC):
             cache_attribute.pop_np_array("Spacing")
         return self._resample(tensor, [int(size) for size in size_1])
 
-    # ------------------------------------------------------------------
-    # Patch-native streaming support.
-    #
-    # These methods let the patch pipeline resample ONE output patch by
-    # reading only the corresponding source region (+ a small halo) instead
-    # of materialising the whole volume. They are numerically identical to a
-    # whole-volume F.interpolate down to fp32 weight-rounding, and byte-
-    # identical patch-to-patch (zero seam error) because every patch derives
-    # its source coordinates from the SAME global mapping:
-    #
-    #     scale_k = n_in_k / n_out_k        (integer sizes, align_corners=False)
-    #     src(o)  = clamp(scale_k*(o+0.5) - 0.5, min=0)
-    #
-    # `transform_shape` already returns n_out (array order Z,Y,X), so the scale
-    # is taken from the truncated integer sizes exactly as F.interpolate does.
-    # ------------------------------------------------------------------
+    # Every patch derives its source coordinates from the same global scale (n_in / n_out, from the
+    # truncated integer sizes F.interpolate itself uses), which is what makes the streamed patches
+    # agree with the whole-volume call and with each other across a seam.
     def _stream_mode(self, tensor: torch.Tensor) -> str:
         if tensor.dtype == torch.uint8:
             return "nearest"
@@ -1174,11 +1161,8 @@ class Save(Transform):
         self.dataset = dataset
         self.group = group
 
-    # patch_locality stays the WHOLE_VOLUME default on purpose. Although Save is a spatial identity,
-    # a Save that survives in the trailing chain (its cached dataset does not yet exist) must WRITE
-    # the fully preprocessed volume to disk. The streaming path applies transforms per patch and never
-    # materialises the whole volume, so it has no volume to write: declaring whole-volume is what keeps
-    # the caching side effect. A Save whose cache already exists is handled earlier, as a source boundary.
+    # WHOLE_VOLUME on purpose: a Save still in the chain must WRITE the preprocessed volume, and the
+    # streamed path never has one to write. (A Save whose cache exists is a source boundary instead.)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor
@@ -1384,11 +1368,8 @@ class Canonical(TransformInverse):
         )
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        # ``shape`` is the channel-stripped SPATIAL shape -- patching strips [C, *spatial] before folding
-        # transform_shape -- and the patch grid is folded from what this returns, so a remap that
-        # transposes extents moves the grid onto the reoriented volume, which is where its patches are.
-        # Read-only, like every answer given from the case metadata: the attribute folded through here is
-        # the case's own, before a single voxel has been read.
+        # ``shape`` is the channel-stripped SPATIAL shape, and the patch grid is folded from what this
+        # returns: a remap that transposes extents moves the grid onto the reoriented volume.
         remap = self._orthogonal_remap(cache_attribute)
         if remap is None:
             return shape

@@ -899,11 +899,8 @@ class DatasetManager:
             keys_before = set(cache_attribute.keys()) if persist else set()
             for stage in stream_source.stages:
                 tensor = stage(self.name, tensor, cache_attribute)
-            # The chain runs on the raw read extent and the read plan is applied AFTER it, exactly as
-            # the whole-volume path transforms the volume before Patch.get_data cuts it: a border patch
-            # is padded with the min of the TRANSFORMED patch (pad_value=None) and the transform never
-            # sees the padding. Padding first would feed f(pad) to the model wherever the volume does
-            # not tile the patch grid.
+            # The read plan is applied AFTER the chain, as the whole-volume path transforms before
+            # Patch.get_data cuts: padding first would feed f(pad) to the model on every border patch.
             tensor = self.patch.apply_read_plan(tensor, plan)
             if persist:
                 self._persist_stream_attributes(a, cache_attribute, keys_before)
@@ -926,11 +923,9 @@ class DatasetManager:
         return self.patch.apply_read_plan(tensor, plan)
 
     def _persist_stream_attributes(self, a: int, cache_attribute: Attribute, keys_before: set[str]) -> None:
-        # Streaming applies the trailing transforms per patch on a throwaway attribute copy, but
-        # state they record for their own inversion (e.g. TensorCast's source dtype) must survive on
-        # the persistent case attribute, exactly as the non-streamed path stores it while
-        # transforming the full volume. Only NEWLY-added keys are copied, so a pre-seeded GLOBAL_STAT
-        # or a case-level geometry key is never overwritten by a patch-local value.
+        # State a transform records for its own inversion (TensorCast's source dtype) must reach the
+        # persistent attribute, as it would on the whole-volume path. Only NEWLY-added keys are copied:
+        # a seeded GLOBAL_STAT or a case-level geometry key must not take a patch-local value.
         persistent = self.cache_attributes[a]
         persistent_keys = set(persistent.keys())
         for key, value in cache_attribute.items():
