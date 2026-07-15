@@ -220,7 +220,10 @@ class _RecordsOnlyInCall(Transform):
     def stream_region_source(
         self, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
     ) -> list[slice]:
-        return [slice(extent - t.stop, extent - t.start) for t, extent in zip(target_slices, source_spatial_shape)]
+        return [
+            slice(extent - t.stop, extent - t.start)
+            for t, extent in zip(target_slices, source_spatial_shape, strict=False)
+        ]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Mirroring moves the near corner, and this is the only place it says so.
