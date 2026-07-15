@@ -347,17 +347,22 @@ def _resolve_annotation(function, annotation):
         return annotation
 
 
-def _unwrap_optional(annotation):
+def _unwrap_optional(annotation) -> tuple[Any, bool]:
+    """Return ``(bound type, was Optional[X])``.
+
+    The flag is what tells an ``X | None`` parameter from a plain ``X``: both bind on ``X``, but only
+    the first may legitimately stay ``None`` (see the nested-object binding in ``apply_config``).
+    """
     origin = get_origin(annotation)
     if origin not in {Union, types.UnionType}:
-        return annotation
+        return annotation, False
 
     args = [arg for arg in get_args(annotation) if arg not in {type(None), types.NoneType}]
     if len(args) == 1:
-        return args[0]
+        return args[0], True
     # Genuine unions (e.g. ``float | str``) are kept intact so the binding can try each
     # member type; only ``Optional[X]`` (``X | None``) collapses to ``X``.
-    return annotation
+    return annotation, False
 
 
 def _convert_union_sequence_value(
@@ -461,7 +466,7 @@ def apply_config(konfai_args: str | None = None):
                                     )
                                 kwargs[param.name] = value
                                 continue
-                            annotation = _unwrap_optional(annotation)
+                            annotation, is_optional = _unwrap_optional(annotation)
 
                             if annotation == inspect._empty:
                                 if param.name != "self":
@@ -583,6 +588,15 @@ def apply_config(konfai_args: str | None = None):
                                     raise ConfigError(f"{values} {exc}") from exc
                                 continue
 
+                            # ``X | None = None`` declares an object the config must ASK for: binding it
+                            # anyway would build X's defaults and write them back, turning "no patch" into
+                            # a patch nobody configured. A non-None default (``X | None = X()``) is the
+                            # opposite declaration and still binds.
+                            if is_optional and param.default is None:
+                                annotation_key = getattr(annotation, "_key", None)
+                                if annotation_key is None or config.get_value(annotation_key, None) is None:
+                                    kwargs[param.name] = None
+                                    continue
                             try:
                                 kwargs[param.name] = apply_config(key_tmp)(annotation)()
                             except Exception as exc:

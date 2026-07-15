@@ -154,6 +154,55 @@ def test_apply_config_preserves_none_for_optional_nested_objects(write_config) -
     assert root.child is None
 
 
+def test_apply_config_keeps_a_none_default_when_the_config_is_silent(write_config) -> None:
+    """A config that never names an ``X | None = None`` object leaves it None, and records that.
+
+    Binding it anyway would construct X and write X's OWN defaults back, so a model declaring "no
+    patch" ran with a patch nobody configured -- and the resolved config, the record of the run,
+    described that phantom instead of what happened.
+    """
+    config_path = write_config("Root: {}\n")
+
+    @config("Child")
+    class Child:
+        def __init__(self, value: int = 1) -> None:
+            self.value = value
+
+    class Root:
+        def __init__(self, child: Child | None = None) -> None:
+            self.child = child
+
+    root = apply_config("Root")(Root)()
+
+    assert root.child is None
+    # "None" (the string) is how KonfAI spells an absent object in a resolved config, as every
+    # `overlap: None` / `augmentations: None` in the shipped configs does.
+    written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    assert written["Root"]["Child"] == "None"
+
+
+def test_apply_config_binds_an_optional_with_a_non_none_default(write_config) -> None:
+    """``X | None = X()`` is the opposite declaration: the object exists unless the config says None.
+
+    This is what keeps ``DatasetPatch``-style defaults instantiated by a silent config.
+    """
+    write_config("Root: {}\n")
+
+    @config("Child")
+    class Child:
+        def __init__(self, value: int = 1) -> None:
+            self.value = value
+
+    class Root:
+        def __init__(self, child: Child | None = Child()) -> None:
+            self.child = child
+
+    root = apply_config("Root")(Root)()
+
+    assert isinstance(root.child, Child)
+    assert root.child.value == 1
+
+
 def test_apply_config_accepts_literal_value(write_config) -> None:
     write_config("Root:\n  mode: eval\n")
 
