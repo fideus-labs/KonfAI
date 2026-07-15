@@ -54,7 +54,7 @@ Most frameworks focus on *models*. **KonfAI focuses on *pipelines*.**
 - 🧩 **Compose** full workflows from modular, named components — no glue code.
 - 🔁 **Iterate** by editing YAML, not rewriting Python.
 - 🔬 **Reproduce** every run: KonfAI resolves and writes back the full config.
-- 🩻 **Scale to real volumes**: data is always read lazily as overlapping patches — never loaded whole into RAM.
+- 🩻 **Scale to real volumes**: volumes are read as patches, and a preprocessing chain that allows it is [streamed](https://konfai.readthedocs.io/en/latest/concepts/streaming.html) from disk rather than loaded.
 - 📦 **Ship** a mature workflow as a reusable [**KonfAI App**](https://konfai.readthedocs.io/en/latest/usage/apps.html) (CLI, HTTP server, 3D Slicer).
 - 🤖 **Drive it with an agent**: KonfAI-MCP lets an LLM inspect data, author configs, and launch runs.
 
@@ -110,6 +110,28 @@ konfai TRAIN -y --gpu 0 --config Config.yml     # use --cpu 1 if you have no GPU
 The full walkthrough (predict, evaluate, what to inspect, common first issues,
 notebook entry points) lives in the
 [**Quickstart**](https://konfai.readthedocs.io/en/latest/quickstart.html).
+
+---
+
+## 🩻 How volumes are read
+
+Volumes are read as patches. Whether the volume is *also* held in RAM depends on
+`use_cache` and on whether your preprocessing chain can be streamed — KonfAI
+derives streamability from the transforms you declared:
+
+| Regime | When | Memory held |
+| --- | --- | --- |
+| **Cache** | `use_cache: true` (training default) | every case, resident for the whole run |
+| **Stream** | `use_cache: false`, chain is streamable | one patch |
+| **Buffer** | `use_cache: false`, chain is not streamable | a FIFO of `max(batch_size + 1, shuffle_window)` cases |
+
+A chain streams when every step declares the region it needs: the exact patch
+(`OneHot`), a halo (`Dilate`), a remap (`Flip`), a resample (`ResampleToShape`),
+or a whole-volume statistic read once from disk (`Normalize`). On the stream
+path, a 16 GiB uncompressed `.mha` trains at patch 64³ under an 8 GiB memory cap
+with a peak resident set of 0.46 GiB.
+
+→ [**Patch streaming**](https://konfai.readthedocs.io/en/latest/concepts/streaming.html) — what streams, what does not, and why.
 
 ---
 
