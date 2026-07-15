@@ -33,8 +33,17 @@ from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.augmentation import Flip as FlipAugmentation
 from konfai.data.augmentation import Rotate as RotateAugmentation
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import Canonical, Normalize, ResampleToShape, TensorCast
+from konfai.data.transform import (
+    Canonical,
+    LocalityKind,
+    Normalize,
+    PatchLocality,
+    ResampleToShape,
+    TensorCast,
+    Transform,
+)
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.errors import PatchError
 
 
 class StreamingDatasetStub:
@@ -200,3 +209,30 @@ def test_streamed_resample_handles_2d(dtype: torch.dtype) -> None:
     slices, starts, scales, n_in_list, _ = resample.resample_source_region(target, [9, 11], Attribute(attribute))
     got = resample.resample_region(volume[(slice(None), *slices)], target, starts, scales, n_in_list)
     torch.testing.assert_close(got, expected, rtol=0, atol=1e-5)
+
+
+class _RecordsOnlyInCall(Transform):
+    """A region transform recording geometry where a streamed patch throws it away."""
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.ORIENTATION)
+
+    def stream_region_source(
+        self, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
+    ) -> list[slice]:
+        return [slice(extent - t.stop, extent - t.start) for t, extent in zip(target_slices, source_spatial_shape)]
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        # Mirroring moves the near corner, and this is the only place it says so.
+        cache_attribute["Origin"] = np.asarray([0.0, 0.0, 7.0])
+        return tensor.flip(tuple(range(1, tensor.dim())))
+
+
+def test_a_region_stage_recording_geometry_nowhere_the_case_reads_is_refused() -> None:
+    # A declaration this framework cannot honour must fail where it is made, not persist the geometry
+    # of the volume as stored and call the run correct.
+    stub = StreamingDatasetStub(np.arange(1 * 8 * 8 * 8, dtype=np.float32).reshape(1, 8, 8, 8))
+    manager = _manager(stub, [_RecordsOnlyInCall()])
+    with pytest.raises(PatchError) as error:
+        manager.get_data(0, 0, [], True)
+    assert "write_stream_cache_attribute" in str(error.value)
