@@ -123,27 +123,115 @@ Common fields:
 
 | Field | Type | Default in code | Effect |
 | --- | --- | --- | --- |
-| `dataset_filenames` | list[str] | `["./Dataset:mha"]` | Dataset sources and selection mode. |
+| `dataset_filenames` | list[str] | `["default\|./Dataset:mha"]` | Dataset sources and selection mode. |
 | `groups_src` | mapping | required in practice | Maps on-disk groups to loaded tensors. |
 | `augmentations` | mapping or null | one default augmentation list | Data augmentations sampled during training. |
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
-| `use_cache` | bool | `true` | Cache transformed data in memory. |
-| `memory_budget` | number / string / null | `null` | RAM budget from which `use_cache` is derived. `null` keeps `use_cache` as given; a number is GiB, a string carries a unit (`"24GB"`, `"32GiB"`); `"auto"` reads the available RAM (cgroup-aware). |
+| `use_cache` | bool | `true` | Holds the whole prepared dataset in RAM. `false` reads patches from disk instead. |
+| `memory_budget` | number / string / null | `null` | RAM budget from which `use_cache` is derived. `null` keeps `use_cache` as given. |
 | `subset` | object | `TrainSubset()` | Restricts which cases are used. |
 | `batch_size` | int | `1` | Batch size. |
-| `num_workers` | int or null | `None` | Number of DataLoader workers. When `use_cache: false`, `None` auto-enables worker prefetching. |
+| `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` under `use_cache: true`, and to `max(1, min(cpu_count, 4))` otherwise. A `KonfAIInference` transform in any group forces `0` whatever the value. |
 | `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |
-| `prefetch_factor` | int or null | `None` | Number of prefetched batches per worker when workers are enabled. |
-| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs when workers are enabled. |
+| `prefetch_factor` | int or null | `None` | Prefetched batches per worker. Applies only when workers are enabled, where `None` resolves to `2`. |
+| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. |
 | `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. |
 | `validation_augmentations` | bool | `true` | Whether validation also iterates over augmented variants. Set `false` to validate only on base (non-augmented) samples. |
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
-| `shuffle_window` | int or null | `null` through subset | Locality-aware shuffle: keeps only this many cases resident at once (their patches shuffled together) before advancing. Bounds the per-case load buffer so each volume is read about once per epoch on the non-streamable path. `null` (default) or a value `>=` the number of cases keeps the historical global shuffle. |
+| `shuffle_window` | int or null | `null` through subset | Locality-aware training order: shuffles cases, then keeps this many cases in play at a time with their patches shuffled together. Single-process training only. |
 
-When `use_cache: false`, KonfAI now tries to stream patches directly from disk instead of materializing full volumes in RAM. This path is used automatically when the configured preprocessing chain is compatible with patch-wise loading; otherwise KonfAI falls back to the existing full-volume loading path. On the non-streamable fallback, a global `shuffle` reloads each volume once per patch that follows a buffer eviction; set `shuffle_window` to keep a bounded set of cases resident and read each volume about once. Cases are also sharded across `num_workers` so a volume is loaded by only one worker.
+### Cache, stream, and buffer
 
-Instead of hand-picking `use_cache`, declare a `memory_budget` and let KonfAI derive the regime: it estimates the dataset size from image headers alone (no voxel read), caches iff the per-rank share (`dataset_size / world_size`, since cases are sharded across ranks) fits the budget, and otherwise falls back to the streaming/buffer path. A number is read as GiB, a string carries its own unit (`"24GB"` decimal, `"32GiB"` binary), and `"auto"` uses a fraction of the detected RAM — read from the **cgroup limit** when running under a container or SLURM, so it is not fooled by the host's total. The chosen regime, the estimate, and the budget (with its source) are logged once at startup. The estimate is the raw header size and deliberately ignores transforms that shrink (resample-down, crop) or grow (pad, one-hot) the cached tensor, so treat it as an honest approximation rather than an exact footprint.
+`use_cache` picks how a loader turns a case into patches. It applies to the
+training and validation subsets alike.
+
+- **Cache** (`use_cache: true`, the default). Every case is loaded, preprocessed,
+  and held in RAM before the first epoch; patches are cut from the resident
+  volume. RAM follows the dataset. `num_workers` defaults to `0` here.
+- **Stream** (`use_cache: false`, patch-compatible preprocessing). Each patch is
+  read from its own region of the source file. No volume is materialized.
+- **Buffer** (`use_cache: false`, preprocessing that needs the whole volume).
+  The case is loaded whole into a FIFO of `batch_size + 1` cases —
+  `max(batch_size + 1, shuffle_window)` when a window is set — evicting the
+  oldest.
+
+Nothing in YAML selects streaming. KonfAI derives it from the declared transforms
+and augmentations, per case and per augmented copy, so stream and buffer coexist
+in one run: a group that needs its whole volume loads that case, while the others
+still stream.
+
+A cached case is resident, so its patches are cut from RAM even when its chain
+would stream.
+
+A 16 GiB uncompressed `.mha` at patch 64³, batch 2, 2 workers and
+`use_cache: false`, run under an 8 GiB memory cap, streams at a peak anonymous
+RSS of 0.46 GiB, flat across epochs, with one batch (2 MiB) resident on the GPU.
+
+### `memory_budget`
+
+`memory_budget` derives `use_cache` from a RAM budget. KonfAI estimates the
+dataset size from image headers alone (no voxel read), caches when the per-rank
+share fits the budget, and takes the streaming/buffer path otherwise. A budget
+decides the regime on its own: the declared `use_cache` is ignored. The decision
+is made once on the launcher, before any rank is spawned, and the estimate, the
+budget, its source, and the chosen regime are printed. `null` (the default)
+leaves `use_cache` exactly as declared.
+
+| Value | Read as |
+| --- | --- |
+| `24`, `"24"` | 24 GiB — a bare number is GiB |
+| `"24GB"`, `"512MB"` | decimal, 10^n |
+| `"32GiB"`, `"512MiB"` | binary, 2^n |
+| `"1024b"` | bytes |
+| `"auto"` | 80% of the detected RAM |
+
+Case is folded and the space before the unit is optional: `"32 gib"` and
+`"32GiB"` name the same budget.
+
+An explicit budget is **per rank**: the comparison is
+`dataset_size / world_size <= budget`, because cases are sharded across ranks.
+`"auto"` divides the detected memory by `world_size` too, so the ranks cancel and
+it reduces to "does the whole dataset fit 80% of the detected memory". `"auto"`
+takes whichever is tighter of the **cgroup limit** — set under a container or
+SLURM — and the host's available RAM; the log names which one won.
+
+```{warning}
+The dataset size is an estimate, not a guarantee. It sums `prod(header_shape) x 4`
+bytes over the source groups: it models a float32 cached tensor, so a `uint8`
+source is over-counted and a `float64` one under-counted. It reads the raw header
+shape and ignores transforms that shrink (resample-down, crop) or grow (pad,
+one-hot) the tensor. It also counts one copy per case, while the cache holds every
+augmented copy of every case — with augmentations declared, the real footprint is a
+multiple of the estimate. `inline_augmentations: true` defers those copies rather
+than dropping them: they are built on demand and released once per epoch, so the
+peak is the same. Caching also peaks above its steady state while it runs. Leave
+headroom.
+```
+
+### `shuffle_window`
+
+Each non-streamable case is loaded into the FIFO buffer, so a global patch shuffle
+reloads a volume once per patch that lands after an eviction. A window keeps
+`shuffle_window` cases in play at a time — their patches shuffled together, all
+emitted before advancing — which reads each volume about once per epoch. `1` is
+perfect locality and no decorrelation; larger windows trade one back for the other.
+
+The window applies to the training loader only. Validation is scored over the whole
+subset whatever the order, so it follows `shuffle` without a window.
+
+The window resolves back to a plain global shuffle — byte for byte — when it is
+`null` (the default), when it is `>=` the number of cases, or when `num_workers`
+exceeds the number of cases. Under a window, cases are partitioned across workers
+and the per-worker batches interleaved, so every volume is read by exactly one
+worker. The buffer is sized to hold the window, so a non-streamable run holds
+`max(batch_size + 1, shuffle_window)` volumes per worker.
+
+```{warning}
+`shuffle_window` is for single-process training. Each rank windows its own shard,
+so the ranks can disagree on the number of batches in an epoch and the collective
+will hang. Leave it `null` for multi-GPU runs.
+```
 
 ### `groups_src`
 

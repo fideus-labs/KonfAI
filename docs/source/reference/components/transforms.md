@@ -27,69 +27,120 @@ below flags those. Transforms that only change the **channel** count (`OneHot`,
 channel axis first). **Inv** flags whether a working `inverse()` exists.
 ```
 
+## Patch streaming
+
+A patch is cut straight from disk when every transform in the chain can name the
+source region that patch depends on. A chain that cannot name it falls back to
+the whole volume: the case is loaded whole, and the result is the same, just
+resident. The **Stream** column below is that answer, per transform.
+
+Streaming happens where the cache is off. A cached case is already in memory, so
+its patches are cut from memory whatever the column says. Training exposes
+`use_cache` under `Dataset:` and defaults it to `true`; PREDICTION carries no
+`use_cache` key and does not cache; EVALUATION caches. A `memory_budget` under
+`Dataset:` overrides all three with a size estimate.
+
+Three rules apply to the chain rather than to any single transform:
+
+- **One region transform per chain.** `Dilate`, `Gradient`, `Crop`, `Canonical`,
+  `Flip`, `Permute` and the resamplers each read a region other than the patch
+  itself. Two of them in one chain — `[Dilate, Gradient]`, `[Canonical, Permute]`
+  — load the whole volume. Augmentations count: a copy's draw is planned as part
+  of the same chain.
+- **A statistic is seeded from the stored volume.** `Normalize`, `Standardize`
+  and `Clip(min_value="min")` read their statistic from disk, which is their input
+  only if every earlier stage left the values alone. Reorienting does; mapping
+  values does not. `[Canonical(), Normalize()]` streams, `[Clip(-200, 400),
+  Normalize()]` loads whole. A cast to a **float** dtype keeps the statistic, an
+  integer cast does not.
+- **A halo must stay within half the patch.** `Dilate(4)` streams at patch 64 and
+  at patch 8, and loads whole at patch 4. The bound is checked per axis against
+  the patch size, or against the case's own extent where that is smaller.
+
+A streamed patch reproduces the whole-volume result exactly, borders included.
+Four kinds round rather than diverge:
+
+- A **seeded statistic** is summed in a different order than the whole-volume
+  pass, so a standardised voxel can land a few float32 ulps away.
+- A **trilinear resample** computes its interpolation weights in the read
+  sub-region's frame. The deviation scales with the local intensity gradient and
+  with the extent, not with the voxel's own value, and is a small fraction of the
+  intensity range. Nearest-neighbour interpolation uses no weights and stays
+  exact.
+- A **`Translate` draw** is sampled the same way and rounds for the same reason.
+- An **integer volume** through a streamed resample quantises that rounding, so a
+  voxel can land one least-significant bit away.
+
+A transform you write yourself starts at the whole volume and streams nothing
+until it declares otherwise.
+
 ## Intensity & normalisation
 
-| Name | Purpose | Key args (defaults) | Shape | Inv |
-| --- | --- | --- | --- | --- |
-| `Clip` | Clamp intensities to a fixed or data-dependent range. | `min_value=-1024, max_value=1024, mask=None` | no | no |
-| `Normalize` | Linear map to `[min,max]`; caches Min/Max. | `min_value=-1, max_value=1, channels=None, lazy=False, inverse=True` | no | **yes** |
-| `UnNormalize` | Map `[-1,1] → [min,max]` (fixed). | `min_value=-1024, max_value=3071` | no | no |
-| `Standardize` | Zero-mean / unit-std from cached, given, or mask-derived stats. | `mean=None, std=None, mask=None, lazy=False, inverse=True` | no | **yes** |
-| `HistogramMatching` | SimpleITK histogram match to a reference group. | `reference_group` | no | no |
+| Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
+| --- | --- | --- | --- | --- | --- |
+| `Clip` | Clamp intensities to a fixed or data-dependent range. | `min_value=-1024, max_value=1024, mask=None` | no | no | **yes** — fixed bounds clamp each voxel on its own, and a `"min"`/`"max"` bound is read from disk; no with `mask=` (a second volume) or a `"percentile:<float>"` bound (the whole histogram) |
+| `Normalize` | Linear map to `[min,max]`; caches Min/Max. | `min_value=-1, max_value=1, channels=None, lazy=False, inverse=True` | no | **yes** | **yes** — Min/Max read from disk |
+| `UnNormalize` | Map `[-1,1] → [min,max]` (fixed). | `min_value=-1024, max_value=3071` | no | no | **yes** |
+| `Standardize` | Zero-mean / unit-std from cached, given, or mask-derived stats. | `mean=None, std=None, mask=None, lazy=False, inverse=True` | no | **yes** | **yes** — Mean/Std read from disk, or neither when both are given; no with `mask=` (a second volume) |
+| `HistogramMatching` | SimpleITK histogram match to a reference group. | `reference_group` | no | no | no — the LUT needs the volume's whole histogram |
 
 ## Geometry & resampling
 
-| Name | Purpose | Key args (defaults) | Shape | Inv |
-| --- | --- | --- | --- | --- |
-| `Padding` | `F.pad`; updates Origin. `mode` supports `"constant:<val>"`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | **yes** | **yes** |
-| `Crop` | Crop to foreground bounding box; caches the box; updates Origin. | `inverse=True` | **yes** | **yes** (pads back) |
-| `ResampleToResolution` | Resample to a target voxel spacing (per-axis `<0` = keep). | `spacing=[1,1,1], inverse=True` | **yes** | **yes** |
-| `ResampleToShape` | Resample to a target shape (per-axis `0/<0` = keep). | `shape=[100,256,256], inverse=True` | **yes** | **yes** |
-| `ResampleTransform` | Warp by stored SimpleITK transforms read from the dataset. | `transforms`, `inverse=True` | no | no |
-| `Canonical` | Reorient to canonical direction (3-D); updates Origin/Direction. | `inverse=True` | no | **yes** |
-| `Permute` | Permute spatial axes. `dims` is a pipe-separated axis list. | `dims="1\|0\|2", inverse=True` | **yes** | **yes** |
-| `Flip` | Flip spatial axes. | `dims="1\|0\|2", inverse=True` | no | **yes** (self-inverse) |
-| `Squeeze` | `tensor.squeeze(dim)`. `transform_shape` drops a squeezed spatial axis and leaves a channel-axis squeeze shape-preserving, so the patch grid folds it. | `dim` (required), `inverse=True` | **yes** | **yes** |
-| `Flatten` | Flatten to 1-D. | — | **yes** | no |
+| Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
+| --- | --- | --- | --- | --- | --- |
+| `Padding` | `F.pad`; updates Origin. `mode` supports `"constant:<val>"`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | **yes** | **yes** | no‡ |
+| `Crop` | Crop to foreground bounding box; caches the box; updates Origin. | `inverse=True` | **yes** | **yes** (pads back) | **yes** — once the `box` is on the case; the region is the patch translated |
+| `ResampleToResolution` | Resample to a target voxel spacing (per-axis `<0` = keep). | `spacing=[1,1,1], inverse=True` | **yes** | **yes** | **yes** — resampled from the source region |
+| `ResampleToShape` | Resample to a target shape (per-axis `0/<0` = keep). | `shape=[100,256,256], inverse=True` | **yes** | **yes** | **yes** — resampled from the source region |
+| `ResampleTransform` | Warp by stored SimpleITK transforms read from the dataset. | `transforms`, `inverse=True` | no | no | no — nothing bounds how far the stored displacement reaches |
+| `Canonical` | Reorient to canonical direction (3-D); updates Origin/Direction. | `inverse=True` | no | **yes** | **yes** — when the case's direction is a signed axis permutation; no on an oblique one (it is resampled) |
+| `Permute` | Permute spatial axes. `dims` is a pipe-separated axis list. | `dims="1\|0\|2", inverse=True` | **yes** | **yes** | **yes** — index remap |
+| `Flip` | Flip spatial axes. | `dims="1\|0\|2", inverse=True` | no | **yes** (self-inverse) | **yes** — index remap |
+| `Squeeze` | `tensor.squeeze(dim)`. `transform_shape` drops a squeezed spatial axis and leaves a channel-axis squeeze shape-preserving, so the patch grid folds it. | `dim` (required), `inverse=True` | **yes** | **yes** | no‡ |
+| `Flatten` | Flatten to 1-D. | — | **yes** | no | no‡ |
 
 ## Labels & masks
 
-| Name | Purpose | Key args (defaults) | Shape | Inv |
-| --- | --- | --- | --- | --- |
-| `TensorCast` | Cast dtype; caches original for inverse. | `dtype="float32", inverse=True` | no | **yes** |
-| `OneHot` | One-hot encode a label map (changes **channels**). | `num_classes, inverse=True` | no† | **yes** |
-| `Argmax` | `argmax(dim)` then unsqueeze. | `dim=0` | no† | no |
-| `Softmax` | `softmax(dim)`. | `dim=0` | no | no |
-| `FlatLabel` | Binarise selected labels (else `>0`) → 1. | `labels=None` | no | no |
-| `SelectLabel` | Remap labels; entries are `"(old,new)"` strings. | `labels` | no | no |
-| `Mask` | Set voxels where mask==0 to `value_outside`. | `path="./default.mha", value_outside=0` | no | no |
-| `Dilate` | Binary dilation via max-pool (2D/3D). | `dilate=1` | no | no |
-| `Sum` | Sum over `dim` (merges multi-model label maps). | `dim=0` | no† | no |
-| `Gradient` | Gradient-magnitude image (or components). | `per_dim=False` | no† | no |
+| Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
+| --- | --- | --- | --- | --- | --- |
+| `TensorCast` | Cast dtype; caches original for inverse. | `dtype="float32", inverse=True` | no | **yes** | **yes** |
+| `OneHot` | One-hot encode a label map (changes **channels**). | `num_classes, inverse=True` | no† | **yes** | **yes** |
+| `Argmax` | `argmax(dim)` then unsqueeze. | `dim=0` | no† | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
+| `Softmax` | `softmax(dim)`. | `dim=0` | no | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
+| `FlatLabel` | Binarise selected labels (else `>0`) → 1. | `labels=None` | no | no | **yes** |
+| `SelectLabel` | Remap labels; entries are `"(old,new)"` strings. | `labels` | no | no | **yes** |
+| `Mask` | Set voxels where mask==0 to `value_outside`. | `path="./default.mha", value_outside=0` | no | no | no — it cannot tell where its tensor sits, so it cannot read the matching mask region |
+| `Dilate` | Binary dilation via max-pool (2D/3D). | `dilate=1` | no | no | **yes** — halo of `dilate` voxels, within half the patch |
+| `Sum` | Sum over `dim` (merges multi-model label maps). | `dim=0` | no† | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
+| `Gradient` | Gradient-magnitude image (or components). | `per_dim=False` | no† | no | **yes** — halo of 1 voxel |
 
 ## Ensemble / uncertainty post-processing
 
 Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 
-| Name | Purpose | Key args | Shape |
-| --- | --- | --- | --- |
-| `InferenceStack` | Aggregate an ensemble stack (mean / median / seg-argmax); writes an `InferenceStack` volume. | `dataset, name, mode="mean"` | no |
-| `Norm` | Vector magnitude over the trailing axis (drops it). | — | **yes** |
-| `Variance` | Per-voxel variance over N. | — | no† |
-| `StandardDeviation` | Per-voxel std over N. | — | no† |
-| `SegmentationDisagreement` | Per-voxel label disagreement across N segmentations. | `ignore_background=False` | no† |
-| `Percentage` | `tensor / baseline * 100`. | `baseline` | no |
+| Name | Purpose | Key args | Shape | Stream |
+| --- | --- | --- | --- | --- |
+| `InferenceStack` | Aggregate an ensemble stack (mean / median / seg-argmax); writes an `InferenceStack` volume. | `dataset, name, mode="mean"` | no | no — it writes the whole per-member stack |
+| `Norm` | Vector magnitude over the trailing axis (drops it). | — | **yes** | no‡ |
+| `Variance` | Per-voxel variance over N. | — | no† | **yes** |
+| `StandardDeviation` | Per-voxel std over N. | — | no† | **yes** |
+| `SegmentationDisagreement` | Per-voxel label disagreement across N segmentations. | `ignore_background=False` | no† | **yes** |
+| `Percentage` | `tensor / baseline * 100`. | `baseline` | no | **yes** |
 
 ## Side-effect & advanced
 
-| Name | Purpose |
-| --- | --- |
-| `Statistics` | Records ImageMin/Max/Mean/Std to the attribute cache and returns the tensor unchanged (feeds the perceptual criteria `SAM_Perceptual`, `IMPACTSynth`, `IMPACTReg`). Order in the transform list matters. |
-| `Save` | Marker — a no-op passthrough (a checkpoint hint, not a saver). |
-| `KonfAIInference` | Run a nested KonfAI app inference in a spawned subprocess. Needs `konfai-apps` and `num_workers: 0`; defaults to a specific HF repo. |
+| Name | Purpose | Stream |
+| --- | --- | --- |
+| `Statistics` | Records ImageMin/Max/Mean/Std to the attribute cache and returns the tensor unchanged (feeds the perceptual criteria `SAM_Perceptual`, `IMPACTSynth`, `IMPACTReg`). Order in the transform list matters. | no‡ |
+| `Save` | Writes the preprocessed volume to a cache dataset and passes the tensor through. Once that cache exists it is read instead, and the transforms before it are skipped. | no — it needs the whole volume to write |
+| `KonfAIInference` | Run a nested KonfAI app inference in a spawned subprocess. Needs `konfai-apps` and `num_workers: 0`; defaults to a specific HF repo. | no‡ |
 
 `†` changes the **channel** dimension, not spatial — no `transform_shape`
 override needed.
+
+`‡` declares no patch locality, so the case is loaded whole. That is the safe
+default every `Transform` inherits, not a statement that the operation could not
+be streamed.
 
 ## Next steps
 
