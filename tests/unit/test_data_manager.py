@@ -508,6 +508,27 @@ def test_windowed_sampler_keeps_a_bounded_set_of_cases_resident() -> None:
         assert _distinct_cases_per_slice(order, mapping, window * 5) <= window
 
 
+def test_windowed_sampler_epoch_length_is_equal_across_ddp_ranks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every rank must run the same number of batches, whatever cases its shard happens to hold.
+
+    ``Data._split`` pads the shards to equal length precisely because DDP(static_graph=True) hangs
+    when the ranks disagree on the batch count. A length read from the per-rank case-to-worker
+    partition undoes that: the shards carry the same NUMBER of patches but different cases, so the
+    partitions -- and the epoch -- come out different sizes.
+    """
+    monkeypatch.setenv("KONFAI_STATE", str(State.TRAIN))
+    # Cases of increasing size, as a real dataset's volumes are: the shards then carry the same
+    # patch COUNT but different cases, which is what makes the partitions -- and the length read
+    # from them -- differ. A symmetric distribution hides this.
+    mapping = [(case, 0, patch) for case, count in enumerate([1, 2, 3, 4, 5, 6, 7, 8]) for patch in range(count)]
+    shards = Data._split(mapping, 2)
+    assert len({len(shard) for shard in shards}) == 1, "precondition: _split equalises shard length"
+
+    lengths = {len(WindowedCaseSampler(shard, shuffle=True, window=2, batch_size=2, num_workers=2)) for shard in shards}
+
+    assert len(lengths) == 1, f"ranks disagree on the epoch length: {lengths}"
+
+
 def test_windowed_sampler_shards_cases_across_workers_without_overlap() -> None:
     # A map-style DataLoader sends batch j to worker j % num_workers, and each worker holds its own
     # buffer. The sampler must therefore give each batch only its worker-partition's cases so a case

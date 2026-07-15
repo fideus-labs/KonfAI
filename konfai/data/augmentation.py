@@ -562,11 +562,9 @@ class Flip(DataAugmentation):
         return result
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        # Mirroring voxels is a bijection on them, which is exactly what ORIENTATION promises and what
-        # LocalityKind.preserves_statistics lets a later stage trust. Negating a component channel is
-        # not one: it maps values, so the multiset -- and every statistic over it -- moves (a DVF's Mean
-        # changes sign). Whether it fires is a property of the tensor's channel count rather than of the
-        # case, so a declaration made from the header cannot tell, and only WHOLE_VOLUME is honest here.
+        # A mirror is a bijection on the voxels (ORIENTATION). Negating a component channel is not: it
+        # maps values, so a later GLOBAL_STAT could no longer seed from the stored volume -- and only
+        # the tensor's channel count says whether it fires, which a header-time declaration cannot see.
         if self.vector_field:
             return PatchLocality(LocalityKind.WHOLE_VOLUME)
         return PatchLocality(LocalityKind.ORIENTATION)

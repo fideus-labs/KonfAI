@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 from konfai.data import data_manager
+from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager import (
     _AUTO_MEMORY_SAFETY_FRACTION,
     DataPrediction,
@@ -142,6 +143,27 @@ def _make_train(memory_budget: str | float | None) -> DataTrain:
 
 def test_estimate_matches_known_fixture() -> None:
     assert _make_train(None)._estimate_cached_bytes() == _DATASET_BYTES
+
+
+def test_estimate_counts_one_copy_per_augmentation_draw() -> None:
+    """A cached case holds its base tensor plus one per draw, so the estimate must multiply by them.
+
+    Counting the base tensor alone under-reports the cache by the augmentation count -- the budget
+    then picks CACHE for a dataset several times too big for it and the run is OOM-killed anyway.
+    """
+    data = DataTrain(
+        augmentations={"Aug_0": DataAugmentationsList(nb=4, data_augmentations={})},
+        memory_budget=None,
+        validation=None,
+    )
+    managers = {group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE)) for _ in _CASES] for group in ("CT", "SEG")}
+    data._prepared_data = managers  # type: ignore[assignment]
+    data._prepared_validation_data = {}
+    data._prepared_train_names = list(_CASES)
+    data._prepared_validation_names = []
+
+    # 1 base copy + 4 draws.
+    assert data._estimate_cached_bytes() == 5 * _DATASET_BYTES
 
 
 def test_budget_larger_than_dataset_caches() -> None:

@@ -53,11 +53,9 @@ from konfai.utils.runtime import (
 )
 from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_path_spec
 
-# A cached case is a float32 torch tensor -- torch's default float dtype and the target of the default
-# TensorCast -- so bytes are estimated at 4/element. This models the RAM the cache actually holds rather
-# than the on-disk dtype (an un-cast uint8 mask is over-counted, a rare float64 source under-counted).
-# The estimate reads the raw header shape but no voxels, and deliberately does not model transforms that
-# shrink (resample-down, crop) or grow (pad, one-hot) the cached tensor: an honest over/under-estimate.
+# A cached case is a float32 tensor (torch's default dtype, and the default TensorCast's target), so
+# bytes are counted at 4/element from the header shape alone -- not the on-disk dtype, and without
+# modelling transforms that shrink or grow the cached tensor.
 _CACHE_ELEMENT_BYTES = 4
 
 # Fraction of the detected node memory an ``"auto"`` budget offers the cache; the rest is reserved for
@@ -393,11 +391,19 @@ class WindowedCaseSampler(Sampler[int]):
         for start in range(0, self._batches_per_worker() * batch, batch):
             for stream in streams:
                 order += [stream[i % len(stream)] for i in range(start, start + batch)]
-        return order
+        # An epoch is `mapping` long whatever order it is walked in, so the round-robin -- whole
+        # batches, a short stream wrapping its own head to fill one -- is cut back to it. Each worker
+        # is therefore walked over its share of the epoch, len(mapping) / num_workers: a partition
+        # holding more than that leaves a tail for another epoch to reach, one holding less repeats.
+        # Both scale with how uneven the partitions are, NOT with a batch -- cases are split by
+        # position (`_partitions`), so a dataset ordered big-then-small can leave a worker's tail cut
+        # by half an epoch. Each epoch reshuffles the cases, so the cut falls elsewhere and nothing is
+        # starved; what this must never do is change the epoch's length, which every rank agrees on.
+        return order[: len(self.mapping)]
 
     def _batches_per_worker(self) -> int:
-        patches = [sum(len(self.case_entries[case]) for case in partition) for partition in self._partitions()]
-        return max((math.ceil(count / self.batch_size) for count in patches), default=0)
+        """Whole batches each worker is walked through to cover an epoch (the last one is cut back)."""
+        return math.ceil(len(self.mapping) / (self.num_workers * self.batch_size))
 
     def __iter__(self) -> Iterator[int]:
         if not self.shuffle:
@@ -407,9 +413,11 @@ class WindowedCaseSampler(Sampler[int]):
         return iter(self._windowed_order())
 
     def __len__(self) -> int:
-        if not self.shuffle or self.window is None:
-            return len(self.mapping)
-        return self._batches_per_worker() * self.num_workers * self.batch_size
+        # One epoch is one pass over the mapping -- windowing chooses the ORDER, not the size. This is
+        # what keeps the ranks in step: `Data._split` gives them equal-length shards, but not equal
+        # cases, so any length read from the per-rank cases (their partitions, or even whether the
+        # window engages at all) would differ and hang DDP's collectives.
+        return len(self.mapping)
 
 
 @dataclass(frozen=True)
@@ -900,15 +908,25 @@ class Data(ABC):
     def _estimate_cached_bytes(self) -> int:
         """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read).
 
-        Sums ``prod(shape) x 4`` over every case of every source group (train and validation), taking
-        the raw header shape recorded on each :class:`DatasetManager`. See ``_CACHE_ELEMENT_BYTES``:
-        this is an honest header-only estimate that ignores size-changing transforms.
+        Sums ``prod(shape) x 4`` over every case of every source group, once per COPY the cache holds:
+        a cached case is its base tensor PLUS one per augmentation draw, which validation only makes
+        when ``validation_augmentations``. See ``_CACHE_ELEMENT_BYTES``: this is an honest header-only
+        estimate that ignores size-changing transforms (an augmentation's ``Mask`` included). It also
+        counts the tensors themselves, not the allocator's arenas around them: those settle about a
+        third higher (measured), which is over the "auto" safety fraction, so a dataset landing within
+        a few percent of an "auto" budget can still be caching more than the budget names.
         """
         total = 0
-        for prepared in (self._prepared_data, self._prepared_validation_data):
+        for prepared, copies in (
+            (self._prepared_data, Data._get_nb_augmentation(self._get_data_augmentations(True))),
+            (
+                self._prepared_validation_data,
+                Data._get_nb_augmentation(self._get_data_augmentations(self.validation_augmentations)),
+            ),
+        ):
             for managers in (prepared or {}).values():
                 for manager in managers:
-                    total += int(np.prod(manager.base_shape, dtype=np.int64)) * _CACHE_ELEMENT_BYTES
+                    total += int(np.prod(manager.base_shape, dtype=np.int64)) * _CACHE_ELEMENT_BYTES * copies
         return total
 
     def _resolve_cache_regime(self, world_size: int) -> None:
