@@ -20,17 +20,96 @@ import copy
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Protocol, cast
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from konfai.data.augmentation import DataAugmentationsList
-from konfai.data.transform import Clip, Normalize, Save, Standardize, TensorCast, Transform
+from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
+from konfai.data.transform import LocalityKind, PatchLocality, Resample, Save, Transform
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PatchError
 from konfai.utils.utils import SUPPORTED_EXTENSIONS, get_module, get_patch_slices_from_shape, split_path_spec
+
+# How far a halo may reach, as a fraction of the patch it surrounds. See DatasetManager._affords_halo.
+_MAX_HALO_FRACTION = 0.5
+
+
+def _halo_radii(halo: tuple[int, ...], n_axes: int) -> list[int]:
+    """The per-axis radius a declared halo means, in array order (one radius covers every axis)."""
+    if not halo:
+        return [0] * n_axes
+    return [halo[k] if k < len(halo) else halo[-1] for k in range(n_axes)]
+
+
+class Stage(Protocol):
+    """One step of what a case's copy is made of, as the patch-streaming dispatcher sees it.
+
+    A copy is its group's transforms followed by the augmentations drawn for it, and streaming asks the
+    same three things of every step: what its output depends on, which source region a target patch
+    needs, and to run on one tensor. A ``Transform`` answers them as itself. An augmentation is
+    parameterised per case and per copy, so it answers them bound to one (see :class:`AugmentedStage`).
+    """
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality: ...
+
+    def stream_region_source(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]: ...
+
+    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None: ...
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor: ...
+
+
+@dataclass(frozen=True)
+class AugmentedStage:
+    """One augmentation, bound to the case and the copy whose draw it carries.
+
+    An augmentation is parameterised per (case, copy); binding both makes it answer the Stage
+    protocol like a plain transform.
+    """
+
+    augmentation: DataAugmentation
+    index: int
+    a: int
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return self.augmentation.patch_locality(self.index, self.a, cache_attribute)
+
+    def stream_region_source(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        return self.augmentation.stream_region_source(self.index, self.a, target_slices, source_spatial_shape)
+
+    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        """An augmentation draws a copy of the case rather than restating its geometry: nothing to record."""
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return self.augmentation.compute(name, self.index, self.a, tensor)
+
+
+@dataclass(frozen=True)
+class _PatchStreamSource:
+    """What a copy's patches are read from, and what runs on them once read.
+
+    ``region_index`` locates the single stage of ``stages`` that reads somewhere other than the target
+    patch, if there is one; the rest are pointwise, so they run wherever the region put them.
+    """
+
+    dataset: Dataset
+    group: str
+    shape: list[int]
+    stages: list[Stage]
+    region_index: int | None
 
 
 @dataclass(frozen=True)
@@ -449,23 +528,35 @@ class DatasetManager:
             else DatasetPatch(_shape)
         )
         self.patch.load(_shape, 0)
-        self.shape = _shape
+        # The spatial grid each copy's patches are cut on: the un-augmented copy's is the source shape
+        # folded by the transforms, and a copy whose draw changes shape (Permute, Mask) has its own.
+        self.shapes: list[list[int]] = [_shape]
         self.data_augmentations_list = data_augmentations_list
-        self._patch_stream_sources: dict[bool, tuple[Dataset, str, list[int], list[Transform]] | None] = {}
+        self._patch_stream_sources: dict[tuple[int, bool], _PatchStreamSource | None] = {}
         self._stream_attributes_persisted: set[int] = set()
-        self.reset_augmentation()
+        self._disk_statistics: dict[tuple[Dataset, str, tuple[int, ...] | None], dict[str, float]] = {}
+        # reset_state=False: the first manager built for a case draws (state_init draws a missing
+        # index), and every later group's manager reuses that draw -- redrawing here would give each
+        # group its own geometry and desynchronise the per-copy patch grids across groups.
+        self.reset_augmentation(reset_state=False)
         self.cache_attributes_bak = copy.deepcopy(self.cache_attributes)
 
     def reset_augmentation(self, reset_state: bool = True):
         self.cache_attributes[:] = self.cache_attributes[:1]
+        self.shapes[:] = self.shapes[:1]
         self.augmented_data.clear()
+        # An augmented copy's stream source is only as good as the draw it was planned for: a halo is
+        # the draw's own, and a re-draw is a new one. Drop every plan, so the next request replans
+        # against the draw the copies actually carry.
+        self._patch_stream_sources.clear()
+        self._stream_attributes_persisted.clear()
         self.total_augmentations = 0
         i = 1
         for data_augmentations in self.data_augmentations_list:
             shape = []
             caches_attribute = []
             for _ in range(data_augmentations.nb):
-                shape.append(self.shape)
+                shape.append(self.shapes[0])
                 caches_attribute.append(copy.deepcopy(self.cache_attributes[0]))
 
             for data_augmentation in data_augmentations.data_augmentations:
@@ -474,6 +565,7 @@ class DatasetManager:
                 shape = data_augmentation.state_init(self.index, shape, caches_attribute)
             for it, s in enumerate(shape):
                 self.cache_attributes.append(caches_attribute[it])
+                self.shapes.append(s)
                 self.patch.load(s, i)
                 i += 1
             self.total_augmentations += data_augmentations.nb
@@ -567,46 +659,55 @@ class DatasetManager:
             self.augmented_data[index] = data
         self.augmentationLoaded = len(self.augmented_data) == self.total_augmentations
 
+    def _augmentation_group(self, a: int) -> tuple[int, DataAugmentationsList]:
+        """The augmentation list copy *a* belongs to, and the copy index that list starts at."""
+        start_index = 1
+        for data_augmentations in self.data_augmentations_list:
+            if start_index <= a < start_index + data_augmentations.nb:
+                return start_index, data_augmentations
+            start_index += data_augmentations.nb
+        raise IndexError(f"Augmentation index {a} out of range for dataset '{self.name}'.")
+
+    def _augmentation_stages(self, a: int) -> list[Stage]:
+        """The augmentations copy *a* is made of, each bound to it.
+
+        Copy 0 is made of none: it is the tensor the transforms produced, which is why it is the one
+        copy that has a counterpart on disk to stream from at all. The rest carry their list's draw,
+        minus whatever that draw does not address to this group.
+        """
+        if a == 0:
+            return []
+        start_index, data_augmentations = self._augmentation_group(a)
+        return [
+            AugmentedStage(data_augmentation, self.index, a - start_index)
+            for data_augmentation in data_augmentations.data_augmentations
+            if data_augmentation.groups is None or self.group_dest in data_augmentation.groups
+        ]
+
     def _get_tensor(self, a: int) -> torch.Tensor:
         if a == 0:
             return self.data[0]
-
         if a not in self.augmented_data:
-            start_index = 1
-            for data_augmentations in self.data_augmentations_list:
-                stop_index = start_index + data_augmentations.nb
-                if start_index <= a < stop_index:
-                    self._load_augmentation_group(start_index, data_augmentations)
-                    break
-                start_index = stop_index
-            else:
-                raise IndexError(f"Augmentation index {a} out of range for dataset '{self.name}'.")
-
+            self._load_augmentation_group(*self._augmentation_group(a))
         return self.augmented_data[a]
 
-    @staticmethod
-    def _required_stream_stats(transform: Transform) -> tuple[set[str], list[int] | None] | None:
-        if isinstance(transform, Normalize):
-            return {"Min", "Max"}, transform.channels
-        if isinstance(transform, Standardize):
-            required_stats = set()
-            if transform.mean is None:
-                required_stats.add("Mean")
-            if transform.std is None:
-                required_stats.add("Std")
-            return required_stats, None
-        if isinstance(transform, Clip):
-            required_stats = set()
-            if isinstance(transform.min_value, str):
-                if transform.min_value != "min":
-                    return None
-                required_stats.add("Min")
-            if isinstance(transform.max_value, str):
-                if transform.max_value != "max":
-                    return None
-                required_stats.add("Max")
-            return required_stats, None
-        return None
+    def _read_disk_statistics(
+        self,
+        source_dataset: Dataset,
+        source_group: str,
+        channels: list[int] | None,
+    ) -> dict[str, float]:
+        """Read (and memoise) the whole-volume statistics of one on-disk group for this case.
+
+        ``read_data_statistics`` scans the stored volume without materialising it, but it is still a
+        full pass: memoise it per (dataset, group, channels) so a per-patch consumer -- whose
+        ``inverse()`` pops the seeded keys back out of the cache attribute at prediction time -- does
+        not re-scan the volume once per patch.
+        """
+        key = (source_dataset, source_group, tuple(channels) if channels is not None else None)
+        if key not in self._disk_statistics:
+            self._disk_statistics[key] = source_dataset.read_data_statistics(source_group, self.name, channels)
+        return self._disk_statistics[key]
 
     def _ensure_stream_stats(
         self,
@@ -620,7 +721,7 @@ class DatasetManager:
         if not missing_stats:
             return True
 
-        stats = source_dataset.read_data_statistics(source_group, self.name, channels)
+        stats = self._read_disk_statistics(source_dataset, source_group, channels)
         stats_mapping = {
             "Min": stats["min"],
             "Max": stats["max"],
@@ -634,24 +735,75 @@ class DatasetManager:
                 cache_attribute[key] = stats_mapping[key]
         return all(key in cache_attribute for key in required_stats)
 
-    def _supports_patch_stream_transform(
+    def _affords_halo(self, a: int, halo: tuple[int, ...]) -> bool:
+        """Whether a halo of this radius still buys copy *a* anything over loading the volume.
+
+        Every patch pays the halo on every side and the patches tile the volume, so streaming a case
+        reads ``prod(1 + 2 * halo_k / patch_k)`` times its bytes -- the multiple streaming pays to keep
+        one volume off the heap. Half a patch doubles every axis: 8x the reads in 3D, measured on a
+        160^3 mha at patch 64 as 8.6x the wall-clock of the load it avoids, against 3.0x for a halo of
+        2 (the per-patch read overhead streaming costs whatever the halo). Past that the multiple runs
+        away -- a halo of one whole patch is 27x -- while the saving is still just the one volume.
+        """
+        patch_size = self.patch.patch_size
+        extent = (
+            self.shapes[a]
+            if patch_size is None or all(p == 0 for p in patch_size)
+            else [min(p, s) for p, s in zip(patch_size, self.shapes[a], strict=False)]
+        )
+        return all(
+            radius <= _MAX_HALO_FRACTION * size
+            for radius, size in zip(_halo_radii(halo, len(extent)), extent, strict=False)
+        )
+
+    def _plan_stream_region(
         self,
-        transform: Transform,
+        a: int,
+        localities: list[PatchLocality],
         source_dataset: Dataset,
         source_group: str,
         cache_attribute: Attribute,
-    ) -> bool:
-        if isinstance(transform, TensorCast):
-            return True
-        if isinstance(transform, Clip) and transform.mask is not None:
-            return False
-        if isinstance(transform, Standardize) and transform.mask is not None:
-            return False
-        required_stream_stats = self._required_stream_stats(transform)
-        if required_stream_stats is None:
-            return False
-        required_stats, channels = required_stream_stats
-        return self._ensure_stream_stats(source_dataset, source_group, cache_attribute, required_stats, channels)
+    ) -> tuple[bool, int | None]:
+        """Validate a copy's locality declarations and locate the single region stage among them.
+
+        Returns ``(streamable, region_index)``. The chain streams only when it is
+        ``[pre-pointwise*][at most one region: HALO|ORIENTATION|RESCALE][post-pointwise*]`` where
+        ``GLOBAL_STAT`` counts as pointwise (exact patch + a pre-populated stat). Any
+        ``WHOLE_VOLUME`` declaration, more than one region stage, an unreadable ``GLOBAL_STAT``, a
+        ``RESCALE`` without a known source ``Spacing``, or a halo too wide to be worth reading rejects
+        streaming. Nothing here names a stage: each declares its own contract, and this is where the
+        declarations are read -- which is why a transform and an augmentation are planned side by side.
+        """
+        if any(loc.kind is LocalityKind.WHOLE_VOLUME for loc in localities):
+            return False, None
+        region_kinds = (LocalityKind.HALO, LocalityKind.ORIENTATION, LocalityKind.CROP, LocalityKind.RESCALE)
+        region_indices = [index for index, loc in enumerate(localities) if loc.kind in region_kinds]
+        if len(region_indices) > 1:
+            return False, None
+        if any(loc.kind is LocalityKind.HALO and not self._affords_halo(a, loc.halo) for loc in localities):
+            return False, None
+        for index, loc in enumerate(localities):
+            if loc.kind is not LocalityKind.GLOBAL_STAT:
+                continue
+            # The seed is the STORED volume's statistic, which is this transform's input only when
+            # every earlier stage preserves it; otherwise ([Clip(-200, 400), Standardize()]) every
+            # patch would be standardized by the pre-Clip statistic -- fall back to the whole volume.
+            if not all(previous.statistics_preserving for previous in localities[:index]):
+                return False, None
+            if not self._ensure_stream_stats(
+                source_dataset, source_group, cache_attribute, set(loc.stat_keys), loc.stat_channels
+            ):
+                return False, None
+        region_index = region_indices[0] if region_indices else None
+        if (
+            region_index is not None
+            and localities[region_index].kind is LocalityKind.RESCALE
+            and "Spacing" not in cache_attribute
+        ):
+            # A resample is patch-native only when the source geometry is known: the scale is read
+            # from cache_attribute['Spacing'] (a free geometry stat, no read_data_statistics).
+            return False, None
+        return True, region_index
 
     @staticmethod
     def _dataset_from_spec(dataset_spec: str) -> Dataset:
@@ -662,17 +814,16 @@ class DatasetManager:
         )
         return Dataset(filename, file_format)
 
-    def _resolve_patch_stream_source(
-        self,
-        apply_augmentations: bool = True,
-    ) -> tuple[Dataset, str, list[int], list[Transform]] | None:
-        if apply_augmentations in self._patch_stream_sources:
-            return self._patch_stream_sources[apply_augmentations]
+    def _resolve_patch_stream_source(self, a: int, apply_augmentations: bool = True) -> _PatchStreamSource | None:
+        key = (a, apply_augmentations)
+        if key in self._patch_stream_sources:
+            return self._patch_stream_sources[key]
 
         source_dataset = self.dataset
         source_group = self.group_src
         source_shape = self.base_shape
-        trailing_transforms = self.transforms
+        boundary_attributes: Attribute | None = None
+        trailing_transforms: list[Stage] = list(self.transforms)
 
         for index in range(len(self.transforms) - 1, -1, -1):
             transform = self.transforms[index]
@@ -682,34 +833,42 @@ class DatasetManager:
                 if dataset.is_dataset_exist(group, self.name):
                     source_dataset = dataset
                     source_group = group
-                    source_shape, _ = dataset.get_infos(group, self.name)
-                    trailing_transforms = self.transforms[index + 1 :]
+                    source_shape, boundary_attributes = dataset.get_infos(group, self.name)
+                    trailing_transforms = list(self.transforms[index + 1 :])
                     break
 
-        stream_cache_attribute = Attribute(self.cache_attributes[0])
-        if (not apply_augmentations or len(self.data_augmentations_list) == 0) and all(
-            self._supports_patch_stream_transform(
-                transform,
-                source_dataset,
-                source_group,
-                stream_cache_attribute,
-            )
-            for transform in trailing_transforms
-        ):
-            self.cache_attributes[0] = Attribute(stream_cache_attribute)
-            self.cache_attributes_bak[0] = Attribute(stream_cache_attribute)
-            self._patch_stream_sources[apply_augmentations] = (
-                source_dataset,
-                source_group,
-                list(source_shape),
-                trailing_transforms,
+        # What copy `a` is: the trailing transforms, then its own draw. The draw is applied to the
+        # transformed volume, so it goes last, and the whole thing is planned as one chain -- a region
+        # transform and a region augmentation are then two regions, which is exactly what they are.
+        stages = trailing_transforms + (self._augmentation_stages(a) if apply_augmentations else [])
+
+        # Plan from the case as STORED (the pristine backup), never from the live attribute: the live
+        # one carries what earlier patches or epochs wrote (a Resample's target Spacing, a Canonical's
+        # canonical Direction), and planning from it would hand a stage its own output as the
+        # description of its input on every epoch after the first.
+        stream_cache_attribute = Attribute(self.cache_attributes_bak[0])
+        if boundary_attributes is not None:
+            # Streaming from a Save cache: the stored volume is the cache, so the stages after the
+            # boundary read its geometry -- stacked over the source keys exactly as the whole-volume
+            # cache-hit merges the cached header.
+            for attribute_key, attribute_value in boundary_attributes.items():
+                stream_cache_attribute[attribute_key] = attribute_value
+        localities = [stage.patch_locality(Attribute(stream_cache_attribute)) for stage in stages]
+        streamable, region_index = self._plan_stream_region(
+            a, localities, source_dataset, source_group, stream_cache_attribute
+        )
+        if streamable:
+            self.cache_attributes[a] = Attribute(stream_cache_attribute)
+            self.cache_attributes_bak[a] = Attribute(stream_cache_attribute)
+            self._patch_stream_sources[key] = _PatchStreamSource(
+                source_dataset, source_group, list(source_shape), stages, region_index
             )
         else:
-            self._patch_stream_sources[apply_augmentations] = None
-        return self._patch_stream_sources[apply_augmentations]
+            self._patch_stream_sources[key] = None
+        return self._patch_stream_sources[key]
 
     def can_stream_patch(self, a: int, apply_augmentations: bool = True) -> bool:
-        return a == 0 and self._resolve_patch_stream_source(apply_augmentations) is not None
+        return self._resolve_patch_stream_source(a, apply_augmentations) is not None
 
     def _get_streamed_data(
         self,
@@ -718,30 +877,210 @@ class DatasetManager:
         is_input: bool,
         apply_augmentations: bool = True,
     ) -> tuple[torch.Tensor, Attribute]:
-        stream_source = self._resolve_patch_stream_source(apply_augmentations)
+        stream_source = self._resolve_patch_stream_source(a, apply_augmentations)
         if stream_source is None:
             raise RuntimeError("Patch streaming requested on a dataset manager without a streaming source.")
 
-        source_dataset, source_group, source_shape, transforms = stream_source
-        plan = self.patch.get_read_plan(source_shape, index, a, is_input)
-        data, attributes = source_dataset.read_data_slice(source_group, self.name, plan.data_slices)
-        tensor = self.patch.apply_read_plan(torch.from_numpy(data), plan)
-        cache_attribute = Attribute(self.cache_attributes[a])
+        region_index = stream_source.region_index
+
+        # RESCALE keeps its dedicated body: its own scale/geometry maths and attribute-persist stack.
+        # The other region kinds go through the generic path below.
+        if region_index is not None and isinstance(stream_source.stages[region_index], Resample):
+            return self._get_streamed_resample_data(index, a, stream_source, region_index, is_input)
+
+        if region_index is None:
+            # POINTWISE / GLOBAL_STAT only: read the exact patch and run the whole chain on it.
+            plan = self.patch.get_read_plan(stream_source.shape, index, a, is_input)
+            data, attributes = stream_source.dataset.read_data_slice(stream_source.group, self.name, plan.data_slices)
+            tensor = torch.from_numpy(data)
+            cache_attribute = Attribute(self.cache_attributes_bak[a])
+            cache_attribute.update(attributes)
+            persist = a not in self._stream_attributes_persisted
+            keys_before = set(cache_attribute.keys()) if persist else set()
+            for stage in stream_source.stages:
+                tensor = stage(self.name, tensor, cache_attribute)
+            # The chain runs on the raw read extent and the read plan is applied AFTER it, exactly as
+            # the whole-volume path transforms the volume before Patch.get_data cuts it: a border patch
+            # is padded with the min of the TRANSFORMED patch (pad_value=None) and the transform never
+            # sees the padding. Padding first would feed f(pad) to the model wherever the volume does
+            # not tile the patch grid.
+            tensor = self.patch.apply_read_plan(tensor, plan)
+            if persist:
+                self._persist_stream_attributes(a, cache_attribute, keys_before)
+            return tensor, cache_attribute
+
+        return self._get_streamed_region_data(index, a, stream_source, region_index, is_input)
+
+    def _finalize_stream_patch(self, tensor: torch.Tensor, index: int, a: int, is_input: bool) -> torch.Tensor:
+        """Pad/format a target-extent streamed patch to ``patch_size`` like the whole-volume path.
+
+        The region and RESCALE streamed paths produce a patch at the raw target-slice extent, but the
+        overlap tiling can leave the last patch narrower than ``patch_size`` (integer-floor stride).
+        The whole-volume ``Patch.get_data`` pads that border patch up to ``patch_size`` via
+        ``apply_read_plan``; running the streamed patch through the SAME read plan makes border patches
+        byte-identical between the two paths instead of one voxel short. The plan is built on
+        ``self.shapes[a]`` -- the spatial grid this copy's patch slices were themselves cut on, which is
+        the source shape reordered by a Permute and resized by a Resample.
+        """
+        plan = self.patch.get_read_plan(self.shapes[a], index, a, is_input)
+        return self.patch.apply_read_plan(tensor, plan)
+
+    def _persist_stream_attributes(self, a: int, cache_attribute: Attribute, keys_before: set[str]) -> None:
+        # Streaming applies the trailing transforms per patch on a throwaway attribute copy, but
+        # state they record for their own inversion (e.g. TensorCast's source dtype) must survive on
+        # the persistent case attribute, exactly as the non-streamed path stores it while
+        # transforming the full volume. Only NEWLY-added keys are copied, so a pre-seeded GLOBAL_STAT
+        # or a case-level geometry key is never overwritten by a patch-local value.
+        persistent = self.cache_attributes[a]
+        persistent_keys = set(persistent.keys())
+        for key, value in cache_attribute.items():
+            if key not in keys_before and key not in persistent_keys:
+                dict.__setitem__(persistent, key, value)
+        self._stream_attributes_persisted.add(a)
+
+    def _get_streamed_region_data(
+        self,
+        index: int,
+        a: int,
+        stream_source: _PatchStreamSource,
+        region_index: int,
+        is_input: bool,
+    ) -> tuple[torch.Tensor, Attribute]:
+        """Patch-native HALO/ORIENTATION: read the source region a target patch maps to.
+
+        The chain is ``[pre-pointwise*][region][post-pointwise*]``. HALO reads the patch enlarged by the
+        declared per-axis radius (clamped to the volume) and crops the halo back after the stage; the
+        stage's own edge padding reproduces the whole-volume border once the clamp reaches the true
+        border, so seams agree. ORIENTATION reads the index-remapped source region
+        (``stream_region_source``) and applies the flip/permute -- same extent, no crop. No whole volume
+        is loaded.
+        """
+        region_stage = stream_source.stages[region_index]
+        pre_stages = stream_source.stages[:region_index]
+        post_stages = stream_source.stages[region_index + 1 :]
+        region_loc = region_stage.patch_locality(Attribute(self.cache_attributes_bak[a]))
+
+        target_slices = tuple(self.patch.get_patch_slices(a)[index])
+        n_prefix = len(stream_source.shape) - len(target_slices)
+        slices_pre = [slice(None) for _ in range(n_prefix)]
+        source_spatial = [int(s) for s in stream_source.shape[n_prefix:]]
+
+        crop_offsets: list[int] | None = None
+        if region_loc.kind is LocalityKind.HALO:
+            source_slices = []
+            crop_offsets = []
+            for k, (sl, radius) in enumerate(
+                zip(target_slices, _halo_radii(region_loc.halo, len(target_slices)), strict=False)
+            ):
+                start = max(0, sl.start - radius)
+                stop = min(source_spatial[k], sl.stop + radius)
+                source_slices.append(slice(start, stop))
+                crop_offsets.append(sl.start - start)
+        else:
+            source_slices = region_stage.stream_region_source(
+                target_slices, source_spatial, Attribute(self.cache_attributes_bak[a])
+            )
+
+        data_slices = tuple(slices_pre + source_slices)
+        data, attributes = stream_source.dataset.read_data_slice(stream_source.group, self.name, data_slices)
+        sub = torch.from_numpy(data)
+
+        # Each patch re-runs the chain from the state the whole-volume pass started from: the case as
+        # stored (plus planned stats), never the live attribute -- that one carries the chain's own
+        # output.
+        cache_attribute = Attribute(self.cache_attributes_bak[a])
         cache_attribute.update(attributes)
         persist = a not in self._stream_attributes_persisted
         keys_before = set(cache_attribute.keys()) if persist else set()
-        for transform in transforms:
-            tensor = transform(self.name, tensor, cache_attribute)
+
+        for stage in pre_stages:
+            sub = stage(self.name, sub, cache_attribute)
+        # The region stage's geometry writes describe the patch's extent, not the volume's: give it a
+        # throwaway scope, and write the case-level answer once from the FULL source shape below
+        # (write_stream_cache_attribute). A CROP's remap IS its action: the region read is already the
+        # target patch, so the stage is not re-applied.
+        if region_loc.kind is LocalityKind.CROP:
+            tensor = sub
+        else:
+            tensor = region_stage(self.name, sub, Attribute(cache_attribute))
+        if crop_offsets is not None:
+            n_channel_axes = tensor.dim() - len(target_slices)
+            crop = tuple(
+                [slice(None)] * n_channel_axes
+                + [slice(off, off + (sl.stop - sl.start)) for off, sl in zip(crop_offsets, target_slices, strict=False)]
+            )
+            tensor = tensor[crop]
+        for stage in post_stages:
+            tensor = stage(self.name, tensor, cache_attribute)
+
+        tensor = self._finalize_stream_patch(tensor, index, a, is_input)
+
         if persist:
-            # Streaming applies the trailing transforms per patch on this throwaway
-            # copy, but state they record for their own inversion (e.g. TensorCast's
-            # source dtype) must survive on the persistent case attribute, exactly as
-            # the non-streamed path stores it while transforming the full volume.
+            # The region stage's own geometry writes went to the patch-scoped copy above, so this is
+            # where the case gets them: computed once, from the FULL source shape, against the attribute
+            # that still describes the whole volume.
+            region_stage.write_stream_cache_attribute(self.cache_attributes[a], source_spatial)
+            self._persist_stream_attributes(a, cache_attribute, keys_before)
+        return tensor, cache_attribute
+
+    def _get_streamed_resample_data(
+        self,
+        index: int,
+        a: int,
+        stream_source: _PatchStreamSource,
+        resample_pos: int,
+        is_input: bool,
+    ) -> tuple[torch.Tensor, Attribute]:
+        """Patch-native resample: read ONLY the source region a target patch maps to.
+
+        The chain is ``[pre-pointwise][Resample][post-pointwise]``. The target-grid
+        patch slices (already on the post-resample shape) are mapped back to a
+        bounded source region via ``resample.resample_source_region``; only that region
+        is read (``read_data_slice``); pre-pointwise stages run on the sub-region,
+        then the gather kernel interpolates to the target extent, then post-pointwise
+        stages run on the patch. No whole volume is loaded.
+        """
+        source_shape = stream_source.shape
+        resample = cast(Resample, stream_source.stages[resample_pos])
+        pre_stages = stream_source.stages[:resample_pos]
+        post_stages = stream_source.stages[resample_pos + 1 :]
+
+        # Target-grid spatial slices for this patch (built on the post-resample shape).
+        target_slices = tuple(self.patch.get_patch_slices(a)[index])
+        source_spatial = list(source_shape[len(source_shape) - len(target_slices) :])
+
+        source_slices, region_starts, scales, n_in, _ = resample.resample_source_region(
+            target_slices, source_spatial, Attribute(self.cache_attributes_bak[a])
+        )
+
+        slices_pre = [slice(None) for _ in range(len(source_shape) - len(target_slices))]
+        data_slices = tuple(slices_pre + source_slices)
+        data, attributes = stream_source.dataset.read_data_slice(stream_source.group, self.name, data_slices)
+        sub = torch.from_numpy(data)
+
+        cache_attribute = Attribute(self.cache_attributes_bak[a])
+        cache_attribute.update(attributes)
+        persist = a not in self._stream_attributes_persisted
+        keys_before = set(cache_attribute.keys()) if persist else set()
+
+        for stage in pre_stages:
+            sub = stage(self.name, sub, cache_attribute)
+        tensor = resample.resample_region(sub, target_slices, region_starts, scales, n_in)
+        for stage in post_stages:
+            tensor = stage(self.name, tensor, cache_attribute)
+
+        tensor = self._finalize_stream_patch(tensor, index, a, is_input)
+
+        if persist:
             persistent = self.cache_attributes[a]
             persistent_keys = set(persistent.keys())
             for key, value in cache_attribute.items():
                 if key not in keys_before and key not in persistent_keys:
                     dict.__setitem__(persistent, key, value)
+            # Record the same Spacing/Size stack a whole-volume __call__ would, so
+            # inverse() at prediction time pops exactly what the non-streamed path
+            # pushed. Uses the FULL source shape, never the halo'd sub-region.
+            resample.write_stream_cache_attribute(persistent, source_spatial)
             self._stream_attributes_persisted.add(a)
         return tensor, cache_attribute
 
@@ -767,8 +1106,13 @@ class DatasetManager:
             data, _ = self._get_streamed_data(index, a, is_input, apply_augmentations)
         else:
             data = self.patch.get_data(self._get_tensor(a), index, a, is_input)
-        for transform_function in patch_transforms:
-            data = transform_function(self.name, data, self.cache_attributes[a])
+        if patch_transforms:
+            # Per-patch scope: writing to the shared case attribute would freeze the first patch's
+            # derived statistic for every other patch. A case-level statistic (`Standardize(lazy=True)`
+            # in `transforms`) is inherited through the copy.
+            cache_attribute = Attribute(self.cache_attributes[a])
+            for transform_function in patch_transforms:
+                data = transform_function(self.name, data, cache_attribute)
         return data
 
     def get_size(self, a: int) -> int:
