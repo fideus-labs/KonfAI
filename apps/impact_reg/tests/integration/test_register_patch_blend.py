@@ -102,9 +102,11 @@ def test_register_large_volume_with_patch_tiling_and_blending(make_reg_pair, tmp
     # (2) patch-tiled registration recovers the smooth warp: NCC improves clearly over the baseline
     after = _ncc(moved_a, fixed_a)
     assert after > baseline + 0.05, f"NCC {baseline:.3f} -> {after:.3f} did not improve enough"
-    # (3) no seam: the Cosinus overlap-blend is a partition of unity, so the reassembled DVF has no gradient
-    #     spike at the patch-boundary planes (patch 64 / overlap 16 on a 96 axis -> borders near z in {31,32,63,64})
-    grad = np.abs(np.diff(dvf, axis=0)).sum(-1)
-    global_mean = float(grad.mean())
-    seam_mean = max(float(grad[p].mean()) for p in (31, 32, 63, 64) if p < grad.shape[0])
-    assert seam_mean < 6.0 * global_mean, f"patch seam detected: {seam_mean:.3f} vs global {global_mean:.3f}"
+    # (3) no seam on ANY tiled axis: the 96^3 volume is tiled on Z, Y AND X (patch 64 / overlap 16), so the
+    #     Cosinus overlap-blend (a partition of unity) must leave the reassembled DVF free of a gradient spike
+    #     at the patch-boundary planes on each axis (borders near {31,32,63,64}), not just Z.
+    for axis in range(3):
+        grad = np.abs(np.diff(dvf, axis=axis)).sum(-1)  # DVF change magnitude across this spatial axis
+        global_mean = float(grad.mean())
+        seam_mean = max(float(grad.take(p, axis=axis).mean()) for p in (31, 32, 63, 64) if p < grad.shape[axis])
+        assert seam_mean < 6.0 * global_mean, f"axis {axis} patch seam: {seam_mean:.3f} vs global {global_mean:.3f}"

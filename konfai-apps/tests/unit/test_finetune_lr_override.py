@@ -99,6 +99,61 @@ def test_local_fine_tune_defaults_lr_to_none(monkeypatch: pytest.MonkeyPatch, tm
     assert captured == [None]
 
 
+def test_local_fine_tune_copies_subpackage_support_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An app whose code/config lives in a subpackage must be replicated into work_dir at its own path."""
+    src_ckpt = tmp_path / "CV_0_src.pt"
+    _write_src_checkpoint(src_ckpt)
+
+    dataset_dir = tmp_path / "Dataset"
+    dataset_dir.mkdir()
+
+    output_dir = tmp_path / "Output"
+    output_dir.mkdir()
+    (output_dir / "Config.yml").write_text("Trainer:\n  train_name: PLACEHOLDER\n", encoding="utf-8")
+    # Support assets in subpackages (a relative-classpath sub-model + custom code) must survive the copy.
+    (output_dir / "models").mkdir()
+    (output_dir / "models" / "UNet.yml").write_text("Network:\n  type: UNet\n", encoding="utf-8")
+    (output_dir / "custom").mkdir()
+    (output_dir / "custom" / "__init__.py").write_text("", encoding="utf-8")
+    (output_dir / "custom" / "loss.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    seen: dict[str, bool] = {}
+
+    def fake_train(*args, **kwargs):  # type: ignore[no-untyped-def]
+        model_config = Path(args[7])
+        work_dir = model_config.parent
+        seen["nested_yml"] = (work_dir / "models" / "UNet.yml").is_file()
+        seen["nested_py"] = (work_dir / "custom" / "loss.py").is_file()
+        with open(model_config) as file:
+            data = YAML().load(file)
+        produced_dir = Path(args[8]) / data["Trainer"]["train_name"]
+        produced_dir.mkdir(parents=True, exist_ok=True)
+        torch.save({"epoch": 0, "it": 5, "loss": 0.0, "Model": {}}, produced_dir / "out.pt")
+
+    monkeypatch.setattr("konfai.trainer.train", fake_train)
+    monkeypatch.setattr(app_module.KonfAIApp, "symlink", staticmethod(lambda *a, **k: None))
+
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app.app_repository = types.SimpleNamespace(  # type: ignore[attr-defined]
+        install_fine_tune=lambda *a, **k: [("CV_0.pt", str(src_ckpt))]
+    )
+    app.fine_tune(
+        dataset=dataset_dir,
+        name="Run",
+        output=output_dir,
+        epochs=1,
+        it_validation=1,
+        models=["CV_0"],
+        gpu=[],
+        cpu=1,
+        quiet=True,
+        config_file="Config.yml",
+        tmp_dir=output_dir,
+    )
+
+    assert seen == {"nested_yml": True, "nested_py": True}
+
+
 class _FakePostResponse:
     def __init__(self, captured: dict, files: list, data: dict) -> None:
         captured["files"] = files

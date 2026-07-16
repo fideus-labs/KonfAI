@@ -28,7 +28,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from konfai import RemoteServer, check_server
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

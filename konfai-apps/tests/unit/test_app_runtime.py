@@ -245,6 +245,13 @@ def test_parse_input_default_rejects_unknown_value() -> None:
         _parse_input_default("FixedMask", "whole")
 
 
+def test_parse_input_default_rejects_default_on_required_input() -> None:
+    # `default` is optional-input-only (a required input is never auto-filled), so declaring both is a
+    # contradiction that _fill_optional_inputs would silently drop -- reject it at load time instead.
+    with pytest.raises(AppMetadataError, match="only valid for optional inputs"):
+        _parse_input_default("Fixed", "ones", required=True)
+
+
 def test_fill_optional_inputs_leaves_input_without_default_absent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -265,6 +272,32 @@ def test_fill_optional_inputs_leaves_input_without_default_absent(
     app._fill_optional_inputs(1)
 
     assert not (tmp_path / "Dataset" / "P000" / "Volume_1.mha").exists()
+
+
+def test_write_mask_or_default_reads_header_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_volume(data / "fixed.mha", shape=(4, 5, 6))
+    monkeypatch.chdir(tmp_path)
+
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app._write_inputs_to_dataset([[data / "fixed.mha"]])
+
+    # The default mask must be sized from the header (get_infos), never a full pixel read.
+    def _forbid_read_data(*args: object, **kwargs: object) -> None:
+        raise AssertionError("default mask must not read the whole volume")
+
+    monkeypatch.setattr(app_module.Dataset, "read_data", _forbid_read_data)
+    app._write_mask_or_default(None)
+
+    mask = tmp_path / "Dataset" / "P000" / "Mask_0.mha"
+    assert mask.exists()
+    arr = sitk.GetArrayFromImage(sitk.ReadImage(str(mask)))
+    assert arr.shape == (4, 5, 6)
+    assert np.array_equal(arr, np.ones_like(arr))
 
 
 class _FakeSseResponse:

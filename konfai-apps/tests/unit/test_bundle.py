@@ -19,7 +19,6 @@
 import json
 
 import pytest
-
 from konfai.utils.errors import AppMetadataError
 from konfai_apps.bundle import assemble_bundle
 

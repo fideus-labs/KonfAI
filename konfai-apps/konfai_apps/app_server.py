@@ -141,7 +141,10 @@ def save_upload_groups(
     for i, group in enumerate(split_into_groups(files, groups)):
         paths = save_uploads(group, base / f"g{i}", max_file_bytes, max_total_bytes - total)
         saved.append(paths)
-        total += sum(p.stat().st_size for p in paths)
+        # Charge the real content bytes: a directory-volume path is a directory whose inode st_size is a
+        # few dozen bytes, not the extracted store -- summing st_size of the paths would let a group of
+        # such volumes bypass max_total_bytes for every following group. Walk directories for their files.
+        total += sum(f.stat().st_size for p in paths for f in ([p] if p.is_file() else p.rglob("*")) if f.is_file())
     return saved
 
 
@@ -284,6 +287,41 @@ def extract_zip_safely(upload: UploadFile, dest: Path) -> Path:
     return dest
 
 
+def _extract_zip_bounded(archive_path: Path, dest: Path, max_file_bytes: int, max_total_bytes: int) -> int:
+    """Extract every member of ``archive_path`` under ``dest``, streaming each member and enforcing the size
+    limits on the EXTRACTED bytes.
+
+    A zip bomb inflates far past its on-wire size, so a limit checked on the compressed upload is no limit at
+    all -- the guard has to count what actually lands on disk. Each member is zip-slip checked before any
+    write. Returns the total number of bytes written.
+    """
+    dest = dest.resolve()
+    extracted = 0
+    with zipfile.ZipFile(archive_path) as zf:
+        for info in zf.infolist():
+            target = (dest / info.filename).resolve()
+            if target != dest and dest not in target.parents:
+                raise HTTPException(400, f"Unsafe path in archive: {info.filename}")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            member_written = 0
+            with zf.open(info) as src, target.open("wb") as out:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    member_written += len(chunk)
+                    extracted += len(chunk)
+                    if member_written > max_file_bytes:
+                        raise HTTPException(413, f"File too large in archive: {info.filename}")
+                    if extracted > max_total_bytes:
+                        raise HTTPException(413, "Total upload too large")
+                    out.write(chunk)
+    return extracted
+
+
 def _save_directory_volume(
     upload: UploadFile, dst: Path, max_file_bytes: int, max_total_bytes: int
 ) -> tuple[Path, int]:
@@ -291,39 +329,41 @@ def _save_directory_volume(
 
     The client zips a DICOM series / OME-Zarr store whole and marks the filename; here it is
     re-materialised as one directory (``dst/<name>``) so the KonfAI dataset backend reads it as a
-    single volume rather than a bag of slices/chunks. Returns the directory and the bytes written.
+    single volume rather than a bag of slices/chunks. Returns the directory and the extracted bytes.
     """
     dir_name = Path(upload.filename).name[: -len(".konfaidir.zip")] if upload.filename else ""
     if not dir_name or "/" in dir_name or "\\" in dir_name:
         raise HTTPException(400, f"Invalid directory-volume name: {upload.filename}")
     dst.mkdir(parents=True, exist_ok=True)
-    target_dir = (dst / dir_name).resolve()
-    if target_dir != dst.resolve() and dst.resolve() not in target_dir.parents:
+    dst_resolved = dst.resolve()
+    target_dir = (dst_resolved / dir_name).resolve()
+    # Require a fresh direct child of the group dir. This rejects '.' (target_dir would be dst itself, so
+    # extraction overwrites sibling uploads and failure cleanup rmtrees the whole group) and '..'/traversal,
+    # and refuses to reuse an existing entry (a name collision that would merge into another upload).
+    if target_dir.parent != dst_resolved:
         raise HTTPException(400, f"Unsafe directory-volume name: {upload.filename}")
-    target_dir.mkdir(parents=True, exist_ok=True)
+    if target_dir.exists():
+        raise HTTPException(400, f"Directory-volume name collides with an existing upload: {upload.filename}")
+    target_dir.mkdir(parents=True)
 
     fd, tmp_name = tempfile.mkstemp(suffix=".zip", dir=dst)
     archive_path = Path(tmp_name)
     written = 0
     try:
+        compressed = 0
         with os.fdopen(fd, "wb") as w:
             while True:
                 chunk = upload.file.read(1024 * 1024)
                 if not chunk:
                     break
-                written += len(chunk)
-                if written > max_file_bytes:
-                    raise HTTPException(413, f"File too large: {upload.filename}")
-                if written > max_total_bytes:
+                compressed += len(chunk)
+                # Bound the transient temp archive too: a legit store's compressed size never exceeds its
+                # extracted size, so capping the download at the extracted budget rejects nothing valid.
+                if compressed > max_total_bytes:
                     raise HTTPException(413, "Total upload too large")
                 w.write(chunk)
         try:
-            with zipfile.ZipFile(archive_path) as zf:
-                for member in zf.namelist():
-                    resolved = (target_dir / member).resolve()
-                    if resolved != target_dir and target_dir not in resolved.parents:
-                        raise HTTPException(400, f"Unsafe path in archive: {member}")
-                zf.extractall(target_dir)
+            written = _extract_zip_bounded(archive_path, target_dir, max_file_bytes, max_total_bytes)
         except zipfile.BadZipFile as exc:
             raise HTTPException(400, f"Uploaded volume is not a valid zip: {upload.filename}") from exc
     except Exception:

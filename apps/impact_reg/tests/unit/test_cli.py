@@ -26,10 +26,27 @@ from impact_reg_konfai import cli
 
 
 def _run(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
+    """Run ``cli.main`` on ``argv``; return the SystemExit code (0 if none)."""
     monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv])
     with pytest.raises(SystemExit) as exc:
         cli.main()
     return int(exc.value.code or 0)
+
+
+def _stub_app(calls: dict[str, dict]) -> type:
+    """A drop-in for ``ImpactRegKonfAIApp`` that records the dispatched call instead of resolving any app."""
+
+    class _StubApp:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def evaluate(self, **kwargs: object) -> None:
+            calls["evaluate"] = kwargs
+
+        def uncertainty(self, **kwargs: object) -> None:
+            calls["uncertainty"] = kwargs
+
+    return _StubApp
 
 
 @pytest.mark.parametrize("subcommand", ["register", "eval", "uncertainty"])
@@ -37,15 +54,36 @@ def test_subcommands_are_wired(monkeypatch: pytest.MonkeyPatch, subcommand: str)
     assert _run(monkeypatch, [subcommand, "--help"]) == 0
 
 
-def test_register_takes_preset_as_positional_not_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    # --preset belongs to eval/uncertainty, NOT register: passing it to register is an argument error.
-    assert _run(monkeypatch, ["register", "--preset", "FireANTs_SyN", "-f", "a.mha", "-m", "b.mha"]) == 2
+def test_register_rejects_preset_flag(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    # --preset belongs to eval/uncertainty, NOT register. Give register a valid positional preset so the ONLY
+    # possible failure is the flag itself: argparse must reject it as unrecognized (not fail on a missing
+    # positional, which would mask a regression that quietly accepted --preset).
+    code = _run(monkeypatch, ["register", "FireANTs_SyN", "--preset", "X", "-f", "a.mha", "-m", "b.mha"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "unrecognized arguments" in err and "--preset" in err
 
 
-def test_eval_and_uncertainty_take_preset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    # --help after --preset resolves cleanly, so the flag is recognised on these subcommands.
-    assert _run(monkeypatch, ["eval", "--preset", "FireANTs_SyN", "--help"]) == 0
-    assert _run(monkeypatch, ["uncertainty", "--preset", "FireANTs_SyN", "--help"]) == 0
+def test_eval_forwards_preset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --preset must be parsed and forwarded to app.evaluate. Stub the app so nothing is resolved; a valid
+    # dispatch (rather than an "unrecognized arguments" argparse error) proves the flag is really wired.
+    calls: dict[str, dict] = {}
+    monkeypatch.setattr(cli, "ImpactRegKonfAIApp", _stub_app(calls))
+    monkeypatch.setattr(
+        sys, "argv", ["impact-reg-konfai", "eval", "--preset", "FireANTs_SyN", "-f", "a.mha", "-m", "b.mha"]
+    )
+    cli.main()  # no SystemExit: argparse accepted --preset and dispatch reached the stub
+    assert calls["evaluate"]["preset"] == "FireANTs_SyN"
+
+
+def test_uncertainty_forwards_preset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, dict] = {}
+    monkeypatch.setattr(cli, "ImpactRegKonfAIApp", _stub_app(calls))
+    monkeypatch.setattr(
+        sys, "argv", ["impact-reg-konfai", "uncertainty", "--preset", "FireANTs_SyN", "--dvf", "a.mha", "b.mha"]
+    )
+    cli.main()
+    assert calls["uncertainty"]["preset"] == "FireANTs_SyN"
 
 
 def test_unknown_subcommand_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
