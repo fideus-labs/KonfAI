@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1330" viewBox="0 0 720 1330" role="img" aria-labelledby="title desc">
+  <title id="title">KonfAI end-to-end execution flow</title>
+  <desc id="desc">Medical images flow through the patch-native KonfAI engine into medical datasets, applications, services, Slicer, and agent-operated experiments.</desc>
+  <defs>
+    <linearGradient id="engineFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123a34"/>
+      <stop offset="1" stop-color="#192f3c"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0L10 5L0 10z" fill="#3fdcc3"/>
+    </marker>
+    <style>
+      :root { background: #14171a; color-scheme: only dark; }
+      .canvas { fill:#14171a; }
+      .surface { fill:#1d2426; stroke:#354348; }
+      .engine { fill:url(#engineFill); stroke:#39786e; }
+      .stage,.nodeIndex { fill:#63e2ce; }
+      .stage { font:700 20px system-ui,-apple-system,"Segoe UI",sans-serif; letter-spacing:2px; }
+      .heading { fill:#f0f5f4; font:700 30px system-ui,-apple-system,"Segoe UI",sans-serif; }
+      .body,.pillText { fill:#d6e0de; }
+      .body { font:600 22px system-ui,-apple-system,"Segoe UI",sans-serif; }
+      .small { fill:#b0bfbc; font:500 19px system-ui,-apple-system,"Segoe UI",sans-serif; }
+      .micro { fill:#91a39f; font:600 16px system-ui,-apple-system,"Segoe UI",sans-serif; letter-spacing:.3px; }
+      .pill,.node { fill:#252e31; stroke:#425358; }
+      .pillText { font:650 19px system-ui,-apple-system,"Segoe UI",sans-serif; }
+      .workflow { fill:#3fdcc3; }
+      .workflowText { fill:#092b25; font:750 16px system-ui,-apple-system,"Segoe UI",sans-serif; letter-spacing:.5px; }
+      .nodeIndex { font:750 17px system-ui,-apple-system,"Segoe UI",sans-serif; }
+      .arrowPath { fill:none; stroke:#3fdcc3; stroke-width:5; stroke-linecap:round; marker-end:url(#arrow); }
+    </style>
+  </defs>
+
+  <rect class="canvas" width="720" height="1330"/>
+
+  <text class="stage" x="36" y="38">01 · INGEST</text>
+  <rect class="surface" x="24" y="58" width="672" height="288" rx="28"/>
+  <text class="heading" x="58" y="105">Medical data, geometry intact</text>
+  <text class="small" x="58" y="138">DICOM, ITK, HDF5 and OME-Zarr</text>
+  <g transform="translate(58 169)">
+    <rect class="pill" x="0" y="0" width="136" height="50" rx="14"/><text class="pillText" x="68" y="32" text-anchor="middle">DICOM</text>
+    <rect class="pill" x="150" y="0" width="136" height="50" rx="14"/><text class="pillText" x="218" y="32" text-anchor="middle">ITK</text>
+    <rect class="pill" x="300" y="0" width="136" height="50" rx="14"/><text class="pillText" x="368" y="32" text-anchor="middle">HDF5</text>
+    <rect class="pill" x="450" y="0" width="160" height="50" rx="14"/><text class="pillText" x="530" y="32" text-anchor="middle">OME-Zarr</text>
+  </g>
+  <circle cx="70" cy="264" r="11" fill="#3fdcc3" opacity=".18"/>
+  <path d="M65 264l4 4 8-10" fill="none" stroke="#3fdcc3" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="body" x="94" y="271">Exact regional reads</text>
+  <text class="small" x="324" y="271">· bounded fallback when needed</text>
+  <text class="micro" x="58" y="316">THE STORAGE BACKEND PARTICIPATES IN EXECUTION</text>
+
+  <path class="arrowPath" d="M360 362v42"/>
+  <text class="stage" x="36" y="449">02 · EXECUTE</text>
+  <rect class="engine" x="24" y="469" width="672" height="480" rx="28"/>
+  <text class="heading" x="58" y="518">Patch-native KonfAI engine</text>
+  <text class="small" x="58" y="551">The transform chain determines exactly what is read.</text>
+  <g transform="translate(58 580)">
+    <rect class="node" x="0" y="0" width="604" height="65" rx="16"/>
+    <circle cx="32" cy="33" r="18" fill="#3fdcc3" opacity=".16"/><text class="nodeIndex" x="32" y="39" text-anchor="middle">1</text>
+    <text class="body" x="65" y="29">Transforms declare spatial dependencies</text><text class="micro" x="65" y="51">EXACT · HALO · REMAP · RESAMPLE · GLOBAL</text>
+    <rect class="node" x="0" y="79" width="604" height="65" rx="16"/>
+    <circle cx="32" cy="112" r="18" fill="#3fdcc3" opacity=".16"/><text class="nodeIndex" x="32" y="118" text-anchor="middle">2</text>
+    <text class="body" x="65" y="108">Planner traces the source region</text><text class="micro" x="65" y="130">STORAGE → PREPROCESSING → DATASET PATCH</text>
+    <rect class="node" x="0" y="158" width="604" height="65" rx="16"/>
+    <circle cx="32" cy="191" r="18" fill="#8fc9ec" opacity=".16"/><text class="nodeIndex" x="32" y="197" text-anchor="middle">3</text>
+    <text class="body" x="65" y="187">Named PyTorch graph runs</text><text class="micro" x="65" y="209">ROUTING · SUPERVISION · MODEL PATCHING</text>
+    <rect class="node" x="0" y="237" width="604" height="65" rx="16"/>
+    <circle cx="32" cy="270" r="18" fill="#b7a5f5" opacity=".16"/><text class="nodeIndex" x="32" y="276" text-anchor="middle">4</text>
+    <text class="body" x="65" y="266">Overlap-aware reconstruction</text><text class="micro" x="65" y="288">TTA · ENSEMBLES · INVERSE TRANSFORMS</text>
+  </g>
+  <g transform="translate(58 901)">
+    <rect class="workflow" x="0" y="0" width="174" height="34" rx="17"/><text class="workflowText" x="87" y="23" text-anchor="middle">TRAIN / RESUME</text>
+    <rect class="workflow" x="188" y="0" width="154" height="34" rx="17"/><text class="workflowText" x="265" y="23" text-anchor="middle">PREDICT</text>
+    <rect class="workflow" x="356" y="0" width="176" height="34" rx="17"/><text class="workflowText" x="444" y="23" text-anchor="middle">EVALUATE</text>
+  </g>
+
+  <path class="arrowPath" d="M360 965v42"/>
+  <text class="stage" x="36" y="1052">03 · DELIVER</text>
+  <rect class="surface" x="24" y="1072" width="672" height="218" rx="28"/>
+  <text class="heading" x="58" y="1120">One workflow, ready to use</text>
+  <g transform="translate(58 1150)">
+    <rect class="pill" x="0" y="0" width="288" height="48" rx="14"/><circle cx="24" cy="24" r="7" fill="#3fdcc3"/><text class="pillText" x="43" y="31">Medical datasets</text>
+    <rect class="pill" x="302" y="0" width="302" height="48" rx="14"/><circle cx="326" cy="24" r="7" fill="#8fc9ec"/><text class="pillText" x="345" y="31">Apps &amp; fine-tuning</text>
+    <rect class="pill" x="0" y="62" width="288" height="48" rx="14"/><circle cx="24" cy="86" r="7" fill="#b7a5f5"/><text class="pillText" x="43" y="93">HTTP &amp; 3D Slicer</text>
+    <rect class="pill" x="302" y="62" width="302" height="48" rx="14"/><circle cx="326" cy="86" r="7" fill="#f59c90"/><text class="pillText" x="345" y="93">MCP &amp; agents</text>
+  </g>
+  <text class="small" x="360" y="1320" text-anchor="middle">Storage → GPU → clinically usable artifact.</text>
+</svg>

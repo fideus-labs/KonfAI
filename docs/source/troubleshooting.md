@@ -95,6 +95,38 @@ If the split looks wrong, check which form your config is actually using.
 
 ## Runtime problems
 
+### `use_cache: false` still uses memory proportional to a case
+
+`use_cache: false` bounds retention across cases; direct regional reads depend
+on the transforms. The current fast path supports `TensorCast` and unmasked
+`Normalize`, `Standardize`, and `Clip`. Other transforms and augmentations use
+the bounded full-volume path.
+
+Reduce the transform chain to identify the boundary, or materialise expensive
+preprocessing once with `Save` and stream from that prepared dataset. See
+{doc}`usage/large-images`.
+
+### Patch inference is slow
+
+Profile the complete execution path:
+
+- patch size and overlap (overlap repeats I/O and forward work)
+- OME-Zarr chunk shape or DICOM slice decoding
+- `batch_size`, `num_workers`, `prefetch_factor`, and `pin_memory`
+- number of TTA variants and checkpoints
+- output-channel count and CPU/GPU reconstruction device
+
+Change one variable at a time on identical cases. KonfAI owns all these stages,
+which makes the end-to-end path tunable from one workflow; a controlled
+cross-framework benchmark is still required for comparative speed claims.
+
+### CUDA OOM occurs during reconstruction or reduction
+
+The peak may be a volume-sized multi-class accumulator rather than the model
+forward. Reduce inference batch size, TTA/ensemble count, or output channels.
+The predictor can move accumulation to CPU when the full output does not fit
+free VRAM, trading throughput for memory safety.
+
 ### KonfAI asks before overwriting an existing run
 
 Add `-y` to skip the interactive confirmation:
@@ -152,6 +184,20 @@ Check:
 - firewall rules
 - whether `konfai-apps-server` is actually running
 - whether `/health` is reachable
+
+### DICOM series is not detected
+
+Use the `dicom` dataset token and the layout
+`<root>/<case>/<group>/*.dcm`. The `dcm` token is a single-file SimpleITK path.
+Extensionless Part-10 files are detected by their `DICM` marker; non-Part-10
+extensionless exports may need conversion or explicit filenames.
+
+### OME-Zarr metadata or geometry is rejected
+
+Verify that each case/group store is valid OME-NGFF, that the selected pyramid
+level exists, and that scale/translation metadata dimensionality matches the
+array. Start with level 0, then consult
+{doc}`reference/components/storage-backends` before selecting another level.
 
 ## Next steps
 

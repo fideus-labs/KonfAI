@@ -19,6 +19,7 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.abspath("../../"))  # to access konfai/
+sys.path.insert(0, os.path.abspath("../../konfai-apps"))  # standalone konfai_apps package
 
 project = "KonfAI"
 author = "Valentin Boussot"
@@ -77,6 +78,7 @@ autodoc_default_options = {
 }
 autodoc_member_order = "bysource"
 autosummary_generate = True
+autodoc_mock_imports = ["SimpleITK"]
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),

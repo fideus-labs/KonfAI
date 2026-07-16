@@ -111,50 +111,65 @@ level `0` being full resolution and each higher level a downsampled copy. Each
 level carries its own physical `scale` (spacing) and `translation` (origin) in the
 `.zattrs` metadata, so geometry stays correct at every level.
 
-### `read_ome_zarr_slice`
+### Regional reads through `Dataset`
 
 ```python
-from konfai.utils.ome_zarr import read_ome_zarr_slice
+from konfai.utils.dataset import Dataset
 
-patch, axes, scale, translation = read_ome_zarr_slice(
-    "image.zarr",
-    (slice(0, 64), slice(0, 256), slice(0, 256)),   # (Z, Y, X)
+dataset = Dataset("Dataset", "omezarr")
+shape, attributes = dataset.get_infos("Volume", "CASE_001")  # metadata only
+patch, patch_attributes = dataset.read_data_slice(
+    "Volume",
+    "CASE_001",
+    (
+        slice(None),       # C
+        slice(0, 64),      # Z
+        slice(0, 256),     # Y
+        slice(0, 256),     # X
+    ),
+)
+```
+
+`get_infos()` reads the pyramid metadata without reading pixels.
+`read_data_slice()` returns a channel-first `(C, Z, Y, X)` NumPy patch and an
+`Attribute` whose origin and spacing have already been updated for the selected
+window.
+
+The lower-level equivalent is
+`konfai.utils.ome_zarr.read_ome_zarr_data_slice(store_path, slices, *, level=0, timepoint=0)`:
+
+```python
+from konfai.utils.ome_zarr import read_ome_zarr_data_slice
+
+patch, metadata = read_ome_zarr_data_slice(
+    "image.ome.zarr",
+    (slice(None), slice(0, 64), slice(0, 256), slice(0, 256)),
     level=0,
 )
 ```
 
-`konfai.utils.ome_zarr.read_ome_zarr_slice(store_path, slices, *, level=0, channel=None, timepoint=0)`
-reads one spatial patch and returns:
+It returns:
 
 | Returned | Meaning |
 | --- | --- |
 | `patch` | channel-first `(C, Z, Y, X)` patch preserving the stored dtype |
-| `axes` | axis names from the OME-NGFF metadata (e.g. `['z', 'y', 'x']`) |
-| `scale` | voxel spacing for the selected level |
-| `translation` | origin translation for the selected level |
+| `metadata` | axes, full shape, chunks, dtype, scale, translation, and stored KonfAI attributes |
 
 The reader inspects the stored `axes` to place the spatial slices on the right
 dimensions and to index optional `T` (time) and `C` (channel) axes, so the same
-call works for `ZYX`, `CZYX`, and `TCZYX` arrays. Local `.zarr` directories and
-remote stores (`s3://`, `gs://`) are both supported.
+call works for `ZYX`, `CZYX`, and `TCZYX` arrays.
 
-### Choosing a resolution: `select_level`
+### Choosing a resolution
 
-`konfai.utils.ome_zarr.select_level(zattrs, target_spacing_mm=None)` picks the
-pyramid level whose voxel spacing is closest to a target:
+Select the pyramid level in the dataset format token. Level `0` is the default;
+`omezarr@1` selects the next coarser image:
 
 ```python
-import zarr
-from konfai.utils.ome_zarr import select_level, read_ome_zarr_slice
+from konfai.utils.dataset import Dataset
 
-zattrs = dict(zarr.open("image.zarr", mode="r").attrs)
-level = select_level(zattrs, target_spacing_mm=1.0)   # nearest level to 1 mm
-patch, *_ = read_ome_zarr_slice("image.zarr", (slice(0, 64),) * 3, level=level)
+coarse = Dataset("Dataset", "omezarr@1")
+coarse_shape, coarse_attributes = coarse.get_infos("Volume", "CASE_001")
 ```
-
-With `target_spacing_mm=None` it returns level `0` (full resolution). Otherwise it
-compares the median spatial scale of each level against the target and returns the
-closest — letting you trade resolution for field of view at a fixed patch size.
 
 Use `konfai.utils.ome_zarr.get_ome_zarr_info(store_path, level=0)` for a metadata
 summary (`axes`, `shape`, `chunks`, `dtype`, `scale`, `translation`, `n_levels`)
@@ -214,19 +229,19 @@ loads a whole volume when it can avoid it:
   with `data.min()`), `extend_slice` (2.5-D context, only when `patch_size[0]==1`).
 - **`ModelPatch`** — patching applied *inside* a model graph, with a
   `patch_combine` blender (`Mean` or `Cosinus`) for overlap reassembly.
-- **Streaming** reads only one patch's window from disk (`read_data_slice`). It is
-  opt-in and conservative: only the base (non-augmented) patch, and only when
-  every trailing transform is on a stream-safe allow-list (`TensorCast`, and
-  `Normalize`/`Standardize`/`Clip` without masks, using precomputed statistics).
-  Anything else falls back to a full in-RAM load.
+- **Streaming** reads a planned source region through `read_data_slice`.
+  Transform and sampled-augmentation locality determines whether that region is
+  exact, haloed, index-remapped, cropped, rescaled, or unavailable. When the
+  chain cannot be represented by one bounded region, KonfAI uses the safe
+  whole-volume buffer. See {doc}`../../concepts/streaming` for the planner.
 - **`Accumulator`** reassembles patches with overlap blending, correcting border
   voxels covered by fewer patches. Patch **read order must match write order** —
   a load-bearing invariant.
 
 ```{important}
 For PREDICTION / EVALUATION, **all patches of a case stay on the same DDP rank**
-(the whole volume is reassembled per rank). For TRAIN, shards are truncated to the
-shortest rank so DDP all-reduces stay balanced.
+(the whole volume is reassembled per rank). For TRAIN, shards are padded to the
+same length so every rank executes the same number of backward passes.
 ```
 
 ## Honest caveats
@@ -247,4 +262,5 @@ shortest rank so DDP all-reduces stay balanced.
 ## Next steps
 
 - {doc}`../../concepts/datasets` — grouped dataset layout, selectors, patching
-- {doc}`transforms` — the stream-safe transform allow-list
+- {doc}`../../concepts/streaming` — locality declarations, planner rules, and fallbacks
+- {doc}`transforms` — transform capabilities and streamability

@@ -24,6 +24,16 @@ Prerequisites
 - a working KonfAI installation
 - a terminal in the repository root
 
+Runtime expectations
+--------------------
+
+The maintained example is a real 41-class workflow, not a synthetic unit test.
+Its checked-in config runs 100 epochs, so total runtime depends on the downloaded
+subset, CPU/GPU, and storage. For a first smoke run, copy the config and change
+``epochs: 100`` to ``epochs: 1``. This should validate the end-to-end training
+path without implying that the resulting checkpoint is useful. KonfAI does not
+currently expose an ``--epochs`` CLI override.
+
 Install KonfAI
 --------------
 
@@ -116,6 +126,21 @@ Train a baseline
 
 At this stage, KonfAI reads ``Config.yml`` and builds a ``Trainer`` object from
 it.
+
+For the short smoke run, preserve the maintained template and edit a copy:
+
+.. code-block:: bash
+
+   cp Config.yml Config.smoke.yml
+
+Change the final ``epochs: 100`` entry in ``Config.smoke.yml`` to
+``epochs: 1``, then run:
+
+.. code-block:: bash
+
+   konfai TRAIN -y --gpu 0 --config Config.smoke.yml
+
+For the complete baseline, use the checked-in configuration:
 
 .. code-block:: bash
 

@@ -728,6 +728,800 @@ article.yue blockquote {
     color: var(--kf-ink-2);
 }
 
+/* ---------- visual evidence: real images presented as inspectable figures ---------- */
+.kf-gallery-marker { display: none; }
+
+.sy-page:has(.kf-gallery-marker) #rside,
+.sy-page:has(.kf-gallery-marker) .rside-overlay {
+    display: none;
+}
+
+main.sy-main:has(.kf-gallery-marker) article.yue {
+    max-width: min(100%, 72rem);
+}
+
+article.yue:has(.kf-gallery-marker) > section > h1,
+article.yue:has(.kf-gallery-marker) > section > p,
+article.yue:has(.kf-gallery-marker) > section > section > :not(.kf-visual):not(.kf-example-grid) {
+    max-inline-size: 48rem;
+}
+
+@media (min-width: 1280px) {
+    main.sy-main:has(.kf-gallery-marker) {
+        width: calc(100% - 18rem);
+        max-width: none;
+    }
+}
+
+article.yue .kf-gallery-nav {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.55rem 1.25rem;
+    padding: 0.9rem 0;
+    margin: 1.5rem 0 3rem;
+    border-block: 1px solid var(--kf-hair);
+}
+
+article.yue .kf-gallery-nav strong {
+    color: var(--kf-ink);
+    font-size: 0.9rem;
+    margin-inline-end: 0.25rem;
+}
+
+article.yue .kf-gallery-nav a {
+    color: var(--kf-ink-2);
+    font-size: 0.86rem;
+    font-weight: 600;
+    text-decoration: none;
+    text-underline-offset: 0.25em;
+}
+
+article.yue .kf-gallery-nav a::before {
+    content: "↳";
+    color: var(--kf-accent);
+    margin-inline-end: 0.38rem;
+}
+
+article.yue .kf-gallery-nav a:hover {
+    color: var(--kf-accent);
+    text-decoration: underline;
+}
+
+article.yue .kf-visual {
+    margin: clamp(1.2rem, 2vw, 1.8rem) 0 clamp(2.4rem, 5vw, 4rem);
+}
+
+article.yue .kf-example-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 1fr));
+    gap: clamp(0.75rem, 1.8vw, 1.1rem);
+    max-inline-size: none;
+    margin: clamp(1.2rem, 2vw, 1.8rem) 0 1rem;
+    padding: 0;
+    list-style: none;
+}
+
+article.yue .kf-example-grid--registration {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-inline-size: 62rem;
+}
+
+article.yue .kf-example-grid--compact {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15.5rem), 1fr));
+}
+
+article.yue .kf-example-grid li {
+    min-inline-size: 0;
+    margin: 0;
+}
+
+article.yue:has(.kf-gallery-marker) .kf-example-grid li {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 580px;
+}
+
+article.yue .kf-example-card {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    block-size: 100%;
+    margin: 0;
+    overflow: clip;
+    border: 1px solid var(--kf-hair);
+    border-radius: 0.8rem;
+    background: var(--kf-surface);
+    box-shadow: var(--kf-shadow);
+    transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), border-color 180ms ease;
+}
+
+article.yue .kf-example-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--kf-accent-line);
+}
+
+article.yue .kf-example-media {
+    display: block;
+    overflow: clip;
+    border-bottom: 1px solid var(--kf-hair);
+    background: #121819;
+    text-decoration: none;
+}
+
+article.yue .kf-example-media:focus-visible {
+    outline: 3px solid var(--kf-accent);
+    outline-offset: -4px;
+}
+
+article.yue .kf-example-grid img {
+    display: block;
+    inline-size: 100%;
+    block-size: auto;
+    margin: 0;
+}
+
+article.yue .kf-example-card figcaption {
+    display: grid;
+    align-content: start;
+    gap: 0.3rem;
+    min-block-size: 7.6rem;
+    padding: 0.9rem 1rem 1rem;
+    color: var(--kf-ink-2);
+    font-size: 0.84rem;
+    line-height: 1.42;
+}
+
+article.yue .kf-example-card figcaption strong {
+    color: var(--kf-ink);
+    font-size: 1rem;
+    line-height: 1.25;
+}
+
+article.yue .kf-example-card figcaption > span:not(.kf-example-stats):not(.kf-example-step) {
+    color: var(--kf-muted);
+}
+
+article.yue .kf-example-stats {
+    align-self: end;
+    inline-size: fit-content;
+    margin-block-start: 0.35rem;
+    border-radius: 999px;
+    background: var(--kf-surface-2);
+    color: var(--kf-ink-2);
+    font-family: var(--kf-mono);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.025em;
+    padding: 0.28rem 0.55rem;
+}
+
+article.yue .kf-example-step {
+    color: var(--kf-accent);
+    font-family: var(--kf-mono);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+}
+
+article.yue .kf-example-caption {
+    display: grid;
+    gap: 0.18rem;
+    margin: 0 0 clamp(2.4rem, 5vw, 4rem);
+    color: var(--kf-ink-2);
+    font-size: 0.82rem;
+}
+
+article.yue .kf-example-caption strong {
+    color: var(--kf-ink);
+    font-size: 0.93rem;
+}
+
+article.yue .kf-example-caption span {
+    display: block;
+}
+
+article.yue .kf-visual--compact {
+    max-inline-size: 48.625rem;
+    margin-inline: auto;
+}
+
+article.yue .kf-visual-frame {
+    display: block;
+    overflow: clip;
+    border-radius: 0.75rem;
+    outline: 1px solid var(--kf-hair);
+    outline-offset: -1px;
+    background: #e8f2f0;
+    text-decoration: none;
+}
+
+article.yue .kf-visual--execution .kf-visual-frame {
+    background: #14171a;
+}
+
+article.yue .kf-visual-frame:focus-visible {
+    outline: 3px solid var(--kf-accent);
+    outline-offset: 3px;
+}
+
+article.yue .kf-visual-frame picture {
+    display: block;
+}
+
+article.yue .kf-visual-frame img {
+    display: block;
+    inline-size: 100%;
+    block-size: auto;
+    margin: 0;
+    transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+article.yue .kf-visual-frame:hover img {
+    transform: scale(1.006);
+}
+
+article.yue .kf-visual figcaption {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.7rem 1.25rem;
+    padding: 0.75rem 0.15rem 0;
+    line-height: 1.45;
+}
+
+article.yue .kf-visual-copy {
+    display: grid;
+    gap: 0.18rem;
+    min-inline-size: 0;
+}
+
+article.yue .kf-visual figcaption strong {
+    color: var(--kf-ink);
+    font-size: 0.93rem;
+}
+
+article.yue .kf-visual .kf-visual-meta {
+    color: var(--kf-ink-2);
+    font-size: 0.82rem;
+}
+
+article.yue .kf-visual-inspect {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-block-size: 44px;
+    padding-inline: 0.8rem;
+    border: 1px solid var(--kf-hair);
+    border-radius: 0.55rem;
+    color: var(--kf-ink-2);
+    font-family: var(--kf-mono);
+    font-size: 0.72rem;
+    font-weight: 650;
+    line-height: 1.2;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+article.yue .kf-visual-inspect:hover {
+    border-color: var(--kf-accent-line);
+    background: var(--kf-accent-soft);
+    color: var(--kf-accent);
+}
+
+article.yue .kf-visual-inspect:focus-visible {
+    outline: 3px solid var(--kf-accent);
+    outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+    article.yue .kf-example-grid--registration {
+        grid-template-columns: 1fr;
+    }
+
+    article.yue .kf-gallery-nav {
+        gap: 0.5rem 1rem;
+        margin-bottom: 2.4rem;
+    }
+
+    article.yue .kf-gallery-nav strong {
+        flex-basis: 100%;
+    }
+
+    article.yue .kf-visual figcaption {
+        grid-template-columns: 1fr;
+    }
+
+    article.yue .kf-visual-inspect {
+        justify-self: start;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    article.yue .kf-example-card,
+    article.yue .kf-visual-frame img {
+        transition: none;
+    }
+
+    article.yue .kf-example-card:hover {
+        transform: none;
+    }
+
+    article.yue .kf-visual-frame:hover img {
+        transform: none;
+    }
+}
+
+/* ================================================================== *
+ * Ecosystem route map
+ *
+ * A dependency/orchestration map rather than a card catalogue. The
+ * desktop canvas behaves like a system diagram; narrow screens keep the
+ * same semantic DOM and turn it into a vertical execution line.
+ * ================================================================== */
+
+.sy-page:has(.kf-ecosystem-map) #rside,
+.sy-page:has(.kf-ecosystem-map) .rside-overlay {
+    display: none;
+}
+
+main.sy-main:has(.kf-ecosystem-map) article.yue {
+    max-width: 100%;
+}
+
+article.yue .kf-sr-only {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+article.yue .kf-ecosystem-map {
+    max-inline-size: 72rem;
+    margin: clamp(1.4rem, 3vw, 2.2rem) auto clamp(2.8rem, 6vw, 4.5rem);
+    container-name: ecosystem-map;
+    container-type: inline-size;
+}
+
+article.yue .kf-ecosystem-map__canvas {
+    position: relative;
+    min-block-size: 62rem;
+    overflow: hidden;
+    border: 1px solid var(--kf-hair);
+    border-radius: 1.1rem;
+    background-color: var(--kf-surface-2);
+    background-image:
+        radial-gradient(circle at 50% 28%, var(--kf-accent-soft), transparent 32%),
+        linear-gradient(var(--kf-hair-2) 1px, transparent 1px),
+        linear-gradient(90deg, var(--kf-hair-2) 1px, transparent 1px);
+    background-size: auto, 32px 32px, 32px 32px;
+    box-shadow: var(--kf-shadow);
+    isolation: isolate;
+}
+
+article.yue .kf-ecosystem-map__canvas::after {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(105deg, transparent 20%, var(--kf-surface-2) 50%, transparent 80%);
+    content: "";
+    opacity: 0.45;
+}
+
+article.yue .kf-ecosystem-map__topline {
+    position: absolute;
+    inset: 1.1rem 1.3rem auto;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    color: var(--kf-accent);
+    font-family: var(--kf-mono);
+    font-size: 0.67rem;
+    font-weight: 750;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+}
+
+article.yue .kf-ecosystem-map__legend {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--kf-muted);
+    font-size: 0.61rem;
+    letter-spacing: 0.06em;
+}
+
+article.yue .kf-ecosystem-map__legend i {
+    inline-size: 1.6rem;
+    border-top: 2px solid var(--kf-accent);
+}
+
+article.yue .kf-ecosystem-map__legend i.is-dashed {
+    margin-inline-start: 0.4rem;
+    border-color: var(--kf-violet);
+    border-top-style: dashed;
+}
+
+article.yue .kf-ecosystem-map__routes {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    inline-size: 100%;
+    block-size: 100%;
+    overflow: visible;
+}
+
+article.yue .kf-ecosystem-map__routes .route {
+    fill: none;
+    stroke: var(--kf-accent);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.5;
+    vector-effect: non-scaling-stroke;
+}
+
+article.yue .kf-ecosystem-map__routes .route--artifact {
+    stroke: var(--kf-amber);
+}
+
+article.yue .kf-ecosystem-map__routes .route--apps {
+    stroke: var(--kf-coral);
+}
+
+article.yue .kf-ecosystem-map__routes .route--mcp {
+    stroke: var(--kf-violet);
+}
+
+article.yue .kf-ecosystem-map__routes .route--external {
+    stroke: var(--kf-steel);
+}
+
+article.yue .kf-ecosystem-map__routes .route--experimental {
+    stroke: var(--kf-violet);
+    stroke-dasharray: 7 8;
+    opacity: 0.72;
+}
+
+article.yue .kf-ecosystem-map__routes .stations circle {
+    fill: var(--kf-surface-2);
+    stroke: var(--kf-accent);
+    stroke-width: 2.5;
+    vector-effect: non-scaling-stroke;
+}
+
+article.yue .kf-ecosystem-map__node {
+    --kf-node-color: var(--kf-steel);
+    --kf-node-soft: var(--kf-steel-soft);
+    --kf-node-line: var(--kf-steel-line);
+    position: absolute;
+    z-index: 2;
+    display: grid;
+    align-content: start;
+    gap: 0.32rem;
+    margin: 0;
+    padding: 0.92rem 1rem 1rem 1.1rem;
+    border: 1px solid var(--kf-node-line);
+    border-inline-start-width: 3px;
+    border-radius: 0.85rem 0.85rem 0.85rem 0.25rem;
+    background: color-mix(in srgb, var(--kf-surface) 92%, var(--kf-node-color));
+    box-shadow: 0 12px 30px -24px color-mix(in srgb, var(--kf-node-color) 60%, transparent);
+}
+
+article.yue .kf-ecosystem-map__node::before {
+    position: absolute;
+    inset: 1.1rem auto auto -0.42rem;
+    inline-size: 0.62rem;
+    block-size: 0.62rem;
+    border: 2px solid var(--kf-surface-2);
+    border-radius: 50%;
+    background: var(--kf-node-color);
+    content: "";
+}
+
+article.yue .kf-ecosystem-map__node p,
+article.yue .kf-ecosystem-map__node strong {
+    margin: 0;
+}
+
+article.yue .kf-ecosystem-map__node strong {
+    color: var(--kf-ink);
+    font-size: 1rem;
+    line-height: 1.24;
+}
+
+article.yue .kf-ecosystem-map__node strong code {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font-size: 1em;
+}
+
+article.yue .kf-ecosystem-map__node p {
+    color: var(--kf-ink-2);
+    font-size: 0.77rem;
+    line-height: 1.42;
+}
+
+article.yue .kf-ecosystem-map__kind {
+    color: var(--kf-node-color);
+    font-family: var(--kf-mono);
+    font-size: 0.61rem;
+    font-weight: 750;
+    letter-spacing: 0.08em;
+    line-height: 1.2;
+    text-transform: uppercase;
+}
+
+article.yue .kf-ecosystem-map__status {
+    position: absolute;
+    inset: 0.7rem 0.75rem auto auto;
+    padding: 0.2rem 0.42rem;
+    border: 1px solid var(--kf-node-line);
+    border-radius: 999px;
+    background: var(--kf-node-soft);
+    color: var(--kf-node-color);
+    font-family: var(--kf-mono);
+    font-size: 0.54rem;
+    font-weight: 750;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+}
+
+article.yue .kf-ecosystem-map__commands {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-block-start: 0.25rem;
+}
+
+article.yue .kf-ecosystem-map__commands span {
+    padding: 0.22rem 0.45rem;
+    border: 1px solid var(--kf-node-line);
+    border-radius: 999px;
+    background: var(--kf-node-soft);
+    color: var(--kf-node-color);
+    font-family: var(--kf-mono);
+    font-size: 0.57rem;
+    font-weight: 750;
+    letter-spacing: 0.045em;
+}
+
+article.yue .kf-ecosystem-map__node--input {
+    inset: 5.6rem auto auto 3.6%;
+    inline-size: 15.8rem;
+}
+
+article.yue .kf-ecosystem-map__node--artifact {
+    --kf-node-color: var(--kf-amber);
+    --kf-node-soft: var(--kf-amber-soft);
+    --kf-node-line: var(--kf-amber-line);
+    inset: 5.6rem 3.6% auto auto;
+    inline-size: 15.8rem;
+    padding-inline-end: 4.6rem;
+}
+
+article.yue .kf-ecosystem-map__node--hub {
+    --kf-node-color: var(--kf-accent);
+    --kf-node-soft: var(--kf-accent-soft);
+    --kf-node-line: var(--kf-accent-line);
+    inset: 14rem auto auto 50%;
+    inline-size: min(43%, 30rem);
+    min-block-size: 9.2rem;
+    padding: 1.15rem 1.25rem 1.2rem;
+    border-inline-start-width: 4px;
+    background:
+        radial-gradient(circle at 90% 15%, var(--kf-accent-soft), transparent 38%),
+        color-mix(in srgb, var(--kf-surface) 90%, var(--kf-accent));
+    transform: translateX(-50%);
+}
+
+article.yue .kf-ecosystem-map__node--hub strong {
+    font-size: 1.55rem;
+}
+
+article.yue .kf-ecosystem-map__node--apps {
+    --kf-node-color: var(--kf-coral);
+    --kf-node-soft: var(--kf-coral-soft);
+    --kf-node-line: var(--kf-coral-line);
+    inset: 28rem auto auto 6.5%;
+    inline-size: 37%;
+    min-block-size: 7.5rem;
+}
+
+article.yue .kf-ecosystem-map__node--mcp {
+    --kf-node-color: var(--kf-violet);
+    --kf-node-soft: var(--kf-violet-soft);
+    --kf-node-line: var(--kf-violet-line);
+    inset: 28rem 6.5% auto auto;
+    inline-size: 35%;
+    min-block-size: 7.5rem;
+}
+
+article.yue .kf-ecosystem-map__node--interfaces {
+    inset: 40rem auto auto 4%;
+    inline-size: 23%;
+    min-block-size: 6.4rem;
+}
+
+article.yue .kf-ecosystem-map__node--tasks {
+    --kf-node-color: var(--kf-coral);
+    --kf-node-soft: var(--kf-coral-soft);
+    --kf-node-line: var(--kf-coral-line);
+    inset: 40rem auto auto 30%;
+    inline-size: 31%;
+    min-block-size: 6.4rem;
+}
+
+article.yue .kf-ecosystem-map__node--agents {
+    --kf-node-color: var(--kf-violet);
+    --kf-node-soft: var(--kf-violet-soft);
+    --kf-node-line: var(--kf-violet-line);
+    inset: 40rem 4% auto auto;
+    inline-size: 23%;
+    min-block-size: 6.4rem;
+}
+
+article.yue .kf-ecosystem-map__node--slicer-apps {
+    inset: 50rem auto auto 4%;
+    inline-size: 23%;
+    min-block-size: 5.8rem;
+    padding-inline-end: 4rem;
+}
+
+article.yue .kf-ecosystem-map__node--slicer-reg {
+    inset: 50rem auto auto 30%;
+    inline-size: 31%;
+    min-block-size: 5.8rem;
+    padding-inline-end: 4rem;
+}
+
+article.yue .kf-ecosystem-map__node--experimental {
+    --kf-node-color: var(--kf-violet);
+    --kf-node-soft: var(--kf-violet-soft);
+    --kf-node-line: var(--kf-violet-line);
+    inset: 50rem 4% auto auto;
+    inline-size: 23%;
+    min-block-size: 5.8rem;
+    padding-inline-end: 4.6rem;
+    border-style: dashed;
+    opacity: 0.86;
+}
+
+article.yue .kf-ecosystem-map > figcaption {
+    display: block;
+    padding: 0.8rem 0.1rem 0;
+    color: var(--kf-muted);
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+article.yue .kf-ecosystem-map > figcaption strong {
+    color: var(--kf-ink);
+}
+
+@container ecosystem-map (max-width: 46rem) {
+    article.yue .kf-ecosystem-map__canvas {
+        display: grid;
+        gap: 0.75rem;
+        min-block-size: auto;
+        padding: 4.4rem 1rem 1.15rem 2rem;
+        background-size: auto, 24px 24px, 24px 24px;
+    }
+
+    article.yue .kf-ecosystem-map__canvas::before {
+        position: absolute;
+        inset: 4.8rem auto 1.6rem 1.2rem;
+        border-inline-start: 2px solid var(--kf-accent-line);
+        content: "";
+    }
+
+    article.yue .kf-ecosystem-map__routes {
+        display: none;
+    }
+
+    article.yue .kf-ecosystem-map__topline {
+        align-items: flex-start;
+    }
+
+    article.yue .kf-ecosystem-map__legend {
+        max-inline-size: 10rem;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+
+    article.yue .kf-ecosystem-map__node {
+        position: relative;
+        inset: auto;
+        inline-size: auto;
+        min-block-size: 0;
+        padding: 0.85rem 0.95rem;
+        transform: none;
+    }
+
+    article.yue .kf-ecosystem-map__node::before {
+        inset-inline-start: -1.22rem;
+        border-color: var(--kf-surface-2);
+    }
+
+    article.yue .kf-ecosystem-map__node--artifact {
+        order: 3;
+    }
+
+    article.yue .kf-ecosystem-map__node--hub {
+        order: 2;
+    }
+
+    article.yue .kf-ecosystem-map__node--input {
+        order: 1;
+    }
+
+    article.yue .kf-ecosystem-map__node--apps {
+        order: 4;
+    }
+
+    article.yue .kf-ecosystem-map__node--interfaces {
+        order: 5;
+        margin-inline-start: 1rem;
+    }
+
+    article.yue .kf-ecosystem-map__node--tasks {
+        order: 6;
+        margin-inline-start: 1rem;
+    }
+
+    article.yue .kf-ecosystem-map__node--slicer-apps {
+        order: 7;
+        margin-inline-start: 2rem;
+    }
+
+    article.yue .kf-ecosystem-map__node--slicer-reg {
+        order: 8;
+        margin-inline-start: 2rem;
+    }
+
+    article.yue .kf-ecosystem-map__node--mcp {
+        order: 9;
+    }
+
+    article.yue .kf-ecosystem-map__node--agents {
+        order: 10;
+        margin-inline-start: 1rem;
+    }
+
+    article.yue .kf-ecosystem-map__node--experimental {
+        order: 11;
+        margin-inline-start: 1rem;
+    }
+}
+
+@container ecosystem-map (max-width: 32.5rem) {
+    article.yue .kf-ecosystem-map__canvas {
+        padding-inline-end: 0.7rem;
+    }
+
+    article.yue .kf-ecosystem-map__legend {
+        display: none;
+    }
+
+    article.yue .kf-ecosystem-map__status {
+        position: static;
+        justify-self: start;
+        margin-block-start: 0.25rem;
+    }
+
+    article.yue .kf-ecosystem-map__node--artifact,
+    article.yue .kf-ecosystem-map__node--slicer-apps,
+    article.yue .kf-ecosystem-map__node--slicer-reg,
+    article.yue .kf-ecosystem-map__node--experimental {
+        padding-inline-end: 0.95rem;
+    }
+}
+
 /* ------------------------------------------------------------------ *
  * Landing-only layout fixes (scoped via :has so no other page moves):
  * - the landing has no in-page TOC, so drop the empty right column
@@ -784,4 +1578,55 @@ html.dark {
     .kf-hero .kf-eyebrow {
         white-space: normal;
     }
+}
+
+/* -------------------------------------------------------------------------
+   Proof strip — real medical-imaging results surfaced right under the hero.
+   Three tiles (segmentation, synthesis, scale) linking to the gallery.
+   ------------------------------------------------------------------------- */
+.kf-proofstrip {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    margin: 1.4rem 0 2.4rem;
+}
+.kf-proofcard {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--kf-hair);
+    border-radius: 0.9rem;
+    overflow: hidden;
+    background: var(--kf-surface);
+    text-decoration: none;
+    color: inherit;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.kf-proofcard:hover {
+    transform: translateY(-3px);
+    border-color: var(--kf-accent);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.12);
+}
+.kf-proofcard img {
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    object-fit: cover;
+    display: block;
+    background: var(--kf-surface-2);
+}
+.kf-proofcard span {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.83rem;
+    line-height: 1.35;
+    color: var(--kf-muted);
+}
+.kf-proofcard span b {
+    color: var(--kf-ink);
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+@media (max-width: 720px) {
+    .kf-proofstrip { grid-template-columns: 1fr; }
 }
