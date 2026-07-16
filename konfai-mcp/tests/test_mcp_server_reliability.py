@@ -217,6 +217,45 @@ def test_mcp_server_timeout_cancel_and_live_metrics_are_stable(
     asyncio.run(scenario())
 
 
+def test_validate_restores_config_when_subprocess_times_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    # The child restores the authored config in its own finally, but a timeout SIGTERMs it before that
+    # runs. Simulate a child that mutated the config (KonfAI rewrites it in place) and was then killed:
+    # the parent must restore the authored bytes regardless.
+    workspace_root = tmp_path / "workspaces"
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
+
+    mcp_server = load_mcp_server()
+    client_cls = fastmcp.Client
+
+    authored = MINIMAL_TRAIN
+
+    def fake_subprocess(target: str, kwargs: dict, *args, **more):  # type: ignore[no-untyped-def]
+        config_path = Path(kwargs["config"])
+        config_path.write_text("Trainer:\n  train_name: FAKE_RUN\n  materialised_default: 42\n", encoding="utf-8")
+        raise TimeoutError("Isolated subprocess exceeded its deadline and was terminated.")
+
+    async def scenario() -> None:
+        async with client_cls(mcp_server.mcp) as client:
+            await _create_fake_train_session(client)
+            config_path = (
+                Path((await client.call_tool("summarize_session", {})).structured_content["path"]) / "Config.yml"
+            )
+            assert config_path.read_text(encoding="utf-8").strip() == authored
+
+            monkeypatch.setattr("konfai_mcp.runner.run_api_in_subprocess", fake_subprocess)
+            with pytest.raises(Exception, match=r"deadline|terminated|Timeout"):
+                await client.call_tool("validate_config_semantics", {"workflow": "train"})
+
+            # The parent-side finally restored the authored config despite the child being killed.
+            assert config_path.read_text(encoding="utf-8").strip() == authored
+
+    asyncio.run(scenario())
+
+
 def test_mcp_server_handles_burst_polling_without_crashing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

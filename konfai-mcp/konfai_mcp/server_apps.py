@@ -74,18 +74,22 @@ def _source_of(info: Any) -> str:
 def _slots(entries: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Render a ``{key: DataEntry}`` mapping as a JSON-clean input/output descriptor.
 
-    ``required: false`` already tells the agent an input is optional; the app's runtime supplies the
-    fallback for a missing optional input (e.g. an all-ones mask), so there is no manifest ``default``
-    field to surface here.
+    An optional input may declare a ``default`` in app.json (``"ones"``/``"zeros"``): the app's runtime
+    synthesises that volume when the input is omitted. Surface it so the agent knows both that the input
+    is optional (``required: false``) and how a missing one is filled.
     """
-    return {
-        key: {
+    slots: dict[str, dict[str, Any]] = {}
+    for key, entry in entries.items():
+        slot: dict[str, Any] = {
             "display_name": entry.display_name,
             "volume_type": entry.volume_type.value,
             "required": entry.required,
         }
-        for key, entry in entries.items()
-    }
+        default = getattr(entry, "default", None)
+        if default is not None:
+            slot["default"] = default
+        slots[key] = slot
+    return slots
 
 
 def parse_remote_ref(ref: str) -> tuple[str, int, str, str | None]:
@@ -453,6 +457,27 @@ class AppService:
             normalized.append(resolved)
         return normalized
 
+    @staticmethod
+    def _check_case_pairing(labeled_groups: list[tuple[str, list[list[str]]]]) -> None:
+        """Reject paired input/gt/mask groups whose case counts disagree -> silent mis-pairing.
+
+        Staging lays every group down positionally (Volume_i/Reference_i/Mask_i for case ``P{idx}``), so
+        all groups must expand to the same number of cases. A directory expands to an unknown case count
+        downstream, so only groups whose entries are all files are counted here; a mismatch among those
+        is an unambiguous authoring error worth failing early and naming.
+        """
+        counted: list[tuple[str, int]] = []
+        for label, groups in labeled_groups:
+            for index, group in enumerate(groups):
+                if group and all(Path(path).is_file() for path in group):
+                    counted.append((f"{label}[{index}]", len(group)))
+        if len({count for _, count in counted}) > 1:
+            detail = ", ".join(f"{name}={count}" for name, count in counted)
+            raise ValueError(
+                f"Paired groups have mismatched case counts ({detail}). Each input/gt/mask group is "
+                "paired by position, so they must list the same number of cases."
+            )
+
     def _default_output(self, subdir: str, label: str) -> str:
         # Unique suffix so re-running the same app does not silently overwrite a previous run.
         return str(self.workspace_layout.workspace_dir() / subdir / f"{label}-{uuid.uuid4().hex[:8]}")
@@ -492,6 +517,7 @@ class AppService:
         Raising here (in the tool body, before launch) keeps the confirmation synchronous.
         """
         normalized = self._normalize_input_groups(inputs)
+        self._check_case_pairing([("inputs", normalized)])
 
         mode = self._infer_mode(ref)
         if mode == "remote" and config_overrides:
@@ -564,6 +590,13 @@ class AppService:
         if needs_gt and not normalized_gt:
             raise ValueError(f"{action} requires ground-truth volumes: pass gt as a list of groups.")
         normalized_mask = self._normalize_input_groups(mask, "mask") if mask is not None else None
+
+        pairing: list[tuple[str, list[list[str]]]] = [("inputs", normalized_inputs)]
+        if normalized_gt is not None:
+            pairing.append(("gt", normalized_gt))
+        if normalized_mask is not None:
+            pairing.append(("mask", normalized_mask))
+        self._check_case_pairing(pairing)
 
         if cpu is not None and gpu is None:
             gpu = []
@@ -866,14 +899,21 @@ class AppService:
                 "as the packaged checkpoints (fine_tune_app will train with it)."
             ]
         if onnx:
-            # Without checkpoint= the export loads the model with its random init and silently
-            # ships an untrained model.onnx. Pick the NEWEST packaged checkpoint (mirroring
-            # discover_model_paths); pass checkpoints=[...] explicitly to override.
-            onnx_path = bundle.export_onnx_into_bundle(
-                bundle_path,
-                patch_size=onnx_patch_size,
-                in_channels=onnx_in_channels,
-                checkpoint=max(resolved_checkpoints, key=lambda path: Path(path).stat().st_mtime),
+            # The ONNX export instantiates and traces the packaged model: it imports the bundle's
+            # Model.py, runs a forward pass, and may init CUDA. That must never run in the long-lived
+            # server process, so route it through the spawn subprocess like every other code-executing
+            # step. Without checkpoint= the export ships an untrained model.onnx, so pick the NEWEST
+            # packaged checkpoint (mirroring discover_model_paths); pass checkpoints=[...] to override.
+            from . import runner as mcp_runner
+
+            onnx_path = mcp_runner.run_api_in_subprocess(
+                "konfai_apps.bundle:export_onnx_into_bundle",
+                {
+                    "bundle": str(bundle_path),
+                    "patch_size": onnx_patch_size,
+                    "in_channels": onnx_in_channels,
+                    "checkpoint": max(resolved_checkpoints, key=lambda path: Path(path).stat().st_mtime),
+                },
             )
             result["onnx"] = str(onnx_path)
         return result
@@ -995,6 +1035,8 @@ class AppService:
         as-is it silently predicts on the TRAINING data. Only the bundle copy is rewritten (idempotent on
         already-conformant configs), never the session file.
         """
+        from konfai.utils.utils import split_path_spec
+
         from .server_support import YAML_SAFE, yaml_dump_content
 
         for config_path in config_paths:
@@ -1024,9 +1066,13 @@ class AppService:
             filenames = dataset.get("dataset_filenames")
             if isinstance(filenames, list) and filenames:
                 # Keep each entry's accessor/format token (staging symlinks inputs with their original
-                # suffix), replace only the path part with the staged ./Dataset/ root.
-                tokens = [str(entry).split(":", 1) for entry in filenames]
-                rewritten = ["./Dataset/" + (f":{parts[1]}" if len(parts) > 1 else "") for parts in tokens]
+                # suffix), replace only the path part with the staged ./Dataset/ root. split_path_spec
+                # parses from the right, so a Windows drive letter is not mistaken for the token.
+                rewritten: list[str] = []
+                for entry in filenames:
+                    _path, flag, file_format = split_path_spec(str(entry), allowed_flags={"a", "i"})
+                    suffix = ":".join(part for part in (flag, file_format) if part)
+                    rewritten.append("./Dataset/" + (f":{suffix}" if suffix else ""))
                 dataset["dataset_filenames"] = list(dict.fromkeys(rewritten))
             outputs_dataset = predictor.get("outputs_dataset")
             for spec in outputs_dataset.values() if isinstance(outputs_dataset, dict) else []:

@@ -1160,6 +1160,29 @@ def design_config_strategy(
     return payload
 
 
+def _classpath_requires_import(classpath: str) -> bool:
+    """True when summarize_classpath_signature would import the classpath's module in-process.
+
+    A shipped/local YAML model ('default|<Name>.yml' or '<Name>.yml') and a local workspace 'File:Class'
+    (a single-token module before the colon, resolved as a workspace .py) are parsed statically and never
+    imported. Everything else -- an installed 'package.module:Class', the colon form 'package:module:Class'
+    (which _parse_classpath joins into a dotted module), or a bare/dotted builtin name -- triggers
+    importlib.import_module, so it must run isolated. The check errs toward isolation: it stays in-process
+    only for the two forms proven not to import, matching summarize_classpath_signature's own branching.
+    """
+    normalized = classpath.strip()
+    if not normalized:
+        return False  # let summarize_classpath_signature raise its own ValueError in-process
+    if normalized.endswith(".yml") or normalized.startswith("default|"):
+        return False
+    # Local 'File:Class' == exactly one colon and a single-token module with no dot (mirrors
+    # _parse_classpath + local_candidate). 'torch:nn:L1Loss' has two colons -> module 'torch.nn' -> imports.
+    colon_parts = [part for part in normalized.split(":") if part]
+    if len(colon_parts) == 2 and "." not in colon_parts[0]:
+        return False
+    return True
+
+
 @mcp.tool(
     description=(
         "Use when choosing, customizing, or debugging any configurable object classpath such as a model, loss, "
@@ -1171,8 +1194,8 @@ def design_config_strategy(
         "guidance (override hyperparameters vs copy-and-edit the structure) — parsed statically, never built. "
         "It does not validate the full workflow config or decide which object to use. "
         "Inputs: classpath. Local Module:Object classpaths are resolved inside the current session workspace and "
-        "parsed statically (never executed); an installed-library classpath is actually imported into the server "
-        "process, so its import side effects run. "
+        "parsed statically (never executed); an installed-library classpath is imported to read its signature, but "
+        "that import runs in an isolated subprocess so its side effects never touch the server process. "
         "Outputs: source type, signature, parameters, defaults, detected_contract, limitations, and next_actions. "
         "Next: write_session_file, write_workflow_config, or review_config_semantics."
     )
@@ -1181,12 +1204,23 @@ def inspect_object_signature(
     classpath: Annotated[
         str,
         Field(
-            description="Builtin name, local 'File:Class' (resolved in the session workspace, parsed statically), or installed 'package.module:Class' (imported into the server process)."
+            description="Builtin name, local 'File:Class' (resolved in the session workspace, parsed statically), or installed 'package.module:Class' (imported in an isolated subprocess)."
         ),
     ],
 ) -> dict[str, Any]:
     """Inspect one configurable object classpath and return signature details when possible."""
-    summary = summarize_classpath_signature(classpath, workspace_dir=WORKSPACE_LAYOUT.workspace_dir())
+    workspace_dir = WORKSPACE_LAYOUT.workspace_dir()
+    if _classpath_requires_import(classpath):
+        # Reading an installed-library signature imports its module; run that in a spawn subprocess so a
+        # heavy/slow/crashing/OOM import cannot take down the long-lived server (AGENTS.md: code that
+        # imports/executes runs isolated). Static YAML-model and local File:Class classpaths never import,
+        # so they stay in-process to avoid the multi-second spawn cost on the common path.
+        summary = _run_api_in_subprocess(
+            "konfai_mcp.server_support:summarize_classpath_signature",
+            {"classpath": classpath, "workspace_dir": workspace_dir},
+        )
+    else:
+        summary = summarize_classpath_signature(classpath, workspace_dir=workspace_dir)
     return {
         **summary,
         "session": WORKSPACE_LAYOUT.current_session,
@@ -1465,7 +1499,11 @@ def export_app(
     ] = False,
 ) -> dict[str, Any]:
     """Save a resolved app (optionally with tuned parameters) as a local, editable bundle."""
-    config_overrides = [f"{name}={value}" for name, value in set_parameters.items()] if set_parameters else None
+    # json.dumps keeps each value's type through the YAML re-parse in _apply_config_overrides: an int
+    # stays an int, but a string "true"/"1" stays a string instead of being coerced to a bool/int.
+    config_overrides = (
+        [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()] if set_parameters else None
+    )
     return APP_SERVICE.export_app(
         ref, path, display_name=display_name, config_overrides=config_overrides, force_update=force_update
     )
@@ -1589,7 +1627,11 @@ def run_app_infer(
     ] = False,
 ) -> dict[str, Any]:
     """Run a published KonfAI app on the user's data as a tracked inference job (local / HuggingFace / remote)."""
-    config_overrides = [f"{name}={value}" for name, value in set_parameters.items()] if set_parameters else None
+    # json.dumps keeps each value's type through the YAML re-parse in _apply_config_overrides: an int
+    # stays an int, but a string "true"/"1" stays a string instead of being coerced to a bool/int.
+    config_overrides = (
+        [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()] if set_parameters else None
+    )
     spec = APP_SERVICE.prepare_infer(
         ref=ref,
         inputs=inputs,
@@ -1817,7 +1859,11 @@ def run_app_pipeline(
     ] = False,
 ) -> dict[str, Any]:
     """Run a published app's full infer -> evaluate -> uncertainty pipeline as a tracked job."""
-    config_overrides = [f"{name}={value}" for name, value in set_parameters.items()] if set_parameters else None
+    # json.dumps keeps each value's type through the YAML re-parse in _apply_config_overrides: an int
+    # stays an int, but a string "true"/"1" stays a string instead of being coerced to a bool/int.
+    config_overrides = (
+        [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()] if set_parameters else None
+    )
     return _launch_app_job(
         APP_SERVICE.prepare_pipeline(
             ref=ref,
@@ -2035,6 +2081,14 @@ def prepare_dataset_aliases(
         raise ValueError("rename_map cannot be empty.")
     if mode == "move" and not allow_destructive:
         raise ValueError("mode='move' is destructive. Set allow_destructive=True to confirm.")
+    # Both group names index files by name inside a case directory; a separator or '..' would let the
+    # target escape the dataset (an arbitrary-write primitive). Require bare path components.
+    for role, groups in (("source", rename_map.keys()), ("target", rename_map.values())):
+        for group in groups:
+            if not group or Path(group).name != group or os.sep in group or (os.altsep and os.altsep in group):
+                raise ValueError(
+                    f"Invalid {role} group name '{group}'. Expected a bare filename component (no path separators)."
+                )
 
     case_dirs = case_directories(dataset_path)
     created: list[str] = []
@@ -3418,16 +3472,37 @@ def preview_volume(
     volume_path = Path(path).expanduser().resolve()
     if not volume_path.is_file():
         raise ValueError(f"Volume file not found: {volume_path}")
-    array = sitk.GetArrayFromImage(sitk.ReadImage(str(volume_path)))
-    while array.ndim > 3:
-        array = array[0]
-    if array.ndim == 3:
+
+    reader = sitk.ImageFileReader()
+    reader.SetFileName(str(volume_path))
+    reader.ReadImageInformation()
+    size_xyz = list(reader.GetSize())  # SimpleITK order (x, y, [z], ...)
+    if len(size_xyz) == 3 and reader.GetNumberOfComponents() == 1:
+        # 3-D scalar volume (the QC case): stream only the requested plane so the whole volume is never
+        # materialised in RAM (mandatory lazy invariant). Array order is [Z, Y, X], i.e. reversed size_xyz.
         axis = int(min(max(axis, 0), 2))
-        depth = array.shape[axis]
+        depth = list(reversed(size_xyz))[axis]
         index = depth // 2 if slice_index is None else int(min(max(slice_index, 0), depth - 1))
-        plane = np.take(array, index, axis=axis)
+        sitk_axis = 2 - axis
+        extract_index = [0, 0, 0]
+        extract_index[sitk_axis] = index
+        extract_size = list(size_xyz)
+        extract_size[sitk_axis] = 1
+        reader.SetExtractIndex(extract_index)
+        reader.SetExtractSize(extract_size)
+        plane = np.squeeze(sitk.GetArrayFromImage(reader.Execute()), axis=axis)
     else:
-        plane = array
+        # Uncommon layout (2-D, 4-D, or multi-component): read the whole image, then slice in memory.
+        array = sitk.GetArrayFromImage(reader.Execute())
+        while array.ndim > 3:
+            array = array[0]
+        if array.ndim == 3:
+            axis = int(min(max(axis, 0), 2))
+            depth = array.shape[axis]
+            index = depth // 2 if slice_index is None else int(min(max(slice_index, 0), depth - 1))
+            plane = np.take(array, index, axis=axis)
+        else:
+            plane = array
     plane = plane.astype(np.float32)
     low, high = np.percentile(plane, (1.0, 99.0))
     if high <= low:
@@ -3682,7 +3757,7 @@ def read_job_log(
         "Use while a job is running and you want parsed runtime metrics instead of raw logs. "
         "This reads the runtime log and returns recent metric snapshots. "
         "It does not block until the job completes. "
-        "Inputs: kind, optional job_id, optional max_entries. "
+        "Inputs: optional kind, optional job_id, optional max_entries. "
         "Outputs: latest metric snapshot, recent entries, by_stage summaries, and job metadata. "
         "Next: wait_for_job or summarize_session."
     )

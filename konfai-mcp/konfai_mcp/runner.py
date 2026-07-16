@@ -98,7 +98,17 @@ def run_api_in_subprocess(target: str, kwargs: dict[str, Any], timeout_s: float 
                             "a result (native crash or OOM)."
                         ),
                     }
-    process.join()
+    # Bounded join: the result is already in hand, so the child should exit near-instantly. If it wedged
+    # during teardown (e.g. a native/CUDA context that will not exit), an unbounded join would hang the
+    # server thread forever -- exactly what the timeout above exists to prevent -- so escalate to
+    # terminate/kill instead, matching the timeout branch.
+    process.join(10)
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        if process.is_alive():
+            process.kill()
+            process.join(5)
     if not result.get("ok_transport"):
         raise RuntimeError(str(result.get("error") or "Isolated subprocess failed."))
     return result["payload"]
@@ -519,8 +529,15 @@ def smoke_test_component(
                         result.mean().backward()
                         payload["backward_ok"] = True
                     except Exception as exc:
+                        # A loss that returns a Tensor but cannot backprop cannot train a model: this is a
+                        # contract failure, so propagate it into ok (the caller branches on ok alone).
                         payload["backward_ok"] = False
                         payload["backward_error"] = str(exc)
+                        payload["ok"] = False
+                        payload["error"] = (
+                            "The criterion returned a loss Tensor but backward() failed, so it cannot train "
+                            f"a model ({payload['backward_error']}). Make its output differentiable."
+                        )
         except Exception as exc:
             return {
                 **payload,
@@ -736,5 +753,14 @@ def validate_workflow_api(
             if config_backup is not None:
                 try:
                     config_path.write_text(config_backup, encoding="utf-8")
-                except OSError:
-                    pass
+                except OSError as restore_exc:
+                    # The side-effect-free invariant is broken: KonfAI already rewrote the config with all
+                    # defaults materialised and the author's bytes could not be put back. Never swallow
+                    # this silently -- a "success" payload would then hide a mutated config on disk.
+                    warnings.warn(
+                        f"Failed to restore the validated config at {config_path}: {restore_exc}. The file "
+                        "was left rewritten by KonfAI (defaults materialised, not the authored bytes).",
+                        stacklevel=2,
+                    )
+                    if "payload" in locals() and isinstance(payload, dict):
+                        payload["config_restore_failed"] = str(restore_exc)

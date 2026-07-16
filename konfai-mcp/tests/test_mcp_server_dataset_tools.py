@@ -176,6 +176,45 @@ def test_mcp_server_dataset_inspection_and_aliasing(
     asyncio.run(scenario())
 
 
+def test_mcp_server_prepare_dataset_aliases_rejects_path_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    # A rename_map target that climbs out of the case directory is an arbitrary-write primitive; the
+    # tool must refuse it (writes never widen beyond the dataset) while a legit rename still works.
+    workspace_root = tmp_path / "workspaces"
+    dataset_dir = tmp_path / "dataset"
+    _create_alias_dataset(dataset_dir)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
+
+    mcp_server = load_mcp_server()
+    client_cls = fastmcp.Client
+
+    async def scenario() -> None:
+        async with client_cls(mcp_server.mcp) as client:
+            with pytest.raises(Exception, match=r"[Ii]nvalid target group|bare filename"):
+                await client.call_tool(
+                    "prepare_dataset_aliases",
+                    {
+                        "dataset_dir": str(dataset_dir),
+                        "rename_map": {"IMG": "../../outside/PWNED"},
+                        "mode": "copy",
+                    },
+                )
+            assert not (outside / "PWNED.mha").exists()
+
+            ok = await client.call_tool(
+                "prepare_dataset_aliases",
+                {"dataset_dir": str(dataset_dir), "rename_map": {"IMG": "CT"}, "mode": "copy"},
+            )
+            assert ok.structured_content["created_count"] == 2
+
+    asyncio.run(scenario())
+
+
 def test_mcp_server_review_config_semantics_surfaces_reasoning_warnings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -302,6 +341,66 @@ class DiceFocalLoss:
             assert inspected_data["signature"] == "DiceFocalLoss(alpha=0.25, gamma=2.0, smooth=1e-05)"
             assert inspected_data["defaults"]["gamma"] == 2.0
             assert any(parameter["name"] == "alpha" for parameter in inspected_data["parameters"])
+
+    asyncio.run(scenario())
+
+
+def test_mcp_server_inspect_object_signature_isolates_library_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """An installed-library classpath is imported in the spawn subprocess, not in the server process.
+
+    AGENTS.md invariant: code that imports/executes runs isolated. A local File:Class is parsed
+    statically and must stay in-process (no multi-second spawn on the common path).
+    """
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+
+    subprocess_calls: list[tuple[str, dict[str, object]]] = []
+    real_summarize = mcp_server.summarize_classpath_signature
+
+    def spy_run_api_in_subprocess(target: str, kwargs: dict[str, object]) -> dict[str, object]:
+        subprocess_calls.append((target, kwargs))
+        # Delegate statically so the tool still returns a valid payload; the point is to record the
+        # routing decision, not to spawn a real interpreter in the test.
+        return real_summarize(**kwargs)
+
+    monkeypatch.setattr(mcp_server, "_run_api_in_subprocess", spy_run_api_in_subprocess)
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            await client.call_tool(
+                "write_session_file",
+                {"relative_path": "Loss.py", "content": "class MyLoss:\n    def __init__(self, a: float = 1.0): ...\n"},
+            )
+
+            # Local File:Class is parsed statically -- it must NOT be routed to the subprocess.
+            local = await client.call_tool("inspect_object_signature", {"classpath": "Loss:MyLoss"})
+            assert local.structured_content["source"] == "local"
+            assert subprocess_calls == []
+
+            # Installed-library classpath -- its import MUST be isolated in the subprocess.
+            imported = await client.call_tool(
+                "inspect_object_signature", {"classpath": "json.decoder.JSONDecoder"}
+            )
+            assert imported.structured_content["source"] == "imported"
+            assert imported.structured_content["ok"] is True
+            assert len(subprocess_calls) == 1
+            target, kwargs = subprocess_calls[0]
+            assert target == "konfai_mcp.server_support:summarize_classpath_signature"
+            assert kwargs["classpath"] == "json.decoder.JSONDecoder"
+
+            # The colon form 'pkg:mod:Class' resolves to a dotted module ('json.decoder') and imports too --
+            # its first token has no dot, so it must NOT be mistaken for a local File:Class and stay in-process.
+            colon_form = await client.call_tool(
+                "inspect_object_signature", {"classpath": "json:decoder:JSONDecoder"}
+            )
+            assert colon_form.structured_content["source"] == "imported"
+            assert len(subprocess_calls) == 2
+            assert subprocess_calls[1][1]["classpath"] == "json:decoder:JSONDecoder"
 
     asyncio.run(scenario())
 

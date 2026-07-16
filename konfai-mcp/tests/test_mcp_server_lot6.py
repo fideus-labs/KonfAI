@@ -97,3 +97,112 @@ def test_preview_volume_returns_png(
                 await client.call_tool("preview_volume", {"path": str(dataset_dir / "nope.mha")})
 
     asyncio.run(scenario())
+
+
+def test_preview_volume_streams_a_single_plane_without_full_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """A 3-D scalar volume must be previewed by streaming one plane, never a full sitk.ReadImage.
+
+    Guards the mandatory lazy invariant (AGENTS.md §7): the whole volume is never materialised in RAM.
+    Also pins byte-identity -- the streamed plane must equal the old full-read np.take plane on every axis.
+    """
+    sitk = pytest.importorskip("SimpleITK")
+    import base64
+
+    import numpy as np
+
+    # Asymmetric shape (each axis a different length) so a wrong axis mapping changes the plane shape and
+    # is caught immediately; a ramp gives each plane distinct, non-constant values.
+    z, y, x = 4, 5, 6
+    zz, yy, xx = np.meshgrid(np.arange(z), np.arange(y), np.arange(x), indexing="ij")
+    array = (zz * 100 + yy * 10 + xx).astype(np.float32)  # [Z, Y, X]
+    volume = tmp_path / "ramp.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(array), str(volume))
+
+    def window(plane: "np.ndarray") -> "np.ndarray":
+        plane = plane.astype(np.float32)
+        low, high = np.percentile(plane, (1.0, 99.0))
+        if high <= low:
+            high = low + 1.0
+        plane = np.clip((plane - low) / (high - low) * 255.0, 0.0, 255.0).astype(np.uint8)
+        stride = max(1, -(-max(plane.shape) // max(512, 16)))
+        return plane[::stride, ::stride]
+
+    real_read_image = sitk.ReadImage
+    full = sitk.GetArrayFromImage(real_read_image(str(volume)))  # reference read, before patching
+    expected = {axis: window(np.take(full, 1, axis=axis)) for axis in (0, 1, 2)}
+
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+
+    full_reads: list[str] = []
+
+    def spy_read_image(*args, **kwargs):
+        full_reads.append(str(args[0]) if args else "")
+        return real_read_image(*args, **kwargs)
+
+    monkeypatch.setattr(sitk, "ReadImage", spy_read_image)
+
+    def decode(image_block) -> "np.ndarray":
+        png = tmp_path / "decoded.png"
+        png.write_bytes(base64.b64decode(image_block.data))
+        return sitk.GetArrayFromImage(real_read_image(str(png)))
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            for axis in (0, 1, 2):
+                preview = await client.call_tool(
+                    "preview_volume", {"path": str(volume), "axis": axis, "slice_index": 1}
+                )
+                block = next(b for b in preview.content if getattr(b, "type", "") == "image")
+                assert np.array_equal(decode(block), expected[axis]), f"axis {axis} plane differs from full read"
+
+    asyncio.run(scenario())
+
+    # The streaming path uses ImageFileReader.Execute(), never sitk.ReadImage on the whole volume.
+    assert full_reads == [], f"preview_volume full-read the volume instead of streaming: {full_reads}"
+
+
+def test_set_parameters_preserve_value_types(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """export_app must encode --set values so their type survives the YAML re-parse in konfai_apps.
+
+    A string "true"/"1" would otherwise come back as a bool/int; json.dumps keeps it a string while
+    leaving genuine ints/bools/floats/lists untouched.
+    """
+    yaml_safe = pytest.importorskip("ruamel.yaml")
+
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+
+    captured: dict[str, list[str] | None] = {}
+
+    def fake_export_app(ref, path, *, display_name=None, config_overrides=None, force_update=False):
+        captured["config_overrides"] = config_overrides
+        return {"ref": ref, "exported_to": str(path)}
+
+    monkeypatch.setattr(mcp_server.APP_SERVICE, "export_app", fake_export_app)
+
+    set_parameters = {"mode": "true", "code": "1", "iterations": 300, "flag": True, "lr": 2.0}
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool(
+                "export_app",
+                {"ref": "org/App", "path": str(tmp_path / "out"), "set_parameters": set_parameters},
+            )
+
+    asyncio.run(scenario())
+
+    overrides = captured["config_overrides"]
+    assert overrides is not None
+    parser = yaml_safe.YAML(typ="safe")
+    round_tripped = {name: parser.load(value) for name, _, value in (item.partition("=") for item in overrides)}
+    assert round_tripped == set_parameters
+    assert isinstance(round_tripped["mode"], str) and isinstance(round_tripped["code"], str)

@@ -299,7 +299,13 @@ class JobRegistry:
         job_dir = self.workspace_layout.job_dir(job.job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
         state_path = self.workspace_layout.job_state_path(job.job_id)
-        state_path.write_text(json.dumps(self._job_to_dict(job), indent=2, sort_keys=True), encoding="utf-8")
+        # Atomic write: a crash mid-write must not leave a truncated job.json, because the recovery loop
+        # json.loads every record at server start -- one half-written file would otherwise be fatal. Write
+        # a sibling temp file (hidden, so it is not matched by the "*/job.json" recovery glob) and rename
+        # it into place; a reader only ever sees the whole old or the whole new file.
+        tmp_path = state_path.with_name(f".{state_path.name}.{uuid.uuid4().hex}.tmp")
+        tmp_path.write_text(json.dumps(self._job_to_dict(job), indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp_path, state_path)
 
     def _persist_manifest(
         self, job: Job, *, config_snapshots: dict[str, str], extra_manifest: dict[str, object] | None
@@ -346,8 +352,14 @@ class JobRegistry:
         if not jobs_root.exists():
             return
         for state_path in sorted(jobs_root.glob("*/job.json")):
-            payload = json.loads(state_path.read_text(encoding="utf-8"))
-            job = self._job_from_dict(payload)
+            try:
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+                job = self._job_from_dict(payload)
+            except (OSError, ValueError, KeyError, TypeError):
+                # A truncated/corrupt record (e.g. a crash mid-write from an older build) must not be
+                # fatal: this loop reads every job.json at server start, so one bad file would otherwise
+                # block startup entirely. Skip it and keep recovering the rest.
+                continue
             if job.job_dir is None:
                 job.job_dir = self.workspace_layout.job_dir(job.job_id)
             if job.manifest_path is None:
@@ -597,10 +609,12 @@ class JobRegistry:
             self.jobs[job.job_id] = job
             self._persist_job(job)
 
-        config_snapshots = self._snapshot_configs(job)
-        self._persist_manifest(job, config_snapshots=config_snapshots, extra_manifest=extra_manifest)
-
         try:
+            # Snapshot + manifest are inside the try so a failure here (e.g. disk full) marks the job
+            # terminal instead of leaving it stuck "queued" forever -- a queued job counts as active, so
+            # it would otherwise block every future launch on its device with no way to clear it.
+            config_snapshots = self._snapshot_configs(job)
+            self._persist_manifest(job, config_snapshots=config_snapshots, extra_manifest=extra_manifest)
             with job.log_path.open("a", encoding="utf-8") as handle:
                 handle.write(f"# KonfAI MCP job {job.job_id}\n")
                 handle.write(f"# kind: {job.kind}\n")

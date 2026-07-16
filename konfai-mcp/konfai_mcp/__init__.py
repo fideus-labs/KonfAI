@@ -23,12 +23,14 @@ import os
 from collections.abc import Sequence
 from typing import Any
 
+_TRANSPORT_CHOICES = ("stdio", "sse", "streamable-http")
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the KonfAI MCP server.")
     parser.add_argument(
         "--transport",
-        choices=("stdio", "sse", "streamable-http"),
+        choices=_TRANSPORT_CHOICES,
         default=os.environ.get("KONFAI_MCP_TRANSPORT", "stdio"),
         help="MCP transport to expose. Defaults to stdio.",
     )
@@ -95,6 +97,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Console-script entrypoint for the MCP server package."""
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
+    # argparse validates a value passed on the CLI against `choices`, but NOT a default, so a bad
+    # KONFAI_MCP_TRANSPORT env value would otherwise flow straight through to the server. Reject it here.
+    if args.transport not in _TRANSPORT_CHOICES:
+        parser.error(
+            f"KONFAI_MCP_TRANSPORT={args.transport!r} is not a valid transport; "
+            f"choose from {', '.join(_TRANSPORT_CHOICES)}."
+        )
     _apply_cli_environment(args)
 
     from .server import main as server_main
