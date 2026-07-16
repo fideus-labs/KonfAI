@@ -191,3 +191,23 @@ def test_residualencoderunet_yaml_decoder_stage_is_a_two_input_node() -> None:
     # First decoder conv maps 2*skip -> skip (the concatenated transpose + skip).
     assert conv_block["Conv_0"].in_channels == 2 * FEATURES_PER_STAGE[4]
     assert conv_block["Conv_0"].out_channels == FEATURES_PER_STAGE[4]
+
+
+def test_residualencoderunet_yaml_stem_tracks_kernel_size_and_negative_slope() -> None:
+    # The stem is spelled out (Conv same-padding + InstanceNorm + LeakyReLU) so it tracks the exposed
+    # knobs like the stages: a non-3 kernel keeps the spatial size and the stem LeakyReLU follows
+    # negative_slope (previously the stem hardcoded padding 1 and slope 0.01, breaking both).
+    net = build_model_from_yaml(
+        yaml_path=str(RESIDUALENCODERUNET_YML),
+        parameters={"kernel_size": 5, "negative_slope": 0.2},
+    )
+    net.eval()
+    with torch.no_grad():
+        out = net.forward_tensor(torch.randn(1, IN_CHANNELS, 128, 128))
+    assert out.shape == (1, NUM_CLASSES, 128, 128)
+    stem_slopes = {
+        module.negative_slope
+        for name, module in net.named_modules()
+        if isinstance(module, torch.nn.LeakyReLU) and "Stem" in name
+    }
+    assert stem_slopes == {0.2}

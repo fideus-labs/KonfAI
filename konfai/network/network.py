@@ -19,6 +19,7 @@
 import importlib
 import inspect
 import os
+import warnings
 from abc import ABC
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -275,11 +276,11 @@ class Measure:
             self._weight.append(weight)
 
         def get_last_loss(self) -> torch.Tensor:
-            return self._loss[-1] * self._weight[-1] if len(self._loss) else torch.zeros((1), requires_grad=True)
+            return self._loss[-1] * self._weight[-1] if len(self._loss) else torch.zeros(1, requires_grad=True)
 
         def get_loss(self) -> torch.Tensor:
             if not len(self._loss):
-                return torch.zeros((1), requires_grad=True)
+                return torch.zeros(1, requires_grad=True)
             # ``_weight`` accumulates across iterations for the logging windows while ``_loss`` is
             # reset every iteration; align the current losses with their own (trailing) weights so a
             # loss-weight scheduler drives the gradient instead of the first weight ever recorded.
@@ -410,7 +411,7 @@ class Measure:
                         # loss added later in the SAME numeric group re-satisfies the uniform-count test and
                         # re-runs backward over the already-freed accumulation graph (double gradient / crash).
                         if criterions_attr.accumulation and criterions_attr.is_loss:
-                            loss = torch.zeros((1), requires_grad=True)
+                            loss = torch.zeros(1, requires_grad=True)
                             for v in [
                                 loss_value
                                 for loss_value in self._loss[criterions_attr.group].values()
@@ -427,7 +428,7 @@ class Measure:
     def get_loss(self) -> list[torch.Tensor]:
         loss: dict[int, torch.Tensor] = {}
         for group in self._loss.keys():
-            loss[group] = torch.zeros((1), requires_grad=True)
+            loss[group] = torch.zeros(1, requires_grad=True)
             for v in self._loss[group].values():
                 if v.is_loss and not v.accumulation:
                     loss_value = v.get_loss()
@@ -1235,9 +1236,11 @@ class Network(ModuleArgsDict, ABC):
             name = name_tmp.replace(";accu;", "")
             if debug:
                 if "KONFAI_DEBUG_LAST_LAYER" in os.environ:
-                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = f"{os.environ['KONFAI_DEBUG_LAST_LAYER']}|{name}:"
-                    f"{get_gpu_memory(output_layer.device)}:"
-                    f"{str(output_layer.device).replace('cuda:', '')}"
+                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
+                        f"{os.environ['KONFAI_DEBUG_LAST_LAYER']}|{name}:"
+                        f"{get_gpu_memory(output_layer.device)}:"
+                        f"{str(output_layer.device).replace('cuda:', '')}"
+                    )
                 else:
                     os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
                         f"{name}:{get_gpu_memory(output_layer.device)}:{str(output_layer.device).replace('cuda:', '')}"
@@ -1519,9 +1522,17 @@ class ModelLoader:
             return None
         if self.classpath.startswith("default|"):
             # 'default|<Name>.yml' selects a model from the shipped catalog (konfai/models/yaml),
-            # the declarative counterpart of 'default|segmentation.UNet.UNet' for Python classes.
+            # the declarative counterpart of 'default|segmentation.UNet.UNet' for Python classes. The
+            # catalog is a flat directory, so the name must be a bare filename -- reject any path
+            # separator or '..' that would resolve outside the shipped catalog.
             import konfai.models.yaml as yaml_catalog
 
+            if Path(raw_path).name != raw_path:
+                raise ConfigError(
+                    f"Invalid catalog model '{raw_path}'.",
+                    "A 'default|<Name>.yml' name must be a bare filename from the shipped catalog "
+                    "(no path separators). Use a plain path for a model file of your own.",
+                )
             path = Path(str(yaml_catalog.__file__)).parent / raw_path
             if not path.is_file():
                 available = sorted(entry.name for entry in path.parent.glob("*.yml"))
@@ -1576,7 +1587,22 @@ class ModelLoader:
             model = apply_config(f"{konfai_args}.{name}")(builder)(konfai_without=konfai_without if not train else [])
             return model
 
-        module, name = get_module(self.classpath, "konfai.models.python")
+        classpath = self.classpath
+        # v1.6.0 moved konfai/models/<kind> to konfai/models/python/<kind>. A config that referenced a
+        # built-in model by its old absolute path (konfai.models.<kind>.<file>:<Class>) keeps working:
+        # rewrite the prefix once, with a deprecation warning, instead of failing on ModuleNotFoundError.
+        if classpath.startswith("konfai.models.") and not classpath.startswith(
+            ("konfai.models.python.", "konfai.models.yaml.")
+        ):
+            new_classpath = classpath.replace("konfai.models.", "konfai.models.python.", 1)
+            warnings.warn(
+                f"Model classpath '{classpath}' uses the pre-1.6.0 package layout; "
+                f"use '{new_classpath}'. The old path is accepted for now but will be removed.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            classpath = new_classpath
+        module, name = get_module(classpath, "konfai.models.python")
         cls = getattr(module, name)
         if not hasattr(cls, "_key"):
             konfai_args += "." + name

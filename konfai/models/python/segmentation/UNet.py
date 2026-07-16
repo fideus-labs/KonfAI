@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Literal
+
 import torch
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
@@ -158,7 +160,7 @@ class UNet(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
     ) -> None:
         super().__init__(
             in_channels=channels[0],

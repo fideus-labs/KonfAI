@@ -682,3 +682,15 @@ def test_a_window_keeps_a_worker_reading_each_volume_once() -> None:
             else:
                 resident.append(resident.pop(resident.index(case)))
         assert loads == len(set(cases))
+
+
+@pytest.mark.parametrize("entries, world_size", [(8, 4), (4, 4), (3, 4), (1, 4)])
+def test_every_rank_gets_a_shard_of_the_same_length(entries: int, world_size: int, monkeypatch) -> None:
+    # DDP(static_graph=True) needs every rank to run the same number of backward all-reduces. A shard
+    # fills itself from its own head, and one holding nothing has no head: fewer entries than ranks
+    # left it empty, and an empty rank runs no backward at all -- the hang this equalises against.
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    mapping = [(index, 0, 0) for index in range(entries)]
+    shards = Data._split(mapping, world_size)
+    assert len({len(shard) for shard in shards}) == 1
+    assert all(shard for shard in shards)

@@ -40,6 +40,15 @@ def _dicom_series(root: Path, name: str, slices: int = 3) -> Path:
     return series
 
 
+def _extensionless_dicom_series(root: Path, name: str, slices: int = 3) -> Path:
+    series = root / name
+    series.mkdir(parents=True)
+    for index in range(slices):
+        # 128-byte preamble + the Part-10 "DICM" magic, no file extension at all.
+        (series / f"slice{index}").write_bytes(b"\x00" * 128 + b"DICM" + b"\x00" * 8)
+    return series
+
+
 def test_directory_volume_suffix_detects_stores_and_series(tmp_path: Path) -> None:
     assert KonfAIApp._directory_volume_suffix(_zarr_store(tmp_path, "a.ome.zarr")) == ".ome.zarr"
     assert KonfAIApp._directory_volume_suffix(_zarr_store(tmp_path, "b.zarr")) == ".zarr"
@@ -54,6 +63,27 @@ def test_directory_volume_suffix_detects_stores_and_series(tmp_path: Path) -> No
     single = tmp_path / "x.mha"
     single.write_bytes(b"")
     assert KonfAIApp._directory_volume_suffix(single) is None
+
+
+def test_directory_volume_suffix_detects_extensionless_dicom_series(tmp_path: Path) -> None:
+    series = _extensionless_dicom_series(tmp_path, "ser")
+    assert KonfAIApp._directory_volume_suffix(series) == ""
+    assert KonfAIApp._list_input_units([series]) == [(series, "")]
+
+    # A plain directory of non-DICOM files must not be misread as a series.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "vol.mha").write_bytes(b"\x00" * 200)
+    assert KonfAIApp._directory_volume_suffix(plain) is None
+
+
+def test_list_input_units_survives_symlink_loop(tmp_path: Path) -> None:
+    cases = tmp_path / "cases"
+    cases.mkdir()
+    (cases / "a.mha").write_bytes(b"")
+    os.symlink(cases, cases / "loop", target_is_directory=True)
+    # A self-referential link must not walk until the OS raises ELOOP: each real dir is visited once.
+    assert KonfAIApp._list_input_units([cases]) == [(cases / "a.mha", ".mha")]
 
 
 def test_list_input_units_treats_store_and_series_as_one_unit(tmp_path: Path) -> None:

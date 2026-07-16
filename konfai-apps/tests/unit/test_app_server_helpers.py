@@ -661,11 +661,11 @@ def test_submit_job_without_dataset_emits_no_dataset_flag(
     assert cmd.count("--inputs") == 1
 
 
-def _make_directory_volume_upload(tmp_path: Path, filename: str) -> SimpleNamespace:
+def _make_directory_volume_upload(tmp_path: Path, filename: str, chunk: bytes = b"chunk") -> SimpleNamespace:
     store = tmp_path / "src_store"
     store.mkdir()
     (store / ".zgroup").write_text("{}", encoding="utf-8")
-    (store / "0.0.0").write_bytes(b"chunk")
+    (store / "0.0.0").write_bytes(chunk)
     zip_path = shutil.make_archive(str(tmp_path / "unit"), "zip", root_dir=str(store))
     upload = SimpleNamespace(filename=filename, file=io.BytesIO(Path(zip_path).read_bytes()))
     shutil.rmtree(store)
@@ -694,6 +694,72 @@ def test_save_upload_groups_maps_zip_unit_to_directory(tmp_path: Path) -> None:
     assert len(groups[0]) == 1
     assert groups[0][0].is_dir()
     assert groups[0][0].name == "unit_0"
+
+
+def test_save_directory_volume_rejects_dot_name_that_escapes_to_group_dir(tmp_path: Path) -> None:
+    # "..konfaidir.zip" -> dir_name "." -> target_dir == the group dir itself. The old containment check
+    # permitted that, so extraction overwrote sibling uploads and failure cleanup rmtree'd the whole group.
+    dst = tmp_path / "g0"
+    real = SimpleNamespace(filename="case.mha", file=io.BytesIO(b"REAL"))
+
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("case.mha", b"CLOBBERED")
+    payload.seek(0)
+    evil = SimpleNamespace(filename="..konfaidir.zip", file=payload)
+
+    with pytest.raises(HTTPException) as exc:
+        app_server.save_uploads([real, evil], dst)
+    assert exc.value.status_code == 400
+
+
+def test_save_directory_volume_rejects_name_collision(tmp_path: Path) -> None:
+    # Two directory volumes with the same target name must not merge into one another.
+    first = _make_directory_volume_upload(tmp_path, "vol.konfaidir.zip")
+    second = _make_directory_volume_upload(tmp_path, "vol.konfaidir.zip")
+
+    with pytest.raises(HTTPException) as exc:
+        app_server.save_uploads([first, second], tmp_path / "inputs")
+    assert exc.value.status_code == 400
+
+
+def _make_zip_bomb_upload(uncompressed_bytes: int) -> SimpleNamespace:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("payload.bin", b"\0" * uncompressed_bytes)
+    payload.seek(0)
+    return SimpleNamespace(filename="store.konfaidir.zip", file=payload)
+
+
+def test_save_directory_volume_bounds_extracted_bytes_not_compressed(tmp_path: Path) -> None:
+    # A directory-volume zip that inflates far past its compressed size must be rejected on the EXTRACTED
+    # bytes: the small compressed upload sailed under the old compressed-only limit and filled the disk.
+    upload = _make_zip_bomb_upload(64 * 1024 * 1024)  # ~64MB extracted, a few KB compressed
+
+    with pytest.raises(HTTPException) as exc:
+        app_server.save_uploads(
+            [upload], tmp_path / "inputs", max_file_bytes=1024 * 1024, max_total_bytes=1024 * 1024
+        )
+    assert exc.value.status_code == 413
+    # Nothing left behind: the partial extraction directory is removed on failure.
+    assert not (tmp_path / "inputs" / "store").exists()
+
+
+def test_save_upload_groups_charges_extracted_directory_bytes(tmp_path: Path) -> None:
+    # A directory-volume path is a directory whose inode st_size is a fixed block (tens of bytes to ~4KB),
+    # unrelated to the extracted store; charging that instead of the real content let a group of such volumes
+    # bypass max_total_bytes for every following group. The content is sized well above any directory inode so
+    # the two behaviours diverge on every filesystem: the budget fits ONE store's real content but not two,
+    # yet comfortably clears two directory inodes -- so only content-charging rejects the second group.
+    store_bytes = 64 * 1024
+    first = _make_directory_volume_upload(tmp_path, "a.konfaidir.zip", chunk=b"\0" * store_bytes)
+    second = _make_directory_volume_upload(tmp_path, "b.konfaidir.zip", chunk=b"\0" * store_bytes)
+
+    with pytest.raises(HTTPException) as exc:
+        app_server.save_upload_groups(
+            [first, second], "1,1", tmp_path / "inputs", max_file_bytes=10**9, max_total_bytes=100_000
+        )
+    assert exc.value.status_code == 413
 
 
 def test_get_app_info_reports_finetunable(monkeypatch: pytest.MonkeyPatch) -> None:

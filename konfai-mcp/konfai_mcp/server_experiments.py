@@ -479,7 +479,10 @@ class SessionService:
                 if len(entries) >= max_entries:
                     truncated = True
                     return True
-                if child.is_dir() and current_depth < depth:
+                # A child sits at ``current_depth + 1``; recurse only while its own children would still
+                # fall within ``depth``, so ``depth`` is an inclusive cap on entry depth (depth=1 lists
+                # immediate children only, not grandchildren).
+                if child.is_dir() and current_depth + 1 < depth:
                     if visit(child, current_depth + 1):
                         return True
             return False
@@ -759,9 +762,13 @@ class SessionService:
         normalized_dataset_dirs = self.normalize_dataset_dirs(dataset_dir, dataset_dirs)
         dataset_summary = self._strategy_dataset_summary(normalized_dataset_dirs)
         dataset_groups = dataset_summary["groups"]
-        selected_extension = extension or (
-            dataset_summary["detected_extensions"][0] if dataset_summary["detected_extensions"] else None
-        )
+
+        # Resolve the read extension PER root: a multi-dataset design can mix formats (an .mha train set
+        # with an .nii.gz eval set), so one global token would mislabel every other root. An explicit
+        # `extension` overrides for all; otherwise each root uses its own first-detected extension.
+        def _root_extension(detected: list[str]) -> str | None:
+            return extension or (detected[0] if detected else None)
+
         requested_workflows = self.normalize_requested_workflows(workflows, allow_none=True)
         normalized_roles = self.normalize_group_roles(group_roles, dataset_groups)
         unresolved_questions = self.unresolved_strategy_questions(
@@ -782,17 +789,11 @@ class SessionService:
                 workflow: workflow_root_name(workflow)
                 for workflow in (requested_workflows or list(WORKFLOW_CONFIG_FILES))
             },
-            "dataset_entries": (
-                [
-                    {
-                        "path": str(path),
-                        "entry": f"{path}:a:{selected_extension}",
-                    }
-                    for path in normalized_dataset_dirs
-                ]
-                if selected_extension is not None
-                else []
-            ),
+            "dataset_entries": [
+                {"path": str(path), "entry": f"{path}:a:{root_extension}"}
+                for path, dataset in zip(normalized_dataset_dirs, dataset_summary["datasets"], strict=False)
+                if (root_extension := _root_extension(dataset["detected_extensions"])) is not None
+            ],
             "group_roles": normalized_roles,
             "modeling_intent": modeling_intent,
             "patching_considerations": self.strategy_patching_considerations(modeling_intent),
@@ -1347,21 +1348,30 @@ class SessionService:
             blocked["semantic_review"] = semantic_review
             return blocked
 
-        with tempfile.TemporaryDirectory(prefix=f"konfai_mcp_validate_{normalized_workflow}_") as tmp_dir:
-            # Isolated spawn child: agent-authored code never executes in the server process and
-            # edited workspace modules are always re-imported fresh.
-            payload = mcp_runner.run_api_in_subprocess(
-                "konfai_mcp.runner:validate_workflow_api",
-                {
-                    "workflow": normalized_workflow,
-                    "level": level,
-                    "workspace_dir": str(workspace),
-                    "config": str(config_path),
-                    "models": resolved_models or None,
-                    "validate_root": tmp_dir,
-                    "collect_model_outputs": collect_model_outputs,
-                },
-            )
+        # The child restores the authored config in its own finally, but a timeout kills it with SIGTERM
+        # and that finally never runs. Snapshot in the parent (which outlives the child) and restore
+        # unconditionally, so a slow-model timeout can never leave the agent's config KonfAI-rewritten.
+        config_backup = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
+        try:
+            with tempfile.TemporaryDirectory(prefix=f"konfai_mcp_validate_{normalized_workflow}_") as tmp_dir:
+                # Isolated spawn child: agent-authored code never executes in the server process and
+                # edited workspace modules are always re-imported fresh.
+                payload = mcp_runner.run_api_in_subprocess(
+                    "konfai_mcp.runner:validate_workflow_api",
+                    {
+                        "workflow": normalized_workflow,
+                        "level": level,
+                        "workspace_dir": str(workspace),
+                        "config": str(config_path),
+                        "models": resolved_models or None,
+                        "validate_root": tmp_dir,
+                        "collect_model_outputs": collect_model_outputs,
+                    },
+                )
+        finally:
+            if config_backup is not None and config_path.is_file():
+                if config_path.read_text(encoding="utf-8") != config_backup:
+                    config_path.write_text(config_backup, encoding="utf-8")
         payload["returncode"] = 0 if payload.get("ok", False) else 1
         payload["semantic_review"] = semantic_review
         return payload

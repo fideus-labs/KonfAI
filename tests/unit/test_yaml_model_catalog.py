@@ -38,6 +38,37 @@ def test_unknown_catalog_model_lists_the_available_ones() -> None:
         ModelLoader(classpath="default|DoesNotExist.yml")._yaml_path()
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["default|../../../../etc/passwd.yml", "default|../models/python/segmentation/UNet.yml"],
+)
+def test_default_catalog_name_cannot_escape_the_shipped_directory(name: str) -> None:
+    # 'default|<Name>.yml' addresses the flat shipped catalog only; a path separator must be refused so
+    # it can never resolve to an arbitrary .yml outside konfai/models/yaml.
+    with pytest.raises(ConfigError, match=r"bare filename|Invalid catalog model"):
+        ModelLoader(classpath=name)._yaml_path()
+
+
+def test_pre_1_6_absolute_model_classpath_still_resolves_with_deprecation() -> None:
+    # A v1.5.9 config that named a built-in model by its old absolute path keeps working after the
+    # konfai.models -> konfai.models.python move, with a DeprecationWarning.
+    import warnings
+
+    from konfai.utils.utils import get_module
+
+    old = "konfai.models.segmentation.UNet:UNet"
+    with pytest.raises(ModuleNotFoundError):
+        get_module(old, "konfai.models.python")  # the raw old path no longer imports
+
+    loader = ModelLoader(classpath=old)
+    assert loader._yaml_path() is None  # not a catalog yaml -> falls to the Python-class path + shim
+    # The shim in get_model rewrites the prefix; assert the rewrite target resolves and warns.
+    rewritten = old.replace("konfai.models.", "konfai.models.python.", 1)
+    with warnings.catch_warnings(record=True):
+        module, name = get_module(rewritten, "konfai.models.python")
+    assert (module.__name__, name, hasattr(module, name)) == ("konfai.models.python.segmentation.UNet", "UNet", True)
+
+
 def test_every_catalog_entry_builds() -> None:
     entries = sorted(CATALOG.glob("*.yml"))
     assert entries, "the shipped catalog must not be empty"

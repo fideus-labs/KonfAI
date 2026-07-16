@@ -14,9 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Literal
+
 import torch
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
+from konfai.utils.errors import ConfigError
 
 
 class NestedUNet(network.Network):
@@ -141,9 +144,13 @@ class NestedUNet(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
         activation: str = "Softmax",
     ) -> None:
+        if attention:
+            # The flag reaches every nested block and no block reads it: asking for attention gates
+            # here builds the plain model and says nothing, so ask for a model that exists instead.
+            raise ConfigError("NestedUNet has no attention gates; set 'attention: false'.")
         super().__init__(
             in_channels=channels[0],
             optimizer=optimizer,

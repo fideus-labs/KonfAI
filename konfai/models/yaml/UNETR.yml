@@ -47,7 +47,7 @@ parameters:
   f4: 64
   f8: 128
   cat8: 256
-  proj_shape: [-1, 2, 2, 2, 64]
+  proj_shape: [-1, 2, 2, 2, "${hidden_size}"]
   proj_axes: [0, 4, 1, 2, 3]
   res_configs:
     - $object: BlockConfig

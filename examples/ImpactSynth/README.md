@@ -1,6 +1,6 @@
 # ImpactSynth Example
 
-Colab-ready demo for [`impact-synth-konfai`](https://github.com/vboussot/ImpactLoss) — whole-body **synthetic CT** from MR/CBCT via a
+Colab-ready demo for [`impact-synth-konfai`](https://github.com/vboussot/KonfAI) — whole-body **synthetic CT** from MR/CBCT via a
 published model on [`VBoussot/ImpactSynth`](https://huggingface.co/VBoussot/ImpactSynth), run through the KonfAI runtime.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vboussot/KonfAI/blob/main/examples/ImpactSynth/ImpactSynth_demo.ipynb)

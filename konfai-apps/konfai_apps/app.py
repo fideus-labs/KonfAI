@@ -191,16 +191,6 @@ def run_distributed_app(
 class AbstractKonfAIApp:
     """Common base class for local and remote KonfAI App runners."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
-
-class Cancelprocess(CancelProcess):
-    """Backward-compatible cancellation exception kept for app integrations."""
-
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-
 
 class KonfAIAppClient(AbstractKonfAIApp):
     """
@@ -697,14 +687,14 @@ class KonfAIApp(AbstractKonfAIApp):
         ----------
         app : str
             Either:
-            - "repo_id:revision" (HuggingFace style), or
+            - "repo_id:app_name" (HuggingFace style), or
             - a local path identifying a model directory.
 
         Notes
         -----
         Sets `self.app_repository` to either:
-        - AppRepositoryOnHF
-        - AppRepository
+        - LocalAppRepositoryFromHF
+        - LocalAppRepositoryFromDirectory
         """
         self.app_repository: LocalAppRepository
         app_repository_info = get_app_repository_info(app, force_update or download)
@@ -818,12 +808,31 @@ class KonfAIApp(AbstractKonfAIApp):
             return ".ome.zarr"
         if lower.endswith(".zarr"):
             return ".zarr"
-        names = {entry.name for entry in path.iterdir()}
+        entries = sorted(path.iterdir(), key=lambda entry: entry.name)
+        names = {entry.name for entry in entries}
         if names & {".zgroup", ".zattrs", "zarr.json"}:
             return ".ome.zarr"
         if any(name.lower().endswith((".dcm", ".dicom")) for name in names):
             return ""
+        # A DICOM series is commonly exported with no extension at all, so the suffixes above miss it;
+        # the Part-10 magic (``DICM`` at offset 128) in the first file is what identifies it then.
+        files = [entry for entry in entries if entry.is_file()]
+        if any(KonfAIApp._is_dicom_file(file) for file in files):
+            return ""
         return None
+
+    @staticmethod
+    def _is_dicom_file(path: Path) -> bool:
+        """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128.
+
+        Reimplemented here (not imported from ``konfai``) to stay on KonfAI's public API rather than
+        reach into a private helper.
+        """
+        try:
+            with open(path, "rb") as file:
+                return file.read(132)[128:132] == b"DICM"
+        except OSError:
+            return False
 
     @staticmethod
     def _list_input_units(paths: list[Path]) -> list[tuple[Path, str]]:
@@ -840,6 +849,7 @@ class KonfAIApp(AbstractKonfAIApp):
             If a path does not exist, is an unsupported file, or yields no volume.
         """
         units: list[tuple[Path, str]] = []
+        visited: set[Path] = set()
 
         def walk(path: Path) -> None:
             directory_suffix = KonfAIApp._directory_volume_suffix(path)
@@ -849,7 +859,19 @@ class KonfAIApp(AbstractKonfAIApp):
             elif directory_suffix is not None:
                 units.append((path, directory_suffix))
             else:
-                for child in sorted(path.iterdir(), key=lambda entry: entry.name):
+                # Guard against symlink loops: recurse into each real directory once (a self-referential
+                # link would otherwise walk until the OS raises ELOOP and aborts the whole staging).
+                real = path.resolve()
+                if real in visited:
+                    return
+                visited.add(real)
+                # A cyclic symlink raises OSError (ELOOP) at iterdir() itself, before the resolve()/visited
+                # guard above can see the child -- skip the unreadable entry instead of aborting staging.
+                try:
+                    children = sorted(path.iterdir(), key=lambda entry: entry.name)
+                except OSError:
+                    return
+                for child in children:
                     walk(child)
 
         for path in paths:
@@ -1079,8 +1101,8 @@ class KonfAIApp(AbstractKonfAIApp):
             dataset = Dataset("Dataset", KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0"))
             names = dataset.get_names("Volume_0")
             for name in names:
-                data, attr = dataset.read_data("Volume_0", name)
-                dataset.write("Mask_0", name, np.ones_like(data), attr)
+                shape, attr = dataset.get_infos("Volume_0", name)  # header only, no pixel read
+                dataset.write("Mask_0", name, np.ones(shape, dtype=np.uint8), attr)
         else:
             for i, mask_path in enumerate(mask):
                 for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(mask_path)):
@@ -1100,7 +1122,7 @@ class KonfAIApp(AbstractKonfAIApp):
         config_overrides: list[str] | None = None,
         uncertainty: bool = False,
         prediction_file: str = "Prediction.yml",
-        gpu: list[int] = cuda_visible_devices(),
+        gpu: list[int] | None = None,
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
@@ -1119,6 +1141,7 @@ class KonfAIApp(AbstractKonfAIApp):
         - Executes inside an isolated temporary workspace (via run_distributed_app).
         - GPU defaults to `cuda_visible_devices()`.
         """
+        gpu = cuda_visible_devices() if gpu is None else gpu
         self._write_inputs_to_dataset(inputs)
         available_vram = None
         if len(gpu):
@@ -1169,7 +1192,7 @@ class KonfAIApp(AbstractKonfAIApp):
         output: Path = Path("./Output/"),
         mask: list[list[Path]] | None = None,
         evaluation_file: str = "Evaluation.yml",
-        gpu: list[int] = cuda_visible_devices(),
+        gpu: list[int] | None = None,
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
@@ -1189,6 +1212,7 @@ class KonfAIApp(AbstractKonfAIApp):
         - Runs inside an isolated workspace (run_distributed_app).
         - GPU defaults to `cuda_visible_devices()`.
         """
+        gpu = cuda_visible_devices() if gpu is None else gpu
         self._write_inputs_to_dataset(inputs)
         self._write_gt_to_dataset(gt)
         self._write_mask_or_default(mask)
@@ -1214,13 +1238,11 @@ class KonfAIApp(AbstractKonfAIApp):
         inputs: list[list[Path]],
         output: Path = Path("./Output/"),
         uncertainty_file: str = "Uncertainty.yml",
-        gpu: list[int] = cuda_visible_devices(),
+        gpu: list[int] | None = None,
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
     ) -> None:
-        self._write_inference_stack_to_dataset(inputs)
-        self.app_repository.install_uncertainty(uncertainty_file)
         """
         Run uncertainty estimation locally.
 
@@ -1235,6 +1257,9 @@ class KonfAIApp(AbstractKonfAIApp):
         - Runs inside an isolated workspace (run_distributed_app).
         - GPU defaults to `cuda_visible_devices()`.
         """
+        gpu = cuda_visible_devices() if gpu is None else gpu
+        self._write_inference_stack_to_dataset(inputs)
+        self.app_repository.install_uncertainty(uncertainty_file)
         from konfai.evaluator import evaluate
 
         evaluate(True, gpu, cpu, quiet, False, Path(uncertainty_file).resolve(), Path("./Uncertainties/"))
@@ -1258,7 +1283,7 @@ class KonfAIApp(AbstractKonfAIApp):
         evaluation_file: str = "Evaluation.yml",
         uncertainty: bool = True,
         uncertainty_file: str = "Uncertainty.yml",
-        gpu: list[int] = cuda_visible_devices(),
+        gpu: list[int] | None = None,
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
@@ -1279,6 +1304,7 @@ class KonfAIApp(AbstractKonfAIApp):
         - runs evaluation only if ``gt`` is provided
         - runs uncertainty only if ``uncertainty=True``
         """
+        gpu = cuda_visible_devices() if gpu is None else gpu
         self.infer(
             inputs=inputs,
             output=output / "Predictions",
@@ -1344,7 +1370,7 @@ class KonfAIApp(AbstractKonfAIApp):
         epochs: int = 10,
         it_validation: int = 1000,
         models: list[str] = [],
-        gpu: list[int] = cuda_visible_devices(),
+        gpu: list[int] | None = None,
         cpu: int | None = None,
         quiet: bool = False,
         config_file: str = "Config.yml",
@@ -1372,6 +1398,7 @@ class KonfAIApp(AbstractKonfAIApp):
         - Fine-tuning requires a CUDA GPU when the loss relies on GPU-only components.
         - `models` selects which checkpoint(s) to fine-tune (default: the first available).
         """
+        gpu = cuda_visible_devices() if gpu is None else gpu
         import torch
 
         selected_models = self.app_repository.install_fine_tune(
@@ -1384,13 +1411,19 @@ class KonfAIApp(AbstractKonfAIApp):
         # Keep training artifacts (Checkpoints/Statistics) outside the output so it stays a clean app.
         work_dir = Path(tempfile.mkdtemp(prefix="konfai_finetune_")).resolve()
         config_path = Path(config_file)
-        # Relative classpaths (e.g. 'classpath: UNet.yml') resolve against the config file's parent, so
-        # the app's support files must sit next to the per-model config copies written into work_dir.
-        for support in Path(".").glob("*.py"):
-            shutil.copy2(support, work_dir / support.name)
-        for support in [*Path(".").glob("*.yml"), *Path(".").glob("*.yaml")]:
-            if support.resolve() != config_path.resolve():
-                shutil.copy2(support, work_dir / support.name)
+        # Relative classpaths (e.g. 'classpath: sub/UNet.yml') resolve against the config file's parent,
+        # so the app's support files -- including any that live in a subpackage -- must sit next to the
+        # per-model config copies written into work_dir, at the same relative path.
+        for support in Path(".").rglob("*"):
+            if not support.is_file() or "__pycache__" in support.parts:
+                continue
+            if support.suffix.lower() not in {".py", ".yml", ".yaml"}:
+                continue
+            if support.resolve() == config_path.resolve():
+                continue
+            dest = work_dir / support
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(support, dest)
         try:
             for checkpoint_name, checkpoint_src in selected_models:
                 stem = Path(checkpoint_name).stem
@@ -1435,9 +1468,16 @@ class KonfAIApp(AbstractKonfAIApp):
             output_dir = Path(output).resolve()
             if Path.cwd().resolve() != output_dir:
                 output_dir.mkdir(parents=True, exist_ok=True)
-                for artifact in Path(".").iterdir():
-                    if artifact.is_file():
-                        shutil.copy2(artifact, output_dir / artifact.name)
+                # Walk the whole bundle so nested assets survive (a subpackaged .yml/.py, requirements.txt,
+                # app.json, and the fine-tuned .pt) -- a root-only iterdir silently drops everything nested.
+                # The ./Dataset symlink is the user's input, not a bundle asset, so it is excluded.
+                skip = {"Dataset"}
+                for artifact in Path(".").rglob("*"):
+                    if not artifact.is_file() or "__pycache__" in artifact.parts or skip.intersection(artifact.parts):
+                        continue
+                    dst = output_dir / artifact.relative_to(".")
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(artifact, dst)
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
             dataset_link = Path("./Dataset")

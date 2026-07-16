@@ -37,9 +37,10 @@
 # full resolution (deep_supervision=False -- what nnU-Net returns), which is the
 # weight-exact comparison point.
 #
-# ANISOTROPIC STRIDES/KERNELS: `strides` and `kernel_sizes` accept BOTH isotropic
-# ints AND per-axis lists per stage (e.g. [1, 2, 2]), passed straight through to
-# the convs and the transpose, so real anisotropic ResEnc plans load unchanged.
+# ANISOTROPIC STRIDES/KERNELS: `strides` is a per-stage list (one entry per stage).
+# `kernel_size` is a single value shared by every stage AND the stem -- an isotropic
+# int OR a per-axis list (e.g. [1, 3, 3]) with same-padding derived from it -- so
+# real anisotropic ResEnc plans load unchanged. There is no per-stage kernel list.
 #
 # FIXED DEPTH: a declarative YAML cannot loop, so the 6 encoder + 5 decoder stages
 # are structural. To load a checkpoint of a different depth, replicate the stage
@@ -78,23 +79,36 @@ network:
 
 modules:
   # ----- Stem: one non-strided conv block (never downsamples), 5 -> 24 ---------
+  # Conv -> InstanceNorm(affine) -> LeakyReLU, spelled out as explicit leaves so the
+  # stem tracks the exposed knobs like the residual stages: same-padding follows
+  # kernel_size (any odd/anisotropic kernel at stride 1) and the LeakyReLU follows
+  # negative_slope. Weighted leaves stay Conv + InstanceNorm, so the execution-order
+  # weight bridge is unchanged.
   - name: Stem
-    type: ConvBlock
     in_branch: [0]
     out_branch: [stem]
-    args:
-      dim: ${dim}
-      in_channels: ${in_channels}
-      out_channels: ${features_per_stage.0}
-      block_configs:
-        - $object: BlockConfig
-          args:
-            kernel_size: ${kernel_size}
-            stride: 1
-            padding: 1
-            bias: ${conv_bias}
-            activation: LeakyReLU;0.01
-            norm_mode: INSTANCE_AFFINE
+    modules:
+      - name: Conv
+        type: Conv
+        args:
+          dim: ${dim}
+          in_channels: ${in_channels}
+          out_channels: ${features_per_stage.0}
+          kernel_size: ${kernel_size}
+          stride: 1
+          padding: same
+          bias: ${conv_bias}
+      - name: Norm
+        type: InstanceNorm
+        args:
+          dim: ${dim}
+          num_features: ${features_per_stage.0}
+          affine: true
+          track_running_stats: false
+      - name: Activation
+        type: LeakyReLU
+        args:
+          negative_slope: ${negative_slope}
 
   # ----- Encoder: residual stages (each output is a decoder skip) --------------
   # Stage k: stack n_blocks_per_stage[k] ResidualBlockD; first block strides + changes width.

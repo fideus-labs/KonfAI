@@ -91,15 +91,11 @@ def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
 def _load_image(store_path: str | Path, level: int) -> Any:
     """Return the ``NgffImage`` for ``level`` of an OME-Zarr store.
 
-    ``@N`` selects among the levels a store offers, so a store with a single level has nothing to
-    select: its one level is read whatever ``N`` says. That is already how every other backend
-    behaves — ``SitkFile`` never reads ``self.level`` at all, so ``:mha@1`` quietly reads its only
-    image — and a one-level store is not a pyramid either. Enforcing ``@N`` on it made the same
-    dataset spec valid for a ``.mha`` group and fatal for its OME-Zarr neighbour.
-
-    Out of range on a store that IS a pyramid stays an error: asking level 3 of a three-level mask
-    beside a four-level image is a real mismatch (it silently pairs 160 µm against 320 µm), and
-    quietly falling back to level 0 would hide it.
+    ``@N`` selects among the levels a store offers, so a single-level store has nothing to select: its
+    one level is read whatever ``N`` says (as every other backend does -- ``SitkFile`` ignores
+    ``self.level`` too). Out of range on a store that IS a pyramid stays an error: asking level 3 of a
+    three-level mask beside a four-level image is a real mismatch (it silently pairs 160 µm against
+    320 µm), and quietly falling back to level 0 would hide it.
     """
     _require_ngff_zarr()
     try:

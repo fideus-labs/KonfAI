@@ -583,8 +583,8 @@ class PerceptualLoss(Criterion):
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         if output.device.index not in self.models:
-            # `Network.to` now resets its GPU-index counter per call, so the perceptual
-            # model is placed starting at this device without the old os.environ reset.
+            # `Network.to` resets its GPU-index counter per call, so the perceptual model is
+            # placed starting at this device.
             self.models[output.device.index] = Network.to(copy.deepcopy(self.model).eval(), output.device.index).eval()
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
         if len(output.shape) == 5 and len(self.shape) == 2:
@@ -688,9 +688,7 @@ class FocalLoss(Criterion):
         logpt = logpt.gather(1, target)
         pt = pt.gather(1, target)
 
-        # alpha[target] is already [B, 1, *spatial] (matching pt/logpt); a spurious unsqueeze here made
-        # it [B, 1, 1, *spatial], which broadcasts against pt to [B, B, *spatial] and cross-pairs samples
-        # for any batch > 1 -- silently corrupting the loss. Index without the extra axis.
+        # alpha[target] is already [B, 1, *spatial] (matching pt/logpt); do not add an axis.
         at = self.alpha.to(target.device)[target]
         loss = -at * ((1 - pt) ** self.gamma) * logpt
 
@@ -906,18 +904,25 @@ class IMPACTReg(CriterionWithAttribute):
     def _pca_project(
         self, output_feature: torch.Tensor, target_feature: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Reduce both feature maps to their top-``pca`` principal components. The basis is fitted on the
-        TARGET (reference) features and reused for the output — the channel-covariance eigendecomposition of
-        itk-impact's ``pca_fit`` (``eigh`` is ascending, so the largest components live at the end) — so the
-        torch metric is behaviourally identical to the itk-impact PCA."""
+        """Reduce both feature maps to their top-``pca`` principal components. For every batch sample the
+        basis is fitted on the TARGET (reference) features and reused for the output — a channel-covariance
+        eigendecomposition (``eigh`` is ascending, so the largest components live at the end), which
+        reproduces itk-impact's per-image ``pca_fit`` by construction. itk-impact fits one basis per image,
+        and a batch mixes unrelated cases, so the basis is fitted per sample: a shared basis would project
+        every sample after the first into another case's feature space."""
         channels = target_feature.shape[1]
         k = min(self.pca, channels)
-        flat = target_feature.detach().reshape(target_feature.shape[0], channels, -1)[0].float()
-        centered = flat - flat.mean(dim=1, keepdim=True)
-        covariance = centered @ centered.t() / max(flat.shape[1] - 1, 1)
-        _, eigenvectors = torch.linalg.eigh(covariance)
-        basis = eigenvectors[:, channels - k :].to(target_feature.dtype)  # {C, K}, largest-eigenvalue components
-        return self._pca_transform(output_feature, basis), self._pca_transform(target_feature, basis)
+        flat = target_feature.detach().reshape(target_feature.shape[0], channels, -1).float()
+        projected_output: list[torch.Tensor] = []
+        projected_target: list[torch.Tensor] = []
+        for b in range(flat.shape[0]):
+            centered = flat[b] - flat[b].mean(dim=1, keepdim=True)
+            covariance = centered @ centered.t() / max(flat.shape[2] - 1, 1)
+            _, eigenvectors = torch.linalg.eigh(covariance)
+            basis = eigenvectors[:, channels - k :].to(target_feature.dtype)  # {C, K}, largest-eigenvalue
+            projected_output.append(self._pca_transform(output_feature[b : b + 1], basis))
+            projected_target.append(self._pca_transform(target_feature[b : b + 1], basis))
+        return torch.cat(projected_output), torch.cat(projected_target)
 
     def _compute(
         self,

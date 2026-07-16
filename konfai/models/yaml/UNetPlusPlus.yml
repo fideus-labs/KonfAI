@@ -32,10 +32,11 @@
 # [64, 128, 256, 512] (`enc_l1..enc_l4`, 1/4..1/32 res). The five features consumed by the decoder are
 # `enc_c1` and `enc_l1..enc_l4`. (resnet18 = block counts [2, 2, 2, 2], same widths.)
 #
-# DECODER channel table (smp's UnetPlusPlusDecoder arithmetic for a BasicBlock ResNet encoder). A
-# declarative YAML cannot compute the dense-grid channel recurrence, so the widths are written
-# explicitly per node; `up_channels + sum(skip_channels) -> out_channels` is the node's `Conv2dReLU`
-# input/output. `dx_d_l` is the branch holding node `x_{d}_{l}`:
+# DECODER channel table (smp's UnetPlusPlusDecoder arithmetic for a BasicBlock ResNet encoder), showing
+# the DEFAULT resolved widths. Encoder-derived widths reference `stage_channels`/`stem_channels` and so
+# track those knobs; the smp decoder widths (256, 128, 64, 32, 16) are structural literals.
+# `up_channels + sum(skip_channels) -> out_channels` is the node's `Conv2dReLU` input/output;
+# `dx_d_l` is the branch holding node `x_{d}_{l}`:
 #
 #   node    in_branch (coarser, skips...)              up  + skips        = conv_in -> out
 #   x_0_0   enc_l4, enc_l3                             512 + [256]        =   768   -> 256
@@ -54,11 +55,12 @@
 # point). The nodes below are declared in smp forward-execution order so the 117 weighted leaves (72
 # encoder + 44 decoder + 1 head) pair one-to-one with the reference.
 #
-# FIXED DEPTH / ENCODER: a declarative YAML cannot loop, so the 4 encoder stages + 11 decoder nodes and
-# the decoder channel table are structural (this file is the resnet18/34 BasicBlock topology). `dim`,
-# `in_channels`, `num_classes`, `stem_channels`, `stage_channels` and `n_blocks_per_stage` stay
-# parametric; retargeting another BasicBlock encoder means editing `n_blocks_per_stage` (e.g. resnet18)
-# and, for different widths, recomputing the decoder table above.
+# FIXED DEPTH / ENCODER: a declarative YAML cannot loop, so the 4 encoder stages + 11 decoder nodes are
+# structural (this file is the resnet18/34 BasicBlock topology). `dim`, `in_channels`, `num_classes`,
+# `stem_channels`, `stage_channels` and `n_blocks_per_stage` stay parametric -- `stem_channels`/
+# `stage_channels` propagate into the decoder grid, so encoder-width changes need no manual edits;
+# retargeting another BasicBlock encoder means editing `n_blocks_per_stage` (e.g. resnet18). The smp
+# decoder widths (256..16) stay literal.
 #
 # Use it as a KonfAI model classpath:
 #   classpath: default|UNetPlusPlus.yml   # shipped catalog copy
@@ -158,58 +160,58 @@ modules:
     type: UNetPlusPlusNode
     in_branch: [enc_l4, enc_l3]
     out_branch: [dx_0_0]
-    args: {dim: "${dim}", up_channels: 512, skip_channels: [256], out_channels: 256}
+    args: {dim: "${dim}", up_channels: "${stage_channels.3}", skip_channels: ["${stage_channels.2}"], out_channels: 256}
   - name: x_1_1
     type: UNetPlusPlusNode
     in_branch: [enc_l3, enc_l2]
     out_branch: [dx_1_1]
-    args: {dim: "${dim}", up_channels: 256, skip_channels: [128], out_channels: 128}
+    args: {dim: "${dim}", up_channels: "${stage_channels.2}", skip_channels: ["${stage_channels.1}"], out_channels: "${stage_channels.1}"}
   - name: x_2_2
     type: UNetPlusPlusNode
     in_branch: [enc_l2, enc_l1]
     out_branch: [dx_2_2]
-    args: {dim: "${dim}", up_channels: 128, skip_channels: [64], out_channels: 64}
+    args: {dim: "${dim}", up_channels: "${stage_channels.1}", skip_channels: ["${stage_channels.0}"], out_channels: "${stage_channels.0}"}
   - name: x_3_3
     type: UNetPlusPlusNode
     in_branch: [enc_l1, enc_c1]
     out_branch: [dx_3_3]
-    args: {dim: "${dim}", up_channels: 64, skip_channels: [64], out_channels: 64}
+    args: {dim: "${dim}", up_channels: "${stage_channels.0}", skip_channels: ["${stem_channels}"], out_channels: "${stem_channels}"}
 
   # --- Dense column l = d + 1 ---
   - name: x_0_1
     type: UNetPlusPlusNode
     in_branch: [dx_0_0, dx_1_1, enc_l2]
     out_branch: [dx_0_1]
-    args: {dim: "${dim}", up_channels: 256, skip_channels: [128, 128], out_channels: 128}
+    args: {dim: "${dim}", up_channels: 256, skip_channels: ["${stage_channels.1}", "${stage_channels.1}"], out_channels: 128}
   - name: x_1_2
     type: UNetPlusPlusNode
     in_branch: [dx_1_1, dx_2_2, enc_l1]
     out_branch: [dx_1_2]
-    args: {dim: "${dim}", up_channels: 128, skip_channels: [64, 64], out_channels: 64}
+    args: {dim: "${dim}", up_channels: "${stage_channels.1}", skip_channels: ["${stage_channels.0}", "${stage_channels.0}"], out_channels: "${stage_channels.0}"}
   - name: x_2_3
     type: UNetPlusPlusNode
     in_branch: [dx_2_2, dx_3_3, enc_c1]
     out_branch: [dx_2_3]
-    args: {dim: "${dim}", up_channels: 64, skip_channels: [64, 64], out_channels: 64}
+    args: {dim: "${dim}", up_channels: "${stage_channels.0}", skip_channels: ["${stem_channels}", "${stem_channels}"], out_channels: "${stem_channels}"}
 
   # --- Dense column l = d + 2 ---
   - name: x_0_2
     type: UNetPlusPlusNode
     in_branch: [dx_0_1, dx_1_2, dx_2_2, enc_l1]
     out_branch: [dx_0_2]
-    args: {dim: "${dim}", up_channels: 128, skip_channels: [64, 64, 64], out_channels: 64}
+    args: {dim: "${dim}", up_channels: 128, skip_channels: ["${stage_channels.0}", "${stage_channels.0}", "${stage_channels.0}"], out_channels: 64}
   - name: x_1_3
     type: UNetPlusPlusNode
     in_branch: [dx_1_2, dx_2_3, dx_3_3, enc_c1]
     out_branch: [dx_1_3]
-    args: {dim: "${dim}", up_channels: 64, skip_channels: [64, 64, 64], out_channels: 64}
+    args: {dim: "${dim}", up_channels: "${stage_channels.0}", skip_channels: ["${stem_channels}", "${stem_channels}", "${stem_channels}"], out_channels: "${stem_channels}"}
 
   # --- Dense column l = d + 3 ---
   - name: x_0_3
     type: UNetPlusPlusNode
     in_branch: [dx_0_2, dx_1_3, dx_2_3, dx_3_3, enc_c1]
     out_branch: [dx_0_3]
-    args: {dim: "${dim}", up_channels: 64, skip_channels: [64, 64, 64, 64], out_channels: 32}
+    args: {dim: "${dim}", up_channels: 64, skip_channels: ["${stem_channels}", "${stem_channels}", "${stem_channels}", "${stem_channels}"], out_channels: 32}
 
   # --- Final full-resolution node (no skip: smp DecoderBlock(in, 0, out)) ---
   - name: x_0_4

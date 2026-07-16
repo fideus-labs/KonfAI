@@ -19,10 +19,16 @@ Three pillars run through the codebase:
 |---|---|
 | `konfai/` | Core package (config, data, network, metric, workflows, utils) |
 | `konfai-apps/` | **Independent** package `konfai_apps` (app management, HF repos, FastAPI server) — own `pyproject.toml`, deps, and CI |
-| `konfai-mcp/` | **Independent** package `konfai_mcp` (FastMCP server exposing KonfAI to LLM agents) — own `pyproject.toml`, tests, CI. Lives on the `konfai-mcp` branch (published to `origin/konfai-mcp`); do not push without explicit confirmation. |
+| `konfai-mcp/` | **Independent** package `konfai_mcp` (FastMCP server exposing KonfAI to LLM agents) — own `pyproject.toml`, tests, CI. On `main` since v1.6.0; published to PyPI by the release workflow. |
 | `apps/` | Ready-to-use model app bundles (excluded from the `konfai` wheel) |
-| `examples/` | Runnable `Segmentation` / `Synthesis` workflows (assume CWD = the example dir) |
+| `examples/` | Runnable `Segmentation` / `Synthesis` / `Registration` workflows (assume CWD = the example dir) |
 | `docs/` · `tests/` | Sphinx site · core test suite (`tests/unit`, `tests/integration`) |
+
+`konfai/models/` has two halves: **`models/python/<kind>/`** (Python `Network` subclasses) and
+**`models/yaml/`** (the shipped declarative catalog, 14 models). `models/python` has no `__init__.py` on
+purpose — it is a PEP 420 namespace package, and the wheel ships it via `include = ["konfai", "konfai.*"]`
+with `namespaces=true`; the catalog `*.yml` ship via `package-data`. Changing either breaks the wheel
+silently, so verify with a clean **non-editable** install, not an editable one.
 
 **Core modules worth knowing:** `utils/config.py` (the reflection engine — read before any config change); `utils/dataset.py` (storage backends `SitkFile`/`H5File`/`OmeZarrFile`/`DicomFile` + the `Attribute` geometry sidecar); `data/data_manager.py` + `data/patching.py` (lazy patch index, DDP sharding, overlap-blended reassembly); `network/network.py` (`ModuleArgsDict`/`Network`/`ModelLoader`/`Measure` — the heart of the model system); `metric/measure.py` (`Criterion` = losses + metrics); `data/{transform,augmentation}.py`; `trainer.py`/`predictor.py`/`evaluator.py` (the pipelines); `main.py` (CLI); `utils/{errors,runtime,model_builder}.py`.
 
@@ -50,15 +56,16 @@ For the full config-key catalogue and a concrete end-to-end trace, read the `doc
 
 Every extension point is **"subclass a base, reference it by classpath in YAML"** — no core edits:
 
-- **Model:** subclass `network.Network`, build the graph in `__init__` via `add_module`. Reference `classpath: module.MyNet`, a local `Model:MyNet`, or a `.yml`.
+- **Model:** subclass `network.Network`, build the graph in `__init__` via `add_module`. Reference `classpath: module.MyNet`, a local `Model:MyNet`, a `.yml`, or `default|<Name>.yml` for the shipped catalog.
+- **Pretrained weights:** `utils/pretrained.py:transfer_weights_by_execution_order` pairs weighted leaves in forward-execution order (no key map). It fills **every** target tensor or raises — a tensor held by a parent module (`torch.nn.MultiheadAttention` owns `in_proj_weight` beside its `out_proj` child) or by a submodule the forward skips cannot be paired. Unreached *source* branches (nnU-Net deep-supervision heads) are ignored on purpose.
 - **Loss / metric:** subclass `metric.measure.Criterion`; `forward` returns a `Tensor` (loss) or a `(value, dict)` tuple (metric — consumers `isinstance`-branch). Attach under `outputs_criterions`/`metrics` to a **named module output**. Optional-dep criteria import lazily via `_require_optional(...)` and raise an actionable `MeasureError` — never a bare top-level import.
 - **Transform:** subclass `data.transform.Transform`; implement `__call__` **and** `transform_shape()` (must predict the output spatial shape *exactly* — patch planning depends on it). Pair `inverse()` if `apply_inverse`.
 - **Augmentation:** subclass `data.augmentation.DataAugmentation`; `_state_init` (sample params per case index) + `_compute` (apply lazily). Only `Mask`/`Permute` may change shape.
 - **Imaging format:** add a `Dataset.AbstractFile` backend, dispatch it in `File.__enter__`, register aliases in `SUPPORTED_EXTENSIONS`; import-guard the heavy lib.
 
-**Classpaths:** a bare name (e.g. `Dice`) resolves inside that kind's package; `module:Class` imports *any* module — a local file (`Loss:MyWrapper`) or an installed library (`monai.losses:DiceLoss`, `torch:nn:L1Loss`).
+**Classpaths:** a bare name (e.g. `Dice`) resolves inside that kind's package; `module:Class` imports *any* module — a local file (`Loss:MyWrapper`) or an installed library (`monai.losses:DiceLoss`, `torch:nn:L1Loss`). Model classpaths resolve against `konfai.models.python`. The pre-1.6.0 absolute form `konfai.models.<kind>.<file>:<Class>` still resolves via a rewrite + `DeprecationWarning`; new code uses the relative or `default|` form.
 
-**YAML model builder** (`utils/model_builder.py`): builds a `Network` from a `.yml`, **safe by construction** (node types must come from two curated registries — no `eval`/import injection). It *complements* `models/` today and can replace the feed-forward subset once the registry grows (`UNet`/`NestedUNet`/`ResNet` are migratable; custom-`forward` models like DDPM/DiffusionGAN/ConvNeXt are not).
+**YAML model builder** (`utils/model_builder.py`): builds a `Network` from a `.yml`, **safe by construction** (node types must come from two curated registries — no `eval`/import injection). The shipped catalog (`models/yaml/`, 14 models incl. `UNet`/`NestedUNet`/`ResNet`/`UNETR`/`ViT`/`VNet`) now covers the feed-forward subset; custom-`forward` models (DDPM/DiffusionGAN/ConvNeXt) stay Python. `default|<Name>.yml` addresses the flat catalog only — a name with a path separator is refused.
 
 ## 5. Apps (`konfai-apps`)
 
@@ -68,7 +75,7 @@ A separate package layered on KonfAI's **public** API (core never imports it). A
 
 ## 5b. MCP server (`konfai-mcp`)
 
-A third independent package (depends only on KonfAI's public API) exposing a **FastMCP** server so an LLM agent can inspect a dataset → author YAML → run train/predict/evaluate → monitor jobs → compare runs → iterate. Lives on the `konfai-mcp` branch (published to `origin/konfai-mcp`; do not push without explicit confirmation). Jobs run in a **`spawn`** subprocess (training may init CUDA); `validate_config_semantics` and `run_component_smoke_test` run in a **spawn subprocess** (never in the server process), are side-effect-free (config bytes snapshotted/restored), and re-import edited workspace code; discovery is via `list_components` / `describe_extension_points` / `describe_config_schema` / `check_external_dependency`. Tests: `pip install -e ./konfai-mcp` then `python -m pytest konfai-mcp/tests` (the segmentation E2E needs the imaging extra).
+A third independent package (depends only on KonfAI's public API) exposing a **FastMCP** server so an LLM agent can inspect a dataset → author YAML → run train/predict/evaluate → monitor jobs → compare runs → iterate. On `main` since v1.6.0 and published to PyPI by the release workflow. Jobs run in a **`spawn`** subprocess (training may init CUDA); `validate_config_semantics` and `run_component_smoke_test` run in a **spawn subprocess** (never in the server process), are side-effect-free (config bytes are snapshotted/restored **in the parent**, so the restore survives a subprocess timeout kill), and re-import edited workspace code; discovery is via `list_components` / `describe_extension_points` / `describe_config_schema` / `check_external_dependency`. Tests: `pip install -e ./konfai-mcp` then `python -m pytest konfai-mcp/tests` (the segmentation E2E needs the imaging extra).
 
 **Working on the MCP server — how to validate a change:**
 
@@ -110,9 +117,22 @@ pixi run check                                                    # lint + forma
 pixi run test                                                     # core unit + integration (tests/)
 pixi run --environment dev typecheck                              # mypy konfai
 pip install -e ./konfai-apps && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate)
+pip install -e ./konfai-mcp  && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate)
 ```
 
-The Pixi `dev` env carries the imaging extras; a bare `pip install .[dev]` does not. `pixi run test` does **not** run `konfai-apps/tests` — install that package first (it pulls its own runtime deps), exactly as its CI does. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `fid`, `cluster`, …).
+The Pixi `dev` env carries the imaging extras; a bare `pip install .[dev]` does not. `pixi run test` does **not** run `konfai-apps/tests` or `konfai-mcp/tests` — install those packages first (they pull their own runtime deps), exactly as their CI does. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `fid`, `cluster`, …).
+
+## 6b. Releasing
+
+Versions are **tag-derived** (`setuptools_scm`, `^v(?P<version>.*)$`) for all three packages — never hand-edit
+a version. Pushing a `v*` tag runs `.github/workflows/publish.yml`: test (core + apps + mcp) → build the
+8-package matrix (konfai, konfai-apps, konfai-mcp, and the 5 `apps/*` bundles) → publish to PyPI via OIDC →
+build the Docker image once `konfai` is visible on PyPI. `apps/*` bundles pin `konfai==` and `konfai-apps==`
+the same version, so the whole matrix releases in lockstep.
+
+Before tagging: `pixi run check` green; both sibling suites green; and — because the test job only exercises
+the **source tree** — confirm the built wheel still ships `konfai/models/python/**` and `konfai/models/yaml/*.yml`
+by installing it **non-editable** in a clean venv (an editable install hides PEP 420 / `package-data` breakage).
 
 ## 7. Invariants — do NOT break
 
@@ -123,7 +143,43 @@ The Pixi `dev` env carries the imaging extras; a bare `pip install .[dev]` does 
 - **`outputs_criterions` keys equal a module's dotted path**; the `:`/`.` separators are load-bearing.
 - **`state_dict` load/save does not recurse into nested `Network`s** (each owns its optimizer/state); alias lists are positional.
 - **The YAML model builder is the trusted/untrusted boundary** — only registry types; module names contain no `.`.
-- **`konfai-apps` is a separate package**; `apps/` is excluded from the `konfai` wheel.
+- **`konfai-apps` is a separate package**; `apps/` is excluded from the `konfai` wheel. Core must never import `konfai_apps`.
+- **The pretrained bridge fills every target tensor or raises** — never report a partial load as success.
+- **The config write is atomic** (temp + `os.replace`); a reader must never see a truncated config and bind all-defaults.
+
+## 7b. Contracts with the ecosystem
+
+- **SlicerKonfAI** (separate repo) drives `konfai-apps` by CLI + JSON. It imports, from
+  `konfai_apps.app_repository`: `current_free_vram(devices, remote_server=None)`, `get_app_repository_info`,
+  `is_app_repo`, `LocalAppRepositoryFromDirectory`, `LocalAppRepositoryFromHF`, `AppRepositoryError`, plus the
+  `get_parameters() -> {values, constraints}` params primitive that drives its advanced-params dialog.
+  **Renaming or dropping any of these breaks Slicer silently** (it happened once: PR#33 dropped
+  `current_free_vram`, PR#35 restored it). Grep the Slicer checkout before touching that surface.
+- **HF bundles** (`hf_bundles/*`) carry `app.json` + config + `requirements.txt` + `.pt` + custom `.py`. Their
+  configs use **bundle-relative** classpaths (`ResidualEncoderUNet.yml`, `model:Unet_TS_CT`,
+  `Model:RegistrationNet`) — never KonfAI's internal module paths, which is why the models→`models.python`
+  move did not break them. Validate a bundle by loading its config on a **copy** (reading mutates).
+
+## 7c. Security boundaries
+
+Three, and only three, places decide trust — keep them honest:
+1. **YAML model builder** — registry types only; the `default|` catalog name must stay a bare filename.
+2. **`konfai-apps` app resolution** — runs the app's `.py` **and** pip-installs its `requirements.txt` by
+   default (`KONFAI_APPS_INSTALL_REQUIREMENTS=0` opts out). Protected core packages are matched by **PEP 503
+   canonical name** (`konfai_apps` ≡ `konfai-apps`); transitive deps are *not* policed — say so, don't overclaim.
+3. **`konfai-mcp`** — validation/smoke-tests run only in a spawn subprocess (never the server process);
+   `read/write_session_file` are path-jailed; dataset tools may *read* arbitrary host paths by design, but
+   **writes must never widen** (any tool that composes a write target must reject path separators);
+   `cancel_job` reaps the whole process group.
+
+## 7d. Traps that have bitten before
+
+- An **editable install hides packaging breakage** (`models/python` is PEP 420; catalog `.yml` is package-data).
+- **A green `validate_*` proves little** — its default level `instantiate` runs no train step; only
+  `level='train_step'` does a real forward+backward.
+- **`transform_shape()` must be exact** — patch planning trusts it; a wrong prediction corrupts reassembly.
+- **Reading a config mutates it** — snapshot bytes before any validation that builds a workflow.
+- **Adding a workflow kind touches ~7 registries** — prefer one descriptor table over editing each.
 
 ## 8. Conventions & rules
 

@@ -382,3 +382,13 @@ def test_a_statistics_chunk_reaches_further_on_a_thin_volume() -> None:
     from konfai.utils.dataset import _statistics_chunk_length
 
     assert _statistics_chunk_length([1, 400, 64, 64], axis=1) > _statistics_chunk_length([1, 400, 512, 512], axis=1)
+
+
+def test_directory_store_detects_extensionless_dicom(tmp_path: Path) -> None:
+    # A DICOM series exported with no extension was left on the SitkFile backend, because detection
+    # only ever looked at file suffixes.
+    series = tmp_path / "ds" / "case_0" / "ser"
+    series.mkdir(parents=True)
+    (series / "IM000001").write_bytes(b"\x00" * 128 + b"DICM" + b"\x00" * 32)
+
+    assert Dataset._detect_directory_store_format(f"{tmp_path}/ds/") == "dicom"

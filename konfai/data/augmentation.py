@@ -570,12 +570,11 @@ class Foreign(DataAugmentation):
     of the copy is drawn once and the global state is set from it before every group, so the class
     draws the same way for the label as for the image.
 
-    ``groups`` is what makes that dependable. Two conditions hold it up: the class must consume its
-    random state the same way whatever it is given, and one draw must suit every group it reaches --
-    a rotation of the image is a rotation of the label, but a rotation SAMPLES, and a label
-    interpolated between two ids is neither. Name the ONE group a foreign draw belongs to. Subclass
-    ``DataAugmentation`` for a draw that spans them: the draw is then a value this framework holds,
-    rather than a random state two libraries agree about.
+    Name the ONE group a foreign draw belongs to. A single draw suits several groups only when the
+    class consumes its random state identically whatever it is given and the draw does not SAMPLE:
+    a rotation of the image is a rotation of the label, but a label interpolated between two ids is
+    neither. Subclass ``DataAugmentation`` for a draw that must span groups -- the draw is then a
+    value this framework holds, rather than a random state two libraries agree about.
     """
 
     def __init__(self, transform, classpath: str, groups: list[str] | None = None) -> None:

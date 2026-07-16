@@ -668,6 +668,33 @@ def test_install_requirements_skips_protected_and_non_pep508_lines(
     assert not any(part.startswith(("-r", "--extra-index-url", "git+")) for part in cmd[4:])
 
 
+def test_install_requirements_protects_against_non_canonical_spellings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # pip resolves 'konfai_apps' / 'Torch' to the same projects as 'konfai-apps' / 'torch', so the guard
+    # must canonicalize (PEP 503) rather than str.lower() -- otherwise these spellings slip past and pip
+    # would downgrade a protected core package.
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_app_with_requirements(
+        app_root,
+        "\n".join(["konfai_apps==0.0.1", "Torch==1.0.0", "konfai-nonexistent-xyz==1.2.3"]) + "\n",
+    )
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+
+    monkeypatch.delenv("KONFAI_APPS_INSTALL_REQUIREMENTS", raising=False)
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        app_repository_module.subprocess, "check_call", lambda cmd, *args, **kwargs: captured.append(cmd)
+    )
+
+    repo._install_requirements(repo._get_filenames())
+
+    assert len(captured) == 1
+    cmd = captured[0]
+    assert not any("konfai_apps" in part or part.lower().startswith("torch") for part in cmd), cmd
+    assert cmd[:5] == [sys.executable, "-m", "pip", "install", "konfai-nonexistent-xyz==1.2.3"]
+
+
 def _local_repo_with_config(tmp_path: Path, config: str) -> tuple[object, Path]:
     app_root = tmp_path / "repo" / "demo_app"
     app_root.mkdir(parents=True)

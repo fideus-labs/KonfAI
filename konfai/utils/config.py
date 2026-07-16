@@ -162,20 +162,31 @@ class Config:
             data = yaml.load(yml)
             if data is None:
                 data = {}
-        with open(self.filename, "w") as yml:
-            # Only the currently visited subtree is rewritten; the recursive
-            # merge preserves the rest of the YAML file untouched.
-            yaml.dump(
-                self.merge(
-                    data,
-                    self.create_dictionary(
-                        self.config,
-                        self.keys,
-                        len(self.keys) - 1,
-                    ),
-                ),
-                yml,
-            )
+        # Only the currently visited subtree is rewritten; the recursive merge preserves the rest of the
+        # YAML file untouched. Write to a sibling temp file then os.replace (atomic on the same
+        # filesystem) so a concurrent independent launch reading this file never observes a truncated or
+        # empty config and silently binds all-defaults.
+        merged = self.merge(
+            data,
+            self.create_dictionary(self.config, self.keys, len(self.keys) - 1),
+        )
+        target = Path(self.filename)
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        try:
+            with open(tmp, "w") as yml:
+                yaml.dump(merged, yml)
+            try:
+                os.replace(tmp, target)
+            except OSError:
+                # Windows can deny the atomic replace when the target is briefly held (a virus
+                # scanner or indexer touching the fresh temp file). Fall back to the in-place rewrite
+                # the pre-1.6 code always did: POSIX (the DDP path) keeps the atomic guarantee, and
+                # Windows keeps its original -- non-atomic -- behaviour instead of failing outright.
+                with open(target, "w") as yml:
+                    yaml.dump(merged, yml)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
 
     @staticmethod
     def _get_input(name: str, default: str) -> str:
@@ -226,8 +237,6 @@ class Config:
 
         if name in self.config and self.config[name] is not None:
             value = self.config[name]
-            if value is None:
-                value = default
             value_config = value
         else:
             value = Config._get_input_default(
@@ -318,12 +327,10 @@ _CONFIG_SUPPORTED_TYPES_MESSAGE = (
 
 
 def _recordable(value):
-    """The form of a default the config can hold, and the callable takes back.
+    """Normalize a default to the form the config file stores and the callable accepts back.
 
-    A resolved default is written to the file, so the file is the run. Two forms a callable states a
-    default in are not YAML's, and each names itself: an enumeration carries its value, and a dtype
-    or any other type carries its name. Both are what the parameter that declared them accepts --
-    ``LossReduction | str``, ``numpy.dtype | type | str`` -- so the file reads back as the run.
+    An ``Enum`` is recorded as its ``.value``, any other ``type`` as its ``.__name__`` -- the forms
+    the declaring parameter accepts (``LossReduction | str``, ``numpy.dtype | type | str``).
     """
     if isinstance(value, Enum):
         return value.value
@@ -333,11 +340,10 @@ def _recordable(value):
 
 
 def _annotation_namespace(function) -> dict[str, Any]:
-    """The module names an annotation was written against.
+    """The globals an annotation's names resolve against.
 
-    A module under ``from __future__ import annotations`` hands every annotation over as the source
-    text, so the names in it are resolved against the module that wrote them. A class carries no
-    ``__globals__`` of its own: the signature bound here is its ``__init__``'s, and so are the names.
+    Under ``from __future__ import annotations`` an annotation is source text resolved against its
+    defining module's ``__globals__``. A class has none of its own, so fall back to its ``__init__``'s.
     """
     namespace = getattr(function, "__globals__", None)
     if namespace is None:

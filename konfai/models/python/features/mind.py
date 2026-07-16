@@ -27,7 +27,6 @@ The descriptor maths are ported verbatim from the reference MIND implementation
 descriptor tensor directly instead of the reference's one-element list.
 """
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from konfai.data.patching import ModelPatch
@@ -46,7 +45,7 @@ def _pdist_squared(x: torch.Tensor) -> torch.Tensor:
     yy = xx.permute(0, 2, 1)
     dist = xx + yy - 2.0 * torch.bmm(x.permute(0, 2, 1), x)
     dist[dist != dist] = 0
-    return torch.clamp(dist, 0.0, np.inf)
+    return torch.clamp(dist, min=0.0)
 
 
 class _MindDescriptor(torch.nn.Module):
@@ -103,6 +102,9 @@ class _MindDescriptor(torch.nn.Module):
         mind_var = torch.mean(mind, dim=1, keepdim=True)
         mind_var_mean = mind_var.mean()
         mind_var = torch.clamp(mind_var, mind_var_mean * 0.001, mind_var_mean * 1000)
+        # A constant patch gives mind_var == 0 everywhere (the clamp bounds are then both 0),
+        # and 0/0 would send NaN into the loss; floor the denominator instead.
+        mind_var = mind_var.clamp_min(torch.finfo(mind_var.dtype).eps)
         mind = mind / mind_var
         return torch.exp(-mind)
 

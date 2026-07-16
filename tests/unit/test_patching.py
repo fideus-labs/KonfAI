@@ -89,6 +89,37 @@ def test_assemble_with_missing_first_patch_does_not_crash():
     assert torch.equal(out[:, :, 2:4, :], full[:, :, 2:4, :])
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA for the GPU-accumulation path")
+@pytest.mark.parametrize("combine_cls", [None, Mean, Cosinus, Gaussian])
+def test_accumulator_gpu_blend_matches_cpu(combine_cls):
+    # The v1.6.0 GPU-accumulation feature blends patches on-device; it is only correct if the assembled
+    # volume matches the CPU assembly of the same patches. Nothing else in the suite compares the two,
+    # so a device-dependent blend regression would pass silently. Reassemble identical overlapping
+    # patches on CPU and CUDA and require the outputs to be identical.
+    torch.manual_seed(0)
+    # 18 = 8 + 5 + 5 tiles exactly at step (patch-overlap)=5, so every patch is full patch_size (the
+    # model always emits full-size patches; the Accumulator crops the border tail only after blending).
+    full = torch.randn(2, 3, 18, 18)
+    patch_size, overlap = [8, 8], 3
+    patch_slices, patches = _tile_2d(full, patch_size, overlap)
+    assert all(p.shape[2:] == tuple(patch_size) for p in patches), [tuple(p.shape[2:]) for p in patches]
+
+    def assemble_on(device: str) -> torch.Tensor:
+        combine = None
+        if combine_cls is not None:
+            combine = combine_cls()
+            combine.set_patch_config(patch_size, overlap)
+        acc = Accumulator(patch_slices, patch_size, patch_combine=combine, batch=True)
+        for i, patch in enumerate(patches):
+            acc.add_layer(i, patch.to(device))
+        return acc.assemble()
+
+    cpu = assemble_on("cpu")
+    gpu = assemble_on("cuda").cpu()
+    assert gpu.shape == cpu.shape
+    assert torch.equal(gpu, cpu), (gpu - cpu).abs().max().item()
+
+
 # --------------------------------------------------------------------------------------
 # Blending windows (Mean / Cosinus)
 # --------------------------------------------------------------------------------------

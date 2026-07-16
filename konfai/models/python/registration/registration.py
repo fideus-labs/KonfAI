@@ -14,10 +14,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import math
+
 import torch
 import torch.nn.functional as F
 from konfai.models.python.segmentation import UNet
 from konfai.network import blocks, network
+from konfai.utils.errors import ConfigError
 from torch.nn.parameter import Parameter
 
 
@@ -42,13 +45,10 @@ class VoxelMorph(network.Network):
         nb_batch_per_step: int = 1,
         rigid: bool = False,
     ):
-        if dim != 2:
-            # SpatialTransformer / ResizeTransform / VecInt are 2-D-hardcoded, so the
-            # 3-D default (dim=3, shape=[192, 192, 192]) crashes at forward. Fail fast with a clear
-            # message until the warping components are made ndim-generic.
-            raise NotImplementedError(
-                f"VoxelMorph currently supports dim=2 only (its warping components are 2-D-hardcoded); got dim={dim}."
-            )
+        if dim not in (2, 3):
+            raise ConfigError(f"VoxelMorph supports dim 2 or 3, got dim={dim}.")
+        if len(shape) != dim:
+            raise ConfigError(f"VoxelMorph 'shape' must have {dim} spatial dimensions, got {shape}.")
         super().__init__(
             in_channels=channels[0],
             optimizer=optimizer,
@@ -78,7 +78,7 @@ class VoxelMorph(network.Network):
         if rigid:
             self.add_module(
                 "Flow",
-                Rigid(channels[1], dim),
+                Rigid(channels[1], shape, dim),
                 in_branch=["unet"],
                 out_branch=["pos_flow"],
             )
@@ -126,22 +126,47 @@ class Flow(network.ModuleArgsDict):
         if int_steps > 0:
             self.add_module(
                 "Integrate_pos_flow",
-                VecInt([int(dim / int_downsize) for dim in shape], int_steps),
+                VecInt([int(extent / int_downsize) for extent in shape], int_steps),
             )
 
         if int_steps > 0 and int_downsize > 1:
             self.add_module("Upsample_pos_flow", ResizeTransform(1 / int_downsize))
 
 
+def rigid_affine(parameters: torch.Tensor, dim: int) -> torch.Tensor:
+    """Build a ``[B, dim, dim + 1]`` affine from ``[B, dim * (dim + 1) / 2]`` rigid parameters.
+
+    The leading ``dim * (dim - 1) / 2`` parameters are rotation generators, the rest the translation.
+    The rotation is the matrix exponential of the skew-symmetric matrix they fill: ``exp`` maps
+    ``so(n)`` onto ``SO(n)``, so every parameter value is a proper rotation whatever the optimizer
+    does to it -- no re-orthogonalisation, no gimbal lock -- and zero is the identity, which is what
+    ``Rigid.init`` starts from.
+    """
+    n_angles = dim * (dim - 1) // 2
+    angles, translation = parameters[:, :n_angles], parameters[:, n_angles:]
+    skew = torch.zeros((parameters.shape[0], dim, dim), device=parameters.device, dtype=parameters.dtype)
+    rows, cols = torch.triu_indices(dim, dim, offset=1, device=parameters.device)
+    skew[:, rows, cols] = angles
+    rotation = torch.matrix_exp(skew - skew.transpose(1, 2))
+    return torch.cat([rotation, translation.unsqueeze(-1)], dim=-1)
+
+
 class Rigid(network.ModuleArgsDict):
-    def __init__(self, in_channels: int, dim: int) -> None:
+    """Regress a rigid transform: ``dim * (dim - 1) / 2`` rotation generators and ``dim`` translations.
+
+    Three parameters in 2-D, six in 3-D -- a rotation and a translation, which is what rigid means.
+    """
+
+    def __init__(self, in_channels: int, shape: list[int], dim: int) -> None:
         super().__init__()
         self.add_module("ToFeatures", torch.nn.Flatten(1))
-        self.add_module("Head", torch.nn.Linear(in_channels * 512 * 512, 2))
+        self.add_module("Head", torch.nn.Linear(in_channels * math.prod(shape), dim * (dim + 1) // 2))
 
-    def init(self, init_type: str, init_gain: float):
+    def init(self, init_type: str, init_gain: float) -> None:
+        # Zero parameters are the identity transform: the skew generator is zero, so its exponential
+        # is the identity rotation, and the translation is zero.
         self["Head"].weight.data.fill_(0)
-        self["Head"].bias.data.copy_(torch.tensor([0, 0], dtype=torch.float))
+        self["Head"].bias.data.zero_()
 
 
 class MaskFlow(torch.nn.Module):
@@ -156,9 +181,16 @@ class MaskFlow(torch.nn.Module):
 
 
 class SpatialTransformer(torch.nn.Module):
-    def __init__(self, size: list[int], rigid: bool = False):
+    """Warp ``src`` by ``flow``, in 2-D or 3-D.
+
+    Rigid takes a flat per-sample translation ``[B, dim]``; otherwise ``flow`` is a dense
+    displacement field ``[B, dim, *size]`` added to the identity grid.
+    """
+
+    def __init__(self, size: list[int], rigid: bool = False) -> None:
         super().__init__()
         self.rigid = rigid
+        self.dim = len(size)
         if not rigid:
             vectors = [torch.arange(0, s) for s in size]
             grids = torch.meshgrid(vectors, indexing="ij")
@@ -167,33 +199,31 @@ class SpatialTransformer(torch.nn.Module):
             grid = grid.type(torch.float)
             self.register_buffer("grid", grid)
 
-    def forward(self, src: torch.Tensor, flow: torch.Tensor):
+    def forward(self, src: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
         if self.rigid:
-            new_locs = torch.zeros((flow.shape[0], 2, 3)).to(flow.device)
-            new_locs[:, 0, 0] = 1
-            new_locs[:, 1, 1] = 1
-            new_locs[:, 0, 2] = flow[:, 0]
-            new_locs[:, 1, 2] = flow[:, 1]
             return F.grid_sample(
                 src,
-                F.affine_grid(new_locs, src.size()),
+                # align_corners must match between grid generation and sampling (and the
+                # non-rigid path below, which also samples with align_corners=True).
+                F.affine_grid(rigid_affine(flow, self.dim), src.size(), align_corners=True),
                 align_corners=True,
                 mode="bilinear",
             )
-        else:
-            new_locs = self.grid + flow
-            shape = flow.shape[2:]
-            for i in range(len(shape)):
-                new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
-            new_locs = new_locs.permute(0, 2, 3, 1)
-            return F.grid_sample(src, new_locs[..., [1, 0]], align_corners=True, mode="bilinear")
+        new_locs = self.grid + flow
+        shape = flow.shape[2:]
+        for i in range(len(shape)):
+            new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
+        # grid_sample wants the axis component trailing, and ordered x..z -- the reverse of the
+        # tensor's (z,)y,x indexing.
+        new_locs = new_locs.permute(0, *range(2, len(shape) + 2), 1)
+        return F.grid_sample(src, new_locs[..., list(reversed(range(len(shape))))], align_corners=True, mode="bilinear")
 
 
 class VecInt(torch.nn.Module):
     def __init__(self, inshape: list[int], nsteps: int):
         super().__init__()
         if nsteps < 0:
-            raise NameError(f"nsteps should be >= 0, found: {nsteps}")
+            raise ConfigError(f"nsteps should be >= 0, found: {nsteps}")
         self.nsteps = nsteps
         self.scale = 1.0 / (2**self.nsteps)
         self.transformer = SpatialTransformer(inshape)
@@ -216,7 +246,7 @@ class ResizeTransform(torch.nn.Module):
                 x,
                 align_corners=True,
                 scale_factor=self.factor,
-                mode="bilinear",
+                mode="trilinear" if x.dim() == 5 else "bilinear",
                 recompute_scale_factor=True,
             )
             x = self.factor * x
@@ -226,7 +256,7 @@ class ResizeTransform(torch.nn.Module):
                 x,
                 align_corners=True,
                 scale_factor=self.factor,
-                mode="bilinear",
+                mode="trilinear" if x.dim() == 5 else "bilinear",
                 recompute_scale_factor=True,
             )
         return x

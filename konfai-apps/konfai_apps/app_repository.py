@@ -42,6 +42,7 @@ from konfai.utils.config import Choices, Range
 from konfai.utils.errors import AppMetadataError, AppRepositoryError, ConfigError
 from konfai.utils.utils import is_windows_absolute_path
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 from ruamel.yaml import YAML
 
 
@@ -192,11 +193,21 @@ class TerminologyEntry:
 INPUT_DEFAULTS = ("ones", "zeros")
 
 
-def _parse_input_default(key: str, default: Any) -> str | None:
-    """Validate an input's ``default`` field from app.json (one of ``INPUT_DEFAULTS`` or omitted)."""
+def _parse_input_default(key: str, default: Any, required: bool = False) -> str | None:
+    """Validate an input's ``default`` field from app.json (one of ``INPUT_DEFAULTS`` or omitted).
+
+    ``default`` is optional-input-only: it tells konfai-apps how to synthesise the volume when the caller
+    omits it, which is meaningless for a required input -- a required input is never auto-filled (see
+    KonfAIApp._fill_optional_inputs, which skips ``entry.required``). Reject the contradiction at load time
+    instead of silently dropping the author's declared default.
+    """
     if default is not None and default not in INPUT_DEFAULTS:
         raise AppMetadataError(
             f"Input '{key}': 'default' must be one of {list(INPUT_DEFAULTS)} or omitted, got {default!r}."
+        )
+    if default is not None and required:
+        raise AppMetadataError(
+            f"Input '{key}': 'default' is only valid for optional inputs, but this input is required."
         )
     return default
 
@@ -381,7 +392,7 @@ class LocalAppRepository(AppRepositoryInfo):
                     display_name=value["display_name"],
                     volume_type=VolumeType(value["volume_type"]),
                     required=bool(value["required"]),
-                    default=_parse_input_default(key, value.get("default")),
+                    default=_parse_input_default(key, value.get("default"), bool(value["required"])),
                 )
                 for key, value in app_repository_metadata["inputs"].items()
             }
@@ -859,19 +870,25 @@ class LocalAppRepository(AppRepositoryInfo):
         its custom code needs (the documented trust model — only resolve apps you trust). Set
         ``KONFAI_APPS_INSTALL_REQUIREMENTS=0`` to opt out (offline / CI / reproducible
         environments). Only missing or version-mismatched packages are installed, so repeat runs
-        are a no-op. Core packages (torch, konfai, …) are never installed or altered, and lines
-        that are not PEP 508 requirements (``-r``, ``--extra-index-url``, ``git+https``…) are skipped.
+        are a no-op. Core packages (torch, konfai, …) are never installed or altered when named
+        directly -- pip may still move them to satisfy another requirement's transitive dependency,
+        which this filter does not police. Lines that are not PEP 508 requirements (``-r``,
+        ``--extra-index-url``, ``git+https``…) are skipped.
         """
         if os.environ.get("KONFAI_APPS_INSTALL_REQUIREMENTS", "1").strip().lower() in {"0", "false", "no"}:
             return
         requirements_filename = self._find_repo_filename("requirements.txt", filenames)
         if requirements_filename is None:
             return
-        protected = {"torch", "torchvision", "torchaudio", "konfai", "konfai-apps"}
+        # Compare PEP 503 canonical names throughout: pip resolves 'konfai_apps' and 'Konfai.Apps' to the
+        # same project as 'konfai-apps', so a plain .lower() would let those spellings past the guard.
+        protected = {
+            canonicalize_name(name) for name in ("torch", "torchvision", "torchaudio", "konfai", "konfai-apps")
+        }
         with open(self._download(requirements_filename), encoding="utf-8") as file:
             required_lines = [line.strip() for line in file if line.strip() and not line.startswith("#")]
         installed = {
-            dist.metadata["Name"].lower(): dist.version
+            canonicalize_name(dist.metadata["Name"]): dist.version
             for dist in importlib.metadata.distributions()
             if dist.metadata.get("Name")
         }
@@ -881,7 +898,7 @@ class LocalAppRepository(AppRepositoryInfo):
                 req = Requirement(line)
             except InvalidRequirement:
                 continue
-            name = req.name.lower()
+            name = canonicalize_name(req.name)
             if name in protected:
                 print(f"[KonfAI-Apps] Skipping protected requirement '{line}'.")
                 continue

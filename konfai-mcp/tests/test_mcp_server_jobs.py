@@ -402,3 +402,108 @@ def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
     assert payload["status"] == "error"
     assert payload["recovered"] is True
     assert "restart" in (payload["error"] or "")
+
+
+def test_corrupt_job_record_does_not_block_server_start(tmp_path: Path) -> None:
+    # A crash mid-write can leave a truncated job.json. The recovery loop reads every record at start,
+    # so a single corrupt file must be skipped, not make JobRegistry construction fatal (dead server).
+    layout = WorkspaceLayout(tmp_path)
+    layout.ensure_session_workspace()
+    layout.jobs_dir().mkdir(parents=True, exist_ok=True)
+
+    good_dir = layout.job_dir("goodjob")
+    good_dir.mkdir(parents=True)
+    layout.job_state_path("goodjob").write_text(
+        """
+{
+  "job_id": "goodjob",
+  "session": "default",
+  "kind": "train",
+  "command": ["echo"],
+  "cwd": "/tmp/demo",
+  "log_path": "/tmp/demo.log",
+  "config_path": "/tmp/Config.yml",
+  "created_at": 1.0,
+  "status": "done"
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    bad_dir = layout.job_dir("badjob")
+    bad_dir.mkdir(parents=True)
+    layout.job_state_path("badjob").write_text('{"job_id": "badjob", "kind": "train"', encoding="utf-8")
+
+    registry = JobRegistry({"queued", "running"}, workspace_layout=WorkspaceLayout(tmp_path))
+    assert "goodjob" in registry.jobs  # the intact record still recovers
+    assert "badjob" not in registry.jobs  # the truncated record is skipped, not fatal
+
+
+def test_job_state_write_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # _persist_job must write via a temp file + os.replace so a job.json is never observed half-written:
+    # a crash at the rename must leave the previous record intact, never a truncated one.
+    import json as _json
+
+    layout = WorkspaceLayout(tmp_path)
+    layout.ensure_session_workspace()
+    registry = JobRegistry({"queued", "running"}, workspace_layout=layout)
+    job = Job(
+        job_id="atomicjob",
+        session="default",
+        kind="train",
+        command=["echo"],
+        cwd=tmp_path,
+        log_path=tmp_path / "job.log",
+        config_path=tmp_path / "Config.yml",
+    )
+    registry._persist_job(job)  # first record: status "queued"
+    state_path = layout.job_state_path("atomicjob")
+    assert state_path.is_file()
+    assert _json.loads(state_path.read_text(encoding="utf-8"))["status"] == "queued"
+    assert list(state_path.parent.glob("*.tmp")) == []  # temp renamed away, none left behind
+    original = state_path.read_text(encoding="utf-8")
+
+    # Crash at the atomic rename while persisting the next state: a bare write_text would truncate the
+    # real file here; the temp-file + os.replace design leaves the prior record byte-for-byte intact.
+    replace_calls: list[tuple[str, str]] = []
+
+    def failing_replace(src: Any, dst: Any) -> None:
+        replace_calls.append((str(src), str(dst)))
+        raise OSError("crash at rename")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    job.status = "done"
+    with pytest.raises(OSError, match="crash at rename"):
+        registry._persist_job(job)
+
+    assert replace_calls, "persist must go through os.replace (temp file + atomic rename), not a bare write"
+    assert state_path.read_text(encoding="utf-8") == original  # reader never sees a half-written "done"
+
+
+def test_manifest_failure_marks_job_terminal_not_stuck_queued(tmp_path: Path) -> None:
+    # A snapshot/manifest failure during launch must mark the job terminal (error), not leave it "queued"
+    # forever -- a queued job counts as active and would block every future launch on its device.
+    layout = WorkspaceLayout(tmp_path)
+    layout.ensure_session_workspace()
+    registry = JobRegistry({"queued", "running"}, workspace_layout=layout)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("disk full while writing manifest")
+
+    registry._persist_manifest = _boom  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="Failed to launch"):
+        registry.launch(
+            session="default",
+            kind="train",
+            command=["x"],
+            cwd=tmp_path,
+            log_path=tmp_path / "log.txt",
+            config_path=tmp_path / "cfg.ref",
+            target="nonexistent:fn",
+            kwargs={},
+        )
+
+    assert registry.active() == []  # not stuck active
+    registry.ensure_no_active_job()  # does not raise: the device is free again
+    statuses = {job.status for job in registry.jobs.values()}
+    assert statuses == {"error"}

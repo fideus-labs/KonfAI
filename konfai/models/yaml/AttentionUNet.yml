@@ -29,9 +29,10 @@
 #     whereas MONAI uses strided-convolution down and up sampling;
 #   * output head: a single 1x1 conv -> Softmax -> ArgMax at the finest level
 #     (Oktay and MONAI both emit one head; no deep supervision).
-# Validated structurally: builds as a Network, forwards on 2D and 3D inputs with
-# the correct segmentation output shape (nb_class channels, spatial preserved),
-# and the three attention gates appear as named modules in the built graph.
+# Validated structurally: builds as a Network and forwards on 2D and 3D inputs. The
+# head's Softmax carries the nb_class segmentation channels (the loss attach point);
+# its terminal ArgMax(dim=1) emits a single-channel index map (spatial preserved).
+# The three attention gates appear as named modules in the built graph.
 name: AttentionUNet
 
 parameters:

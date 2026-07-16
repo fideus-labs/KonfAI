@@ -87,3 +87,9 @@ Set `tool_timeout_sec` generously (training is long) and rely on `wait_for_job` 
 challenge; **with it unset, the HTTP transport starts fully unauthenticated (no `401`)** —
 there is no guard rejecting a tokenless HTTP start. Since this server executes real compute,
 **always set a token before exposing `sse` / `streamable-http`.**
+
+A bearer token is only as safe as the channel: over plain HTTP it travels in clear and is
+trivially sniffable, so the token alone protects nothing on the wire. **Keep `sse` /
+`streamable-http` bound to loopback** (reach it over an SSH tunnel or a reverse proxy) **or
+terminate TLS in front of the server** — never expose a tokened-but-unencrypted endpoint
+beyond `localhost`.

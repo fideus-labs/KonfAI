@@ -32,13 +32,14 @@ from __future__ import annotations
 import importlib.metadata as _metadata
 import importlib.util as _util
 import re
+from pathlib import Path
 from typing import Any
 
 # How a component name/classpath is written in a KonfAI YAML config.
 YAML_REFERENCE_SYNTAX = {
     "builtin_name": "Bare class name resolved inside KonfAI's package for that kind, e.g. `Dice`, `Flip`.",
     "local_file": "`File:Class` -> a class in a local `File.py` written into the session workspace, e.g. `Loss:MyDiceFocal` (write it with write_session_file).",
-    "external_library": "`package.module:Class` -> a class imported directly from an installed library, e.g. `monai.losses:DiceLoss`, `torch:nn:L1Loss`, `smp:Unet`. Works for any installed library via get_module(); no wrapper needed when the class's call/forward convention already matches the KonfAI base.",
+    "external_library": "`package.module:Class` -> a class imported directly from an installed library, e.g. `monai.losses:DiceLoss`, `torch.nn:L1Loss`, `segmentation_models_pytorch:Unet`. Works for any installed library via get_module(); no wrapper needed when the class's call/forward convention already matches the KonfAI base.",
 }
 
 # Curated, code-grounded extension contract per kind (see konfai/metric/measure.py, konfai/network/network.py,
@@ -49,7 +50,7 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
         "required_methods": ["forward(self, output, *targets) -> Tensor"],
         "return_contract": "A loss returns a Tensor. (Metrics return a (value, dict) tuple; consumers isinstance-branch.)",
         "config_location": "Trainer.Model.outputs_criterions.<output_module_path>.targets_criterions.<target_group>.criterions_loader.<Name>",
-        "direct_external": "A library loss with forward(input, target) -> Tensor (e.g. torch:nn:L1Loss, most monai.losses) can be referenced directly by classpath.",
+        "direct_external": "A library loss with forward(input, target) -> Tensor (e.g. torch.nn:L1Loss, most monai.losses) can be referenced directly by classpath.",
         "local_wrapper": "When the signature/return differ or you need masking, subclass Criterion and adapt in forward.",
         "gotcha": "MaskedLoss-style masking is NOT applied to a directly-referenced external loss; wrap it if you need masking. Inspect forward with inspect_object_signature before deciding.",
         "list_tool": "list_components('criterion')",
@@ -70,7 +71,7 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
             "__init__ that builds the graph via add_module(name, module, in_branch=[...], out_branch=[...], alias=[...])"
         ],
         "return_contract": "A routed ModuleArgsDict graph; named module outputs become the dotted keys used by outputs_criterions.",
-        "config_location": "Trainer.Model.classpath = `segmentation.UNet.UNet` (built-in) | `Model:MyNet` (local) | `smp:Unet` / `torchvision.models:resnet50` (external) | `UNet.yml` (declarative).",
+        "config_location": "Trainer.Model.classpath = `segmentation.UNet.UNet` (built-in) | `Model:MyNet` (local) | `segmentation_models_pytorch:Unet` / `torchvision.models:resnet50` (external) | `UNet.yml` (declarative).",
         "direct_external": "A non-Network external nn.Module is wrapped in MinimalModel automatically -- usable as a black-box model.",
         "local_wrapper": "Subclass Network and re-add_module the external submodules (see examples/Synthesis/Model.py wrapping segmentation_models_pytorch's UnetPlusPlus).",
         "gotcha": "MinimalModel gives the external network a SINGLE 'Model' child with NO add_module graph, so outputs_criterions dotted keys (deep supervision / intermediate-feature / perceptual / multi-head) can only target the top-level output. To wire losses to internal features you MUST subclass Network and re-add_module.",
@@ -170,6 +171,57 @@ def describe_extension_points(kind: str | None = None) -> dict[str, Any]:
     return payload
 
 
+def _normalize_distribution_name(name: str) -> str:
+    """PEP 503 name normalization so ``itk_core`` / ``ITK.Core`` compare equal to ``itk-core``."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _select_distribution(top: str, distributions: list[str], full: str | None = None) -> str:
+    """Pick the distribution that actually provides top-level import ``top``.
+
+    ``packages_distributions()`` maps one import name to EVERY distribution that ships it, and a
+    namespace package (``itk``, ``google``) spans several wheels -- taking the first would report a
+    sibling wheel's version/license. Prefer a distribution whose normalized name matches the import
+    name; otherwise pick the one whose files include the module's own ``origin`` path.
+
+    ``full`` is the pointed module path (``google.cloud.storage`` for ``google.cloud.storage:Class``).
+    A pure namespace root has no ``origin`` of its own, so when ``top`` resolves to nothing we fall back
+    to the pointed submodule's origin. ``find_spec`` on a dotted name imports only the lightweight
+    namespace parents, never the heavy target module, so the no-import contract still holds.
+    """
+    if not distributions:
+        return top
+    if len(distributions) == 1:
+        return distributions[0]
+    normalized = _normalize_distribution_name(top)
+    for candidate in distributions:
+        if _normalize_distribution_name(candidate) == normalized:
+            return candidate
+    try:
+        origin = getattr(_util.find_spec(top), "origin", None)
+    except (ImportError, ModuleNotFoundError, ValueError):
+        origin = None
+    if origin is None and full is not None and full != top:
+        try:
+            origin = getattr(_util.find_spec(full), "origin", None)
+        except (ImportError, ModuleNotFoundError, ValueError):
+            origin = None
+    if origin:
+        origin_path = Path(origin).resolve()
+        for candidate in distributions:
+            try:
+                files = _metadata.distribution(candidate).files or []
+            except _metadata.PackageNotFoundError:
+                continue
+            for entry in files:
+                try:
+                    if Path(entry.locate()).resolve() == origin_path:
+                        return candidate
+                except (OSError, ValueError):
+                    continue
+    return distributions[0]
+
+
 def _konfai_required_distributions() -> set[str]:
     try:
         requirements = _metadata.requires("konfai") or []
@@ -192,7 +244,8 @@ def check_external_dependency(module: str, object_name: str | None = None) -> di
     cleaned = module.strip()
     if not cleaned:
         raise ValueError("module must not be empty.")
-    top = cleaned.split(":", 1)[0].split(".", 1)[0]
+    full = cleaned.split(":", 1)[0]
+    top = full.split(".", 1)[0]
 
     try:
         installed = _util.find_spec(top) is not None
@@ -202,7 +255,7 @@ def check_external_dependency(module: str, object_name: str | None = None) -> di
     version = license_name = distribution = None
     if installed:
         distributions = _metadata.packages_distributions().get(top, [])
-        distribution = distributions[0] if distributions else top
+        distribution = _select_distribution(top, distributions, full)
         try:
             meta = _metadata.metadata(distribution)
             version = meta.get("Version")

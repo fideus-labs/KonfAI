@@ -61,19 +61,12 @@ class Reduction(ABC):
     """Abstract reduction applied across model ensemble or augmentation outputs."""
 
     @abstractmethod
-    def __init__(self):
-        pass
-
-    @abstractmethod
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         raise NotImplementedError()
 
 
 class Mean(Reduction):
     """Average ensemble or augmentation predictions element-wise."""
-
-    def __init__(self):
-        pass
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         # A single element (no TTA / a lone model) is its own mean; skip the float32 clone + accumulate,
@@ -91,9 +84,6 @@ class Mean(Reduction):
 class Median(Reduction):
     """Compute the element-wise median across prediction tensors."""
 
-    def __init__(self):
-        pass
-
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         # A single element is its own median; skip the float32 stack (a large no-op for whole volumes).
         if len(tensors) == 1:
@@ -103,9 +93,6 @@ class Median(Reduction):
 
 class Concat(Reduction):
     """Concatenate prediction tensors along the channel dimension."""
-
-    def __init__(self):
-        pass
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         return torch.cat(tensors, dim=1)
@@ -311,7 +298,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
             "after_reduction_transforms": self.after_reduction_transforms,
             "final_transforms": self.final_transforms,
             "patch_combine": self.patch_combine,
-            "reduction": self.patch_combine,
+            "reduction": self.reduction,
         }
         return str(params)
 

@@ -16,7 +16,7 @@
 
 import itertools
 from functools import partial
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -25,6 +25,7 @@ from konfai.data.patching import Attribute, ModelPatch
 from konfai.models.python.generation.ddpm import DDPM
 from konfai.models.python.segmentation import NestedUNet, UNet
 from konfai.network import blocks, network
+from konfai.utils.errors import ConfigError
 
 
 class Discriminator(network.Network):
@@ -429,9 +430,9 @@ class GeneratorV1(network.Network):
             self.add_module("Decoder", GeneratorV1.GeneratorDecoder(channels, dim))
 
     class GeneratorBlock(network.ModuleArgsDict):
-        def __init__(self, ngf: int, dim: int) -> None:
+        def __init__(self, ngf: int, dim: int, in_channels: int = 3) -> None:
             super().__init__()
-            self.add_module("Stem", GeneratorV1.GeneratorStem(3, ngf, dim))
+            self.add_module("Stem", GeneratorV1.GeneratorStem(in_channels, ngf, dim))
             self.add_module("AutoEncoder", GeneratorV1.GeneratorAutoEncoder(ngf, dim))
             self.add_module(
                 "Head",
@@ -488,6 +489,9 @@ class GeneratorV2(network.Network):
             dim: int,
         ) -> None:
             super().__init__()
+            if attention:
+                # NestedUNetBlock never reads the flag, so a request for gates would be a silent no-op.
+                raise ConfigError("GeneratorV2 has no attention gates; set 'attention: false'.")
             self.add_module(
                 "UNetBlock_0",
                 NestedUNet.NestedUNet.NestedUNetBlock(
@@ -522,7 +526,7 @@ class GeneratorV2(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
         dim: int = 3,
     ) -> None:
         super().__init__(
@@ -612,7 +616,7 @@ class GeneratorV3(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
         dim: int = 3,
     ) -> None:
         super().__init__(
@@ -784,7 +788,7 @@ class CycleGanGeneratorV2(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
         dim: int = 3,
     ) -> None:
         super().__init__(
@@ -842,7 +846,7 @@ class CycleGanGeneratorV3(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
         dim: int = 3,
     ) -> None:
         super().__init__(

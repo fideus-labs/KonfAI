@@ -16,6 +16,7 @@
 
 """Training workflow entrypoints and orchestration for KonfAI."""
 
+import math
 import os
 import shutil
 from pathlib import Path
@@ -111,6 +112,12 @@ class EarlyStopping(EarlyStoppingBase):
         mode: str = "min",
     ):
         super().__init__()
+        if mode not in {"min", "max"}:
+            raise ConfigError(
+                f"EarlyStopping.mode must be 'min' or 'max' (got '{mode}').",
+                "It is the direction the monitored score improves in, and both early stopping and"
+                " BEST-checkpoint retention read it.",
+            )
         self.monitor = [] if monitor is None else monitor
         self.patience = patience
         self.min_delta = min_delta
@@ -247,6 +254,8 @@ class _Trainer:
         for checkpoint_path in all_checkpoints:
             state_dict = safe_torch_load(checkpoint_path, torch.device("cpu"))
             checkpoint_loss = float(state_dict.get("loss", self.early_stopping.worst_score))
+            if not math.isfinite(checkpoint_loss):
+                checkpoint_loss = self.early_stopping.worst_score
             if self.early_stopping.is_better(checkpoint_loss, best_loss):
                 best_loss = checkpoint_loss
                 best_ckpt = checkpoint_path
@@ -436,10 +445,13 @@ class _Trainer:
             save_path = path / f"{date}_{collision}.pt"
             collision += 1
 
+        # An unscored checkpoint (the final save at close) carries the worst possible score so
+        # `_update_best_checkpoint` retires it in BEST mode instead of leaving it beside the real best.
+        checkpoint_loss = loss if loss is not None else self.early_stopping.worst_score
         save_dict = {
             "epoch": self.epoch,
             "it": self.it,
-            "loss": loss if loss is not None else float("inf"),
+            "loss": checkpoint_loss,
             "Model": self.model.module.state_dict(),
         }
 
@@ -471,8 +483,8 @@ class _Trainer:
 
         torch.save(save_dict, save_path)
 
-        if self.save_checkpoint_mode == "BEST" and loss is not None:
-            self._update_best_checkpoint(save_path, loss)
+        if self.save_checkpoint_mode == "BEST":
+            self._update_best_checkpoint(save_path, checkpoint_loss)
 
     @torch.no_grad()
     def _log(
@@ -657,9 +669,6 @@ class Trainer(DistributedObject):
         self.model_ema: torch.optim.swa_utils.AveragedModel | None = None
         self.data_log = data_log
 
-        modules = []
-        for i, _ in self.model.named_modules():
-            modules.append(i)
         self.gradient_checkpoints = gradient_checkpoints
         self.gpu_checkpoints = gpu_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
@@ -764,17 +773,7 @@ class Trainer(DistributedObject):
             )
 
     def _avg_fn(self, averaged_model_parameter: float, model_parameter, num_averaged):
-        """
-        EMA update rule used by AveragedModel.
-
-        Follows the standard exponential moving average convention: the running
-        average is weighted by ``ema_decay`` and the current model contributes
-        ``1 - ema_decay``. A decay close to 1 keeps the average stable and lets the
-        model nudge it only slightly.
-
-        Returns:
-            torch.Tensor: Blended parameter using decay factor.
-        """
+        """EMA update (AveragedModel avg_fn): ``ema_decay * averaged + (1 - ema_decay) * model``."""
         return self.ema_decay * averaged_model_parameter + (1 - self.ema_decay) * model_parameter
 
     def run_process(
