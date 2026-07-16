@@ -132,12 +132,8 @@ _STATISTICS_CHUNK_ELEMENTS = 8_000_000
 def _statistics_chunk_length(shape: list[int] | tuple[int, ...], axis: int) -> int:
     """How far along ``axis`` a chunk may reach to hold about ``_STATISTICS_CHUNK_ELEMENTS``.
 
-    A chunk spans every OTHER axis whole, the channels included, and is accumulated in float64: it is
-    the volume divided by the axis it is cut along that says what one step costs, not the axes behind
-    it. A 122-channel volume cut on a plane alone holds 122 times the budget.
-
-    One step is the floor: a volume whose single step already exceeds the budget is read a step at a
-    time and no less, since the other axes are what a chunk is whole on.
+    A chunk spans every other axis whole (channels included), so the per-step cost is the volume
+    divided by ``axis``; the length is that budget over the per-step cost, floored to one step.
     """
     per_step = int(np.prod([extent for other, extent in enumerate(shape) if other != axis], dtype=np.int64))
     return max(1, _STATISTICS_CHUNK_ELEMENTS // max(1, per_step))
@@ -200,8 +196,8 @@ def _warn_unstreamed_region_read(path: str) -> None:
     _unstreamed_formats_warned.add(suffix)
     warnings.warn(
         f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region "
-        "(NRRD, or any compressed file), so every patch decodes the whole volume again -- 10-20x the "
-        "cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI "
+        "(NRRD, or any compressed file), so every patch decodes the whole volume again -- many times "
+        "the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI "
         "streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
         stacklevel=2,
     )
@@ -974,8 +970,7 @@ class Dataset:
             channels: list[int] | None = None,
         ) -> dict[str, float]:
             shape, _ = self.get_infos(group, name)
-            trailing_size = int(np.prod(shape[2:], dtype=np.int64)) if len(shape) > 2 else 1
-            chunk_length = max(1, 8_000_000 // max(1, trailing_size))
+            chunk_length = _statistics_chunk_length(shape, 1)
             state: dict[str, float] | None = None
             for start in range(0, shape[1], chunk_length):
                 slices = [slice(None)] * len(shape)
@@ -1231,10 +1226,24 @@ class Dataset:
                         or (entry / "zarr.json").exists()
                     ):
                         return "omezarr"
-                    if any(child.suffix.lower() in (".dcm", ".dicom") for child in entry.iterdir() if child.is_file()):
+                    files = [child for child in sorted(entry.iterdir()) if child.is_file()]
+                    if any(child.suffix.lower() in (".dcm", ".dicom") for child in files):
+                        return "dicom"
+                    # A DICOM series is commonly exported with no extension at all, so the suffixes
+                    # above miss it; the Part-10 magic at offset 128 is what identifies it then.
+                    if files and Dataset._is_dicom_file(files[0]):
                         return "dicom"
             return None  # first case is representative of the whole dataset's layout
         return None
+
+    @staticmethod
+    def _is_dicom_file(path: Path) -> bool:
+        """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128."""
+        try:
+            with open(path, "rb") as file:
+                return file.read(132)[128:132] == b"DICM"
+        except OSError:
+            return False
 
     def _exists_on_disk(self) -> bool:
         if os.path.exists(self.filename):

@@ -740,10 +740,9 @@ class DatasetManager:
 
         Every patch pays the halo on every side and the patches tile the volume, so streaming a case
         reads ``prod(1 + 2 * halo_k / patch_k)`` times its bytes -- the multiple streaming pays to keep
-        one volume off the heap. Half a patch doubles every axis: 8x the reads in 3D, measured on a
-        160^3 mha at patch 64 as 8.6x the wall-clock of the load it avoids, against 3.0x for a halo of
-        2 (the per-patch read overhead streaming costs whatever the halo). Past that the multiple runs
-        away -- a halo of one whole patch is 27x -- while the saving is still just the one volume.
+        one volume off the heap. Half a patch doubles every axis: 8x the reads in 3D. Past that the
+        multiple runs away -- a halo of one whole patch is 27x -- while the saving is still just the
+        one volume.
         """
         patch_size = self.patch.patch_size
         extent = (
@@ -767,7 +766,7 @@ class DatasetManager:
         """Validate a copy's locality declarations and locate the single region stage among them.
 
         Returns ``(streamable, region_index)``. The chain streams only when it is
-        ``[pre-pointwise*][at most one region: HALO|ORIENTATION|RESCALE][post-pointwise*]`` where
+        ``[pre-pointwise*][at most one region: HALO|ORIENTATION|CROP|RESCALE][post-pointwise*]`` where
         ``GLOBAL_STAT`` counts as pointwise (exact patch + a pre-populated stat). Any
         ``WHOLE_VOLUME`` declaration, more than one region stage, an unreadable ``GLOBAL_STAT``, a
         ``RESCALE`` without a known source ``Spacing``, or a halo too wide to be worth reading rejects
@@ -883,8 +882,8 @@ class DatasetManager:
 
         region_index = stream_source.region_index
 
-        # RESCALE keeps its dedicated body: its own scale/geometry maths and attribute-persist stack.
-        # The other region kinds go through the generic path below.
+        # RESCALE keeps its dedicated body for its own scale/geometry maths (the attribute-persist
+        # stack is the same as the generic path below). The other region kinds go through that path.
         if region_index is not None and isinstance(stream_source.stages[region_index], Resample):
             return self._get_streamed_resample_data(index, a, stream_source, region_index, is_input)
 
@@ -947,8 +946,9 @@ class DatasetManager:
         declared per-axis radius (clamped to the volume) and crops the halo back after the stage; the
         stage's own edge padding reproduces the whole-volume border once the clamp reaches the true
         border, so seams agree. ORIENTATION reads the index-remapped source region
-        (``stream_region_source``) and applies the flip/permute -- same extent, no crop. No whole volume
-        is loaded.
+        (``stream_region_source``) and applies the flip/permute -- same extent, no crop. Only the region
+        is requested; whether that avoids decoding the whole volume depends on the storage format --
+        compressed MetaImage and NRRD decode the full volume per read (see ``_supports_region_read``).
         """
         region_stage = stream_source.stages[region_index]
         pre_stages = stream_source.stages[:region_index]
@@ -1058,7 +1058,9 @@ class DatasetManager:
         bounded source region via ``resample.resample_source_region``; only that region
         is read (``read_data_slice``); pre-pointwise stages run on the sub-region,
         then the gather kernel interpolates to the target extent, then post-pointwise
-        stages run on the patch. No whole volume is loaded.
+        stages run on the patch. Only the source region is requested; whether that avoids decoding
+        the whole volume depends on the storage format -- compressed MetaImage and NRRD decode the
+        full volume per read (see ``_supports_region_read``).
         """
         source_shape = stream_source.shape
         resample = cast(Resample, stream_source.stages[resample_pos])

@@ -330,16 +330,16 @@ class WindowedCaseSampler(Sampler[int]):
     """Locality-aware training order: shuffle cases, window them, shuffle patches within each window.
 
     ``DatasetIter`` loads each non-streamable case into a FIFO buffer, so a global patch shuffle
-    reloads a volume once per patch that lands after an eviction (7-56x redundant reads). Keeping only
+    reloads a volume repeatedly -- once per patch that lands after an eviction. Keeping only
     ``window`` cases in play at a time — their patches shuffled together, emitted before advancing —
     reads each volume ~once. ``window`` is the decorrelation knob: ``1`` is perfect locality, and
     ``None`` (default) or ``>= n_cases`` is a single all-cases window, i.e. a plain global shuffle,
     byte for byte.
 
     A map-style ``DataLoader`` sends batch ``j`` to worker ``j % num_workers`` and gives each worker its
-    own buffer, so the cases are partitioned across workers (``position % num_workers``) and the
-    per-worker windowed batches are round-robin interleaved: batch ``j`` then carries only worker
-    ``j % num_workers``'s cases, and every volume is read by exactly one worker.
+    own buffer, so the cases are partitioned across workers (greedy least-loaded by patch count, see
+    ``_partitions``) and the per-worker windowed batches are round-robin interleaved: batch ``j`` then
+    carries only worker ``j % num_workers``'s cases, and every volume is read by exactly one worker.
     """
 
     def __init__(
@@ -407,9 +407,9 @@ class WindowedCaseSampler(Sampler[int]):
         #
         # So a short stream runs out and the ones still going shift onto the workers that finished:
         # a case lands on two of them and each reads its volume. The epoch stays exact and the reads
-        # go from 1.00x to about 1.17x on such a dataset -- against 8.83x with no window at all.
-        # Padding the streams instead buys the affinity back by walking 46% of that epoch twice and
-        # the rest not at all, which is not a trade to make.
+        # stay close to 1x -- far below the redundant reads of no window at all. Padding the streams
+        # instead buys the affinity back by walking part of the epoch twice and the rest not at all,
+        # which is not a trade to make.
         batch = self.batch_size
         order: list[int] = []
         for start in range(0, max((len(stream) for stream in streams), default=0), batch):
@@ -765,14 +765,7 @@ class Subset:
         return {names[i] for i in index}
 
     def __str__(self):
-        return (
-            "Subset : "
-            + str(self.subset)
-            + " shuffle : "
-            + str(self.shuffle)
-            + " shuffle_window : "
-            + str(self.shuffle_window)
-        )
+        return f"Subset : {self.subset} shuffle : {self.shuffle} shuffle_window : {self.shuffle_window}"
 
 
 class TrainSubset(Subset):
@@ -1388,8 +1381,11 @@ class Data(ABC):
             # drops the tail sample of the longer shards (it is outside every rank's shard, and _split
             # runs once at setup so the sampler's per-epoch shuffle never reaches it), whereas padding
             # keeps every sample training with only a harmless duplicate. world_size == 1 is a no-op.
+            # A shard fills itself from its own head, and one that holds nothing has no head to fill
+            # from: fewer entries than ranks leaves it empty, and an empty rank runs no backward at
+            # all -- the very hang this equalises against. It takes the mapping's head instead.
             max_len = max(len(shard) for shard in mappings)
-            mappings = [shard + shard[: max_len - len(shard)] if shard else shard for shard in mappings]
+            mappings = [shard + (shard if shard else mapping)[: max_len - len(shard)] for shard in mappings]
         return mappings
 
     @staticmethod

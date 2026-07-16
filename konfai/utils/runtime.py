@@ -225,7 +225,7 @@ def gpu_info() -> str:
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
     else:
         return ""
-    node_name = "Node: {} " + os.environ["SLURMD_NODENAME"] if "SLURMD_NODENAME" in os.environ else ""
+    node_name = f"Node: {os.environ['SLURMD_NODENAME']} " if "SLURMD_NODENAME" in os.environ else ""
     return f"{node_name}GPU({devices}) Memory GPU ({memory.used / 1e9:.2f}G ({memory.used / memory.total * 100:.2f} %))"
 
 

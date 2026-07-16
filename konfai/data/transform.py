@@ -365,10 +365,10 @@ class Clip(Transform):
 
         # Fast path: one fused in-place clamp instead of two float()-copy + where-scatter passes.
         # Restricted to float32 (integer tensors reject float bounds; float16/float64 would compare
-        # at a different precision than the legacy float()-cast scatter) and to non-NaN bounds: a
-        # NaN bound — from a dynamic min/max/percentile over data containing NaN — makes clamp_
-        # propagate NaN to the whole tensor, whereas the legacy scatter no-ops on it (NaN
-        # comparisons are False). All other cases keep the exact original behaviour byte-for-byte.
+        # at a different precision than the float()-cast scatter in the else branch below) and to
+        # non-NaN bounds: a NaN bound — from a dynamic min/max/percentile over data containing NaN —
+        # makes clamp_ propagate NaN to the whole tensor, whereas the fallback scatter no-ops on it
+        # (NaN comparisons are False). Every other case takes that fallback, unchanged.
         if tensor.dtype == torch.float32 and min_value == min_value and max_value == max_value:
             tensor.clamp_(min=min_value, max=max_value)
         else:
