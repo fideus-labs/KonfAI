@@ -363,8 +363,21 @@ class WindowedCaseSampler(Sampler[int]):
         self.window = window if window is not None and 0 < window < n_cases and self.num_workers <= n_cases else None
 
     def _partitions(self) -> list[list[int]]:
-        cases = list(self.case_entries)
-        return [cases[worker :: self.num_workers] for worker in range(self.num_workers)]
+        """The cases each worker walks, balanced by the patches they hold.
+
+        A worker is handed whole cases, because a case is what its buffer keeps resident. Handing out
+        an equal COUNT of them leaves the patch counts as uneven as the cases are, and it is patches
+        that are walked: the workers then run out at different times, and the batches of whoever is
+        left shift onto the workers that finished -- a case landing on two of them, each reading the
+        volume. Give the next case to whoever holds the fewest patches so far, largest first.
+        """
+        loads = [0] * self.num_workers
+        partitions: list[list[int]] = [[] for _ in range(self.num_workers)]
+        for case in sorted(self.case_entries, key=lambda case: -len(self.case_entries[case])):
+            worker = min(range(self.num_workers), key=lambda worker: loads[worker])
+            partitions[worker].append(case)
+            loads[worker] += len(self.case_entries[case])
+        return partitions
 
     def _windowed_order(self) -> list[int]:
         generator = torch.Generator().manual_seed(int(torch.randint(0, 2**31 - 1, (1,)).item()))
@@ -383,27 +396,26 @@ class WindowedCaseSampler(Sampler[int]):
                 )
             streams.append(stream)
 
-        # Round-robin interleave equal-length per-worker batches so batch j lands on worker
-        # j % num_workers. The modulo wraps each stream's head to fill its final short batch and to pad
-        # up to the longest worker -- the same bounded duplication the DDP shard split relies on.
+        # Round-robin the workers a batch at a time, so batch j lands on worker j % num_workers and a
+        # window stays resident while its patches are walked.
+        #
+        # Three things are wanted here and only two of them fit. An epoch must be one pass over the
+        # mapping; a worker must keep whole cases, since a case is what its buffer holds; and a case
+        # should stay on one worker, which needs every stream the same length. A case does not split,
+        # so streams of equal length are not something `_partitions` can always hand over -- one case
+        # of 200 patches beside ten of 2 is longer on its own than a quarter of the epoch.
+        #
+        # So a short stream runs out and the ones still going shift onto the workers that finished:
+        # a case lands on two of them and each reads its volume. The epoch stays exact and the reads
+        # go from 1.00x to about 1.17x on such a dataset -- against 8.83x with no window at all.
+        # Padding the streams instead buys the affinity back by walking 46% of that epoch twice and
+        # the rest not at all, which is not a trade to make.
         batch = self.batch_size
         order: list[int] = []
-        for start in range(0, self._batches_per_worker() * batch, batch):
+        for start in range(0, max((len(stream) for stream in streams), default=0), batch):
             for stream in streams:
-                order += [stream[i % len(stream)] for i in range(start, start + batch)]
-        # An epoch is `mapping` long whatever order it is walked in, so the round-robin -- whole
-        # batches, a short stream wrapping its own head to fill one -- is cut back to it. Each worker
-        # is therefore walked over its share of the epoch, len(mapping) / num_workers: a partition
-        # holding more than that leaves a tail for another epoch to reach, one holding less repeats.
-        # Both scale with how uneven the partitions are, NOT with a batch -- cases are split by
-        # position (`_partitions`), so a dataset ordered big-then-small can leave a worker's tail cut
-        # by half an epoch. Each epoch reshuffles the cases, so the cut falls elsewhere and nothing is
-        # starved; what this must never do is change the epoch's length, which every rank agrees on.
-        return order[: len(self.mapping)]
-
-    def _batches_per_worker(self) -> int:
-        """Whole batches each worker is walked through to cover an epoch (the last one is cut back)."""
-        return math.ceil(len(self.mapping) / (self.num_workers * self.batch_size))
+                order += stream[start : start + batch]
+        return order
 
     def __iter__(self) -> Iterator[int]:
         if not self.shuffle:

@@ -363,3 +363,22 @@ def test_init_overrides_mha_token_for_ome_zarr_store(tmp_path: Path) -> None:
 def test_init_keeps_token_for_plain_file_dataset(tmp_path: Path) -> None:
     root = _make_case(tmp_path / "ds", "Volume_0.mha", is_dir=False)
     assert Dataset(str(root), "mha").file_format == "mha"
+
+
+def test_a_statistics_chunk_is_budgeted_with_its_channels() -> None:
+    # A chunk spans every other axis whole, the channels included, and is accumulated in float64. Cut
+    # on a plane alone, a 122-channel volume holds 122 times the budget -- 7 GiB where 0.06 was meant.
+    from konfai.utils.dataset import _STATISTICS_CHUNK_ELEMENTS, _statistics_chunk_length
+
+    for channels in (1, 4, 122):
+        shape = [channels, 400, 512, 512]
+        length = _statistics_chunk_length(shape, axis=1)
+        held = channels * length * 512 * 512
+        # One step is the floor, so a volume whose step alone overflows is read a step at a time.
+        assert held <= max(_STATISTICS_CHUNK_ELEMENTS, channels * 512 * 512)
+
+
+def test_a_statistics_chunk_reaches_further_on_a_thin_volume() -> None:
+    from konfai.utils.dataset import _statistics_chunk_length
+
+    assert _statistics_chunk_length([1, 400, 64, 64], axis=1) > _statistics_chunk_length([1, 400, 512, 512], axis=1)

@@ -129,6 +129,20 @@ class Attribute(dict[str, Any]):
 _STATISTICS_CHUNK_ELEMENTS = 8_000_000
 
 
+def _statistics_chunk_length(shape: list[int] | tuple[int, ...], axis: int) -> int:
+    """How far along ``axis`` a chunk may reach to hold about ``_STATISTICS_CHUNK_ELEMENTS``.
+
+    A chunk spans every OTHER axis whole, the channels included, and is accumulated in float64: it is
+    the volume divided by the axis it is cut along that says what one step costs, not the axes behind
+    it. A 122-channel volume cut on a plane alone holds 122 times the budget.
+
+    One step is the floor: a volume whose single step already exceeds the budget is read a step at a
+    time and no less, since the other axes are what a chunk is whole on.
+    """
+    per_step = int(np.prod([extent for other, extent in enumerate(shape) if other != axis], dtype=np.int64))
+    return max(1, _STATISTICS_CHUNK_ELEMENTS // max(1, per_step))
+
+
 def _update_running_statistics(
     state: dict[str, float] | None,
     array: np.ndarray,
@@ -415,8 +429,7 @@ class Dataset:
                 raise NameError(f"Dataset '{groups}/{name}' not found in '{self.filename}'.")
 
             axis = 1 if dataset.ndim > 1 else 0
-            trailing_size = int(np.prod(dataset.shape[axis + 1 :], dtype=np.int64)) if axis + 1 < dataset.ndim else 1
-            chunk_length = max(1, _STATISTICS_CHUNK_ELEMENTS // max(1, trailing_size))
+            chunk_length = _statistics_chunk_length(dataset.shape, axis)
             state: dict[str, float] | None = None
 
             for start in range(0, dataset.shape[axis], chunk_length):
@@ -645,8 +658,7 @@ class Dataset:
             reader.ReadImageInformation()
             data_shape = [reader.GetNumberOfComponents(), *reversed(reader.GetSize())]
 
-            trailing_size = int(np.prod(data_shape[2:], dtype=np.int64))
-            slab_length = max(1, _STATISTICS_CHUNK_ELEMENTS // max(1, trailing_size))
+            slab_length = _statistics_chunk_length(data_shape, 1)
             state: dict[str, float] | None = None
 
             for start in range(0, data_shape[1], slab_length):

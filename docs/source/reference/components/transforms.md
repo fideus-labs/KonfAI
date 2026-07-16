@@ -51,8 +51,8 @@ Three rules apply to the chain rather than to any single transform:
   and `Clip(min_value="min")` read their statistic from disk, which is their input
   only if every earlier stage left the values alone. Reorienting does; mapping
   values does not. `[Canonical(), Normalize()]` streams, `[Clip(-200, 400),
-  Normalize()]` loads whole. A cast to a **float** dtype keeps the statistic, an
-  integer cast does not.
+  Normalize()]` loads whole. A cast keeps the statistic only where it keeps
+  every value: `float32` and `float64` do, `float16` and an integer cast do not.
 - **A halo must stay within half the patch.** `Dilate(4)` streams at patch 64 and
   at patch 8, and loads whole at patch 4. The bound is checked per axis against
   the patch size, or against the case's own extent where that is smaller.

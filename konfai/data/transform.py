@@ -552,15 +552,22 @@ class Standardize(TransformInverse):
 
 
 class TensorCast(TransformInverse):
+    # Wide enough to hold every dtype a volume is read as (int8/int16/uint8/float32) with no value moved.
+    _VALUE_PRESERVING_DTYPES = frozenset({torch.float32, torch.float64})
+
     def __init__(self, dtype: str = "float32", inverse: bool = True) -> None:
         super().__init__(inverse)
         self.dtype: torch.dtype = getattr(torch, dtype)
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # A cast to a floating dtype keeps every value (up to fp rounding on a downcast), so the stored
-        # volume's Min/Max/Mean/Std are still a later GLOBAL_STAT's input statistics; an integer cast
-        # truncates and may not preserve them.
-        return PatchLocality(LocalityKind.POINTWISE, preserves_statistics=self.dtype.is_floating_point)
+        # The promise is that the stored volume's Min/Max/Mean/Std are still a later GLOBAL_STAT's
+        # input statistics, and a cast keeps them only where it keeps every value. The dtype a volume
+        # is stored as is not on its header, so the target is what has to hold whatever that is:
+        # float32 holds an int16 or a float32 exactly, and float16 holds neither -- it runs out of
+        # mantissa at 2048, where a CT reaches 3000. An integer cast truncates.
+        return PatchLocality(
+            LocalityKind.POINTWISE, preserves_statistics=self.dtype in TensorCast._VALUE_PRESERVING_DTYPES
+        )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         cache_attribute["dtype"] = str(tensor.dtype).replace("torch.", "")

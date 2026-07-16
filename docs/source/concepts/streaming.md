@@ -7,7 +7,9 @@ decides whether that happens, and what you control.
 Streaming is **derived, not configured**. Nothing in YAML asks for it. KonfAI
 reads your preprocessing chain, works out whether each patch's answer can be
 computed from a bounded region of the file, and streams when it can. When it
-cannot, it loads the volume. Both paths give the same patches; they differ in
+cannot, it loads the volume. Both paths give the same patches — exactly for
+every kind but a resample, which gathers the same samples through a different
+coordinate frame and lands within the tolerance stated below. They differ in
 memory and speed.
 
 A 16 GiB uncompressed `.mha` at patch 64³, batch 2, two workers, cache off,
@@ -155,9 +157,10 @@ are `Normalize`'s own input, and the chain streams.
 
 The rule generalizes: a `GLOBAL_STAT` stage streams only when **every** stage
 before it preserves statistics. `TensorCast` is the one built-in that declares
-this for itself — casting to a float dtype changes no value, so
-`[TensorCast('float32'), Standardize()]` streams, while
-`[TensorCast('uint8'), Standardize()]` does not.
+this for itself, and only for a target that holds every value a volume is read
+as: `[TensorCast('float32'), Standardize()]` streams, while
+`[TensorCast('uint8'), Standardize()]` and `[TensorCast('float16'), Standardize()]`
+do not — a half cast moves 1500.3 onto 1500.0.
 
 ### Why two region stages do not stream
 

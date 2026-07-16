@@ -45,6 +45,7 @@ from konfai.data.transform import (
     StandardDeviation,
     Standardize,
     Statistics,
+    TensorCast,
     Variance,
 )
 from konfai.utils.dataset import Attribute
@@ -713,3 +714,22 @@ def test_canonical_declaration_is_total_on_absent_metadata() -> None:
     # The config-time checks probe with an empty Attribute, and a group carries only what its writer
     # stored: a missing direction must fall to the safe kind rather than raise.
     assert Canonical().patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
+
+
+@pytest.mark.parametrize(
+    "dtype, preserving",
+    [("float64", True), ("float32", True), ("float16", False), ("bfloat16", False), ("int16", False)],
+)
+def test_tensor_cast_keeps_the_statistics_only_where_it_keeps_every_value(dtype: str, preserving: bool) -> None:
+    # The promise lets a later GLOBAL_STAT seed itself from the stored volume, so it holds only where
+    # the cast moves no value. The stored dtype is not on the header: the target has to hold whatever
+    # a volume is read as.
+    assert TensorCast(dtype).patch_locality(Attribute()).statistics_preserving is preserving
+
+
+def test_a_half_cast_moves_a_ct_value() -> None:
+    # What the promise would be hiding: float16 runs out of mantissa at 2048, and a CT reaches 3000.
+    volume = torch.tensor([[-1024.0, 137.7, 1500.3, 2999.9]])
+    through_half = TensorCast("float16")("CT", volume.clone(), Attribute()).to(torch.float32)
+    assert not torch.equal(volume, through_half)
+    assert torch.equal(volume, TensorCast("float32")("CT", volume.clone(), Attribute()))
