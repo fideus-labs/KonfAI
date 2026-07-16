@@ -383,27 +383,17 @@ class WindowedCaseSampler(Sampler[int]):
                 )
             streams.append(stream)
 
-        # Round-robin interleave equal-length per-worker batches so batch j lands on worker
-        # j % num_workers. The modulo wraps each stream's head to fill its final short batch and to pad
-        # up to the longest worker -- the same bounded duplication the DDP shard split relies on.
+        # Round-robin the workers a batch at a time, so batch j lands on worker j % num_workers and a
+        # window stays resident while its patches are walked. A worker holding fewer patches simply
+        # runs out first: an epoch is one pass over the mapping, so the order it is walked in is a
+        # permutation of it and nothing here may repeat an entry or drop one. Partitions are cut by
+        # case (`_partitions`), and cases differ in patch count, so the streams are uneven by nature.
         batch = self.batch_size
         order: list[int] = []
-        for start in range(0, self._batches_per_worker() * batch, batch):
+        for start in range(0, max((len(stream) for stream in streams), default=0), batch):
             for stream in streams:
-                order += [stream[i % len(stream)] for i in range(start, start + batch)]
-        # An epoch is `mapping` long whatever order it is walked in, so the round-robin -- whole
-        # batches, a short stream wrapping its own head to fill one -- is cut back to it. Each worker
-        # is therefore walked over its share of the epoch, len(mapping) / num_workers: a partition
-        # holding more than that leaves a tail for another epoch to reach, one holding less repeats.
-        # Both scale with how uneven the partitions are, NOT with a batch -- cases are split by
-        # position (`_partitions`), so a dataset ordered big-then-small can leave a worker's tail cut
-        # by half an epoch. Each epoch reshuffles the cases, so the cut falls elsewhere and nothing is
-        # starved; what this must never do is change the epoch's length, which every rank agrees on.
-        return order[: len(self.mapping)]
-
-    def _batches_per_worker(self) -> int:
-        """Whole batches each worker is walked through to cover an epoch (the last one is cut back)."""
-        return math.ceil(len(self.mapping) / (self.num_workers * self.batch_size))
+                order += stream[start : start + batch]
+        return order
 
     def __iter__(self) -> Iterator[int]:
         if not self.shuffle:

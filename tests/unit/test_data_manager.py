@@ -649,3 +649,36 @@ def test_train_subset_exposes_shuffle_window_knob() -> None:
     configured = TrainSubset(shuffle_window=4)
     assert configured.shuffle_window == 4
     assert configured.shuffle is True
+
+
+def test_the_windowed_order_is_a_permutation_of_the_epoch() -> None:
+    # An epoch is one pass over the mapping: the window chooses the order, never the contents. Cases
+    # differ in patch count and the partitions are cut by case, so the per-worker streams are uneven
+    # by nature -- padding the short ones up to the longest and cutting the result back to length
+    # keeps the length right while dropping and repeating almost half of an uneven epoch.
+    mapping = [(case, patch, 0) for case in range(12) for patch in range(200 if case < 2 else 2)]
+    sampler = WindowedCaseSampler(mapping, shuffle=True, window=4, batch_size=2, num_workers=4)
+    order = list(iter(sampler))
+    assert len(order) == len(mapping) == len(sampler)
+    assert sorted(order) == list(range(len(mapping)))
+
+
+def test_a_window_keeps_a_worker_reading_each_volume_once() -> None:
+    # What the window is for: a case's patches are walked while it is resident, so the FIFO reads it
+    # once an epoch rather than once per eviction.
+    mapping = [(case, patch, 0) for case in range(24) for patch in range(10)]
+    sampler = WindowedCaseSampler(mapping, shuffle=True, window=4, batch_size=2, num_workers=4)
+    order = list(iter(sampler))
+    for worker in range(4):
+        cases = [mapping[index][0] for position, index in enumerate(order) if (position // 2) % 4 == worker]
+        resident: list[int] = []
+        loads = 0
+        for case in cases:
+            if case not in resident:
+                loads += 1
+                resident.append(case)
+                if len(resident) > 4:
+                    resident.pop(0)
+            else:
+                resident.append(resident.pop(resident.index(case)))
+        assert loads == len(set(cases))
