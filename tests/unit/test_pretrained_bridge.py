@@ -104,3 +104,58 @@ def test_bridge_refuses_a_non_equivalent_pair() -> None:
             target_forward=lambda: list(net.named_forward(inputs)),
             source_forward=lambda: wrong(inputs),
         )
+
+
+def test_bridge_refuses_a_target_tensor_no_leaf_owns() -> None:
+    # MultiheadAttention holds in_proj_weight itself while having an out_proj child, so it is not a
+    # childless leaf and the trace never hooks it. Copying must refuse rather than leave in_proj_weight
+    # at its random init and report success.
+    source = torch.nn.MultiheadAttention(embed_dim=8, num_heads=2, batch_first=True)
+    target = torch.nn.MultiheadAttention(embed_dim=8, num_heads=2, batch_first=True)
+    inputs = torch.randn(1, 4, 8)
+    untouched = target.in_proj_weight.clone()
+
+    with pytest.raises(ConfigError, match=r"owned by no traced leaf"):
+        transfer_weights_by_execution_order(
+            target=target,
+            source=source,
+            target_forward=lambda: target(inputs, inputs, inputs),
+            source_forward=lambda: source(inputs, inputs, inputs),
+        )
+    assert torch.equal(target.in_proj_weight, untouched)
+
+
+def test_bridge_ignores_source_branches_the_forward_skips() -> None:
+    # The mirror of the check above: a source head this configuration never runs (nnU-Net's
+    # deep-supervision seg_layers, inactive when deep supervision is off) has no target counterpart to
+    # feed, so it must NOT block an otherwise-complete transfer.
+    class Reference(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.used = torch.nn.Linear(4, 4)
+            self.deep_supervision_head = torch.nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.used(x)
+
+    class Konfai(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.used = torch.nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.used(x)
+
+    source, target = Reference(), Konfai()
+    with torch.no_grad():
+        source.used.weight.add_(1.0)
+    inputs = torch.randn(1, 4)
+
+    transferred = transfer_weights_by_execution_order(
+        target=target,
+        source=source,
+        target_forward=lambda: target(inputs),
+        source_forward=lambda: source(inputs),
+    )
+    assert transferred == 1
+    assert torch.equal(target.used.weight, source.used.weight)

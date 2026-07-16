@@ -18,7 +18,14 @@
 
 import pytest
 import torch
-from konfai.network.blocks import Exit, LatentDistribution, Select, Unsqueeze
+from konfai.network.blocks import (
+    Exit,
+    LatentDistribution,
+    MultiHeadSelfAttention,
+    ResNetBasicBlock,
+    Select,
+    Unsqueeze,
+)
 
 
 def test_vae_latent_uses_gaussian_noise():
@@ -48,3 +55,43 @@ def test_select_squeezes_size_one_dims_by_size():
 def test_debug_exit_block_raises_runtime_error() -> None:
     with pytest.raises(RuntimeError, match="debug Exit block"):
         Exit()(torch.ones(1))
+
+
+def test_clip_normalize_is_the_identity_until_a_checkpoint_states_it() -> None:
+    # A checkpoint fills the four scalars and a model is built before one is loaded. Left as
+    # uninitialised memory they held clip_min above clip_max, so the clamp flattened every input onto
+    # one value and the node returned zeros for anything -- silently, with no NaN to notice.
+    from konfai.network.blocks import ClipNormalize
+
+    volume = torch.tensor([[-1000.0, 0.0, 1000.0]])
+    assert torch.equal(ClipNormalize()(volume), volume)
+
+
+def test_clip_normalize_takes_what_a_checkpoint_states() -> None:
+    from konfai.network.blocks import ClipNormalize
+
+    node = ClipNormalize()
+    node.load_state_dict(
+        {
+            "clip_min": torch.tensor([-200.0]),
+            "clip_max": torch.tensor([200.0]),
+            "mean": torch.tensor([0.0]),
+            "std": torch.tensor([100.0]),
+        }
+    )
+    got = node(torch.tensor([[-1000.0, 0.0, 1000.0]]))
+    assert torch.equal(got, torch.tensor([[-2.0, 0.0, 2.0]]))
+
+
+def test_multi_head_self_attention_rejects_zero_heads() -> None:
+    # num_heads=0 reached the modulo before the divisibility check and died on a bare
+    # ZeroDivisionError, which says nothing about the config that caused it.
+    with pytest.raises(ValueError, match="num_heads"):
+        MultiHeadSelfAttention(64, 0)
+
+
+def test_resnet_basic_block_rejects_a_downsample_it_cannot_honour() -> None:
+    # Disabling the projection while the block changes channel count leaves the residual Add two
+    # tensors of different shapes -- a graph built to crash, caught here at construction instead.
+    with pytest.raises(ValueError, match="downsample=False"):
+        ResNetBasicBlock(8, 16, dim=2, downsample=False)

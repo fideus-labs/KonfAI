@@ -19,33 +19,23 @@ from abc import ABC
 import torch
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
+from konfai.utils.errors import ConfigError
 
-"""
-'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
-dim = 2, in_channels = 3, depths=[2, 2, 2, 2], widths = [64, 64, 128, 256, 512],
-num_classes=1000, use_bottleneck=False
-
-'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
-dim = 2, in_channels = 3, depths=[3, 4, 6, 3], widths = [64, 64, 128, 256, 512],
-num_classes=1000, use_bottleneck=False
-
-'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
-dim = 2, in_channels = 3, depths=[3, 4, 6, 3], widths = [64, 256, 512, 1024, 2048],
-num_classes=1000, use_bottleneck=True
-
-'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
-dim = 2, in_channels = 3, depths=[3, 4, 23, 3], widths = [64, 256, 512, 1024, 2048],
-num_classes=1000, use_bottleneck=True
-
-'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
-dim = 2, in_channels = 3, depths=[3, 8, 36, 3], widths = [64, 256, 512, 1024, 2048],
-num_classes=1000, use_bottleneck=True
-
-'resnext50_32x4d': 'https://download.pytorch.org/models/resnext50_32x4d-7cdf4587.pth',
-'resnext101_32x8d': 'https://download.pytorch.org/models/resnext101_32x8d-8ba56ff5.pth',
-'wide_resnet50_2': 'https://download.pytorch.org/models/wide_resnet50_2-95faca4d.pth',
-'wide_resnet101_2': 'https://download.pytorch.org/models/wide_resnet101_2-32ee1156.pth',
-"""
+# torchvision checkpoint URLs and the (dim, in_channels, depths, widths, num_classes, use_bottleneck) that reproduce them:
+# resnet18:  https://download.pytorch.org/models/resnet18-5c106cde.pth
+#   dim=2, in_channels=3, depths=[2, 2, 2, 2], widths=[64, 64, 128, 256, 512], num_classes=1000, use_bottleneck=False
+# resnet34:  https://download.pytorch.org/models/resnet34-333f7ec4.pth
+#   dim=2, in_channels=3, depths=[3, 4, 6, 3], widths=[64, 64, 128, 256, 512], num_classes=1000, use_bottleneck=False
+# resnet50:  https://download.pytorch.org/models/resnet50-19c8e357.pth
+#   dim=2, in_channels=3, depths=[3, 4, 6, 3], widths=[64, 256, 512, 1024, 2048], num_classes=1000, use_bottleneck=True
+# resnet101: https://download.pytorch.org/models/resnet101-5d3b4d8f.pth
+#   dim=2, in_channels=3, depths=[3, 4, 23, 3], widths=[64, 256, 512, 1024, 2048], num_classes=1000, use_bottleneck=True
+# resnet152: https://download.pytorch.org/models/resnet152-b121ed2d.pth
+#   dim=2, in_channels=3, depths=[3, 8, 36, 3], widths=[64, 256, 512, 1024, 2048], num_classes=1000, use_bottleneck=True
+# resnext50_32x4d:  https://download.pytorch.org/models/resnext50_32x4d-7cdf4587.pth
+# resnext101_32x8d: https://download.pytorch.org/models/resnext101_32x8d-8ba56ff5.pth
+# wide_resnet50_2:  https://download.pytorch.org/models/wide_resnet50_2-95faca4d.pth
+# wide_resnet101_2: https://download.pytorch.org/models/wide_resnet101_2-32ee1156.pth
 
 
 class AbstractResBlock(network.ModuleArgsDict, ABC):
@@ -56,7 +46,9 @@ class AbstractResBlock(network.ModuleArgsDict, ABC):
 class ResBlock(AbstractResBlock):
     def __init__(self, in_channels: int, out_channels: int, downsample: bool, dim: int):
         super().__init__(in_channels, out_channels, downsample, dim)
-        if downsample:
+        # As in torchvision BasicBlock: project the shortcut whenever the block is strided OR
+        # changes channel count, otherwise the residual Add receives mismatched tensors.
+        if downsample or in_channels != out_channels:
             self.add_module(
                 "Shortcut",
                 blocks.ConvBlock(
@@ -65,7 +57,7 @@ class ResBlock(AbstractResBlock):
                     [
                         blocks.BlockConfig(
                             kernel_size=1,
-                            stride=2,
+                            stride=2 if downsample else 1,
                             padding=0,
                             bias=False,
                             activation="None",
@@ -174,7 +166,9 @@ class ResBottleneckBlock(AbstractResBlock):
                         stride=1,
                         padding=0,
                         bias=False,
-                        activation="ReLU",
+                        # No activation on conv3/bn3 before the residual add (torchvision
+                        # Bottleneck); a ReLU here diverges from the pretrained architecture.
+                        activation="None",
                         norm_mode=blocks.NormMode.BATCH.name,
                     )
                 ],
@@ -283,6 +277,13 @@ class ResNetEncoder(network.ModuleArgsDict):
         dim: int,
     ):
         super().__init__()
+        if len(widths) != len(depths) + 1:
+            raise ConfigError(
+                f"ResNet expects len(widths) == len(depths) + 1 (stem width + one width per stage), "
+                f"got {len(widths)} widths for {len(depths)} depths.",
+            )
+        if any(depth < 1 for depth in depths):
+            raise ConfigError(f"ResNet stage depths must all be >= 1, got {depths}.")
         self.add_module("ResNetStem", ResNetStem(in_channels, widths[0], dim=dim))
 
         for i, (in_channels, out_channels, depth) in enumerate(list(zip(widths[:], widths[1:], depths, strict=False))):

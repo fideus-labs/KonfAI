@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Literal
+
 import torch
 from konfai.network import blocks, network
 
@@ -123,7 +125,7 @@ class VAE(network.Network):
         nb_conv_per_stage: int = 2,
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
     ) -> None:
 
         super().__init__(

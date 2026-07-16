@@ -213,7 +213,7 @@ class UNetPlusPlus(network.Network):
                 blocks.ConvBlock(
                     in_channels=conv_in,
                     out_channels=conv_out,
-                    block_configs=[_decoder_block_config(dim) for _ in range(2)],
+                    block_configs=[_decoder_block_config() for _ in range(2)],
                     dim=dim,
                 ),
                 in_branch=[conv_input],
@@ -270,13 +270,12 @@ class UNetPlusPlus(network.Network):
         super().load(state_dict, init=False, ema=ema, override_lr=override_lr)
 
 
-def _decoder_block_config(dim: int) -> blocks.BlockConfig:
+def _decoder_block_config() -> blocks.BlockConfig:
     """One smp ``Conv2dReLU``: Conv(3x3, bias=False) -> BatchNorm -> ReLU.
 
-    ``dim`` is unused here (kernel/stride/padding are dimension-agnostic) but kept for symmetry with the
-    other model helpers; the block config is materialised into ``dim``-d layers by ``ConvBlock``.
+    The kernel/stride/padding are dimension-agnostic; ``ConvBlock`` materialises this config into
+    ``dim``-d layers.
     """
-    del dim
     return blocks.BlockConfig(
         kernel_size=3,
         stride=1,

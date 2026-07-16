@@ -170,3 +170,20 @@ def test_unetplusplus_yaml_node_is_a_multi_input_upsample_concat_conv() -> None:
     final = net["x_0_4"]
     assert [type(module).__name__ for module in final.values()] == ["Upsample", "ConvBlock"]
     assert final["Conv"]["Conv_0"].in_channels == 32
+
+
+def test_unetplusplus_yaml_encoder_widths_propagate_into_the_decoder() -> None:
+    # stem_channels/stage_channels feed the decoder grid through references, so halving the encoder
+    # widths builds and forwards (the decoder is not pinned to the hardcoded 512/256/128/64 table).
+    net = build_model_from_yaml(
+        yaml_path=str(UNETPLUSPLUS_YML),
+        parameters={"stem_channels": 32, "stage_channels": [32, 64, 128, 256], "num_classes": 2},
+    )
+    # x_0_0 now takes up=stage[3]=256 + skip=stage[2]=128 -> 384 into its first conv (was 768).
+    assert net["x_0_0"]["Conv"]["Conv_0"].in_channels == 384
+    net.eval()
+    torch.manual_seed(0)
+    x = torch.randn(1, IN_CHANNELS, 64, 64)
+    with torch.no_grad():
+        out = dict(net.named_forward(x))["SegmentationHead"]
+    assert out.shape == (1, 2, 64, 64)

@@ -60,14 +60,18 @@ from konfai.utils.errors import ConfigError
 
 def _as_stage_list(value: int | list[int], length: int, name: str) -> list[int]:
     """Broadcast an int to a per-stage list, or validate a list of the expected length."""
-    if isinstance(value, int):
-        return [value] * length
-    if len(value) != length:
+    values = [value] * length if isinstance(value, int) else list(value)
+    if len(values) != length:
         raise ConfigError(
-            f"'{name}' must have {length} entries (got {len(value)}: {value}).",
+            f"'{name}' must have {length} entries (got {len(values)}: {values}).",
             "It is broadcast per resolution stage, so its length must match the topology.",
         )
-    return list(value)
+    if any(count < 1 for count in values):
+        raise ConfigError(
+            f"'{name}' entries must all be >= 1 (got {values}).",
+            "Each stage must contain at least one block; a zero count builds an invalid graph.",
+        )
+    return values
 
 
 def _as_kernel_list(kernel_sizes: int | list[Any], n_stages: int) -> list[Any]:

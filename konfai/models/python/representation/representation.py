@@ -16,6 +16,7 @@
 
 import torch
 from konfai.network import blocks, network
+from konfai.utils.errors import ConfigError
 
 
 class ConvBlock(torch.nn.Module):
@@ -92,6 +93,10 @@ class Representation(network.Network):
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
         dim: int = 3,
     ):
+        if dim != 3:
+            # Adaptation is Conv3d/InstanceNorm3d-hardcoded: another dim constructs fine but
+            # crashes at forward, so reject it up front.
+            raise ConfigError(f"Representation supports dim=3 only, got dim={dim}.")
         super().__init__(
             in_channels=1,
             optimizer=optimizer,

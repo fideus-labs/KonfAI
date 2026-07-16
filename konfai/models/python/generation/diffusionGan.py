@@ -16,7 +16,7 @@
 
 import itertools
 from functools import partial
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -429,9 +429,9 @@ class GeneratorV1(network.Network):
             self.add_module("Decoder", GeneratorV1.GeneratorDecoder(channels, dim))
 
     class GeneratorBlock(network.ModuleArgsDict):
-        def __init__(self, ngf: int, dim: int) -> None:
+        def __init__(self, ngf: int, dim: int, in_channels: int = 3) -> None:
             super().__init__()
-            self.add_module("Stem", GeneratorV1.GeneratorStem(3, ngf, dim))
+            self.add_module("Stem", GeneratorV1.GeneratorStem(in_channels, ngf, dim))
             self.add_module("AutoEncoder", GeneratorV1.GeneratorAutoEncoder(ngf, dim))
             self.add_module(
                 "Head",
@@ -522,7 +522,7 @@ class GeneratorV2(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
         dim: int = 3,
     ) -> None:
         super().__init__(
@@ -612,7 +612,7 @@ class GeneratorV3(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
         dim: int = 3,
     ) -> None:
         super().__init__(
@@ -784,7 +784,7 @@ class CycleGanGeneratorV2(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
         dim: int = 3,
     ) -> None:
         super().__init__(
@@ -842,7 +842,7 @@ class CycleGanGeneratorV3(network.Network):
         downsample_mode: str = "MAXPOOL",
         upsample_mode: str = "CONV_TRANSPOSE",
         attention: bool = False,
-        block_type: str = "Conv",
+        block_type: Literal["Conv", "Res"] = "Conv",
         dim: int = 3,
     ) -> None:
         super().__init__(

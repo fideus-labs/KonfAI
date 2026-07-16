@@ -340,6 +340,11 @@ class ResNetBasicBlock(network.ModuleArgsDict):
         has_stride = any(value != 1 for value in stride_list)
         if downsample is None:
             downsample = has_stride or in_channels != out_channels
+        elif not downsample and (has_stride or in_channels != out_channels):
+            raise ValueError(
+                "downsample=False is invalid when the block is strided or changes channel count: "
+                "the residual Add would receive tensors of different shapes."
+            )
         norm = NormMode[norm_mode] if isinstance(norm_mode, str) else norm_mode
 
         # ----- Main path on branch 1 (block input preserved on branch 0) ------------------- #
@@ -712,10 +717,12 @@ class ClipNormalize(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer("clip_min", torch.empty(1))
-        self.register_buffer("clip_max", torch.empty(1))
-        self.register_buffer("mean", torch.empty(1))
-        self.register_buffer("std", torch.empty(1))
+        # Default to identity (no clip, zero mean, unit std): a checkpoint fills these, so a model
+        # built before its checkpoint is loaded must pass its input through unchanged.
+        self.register_buffer("clip_min", torch.full((1,), float("-inf")))
+        self.register_buffer("clip_max", torch.full((1,), float("inf")))
+        self.register_buffer("mean", torch.zeros(1))
+        self.register_buffer("std", torch.ones(1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (torch.clamp(x, self.clip_min, self.clip_max) - self.mean) / self.std
@@ -980,6 +987,8 @@ class MultiHeadSelfAttention(torch.nn.Module):
 
     def __init__(self, hidden_size: int, num_heads: int, qkv_bias: bool = False) -> None:
         super().__init__()
+        if num_heads < 1:
+            raise ValueError(f"num_heads must be >= 1, got {num_heads}.")
         if hidden_size % num_heads != 0:
             raise ValueError(f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads}).")
         self.num_heads = num_heads

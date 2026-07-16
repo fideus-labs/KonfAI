@@ -58,7 +58,9 @@ def _parametric_leaves_in_execution_order(model: torch.nn.Module, run: Callable[
         is_leaf = next(module.children(), None) is None
         if is_leaf and next(module.parameters(recurse=False), None) is not None:
             handles.append(module.register_forward_hook(hook))
-    was_training = model.training
+    # Snapshot per-module modes: model.train(root_mode) would force every descendant into the
+    # root's mode and lose frozen/eval-only submodules.
+    training_states = {module: module.training for module in model.modules()}
     model.eval()
     try:
         with torch.no_grad():
@@ -66,8 +68,26 @@ def _parametric_leaves_in_execution_order(model: torch.nn.Module, run: Callable[
     finally:
         for handle in handles:
             handle.remove()
-        model.train(was_training)
+        for module, training in training_states.items():
+            module.training = training
     return order
+
+
+def _untraced_tensors(model: torch.nn.Module, leaves: list[torch.nn.Module]) -> list[str]:
+    """Return the names of the model's parameters/buffers that no traced leaf owns.
+
+    Two shapes escape the leaf trace: a module that owns parameters *and* has children (torch's
+    ``MultiheadAttention`` holds ``in_proj_weight`` beside its ``out_proj`` child) is never a leaf, and
+    a leaf the forward does not reach is never hooked. Their tensors would be skipped, so the caller
+    must refuse the transfer instead of reporting success on a partial load.
+    """
+    covered: set[int] = set()
+    for leaf in leaves:
+        covered.update(id(tensor) for tensor in leaf.parameters())
+        covered.update(id(tensor) for tensor in leaf.buffers())
+    return [name for name, tensor in model.named_parameters() if id(tensor) not in covered] + [
+        name for name, tensor in model.named_buffers() if id(tensor) not in covered
+    ]
 
 
 def transfer_weights_by_execution_order(
@@ -77,19 +97,36 @@ def transfer_weights_by_execution_order(
     target_forward: Callable[[], object],
     source_forward: Callable[[], object],
 ) -> int:
-    """Copy every parameter and buffer of ``source`` into ``target`` by execution-order leaf pairing.
+    """Fill every parameter and buffer of ``target`` from ``source`` by execution-order leaf pairing.
 
     ``target`` is the KonfAI model receiving the weights; ``source`` is the external reference whose
     pretrained checkpoint you want to reuse. ``target_forward`` / ``source_forward`` are zero-argument
     callables that each run one forward pass (e.g. ``lambda: list(net.named_forward(x))`` for a KonfAI
     Network, ``lambda: monai_model(x)`` for the reference). Returns the number of leaves transferred.
 
-    Raises ``ConfigError`` when the two graphs are not weight-exact -- a different number of weighted
-    leaves, or a paired leaf whose local ``state_dict`` (its own weight/bias/buffers) does not match in
-    keys or shapes. That is intentional: silently loading a mismatched network is worse than failing.
+    Every ``target`` tensor is written or the call raises; ``source`` tensors its forward does not reach
+    (an unused deep-supervision head) have no counterpart to feed and are ignored.
+
+    Raises ``ConfigError`` when the two graphs are not weight-exact -- a target tensor no traced leaf
+    owns, a different number of weighted leaves, or a paired leaf whose local ``state_dict`` (its own
+    weight/bias/buffers) does not match in keys or shapes. That is intentional: silently loading a
+    mismatched network is worse than failing.
     """
     target_leaves = _parametric_leaves_in_execution_order(target, target_forward)
     source_leaves = _parametric_leaves_in_execution_order(source, source_forward)
+    # Only the target is required to be fully covered: an untraced target tensor would silently keep its
+    # random init. An untraced *source* tensor is a branch this configuration does not run (nnU-Net's
+    # unused deep-supervision heads) and has no target counterpart to feed, so it is correctly ignored.
+    untraced = _untraced_tensors(target, target_leaves)
+    if untraced:
+        raise ConfigError(
+            f"Cannot transfer weights: {len(untraced)} target tensor(s) are owned by no traced leaf and "
+            f"would keep their random init ({', '.join(untraced[:5])}{', ...' if len(untraced) > 5 else ''}).",
+            "Execution-order pairing only copies weighted leaf modules the forward reaches. A tensor held "
+            "directly by a parent module (torch.nn.MultiheadAttention holds in_proj_weight beside its "
+            "out_proj child) or by a submodule this forward skips cannot be paired; wrap it in a leaf "
+            "module, or transfer those tensors by name.",
+        )
     if len(target_leaves) != len(source_leaves):
         raise ConfigError(
             f"Cannot transfer weights: the models have a different number of weighted leaves "

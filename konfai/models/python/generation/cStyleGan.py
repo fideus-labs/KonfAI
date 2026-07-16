@@ -20,6 +20,7 @@ import itertools
 import torch
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
+from konfai.utils.errors import ConfigError
 
 
 class MappingNetwork(network.ModuleArgsDict):
@@ -271,6 +272,11 @@ class Generator(network.Network):
         w_dim: int = 512,
         dim: int = 3,
     ) -> None:
+        if c_dim < 1:
+            # The mapping network is conditional-only: with c_dim=0 the 'Embed' branch is never
+            # produced, the first projection gets in_features=0 and the forward still expects a
+            # conditioning input. Reject instead of building a graph guaranteed to crash.
+            raise ConfigError(f"cStyleGan.Generator is conditional-only and requires c_dim >= 1, got c_dim={c_dim}.")
         super().__init__(
             optimizer=optimizer,
             in_channels=channels[0],

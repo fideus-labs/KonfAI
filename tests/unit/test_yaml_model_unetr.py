@@ -153,3 +153,13 @@ def test_unetr_output_shape_matches_monai(
         mine = net.forward_tensor(inputs)
         theirs = reference(inputs)
     assert mine.shape == theirs.shape == (input_shape[0], OUT_CHANNELS, *([IMG] * spatial_dims))
+
+
+def test_unetr_hidden_size_is_tunable() -> None:
+    # proj_shape's channel dim references hidden_size, so a non-default width reshapes the token
+    # sequence correctly and forwards (it is not pinned to the hardcoded 64).
+    net = _build_unetr({"hidden_size": 32})
+    net.eval()
+    with torch.no_grad():
+        logits = net.forward_tensor(torch.randn(2, 1, IMG, IMG, IMG))
+    assert logits.shape == (2, OUT_CHANNELS, IMG, IMG, IMG)

@@ -21,22 +21,21 @@ import torch.nn.functional as F
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
 
-"""
-"convnext_tiny_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth",
-depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]
-"convnext_small_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_small_1k_224_ema.pth",
-depths=[3, 3, 27, 3], dims=[96, 192, 384, 768]
-"convnext_base_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_base_1k_224_ema.pth",
-depths=[3, 3, 27, 3], dims=[128, 256, 512, 1024]
-"convnext_large_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_large_1k_224_ema.pth",
-[3, 3, 27, 3], dims=[192, 384, 768, 1536]
-"convnext_tiny_22k": "https://dl.fbaipublicfiles.com/convnext/convnext_tiny_22k_224.pth",
-"convnext_small_22k": "https://dl.fbaipublicfiles.com/convnext/convnext_small_22k_224.pth",
-"convnext_base_22k": "https://dl.fbaipublicfiles.com/convnext/convnext_base_22k_224.pth",
-"convnext_large_22k": "https://dl.fbaipublicfiles.com/convnext/convnext_large_22k_224.pth",
-"convnext_xlarge_22k": "https://dl.fbaipublicfiles.com/convnext/convnext_xlarge_22k_224.pth",
-depths=[3, 3, 27, 3], dims=[256, 512, 1024, 2048]
-"""
+# Reference ConvNeXt checkpoint URLs and the (depths, dims) that reproduce them:
+# convnext_tiny_1k:  https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth
+#   depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]
+# convnext_small_1k: https://dl.fbaipublicfiles.com/convnext/convnext_small_1k_224_ema.pth
+#   depths=[3, 3, 27, 3], dims=[96, 192, 384, 768]
+# convnext_base_1k:  https://dl.fbaipublicfiles.com/convnext/convnext_base_1k_224_ema.pth
+#   depths=[3, 3, 27, 3], dims=[128, 256, 512, 1024]
+# convnext_large_1k: https://dl.fbaipublicfiles.com/convnext/convnext_large_1k_224_ema.pth
+#   depths=[3, 3, 27, 3], dims=[192, 384, 768, 1536]
+# convnext_tiny_22k:   https://dl.fbaipublicfiles.com/convnext/convnext_tiny_22k_224.pth
+# convnext_small_22k:  https://dl.fbaipublicfiles.com/convnext/convnext_small_22k_224.pth
+# convnext_base_22k:   https://dl.fbaipublicfiles.com/convnext/convnext_base_22k_224.pth
+# convnext_large_22k:  https://dl.fbaipublicfiles.com/convnext/convnext_large_22k_224.pth
+# convnext_xlarge_22k: https://dl.fbaipublicfiles.com/convnext/convnext_xlarge_22k_224.pth
+#   depths=[3, 3, 27, 3], dims=[256, 512, 1024, 2048]
 
 
 class LayerNorm(torch.nn.Module):

@@ -118,3 +118,13 @@ def test_konfai_mind2d_builds_and_forwards() -> None:
         for _, o in model.named_forward(x):
             out = o
     assert out is not None and out.dim() == 4 and out.shape[2:] == (24, 24)
+
+
+def test_konfai_mind_constant_patch_yields_no_nan() -> None:
+    # A constant patch -- background is full of them -- makes mind_var zero everywhere, and the
+    # clamp bounds are zero with it, so the division was 0/0 and fed NaN into the loss.
+    from konfai.models.python.features.mind import _MindDescriptor
+
+    with torch.no_grad():
+        out = _MindDescriptor(2, 2, 2)(torch.full((1, 1, 32, 32), 5.0))
+    assert not torch.isnan(out).any()
