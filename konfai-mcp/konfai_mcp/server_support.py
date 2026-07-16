@@ -1366,7 +1366,6 @@ def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = N
         and "." not in normalized.split(":", 1)[0]
         and workspace_dir is not None
         and len(module_name.split(".")) == 1
-        and (workspace_dir / f"{module_name}.py").exists()
     )
 
     if local_candidate:

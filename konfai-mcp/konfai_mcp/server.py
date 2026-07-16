@@ -1160,28 +1160,25 @@ def design_config_strategy(
     return payload
 
 
-def _classpath_requires_import(classpath: str, workspace_dir: Path) -> bool:
+def _classpath_requires_import(classpath: str) -> bool:
     """True when summarize_classpath_signature would import the classpath's module in-process.
 
     A shipped/local YAML model ('default|<Name>.yml' or '<Name>.yml') and a local workspace 'File:Class'
-    (a single-token module before the colon that resolves to an existing workspace '<File>.py') are parsed
-    statically and never imported. Everything else -- an installed 'package:Class'/'package.module:Class',
-    the colon form 'package:module:Class' (which _parse_classpath joins into a dotted module), or a
-    bare/dotted builtin name -- triggers importlib.import_module, so it must run isolated. The check errs
-    toward isolation: it stays in-process only for the forms proven not to import, matching
-    summarize_classpath_signature's own local_candidate branching (which requires the '<File>.py' to exist,
-    so an installed 'segmentation_models_pytorch:Unet' with no workspace file is imported, not mis-routed).
+    (a single-token module before the colon, resolved as a workspace .py) are parsed statically and never
+    imported. Everything else -- an installed 'package.module:Class', the colon form 'package:module:Class'
+    (which _parse_classpath joins into a dotted module), or a bare/dotted builtin name -- triggers
+    importlib.import_module, so it must run isolated. The check errs toward isolation: it stays in-process
+    only for the two forms proven not to import, matching summarize_classpath_signature's own branching.
     """
     normalized = classpath.strip()
     if not normalized:
         return False  # let summarize_classpath_signature raise its own ValueError in-process
     if normalized.endswith(".yml") or normalized.startswith("default|"):
         return False
-    # Local 'File:Class' == exactly one colon and a single-token module with no dot whose workspace '.py'
-    # exists (mirrors _parse_classpath + local_candidate). 'torch:nn:L1Loss' has two colons -> module
-    # 'torch.nn' -> imports; a missing '<File>.py' means it is not local -> import to read the signature.
+    # Local 'File:Class' == exactly one colon and a single-token module with no dot (mirrors
+    # _parse_classpath + local_candidate). 'torch:nn:L1Loss' has two colons -> module 'torch.nn' -> imports.
     colon_parts = [part for part in normalized.split(":") if part]
-    if len(colon_parts) == 2 and "." not in colon_parts[0] and (workspace_dir / f"{colon_parts[0]}.py").exists():
+    if len(colon_parts) == 2 and "." not in colon_parts[0]:
         return False
     return True
 
@@ -1213,7 +1210,7 @@ def inspect_object_signature(
 ) -> dict[str, Any]:
     """Inspect one configurable object classpath and return signature details when possible."""
     workspace_dir = WORKSPACE_LAYOUT.workspace_dir()
-    if _classpath_requires_import(classpath, workspace_dir):
+    if _classpath_requires_import(classpath):
         # Reading an installed-library signature imports its module; run that in a spawn subprocess so a
         # heavy/slow/crashing/OOM import cannot take down the long-lived server (AGENTS.md: code that
         # imports/executes runs isolated). Static YAML-model and local File:Class classpaths never import,
