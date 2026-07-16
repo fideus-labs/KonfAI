@@ -482,3 +482,19 @@ def test_apply_config_keeps_config_path_during_constructor_call(write_config) ->
 
     assert child.value == 7
     assert child.config_path == "Root.Child"
+
+
+def test_a_block_type_outside_its_two_names_is_refused(tmp_path: Path, monkeypatch) -> None:
+    # `block_type` was a str tested only for "Conv": every other value, a typo included, built the
+    # residual model instead -- another architecture, another checkpoint, and nothing said so.
+    from konfai.models.python.segmentation.UNet import UNet
+    from konfai.utils.config import apply_config
+
+    config = tmp_path / "Config.yml"
+    config.write_text("M:\n  block_type: Cnov\n  channels: [1, 8, 16]\n  nb_class: 2\n")
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+
+    with pytest.raises(ConfigError) as error:
+        apply_config("M")(UNet)()
+    assert "'Conv', 'Res'" in str(error.value)

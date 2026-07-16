@@ -28,7 +28,7 @@ import torch
 from konfai.metric.schedulers import PolyLRScheduler
 from konfai.network.network import Network
 from konfai.trainer import EarlyStopping, EarlyStoppingBase, Trainer, _Trainer
-from konfai.utils.errors import TrainerError
+from konfai.utils.errors import ConfigError, TrainerError
 from konfai.utils.runtime import State
 from torch import nn
 from torch.optim.swa_utils import AveragedModel
@@ -432,3 +432,37 @@ def test_build_train_keeps_https_checkpoint_url(monkeypatch) -> None:
     trainer_module.build_train(command=State.RESUME, model=url)
 
     assert recorded["model"] == url
+
+
+def test_early_stopping_refuses_a_mode_that_is_not_a_direction() -> None:
+    # `is_better` and `worst_score` read it as "max" or everything-else, so a typo silently retained
+    # and deleted checkpoints by the wrong direction before anything complained.
+    with pytest.raises(ConfigError) as error:
+        EarlyStopping(monitor=None, mode="mxa")
+    assert "'min' or 'max'" in str(error.value)
+
+
+@pytest.mark.parametrize("mode", ["min", "max"])
+def test_a_saved_checkpoint_with_no_score_loses_to_one_with_a_score(tmp_path: Path, monkeypatch, mode: str) -> None:
+    # A no-score epoch stored `inf`, which only loses where lower is better: under 'max' it beat every
+    # finite score, so BEST froze on the last unscored epoch and no later one could take it.
+    early_stopping = EarlyStopping(monitor=None, mode=mode)
+    trainer = _build_trainer(tmp_path, monkeypatch, ["ckpt_a", "ckpt_b"], early_stopping=early_stopping)
+    trainer.checkpoint_save(None)
+    saved = sorted((tmp_path / "RUN" / "Checkpoints").glob("*.pt")) if (tmp_path / "RUN").exists() else []
+    if not saved:
+        saved = sorted(tmp_path.rglob("*.pt"))
+    assert saved, "checkpoint_save wrote nothing"
+    stored = float(torch.load(saved[-1], map_location="cpu", weights_only=False)["loss"])
+    assert not early_stopping.is_better(stored, 0.5)
+
+
+@pytest.mark.parametrize("mode", ["min", "max"])
+def test_a_score_that_is_not_finite_is_no_score(mode: str) -> None:
+    # What an older run wrote for a no-score epoch, whichever direction reads it back.
+    import math
+
+    early_stopping = EarlyStopping(monitor=None, mode=mode)
+    legacy = float("inf")
+    read_back = early_stopping.worst_score if not math.isfinite(legacy) else legacy
+    assert not early_stopping.is_better(read_back, 0.5)

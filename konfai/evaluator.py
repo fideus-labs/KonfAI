@@ -44,38 +44,27 @@ from konfai.utils.runtime import (
 from konfai.utils.utils import split_path_spec
 
 
-class CriterionsAttr:
-    """
-    Empty placeholder attribute object attached to each evaluation criterion.
-
-    Reserved for future extension (per-criterion weighting, conditional activation, logging
-    preferences); currently carries no attributes and nothing reads instances of it.
-    """
-
-    def __init__(self) -> None:
-        pass
-
-
 class CriterionsLoader:
     """
     Loader for multiple criterion modules to be applied between a model output and one or more targets.
 
     Each loss module (e.g., Dice, CrossEntropy, NCC) is dynamically loaded using its fully-qualified
-    classpath and is associated with a `CriterionsAttr` configuration object.
+    classpath. Evaluation criteria carry no per-criterion attributes, so the config value bound to each
+    classpath is an unused placeholder (``None``).
 
     Args:
-        criterions_loader (dict): A mapping from module classpaths (as strings) to `CriterionsAttr` instances.
+        criterions_loader (dict): A mapping from module classpaths (as strings) to placeholder values.
                                   The module path is parsed and instantiated via `get_module`.
 
     """
 
     def __init__(
         self,
-        criterions_loader: dict[str, CriterionsAttr] = {"default|torch:nn:CrossEntropyLoss|Dice|NCC": CriterionsAttr()},
+        criterions_loader: dict[str, Any] = {"default|torch:nn:CrossEntropyLoss|Dice|NCC": None},
     ) -> None:
         self.criterions_loader = criterions_loader
 
-    def get_criterions(self, output_group: str, target_group: str) -> dict[torch.nn.Module, CriterionsAttr]:
+    def get_criterions(self, output_group: str, target_group: str) -> dict[torch.nn.Module, Any]:
         return build_configured_criterions(
             self.criterions_loader,
             f"{konfai_root()}.metrics.{output_group}.targets_criterions.{target_group}",
@@ -101,7 +90,7 @@ class TargetCriterionsLoader:
     ) -> None:
         self.targets_criterions = targets_criterions
 
-    def get_targets_criterions(self, output_group: str) -> dict[str, dict[torch.nn.Module, CriterionsAttr]]:
+    def get_targets_criterions(self, output_group: str) -> dict[str, dict[torch.nn.Module, Any]]:
         """
         Retrieve the criterion modules and their attributes for a specific output group.
 
@@ -112,8 +101,8 @@ class TargetCriterionsLoader:
             output_group (str): Name of the model output group (e.g., "output_segmentation").
 
         Returns:
-            dict[str, dict[nn.Module, CriterionsAttr]]: A nested dictionary where the first key is the
-            target group name, and the value is a dictionary mapping each loss module to its attributes.
+            dict[str, dict[nn.Module, Any]]: A nested dictionary where the first key is the
+            target group name, and the value is a dictionary mapping each loss module to its placeholder.
         """
         targets_criterions = {}
         for target_group, criterions_loader in self.targets_criterions.items():
@@ -498,7 +487,7 @@ class Evaluator(DistributedObject):
 
             def description(measure):
                 return (
-                    f"Metric VALIDATION : {' | '.join(f'{k}: {v:.2f}' for k, v in measure.items())}"
+                    f"Metric VALIDATION : {' | '.join(f'{k}: {v:.4f}' for k, v in measure.items())}"
                     if measure is not None
                     else "Metric VALIDATION : "
                 )

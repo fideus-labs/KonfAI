@@ -89,7 +89,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
             help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
         )
 
-        def non_negative_int(value: str) -> int:
+        def positive_int(value: str) -> int:
             ivalue = int(value)
             if ivalue <= 0:
                 raise argparse.ArgumentTypeError("CPU value must be > 0")
@@ -97,7 +97,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
 
         device_group.add_argument(
             "--cpu",
-            type=non_negative_int,
+            type=positive_int,
             default=None,
             help="Run on CPU using N worker processes/cores. If omitted, uses GPU when available.",
         )

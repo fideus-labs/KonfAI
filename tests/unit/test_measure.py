@@ -262,8 +262,12 @@ class TestImpactRegPCA:
 
     def test_transform_centres_by_own_channel_mean(self):
         core = self._core(2)
+        torch.manual_seed(0)
         basis = torch.linalg.qr(torch.randn(6, 2))[0]
-        const = torch.ones(1, 6, 3, 3, 3) * 7.0  # per-channel constant -> centres to 0 -> projects to 0
+        # Distinct per-channel constants: each channel is spatially flat, so per-CHANNEL mean-centring zeros
+        # it -> projects to 0. A global/cross-channel mean would leave the per-channel offsets and project to
+        # a non-zero value (~0.79 here), so this input discriminates the correct centring from that bug.
+        const = torch.arange(1.0, 7.0).reshape(1, 6, 1, 1, 1).expand(1, 6, 3, 3, 3).contiguous()
         out = core._pca_transform(const, basis)
         assert torch.allclose(out, torch.zeros_like(out), atol=1e-5)
 
