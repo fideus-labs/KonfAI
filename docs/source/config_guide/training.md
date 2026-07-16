@@ -128,7 +128,7 @@ Common fields:
 | `augmentations` | mapping or null | one default augmentation list | Data augmentations sampled during training. |
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
-| `use_cache` | bool | `true` | Holds the whole prepared dataset in RAM. `false` reads patches from disk instead. |
+| `use_cache` | bool | `true` | Holds the whole prepared dataset in RAM. `false` opens the stream/buffer path: a streamable chain reads each patch from disk, and any other loads whole cases into a bounded FIFO. |
 | `memory_budget` | number / string / null | `null` | RAM budget from which `use_cache` is derived. `null` keeps `use_cache` as given. |
 | `subset` | object | `TrainSubset()` | Restricts which cases are used. |
 | `batch_size` | int | `1` | Batch size. |

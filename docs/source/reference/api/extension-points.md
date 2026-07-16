@@ -185,9 +185,11 @@ stored volume's statistics. `[Canonical(), Normalize()]` streams.
 `[Clip(-200., 400.), Normalize()]` falls back, because the clip moves the
 statistics the normalise would then read.
 
-One built-in overrides it: `TensorCast` declares
-`POINTWISE, preserves_statistics=self.dtype.is_floating_point`. A cast to a float
-dtype maps no value, so a later `Standardize` may still seed from disk.
+One built-in overrides it: `TensorCast` declares `POINTWISE` and preserves the
+statistics only for a target that holds every value a volume is read as —
+`float32` and `float64`. A later `Standardize` may then still seed from disk. A
+half cast is not one of them: `float16` runs out of mantissa at 2048, where a CT
+reaches 3000.
 
 Declaring `preserves_statistics=True` on a transform that is not a bijection is a
 silent-correctness bug, not an error. Nothing validates the claim against what
