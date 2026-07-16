@@ -1230,8 +1230,9 @@ class Dataset:
                     if any(child.suffix.lower() in (".dcm", ".dicom") for child in files):
                         return "dicom"
                     # A DICOM series is commonly exported with no extension at all, so the suffixes
-                    # above miss it; the Part-10 magic at offset 128 is what identifies it then.
-                    if files and Dataset._is_dicom_file(files[0]):
+                    # above miss it; the Part-10 magic at offset 128 is what identifies it then. A
+                    # non-DICOM file may sort first, so probe every file, not only files[0].
+                    if any(Dataset._is_dicom_file(file) for file in files):
                         return "dicom"
             return None  # first case is representative of the whole dataset's layout
         return None

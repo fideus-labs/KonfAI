@@ -304,8 +304,13 @@ class JobRegistry:
         # a sibling temp file (hidden, so it is not matched by the "*/job.json" recovery glob) and rename
         # it into place; a reader only ever sees the whole old or the whole new file.
         tmp_path = state_path.with_name(f".{state_path.name}.{uuid.uuid4().hex}.tmp")
-        tmp_path.write_text(json.dumps(self._job_to_dict(job), indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp_path, state_path)
+        try:
+            tmp_path.write_text(json.dumps(self._job_to_dict(job), indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp_path, state_path)
+        finally:
+            # A failed write/replace must not leak the hidden temp file (it would accumulate every retry);
+            # unlink is a no-op after a successful os.replace, which already consumed tmp_path.
+            tmp_path.unlink(missing_ok=True)
 
     def _persist_manifest(
         self, job: Job, *, config_snapshots: dict[str, str], extra_manifest: dict[str, object] | None

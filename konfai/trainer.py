@@ -445,12 +445,13 @@ class _Trainer:
             save_path = path / f"{date}_{collision}.pt"
             collision += 1
 
+        # An unscored checkpoint (the final save at close) carries the worst possible score so
+        # `_update_best_checkpoint` retires it in BEST mode instead of leaving it beside the real best.
+        checkpoint_loss = loss if loss is not None else self.early_stopping.worst_score
         save_dict = {
             "epoch": self.epoch,
             "it": self.it,
-            # A checkpoint with no score must lose to every scored one. `inf` only loses when lower
-            # is better: under 'max' it beat everything, and BEST froze on the last unscored epoch.
-            "loss": loss if loss is not None else self.early_stopping.worst_score,
+            "loss": checkpoint_loss,
             "Model": self.model.module.state_dict(),
         }
 
@@ -482,8 +483,8 @@ class _Trainer:
 
         torch.save(save_dict, save_path)
 
-        if self.save_checkpoint_mode == "BEST" and loss is not None:
-            self._update_best_checkpoint(save_path, loss)
+        if self.save_checkpoint_mode == "BEST":
+            self._update_best_checkpoint(save_path, checkpoint_loss)
 
     @torch.no_grad()
     def _log(

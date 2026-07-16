@@ -176,13 +176,18 @@ def _normalize_distribution_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _select_distribution(top: str, distributions: list[str]) -> str:
+def _select_distribution(top: str, distributions: list[str], full: str | None = None) -> str:
     """Pick the distribution that actually provides top-level import ``top``.
 
     ``packages_distributions()`` maps one import name to EVERY distribution that ships it, and a
     namespace package (``itk``, ``google``) spans several wheels -- taking the first would report a
     sibling wheel's version/license. Prefer a distribution whose normalized name matches the import
     name; otherwise pick the one whose files include the module's own ``origin`` path.
+
+    ``full`` is the pointed module path (``google.cloud.storage`` for ``google.cloud.storage:Class``).
+    A pure namespace root has no ``origin`` of its own, so when ``top`` resolves to nothing we fall back
+    to the pointed submodule's origin. ``find_spec`` on a dotted name imports only the lightweight
+    namespace parents, never the heavy target module, so the no-import contract still holds.
     """
     if not distributions:
         return top
@@ -196,6 +201,11 @@ def _select_distribution(top: str, distributions: list[str]) -> str:
         origin = getattr(_util.find_spec(top), "origin", None)
     except (ImportError, ModuleNotFoundError, ValueError):
         origin = None
+    if origin is None and full is not None and full != top:
+        try:
+            origin = getattr(_util.find_spec(full), "origin", None)
+        except (ImportError, ModuleNotFoundError, ValueError):
+            origin = None
     if origin:
         origin_path = Path(origin).resolve()
         for candidate in distributions:
@@ -234,7 +244,8 @@ def check_external_dependency(module: str, object_name: str | None = None) -> di
     cleaned = module.strip()
     if not cleaned:
         raise ValueError("module must not be empty.")
-    top = cleaned.split(":", 1)[0].split(".", 1)[0]
+    full = cleaned.split(":", 1)[0]
+    top = full.split(".", 1)[0]
 
     try:
         installed = _util.find_spec(top) is not None
@@ -244,7 +255,7 @@ def check_external_dependency(module: str, object_name: str | None = None) -> di
     version = license_name = distribution = None
     if installed:
         distributions = _metadata.packages_distributions().get(top, [])
-        distribution = _select_distribution(top, distributions)
+        distribution = _select_distribution(top, distributions, full)
         try:
             meta = _metadata.metadata(distribution)
             version = meta.get("Version")

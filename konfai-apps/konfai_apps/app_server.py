@@ -114,6 +114,7 @@ app = FastAPI(lifespan=lifespan)
 
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # 2GB
 MAX_TOTAL_BYTES = 6 * 1024 * 1024 * 1024  # 6GB
+MAX_ARCHIVE_MEMBERS = 1_000_000
 
 _T = TypeVar("_T")
 
@@ -274,7 +275,10 @@ def extract_zip_safely(upload: UploadFile, dest: Path) -> Path:
 
         try:
             with zipfile.ZipFile(archive_path) as zf:
-                for member in zf.namelist():
+                members = zf.namelist()
+                if len(members) > MAX_ARCHIVE_MEMBERS:
+                    raise HTTPException(400, "Archive contains too many members")
+                for member in members:
                     target = (dest / member).resolve()
                     if target != dest and dest not in target.parents:
                         raise HTTPException(400, f"Unsafe path in archive: {member}")
@@ -298,7 +302,10 @@ def _extract_zip_bounded(archive_path: Path, dest: Path, max_file_bytes: int, ma
     dest = dest.resolve()
     extracted = 0
     with zipfile.ZipFile(archive_path) as zf:
-        for info in zf.infolist():
+        infos = zf.infolist()
+        if len(infos) > MAX_ARCHIVE_MEMBERS:
+            raise HTTPException(400, "Archive contains too many members")
+        for info in infos:
             target = (dest / info.filename).resolve()
             if target != dest and dest not in target.parents:
                 raise HTTPException(400, f"Unsafe path in archive: {info.filename}")

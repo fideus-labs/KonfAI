@@ -27,6 +27,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from queue import Empty
 from typing import Any
+from uuid import uuid4
 
 from konfai.evaluator import build_evaluate
 from konfai.predictor import build_predict
@@ -752,7 +753,15 @@ def validate_workflow_api(
             # Restore the authored config so validation never mutates the file it validated.
             if config_backup is not None:
                 try:
-                    config_path.write_text(config_backup, encoding="utf-8")
+                    # Atomic restore: an OSError mid-write must not truncate the author's config. Write a
+                    # sibling temp file and rename it into place (mirrors server_jobs._persist_job).
+                    tmp = config_path.with_name(f".{config_path.name}.{uuid4().hex}.tmp")
+                    try:
+                        tmp.write_text(config_backup, encoding="utf-8")
+                        os.replace(tmp, config_path)
+                    except OSError:
+                        tmp.unlink(missing_ok=True)
+                        raise
                 except OSError as restore_exc:
                     # The side-effect-free invariant is broken: KonfAI already rewrote the config with all
                     # defaults materialised and the author's bytes could not be put back. Never swallow

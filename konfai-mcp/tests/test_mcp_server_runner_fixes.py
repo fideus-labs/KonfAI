@@ -38,9 +38,7 @@ def test_run_api_in_subprocess_reaps_child_wedged_after_result() -> None:
     # A child that produced its result but will not exit must not hang the caller forever: the final
     # join is bounded and escalates to terminate/kill. Without the fix the unbounded join hangs here.
     start = time.monotonic()
-    payload = runner.run_api_in_subprocess(
-        "_runner_wedge_target:wedge_after_result", {"value": 7}, timeout_s=0
-    )
+    payload = runner.run_api_in_subprocess("_runner_wedge_target:wedge_after_result", {"value": 7}, timeout_s=0)
     elapsed = time.monotonic() - start
     assert payload == {"echoed": 7}
     # join(10) grace + terminate; must return well within the unbounded-hang regime.
@@ -56,15 +54,11 @@ def test_validate_config_restore_failure_is_surfaced(tmp_path: Path, monkeypatch
     # Reach the success payload without a real dataset/model.
     monkeypatch.setattr(runner, "build_train", lambda **_kwargs: object())
 
-    # Make ONLY the finally-block restore write fail (the write on the config path).
-    real_write_text = Path.write_text
+    # The restore writes a temp file and os.replace()s it onto the config; fail that commit step.
+    def failing_replace(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("read-only filesystem")
 
-    def failing_write_text(self: Path, *args: Any, **kwargs: Any) -> int:
-        if self.resolve() == config_path.resolve():
-            raise OSError("read-only filesystem")
-        return real_write_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing_write_text)
+    monkeypatch.setattr(runner.os, "replace", failing_replace)
 
     with pytest.warns(UserWarning, match="Failed to restore"):
         payload = runner.validate_workflow_api(

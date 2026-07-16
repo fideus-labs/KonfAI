@@ -817,7 +817,7 @@ class KonfAIApp(AbstractKonfAIApp):
         # A DICOM series is commonly exported with no extension at all, so the suffixes above miss it;
         # the Part-10 magic (``DICM`` at offset 128) in the first file is what identifies it then.
         files = [entry for entry in entries if entry.is_file()]
-        if files and KonfAIApp._is_dicom_file(files[0]):
+        if any(KonfAIApp._is_dicom_file(file) for file in files):
             return ""
         return None
 
@@ -865,7 +865,13 @@ class KonfAIApp(AbstractKonfAIApp):
                 if real in visited:
                     return
                 visited.add(real)
-                for child in sorted(path.iterdir(), key=lambda entry: entry.name):
+                # A cyclic symlink raises OSError (ELOOP) at iterdir() itself, before the resolve()/visited
+                # guard above can see the child -- skip the unreadable entry instead of aborting staging.
+                try:
+                    children = sorted(path.iterdir(), key=lambda entry: entry.name)
+                except OSError:
+                    return
+                for child in children:
                     walk(child)
 
         for path in paths:
@@ -1462,9 +1468,16 @@ class KonfAIApp(AbstractKonfAIApp):
             output_dir = Path(output).resolve()
             if Path.cwd().resolve() != output_dir:
                 output_dir.mkdir(parents=True, exist_ok=True)
-                for artifact in Path(".").iterdir():
-                    if artifact.is_file():
-                        shutil.copy2(artifact, output_dir / artifact.name)
+                # Walk the whole bundle so nested assets survive (a subpackaged .yml/.py, requirements.txt,
+                # app.json, and the fine-tuned .pt) -- a root-only iterdir silently drops everything nested.
+                # The ./Dataset symlink is the user's input, not a bundle asset, so it is excluded.
+                skip = {"Dataset"}
+                for artifact in Path(".").rglob("*"):
+                    if not artifact.is_file() or "__pycache__" in artifact.parts or skip.intersection(artifact.parts):
+                        continue
+                    dst = output_dir / artifact.relative_to(".")
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(artifact, dst)
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
             dataset_link = Path("./Dataset")

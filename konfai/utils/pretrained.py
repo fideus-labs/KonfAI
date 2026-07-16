@@ -56,7 +56,12 @@ def _parametric_leaves_in_execution_order(model: torch.nn.Module, run: Callable[
     handles = []
     for module in model.modules():
         is_leaf = next(module.children(), None) is None
-        if is_leaf and next(module.parameters(recurse=False), None) is not None:
+        # A leaf may own only buffers (a non-affine BatchNorm/InstanceNorm with running stats), whose
+        # tensors _untraced_tensors would otherwise flag as uncovered and wrongly refuse the transfer.
+        if is_leaf and (
+            next(module.parameters(recurse=False), None) is not None
+            or next(module.buffers(recurse=False), None) is not None
+        ):
             handles.append(module.register_forward_hook(hook))
     # Snapshot per-module modes: model.train(root_mode) would force every descendant into the
     # root's mode and lose frozen/eval-only submodules.
