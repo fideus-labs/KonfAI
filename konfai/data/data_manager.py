@@ -363,8 +363,21 @@ class WindowedCaseSampler(Sampler[int]):
         self.window = window if window is not None and 0 < window < n_cases and self.num_workers <= n_cases else None
 
     def _partitions(self) -> list[list[int]]:
-        cases = list(self.case_entries)
-        return [cases[worker :: self.num_workers] for worker in range(self.num_workers)]
+        """The cases each worker walks, balanced by the patches they hold.
+
+        A worker is handed whole cases, because a case is what its buffer keeps resident. Handing out
+        an equal COUNT of them leaves the patch counts as uneven as the cases are, and it is patches
+        that are walked: the workers then run out at different times, and the batches of whoever is
+        left shift onto the workers that finished -- a case landing on two of them, each reading the
+        volume. Give the next case to whoever holds the fewest patches so far, largest first.
+        """
+        loads = [0] * self.num_workers
+        partitions: list[list[int]] = [[] for _ in range(self.num_workers)]
+        for case in sorted(self.case_entries, key=lambda case: -len(self.case_entries[case])):
+            worker = min(range(self.num_workers), key=lambda worker: loads[worker])
+            partitions[worker].append(case)
+            loads[worker] += len(self.case_entries[case])
+        return partitions
 
     def _windowed_order(self) -> list[int]:
         generator = torch.Generator().manual_seed(int(torch.randint(0, 2**31 - 1, (1,)).item()))
@@ -384,10 +397,19 @@ class WindowedCaseSampler(Sampler[int]):
             streams.append(stream)
 
         # Round-robin the workers a batch at a time, so batch j lands on worker j % num_workers and a
-        # window stays resident while its patches are walked. A worker holding fewer patches simply
-        # runs out first: an epoch is one pass over the mapping, so the order it is walked in is a
-        # permutation of it and nothing here may repeat an entry or drop one. Partitions are cut by
-        # case (`_partitions`), and cases differ in patch count, so the streams are uneven by nature.
+        # window stays resident while its patches are walked.
+        #
+        # Three things are wanted here and only two of them fit. An epoch must be one pass over the
+        # mapping; a worker must keep whole cases, since a case is what its buffer holds; and a case
+        # should stay on one worker, which needs every stream the same length. A case does not split,
+        # so streams of equal length are not something `_partitions` can always hand over -- one case
+        # of 200 patches beside ten of 2 is longer on its own than a quarter of the epoch.
+        #
+        # So a short stream runs out and the ones still going shift onto the workers that finished:
+        # a case lands on two of them and each reads its volume. The epoch stays exact and the reads
+        # go from 1.00x to about 1.17x on such a dataset -- against 8.83x with no window at all.
+        # Padding the streams instead buys the affinity back by walking 46% of that epoch twice and
+        # the rest not at all, which is not a trade to make.
         batch = self.batch_size
         order: list[int] = []
         for start in range(0, max((len(stream) for stream in streams), default=0), batch):
