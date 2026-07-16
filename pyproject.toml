@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "konfai"
 dynamic = ["version"]
-description = "A Modular and configurable Deep Learning framework with YAML and PyTorch"
+description = "A declarative execution engine for reproducible medical-imaging workflows"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [
   { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
 ]
 
-keywords = ["deep learning", "medical imaging", "YAML", "configuration", "PyTorch", "reproducibility"]
+keywords = ["deep learning", "medical imaging", "workflow", "streaming", "YAML", "PyTorch", "reproducibility"]
 
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -141,7 +141,7 @@ pip = "*"
 default = { solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
 lint = { features = ["lint"], no-default-feature = true, solve-group = "default" }
-docs = { features = ["docs"], no-default-feature = true, solve-group = "default" }
+docs = { features = ["default", "docs"], solve-group = "default" }
 
 # ---------------------------------------------------------------------------
 # Feature: dev

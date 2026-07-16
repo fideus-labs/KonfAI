@@ -9,18 +9,17 @@ KonfAI
      <section class="kf-hero">
        <div class="kf-hero-grid">
          <div>
-           <p class="kf-eyebrow">YAML-driven deep learning &middot; medical imaging &middot; PyTorch</p>
-           <h2 class="kf-title" style="border:0; padding:0;">The config <em>is</em> the experiment.</h2>
+           <p class="kf-eyebrow">Scale &middot; reproduce &middot; ship and automate</p>
+           <h2 class="kf-title" style="border:0; padding:0;">From medical-image storage to a reusable application.</h2>
            <p class="kf-lede">
-             Describe the whole pipeline &mdash; data, model, losses, metrics, augmentations, and the
-             train&nbsp;/&nbsp;predict&nbsp;/&nbsp;evaluate workflow &mdash; in configuration, not orchestration
-             scripts. KonfAI builds Python objects from that YAML by reflection, and writes the
-             fully-resolved config back to disk. Reproducible, inspectable, shareable.
+             KonfAI is a declarative medical-imaging execution engine. It connects regional data access,
+             patch execution, inspectable PyTorch graphs, training, prediction, evaluation, and medical-image
+             outputs through one reproducible workflow &mdash; then packages it for people, services, or agents.
            </p>
            <div class="kf-cta">
-             <a class="kf-btn kf-btn-primary" href="quickstart.html">Run it in 5 minutes &rarr;</a>
-             <a class="kf-btn kf-btn-ghost" href="#mental-model">See the mental model</a>
-             <a class="kf-btn kf-btn-ghost" href="https://github.com/vboussot/KonfAI">GitHub</a>
+             <a class="kf-btn kf-btn-primary" href="quickstart.html">Run your first workflow &rarr;</a>
+             <a class="kf-btn kf-btn-ghost" href="examples/visual-gallery.html">See it on real data</a>
+             <a class="kf-btn kf-btn-ghost" href="https://github.com/fideus-labs/KonfAI">GitHub</a>
            </div>
            <div class="kf-herometa">
              <span><b>pip</b> install "konfai[imaging]"</span>
@@ -50,6 +49,22 @@ KonfAI
            </div>
          </div>
        </div>
+     </section>
+
+     <!-- ================== PROOF STRIP ===================== -->
+     <section class="kf-proofstrip" aria-label="Real medical-imaging results">
+       <a class="kf-proofcard" href="examples/visual-gallery.html">
+         <img src="_static/apps/impact-synth/totalsegmentator.png" alt="Whole-body CT segmentation overlay">
+         <span><b>Whole-body segmentation</b>CT structures, from a packaged model</span>
+       </a>
+       <a class="kf-proofcard" href="examples/visual-gallery.html">
+         <img src="_static/apps/impact-synth/synthetic-ct.png" alt="MR-to-synthetic-CT result">
+         <span><b>MR &rarr; synthetic CT</b>continuous Hounsfield output</span>
+       </a>
+       <a class="kf-proofcard" href="usage/large-images.html">
+         <img src="_static/gallery/scale-omezarr.webp" alt="Streaming patches from an OME-Zarr store">
+         <span><b>Scale from storage, not RAM</b>stream patches from OME-Zarr</span>
+       </a>
      </section>
 
      <!-- ================== MENTAL MODEL ==================== -->
@@ -110,8 +125,8 @@ KonfAI
          <div class="kf-pillar kf-h-steel">
            <span class="tag">Imaging</span>
            <h3>Lazy, patch-based</h3>
-           <p>Volumes are never loaded whole. Data is read as overlapping patches and predictions
-              are reassembled with overlap blending &mdash; large 3D scans on modest hardware.</p>
+           <p>Compatible chains stream only the source region required by each patch; other chains
+              use a bounded case buffer. Predictions are reassembled with overlap blending.</p>
          </div>
          <div class="kf-pillar kf-h-violet">
            <span class="tag">Models</span>
@@ -143,6 +158,18 @@ KonfAI
            <p>How YAML becomes Python objects, classpaths, named module outputs, and the
               rewrite-on-read behaviour.</p>
            <span class="go">Core concepts &rarr;</span>
+         </a>
+         <a class="kf-nextcard kf-h-steel" href="usage/large-images.html">
+           <span class="intent">Scale</span>
+           <h3>Process large images</h3>
+           <p>Choose cache, bounded buffering, or direct regional reads and understand exactly when streaming falls back.</p>
+           <span class="go">Large-image guide &rarr;</span>
+         </a>
+         <a class="kf-nextcard kf-h-teal" href="usage/adopting-konfai.html">
+           <span class="intent">Reuse</span>
+           <h3>Bring PyTorch or MONAI</h3>
+           <p>Adopt gradually, reuse existing components and weights, and choose fairly between KonfAI and neighbouring tools.</p>
+           <span class="go">Adoption guide &rarr;</span>
          </a>
          <a class="kf-nextcard kf-h-coral" href="usage/apps.html">
            <span class="intent">Ship</span>
@@ -179,7 +206,7 @@ KonfAI
        </div>
 
        <div class="kf-proof">
-         <span class="label">Proven at MICCAI</span>
+         <span class="label">Top-ranking at recent MICCAI challenges</span>
          <div class="chips">
            <span class="chip kf-h-teal"><b>SynthRAD</b></span>
            <span class="chip kf-h-steel"><b>TrackRAD</b></span>
@@ -202,6 +229,20 @@ KonfAI
 
 .. toctree::
    :maxdepth: 2
+   :caption: Tutorials
+   :hidden:
+
+   examples/index
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Task-oriented guides
+   :hidden:
+
+   usage/index
+
+.. toctree::
+   :maxdepth: 2
    :caption: Core concepts
    :hidden:
 
@@ -210,10 +251,12 @@ KonfAI
 
 .. toctree::
    :maxdepth: 2
-   :caption: Guides
+   :caption: Apps and automation
    :hidden:
 
-   usage/index
+   usage/apps
+   usage/mcp
+   ecosystem/index
 
 .. toctree::
    :maxdepth: 2
@@ -227,7 +270,5 @@ KonfAI
    :caption: Project
    :hidden:
 
-   examples/index
-   ecosystem/index
    troubleshooting
    development

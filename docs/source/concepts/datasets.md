@@ -58,13 +58,19 @@ extras, API details) lives in {doc}`../reference/components/storage-backends`.
 | `konfai/data/augmentation.py` | `DataAugmentationsList` — on-the-fly augmentation |
 | `konfai/data/patching.py` | `DatasetPatch` — patch extraction and reassembly |
 
-### Never load a full volume into RAM
+### Patch-native execution from storage
 
-The central rule of the data layer is that a full volume is **never** loaded into
-memory just to feed the model. The DICOM and OME-Zarr readers expose
-slice-/patch-level entry points (an OME-Zarr array is already chunked and lazy),
-and `DatasetPatch` crops large volumes before they reach the network. Always
-reach for lazy or patch-based access; see **When to use dataset patching** below.
+KonfAI's data engine plans work around patches rather than assuming an entire
+case is the unit of execution. DICOM, OME-Zarr, HDF5, and supported SimpleITK
+paths expose regional entry points, allowing a compatible pipeline to read the
+source window needed for the current patch.
+
+When a transform cannot preserve this regional contract, KonfAI keeps the same
+workflow and selects a bounded full-volume buffer instead of producing an
+incorrect patch. This fallback is a safety property; it does not change the
+patch-native interface seen by training or prediction. See
+{doc}`../usage/large-images` for operational tuning and {doc}`streaming` for
+the spatial-planner rules.
 
 ### The `Attribute` class
 
@@ -202,4 +208,5 @@ network itself. See {doc}`model-graph`.
 
 - {doc}`model-graph` — to attach losses and metrics that target these groups
 - {doc}`../reference/components/storage-backends` — format tokens, optional extras, and the DICOM / OME-Zarr APIs
+- {doc}`../usage/large-images` — regional execution, bounded fallback, and tuning
 - {doc}`../config_guide/training` — the `Dataset` keys in the context of a full training config

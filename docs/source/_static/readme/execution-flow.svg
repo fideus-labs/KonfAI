@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
+  <title id="title">KonfAI end-to-end execution flow</title>
+  <desc id="desc">Medical images are read regionally, processed by the patch-native KonfAI engine, and delivered as medical datasets, applications, services, Slicer workflows, or agent-operated experiments.</desc>
+  <defs>
+    <linearGradient id="engineFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123a34"/>
+      <stop offset="1" stop-color="#192f3c"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3fdcc3"/>
+    </marker>
+    <filter id="shadow" x="-12%" y="-12%" width="124%" height="132%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000000" flood-opacity=".34"/>
+    </filter>
+    <style>
+      :root { background: #14171a; color-scheme: only dark; }
+      .canvas { fill: #14171a; }
+      .surface { fill: #1d2426; stroke: #354348; }
+      .engine { fill: url(#engineFill); stroke: #39786e; }
+      .divider { stroke: #354348; }
+      .rail { stroke: #39786e; }
+      .stage { fill: #63e2ce; font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 1.8px; }
+      .heading { fill: #f0f5f4; font: 700 22px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .body { fill: #d6e0de; font: 600 16px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .small { fill: #b0bfbc; font: 500 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .micro { fill: #91a39f; font: 600 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .3px; }
+      .pill, .node { fill: #252e31; stroke: #425358; }
+      .pillText { fill: #d6e0de; font: 650 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .workflow { fill: #3fdcc3; }
+      .workflowText { fill: #092b25; font: 750 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .5px; }
+      .nodeIndex { fill: #63e2ce; font: 750 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .arrowPath { fill: none; stroke: #3fdcc3; stroke-width: 3; stroke-linecap: round; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect class="canvas" width="1200" height="500"/>
+
+  <text class="stage" x="20" y="29">01 · INGEST</text>
+  <text class="stage" x="400" y="29">02 · EXECUTE</text>
+  <text class="stage" x="880" y="29">03 · DELIVER</text>
+
+  <rect class="surface" x="12" y="48" width="310" height="402" rx="24" filter="url(#shadow)"/>
+  <g transform="translate(36 76)">
+    <g aria-hidden="true">
+      <ellipse cx="24" cy="9" rx="20" ry="8" fill="#3fdcc3" opacity=".24"/>
+      <path d="M4 9v35c0 4 9 8 20 8s20-4 20-8V9" fill="none" stroke="#3fdcc3" stroke-width="3"/>
+      <path d="M4 26c0 4 9 8 20 8s20-4 20-8" fill="none" stroke="#3fdcc3" stroke-width="3"/>
+    </g>
+    <text class="heading" x="64" y="18">Medical data</text>
+    <text class="small" x="64" y="42">on disk, with geometry intact</text>
+  </g>
+
+  <g transform="translate(36 155)">
+    <rect class="pill" x="0" y="0" width="112" height="42" rx="12"/>
+    <text class="pillText" x="56" y="26" text-anchor="middle">DICOM</text>
+    <rect class="pill" x="126" y="0" width="112" height="42" rx="12"/>
+    <text class="pillText" x="182" y="26" text-anchor="middle">ITK</text>
+    <rect class="pill" x="0" y="54" width="112" height="42" rx="12"/>
+    <text class="pillText" x="56" y="80" text-anchor="middle">HDF5</text>
+    <rect class="pill" x="126" y="54" width="112" height="42" rx="12"/>
+    <text class="pillText" x="182" y="80" text-anchor="middle">OME-Zarr</text>
+  </g>
+
+  <line class="divider" x1="36" y1="279" x2="298" y2="279"/>
+  <g transform="translate(36 304)">
+    <circle cx="12" cy="11" r="10" fill="#3fdcc3" opacity=".17"/>
+    <path d="M8 11l3 3 6-7" fill="none" stroke="#3fdcc3" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="body" x="32" y="16">Exact regional reads</text>
+    <text class="small" x="32" y="40">when the transform chain streams</text>
+  </g>
+  <g transform="translate(36 367)">
+    <circle cx="12" cy="11" r="10" fill="#8fc9ec" opacity=".17"/>
+    <path d="M7 11h10M12 6v10" stroke="#8fc9ec" stroke-width="2.2" stroke-linecap="round"/>
+    <text class="body" x="32" y="16">Bounded fallback</text>
+    <text class="small" x="32" y="40">when full context is required</text>
+  </g>
+
+  <path class="arrowPath" d="M338 249 C355 249 365 249 382 249"/>
+
+  <rect class="engine" x="400" y="48" width="400" height="402" rx="24" filter="url(#shadow)"/>
+  <text class="heading" x="430" y="86">Patch-native execution engine</text>
+  <text class="small" x="430" y="110">Transforms drive reads, patches, and reconstruction.</text>
+  <line class="rail" x1="455" y1="145" x2="455" y2="325" stroke-width="3" stroke-linecap="round"/>
+  <g transform="translate(430 132)">
+    <rect class="node" x="0" y="0" width="340" height="52" rx="14"/>
+    <circle cx="25" cy="26" r="14" fill="#3fdcc3" opacity=".16"/>
+    <text class="nodeIndex" x="25" y="31" text-anchor="middle">1</text>
+    <text class="body" x="52" y="24">Transforms declare spatial needs</text>
+    <text class="micro" x="52" y="42">exact · halo · remap · resample · global</text>
+  </g>
+  <g transform="translate(430 197)">
+    <rect class="node" x="0" y="0" width="340" height="52" rx="14"/>
+    <circle cx="25" cy="26" r="14" fill="#3fdcc3" opacity=".16"/>
+    <text class="nodeIndex" x="25" y="31" text-anchor="middle">2</text>
+    <text class="body" x="52" y="24">Planner traces the exact source region</text>
+    <text class="micro" x="52" y="42">storage → preprocessing → dataset patch</text>
+  </g>
+  <g transform="translate(430 262)">
+    <rect class="node" x="0" y="0" width="340" height="52" rx="14"/>
+    <circle cx="25" cy="26" r="14" fill="#8fc9ec" opacity=".16"/>
+    <text class="nodeIndex" x="25" y="31" text-anchor="middle">3</text>
+    <text class="body" x="52" y="24">Named PyTorch graph runs on patches</text>
+    <text class="micro" x="52" y="42">intermediate losses · model patching · routing</text>
+  </g>
+  <g transform="translate(430 327)">
+    <rect class="node" x="0" y="0" width="340" height="52" rx="14"/>
+    <circle cx="25" cy="26" r="14" fill="#b7a5f5" opacity=".16"/>
+    <text class="nodeIndex" x="25" y="31" text-anchor="middle">4</text>
+    <text class="body" x="52" y="24">Overlap-aware reconstruction</text>
+    <text class="micro" x="52" y="42">TTA · ensembles · inverse transforms · geometry</text>
+  </g>
+  <g transform="translate(430 397)">
+    <rect class="workflow" x="0" y="0" width="96" height="30" rx="15"/>
+    <text class="workflowText" x="48" y="20" text-anchor="middle">TRAIN</text>
+    <rect class="workflow" x="108" y="0" width="108" height="30" rx="15"/>
+    <text class="workflowText" x="162" y="20" text-anchor="middle">PREDICT</text>
+    <rect class="workflow" x="228" y="0" width="112" height="30" rx="15"/>
+    <text class="workflowText" x="284" y="20" text-anchor="middle">EVALUATE</text>
+  </g>
+
+  <path class="arrowPath" d="M818 249 C835 249 845 249 862 249"/>
+
+  <rect class="surface" x="880" y="48" width="308" height="402" rx="24" filter="url(#shadow)"/>
+  <g transform="translate(908 76)">
+    <rect x="0" y="0" width="48" height="48" rx="14" fill="#3fdcc3" opacity=".16"/>
+    <path d="M12 25l8 8 17-19" fill="none" stroke="#3fdcc3" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="heading" x="64" y="18">Ready to use</text>
+    <text class="small" x="64" y="42">without rebuilding the workflow</text>
+  </g>
+  <g transform="translate(908 151)">
+    <rect class="pill" x="0" y="0" width="252" height="48" rx="14"/>
+    <circle cx="24" cy="24" r="7" fill="#3fdcc3"/>
+    <text class="body" x="44" y="29">Medical-image datasets</text>
+    <rect class="pill" x="0" y="60" width="252" height="48" rx="14"/>
+    <circle cx="24" cy="84" r="7" fill="#8fc9ec"/>
+    <text class="body" x="44" y="89">Apps &amp; fine-tuning</text>
+    <rect class="pill" x="0" y="120" width="252" height="48" rx="14"/>
+    <circle cx="24" cy="144" r="7" fill="#b7a5f5"/>
+    <text class="body" x="44" y="149">HTTP &amp; 3D Slicer</text>
+    <rect class="pill" x="0" y="180" width="252" height="48" rx="14"/>
+    <circle cx="24" cy="204" r="7" fill="#f59c90"/>
+    <text class="body" x="44" y="209">MCP &amp; scientific agents</text>
+  </g>
+  <text class="micro" x="1034" y="416" text-anchor="middle">ONE RESOLVED, REPRODUCIBLE WORKFLOW</text>
+  <text class="small" x="600" y="487" text-anchor="middle">From storage to GPU to a clinically usable artifact — in one execution model.</text>
+</svg>
