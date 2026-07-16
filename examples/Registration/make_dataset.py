@@ -57,8 +57,8 @@ def _write(array: np.ndarray, path: Path) -> None:
 def _blobs(rng: np.random.Generator, n_blobs: int = 4) -> np.ndarray:
     """Build a smooth [0, 1] intensity image made of a few Gaussian blobs.
 
-    Blob centers stay away from the borders so that translating by ``KNOWN_SHIFT_YX``
-    only rolls background into view, keeping the translation cleanly recoverable.
+    Blob centers stay away from the borders so that shifting by ``KNOWN_SHIFT_YX``
+    only brings zero-filled background into view, keeping the translation cleanly recoverable.
     """
     height, width = SHAPE
     yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
@@ -83,8 +83,12 @@ def make_dataset(base: Path) -> Path:
     rng = np.random.default_rng(0)
     for i in range(N_CASES):
         fixed = _blobs(rng)
-        # MOVING is FIXED shifted by the known translation (axis 0 = Y, axis 1 = X).
-        moving = np.roll(fixed, shift=KNOWN_SHIFT_YX, axis=(0, 1))
+        # MOVING is FIXED shifted by the known (positive) translation (axis 0 = Y, axis 1 = X). A
+        # zero-filled shift (not np.roll, which would wrap the opposite edge in) keeps MOVING an exact
+        # translate of FIXED, so the advertised ground-truth shift is truly recoverable.
+        dy, dx = KNOWN_SHIFT_YX
+        moving = np.zeros_like(fixed)
+        moving[dy:, dx:] = fixed[:-dy, :-dx]
         case = base / f"CASE_{i:03d}"
         # Store as a single-slice volume [Z=1, Y, X] so the [1, 64, 64] patch covers it whole.
         _write(fixed[np.newaxis, ...], case / "FIXED.mha")

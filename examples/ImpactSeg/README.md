@@ -1,6 +1,6 @@
 # ImpactSeg Example
 
-Colab-ready demo for [`impact-seg-konfai`](https://github.com/vboussot/ImpactLoss) — multimodal / multi-organ **segmentation** via a
+Colab-ready demo for [`impact-seg-konfai`](https://github.com/vboussot/KonfAI) — multimodal / multi-organ **segmentation** via a
 published model on [`VBoussot/ImpactSeg`](https://huggingface.co/VBoussot/ImpactSeg), run through the KonfAI runtime.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vboussot/KonfAI/blob/main/examples/ImpactSeg/ImpactSeg_demo.ipynb)
