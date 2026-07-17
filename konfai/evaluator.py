@@ -357,7 +357,7 @@ class Evaluator(DistributedObject):
             dict[str, float]: Dictionary of computed metric values with keys in the format
                             'output_group:target_group:MetricName'.
         """
-        result = {}
+        result: dict[str, float] = {}
         for output_group in self.metrics:
             output_tensor = batch_sample[output_group].tensor
             metric_device = output_tensor.device
@@ -394,45 +394,56 @@ class Evaluator(DistributedObject):
                     if isinstance(loss, tuple):
                         true_loss = loss[1]
                         if len(loss) == 3:
-                            if metric.dataset:
-                                filename, _, file_format = split_path_spec(metric.dataset)
-                                map_dataset = Dataset(filename, file_format)
-                                group = metric.group if metric.group else output_group
-                                for dataset in self.dataset.datasets.values():
-                                    for g in dataset.get_group():
-                                        if dataset.is_dataset_exist(g, name):
-                                            _, cache_attribute = dataset.get_infos(g, name)
-                                            map_dataset.write(
-                                                group,
-                                                name,
-                                                loss[2].squeeze(0).numpy(),
-                                                cache_attribute,
-                                            )
-                                            break
+                            self._write_error_map(metric, loss[2], name, output_group)
                     else:
                         true_loss = loss.item()
 
                     direction = "max" if getattr(metric, "maximize", False) else "min"
-                    if isinstance(true_loss, dict):
-                        loss = 0
-                        c = 0
-                        for k, v in true_loss.items():
-                            component_key = f"{output_group}:{target_group}:{metric.get_name()}:{k}"
-                            result[component_key] = v
-                            statistics.directions[component_key] = direction
-                            if not np.isnan(v):
-                                loss += v
-                                c += 1
-                        base_key = f"{output_group}:{target_group}:{metric.get_name()}"
-                        result[base_key] = loss / c if c > 0 else np.nan
-                        statistics.directions[base_key] = direction
-                    else:
-                        base_key = f"{output_group}:{target_group}:{metric.get_name()}"
-                        result[base_key] = true_loss
-                        statistics.directions[base_key] = direction
+                    base_key = f"{output_group}:{target_group}:{metric.get_name()}"
+                    self._record_metric(result, statistics, base_key, true_loss, direction)
         if len(self.metrics) > 0:
             statistics.add(result, name)
         return result
+
+    def _write_error_map(self, metric: Any, error_map: torch.Tensor, name: str, output_group: str) -> None:
+        """Write a metric's per-voxel error map for ``name`` into its declared dataset, if it declares one."""
+        if not metric.dataset:
+            return
+        filename, _, file_format = split_path_spec(metric.dataset)
+        map_dataset = Dataset(filename, file_format)
+        group = metric.group if metric.group else output_group
+        for dataset in self.dataset.datasets.values():
+            for g in dataset.get_group():
+                if dataset.is_dataset_exist(g, name):
+                    _, cache_attribute = dataset.get_infos(g, name)
+                    map_dataset.write(group, name, error_map.squeeze(0).numpy(), cache_attribute)
+                    break
+
+    def _record_metric(
+        self,
+        result: dict[str, float],
+        statistics: Statistics,
+        base_key: str,
+        true_loss: float | dict[str, float],
+        direction: str,
+    ) -> None:
+        """Record one metric value under ``base_key``. A dict value records each component plus their
+        NaN-skipping mean under the base key; a scalar records straight through."""
+        if isinstance(true_loss, dict):
+            total = 0.0
+            count = 0
+            for k, v in true_loss.items():
+                component_key = f"{base_key}:{k}"
+                result[component_key] = v
+                statistics.directions[component_key] = direction
+                if not np.isnan(v):
+                    total += v
+                    count += 1
+            result[base_key] = total / count if count > 0 else np.nan
+            statistics.directions[base_key] = direction
+        else:
+            result[base_key] = true_loss
+            statistics.directions[base_key] = direction
 
     def run_process(self, world_size: int, global_rank: int, gpu: int, dataloaders: list[DataLoader]):
         """
@@ -457,60 +468,33 @@ class Evaluator(DistributedObject):
             - Only the main process (`global_rank == 0`) writes final results to disk.
         """
 
-        def description(measure):
-            return (
-                f"Metric TRAIN : {' | '.join(f'{k}: {v:.4f}' for k, v in measure.items())}"
-                if measure is not None
-                else "Metric TRAIN : "
-            )
+        self._run_split(dataloaders[0], self.statistics_train, "TRAIN", world_size, gpu, global_rank)
+        if len(dataloaders) == 2:
+            self._run_split(dataloaders[1], self.statistics_validation, "VALIDATION", world_size, gpu, global_rank)
+
+    def _run_split(
+        self,
+        loader: DataLoader,
+        statistics: Statistics,
+        label: str,
+        world_size: int,
+        gpu: int,
+        global_rank: int,
+    ) -> None:
+        """Evaluate one split over its loader, then synchronise across ranks and write the JSON on rank 0."""
+
+        def description(measure: dict[str, float] | None) -> str:
+            body = " | ".join(f"{k}: {v:.4f}" for k, v in measure.items()) if measure is not None else ""
+            return f"Metric {label} : {body}"
 
         with tqdm.tqdm(
-            iterable=enumerate(dataloaders[0]),
-            leave=True,
-            desc=description(None),
-            total=len(dataloaders[0]),
-            ncols=0,
+            iterable=enumerate(loader), leave=True, desc=description(None), total=len(loader), ncols=0
         ) as batch_iter:
             for _, batch_sample in batch_iter:
-                batch_iter.set_description(
-                    description(
-                        self.update(
-                            batch_sample,
-                            self.statistics_train,
-                        )
-                    )
-                )
-        outputs = synchronize_data(world_size, gpu, self.statistics_train.measures)
+                batch_iter.set_description(description(self.update(batch_sample, statistics)))
+        outputs = synchronize_data(world_size, gpu, statistics.measures)
         if global_rank == 0:
-            self.statistics_train.write(outputs)
-        if len(dataloaders) == 2:
-
-            def description(measure):
-                return (
-                    f"Metric VALIDATION : {' | '.join(f'{k}: {v:.4f}' for k, v in measure.items())}"
-                    if measure is not None
-                    else "Metric VALIDATION : "
-                )
-
-            with tqdm.tqdm(
-                iterable=enumerate(dataloaders[1]),
-                leave=True,
-                desc=description(None),
-                total=len(dataloaders[1]),
-                ncols=0,
-            ) as batch_iter:
-                for _, batch_sample in batch_iter:
-                    batch_iter.set_description(
-                        description(
-                            self.update(
-                                batch_sample,
-                                self.statistics_validation,
-                            )
-                        )
-                    )
-            outputs = synchronize_data(world_size, gpu, self.statistics_validation.measures)
-            if global_rank == 0:
-                self.statistics_validation.write(outputs)
+            statistics.write(outputs)
 
 
 def build_evaluate(
