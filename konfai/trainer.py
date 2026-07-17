@@ -57,6 +57,8 @@ from konfai.utils.runtime import (
     safe_torch_load,
     synchronize_data,
 )
+from konfai.utils.utils import concretize_patch_size
+from konfai.utils.vram import next_patch_candidate, usable_vram
 
 
 class EarlyStoppingBase:
@@ -656,6 +658,15 @@ class Trainer(DistributedObject):
         super().__init__(train_name)
         self.manual_seed = manual_seed
         self.dataset = dataset
+        # Auto-patching (VRAM): a per-axis 0 in the user's patch_size marks a FREE axis and opts into
+        # the OOM restart loop -- captured before any re-plan materialises concrete sizes over it.
+        patch = dataset.patch
+        self._vram_patch_template: list[int] | None = (
+            [int(size) for size in patch.patch_size]
+            if patch is not None and patch.patch_size is not None and any(size == 0 for size in patch.patch_size)
+            else None
+        )
+        self._vram_patch_candidate: list[int] | None = None
         self.autocast = autocast
         self.epochs = epochs
         self.epoch = 0
@@ -803,26 +814,93 @@ class Trainer(DistributedObject):
             model = Model(model)
         if self.model_ema is not None:
             self.model_ema.module = Network.to(self.model_ema.module, local_rank * self.size)
-        with _Trainer(
-            world_size,
-            global_rank,
-            local_rank,
-            self.size,
-            self.name,
-            self.early_stopping,
-            self.data_log,
-            self.save_checkpoint_mode,
-            self.epochs,
-            self.epoch,
-            self.autocast,
-            self.it_validation,
-            self.it_lr_update,
-            self.it,
-            model,
-            self.model_ema,
-            *dataloaders,
-        ) as t:
-            t.run()
+        device = local_rank * self.size if len(cuda_visible_devices()) else None
+        while True:
+            try:
+                with _Trainer(
+                    world_size,
+                    global_rank,
+                    local_rank,
+                    self.size,
+                    self.name,
+                    self.early_stopping,
+                    self.data_log,
+                    self.save_checkpoint_mode,
+                    self.epochs,
+                    self.epoch,
+                    self.autocast,
+                    self.it_validation,
+                    self.it_lr_update,
+                    self.it,
+                    model,
+                    self.model_ema,
+                    *dataloaders,
+                ) as t:
+                    t.run()
+                return
+            except torch.cuda.OutOfMemoryError:
+                if self._vram_patch_template is None:
+                    raise  # no free axis declared: not auto-patched, the OOM propagates unchanged
+                # The restart loop IS the sizing iteration: the step that just OOMed already measured
+                # its transient for free. Drop the failed step's gradients before reading free VRAM.
+                measured = self._transient_at_oom(device)
+                self.model.zero_grad(set_to_none=True)
+                candidate = self._shrunken_patch(measured, self._usable_vram_after_oom(device))
+                # Every rank must train the same grid, so the shrink is agreed at a rendezvous: each
+                # failing rank proposes its own candidate and all adopt the per-axis MIN. A rank that
+                # did NOT run out never reaches this all-gather; the job then dies at the collective
+                # timeout, exactly as an unhandled OOM kills it. Ranks failing together -- the
+                # common case, they share the patch size -- recover together.
+                proposals = [
+                    proposal
+                    for proposal in synchronize_data(world_size, local_rank * self.size, candidate)
+                    if proposal is not None
+                ]
+                if not proposals:
+                    raise
+                agreed = [min(sizes) for sizes in zip(*proposals, strict=True)]
+                print(
+                    f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> "
+                    f"re-planning the free patch axes to {agreed} and restarting the training run."
+                )
+                self._vram_patch_candidate = agreed
+                self.dataset.replan_patch(agreed)
+                dataloaders = self.dataset.get_data(world_size)[0][global_rank]
+
+    def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
+        """One shrink step for the free patch axes after a CUDA OOM (``None`` = not auto, or floor).
+
+        The first OOM starts from the worst prepared case at full extent (the size the failed grid
+        effectively ran); later ones shrink the current candidate further.
+        """
+        if self._vram_patch_template is None:
+            return None
+        worst = self.dataset.worst_case_shape()
+        if worst is None:
+            return None
+        candidate = self._vram_patch_candidate or concretize_patch_size(self._vram_patch_template, worst)
+        return next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable)
+
+    def _transient_at_oom(self, device: int | None) -> int | None:
+        """The failed step's measured transient (CUDA peak over resident), ``None`` when unreadable."""
+        if device is None:
+            return None
+        try:
+            transient = int(torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device))
+        except Exception:  # nosec B110 - an unreadable measurement just falls back to the fixed step
+            return None
+        return transient if transient > 0 else None
+
+    def _usable_vram_after_oom(self, device: int | None) -> float:
+        """The VRAM budget the next attempt's step may claim, read once the failed state is freed."""
+        if device is None:
+            return 0.0
+        try:
+            torch.cuda.empty_cache()
+            free, _ = torch.cuda.mem_get_info(device)
+        except Exception:  # nosec B110 - an unreadable budget refuses the restart (the OOM re-raises)
+            return 0.0
+        return usable_vram(free)
 
 
 def build_train(
