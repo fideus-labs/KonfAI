@@ -74,7 +74,7 @@ class EarlyStoppingBase:
         return self.early_stop
 
     def get_score(self, values: dict[str, float]):
-        return sum(list(values.values()))
+        return sum(values.values())
 
     def is_better(self, score: float, reference: float) -> bool:
         """True if `score` is strictly better than `reference` under this monitor's direction."""
@@ -126,28 +126,22 @@ class EarlyStopping(EarlyStoppingBase):
         self.best_score: float | None = None
 
     def get_score(self, values: dict[str, float]):
-        if len(self.monitor) == 0:
+        if not self.monitor:
             return super().get_score(values)
         for v in self.monitor:
-            if v not in values.keys():
+            if v not in values:
                 raise TrainerError(
                     f"Metric '{v}' specified in EarlyStopping.monitor not found in logged values. "
                     f"Available keys: {sorted(values.keys())}. Please check your configuration."
                 )
-        return sum([i for v, i in values.items() if v in self.monitor])
+        return sum(i for v, i in values.items() if v in self.monitor)
 
     def __call__(self, current_score: float) -> bool:
         if self.best_score is None:
             self.best_score = current_score
             return False
 
-        if self.mode == "min":
-            improvement = self.best_score - current_score
-        elif self.mode == "max":
-            improvement = current_score - self.best_score
-        else:
-            raise TrainerError("Mode must be 'min' or 'max'.")
-
+        improvement = current_score - self.best_score if self.mode == "max" else self.best_score - current_score
         if improvement > self.min_delta:
             self.best_score = current_score
             self.counter = 0
@@ -226,12 +220,9 @@ class _Trainer:
         if self.global_rank == 0 and self.save_checkpoint_mode == "BEST":
             self._initialize_best_checkpoint_state()
         self.data_log: dict[str, tuple[DataLog, int]] = {}
-        if data_log is not None:
-            for data in data_log:
-                self.data_log[data.split("/")[0].replace(":", ".")] = (
-                    DataLog[data.split("/")[1]],
-                    int(data.split("/")[2]),
-                )
+        for data in data_log or []:
+            parts = data.split("/")
+            self.data_log[parts[0].replace(":", ".")] = (DataLog[parts[1]], int(parts[2]))
 
     def __enter__(self):
         return self
@@ -282,6 +273,21 @@ class _Trainer:
 
         checkpoint_path.unlink()
 
+    def _set_state(self, train: bool) -> None:
+        """Switch the model and its EMA companion between TRAIN and PREDICTION together.
+
+        The EMA copy always stays in eval mode; only its NetState follows the phase.
+        """
+        state = NetState.TRAIN if train else NetState.PREDICTION
+        if train:
+            self.model.train()
+        else:
+            self.model.eval()
+        self.model.module.set_state(state)
+        if self.model_ema is not None:
+            self.model_ema.eval()
+            self.model_ema.module.set_state(state)
+
     def run(self) -> None:
         """
         Launches the training loop, performing one epoch at a time.
@@ -315,11 +321,7 @@ class _Trainer:
         - loss logging and checkpoint saving
         - validation at configurable iteration interval
         """
-        self.model.train()
-        self.model.module.set_state(NetState.TRAIN)
-        if self.model_ema is not None:
-            self.model_ema.eval()
-            self.model_ema.module.set_state(NetState.TRAIN)
+        self._set_state(train=True)
 
         with tqdm.tqdm(
             iterable=enumerate(self.dataloader_training),
@@ -383,10 +385,7 @@ class _Trainer:
         """
         if self.dataloader_validation is None:
             return 0
-        self.model.eval()
-        self.model.module.set_state(NetState.PREDICTION)
-        if self.model_ema is not None:
-            self.model_ema.module.set_state(NetState.PREDICTION)
+        self._set_state(train=False)
 
         batch_sample: BatchSample = {}
         with tqdm.tqdm(
@@ -405,10 +404,7 @@ class _Trainer:
         self.dataloader_validation.dataset.reset_augmentation("Validation")
         if dist.is_initialized():
             dist.barrier()
-        self.model.train()
-        self.model.module.set_state(NetState.TRAIN)
-        if self.model_ema is not None:
-            self.model_ema.module.set_state(NetState.TRAIN)
+        self._set_state(train=True)
         return self._validation_log(batch_sample)
 
     def _broadcast_stop(self, stop: bool) -> bool:
@@ -459,27 +455,11 @@ class _Trainer:
             save_dict["Model_EMA"] = self.model_ema.module.state_dict()
             save_dict["Model_EMA_n_averaged"] = int(self.model_ema.n_averaged)
 
-        save_dict.update(
-            {
-                f"{name}_optimizer_state_dict": network.optimizer.state_dict()
-                for name, network in self.model.module.get_networks().items()
-                if network.optimizer is not None
-            }
-        )
-        save_dict.update(
-            {
-                f"{name}_it": network._it
-                for name, network in self.model.module.get_networks().items()
-                if network.optimizer is not None
-            }
-        )
-        save_dict.update(
-            {
-                f"{name}_nb_lr_update": network._nb_lr_update
-                for name, network in self.model.module.get_networks().items()
-                if network.optimizer is not None
-            }
-        )
+        for name, network in self.model.module.get_networks().items():
+            if network.optimizer is not None:
+                save_dict[f"{name}_optimizer_state_dict"] = network.optimizer.state_dict()
+                save_dict[f"{name}_it"] = network._it
+                save_dict[f"{name}_nb_lr_update"] = network._nb_lr_update
 
         torch.save(save_dict, save_path)
 
@@ -518,81 +498,71 @@ class _Trainer:
             ),
         )
 
-        if self.global_rank == 0:
-            images_log = []
-            if len(self.data_log):
-                for name, data_type in self.data_log.items():
-                    if name in batch_sample:
-                        data_type[0](
-                            self.tb,
-                            f"{type_log}/{name}",
-                            batch_sample[name].tensor[: self.data_log[name][1]].detach().cpu().numpy(),
-                            self.it,
-                        )
-                    else:
-                        images_log.append(name.replace(":", "."))
+        if self.global_rank != 0:
+            return None
 
-            for label, model in models.items():
-                for name, network in model.get_networks().items():
-                    if network.measure is not None:
-                        self.tb.add_scalars(
-                            f"{type_log}/{name}/Loss/{label}",
-                            {k.replace(":", "."): v[1] for k, v in measures[f"{name}{label}"][0].items()},
-                            self.it,
-                        )
-                        self.tb.add_scalars(
-                            f"{type_log}/{name}/Loss_weight/{label}",
-                            {k.replace(":", "."): v[0] for k, v in measures[f"{name}{label}"][0].items()},
-                            self.it,
-                        )
+        images_log = []
+        for name, (logger, count) in self.data_log.items():
+            if name in batch_sample:
+                logger(
+                    self.tb,
+                    f"{type_log}/{name}",
+                    batch_sample[name].tensor[:count].detach().cpu().numpy(),
+                    self.it,
+                )
+            else:
+                images_log.append(name.replace(":", "."))
 
-                        self.tb.add_scalars(
-                            f"{type_log}/{name}/Metric/{label}",
-                            {k.replace(":", "."): v[1] for k, v in measures[f"{name}{label}"][1].items()},
-                            self.it,
-                        )
-                        self.tb.add_scalars(
-                            f"{type_log}/{name}/Metric_weight/{label}",
-                            {k.replace(":", "."): v[0] for k, v in measures[f"{name}{label}"][1].items()},
-                            self.it,
-                        )
-
-                    if len(images_log):
-                        for name, layer, _ in model.get_layers(
-                            [v.tensor for v in batch_sample.values() if v.is_input],
-                            images_log,
-                        ):
-                            self.data_log[name][0](
-                                self.tb,
-                                f"{type_log}/{name}{label}",
-                                layer[: self.data_log[name][1]].detach().cpu().numpy(),
-                                self.it,
-                            )
-
-            if type_log == "Training":
-                for name, network in self.model.module.get_networks().items():
-                    if network.optimizer is not None:
-                        self.tb.add_scalar(
-                            f"{type_log}/{name}/Learning Rate",
-                            network.optimizer.param_groups[0]["lr"],
-                            self.it,
-                        )
-
-        if self.global_rank == 0:
-            loss = {}
-            loss_keys: set[str] = set()
-            for name, network in self.model.module.get_networks().items():
+        for label, model in models.items():
+            for name, network in model.get_networks().items():
                 if network.measure is not None:
-                    losses = {k: v[1] for k, v in measures[name][0].items()}
-                    loss_keys.update(losses)
-                    loss.update(losses)
-                    loss.update({k: v[1] for k, v in measures[name][1].items()})
-            # Remember which keys are losses (always minimise) vs metrics (direction varies), so
-            # default checkpoint/early-stop selection scores on the losses only -- summing a
-            # maximise-metric (e.g. Dice) into a minimised score would keep the worst model.
-            self._loss_keys = loss_keys
-            return loss
-        return None
+                    for kind, kind_measures in zip(("Loss", "Metric"), measures[f"{name}{label}"], strict=True):
+                        self.tb.add_scalars(
+                            f"{type_log}/{name}/{kind}/{label}",
+                            {k.replace(":", "."): v[1] for k, v in kind_measures.items()},
+                            self.it,
+                        )
+                        self.tb.add_scalars(
+                            f"{type_log}/{name}/{kind}_weight/{label}",
+                            {k.replace(":", "."): v[0] for k, v in kind_measures.items()},
+                            self.it,
+                        )
+
+                if images_log:
+                    for name, layer, _ in model.get_layers(
+                        [v.tensor for v in batch_sample.values() if v.is_input],
+                        images_log,
+                    ):
+                        logger, count = self.data_log[name]
+                        logger(
+                            self.tb,
+                            f"{type_log}/{name}{label}",
+                            layer[:count].detach().cpu().numpy(),
+                            self.it,
+                        )
+
+        if type_log == "Training":
+            for name, network in self.model.module.get_networks().items():
+                if network.optimizer is not None:
+                    self.tb.add_scalar(
+                        f"{type_log}/{name}/Learning Rate",
+                        network.optimizer.param_groups[0]["lr"],
+                        self.it,
+                    )
+
+        loss: dict[str, float] = {}
+        loss_keys: set[str] = set()
+        for name, network in self.model.module.get_networks().items():
+            if network.measure is not None:
+                losses = {k: v[1] for k, v in measures[name][0].items()}
+                loss_keys.update(losses)
+                loss.update(losses)
+                loss.update({k: v[1] for k, v in measures[name][1].items()})
+        # Remember which keys are losses (always minimise) vs metrics (direction varies), so
+        # default checkpoint/early-stop selection scores on the losses only -- summing a
+        # maximise-metric (e.g. Dice) into a minimised score would keep the worst model.
+        self._loss_keys = loss_keys
+        return loss
 
     @torch.no_grad()
     def _train_log(self, batch_sample: BatchSample) -> dict[str, float]:
@@ -728,12 +698,9 @@ class Trainer(DistributedObject):
         shutil.copyfile(self.config_path_src, self.config_namefile)
 
         self.dataloader, train_names, validation_names = self.dataset.get_data(world_size // self.size)
-        with open(statistics_directory() / self.name / f"Train_{self.it}.txt", "w") as f:
-            for name in train_names:
-                f.write(name + "\n")
-        with open(statistics_directory() / self.name / f"Validation_{self.it}.txt", "w") as f:
-            for name in validation_names:
-                f.write(name + "\n")
+        for split, names in (("Train", train_names), ("Validation", validation_names)):
+            path = statistics_directory() / self.name / f"{split}_{self.it}.txt"
+            path.write_text("".join(f"{name}\n" for name in names))
 
     def set_model(self, path_to_model: str | Path) -> None:
         self.path_to_model = str(path_to_model)
