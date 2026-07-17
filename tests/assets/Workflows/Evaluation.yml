@@ -32,5 +32,4 @@ Evaluator:
       - __DATASET_DIR__:a:mha
       - __PREDICTIONS_DATASET_DIR__:i:mha
     batch_size: 4
-    use_cache: false
   train_name: __TRAIN_NAME__

@@ -555,7 +555,7 @@ def _force_single_process_loading(workflow_object: Any) -> int:
     """Force num_workers=0 on the dataset before setup builds the dataloader; return the requested value.
 
     The validation subprocess is daemonic (run_api_in_subprocess), and daemonic processes cannot spawn
-    children, so a DataLoader with num_workers>0 (the default when use_cache is false) would raise
+    children, so a DataLoader with num_workers>0 (the default on the streaming path) would raise
     'daemonic processes are not allowed to have children'. Loading single-process also means the real
     error surfaces here instead of being masked by a dying worker. Guarded so a core rename degrades
     gracefully rather than crashing the dry-run. The original ``num_workers`` is returned so the caller
@@ -602,7 +602,7 @@ def _check_worker_spawn_picklability(workflow_object: Any, requested_num_workers
                     "spawn DataLoader workers by pickling this dataset, and that pickling fails, so "
                     "training would die at setup with a masked worker crash. Make every dataset/transform "
                     "attribute picklable (no lambdas, open handles, or SimpleITK objects kept on self), "
-                    "or set Dataset.num_workers: 0 / Dataset.use_cache: true."
+                    "or set Dataset.num_workers: 0."
                 ),
             )
             return result

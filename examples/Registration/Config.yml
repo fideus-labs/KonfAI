@@ -93,7 +93,6 @@ Trainer:
     dataset_filenames:  # Dataset source (format: folder_path:mode:image_format)
     - ./Dataset:a:mha
     inline_augmentations: false
-    use_cache: true
     batch_size: 4
     validation: 0.25  # Hold out 25% of the cases for validation
     validation_augmentations: false

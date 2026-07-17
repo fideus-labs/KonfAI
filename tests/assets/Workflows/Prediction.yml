@@ -22,7 +22,6 @@ Predictor:
     filter: None
     dataset_filenames:
       - __DATASET_DIR__:a:mha
-    use_cache: false
     batch_size: 16
   outputs_dataset:
     Head:Tanh:

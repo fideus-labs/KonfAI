@@ -196,14 +196,16 @@ notebook entry points) lives in the
 ## 🩻 How volumes are read
 
 Volumes are read as patches. Whether the volume is *also* held in RAM depends on
-`use_cache` and on whether your preprocessing chain can be streamed — KonfAI
-derives streamability from the transforms you declared:
+the workflow's loading regime (training caches, prediction and evaluation
+stream; `memory_budget` makes it adaptive) and on whether your preprocessing
+chain can be streamed — KonfAI derives streamability from the transforms you
+declared:
 
 | Regime | When | Memory held |
 | --- | --- | --- |
-| **Cache** | `use_cache: true` (training default) | every case, resident for the whole run |
-| **Stream** | `use_cache: false`, chain is streamable | one patch |
-| **Buffer** | `use_cache: false`, chain is not streamable | a FIFO of `max(batch_size + 1, shuffle_window)` cases |
+| **Cache** | training default | every case, resident for the whole run |
+| **Stream** | predict/eval default or budget exceeded; chain streamable | one patch |
+| **Buffer** | same triggers; chain not streamable | a FIFO of `max(batch_size + 1, shuffle_window)` cases |
 
 A chain streams when every step declares the region it needs: the exact patch
 (`OneHot`), a halo (`Dilate`), a remap (`Flip`), a resample (`ResampleToShape`),

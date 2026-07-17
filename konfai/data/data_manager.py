@@ -107,7 +107,7 @@ def _parse_memory_budget_bytes(value: str | float) -> int:
     raise ConfigError(
         f"memory_budget: '{value}' is not a valid memory size.",
         "Use a number in GiB (e.g. 24), a unit string ('24GB', '32GiB', '512MB'), 'auto', or None to "
-        "keep 'use_cache' as given.",
+        "keep the workflow's default loading regime.",
     )
 
 
@@ -1536,7 +1536,6 @@ class DataTrain(Data):
         augmentations: dict[str, DataAugmentationsList] | None = {"DataAugmentation_0": DataAugmentationsList()},
         inline_augmentations: bool = False,
         patch: DatasetPatch | None = DatasetPatch(),
-        use_cache: bool = True,
         memory_budget: str | float | None = None,
         subset: TrainSubset = TrainSubset(),
         batch_size: int = 1,
@@ -1551,7 +1550,10 @@ class DataTrain(Data):
             dataset_filenames,
             groups_src,
             patch,
-            use_cache,
+            # Training re-reads every case each epoch, so the cache is the right default; the config
+            # no longer exposes the mechanism -- 'memory_budget' replaces it with the fit-test, which
+            # streams whenever the dataset outgrows the budget (an old 'use_cache' key is inert).
+            True,
             subset,
             batch_size,
             validation,

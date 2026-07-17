@@ -155,7 +155,6 @@ Trainer:
     dataset_filenames:  # Dataset sources (format: folder_path:mode:image_format; mode = a = add cases, i = keep only common cases across datasets)
     - ./Dataset/:a:mha
     inline_augmentations: true # Apply new augmentations at each epoch
-    use_cache: true # Cache processed data in memory for faster training
     batch_size: 1 # Number of samples per training batch
     validation: None  # None = no validation split, or use a case-list file / list of files / case names
     validation_augmentations: true # Set to false to validate only on non-augmented samples

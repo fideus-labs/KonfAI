@@ -128,11 +128,10 @@ Common fields:
 | `augmentations` | mapping or null | one default augmentation list | Data augmentations sampled during training. |
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
-| `use_cache` | bool | `true` | Holds the whole prepared dataset in RAM. `false` opens the stream/buffer path: a streamable chain reads each patch from disk, and any other loads whole cases into a bounded FIFO. |
-| `memory_budget` | number / string / null | `null` | RAM budget from which `use_cache` is derived. `null` keeps `use_cache` as given. |
+| `memory_budget` | number / string / null | `null` | RAM budget the loading regime is derived from: the dataset caches when its per-rank share fits, streams otherwise. `null` keeps the training default (cache). |
 | `subset` | object | `TrainSubset()` | Restricts which cases are used. |
 | `batch_size` | int | `1` | Batch size. |
-| `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` under `use_cache: true`, and to `max(1, min(cpu_count, 4))` otherwise. A `KonfAIInference` transform in any group forces `0` whatever the value. |
+| `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` on the cache regime, and to `max(1, min(cpu_count, 4))` on the stream/buffer regime. A `KonfAIInference` transform in any group forces `0` whatever the value. |
 | `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |
 | `prefetch_factor` | int or null | `None` | Prefetched batches per worker. Applies only when workers are enabled, where `None` resolves to `2`. |
 | `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. |
@@ -143,15 +142,16 @@ Common fields:
 
 ### Cache, stream, and buffer
 
-`use_cache` picks how a loader turns a case into patches. It applies to the
-training and validation subsets alike.
+The loading regime picks how a loader turns a case into patches. It applies to
+the training and validation subsets alike. Training defaults to the cache;
+`memory_budget` switches the regime from the dataset's measured size.
 
-- **Cache** (`use_cache: true`, the default). Every case is loaded, preprocessed,
+- **Cache** (the training default). Every case is loaded, preprocessed,
   and held in RAM before the first epoch; patches are cut from the resident
   volume. RAM follows the dataset. `num_workers` defaults to `0` here.
-- **Stream** (`use_cache: false`, patch-compatible preprocessing). Each patch is
+- **Stream** (budget exceeded, patch-compatible preprocessing). Each patch is
   read from its own region of the source file. No volume is materialized.
-- **Buffer** (`use_cache: false`, preprocessing that needs the whole volume).
+- **Buffer** (budget exceeded, preprocessing that needs the whole volume).
   The case is loaded whole into a FIFO of `batch_size + 1` cases —
   `max(batch_size + 1, shuffle_window)` when a window is set — evicting the
   oldest.
@@ -164,19 +164,19 @@ still stream.
 A cached case is resident, so its patches are cut from RAM even when its chain
 would stream.
 
-A 16 GiB uncompressed `.mha` at patch 64³, batch 2, 2 workers and
-`use_cache: false`, run under an 8 GiB memory cap, streams at a peak anonymous
+A 16 GiB uncompressed `.mha` at patch 64³, batch 2, 2 workers on the streaming
+regime, run under an 8 GiB memory cap, streams at a peak anonymous
 RSS of 0.46 GiB, flat across epochs, with one batch (2 MiB) resident on the GPU.
 
 ### `memory_budget`
 
-`memory_budget` derives `use_cache` from a RAM budget. KonfAI estimates the
-dataset size from image headers alone (no voxel read), caches when the per-rank
-share fits the budget, and takes the streaming/buffer path otherwise. A budget
-decides the regime on its own: the declared `use_cache` is ignored. The decision
+`memory_budget` derives the loading regime from a RAM budget. KonfAI estimates
+the dataset size from image headers alone (no voxel read), caches when the
+per-rank share fits the budget, and takes the streaming/buffer path otherwise —
+a budget below the dataset's size therefore forces streaming. The decision
 is made once on the launcher, before any rank is spawned, and the estimate, the
 budget, its source, and the chosen regime are printed. `null` (the default)
-leaves `use_cache` exactly as declared.
+keeps the training default: the cache.
 
 | Value | Read as |
 | --- | --- |
