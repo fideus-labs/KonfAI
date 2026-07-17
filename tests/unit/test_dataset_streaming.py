@@ -920,6 +920,18 @@ def test_stream_composed_rescale_and_orientation_matches_whole_volume() -> None:
     assert tuple(plans[1].in_shape) == (12, 12)
 
 
+def test_stream_composed_triple_region_chain_matches_whole_volume() -> None:
+    # Three region stages in one chain — flip, resample, permute — folded into one bounded read.
+    rng = np.random.default_rng(11)
+    volume = (rng.standard_normal((1, 8, 6)).astype(np.float32)) * 100.0
+    manager = _assert_stream_matches_whole_volume(
+        volume, [Flip("0"), ResampleToShape(shape=[12, 9]), Permute("1|0")], [4, 4], atol=1e-3
+    )
+    plans = manager._resolve_patch_stream_source(0, True).stage_plans
+    assert [plan.kind.value for plan in plans] == ["orientation", "rescale", "orientation"]
+    assert tuple(plans[2].out_shape) == (9, 12)
+
+
 def test_stream_composed_orientations_with_pointwise_between_match_whole_volume() -> None:
     # Two orientations with a pointwise stage between them: the fold carries the permuted extents and
     # the value map rides along where the regions put it.
