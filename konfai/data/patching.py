@@ -1226,7 +1226,9 @@ class DatasetManager:
         for stage in stages:
             loc = stage.patch_locality(Attribute(evolved))
             localities.append(loc)
-            if loc.kind is LocalityKind.WHOLE_VOLUME:
+            if loc.kind in (LocalityKind.WHOLE_VOLUME, LocalityKind.SLAB):
+                # SLAB is a write-side contract: its side effect needs the slab's place in the
+                # OUTPUT, which a patch read has no notion of.
                 return False, ()
             if loc.kind is LocalityKind.GLOBAL_STAT:
                 # The seed is the STORED volume's statistic, which is this transform's input only when

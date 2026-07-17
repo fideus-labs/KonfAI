@@ -37,7 +37,7 @@ import torch.nn.functional as F
 
 from konfai import cuda_visible_devices
 from konfai.utils.config import _escape_key_component, apply_config
-from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
+from konfai.utils.dataset import Attribute, Dataset, DataStream, data_to_image, image_to_data
 from konfai.utils.errors import TransformError
 from konfai.utils.ITK import _require_simpleitk, box_with_mask, crop_with_mask
 from konfai.utils.runtime import NeedDevice
@@ -61,6 +61,10 @@ class LocalityKind(Enum):
     - ``GLOBAL_STAT`` -- needs whole-volume stats (``stat_keys`` subset of Min/Max/Mean/Std), obtained
       once from disk and cached: read the exact patch + the cached stat.
     - ``RESCALE``     -- resample: source region via the scale mapping + interpolation halo.
+    - ``SLAB``        -- per-voxel value map, plus a side effect that needs the slab's place in the
+      volume (a per-region side write): the streamed-WRITE dispatcher runs it through
+      :meth:`Transform.stream_slab` with region context; the read dispatcher has no such context and
+      treats it as ``WHOLE_VOLUME``.
     - ``WHOLE_VOLUME``-- genuinely needs the whole volume: the dispatcher falls back to a full load.
     """
 
@@ -70,6 +74,7 @@ class LocalityKind(Enum):
     CROP = "crop"
     GLOBAL_STAT = "global_stat"
     RESCALE = "rescale"
+    SLAB = "slab"
     WHOLE_VOLUME = "whole_volume"
 
     @property
@@ -174,6 +179,24 @@ class Transform(NeedDevice, ABC):
             f"{type(self).__name__} declared a region patch-locality but does not implement stream_region_source().",
             "Implement stream_region_source() or declare a non-region patch_locality().",
         )
+
+    def stream_slab(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        region: slice,
+        spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> torch.Tensor:
+        """Run this transform on one finalized slab — rows ``region`` of a ``spatial_shape`` volume.
+
+        The streamed-write dispatcher calls this instead of ``__call__`` for a ``SLAB`` declaration:
+        the value map is per-voxel, so the default whole-volume call is exact on the slab, but the
+        stage's side effect needs to know where the slab sits — which is what a ``SLAB`` transform
+        overrides this to read. Slabs arrive in order and tile the volume exactly once per case.
+        """
+        del region, spatial_shape
+        return self(name, tensor, cache_attribute)
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
         """Record the geometry a whole-volume ``__call__`` would, given the FULL source shape.
@@ -1890,25 +1913,71 @@ class InferenceStack(Transform):
             self.dataset = Dataset(filename, file_format)
         self.name = name
         self.mode = mode
+        self._stack_sinks: dict[str, DataStream] = {}
+        self._stack_buffers: dict[str, list[np.ndarray]] = {}
 
-    # patch_locality stays the WHOLE_VOLUME default: the member reduction is pointwise, but __call__
-    # also WRITES the whole per-member stack to disk (like Save), which a per-patch pass cannot do. It
-    # is an ensemble/finalize transform, never in a streaming input chain, so this costs no streaming.
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # The member reduction is per-voxel; the per-member stack write is the side effect that needs
+        # the slab's place in the volume, which is exactly what SLAB declares (whole-volume on the
+        # read side, streamed region by region on the write side via ``stream_slab``).
+        return PatchLocality(LocalityKind.SLAB)
 
-    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        if tensors.shape[0] == 1:
-            return tensors.squeeze(0)
+    def _stack(self, tensors: torch.Tensor) -> np.ndarray:
         if self.mode == "Seg":
             _tensors = torch.argmax(torch.softmax(tensors, dim=1), dim=1).to(torch.uint8)
         else:
             _tensors = tensors.squeeze(1)
-        dataset = self.dataset if self.dataset else self.datasets[-1]
-        dataset.write("InferenceStack", name, _tensors.float().cpu().numpy(), cache_attribute)
+        return _tensors.float().cpu().numpy()
+
+    def _reduce(self, tensors: torch.Tensor) -> torch.Tensor:
         return (
             torch.median(tensors.float(), dim=0).values.to(tensors.dtype)
             if self.mode == "median"
             else tensors.float().mean(0).to(tensors.dtype)
         )
+
+    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if tensors.shape[0] == 1:
+            return tensors.squeeze(0)
+        dataset = self.dataset if self.dataset else self.datasets[-1]
+        dataset.write("InferenceStack", name, self._stack(tensors), cache_attribute)
+        return self._reduce(tensors)
+
+    def stream_slab(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        region: slice,
+        spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> torch.Tensor:
+        """The whole-volume call, region by region: reduce the members per voxel and write the slab's
+        rows of the per-member stack into a region sink opened at the first slab. A destination that
+        cannot serve region writes falls back to buffering the stack and writing it classically at
+        the last slab — the memory cost of the whole-volume path, never a lost stack."""
+        if tensor.shape[0] == 1:
+            return tensor.squeeze(0)
+        stack = self._stack(tensor)
+        dataset = self.dataset if self.dataset else self.datasets[-1]
+        if name not in self._stack_sinks and name not in self._stack_buffers:
+            sink = dataset.open_data_stream(
+                "InferenceStack", name, [stack.shape[0], *spatial_shape], stack.dtype, cache_attribute
+            )
+            if sink is None:
+                self._stack_buffers[name] = []
+            else:
+                self._stack_sinks[name] = sink
+        if name in self._stack_buffers:
+            self._stack_buffers[name].append(stack)
+            if region.stop == spatial_shape[0]:
+                whole = np.concatenate(self._stack_buffers.pop(name), axis=1)
+                dataset.write("InferenceStack", name, whole, cache_attribute)
+        else:
+            target = (slice(0, stack.shape[0]), region, *(slice(0, extent) for extent in spatial_shape[1:]))
+            self._stack_sinks[name].write_slice(target, stack)
+            if region.stop == spatial_shape[0]:
+                self._stack_sinks.pop(name).__exit__(None, None, None)
+        return self._reduce(tensor)
 
 
 class Norm(Transform):
