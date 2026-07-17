@@ -233,6 +233,19 @@ so the ranks can disagree on the number of batches in an epoch and the collectiv
 will hang. Leave it `null` for multi-GPU runs.
 ```
 
+### Free patch axes: sizing by measurement
+
+`Patch.patch_size` accepts the same free-axis convention as prediction: `0`
+entries are sized by the framework, starting at the full extent and shrinking
+only on a CUDA out-of-memory — the failed step (forward, backward and optimizer)
+already measured its cost, so the shrink lands near the target and the run
+restarts on the re-planned grid. Training runs out of memory at the first step
+when it does at all (its memory is maximal from step one), so a restart loses no
+meaningful work. Under DDP the failing ranks agree on the per-axis minimum
+before restarting, so every rank trains the same grid; a single rank failing
+alone dies at the collective timeout, exactly as an unhandled OOM does. A
+`patch_size` without a `0` is never resized: the OOM propagates.
+
 ### `groups_src`
 
 Each source group contains one or more destination groups:

@@ -89,6 +89,28 @@ Use `Dataset.Patch` when:
 - you want slice-wise or sliding-window inference
 - you need the same spatial strategy as training
 
+### Free patch axes: sizing by measurement
+
+A `patch_size` entry of `0` declares a FREE axis the framework sizes itself. The
+patch starts at the axis's full extent — the whole volume when every axis is
+free — and shrinks only if the device actually runs out of memory:
+
+```yaml
+Patch:
+  patch_size: [0, 0, 0]   # whole volume when it fits; [1, 0, 0] = full 2D slices
+  overlap: 0
+```
+
+There is no budget key: the budget is the GPU's measured free VRAM. On a CUDA
+out-of-memory the run reads what the failed forward cost (the measurement is
+free — it already ran), shrinks the free axes by that ratio (pinned axes never
+move), re-plans the patch grid and re-runs the rank's cases — typically one
+restart. The chosen size also reserves room for the accumulation, so the blend
+stays on the GPU. `overlap` accepts voxels, a fraction (`0.2`), a percent string
+(`"20%"`) or a per-axis list, resolved after the size; an axis a single patch
+spans gets none. A `patch_size` without a `0` is never resized: the OOM
+propagates.
+
 ## `outputs_dataset`
 
 `outputs_dataset` defines how selected model outputs become files on disk.

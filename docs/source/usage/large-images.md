@@ -145,7 +145,9 @@ memory or dimensionality requirement. See {doc}`../concepts/model-graph`.
 
 1. Set `use_cache: false` to force the stream/buffer path, or set a
    `memory_budget` when dataset size should decide.
-2. Choose the largest `patch_size` that fits the model and required context.
+2. Leave `patch_size` axes at `0` so the framework sizes them (the whole volume
+   when it fits, a measured shrink on OOM), or pin the largest size that fits
+   the model and required context.
 3. Start with `batch_size: 1`; increase it while measuring throughput and VRAM.
 4. Add overlap only when border quality requires it. More overlap means more
    reads and forward passes.
