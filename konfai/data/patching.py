@@ -32,7 +32,14 @@ from konfai.data.transform import LocalityKind, PatchLocality, Resample, Save, T
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PatchError
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, get_module, get_patch_slices_from_shape, split_path_spec
+from konfai.utils.utils import (
+    SUPPORTED_EXTENSIONS,
+    OverlapSpec,
+    get_module,
+    get_patch_slices_from_shape,
+    resolve_overlap,
+    split_path_spec,
+)
 
 # How far a halo may reach, as a fraction of the patch it surrounds. See DatasetManager._affords_halo.
 _MAX_HALO_FRACTION = 0.5
@@ -194,19 +201,22 @@ class PathCombine(ABC):
         self.overlap: int
         self._data_per_device: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
-    def set_patch_config(self, patch_size: list[int], overlap: int) -> None:
+    def set_patch_config(self, patch_size: list[int], overlap: int | list[int]) -> None:
         self._data_per_device.clear()
-        self.overlap = overlap
-        if overlap <= 0:
+        overlaps = [overlap] * len(patch_size) if isinstance(overlap, int) else list(overlap)
+        self.overlap = max(overlaps)
+        if all(o <= 0 for o in overlaps):
             self.data = torch.ones(patch_size)
             return
         # The per-patch weight is the outer product of one 1-D window per axis. It is separable by
         # construction, so a per-axis partition of unity stays a partition of unity in N-D and overlapping
         # patches blend without darkening — no distance map or explicit renormalisation loop is needed, and
         # the trailing ``result / weight_sum`` in Accumulator.assemble stays exact at the volume borders.
-        data = self._window_1d(patch_size[0], overlap)
-        for size in patch_size[1:]:
-            data = data.unsqueeze(-1) * self._window_1d(size, overlap)
+        # Each axis tapers over its own overlap, so anisotropic overlaps blend correctly per axis.
+        data = self._window_1d(patch_size[0], overlaps[0]) if overlaps[0] > 0 else torch.ones(patch_size[0])
+        for size, axis_overlap in zip(patch_size[1:], overlaps[1:], strict=True):
+            window = self._window_1d(size, axis_overlap) if axis_overlap > 0 else torch.ones(size)
+            data = data.unsqueeze(-1) * window
         self.data = data
 
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -226,6 +236,18 @@ class PathCombine(ABC):
     @abstractmethod
     def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
         """Return the 1-D blend weight along one axis (length ``size``, ``overlap`` voxels tapered per side)."""
+
+
+def blend_overlap(overlap: "int | float | str | list[int | float | str]", patch_size: list[int]) -> list[int]:
+    """Per-axis blend overlap for a concrete ``patch_size`` (int broadcast, ``%``/fraction resolved).
+
+    The blend has no volume extent: every axis whose patch is longer than one voxel is treated as tiled
+    (the untiled-axis-0 rule is already applied by the slicing plan), so an int is the same voxel
+    overlap on every such axis.
+    """
+    if isinstance(overlap, int):
+        return [overlap if size > 1 else 0 for size in patch_size]
+    return resolve_overlap(overlap, patch_size, [size + 1 for size in patch_size])
 
 
 class Mean(PathCombine):
@@ -672,7 +694,7 @@ class Patch(ABC):
     def __init__(
         self,
         patch_size: list[int],
-        overlap: int | None,
+        overlap: OverlapSpec = None,
         pad_value: float | None = 0,
         extend_slice: int = 0,
     ) -> None:
@@ -789,7 +811,7 @@ class DatasetPatch(Patch):
     def __init__(
         self,
         patch_size: list[int] = [128, 128, 128],
-        overlap: int | None = None,
+        overlap: OverlapSpec = None,
         pad_value: float | None = None,
         extend_slice: int = 0,
     ) -> None:
@@ -806,7 +828,7 @@ class ModelPatch(Patch):
     def __init__(
         self,
         patch_size: list[int] = [128, 128, 128],
-        overlap: int | None = None,
+        overlap: OverlapSpec = None,
         patch_combine: str | None = None,
         pad_value: float | None = None,
         extend_slice: int = 0,
@@ -821,7 +843,8 @@ class ModelPatch(Patch):
             self.patch_combine = apply_config(key)(getattr(module, name))()
         if self.patch_size is not None and self.overlap is not None:
             if self.patch_combine is not None:
-                self.patch_combine.set_patch_config([i for i in self.patch_size if i > 1], self.overlap)
+                kept = [i for i in self.patch_size if i > 1]
+                self.patch_combine.set_patch_config(kept, blend_overlap(self.overlap, kept))
         else:
             self.patch_combine = None
 

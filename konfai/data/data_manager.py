@@ -51,7 +51,7 @@ from konfai.utils.runtime import (
     get_memory_info,
     memory_forecast,
 )
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_path_spec
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, OverlapSpec, split_path_spec
 
 # A cached case is a float32 tensor (torch's default dtype, and the default TensorCast's target), so
 # bytes are counted at 4/element from the header shape alone -- not the on-disk dtype, and without
@@ -491,7 +491,7 @@ class DatasetIter(data.Dataset):
         inline_augmentations: bool,
         data_augmentations_list: list[DataAugmentationsList],
         patch_size: list[int] | None,
-        overlap: int | None,
+        overlap: OverlapSpec,
         buffer_size: int,
         apply_augmentations: bool = True,
         use_cache=True,
@@ -512,7 +512,7 @@ class DatasetIter(data.Dataset):
         self.inline_augmentations = inline_augmentations
         self.has_augmented_samples = self.apply_augmentations and any(a > 0 for _, a, _ in mapping)
 
-    def get_patch_config(self) -> tuple[list[int] | None, int | None]:
+    def get_patch_config(self) -> tuple[list[int] | None, OverlapSpec]:
         return self.patch_size, self.overlap
 
     def to(self, device: int):
