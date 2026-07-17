@@ -48,6 +48,7 @@ from konfai.data.patching import (
     _halo_radii,
     _remap_pull,
     _scale_pull,
+    blend_overlap,
 )
 from konfai.data.transform import (
     LocalityKind,
@@ -287,12 +288,12 @@ class OutputDataset(Dataset, NeedDevice, ABC):
     def set_patch_config(
         self,
         patch_size: list[int] | None,
-        overlap: int | None,
+        overlap: int | float | str | list[int | float | str] | None,
         nb_data_augmentation: int,
     ) -> None:
         if patch_size is not None and overlap is not None:
             if self.patch_combine is not None:
-                self.patch_combine.set_patch_config(patch_size, overlap)
+                self.patch_combine.set_patch_config(patch_size, blend_overlap(overlap, patch_size))
         else:
             self.patch_combine = None
         self.nb_data_augmentation = nb_data_augmentation
