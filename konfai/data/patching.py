@@ -687,6 +687,68 @@ class SlabRegionStream:
         return window[(*lead, slice(None), *source[1:])]
 
 
+class SlabAligner:
+    """Merge several slab streams over the same axis into jointly finalized intervals.
+
+    The cross-stream mirror of :class:`StreamingAccumulator`: each stream (a TTA copy's accumulator)
+    emits finalized slabs in non-decreasing order along the shared first spatial axis, and a consumer
+    that needs every stream's rows together — a cross-copy reduction — can only advance to the
+    slowest frontier. ``push`` takes one stream's new slabs and returns the intervals that just
+    became complete, each carrying every stream's rows; only the inter-stream skew is ever buffered,
+    and a single stream passes through untouched. Nothing here knows what a stream is: it is pure
+    interval arithmetic over ``nb_streams`` ordered emitters.
+    """
+
+    def __init__(self, nb_streams: int, lead_dims: int = 1) -> None:
+        self._nb_streams = nb_streams
+        self._lead = lead_dims
+        self._pending: dict[int, list[tuple[int, torch.Tensor]]] = {}
+        self._frontiers: dict[int, int] = {}
+        self._consumed = 0
+        self._completed: set[int] = set()
+
+    @property
+    def complete(self) -> bool:
+        """Whether every stream has pushed its last slab."""
+        return len(self._completed) == self._nb_streams
+
+    def push(
+        self, stream: int, slabs: list[tuple[slice, torch.Tensor]], finished: bool = False
+    ) -> list[tuple[slice, dict[int, torch.Tensor]]]:
+        """Take ``stream``'s freshly finalized slabs and return the newly joint-final intervals."""
+        pending = self._pending.setdefault(stream, [])
+        for region, slab in slabs:
+            pending.append((region.start, slab))
+            self._frontiers[stream] = region.stop
+        if finished:
+            self._completed.add(stream)
+        if len(self._frontiers) < self._nb_streams:
+            return []
+        joint = min(self._frontiers.values())
+        if joint <= self._consumed:
+            return []
+        lead = (slice(None),) * self._lead
+        rows: dict[int, torch.Tensor] = {}
+        for key in sorted(self._pending):
+            pieces = [
+                slab[
+                    (
+                        *lead,
+                        slice(max(start, self._consumed) - start, min(start + slab.shape[self._lead], joint) - start),
+                    )
+                ]
+                for start, slab in self._pending[key]
+                if start < joint and start + slab.shape[self._lead] > self._consumed
+            ]
+            rows[key] = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=self._lead)
+            self._pending[key] = [
+                (start, slab) for start, slab in self._pending[key] if start + slab.shape[self._lead] > joint
+            ]
+        interval = slice(self._consumed, joint)
+        self._consumed = joint
+        return [(interval, rows)]
+
+
 class Patch(ABC):
     """Abstract base class for dataset-level and model-level patch definitions."""
 
