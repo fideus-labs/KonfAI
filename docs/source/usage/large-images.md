@@ -160,6 +160,14 @@ back to CPU accumulation when it does not. Mean/Cosinus overlap blending and
 Mean/Median/Concat model or TTA reductions have different memory costs. The
 canonical prediction fields are in {doc}`../config_guide/prediction`.
 
+When the reassembled output itself is the memory peak, streaming handles it
+automatically — there is no flag to set. Each output slab is finalized and
+written to disk as soon as its patches complete, so peak RAM is one patch window
+instead of the whole volume. It applies per case only when it is byte-identical
+to the assembled path (a voxel-local finalize chain, a single augmentation, an
+`mha`/`h5`/`omezarr` destination) and uses the whole-volume write transparently
+otherwise. `KONFAI_STREAMED_WRITES=0` forces the whole-volume path globally.
+
 ## Verify the behaviour you care about
 
 Do not infer streaming from a successful run alone—the fallback is designed to

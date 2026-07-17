@@ -123,6 +123,15 @@ One `Prediction.yml` can be shared between different checkpoints as long as
 the exported output name stays consistent.
 ```
 
+```{note}
+**Streamed writes are automatic — there is no config key.** When an output can be finalized slab by slab
+byte-identically to the assembled volume (a voxel-local finalize chain, a single augmentation, and an
+`mha`/`h5`/`omezarr` destination), each slab is written to disk as its patches complete, bounding RAM at
+one patch window instead of the whole volume; otherwise the whole-volume path is used transparently. Set
+`KONFAI_STREAMED_WRITES=0` to force the whole-volume path globally (ops/debug or exact bit-reproducibility
+against a CPU run).
+```
+
 ## Examples
 
 See:

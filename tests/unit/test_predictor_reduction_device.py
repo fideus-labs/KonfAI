@@ -19,6 +19,7 @@ from typing import cast
 import pytest
 import torch
 from konfai.predictor import OutSameAsGroupDataset
+from konfai.utils.utils import get_patch_slices_from_shape
 
 
 def _dataset(device: torch.device | int, nb_data_augmentation: int = 1) -> OutSameAsGroupDataset:
@@ -65,6 +66,12 @@ class _FakeAccumulator:
     def __init__(self, shape: list[int]) -> None:
         self.shape = shape
 
+    @property
+    def footprint_shape(self) -> list[int]:
+        # A whole-volume accumulator's resident footprint IS its shape (StreamingAccumulator overrides
+        # this with its window); _accumulate_device budgets against the footprint.
+        return self.shape
+
 
 def test_accumulate_device_is_cpu_for_a_cpu_dataset() -> None:
     ds = _dataset(torch.device("cpu"))
@@ -78,8 +85,18 @@ def test_accumulate_device_is_cpu_when_the_patch_is_on_cpu() -> None:
     assert ds._accumulate_device(torch.zeros(4, 8, dtype=torch.float16), _FakeAccumulator([8])).type == "cpu"
 
 
+def _no_transient(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pin the MEASURED forward transient to 0 (memory_allocated == max_memory_allocated) so a test
+    # exercises the accumulator budget alone, independent of any stale process-wide peak.
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda *a, **k: 0)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda *a, **k: 0)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU accumulation only applies on CUDA")
-def test_accumulate_device_uses_gpu_when_the_volume_fits_and_falls_back_when_it_does_not() -> None:
+def test_accumulate_device_uses_gpu_when_the_volume_fits_and_falls_back_when_it_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_transient(monkeypatch)
     ds = _dataset(0)
     patch = torch.zeros(4, 8, dtype=torch.float16, device="cuda")
     # a small combined volume comfortably fits free VRAM -> blend on the dataset's CUDA device
@@ -90,9 +107,9 @@ def test_accumulate_device_uses_gpu_when_the_volume_fits_and_falls_back_when_it_
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU accumulation only applies on CUDA")
 def test_accumulate_device_falls_back_when_free_vram_is_low(monkeypatch: pytest.MonkeyPatch) -> None:
-    # ``free`` is read after the first batch's forward, so a larger batch (which leaves little free
-    # VRAM) is rejected even for a tiny accumulator -- exactly when the resident accumulator plus the
-    # remaining forwards would otherwise OOM mid-case.
+    # ``free`` is read after the first batch's forward, so little free VRAM is rejected even for a tiny
+    # accumulator -- exactly when the resident accumulator plus the remaining forwards would OOM mid-case.
+    _no_transient(monkeypatch)
     ds = _dataset(0)
     patch = torch.zeros(4, 8, dtype=torch.float16, device="cuda")
     accumulator = _FakeAccumulator([8, 8, 8])  # a negligible combined volume
@@ -110,13 +127,38 @@ def test_accumulate_device_budgets_every_tta_augmentation(monkeypatch: pytest.Mo
     # augmentation complete before ``get_output``), so the per-case decision budgets accumulator x T:
     # a volume where one copy fits but T copies do not must take the CPU path for the WHOLE case —
     # a per-augmentation flip would hand the reduction a mixed CPU/CUDA list and crash it.
+    _no_transient(monkeypatch)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda *a, **k: None)
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (12 * 1024**3, 25 * 1024**3))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (5 * 1024**3, 25 * 1024**3))
     patch = torch.zeros(1, 8, dtype=torch.float16, device="cuda")
     voxels = 512 * 1024**2  # (C+1)=2 x 2 bytes x voxels = 2 GiB per augmentation
-    # T=1: 2 GiB x 2 < 12 GiB x 0.56 -> GPU; T=3: 6 GiB x 2 >= 6.72 GiB -> whole case on CPU
+    # T=1: 2 GiB < 5 x 0.9 -> GPU ; T=3: 6 GiB >= 4.5 GiB -> whole case on CPU. The accumulation gate now
+    # budgets accumulator + measured forward (0 here); the reduction temp fit-checks itself at get_output.
     assert _dataset(0, nb_data_augmentation=1)._accumulate_device(patch, _FakeAccumulator([voxels])).type == "cuda"
     assert _dataset(0, nb_data_augmentation=3)._accumulate_device(patch, _FakeAccumulator([voxels])).type == "cpu"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU accumulation only applies on CUDA")
+def test_accumulate_device_budgets_the_streaming_window_not_the_whole_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A StreamingAccumulator only ever holds its window, so _accumulate_device budgets that, not the
+    # full volume: a volume too big to assemble on the GPU still streams on the GPU when its window
+    # fits. This is what keeps a huge case both GPU-fast and VRAM-bounded.
+    from konfai.data.patching import Cosinus, StreamingAccumulator
+
+    _no_transient(monkeypatch)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda *a, **k: None)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (3 * 1024**3, 25 * 1024**3))
+    ds = _dataset(0)
+    patch = torch.zeros(64, 8, dtype=torch.float16, device="cuda")
+    # The whole volume's accumulator (~3.4 GiB) overflows 3 x 0.9; the window (one patch extent,
+    # ~0.13 GiB) fits easily.
+    patch_slices, _ = get_patch_slices_from_shape([16, 256, 256], [400, 256, 256], 0)
+    combine = Cosinus()
+    combine.set_patch_config([16, 256, 256], 0)
+    whole = _FakeAccumulator([400, 256, 256])
+    streaming = StreamingAccumulator(patch_slices, [16, 256, 256], patch_combine=combine, batch=False)
+    assert ds._accumulate_device(patch, whole).type == "cpu"
+    assert ds._accumulate_device(patch, streaming).type == "cuda"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU reduction only applies on CUDA")
@@ -140,3 +182,20 @@ def test_reduction_device_budgets_every_parked_chunk() -> None:
     assert ds._reduction_device(cast(torch.Tensor, _Chunk(fits_alone)), 1).type == "cuda"
     # ...but (2*8+1) x chunk does not: eight parked chunks must fall back to the CPU reduction.
     assert ds._reduction_device(cast(torch.Tensor, _Chunk(fits_alone)), 8).type == "cpu"
+
+
+def test_reduction_declares_slab_locality_by_type() -> None:
+    # The streamed-write gate asks the reduction whether it is voxel-local (per-voxel over the model/TTA
+    # axis). Mean/Median/Concat all reduce orthogonally to the spatial slab axis; a bare custom reduction
+    # is unknown and must default to not-streamable, the way a transform defaults to WHOLE_VOLUME.
+    from konfai.predictor import Concat, Mean, Median, Reduction
+
+    assert Mean().voxel_local
+    assert Median().voxel_local
+    assert Concat().voxel_local
+
+    class _CustomReduction(Reduction):
+        def __call__(self, tensors):
+            return tensors[0]
+
+    assert _CustomReduction().voxel_local is False

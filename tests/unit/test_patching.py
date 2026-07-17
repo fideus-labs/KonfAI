@@ -16,9 +16,11 @@
 
 """Unit tests for patch reconstruction and overlap-blending (``konfai.data.patching``)."""
 
+import itertools
+
 import pytest
 import torch
-from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean
+from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean, StreamingAccumulator
 from konfai.utils.errors import PatchError
 from konfai.utils.utils import get_patch_slices_from_shape
 
@@ -267,3 +269,102 @@ def test_gaussian_blend_in_fp16_has_no_nan_at_single_coverage_corners() -> None:
     assert not torch.isnan(out).any()
     # Single coverage: dividing by the accumulated weight must recover the raw value, corners included.
     torch.testing.assert_close(out.float(), torch.full((16, 16, 16), 3.0), rtol=0.02, atol=0.02)
+
+
+# --------------------------------------------------------------------------------------
+# StreamingAccumulator: slab-by-slab finalization must equal whole-volume assembly
+# --------------------------------------------------------------------------------------
+
+
+def _padded_patches(full: torch.Tensor, patch_slices, patch_size: list[int]) -> list[torch.Tensor]:
+    """Emit model-like patches: always full patch_size, garbage in the padded out-of-volume tail."""
+    patches = []
+    for sl in patch_slices:
+        patch = torch.randn(full.shape[0], *patch_size, dtype=full.dtype)
+        extents = [min(s.stop, full.shape[dim + 1]) - s.start for dim, s in enumerate(sl)]
+        source = (slice(None), *[slice(s.start, s.start + extent) for s, extent in zip(sl, extents, strict=True)])
+        patch[(slice(None), *[slice(0, extent) for extent in extents])] = full[source]
+        patches.append(patch)
+    return patches
+
+
+@pytest.mark.parametrize("combine_cls", [None, Mean, Cosinus, Gaussian])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize(
+    ("shape", "patch_size", "overlap"),
+    [
+        ((2, 13, 9, 11), [4, 4, 4], 2),
+        ((1, 7, 8), [3, 8], 1),
+        ((3, 16, 8, 8), [4, 8, 8], 0),
+        ((1, 5, 6, 7), [5, 6, 7], 0),
+    ],
+)
+def test_streaming_accumulator_slabs_match_assemble(combine_cls, dtype, shape, patch_size, overlap):
+    torch.manual_seed(0)
+    full = torch.randn(shape, dtype=dtype)
+    patch_slices, _ = get_patch_slices_from_shape(patch_size, list(shape[1:]), overlap)
+    patches = _padded_patches(full, patch_slices, patch_size)
+
+    def _combine():
+        if combine_cls is None:
+            return None
+        combine = combine_cls()
+        combine.set_patch_config(patch_size, overlap)
+        return combine
+
+    reference = Accumulator(patch_slices, patch_size, patch_combine=_combine(), batch=False)
+    streaming = StreamingAccumulator(patch_slices, patch_size, patch_combine=_combine(), batch=False)
+    slabs = []
+    for index, patch in enumerate(patches):
+        reference.add_layer(index, patch.clone())
+        slabs += streaming.add_layer(index, patch.clone())
+    assert streaming.is_full()
+    slabs += streaming.finalize()
+
+    expected = reference.assemble()
+    # The slab regions must tile the first spatial axis exactly, in order.
+    assert slabs[0][0].start == 0
+    assert slabs[-1][0].stop == shape[1]
+    assert all(a.stop == b.start for (a, _), (b, _) in itertools.pairwise(slabs))
+    assert all(tensor.shape[1] == region.stop - region.start for region, tensor in slabs)
+    result = torch.cat([tensor for _, tensor in slabs], dim=1)
+    assert torch.equal(result, expected), (result - expected).abs().max().item()
+
+
+def test_streaming_accumulator_rejects_unordered_patches():
+    with pytest.raises(PatchError, match="non-decreasing"):
+        StreamingAccumulator([(slice(4, 8),), (slice(0, 4),)], [4], patch_combine=None, batch=False)
+
+
+def test_streaming_accumulator_refuses_whole_volume_assemble():
+    streaming = StreamingAccumulator([(slice(0, 4),), (slice(4, 8),)], [4], patch_combine=None, batch=False)
+    streaming.add_layer(0, torch.ones(1, 4))
+    with pytest.raises(PatchError, match="assemble"):
+        streaming.assemble()
+
+
+def test_streaming_accumulator_is_reusable_after_finalize():
+    full = torch.arange(2 * 8, dtype=torch.float32).reshape(1, 2, 8)
+    patch_slices, _ = get_patch_slices_from_shape([1, 8], [2, 8], 0)
+    streaming = StreamingAccumulator(patch_slices, [1, 8], patch_combine=None, batch=False)
+    for _ in range(2):
+        slabs = []
+        for index, sl in enumerate(patch_slices):
+            slabs += streaming.add_layer(index, full[(slice(None), *sl)])
+        slabs += streaming.finalize()
+        assert torch.equal(torch.cat([tensor for _, tensor in slabs], dim=1), full)
+
+
+def test_streaming_accumulator_rejects_out_of_order_arrival():
+    # Correctness needs patches to ARRIVE in non-decreasing first-axis-start order, not just the slice
+    # list to be sorted. Arriving 0, 2, 3 then the skipped 1 flushes the window past start=2 before
+    # patch 1 (start=2) shows up; without the guard its window offset goes negative -> silent misplace.
+    patch_slices, _ = get_patch_slices_from_shape([4, 8], [10, 8], 2)  # starts 0, 2, 4, 6; window 4
+    starts = [sl[0].start for sl in patch_slices]
+    assert starts == [0, 2, 4, 6]
+    streaming = StreamingAccumulator(patch_slices, [4, 8], patch_combine=None, batch=False)
+    streaming.add_layer(0, torch.ones(1, 4, 8))
+    streaming.add_layer(1, torch.ones(1, 4, 8))
+    streaming.add_layer(3, torch.ones(1, 4, 8))  # start=6 flushes the window up to 6
+    with pytest.raises(PatchError, match="non-decreasing"):
+        streaming.add_layer(2, torch.ones(1, 4, 8))  # start=4 < flushed=6
