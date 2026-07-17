@@ -229,40 +229,30 @@ def gpu_info() -> str:
     return f"{node_name}GPU({devices}) Memory GPU ({memory.used / 1e9:.2f}G ({memory.used / memory.total * 100:.2f} %))"
 
 
+def _nvml_device_memory(device: int | torch.device) -> Any | None:
+    """Return the NVML memory info for one visible device, or ``None`` on CPU / without NVML."""
+    if not _PYNVML_AVAILABLE:
+        return None
+    if isinstance(device, torch.device):
+        if not str(device).startswith("cuda:"):
+            return None
+        device = int(str(device).replace("cuda:", ""))
+    device = cuda_visible_devices()[device]
+    if device >= pynvml.nvmlDeviceGetCount():
+        return None
+    return pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(device))
+
+
 def get_max_gpu_memory(device: int | torch.device) -> float:
     """Return the total VRAM in GB for one device, or ``0`` on CPU."""
-    if not _PYNVML_AVAILABLE:
-        return 0
-    if isinstance(device, torch.device):
-        if str(device).startswith("cuda:"):
-            device = int(str(device).replace("cuda:", ""))
-        else:
-            return 0
-    device = cuda_visible_devices()[device]
-    if device < pynvml.nvmlDeviceGetCount():
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-        memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    else:
-        return 0
-    return float(memory.total) / (10**9)
+    memory = _nvml_device_memory(device)
+    return float(memory.total) / (10**9) if memory is not None else 0
 
 
 def get_gpu_memory(device: int | torch.device) -> float:
     """Return current VRAM usage in GB for one device, or ``0`` on CPU."""
-    if not _PYNVML_AVAILABLE:
-        return 0
-    if isinstance(device, torch.device):
-        if str(device).startswith("cuda:"):
-            device = int(str(device).replace("cuda:", ""))
-        else:
-            return 0
-    device = cuda_visible_devices()[device]
-    if device < pynvml.nvmlDeviceGetCount():
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-        memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    else:
-        return 0
-    return float(memory.used) / (10**9)
+    memory = _nvml_device_memory(device)
+    return float(memory.used) / (10**9) if memory is not None else 0
 
 
 class NeedDevice:
@@ -385,11 +375,7 @@ def _log_image_format(array: np.ndarray) -> np.ndarray:
 
 
 def _log_images_format(array: np.ndarray) -> np.ndarray:
-    result = []
-    for n in range(array.shape[0]):
-        result.append(_log_image_format(array[n]))
-    result = np.stack(result, axis=0)
-    return result
+    return np.stack([_log_image_format(image) for image in array], axis=0)
 
 
 def _log_video_format(array: np.ndarray) -> np.ndarray:
