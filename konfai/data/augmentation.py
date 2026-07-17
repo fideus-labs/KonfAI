@@ -304,6 +304,15 @@ class DataAugmentation(NeedDevice, ABC):
         """Map a target patch's spatial slices to the source region copy *a* reads (region kinds)."""
         return self._stream_region_source(index, self.who_index[index].index(a), target_slices, source_spatial_shape)
 
+    def stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
+        """The spatial shape copy *a*'s draw produces from ``shape`` (the shape-fold counterpart of
+        ``Transform.transform_shape``). The identity default covers every draw but a shape-changing
+        one, which restates here what its ``state_init`` did to the copy's grid."""
+        return self._stream_shape(index, self.who_index[index].index(a), shape)
+
+    def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
+        return shape
+
     def _stream_region_source(
         self,
         index: int,
@@ -507,6 +516,10 @@ class Rotate(EulerTransform):
         if Rotate._index_remap(self.matrix[index][a]) is None:
             return PatchLocality(LocalityKind.WHOLE_VOLUME)
         return PatchLocality(LocalityKind.ORIENTATION)
+
+    def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
+        # The same extent carry state_init applied to the copy's grid.
+        return Rotate._draw_shape(self.matrix[index][a], list(shape))
 
     def _stream_region_source(
         self,
@@ -1019,6 +1032,10 @@ class Permute(DataAugmentation):
         # Reordering axes moves every voxel and touches none, so the multiset of values is the input's:
         # a bijection, which is what ORIENTATION promises.
         return PatchLocality(LocalityKind.ORIENTATION)
+
+    def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
+        # The same reorder state_init applied to the copy's grid.
+        return [shape[axis] for axis in self._source_axes(index, a)]
 
     def _stream_region_source(
         self,

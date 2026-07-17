@@ -897,6 +897,41 @@ def test_stream_pointwise_chain_matches_whole_volume() -> None:
     assert manager._resolve_patch_stream_source(0, True).region_index == 1
 
 
+def test_stream_composed_orientation_and_halo_matches_whole_volume() -> None:
+    # Region stages compose: the dilation's halo pulls through the flip's mirror, so one bounded read
+    # serves both and the seam-spreading foreground must still agree bit for bit.
+    volume = np.zeros((1, 8, 8), dtype=np.float32)
+    volume[0, 3:5, 3:5] = 1.0
+    manager = _assert_stream_matches_whole_volume(volume, [Flip("0"), Dilate(1)], [4, 4])
+    plans = manager._resolve_patch_stream_source(0, True).stage_plans
+    assert [plan.kind.value for plan in plans] == ["orientation", "halo"]
+
+
+def test_stream_composed_rescale_and_orientation_matches_whole_volume() -> None:
+    # A resample followed by a flip: the flip's mirror region pulls through the resample's scale
+    # window, on the RESAMPLED grid the fold computed between them.
+    rng = np.random.default_rng(7)
+    volume = (rng.standard_normal((1, 8, 8)).astype(np.float32)) * 100.0
+    manager = _assert_stream_matches_whole_volume(
+        volume, [ResampleToShape(shape=[12, 12]), Flip("0")], [4, 4], atol=1e-3
+    )
+    plans = manager._resolve_patch_stream_source(0, True).stage_plans
+    assert [plan.kind.value for plan in plans] == ["rescale", "orientation"]
+    assert tuple(plans[1].in_shape) == (12, 12)
+
+
+def test_stream_composed_orientations_with_pointwise_between_match_whole_volume() -> None:
+    # Two orientations with a pointwise stage between them: the fold carries the permuted extents and
+    # the value map rides along where the regions put it.
+    volume = np.arange(1 * 8 * 6, dtype=np.float32).reshape(1, 8, 6)
+    manager = _assert_stream_matches_whole_volume(
+        volume, [Flip("0"), Clip(min_value=-10.0, max_value=10.0), Permute("1|0")], [4, 4]
+    )
+    plans = manager._resolve_patch_stream_source(0, True).stage_plans
+    assert [plan.kind.value for plan in plans] == ["orientation", "pointwise", "orientation"]
+    assert tuple(plans[2].out_shape) == (6, 8)
+
+
 def test_softmax_channel_axis_is_pointwise_but_spatial_axis_falls_back() -> None:
     # A channel-axis softmax (dim 0) is spatially pointwise and streams the exact patch. A softmax over
     # a SPATIAL axis normalises across the whole extent, so a per-patch softmax would diverge: the
