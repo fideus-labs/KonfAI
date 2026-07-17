@@ -30,6 +30,7 @@ import shutil
 import threading
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +179,33 @@ def _finalize_running_statistics(state: dict[str, float] | None) -> dict[str, fl
         "mean": state["mean"],
         "std": math.sqrt(max(variance, 0.0)),
     }
+
+
+def _accumulate_statistics(
+    shape: list[int] | tuple[int, ...],
+    axis: int,
+    read_slab: Callable[[tuple[slice, ...]], np.ndarray],
+    channels: list[int] | None,
+) -> dict[str, float]:
+    """Running min/max/mean/std over an array read chunk by chunk along ``axis``, so no backend ever
+    holds the whole volume. ``read_slab(slices)`` returns the NumPy chunk for one slice tuple."""
+    chunk_length = _statistics_chunk_length(shape, axis)
+    state: dict[str, float] | None = None
+    for start in range(0, shape[axis], chunk_length):
+        slices: list[slice] = [slice(None)] * len(shape)
+        slices[axis] = slice(start, min(shape[axis], start + chunk_length))
+        chunk = read_slab(tuple(slices))
+        if channels is not None:
+            chunk = chunk[channels]
+        state = _update_running_statistics(state, chunk)
+    return _finalize_running_statistics(state)
+
+
+def _flatten_transform(transform: sitk.Transform) -> list[sitk.Transform]:
+    """Expand a (possibly composite) transform into its ordered leaf transforms."""
+    if isinstance(transform, sitk.CompositeTransform):
+        return [transform.GetNthTransform(i) for i in range(transform.GetNumberOfTransforms())]
+    return [transform]
 
 
 # Formats already reported by _warn_unstreamed_region_read. Keyed by format, not by file: the remedy
@@ -551,18 +579,7 @@ class Dataset:
                 raise NameError(f"Dataset '{groups}/{name}' not found in '{self.filename}'.")
 
             axis = 1 if dataset.ndim > 1 else 0
-            chunk_length = _statistics_chunk_length(dataset.shape, axis)
-            state: dict[str, float] | None = None
-
-            for start in range(0, dataset.shape[axis], chunk_length):
-                slices = [slice(None)] * dataset.ndim
-                slices[axis] = slice(start, min(dataset.shape[axis], start + chunk_length))
-                chunk = np.asarray(dataset[tuple(slices)])
-                if channels is not None:
-                    chunk = chunk[channels]
-                state = _update_running_statistics(state, chunk)
-
-            return _finalize_running_statistics(state)
+            return _accumulate_statistics(dataset.shape, axis, lambda s: np.asarray(dataset[s]), channels)
 
         def data_to_file(
             self,
@@ -578,12 +595,7 @@ class Dataset:
                 data, attributes_tmp = image_to_data(data)
                 attributes.update(attributes_tmp)
             elif isinstance(data, sitk.Transform):
-                transforms = []
-                if isinstance(data, sitk.CompositeTransform):
-                    for i in range(data.GetNumberOfTransforms()):
-                        transforms.append(data.GetNthTransform(i))
-                else:
-                    transforms.append(data)
+                transforms = _flatten_transform(data)
                 datas = []
                 for i, transform in enumerate(transforms):
                     if isinstance(transform, sitk.Euler3DTransform):
@@ -802,29 +814,15 @@ class Dataset:
             reader.ReadImageInformation()
             data_shape = [reader.GetNumberOfComponents(), *reversed(reader.GetSize())]
 
-            slab_length = _statistics_chunk_length(data_shape, 1)
-            state: dict[str, float] | None = None
-
-            for start in range(0, data_shape[1], slab_length):
-                slices: list[slice] = [slice(None)] * len(data_shape)
-                slices[1] = slice(start, min(data_shape[1], start + slab_length))
-                slab, _ = self._file_to_image_slice(name, path, tuple(slices))
-                if channels is not None:
-                    slab = slab[channels]
-                state = _update_running_statistics(state, slab)
-
-            return _finalize_running_statistics(state)
+            return _accumulate_statistics(
+                data_shape, 1, lambda s: self._file_to_image_slice(name, path, s)[0], channels
+            )
 
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             attributes = Attribute()
             if os.path.exists(f"{self.filename}{name}.itk.txt"):
                 data = sitk.ReadTransform(f"{self.filename}{name}.itk.txt")
-                transforms = []
-                if isinstance(data, sitk.CompositeTransform):
-                    for i in range(data.GetNumberOfTransforms()):
-                        transforms.append(data.GetNthTransform(i))
-                else:
-                    transforms.append(data)
+                transforms = _flatten_transform(data)
                 datas = []
                 for i, transform in enumerate(transforms):
                     if isinstance(transform, sitk.Euler3DTransform):
