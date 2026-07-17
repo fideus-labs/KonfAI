@@ -163,10 +163,22 @@ canonical prediction fields are in {doc}`../config_guide/prediction`.
 When the reassembled output itself is the memory peak, streaming handles it
 automatically — there is no flag to set. Each output slab is finalized and
 written to disk as soon as its patches complete, so peak RAM is one patch window
-instead of the whole volume. It applies per case only when it is byte-identical
-to the assembled path (a voxel-local finalize chain, a single augmentation, an
-`mha`/`h5`/`omezarr` destination) and uses the whole-volume write transparently
-otherwise. `KONFAI_STREAMED_WRITES=0` forces the whole-volume path globally.
+instead of the whole volume. Geometry inverses stream too, and they **compose**:
+a `Canonical`/`Flip`/`Permute` inverse remaps each slab to its written region, a
+`Padding` inverse crops it in flight, a `ResampleToResolution`/`ResampleToShape`
+inverse resamples back through a sliding window — chained in any number, each
+pulling through the next — so a huge output at ORIGINAL resolution is written
+slab by slab without ever being held whole. What streaming cannot honour (a
+whole-volume transform, a float resample — whose interpolation is only bit-equal
+whole-volume — or a destination without region writes) splits instead: the
+pointwise prefix still streams into a light post-reduction buffer and the
+remaining stages run once on it. Only several augmentations (TTA inverses apply
+to the assembled volume) or a non-voxel-local reduction keep the whole-volume
+path. Every streamed or split case is voxel-identical to the
+assembled path on a given device; as with the assembled path, only a
+transcendental-terminated float chain can differ by ~1 ULP between a GPU window
+and a CPU whole-volume run. `KONFAI_STREAMED_WRITES=0` forces the whole-volume
+path globally.
 
 ## Verify the behaviour you care about
 
