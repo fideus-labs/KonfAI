@@ -17,14 +17,16 @@
 """Streamed prediction writes (automatic, no config knob): the slab-by-slab path must be voxel-identical
 to the assembled-volume path (obtained via the ``KONFAI_STREAMED_WRITES=0`` kill-switch), must actually
 take the streamed writer (its hand-written MetaImage header is observable), and must fall back safely
-when the gate refuses (here: TTA).
+when the gate refuses.
 
 The geometry variants exercise the write dispatcher end to end, one per region kind and then in
 composition: a ``Canonical`` inverse (ORIENTATION — in-slab mirrors), a ``Padding`` inverse (CROP), a
 ``ResampleToResolution`` inverse on a uint8 chain (RESCALE, streamed through in nearest mode) and on a
 float chain (demoted to the buffered tail, since interpolation is only byte-identical whole-volume),
 a two-inverse pipe, and the full three-inverse stack (crop + rescale + reorient composed, streamed
-end to end). Every variant is compared voxel for voxel against its own kill-switch reference."""
+end to end). The TTA variants exercise the slab-synchronized cross-copy reduce: an in-plane flip
+streams (each copy's window reduced slab by slab), while a slab-axis flip must refuse and complete
+whole-volume. Every variant is compared voxel for voxel against its own kill-switch reference."""
 
 import subprocess
 import sys
@@ -82,14 +84,17 @@ def main() -> None:
         statistics_dir=root / "Statistics",
     )
     # Same config both ways -- only the kill-switch differs -- so the outputs must match bit for bit.
-    for variant in ["", "Canonical", "Padding", "ResampleLabel", "ResampleFloat", "GeometryPair", "GeometryStack"]:
+    # TTA (in-plane flip) streams through the slab-synchronized reduce; TTAZ (slab-axis flip) must
+    # refuse and complete whole-volume.
+    for variant in [
+        "", "Canonical", "Padding", "ResampleLabel", "ResampleFloat", "GeometryPair", "GeometryStack",
+        "TTA", "TTAZ", "TTAStack",
+    ]:
         run_prediction(
             root / f"Prediction{variant}.yml", root / f"Predictions_{variant or 'base'}_reference",
             disable_streaming=True,
         )
         run_prediction(root / f"Prediction{variant}.yml", root / f"Predictions_{variant or 'base'}_streamed")
-    # TTA makes the finalize chain non-local, so streaming refuses and the run completes whole-volume.
-    run_prediction(root / "PredictionTTA.yml", root / "Predictions_streamed_tta")
 
 
 if __name__ == "__main__":
@@ -162,13 +167,40 @@ _VARIANT_USES_STREAMED_WRITER = {
     "ResampleFloat": False,
     "GeometryPair": True,
     "GeometryStack": True,
+    "TTA": True,
+    "TTAZ": False,
+    "TTAStack": True,
 }
+
+_ALL_VARIANTS = tuple(_VARIANT_USES_STREAMED_WRITER)
+
+# TTA copies concatenated, then InferenceStack (SLAB: per-voxel member mean + a per-region side write
+# of the stack) — the streamed prefix must feed it every slab's place and the stack must still match.
+_STACK_AFTER_REDUCTION_BLOCK = """\
+        after_reduction_transforms:
+          InferenceStack:
+            dataset: ''
+            name: stack
+            mode: mean"""
 
 
 def _write_streamed_prediction_configs(experiment_dir: Path) -> None:
     base = (experiment_dir / "Prediction.yml").read_text(encoding="utf-8")
+    # The in-plane flip (y and x, never z) is slab-parallel, so the case streams; flipping the slab
+    # axis instead mirrors the slab order, which the gate must refuse.
     tta = _replace_once(base, "    augmentations: None", TTA_AUGMENTATIONS_BLOCK)
     (experiment_dir / "PredictionTTA.yml").write_text(tta, encoding="utf-8")
+    z_flip_block = TTA_AUGMENTATIONS_BLOCK.replace(
+        "- 0\n            - 1\n            - 1", "- 1\n            - 0\n            - 0"
+    )
+    assert z_flip_block != TTA_AUGMENTATIONS_BLOCK, "the TTA block does not match the expected f_prob layout"
+    (experiment_dir / "PredictionTTAZ.yml").write_text(
+        _replace_once(base, "    augmentations: None", z_flip_block), encoding="utf-8"
+    )
+    tta_stack = _replace_once(tta, "        after_reduction_transforms: None", _STACK_AFTER_REDUCTION_BLOCK)
+    tta_stack = _replace_once(tta_stack, "        reduction: Mean", "        reduction: Concat")
+    tta_stack = _replace_once(tta_stack, "        Mean: {}", "        Concat: {}")
+    (experiment_dir / "PredictionTTAStack.yml").write_text(tta_stack, encoding="utf-8")
     for variant, transforms_block in _VARIANT_TRANSFORMS.items():
         config = _replace_once(base, "            transforms: None", transforms_block)
         if variant in _UINT8_VARIANTS:
@@ -178,8 +210,8 @@ def _write_streamed_prediction_configs(experiment_dir: Path) -> None:
 
 @pytest.fixture(scope="module")
 def streamed_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
-    """Train once, then predict the assembled reference (kill-switch), the automatic streamed run, and a
-    TTA run that must fall back to the whole-volume path."""
+    """Train once, then predict every variant twice: the assembled reference (kill-switch) and the
+    automatic streamed run."""
     experiment_dir = tmp_path_factory.mktemp("streamed") / "experiment"
     paths = _prepare_experiment_dir(experiment_dir, TRAIN_NAME)
     _write_streamed_prediction_configs(experiment_dir)
@@ -195,7 +227,6 @@ def streamed_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, P
     return {
         "dataset_dir": paths["dataset_dir"],
         "experiment_dir": experiment_dir,
-        "streamed_tta": experiment_dir / "Predictions_streamed_tta",
     }
 
 
@@ -211,7 +242,7 @@ def _prediction_path(predictions_dir: Path, case: str) -> Path:
     return path
 
 
-@pytest.mark.parametrize("variant", ["base", *_VARIANT_TRANSFORMS])
+@pytest.mark.parametrize("variant", _ALL_VARIANTS)
 def test_streamed_prediction_is_voxel_identical_to_reference(
     streamed_experiment: dict[str, Path], variant: str
 ) -> None:
@@ -230,11 +261,12 @@ def test_streamed_prediction_is_voxel_identical_to_reference(
         np.testing.assert_array_equal(streamed_array, reference_array, err_msg=f"{variant}/{case}")
 
 
-@pytest.mark.parametrize("variant", ["base", *_VARIANT_TRANSFORMS])
+@pytest.mark.parametrize("variant", _ALL_VARIANTS)
 def test_streamed_prediction_takes_the_expected_writer(streamed_experiment: dict[str, Path], variant: str) -> None:
     """SimpleITK always writes ``CenterOfRotation`` into a MetaImage header; the streamed region writer
-    never does. Its absence proves the variant streamed to the sink; its presence proves the buffered
-    (chain-split / demoted) variants assembled and wrote classically."""
+    never does. Its absence proves the variant streamed to the sink (for TTA: the slab-synchronized
+    cross-copy reduce); its presence proves the buffered (chain-split / demoted) and refused (TTAZ —
+    a slab-axis flip) variants assembled and wrote classically."""
     experiment_dir = streamed_experiment["experiment_dir"]
     case = _case_names(streamed_experiment["dataset_dir"])[0]
     streamed_header = _prediction_path(experiment_dir / f"Predictions_{variant}_streamed", case).read_bytes()[:2048]
@@ -243,10 +275,26 @@ def test_streamed_prediction_takes_the_expected_writer(streamed_experiment: dict
     assert b"CenterOfRotation" in reference_header, variant
 
 
-def test_streamed_request_with_tta_falls_back_to_whole_volume_path(streamed_experiment: dict[str, Path]) -> None:
+def test_streamed_tta_output_shape_and_values_are_sane(streamed_experiment: dict[str, Path]) -> None:
     for case in _case_names(streamed_experiment["dataset_dir"]):
-        path = _prediction_path(streamed_experiment["streamed_tta"], case)
-        assert b"CenterOfRotation" in path.read_bytes()[:2048], "expected the whole-volume writer"
+        path = _prediction_path(streamed_experiment["experiment_dir"] / "Predictions_TTA_streamed", case)
         array = SimpleITK.GetArrayFromImage(SimpleITK.ReadImage(str(path)))
         assert array.shape == (3, 16, 16), case
         assert np.isfinite(array).all(), case
+
+
+def test_streamed_inference_stack_sidecar_is_voxel_identical_to_reference(
+    streamed_experiment: dict[str, Path],
+) -> None:
+    """The per-member stack InferenceStack persists is an output too: written region by region on the
+    streamed path, it must hold the same voxels as the whole-volume write."""
+    experiment_dir = streamed_experiment["experiment_dir"]
+    for case in _case_names(streamed_experiment["dataset_dir"]):
+        stacks = {}
+        for kind in ("streamed", "reference"):
+            path = (
+                experiment_dir / f"Predictions_TTAStack_{kind}" / TRAIN_NAME / "Dataset" / case / "InferenceStack.mha"
+            )
+            assert path.exists(), f"missing InferenceStack sidecar: {path}"
+            stacks[kind] = SimpleITK.GetArrayFromImage(SimpleITK.ReadImage(str(path)))
+        np.testing.assert_array_equal(stacks["streamed"], stacks["reference"], err_msg=case)

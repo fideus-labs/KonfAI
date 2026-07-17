@@ -358,13 +358,13 @@ def _geometry_attribute() -> Attribute:
 
 def test_plan_all_pointwise_streams_direct() -> None:
     plan = _output_dataset(final=[TensorCast("float32", inverse=False)])._plan_stream(
-        _dataset_iter([]), _geometry_attribute()
+        _dataset_iter([]), 0, _geometry_attribute()
     )
     assert plan is not None and plan.mode == "direct"
 
 
 def test_plan_one_geometry_inverse_streams_through_the_region_stage() -> None:
-    plan = _output_dataset()._plan_stream(_dataset_iter([Flip("0", inverse=True)]), _geometry_attribute())
+    plan = _output_dataset()._plan_stream(_dataset_iter([Flip("0", inverse=True)]), 0, _geometry_attribute())
     assert plan is not None and plan.mode == "region"
     assert plan.pipe_start == 0 and plan.stages[0].inverted
 
@@ -374,6 +374,7 @@ def test_plan_several_region_stages_compose_into_one_streamed_pipe() -> None:
     # geometry chain still streams to the write — no chain is one region too many.
     plan = _output_dataset()._plan_stream(
         _dataset_iter([Flip("0", inverse=True), Padding([0, 0, 0, 0, 2, 1], inverse=True)]),
+        0,
         _geometry_attribute(),
     )
     assert plan is not None and plan.mode == "region"
@@ -384,7 +385,7 @@ def test_plan_whole_volume_stage_falls_to_the_buffered_tail_and_swallows_the_reg
     # [region, WHOLE_VOLUME]: the tail must start at the region stage, not after it — a buffered head
     # is pointwise-only so the buffer sits on the accumulator grid.
     plan = _output_dataset(final=[Softmax(1)])._plan_stream(
-        _dataset_iter([Flip("0", inverse=True)]), _geometry_attribute()
+        _dataset_iter([Flip("0", inverse=True)]), 0, _geometry_attribute()
     )
     assert plan is not None and plan.mode == "buffered"
     assert plan.pipe_start is None and plan.tail_start == 0
@@ -396,9 +397,9 @@ def test_plan_seeded_global_stat_counts_as_pointwise_and_unseeded_does_not() -> 
     seeded = _geometry_attribute()
     seeded["Min"] = 0.0
     seeded["Max"] = 1.0
-    plan = _output_dataset(final=[Normalize(inverse=False)])._plan_stream(_dataset_iter([]), seeded)
+    plan = _output_dataset(final=[Normalize(inverse=False)])._plan_stream(_dataset_iter([]), 0, seeded)
     assert plan is not None and plan.mode == "direct"
-    plan = _output_dataset(final=[Normalize(inverse=False)])._plan_stream(_dataset_iter([]), _geometry_attribute())
+    plan = _output_dataset(final=[Normalize(inverse=False)])._plan_stream(_dataset_iter([]), 0, _geometry_attribute())
     assert plan is not None and plan.mode == "buffered" and plan.tail_start == 0
 
 
@@ -408,15 +409,15 @@ def test_plan_refuses_tta_custom_reduction_and_non_pointwise_before_reduction() 
             return tensors[0]
 
     attribute = _geometry_attribute()
-    assert _output_dataset(nb_data_augmentation=2)._plan_stream(_dataset_iter([]), attribute) is None
-    assert _output_dataset(reduction=_CustomReduction())._plan_stream(_dataset_iter([]), attribute) is None
-    assert _output_dataset(before=[Softmax(1)])._plan_stream(_dataset_iter([]), attribute) is None
+    assert _output_dataset(nb_data_augmentation=2)._plan_stream(_dataset_iter([]), 0, attribute) is None
+    assert _output_dataset(reduction=_CustomReduction())._plan_stream(_dataset_iter([]), 0, attribute) is None
+    assert _output_dataset(before=[Softmax(1)])._plan_stream(_dataset_iter([]), 0, attribute) is None
 
 
 def test_plan_non_region_writable_format_buffers_and_writes_classically() -> None:
     # nrrd cannot serve region writes: the pointwise chain still streams the accumulator into a buffer
     # (the windowed-accumulator win survives), and the volume is written through the classic writer.
-    plan = _output_dataset(file_format="nrrd")._plan_stream(_dataset_iter([]), _geometry_attribute())
+    plan = _output_dataset(file_format="nrrd")._plan_stream(_dataset_iter([]), 0, _geometry_attribute())
     assert plan is not None and plan.mode == "buffered" and plan.tail_start == len(plan.stages)
 
 
