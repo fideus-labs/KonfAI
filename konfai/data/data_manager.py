@@ -326,7 +326,7 @@ class GroupMetric(dict[str, GroupTransformMetric]):
         super().__init__(groups_dest)
 
 
-def _interleaved_case_entries(patch: "DatasetPatch", entries: list[tuple[int, int]]) -> list[tuple[int, int]]:
+def _interleaved_case_entries(patches: list["DatasetPatch"], entries: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """One case's ``(copy, patch)`` entries ordered so the copies advance together along the slab axis.
 
     A streamed TTA write reduces the copies slab by slab, so it can only advance to the slowest
@@ -335,8 +335,23 @@ def _interleaved_case_entries(patch: "DatasetPatch", entries: list[tuple[int, in
     skew at one patch extent, whatever grid each copy was cut on. The sort is total on
     ``(start, copy, patch)``, so within a copy the order is untouched — per-copy accumulation is
     byte-identical either way, and the whole-volume path reduces at the end whatever the order.
+
+    ``patches`` holds every destination group's grid for the case: one shared order must serve them
+    all, so if the groups disagree on the slab starts — or a group cannot even index an entry — the
+    plain order is kept. The interleave is a memory bound, never a correctness requirement.
     """
-    return sorted(entries, key=lambda entry: (patch.get_patch_slices(entry[0])[entry[1]][0].start, *entry))
+
+    def starts(patch: "DatasetPatch") -> list[int] | None:
+        try:
+            return [patch.get_patch_slices(copy)[index][0].start for copy, index in entries]
+        except (IndexError, KeyError):
+            return None
+
+    reference = starts(patches[0])
+    if reference is None or any(starts(patch) != reference for patch in patches[1:]):
+        return entries
+    order = dict(zip(entries, reference, strict=True))
+    return sorted(entries, key=lambda entry: (order[entry], *entry))
 
 
 class WindowedCaseSampler(Sampler[int]):
@@ -1416,7 +1431,7 @@ class Data(ABC):
         for x in range(nb_dataset):
             entries = [(y, z) for y in range(nb_augmentation) for z in range(nb_patch[x][y])]
             if interleave:
-                entries = _interleaved_case_entries(data[next(reversed(data))][x].patch, entries)
+                entries = _interleaved_case_entries([managers[x].patch for managers in data.values()], entries)
             mapping.extend((x, y, z) for y, z in entries)
         return data, mapping
 

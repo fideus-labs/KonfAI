@@ -23,6 +23,7 @@ import shutil
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -571,6 +572,11 @@ class OutSameAsGroupDataset(OutputDataset):
             sink = self._stream_sinks.pop(index_dataset, None)
             if sink is not None:
                 sink.__exit__(type(error), error, error.__traceback__)
+            plan = self._stream_plans.get(index_dataset)
+            if plan is not None:
+                for position in plan.slab_stages:
+                    with suppress(Exception):
+                        plan.stages[position].transform.stream_abort(self.names[index_dataset])
             raise
         if finished:
             self._close_stream(index_dataset)

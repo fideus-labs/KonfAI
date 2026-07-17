@@ -198,6 +198,13 @@ class Transform(NeedDevice, ABC):
         del region, spatial_shape
         return self(name, tensor, cache_attribute)
 
+    def stream_abort(self, name: str) -> None:
+        """Drop whatever ``stream_slab`` holds open for ``name`` after a mid-case failure.
+
+        Called by the streamed-write dispatcher when a case dies between slabs, so a ``SLAB`` stage's
+        region sink or buffer does not outlive the case. The base holds nothing.
+        """
+
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
         """Record the geometry a whole-volume ``__call__`` would, given the FULL source shape.
 
@@ -1978,6 +1985,12 @@ class InferenceStack(Transform):
             if region.stop == spatial_shape[0]:
                 self._stack_sinks.pop(name).__exit__(None, None, None)
         return self._reduce(tensor)
+
+    def stream_abort(self, name: str) -> None:
+        self._stack_buffers.pop(name, None)
+        sink = self._stack_sinks.pop(name, None)
+        if sink is not None:
+            sink.__exit__(None, None, None)
 
 
 class Norm(Transform):
