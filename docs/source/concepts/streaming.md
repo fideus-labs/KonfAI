@@ -112,25 +112,21 @@ which region of the file a patch needs.
 `WHOLE_VOLUME` is the default. A transform that declares nothing loads the
 volume and is correct.
 
-A chain streams when it has the shape
+A chain streams when every stage is pointwise or a region kind — `HALO`,
+`ORIENTATION`, `CROP`, `RESCALE` — where `GLOBAL_STAT` counts as pointwise.
+Region stages **compose** in any number: each stage's region pulls through the
+one before it, down to one bounded read of the stored volume. The chain planned
+is the group's `transforms` followed by the copy's own augmentation draw — one
+list, so a region transform and a region augmentation compose exactly like two
+region transforms.
 
-```text
-[pointwise*] [at most one region stage] [pointwise*]
-```
-
-where `GLOBAL_STAT` counts as pointwise, and the region stages are `HALO`,
-`ORIENTATION`, `CROP`, and `RESCALE`. The chain planned is the group's
-`transforms` followed by the copy's own augmentation draw — one list, so a
-region transform and a region augmentation are two regions.
-
-Six conditions reject streaming:
+Five conditions reject streaming:
 
 1. any `WHOLE_VOLUME` declaration;
-2. more than one region stage;
-3. a halo wider than half the read extent on any axis;
-4. a `GLOBAL_STAT` preceded by a stage that does not preserve statistics;
-5. a `GLOBAL_STAT` whose statistic cannot be read from disk;
-6. a `RESCALE` on a case with no `Spacing`.
+2. a halo wider than half the read extent on any axis;
+3. a `GLOBAL_STAT` preceded by a stage that does not preserve statistics;
+4. a `GLOBAL_STAT` whose statistic cannot be read from disk;
+5. a `RESCALE` on a case with no `Spacing`.
 
 ### Why `[Clip(-200, 400), Standardize()]` does not stream
 

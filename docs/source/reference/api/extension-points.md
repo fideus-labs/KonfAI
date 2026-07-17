@@ -165,9 +165,10 @@ What a declaration costs you:
   `prod(1 + 2 * halo_k / patch_k)` times the case's bytes. A radius above half the
   patch — or half the case, whichever is smaller — on any axis is rejected, and
   the case falls back to a full load.
-- A chain streams only as `[pointwise*][at most one region][pointwise*]`, where
-  `GLOBAL_STAT` counts as pointwise. Two region stages, or any `WHOLE_VOLUME`,
-  falls back.
+- A chain streams when every stage is pointwise or a region kind, where
+  `GLOBAL_STAT` counts as pointwise. Region stages compose — each pulls through
+  the one before it — so their number is not limited; any `WHOLE_VOLUME` falls
+  back.
 
 `patch_transforms` is stricter than `transforms`: only `POINTWISE` and
 `GLOBAL_STAT` are accepted, and any other kind raises a `ConfigError` pointing at

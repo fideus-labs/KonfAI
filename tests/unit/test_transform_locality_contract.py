@@ -588,8 +588,9 @@ def test_streamed_augmented_patch_equals_whole_volume(case: _AugmentationCase, d
 def test_a_pointwise_augmentation_streams_the_whole_grid_after_a_transform(dataset: Dataset) -> None:
     """A copy is its transforms AND its draw: the dispatcher plans them as one chain.
 
-    A pointwise draw behind a region transform is still one region, so it streams; the same draw behind
-    a region transform AND a region draw would be two, which is what the plan refuses.
+    A pointwise draw behind a region transform is still one region, so it streams; a region draw
+    behind a region transform makes two — and region stages compose, each pulling through the one
+    before it, so the pair streams too and must match the loaded copy patch for patch.
     """
     torch.manual_seed(0)
     brightness = augmentation_module.Brightness(0.5)
@@ -611,8 +612,19 @@ def test_a_pointwise_augmentation_streams_the_whole_grid_after_a_transform(datas
 
     resample = ResampleToResolution([2.0, 1.0, 3.0])
     assert manager(resample).can_stream_patch(1) is True
-    # Two regions in one chain: the resample's, and the flip's.
+    # Two regions in one chain — the resample's, then the flip draw's — composed into one pull.
     flip = FlipAugmentation(f_prob=[1.0, 1.0, 1.0])
     flip.load(1.0)
     augmentations.data_augmentations = [flip]
-    assert manager(resample).can_stream_patch(1) is False
+    streamed, reference = manager(resample), manager(resample)
+    for item in (streamed, reference):
+        item.reset_augmentation(reset_state=False)
+    assert streamed.can_stream_patch(1) is True
+    reference.load([resample], [augmentations], load_augmentations=True)
+    for index in range(streamed.get_size(1)):
+        got = streamed.get_data(index, 1, [], True)
+        expected = reference.get_data(index, 1, [], True)
+        assert got.shape == expected.shape
+        # The streamed resample matches F.interpolate to float32 interpolation rounding; the flip
+        # draw on top is an exact index remap of it.
+        np.testing.assert_allclose(got.numpy(), expected.numpy(), rtol=0, atol=1e-3)
