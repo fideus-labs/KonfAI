@@ -125,11 +125,16 @@ the exported output name stays consistent.
 
 ```{note}
 **Streamed writes are automatic — there is no config key.** When an output can be finalized slab by slab
-byte-identically to the assembled volume (a voxel-local finalize chain, a single augmentation, and an
+identically to the assembled volume (a single augmentation, a voxel-local reduction, and an
 `mha`/`h5`/`omezarr` destination), each slab is written to disk as its patches complete, bounding RAM at
-one patch window instead of the whole volume; otherwise the whole-volume path is used transparently. Set
-`KONFAI_STREAMED_WRITES=0` to force the whole-volume path globally (ops/debug or exact bit-reproducibility
-against a CPU run).
+one patch window instead of the whole volume. Geometry inverses stream too, composed in any number
+(`Canonical`/`Flip`/`Permute`, `Padding`, nearest-mode `ResampleToResolution`/`ResampleToShape`):
+each slab is remapped, cropped, or resampled through a sliding window straight to its written region.
+A chain streaming cannot honour streams its pointwise prefix into a light post-reduction buffer and
+runs the rest whole-volume on it. Streamed outputs match the assembled path voxel for voxel on a given
+device; only a transcendental-terminated float chain (Softmax/Sigmoid) can differ by ~1 ULP between a
+GPU window and a CPU whole-volume run. Set `KONFAI_STREAMED_WRITES=0` to force the whole-volume path
+globally (ops/debug or exact bit-reproducibility against a CPU run).
 ```
 
 ## Examples

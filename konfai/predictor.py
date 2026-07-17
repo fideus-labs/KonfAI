@@ -22,6 +22,8 @@ import os
 import shutil
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,8 +39,24 @@ except ImportError:
 
 from konfai import config_file, cuda_visible_devices, konfai_root, predictions_directory
 from konfai.data.data_manager import BatchSample, DataPrediction, DatasetIter
-from konfai.data.patching import Accumulator, PathCombine, StreamingAccumulator
-from konfai.data.transform import LocalityKind, Transform, TransformInverse, TransformLoader
+from konfai.data.patching import (
+    Accumulator,
+    PathCombine,
+    SlabRegionStream,
+    StreamingAccumulator,
+    _halo_pull,
+    _halo_radii,
+    _remap_pull,
+    _scale_pull,
+)
+from konfai.data.transform import (
+    LocalityKind,
+    PatchLocality,
+    Resample,
+    Transform,
+    TransformInverse,
+    TransformLoader,
+)
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
@@ -335,6 +353,77 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         return str(self)
 
 
+# The write-side region kinds: what SlabRegionStream can carry inside a streamed finalize chain (the
+# same set the read dispatcher accepts as its region stages; on both sides they compose).
+_REGION_KINDS = (LocalityKind.HALO, LocalityKind.ORIENTATION, LocalityKind.CROP, LocalityKind.RESCALE)
+
+
+@dataclass(frozen=True)
+class _FinalizeStage:
+    """One step of the finalize chain, bound to how the chain applies it (forward or inverted)."""
+
+    transform: Transform
+    inverted: bool
+
+    def locality(self, attribute: Attribute) -> PatchLocality:
+        if self.inverted:
+            return cast(TransformInverse, self.transform).inverse_patch_locality(attribute)
+        return self.transform.patch_locality(attribute)
+
+    def __call__(self, name: str, tensor: torch.Tensor, attribute: Attribute) -> torch.Tensor:
+        if self.inverted:
+            return cast(TransformInverse, self.transform).inverse(name, tensor, attribute)
+        return self.transform(name, tensor, attribute)
+
+
+@dataclass(frozen=True)
+class _StreamPlan:
+    """How one case streams: the post-reduction stages, split into a per-slab pointwise prefix, a
+    streamed pipe of region and pointwise stages, and — past what streaming can honour — a
+    whole-volume tail.
+
+    ``to_sink`` streams straight into a region-write ``DataStream``; ``pipe_start`` is the first
+    region stage (``None`` when the chain is pointwise throughout), and the pipe runs from there to
+    the end — region stages compose, so their number is not limited. Without ``to_sink`` the prefix
+    streams into a post-reduction buffer and ``stages[tail_start:]`` runs once on it (the chain
+    split). The invariants: ``to_sink`` implies no tail, and a pipe implies ``to_sink`` — a tail
+    swallows the region stages, so the buffer always sits on the accumulator grid.
+    """
+
+    stages: list[_FinalizeStage]
+    pipe_start: int | None
+    tail_start: int
+    to_sink: bool
+
+    @property
+    def boundary(self) -> int:
+        """Where the per-slab pointwise prefix ends."""
+        return self.pipe_start if self.pipe_start is not None else self.tail_start
+
+    @property
+    def mode(self) -> str:
+        if not self.to_sink:
+            return "buffered"
+        return "region" if self.pipe_start is not None else "direct"
+
+
+@dataclass
+class _RegionState:
+    """One case's live streamed pipe: its slab scheduler and the geometry its closures share.
+
+    ``shapes[i]`` is the spatial shape between pipe stage ``i - 1`` and ``i`` (``shapes[0]`` the
+    accumulator's, ``shapes[-1]`` the written image's); a pointwise stage leaves it unchanged, so the
+    per-stage region bookkeeping folds through the same list the pull map composes over.
+    """
+
+    stages: list[_FinalizeStage]
+    kinds: list[LocalityKind]
+    shapes: list[list[int]]
+    stream: SlabRegionStream | None = None
+    # The attribute the latest emission ran the pipe on: what the sink opens with.
+    attribute: Attribute | None = None
+
+
 @config("OutputDataset")
 class OutSameAsGroupDataset(OutputDataset):
     """
@@ -365,14 +454,16 @@ class OutSameAsGroupDataset(OutputDataset):
         )
         self.group_src, self.group_dest = same_as_group.split(":")
         # Slab streaming has no config knob: it is applied automatically, per case, whenever it is
-        # byte-identical to the assembled path (``_stream_refusal is None`` -- pointwise finalize, single
-        # augmentation, region-writable backend), finalizing and writing each z-slab as its patches
-        # complete so RAM is bounded at one patch window; otherwise the whole-volume path is used
-        # transparently. ``KONFAI_STREAMED_WRITES=0`` is a global ops/debug kill-switch (also how a test
-        # gets the assembled reference), not a per-output option.
+        # byte-identical to the assembled path (see ``_plan_stream``), finalizing each z-slab as its
+        # patches complete so RAM is bounded at one patch window; otherwise the whole-volume path is
+        # used transparently. ``KONFAI_STREAMED_WRITES=0`` is a global ops/debug kill-switch (also how
+        # a test gets the assembled reference), not a per-output option.
         self._streaming_enabled = os.environ.get("KONFAI_STREAMED_WRITES", "1").lower() not in ("0", "false")
-        self._stream_active: dict[int, bool] = {}
+        self._stream_plans: dict[int, _StreamPlan | None] = {}
         self._stream_sinks: dict[int, DataStream] = {}
+        self._region_states: dict[int, _RegionState] = {}
+        self._stream_buffers: dict[int, torch.Tensor] = {}
+        self._post_prefix_attributes: dict[int, Attribute] = {}
 
     def add_layer(
         self,
@@ -396,15 +487,14 @@ class OutSameAsGroupDataset(OutputDataset):
                 self.output_layer_accumulator[index_dataset] = {}
                 self.attributes[index_dataset] = {}
                 self.names[index_dataset] = input_dataset.name
-                # Stream this case iff enabled and byte-identical to the assembled path. No warning on a
-                # refusal: streaming is transparent, so the whole-volume path is a normal outcome, not a
-                # misconfiguration.
-                self._stream_active[index_dataset] = (
-                    self._streaming_enabled and self._stream_refusal(dataset, source_attribute) is None
+                # Plan how (or whether) this case streams. No warning on a refusal: streaming is
+                # transparent, so the whole-volume path is a normal outcome, not a misconfiguration.
+                self._stream_plans[index_dataset] = (
+                    self._plan_stream(dataset, source_attribute) if self._streaming_enabled else None
                 )
             self.attributes[index_dataset][index_augmentation] = {}
 
-            accumulator_type = StreamingAccumulator if self._stream_active[index_dataset] else Accumulator
+            accumulator_type = StreamingAccumulator if self._stream_plans[index_dataset] else Accumulator
             self.output_layer_accumulator[index_dataset][index_augmentation] = accumulator_type(
                 input_dataset.patch.get_patch_slices(index_augmentation),
                 input_dataset.patch.patch_size,
@@ -445,13 +535,15 @@ class OutSameAsGroupDataset(OutputDataset):
             self._accum_device[index_dataset] = torch.device("cpu")
             torch.cuda.empty_cache()
             slabs = accumulator.add_layer(index_patch, self._offload_to_cpu(layer)) or []
-        if not self._stream_active.get(index_dataset, False):
+        if not self._stream_plans.get(index_dataset):
             return
         finished = accumulator.is_full()
         if finished:
             slabs = slabs + cast(StreamingAccumulator, accumulator).finalize()
         try:
-            self._flush_slabs(index_dataset, slabs, number_of_channels_per_model, dataset)
+            self._consume_slabs(index_dataset, slabs, number_of_channels_per_model)
+            if finished:
+                self._finish_stream(index_dataset)
         except BaseException as error:
             sink = self._stream_sinks.pop(index_dataset, None)
             if sink is not None:
@@ -460,79 +552,315 @@ class OutSameAsGroupDataset(OutputDataset):
         if finished:
             self._close_stream(index_dataset)
 
-    def _stream_refusal(self, dataset: DatasetIter, attribute: Attribute) -> str | None:
-        """Why this case cannot be written slab by slab (``None`` = it can).
+    @staticmethod
+    def _voxel_local(locality: PatchLocality, attribute: Attribute) -> bool:
+        """Whether a finalize stage is a per-voxel map here: POINTWISE, or GLOBAL_STAT whose statistic
+        the case already carries — the finalize attribute holds what the forward pass pushed, and there
+        is no stored volume left to derive a missing one from."""
+        if locality.kind is LocalityKind.POINTWISE:
+            return True
+        return locality.kind is LocalityKind.GLOBAL_STAT and all(key in attribute for key in locality.stat_keys)
 
-        Streaming is only byte-identical to the assembled-volume path when every finalize stage is
-        voxel-local: single augmentation (TTA inverses apply to the assembled volume), a Mean/Median
-        reduction, and a POINTWISE ``patch_locality`` for every transform of the finalize chain — a
-        pointwise transform is a per-voxel value map, so its inverse is voxel-local too. Anything else
-        falls back to the proven whole-volume path.
+    def _plan_stream(self, dataset: DatasetIter, attribute: Attribute) -> _StreamPlan | None:
+        """The streaming plan for this case, or ``None`` for the whole-volume path.
+
+        The streamed part of the finalize chain is ``[pointwise*][region and pointwise stages]``:
+        region stages compose — each pulls through the one before it — so any number of geometry
+        inverses streams to the write. What streaming cannot honour — a WHOLE_VOLUME stage, a
+        statistic nothing seeded — becomes a whole-volume TAIL: the prefix still streams slab by slab
+        into a light post-reduction buffer and the tail runs once on that buffer. A destination that
+        cannot serve region writes buffers too, and writes classically. Only a non-streamable start
+        refuses outright: several augmentations (TTA inverses apply to the assembled volume), a
+        reduction that is not voxel-local, or a non-voxel-local before-reduction transform (it runs
+        per model chunk inside the slab prefix).
         """
-        if self.nb_data_augmentation != 1:
-            return "test-time augmentation inverses apply to the assembled volume"
-        # The reduction declares its own slab-locality (like a transform declares patch_locality) rather
-        # than the gate hardcoding a whitelist: any voxel-local reduction streams, an unknown one does not.
-        if not self.reduction.voxel_local:
-            return f"reduction '{type(self.reduction).__name__}' is not voxel-local"
-        chain: list[Transform] = [
-            *self.before_reduction_transforms,
-            *self.after_reduction_transforms,
-            *[
-                transform
-                for transform in dataset.groups_src[self.group_src][self.group_dest].transforms
+        if self.nb_data_augmentation != 1 or not self.reduction.voxel_local:
+            return None
+        for transform in self.before_reduction_transforms:
+            if not self._voxel_local(transform.patch_locality(Attribute(attribute)), attribute):
+                return None
+        stages = [
+            *(_FinalizeStage(transform, False) for transform in self.after_reduction_transforms),
+            *(
+                _FinalizeStage(transform, True)
+                for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].transforms)
                 if isinstance(transform, TransformInverse) and transform.apply_inverse
-            ],
-            *self.final_transforms,
+            ),
+            *(_FinalizeStage(transform, False) for transform in self.final_transforms),
         ]
-        for transform in chain:
-            if transform.patch_locality(Attribute(attribute)).kind is not LocalityKind.POINTWISE:
-                return f"transform '{type(transform).__name__}' is not pointwise"
-        if not self.can_stream_data(attribute):
-            return f"write format '{self.file_format}' cannot serve region writes"
-        return None
+        pipe_start: int | None = None
+        tail_start = len(stages)
+        for index, stage in enumerate(stages):
+            locality = stage.locality(Attribute(attribute))
+            if self._voxel_local(locality, attribute):
+                continue
+            if locality.kind in _REGION_KINDS:
+                if pipe_start is None:
+                    pipe_start = index
+                continue
+            tail_start = index
+            break
+        if tail_start < len(stages) or not self.can_stream_data(attribute):
+            # A whole-volume tail swallows the region stages too: the buffer sits on the accumulator
+            # grid, and the tail runs the true whole-volume operators on it — byte-identical for free.
+            if pipe_start is not None:
+                tail_start = min(tail_start, pipe_start)
+            return _StreamPlan(stages, None, tail_start, to_sink=False)
+        return _StreamPlan(stages, pipe_start, len(stages), to_sink=True)
 
-    def _flush_slabs(
+    def _consume_slabs(
         self,
         index: int,
         slabs: list[tuple[slice, torch.Tensor]],
         number_of_channels_per_model: list[int] | None,
-        dataset: DatasetIter,
     ) -> None:
-        """Finalize each slab and write it into the case's sink (opened at the first slab, once the
-        finalize chain has fixed the output's channel count and dtype)."""
+        """Run each finalized slab through the plan: prefix per slab, then sink, region stream, or
+        buffer. The first slab fixes the case's state (post-prefix attribute, region scheduler or
+        buffer) and may demote a RESCALE region to the buffered tail (see ``_init_stream_state``)."""
+        plan = cast(_StreamPlan, self._stream_plans[index])
         for region, slab in slabs:
-            result, attribute = self._finalize_slab(index, slab, number_of_channels_per_model, dataset)
-            array = result.detach().cpu().numpy()
-            if index not in self._stream_sinks:
-                spatial = self.output_layer_accumulator[index][0].shape
-                sink = self.open_data_stream(
-                    self.group, self.names[index], [array.shape[0], *spatial], array.dtype, attribute
-                )
-                if sink is None:
-                    raise PredictorError(
-                        f"Streamed write refused by the '{self.file_format}' backend for dtype"
-                        f" '{array.dtype}' on output '{self.group}': write it to an h5 or omezarr"
-                        f" dataset, or set KONFAI_STREAMED_WRITES=0 to force the whole-volume path."
-                    )
-                self._stream_sinks[index] = sink
-            self._stream_sinks[index].write_slice(
-                (slice(0, array.shape[0]), region, *(slice(0, extent) for extent in array.shape[2:])),
-                array,
+            block, attribute = self._finalize_slab(
+                index, slab, number_of_channels_per_model, plan.stages[: plan.boundary]
             )
+            if index not in self._post_prefix_attributes:
+                plan = self._init_stream_state(index, plan, block, attribute)
+            state = self._region_states.get(index)
+            if state is not None:
+                for target, emitted in cast(SlabRegionStream, state.stream).push(region, block):
+                    self._write_stream_block(index, target, emitted, cast(Attribute, state.attribute))
+            elif plan.to_sink:
+                spatial = self.output_layer_accumulator[index][0].shape
+                target = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
+                self._write_stream_block(index, target, block, attribute)
+            else:
+                buffer = self._stream_buffers[index]
+                lead = (slice(None),) * (block.dim() - len(self.output_layer_accumulator[index][0].shape))
+                buffer[(*lead, region)] = block.to(buffer.device)
+
+    def _init_stream_state(
+        self, index: int, plan: _StreamPlan, block: torch.Tensor, attribute: Attribute
+    ) -> _StreamPlan:
+        """Fix the case's streaming state at its first slab, when the prefix output is known.
+
+        A RESCALE stage streams through ``resample_region``, which matches ``F.interpolate`` bit for
+        bit only in nearest mode (uint8): a pipe whose rescale would interpolate is demoted here to
+        the buffered tail, where the true inverse runs whole-volume — byte-identity is never traded
+        for streaming. The demotion leaves the prefix untouched (the pipe was never part of it).
+        """
+        self._post_prefix_attributes[index] = Attribute(attribute)
+        spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
+        if plan.pipe_start is not None:
+            state = self._make_pipe_state(index, plan, spatial, block)
+            if state is None:
+                plan = _StreamPlan(plan.stages, None, plan.pipe_start, to_sink=False)
+                self._stream_plans[index] = plan
+            else:
+                self._region_states[index] = state
+        if not plan.to_sink:
+            lead = list(block.shape[: block.dim() - len(spatial)])
+            try:
+                buffer = torch.empty([*lead, *spatial], dtype=block.dtype, device=block.device)
+            except torch.cuda.OutOfMemoryError:
+                buffer = torch.empty([*lead, *spatial], dtype=block.dtype, device="cpu")
+            self._stream_buffers[index] = buffer
+        return plan
+
+    def _make_pipe_state(
+        self, index: int, plan: _StreamPlan, in_shape: list[int], block: torch.Tensor
+    ) -> _RegionState | None:
+        """Wire the case's streamed pipe into one :class:`SlabRegionStream` — or answer ``None`` for
+        the buffered tail where streaming would not be exact.
+
+        Region stages compose: the pull map folds each stage's own declaration backward — a written
+        region pulls through the last stage, whose region pulls through the one before it, down to
+        the accumulator — and ``produce`` walks the pipe forward over the pulled window, handing each
+        stage the region pair the same fold computed for it. Pointwise stages ride along unchanged.
+
+        The fold is planned by walking a one-voxel corner of the real first slab through the pipe
+        with one evolving attribute: each stage declares against, and remaps from, the state the
+        stages before it left — a second resample pops the Size stack the first one already popped,
+        a reorientation after a permute reads the moved axes — and the walk carries the dtype, so a
+        RESCALE that would interpolate (``resample_region`` matches ``F.interpolate`` bit for bit
+        only in nearest mode) answers ``None`` instead: byte-identity is never traded for streaming.
+        ``produce`` then replays the same transitions on a fresh copy per emission (the same
+        slab-local scoping as the prefix).
+        """
+        attr0 = self._post_prefix_attributes[index]
+        pipe = plan.stages[cast(int, plan.pipe_start) :]
+        name = self.names[index]
+
+        probe = block[(Ellipsis, *([slice(0, 1)] * len(in_shape)))].clone()
+        walking = Attribute(attr0)
+        shapes = [list(in_shape)]
+        kinds: list[LocalityKind] = []
+        pull_fns: list[Callable[[tuple[slice, ...]], list[slice]]] = []
+        try:
+            for stage in pipe:
+                shape = shapes[-1]
+                locality = stage.locality(Attribute(walking))
+                kinds.append(locality.kind)
+                snapshot = Attribute(walking)
+                if locality.kind is LocalityKind.HALO:
+                    pull_fns.append(_halo_pull(_halo_radii(locality.halo, len(shape)), shape))
+                    shapes.append(list(shape))
+                    probe = stage(name, probe, walking)
+                elif locality.kind is LocalityKind.RESCALE:
+                    if probe.dtype is not torch.uint8:
+                        return None
+                    resample = cast(Resample, stage.transform)
+                    if stage.inverted:
+                        pull_fns.append(_remap_pull(resample.stream_region_target, shape, snapshot))
+                        out = resample._inverse_geometry(walking)
+                    else:
+                        out = [
+                            int(extent)
+                            for extent in resample.transform_shape(
+                                self.group_src, name, list(shape), Attribute(walking)
+                            )
+                        ]
+                        scales = [shape[k] / out[k] for k in range(len(shape))]
+                        pull_fns.append(_scale_pull(scales, shape))
+                        resample.write_stream_cache_attribute(walking, shape)
+                    shapes.append([int(extent) for extent in out])
+                elif locality.kind in _REGION_KINDS:
+                    if stage.inverted:
+                        remapper = cast(TransformInverse, stage.transform)
+                        pull_fns.append(_remap_pull(remapper.stream_region_target, shape, snapshot))
+                        out = remapper.inverse_transform_shape(list(shape), Attribute(walking))
+                    else:
+                        pull_fns.append(_remap_pull(stage.transform.stream_region_source, shape, snapshot))
+                        out = stage.transform.transform_shape(self.group_src, name, list(shape), Attribute(walking))
+                    shapes.append([int(extent) for extent in out])
+                    # The stage's attribute transition, on a one-voxel corner: a crop's tensor answer
+                    # is meaningless there (the map is the action) but its pops are the case's.
+                    result = stage(name, probe, walking)
+                    if locality.kind is not LocalityKind.CROP:
+                        probe = result
+                else:
+                    pull_fns.append(lambda target: list(target))
+                    shapes.append(list(shape))
+                    probe = stage(name, probe, walking)
+        except Exception:  # nosec B110 - an unplannable pipe just keeps the case on the buffered path
+            return None
+
+        state = _RegionState(pipe, kinds, shapes)
+
+        def spans_for(target: tuple[slice, ...]) -> list[list[slice]]:
+            """The region of each inter-stage space behind ``target``, folded back to the accumulator."""
+            spans: list[list[slice]] = [list(target)]
+            for pull_stage in reversed(pull_fns):
+                spans.append(pull_stage(tuple(spans[-1])))
+            spans.reverse()
+            return spans
+
+        def pull(target: tuple[slice, ...]) -> list[slice]:
+            return spans_for(target)[0]
+
+        def produce(window: torch.Tensor, target: tuple[slice, ...], source: list[slice]) -> torch.Tensor:
+            attribute = Attribute(attr0)
+            spans = spans_for(target)
+            block = window
+            for i, (stage, kind) in enumerate(zip(pipe, kinds, strict=True)):
+                block = self._apply_pipe_stage(
+                    stage, kind, block, tuple(spans[i + 1]), spans[i], shapes[i], shapes[i + 1], attribute, name
+                )
+            state.attribute = attribute
+            return block
+
+        state.stream = SlabRegionStream(pull, produce, in_shape, shapes[-1])
+        return state
+
+    def _apply_pipe_stage(
+        self,
+        stage: _FinalizeStage,
+        kind: LocalityKind,
+        block: torch.Tensor,
+        target: tuple[slice, ...],
+        source: list[slice],
+        in_shape: list[int],
+        out_shape: list[int],
+        attribute: Attribute,
+        name: str,
+    ) -> torch.Tensor:
+        """Run one pipe stage on its pulled block, by declared kind — never by stage name."""
+        if kind is LocalityKind.CROP:
+            # The pull already translated the region, so the block IS the answer. The stage still runs
+            # for its attribute transition (a crop restores the origin it recorded); its tensor answer
+            # is one window's, dropped.
+            stage(name, block, attribute)
+            return block
+        if kind is LocalityKind.RESCALE:
+            resample = cast(Resample, stage.transform)
+            scales = [in_shape[k] / out_shape[k] for k in range(len(in_shape))]
+            result = resample.resample_region(block, target, [s.start for s in source], scales, in_shape)
+            if stage.inverted:
+                resample._inverse_geometry(attribute)
+            else:
+                resample.write_stream_cache_attribute(attribute, in_shape)
+            return result
+        result = stage(name, block, attribute)
+        if kind is LocalityKind.HALO:
+            lead = (slice(None),) * (result.dim() - len(target))
+            crop = tuple(slice(t.start - s.start, t.stop - s.start) for t, s in zip(target, source, strict=False))
+            result = result[(*lead, *crop)]
+        return result
+
+    def _write_stream_block(
+        self, index: int, target: tuple[slice, ...], block: torch.Tensor, attribute: Attribute
+    ) -> None:
+        """Write one finalized output block into the case's sink (opened at the first block, once the
+        chain has fixed the output's shape, channel count and dtype)."""
+        array = block.detach().cpu().numpy()
+        if index not in self._stream_sinks:
+            state = self._region_states.get(index)
+            spatial = (
+                state.shapes[-1]
+                if state is not None
+                else [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
+            )
+            sink = self.open_data_stream(
+                self.group, self.names[index], [array.shape[0], *spatial], array.dtype, attribute
+            )
+            if sink is None:
+                raise PredictorError(
+                    f"Streamed write refused by the '{self.file_format}' backend for dtype"
+                    f" '{array.dtype}' on output '{self.group}': write it to an h5 or omezarr"
+                    f" dataset, or set KONFAI_STREAMED_WRITES=0 to force the whole-volume path."
+                )
+            self._stream_sinks[index] = sink
+        self._stream_sinks[index].write_slice((slice(0, array.shape[0]), *target), array)
+
+    def _finish_stream(self, index: int) -> None:
+        """Complete the case: flush the region scheduler, or run the whole-volume tail on the buffer
+        and write it classically."""
+        plan = cast(_StreamPlan, self._stream_plans[index])
+        state = self._region_states.get(index)
+        if state is not None:
+            for target, emitted in cast(SlabRegionStream, state.stream).finalize():
+                self._write_stream_block(index, target, emitted, cast(Attribute, state.attribute))
+            return
+        if plan.to_sink:
+            return
+        result = self._stream_buffers.pop(index)
+        attribute = Attribute(self._post_prefix_attributes[index])
+        name = self.names[index]
+        for stage in plan.stages[plan.tail_start :]:
+            result = stage(name, result, attribute)
+        super().write(self.group, name, result.detach().cpu().numpy(), attribute)
 
     def _finalize_slab(
         self,
         index: int,
         layer: torch.Tensor,
         number_of_channels_per_model: list[int] | None,
-        dataset: DatasetIter,
+        stages: list[_FinalizeStage],
     ) -> tuple[torch.Tensor, Attribute]:
-        """The single-augmentation finalize chain of ``_get_output``/``get_output``, on one z-slab.
+        """The single-augmentation finalize chain of ``_get_output``/``get_output``, on one z-slab, up
+        to the plan's prefix boundary.
 
-        Every stage passed ``_stream_refusal`` as voxel-local, so applying it slab by slab yields the
-        same voxels as applying it to the assembled volume. Each slab gets its own copy of the case
-        attribute (transform writes stay slab-local).
+        Every prefix stage passed the gate as voxel-local, so applying it slab by slab yields the same
+        voxels as applying it to the assembled volume. Each slab gets its own copy of the case
+        attribute (transform writes stay slab-local, and case-level pops repeat identically per slab).
         """
         attribute = Attribute(self.attributes[index][0][0])
         if number_of_channels_per_model and layer.shape[0] == sum(number_of_channels_per_model):
@@ -550,13 +878,8 @@ class OutSameAsGroupDataset(OutputDataset):
         result = self.reduction([torch.stack(results, dim=0).unsqueeze(0)]).squeeze(0)
         if isinstance(self.reduction, Mean | Median):
             result = result.squeeze(0)
-        for transform in self.after_reduction_transforms:
-            result = transform(self.names[index], result, attribute)
-        for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].transforms):
-            if isinstance(transform, TransformInverse) and transform.apply_inverse:
-                result = transform.inverse(self.names[index], result, attribute)
-        for transform in self.final_transforms:
-            result = transform(self.names[index], result, attribute)
+        for stage in stages:
+            result = stage(self.names[index], result, attribute)
         return result, attribute
 
     def _close_stream(self, index: int) -> None:
@@ -564,7 +887,10 @@ class OutSameAsGroupDataset(OutputDataset):
         sink = self._stream_sinks.pop(index, None)
         if sink is not None:
             sink.__exit__(None, None, None)
-        self._stream_active.pop(index, None)
+        self._stream_plans.pop(index, None)
+        self._region_states.pop(index, None)
+        self._stream_buffers.pop(index, None)
+        self._post_prefix_attributes.pop(index, None)
         self.output_layer_accumulator.pop(index, None)
         self.attributes.pop(index, None)
         self._accum_device.pop(index, None)
@@ -679,6 +1005,10 @@ class OutSameAsGroupDataset(OutputDataset):
         # During accumulation the resident accumulator and one forward coexist. The channel reduction's
         # working volume is budgeted separately, at ``get_output`` time, by ``_reduction_device``.
         needed = accumulator_bytes + transient
+        if isinstance(accumulator, StreamingAccumulator):
+            # Flushing a slab divides it out-of-place and clones the shifted window: up to two
+            # window-sized transients coexist with the resident window while a slab finalizes.
+            needed += 2 * layer.shape[0] * voxels * layer.element_size()
         return device if needed < free * self._ACCUMULATE_MARGIN else torch.device("cpu")
 
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
