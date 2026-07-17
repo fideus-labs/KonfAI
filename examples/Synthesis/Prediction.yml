@@ -86,7 +86,6 @@ Predictor:
     filter: None # Optional dataset filtering
     dataset_filenames: # Dataset sources (format: folder_path:mode:image_format)
     - ./Dataset:a:mha
-    use_cache: false # Disable caching to reduce RAM usage during prediction
     batch_size: 32 # Number of patches processed per batch during inference
   outputs_dataset:
     Head:Tanh:  # Model output used to generate the predicted dataset

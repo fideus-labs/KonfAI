@@ -87,7 +87,6 @@ EVALUATION_TEMPLATE = """Evaluator:
     dataset_filenames:
       - __DATASET_DIR__:a:mha
       - __PREDICTIONS_DIR__:i:mha
-    use_cache: false
   train_name: __TRAIN_NAME__
 """
 

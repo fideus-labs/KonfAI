@@ -55,7 +55,6 @@ Predictor:
     filter: None
     dataset_filenames:
     - ./Dataset:a:mha
-    use_cache: false
     batch_size: 4
     num_workers: None
     pin_memory: false

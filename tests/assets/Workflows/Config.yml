@@ -60,7 +60,6 @@ Trainer:
     dataset_filenames:
       - __DATASET_DIR__:a:mha
     inline_augmentations: false
-    use_cache: false
     batch_size: 16
     validation: 0.25
   train_name: __TRAIN_NAME__

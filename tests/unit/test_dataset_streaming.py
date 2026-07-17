@@ -306,7 +306,10 @@ def test_dataset_iter_streams_patch_reads_when_cache_disabled() -> None:
 
 
 def test_data_train_enables_worker_prefetch_when_cache_is_disabled() -> None:
-    dataset = DataTrain(use_cache=False, augmentations=None)
+    # The cache regime is no longer a config knob; the budget resolver flips it through the same
+    # re-entry point used here.
+    dataset = DataTrain(augmentations=None)
+    dataset._configure_data_loading(use_cache=False)
 
     assert cast(int, dataset.dataLoader_args["num_workers"]) >= 1
     assert dataset.dataLoader_args["prefetch_factor"] == 2

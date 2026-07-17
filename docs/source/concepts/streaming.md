@@ -18,61 +18,49 @@ across epochs, with VRAM equal to one batch.
 
 ## The three regimes
 
-Which one a case takes follows from `use_cache` and from the chain itself.
+Which one a case takes follows from the workflow's regime and from the chain
+itself.
 
 | Regime | When | Memory held |
 | --- | --- | --- |
-| **Cache** | `use_cache: true` | every case, resident for the whole run |
-| **Stream** | `use_cache: false` and the chain is streamable | one patch |
-| **Buffer** | `use_cache: false` and the chain is not streamable | a FIFO of `batch_size + 1` cases (or `shuffle_window` cases, whichever is larger) |
+| **Cache** | the training default | every case, resident for the whole run |
+| **Stream** | the predict/eval default, or a budget the dataset exceeds; chain streamable | one patch |
+| **Buffer** | same triggers, chain not streamable | a FIFO of `batch_size + 1` cases (or `shuffle_window` cases, whichever is larger) |
 
-**The cache wins over streaming.** `use_cache: true` preloads every case, and a
-preloaded case is cut from the resident volume even when its chain would stream.
-Set `use_cache: false` to get the streaming path at all.
+**The cache wins over streaming.** A cached case is cut from the resident
+volume even when its chain would stream; the stream/buffer paths only run on
+the streaming regime.
 
 Stream and buffer coexist inside one run. The decision is made per case *and*
 per augmented copy, not once per dataset, so a chain that streams for one
 augmentation draw may load the volume for the next.
 
-`use_cache` is a training key: only `Trainer:` accepts it. Prediction declares
-`false` and evaluation declares `true`. A `memory_budget` overrides that
-declared value in every workflow — see below.
+The regime is not a config key. Training defaults to the cache (epochs re-read
+every case); prediction and evaluation default to streaming (one pass). A
+`memory_budget` replaces the default with a measured decision — see below.
 
 ## What you control
 
-Three keys under `Dataset:`:
+Two keys under `Dataset:`:
 
 | Key | Default | Where | Effect |
 | --- | --- | --- | --- |
-| `use_cache` | `true` | `Trainer:` | `false` opens the stream/buffer path. |
-| `memory_budget` | `null` | all three workflows | Derives `use_cache` from the dataset's size. |
+| `memory_budget` | `null` | all three workflows | Derives the regime from the dataset's size. |
 | `subset.shuffle_window` | `null` | `Trainer:` | Bounds how many cases stay resident on the buffer path. |
 
-All three are listed in {doc}`../config_guide/training`.
+Both are listed in {doc}`../config_guide/training`.
 
 `memory_budget` compares the estimated per-rank dataset size against the budget
-and sets `use_cache` accordingly, printing its decision once. A bare number is
+and picks the regime accordingly, printing its decision once. A bare number is
 GiB (`24` means 24 GiB), a string may name its unit (`"24GB"`, `"32 GiB"`,
 `"512mb"`), and `"auto"` offers 80% of the detected node memory, cgroup limit
-included, divided by the ranks sharing it. `null` leaves `use_cache` exactly as
-declared.
+included, divided by the ranks sharing it. `null` keeps the workflow's default.
 
-`memory_budget` replaces the declared `use_cache`, in both directions and in
-every workflow. A prediction under `memory_budget: auto` caches its dataset
-whenever it fits the budget; an evaluation under a budget smaller than its
-dataset does not cache. Set the budget on the workflow you mean to bound.
-
-To take the stream/buffer path on every case, declare `use_cache` and leave the
-budget out:
-
-```yaml
-Dataset:
-  use_cache: false
-```
-
-To let the dataset's size decide, declare a budget. It settles `use_cache`
-whatever the config says, so the two keys together are not a way to force
-streaming on a dataset that fits:
+The budget decides in both directions and in every workflow: a prediction under
+`memory_budget: auto` caches its dataset whenever it fits the budget; a training
+under a budget smaller than its dataset streams instead of caching — declaring a
+deliberately small budget is how you force the streaming path. Set the budget on
+the workflow you mean to bound:
 
 ```yaml
 Dataset:
@@ -287,5 +275,5 @@ augmentation interpolates on the same terms as `RESCALE`.
 ## Next steps
 
 - {doc}`datasets` — the grouped layout, `groups_src`, and where patching sits
-- {doc}`../config_guide/training` — `use_cache`, `memory_budget`, and `shuffle_window` in a full config
+- {doc}`../config_guide/training` — `memory_budget` and `shuffle_window` in a full config
 - {doc}`../reference/components/storage-backends` — format tokens and the per-backend APIs

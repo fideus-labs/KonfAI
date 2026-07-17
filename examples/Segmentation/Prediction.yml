@@ -50,7 +50,6 @@ Predictor:
     filter: None
     dataset_filenames:
     - ./Dataset:a:mha
-    use_cache: false
     batch_size: 8
   outputs_dataset:
     UNetBlock_0:Head:Argmax:

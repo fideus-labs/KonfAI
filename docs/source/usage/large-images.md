@@ -34,16 +34,16 @@ image pixels is materialised for that native plane window.
 ## Choose the memory regime
 
 Streaming is derived from the pipeline; there is no `streaming: true` switch.
-`Dataset.use_cache`, the optional `memory_budget`, and the transform chain lead
-each case and augmentation draw to one of three regimes:
+The workflow's default, the optional `memory_budget`, and the transform chain
+lead each case and augmentation draw to one of three regimes:
 
 | Regime | When | Memory held |
 | --- | --- | --- |
-| **Cache** | `use_cache: true` | Every case, resident across epochs. |
-| **Stream** | `use_cache: false` and the chain is streamable | The source region for one patch. |
-| **Buffer** | `use_cache: false` and the chain needs a whole volume | A FIFO of `max(batch_size + 1, shuffle_window)` cases. |
+| **Cache** | the training default | Every case, resident across epochs. |
+| **Stream** | predict/eval default or budget exceeded; chain streamable | The source region for one patch. |
+| **Buffer** | same triggers; the chain needs a whole volume | A FIFO of `max(batch_size + 1, shuffle_window)` cases. |
 
-`memory_budget` may replace the declared `use_cache` decision in any workflow.
+`memory_budget` replaces the workflow's default regime in any workflow.
 A number is interpreted as GiB, strings may include units, and `auto` offers
 80% of the detected per-rank memory limit. It is a size estimate—not a hard
 allocator limit—because transformed shapes, augmented copies, and transient
@@ -54,7 +54,7 @@ exact precedence and {doc}`../config_guide/training` for `shuffle_window`.
 Dataset:
   dataset_filenames:
     - ./Dataset:omezarr
-  use_cache: false
+  memory_budget: auto
   batch_size: 2
   num_workers: 4
   Patch:
@@ -143,8 +143,8 @@ memory or dimensionality requirement. See {doc}`../concepts/model-graph`.
 
 ## Tune in this order
 
-1. Set `use_cache: false` to force the stream/buffer path, or set a
-   `memory_budget` when dataset size should decide.
+1. Set a `memory_budget` (`auto`, or a value below the dataset's size to
+   force the stream/buffer path).
 2. Leave `patch_size` axes at `0` so the framework sizes them (the whole volume
    when it fits, a measured shrink on OOM), or pin the largest size that fits
    the model and required context.

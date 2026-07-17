@@ -95,9 +95,9 @@ If the split looks wrong, check which form your config is actually using.
 
 ## Runtime problems
 
-### `use_cache: false` still uses memory proportional to a case
+### The streaming regime still uses memory proportional to a case
 
-`use_cache: false` bounds retention across cases; direct regional reads depend
+The stream/buffer regime bounds retention across cases; direct regional reads depend
 on the transforms. The current fast path supports `TensorCast` and unmasked
 `Normalize`, `Standardize`, and `Clip`. Other transforms and augmentations use
 the bounded full-volume path.

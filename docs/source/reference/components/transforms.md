@@ -40,10 +40,9 @@ the whole volume: the case is loaded whole, and the result is the same, just
 resident. The **Stream** column below is that answer, per transform.
 
 Streaming happens where the cache is off. A cached case is already in memory, so
-its patches are cut from memory whatever the column says. Training exposes
-`use_cache` under `Dataset:` and defaults it to `true`; PREDICTION carries no
-`use_cache` key and does not cache; EVALUATION caches. A `memory_budget` under
-`Dataset:` overrides all three with a size estimate.
+its patches are cut from memory whatever the column says. Training caches by
+default (epochs re-read every case); PREDICTION and EVALUATION stream. A
+`memory_budget` under `Dataset:` overrides all three with a size estimate.
 
 Three rules apply to the chain rather than to any single transform:
 

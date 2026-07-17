@@ -99,7 +99,6 @@ Trainer:
     dataset_filenames:
     - ./Dataset:a:mha
     inline_augmentations: true
-    use_cache: true
     batch_size: 8
     validation: 0.2
     validation_augmentations: true
