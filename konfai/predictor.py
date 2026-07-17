@@ -38,10 +38,12 @@ except ImportError:
     SummaryWriter = None  # type: ignore[assignment,misc]
 
 from konfai import config_file, cuda_visible_devices, konfai_root, predictions_directory
+from konfai.data.augmentation import DataAugmentation
 from konfai.data.data_manager import BatchSample, DataPrediction, DatasetIter
 from konfai.data.patching import (
     Accumulator,
     PathCombine,
+    SlabAligner,
     SlabRegionStream,
     StreamingAccumulator,
     _halo_pull,
@@ -405,6 +407,9 @@ class _StreamPlan:
     pipe_start: int | None
     tail_start: int
     to_sink: bool
+    # Prefix stages whose declaration is SLAB: per-voxel value maps with a per-region side effect,
+    # run through ``Transform.stream_slab`` so they learn where each slab sits.
+    slab_stages: frozenset[int] = frozenset()
 
     @property
     def boundary(self) -> int:
@@ -475,6 +480,10 @@ class OutSameAsGroupDataset(OutputDataset):
         self._region_states: dict[int, _RegionState] = {}
         self._stream_buffers: dict[int, torch.Tensor] = {}
         self._post_prefix_attributes: dict[int, Attribute] = {}
+        # One aligner per streamed case: the copies' accumulators emit slabs at their own pace, and
+        # the finalize needs every copy's rows together (the cross-copy reduction). A single copy is
+        # simply a one-stream aligner — same path, no special case.
+        self._aligners: dict[int, SlabAligner] = {}
 
     def add_layer(
         self,
@@ -501,7 +510,7 @@ class OutSameAsGroupDataset(OutputDataset):
                 # Plan how (or whether) this case streams. No warning on a refusal: streaming is
                 # transparent, so the whole-volume path is a normal outcome, not a misconfiguration.
                 self._stream_plans[index_dataset] = (
-                    self._plan_stream(dataset, source_attribute) if self._streaming_enabled else None
+                    self._plan_stream(dataset, index_dataset, source_attribute) if self._streaming_enabled else None
                 )
             self.attributes[index_dataset][index_augmentation] = {}
 
@@ -548,11 +557,14 @@ class OutSameAsGroupDataset(OutputDataset):
             slabs = accumulator.add_layer(index_patch, self._offload_to_cpu(layer)) or []
         if not self._stream_plans.get(index_dataset):
             return
-        finished = accumulator.is_full()
-        if finished:
+        copy_finished = accumulator.is_full()
+        if copy_finished:
             slabs = slabs + cast(StreamingAccumulator, accumulator).finalize()
         try:
-            self._consume_slabs(index_dataset, slabs, number_of_channels_per_model)
+            aligner = self._aligners.setdefault(index_dataset, SlabAligner(self.nb_data_augmentation))
+            joint = aligner.push(index_augmentation, slabs, copy_finished)
+            self._consume_slabs(index_dataset, joint, number_of_channels_per_model, dataset)
+            finished = aligner.complete
             if finished:
                 self._finish_stream(index_dataset)
         except BaseException as error:
@@ -572,7 +584,7 @@ class OutSameAsGroupDataset(OutputDataset):
             return True
         return locality.kind is LocalityKind.GLOBAL_STAT and all(key in attribute for key in locality.stat_keys)
 
-    def _plan_stream(self, dataset: DatasetIter, attribute: Attribute) -> _StreamPlan | None:
+    def _plan_stream(self, dataset: DatasetIter, index: int, attribute: Attribute) -> _StreamPlan | None:
         """The streaming plan for this case, or ``None`` for the whole-volume path.
 
         The streamed part of the finalize chain is ``[pointwise*][region and pointwise stages]``:
@@ -581,11 +593,15 @@ class OutSameAsGroupDataset(OutputDataset):
         statistic nothing seeded — becomes a whole-volume TAIL: the prefix still streams slab by slab
         into a light post-reduction buffer and the tail runs once on that buffer. A destination that
         cannot serve region writes buffers too, and writes classically. Only a non-streamable start
-        refuses outright: several augmentations (TTA inverses apply to the assembled volume), a
-        reduction that is not voxel-local, or a non-voxel-local before-reduction transform (it runs
-        per model chunk inside the slab prefix).
+        refuses outright: a reduction that is not voxel-local, a non-voxel-local before-reduction
+        transform (it runs per model chunk inside the slab prefix), or a TTA copy whose un-augment
+        does not act slab by slab (see ``_tta_streamable``).
         """
-        if self.nb_data_augmentation != 1 or not self.reduction.voxel_local:
+        if self.nb_data_augmentation < 1:
+            return None
+        if not self.reduction.voxel_local:
+            return None
+        if self.nb_data_augmentation != 1 and not self._tta_streamable(dataset, index, attribute):
             return None
         for transform in self.before_reduction_transforms:
             if not self._voxel_local(transform.patch_locality(Attribute(attribute)), attribute):
@@ -601,38 +617,113 @@ class OutSameAsGroupDataset(OutputDataset):
         ]
         pipe_start: int | None = None
         tail_start = len(stages)
-        for index, stage in enumerate(stages):
+        slab_stages = set()
+        for position, stage in enumerate(stages):
             locality = stage.locality(Attribute(attribute))
             if self._voxel_local(locality, attribute):
                 continue
+            if locality.kind is LocalityKind.SLAB and not stage.inverted and pipe_start is None:
+                # A per-voxel stage with a per-region side effect streams through ``stream_slab`` —
+                # but only on the accumulator grid: past a region stage the emissions are regions of
+                # ANOTHER space, so there it falls to the tail (whose whole-volume call is its
+                # classic behaviour).
+                slab_stages.add(position)
+                continue
             if locality.kind in _REGION_KINDS:
                 if pipe_start is None:
-                    pipe_start = index
+                    pipe_start = position
                 continue
-            tail_start = index
+            tail_start = position
             break
         if tail_start < len(stages) or not self.can_stream_data(attribute):
             # A whole-volume tail swallows the region stages too: the buffer sits on the accumulator
             # grid, and the tail runs the true whole-volume operators on it — byte-identical for free.
             if pipe_start is not None:
                 tail_start = min(tail_start, pipe_start)
-            return _StreamPlan(stages, None, tail_start, to_sink=False)
-        return _StreamPlan(stages, pipe_start, len(stages), to_sink=True)
+            return _StreamPlan(stages, None, tail_start, to_sink=False, slab_stages=frozenset(slab_stages))
+        return _StreamPlan(stages, pipe_start, len(stages), to_sink=True, slab_stages=frozenset(slab_stages))
+
+    @staticmethod
+    def _copy_draw(dataset: DatasetIter, index_augmentation: int) -> tuple[list[DataAugmentation], int] | None:
+        """The augmentations copy ``index_augmentation`` carries and its index within their list, or
+        ``None`` for the un-augmented copy."""
+        if index_augmentation == 0:
+            return None
+        i = index_augmentation - 1
+        for data_augmentations in dataset.data_augmentations_list:
+            if i < data_augmentations.nb:
+                return data_augmentations.data_augmentations, i
+            i -= data_augmentations.nb
+        return None
+
+    def _unaugment(
+        self, dataset: DatasetIter, index: int, index_augmentation: int, tensor: torch.Tensor
+    ) -> torch.Tensor:
+        """Undo copy ``index_augmentation``'s draw on ``tensor`` — the augmentations applied in
+        reverse, bound by the case index the draw was made under (the manager's own)."""
+        draw = self._copy_draw(dataset, index_augmentation)
+        if draw is None:
+            return tensor
+        augmentations, a = draw
+        case = dataset.get_dataset_from_index(self.group_dest, index).index
+        for data_augmentation in reversed(augmentations):
+            tensor = data_augmentation.inverse(case, a, tensor)
+        return tensor
+
+    def _tta_streamable(self, dataset: DatasetIter, index: int, attribute: Attribute) -> bool:
+        """Whether every copy's un-augment acts slab by slab, read from the declarations alone.
+
+        The slab-synchronized reduce applies each augmentation's ``inverse`` to a finalized z-slab,
+        which equals the whole-volume inverse restricted to that slab exactly when the draw maps every
+        slab onto itself: a POINTWISE draw does (a per-voxel map inverts per voxel), and an
+        ORIENTATION draw does when its declared region remap fixes the slab axis row for row and its
+        shape fold keeps the slab extent — probed here against ``stream_region_source``, never by
+        running patches. A z-flip mirrors the rows (row 0 pulls the last), a z-moving permute
+        relocates them: both fail the probe and the case falls back to the whole-volume path. Any
+        other kind (a halo'd translate, a whole-volume draw) refuses outright.
+        """
+        try:
+            input_dataset = dataset.get_dataset_from_index(self.group_dest, index)
+            case = input_dataset.index
+            for index_augmentation in range(1, self.nb_data_augmentation):
+                draw = self._copy_draw(dataset, index_augmentation)
+                if draw is None:
+                    continue
+                augmentations, a = draw
+                shape = [int(extent) for extent in input_dataset.shapes[0]]
+                for augmentation in augmentations:
+                    locality = augmentation.patch_locality(case, a, Attribute(attribute))
+                    if locality.kind is LocalityKind.POINTWISE:
+                        continue
+                    if locality.kind is not LocalityKind.ORIENTATION:
+                        return False
+                    out_shape = [int(extent) for extent in augmentation.stream_shape(case, a, list(shape))]
+                    if out_shape[0] != shape[0]:
+                        return False
+                    plane = tuple(slice(0, extent) for extent in out_shape[1:])
+                    for row in range(out_shape[0]):
+                        source = augmentation.stream_region_source(case, a, (slice(row, row + 1), *plane), shape)
+                        if (source[0].start, source[0].stop) != (row, row + 1):
+                            return False
+                    shape = out_shape
+        except Exception:  # nosec B110 - an unprobeable draw just keeps the case on the whole-volume path
+            return False
+        return True
 
     def _consume_slabs(
         self,
         index: int,
-        slabs: list[tuple[slice, torch.Tensor]],
+        slabs: list[tuple[slice, dict[int, torch.Tensor]]],
         number_of_channels_per_model: list[int] | None,
+        dataset: DatasetIter,
     ) -> None:
-        """Run each finalized slab through the plan: prefix per slab, then sink, region stream, or
-        buffer. The first slab fixes the case's state (post-prefix attribute, region scheduler or
-        buffer) and may demote a RESCALE region to the buffered tail (see ``_init_stream_state``)."""
+        """Run each jointly finalized slab through the plan: prefix per slab, then sink, region
+        stream, or buffer. The first slab fixes the case's state (post-prefix attribute, region
+        scheduler or buffer) and may demote a RESCALE region to the buffered tail (see
+        ``_init_stream_state``)."""
         plan = cast(_StreamPlan, self._stream_plans[index])
-        for region, slab in slabs:
-            block, attribute = self._finalize_slab(
-                index, slab, number_of_channels_per_model, plan.stages[: plan.boundary]
-            )
+        for region, copies in slabs:
+            block, attribute = self._finalize_slab(index, copies, number_of_channels_per_model, plan, dataset, region)
             if index not in self._post_prefix_attributes:
                 plan = self._init_stream_state(index, plan, block, attribute)
             state = self._region_states.get(index)
@@ -663,7 +754,7 @@ class OutSameAsGroupDataset(OutputDataset):
         if plan.pipe_start is not None:
             state = self._make_pipe_state(index, plan, spatial, block)
             if state is None:
-                plan = _StreamPlan(plan.stages, None, plan.pipe_start, to_sink=False)
+                plan = _StreamPlan(plan.stages, None, plan.pipe_start, to_sink=False, slab_stages=plan.slab_stages)
                 self._stream_plans[index] = plan
             else:
                 self._region_states[index] = state
@@ -859,21 +950,19 @@ class OutSameAsGroupDataset(OutputDataset):
             result = stage(name, result, attribute)
         super().write(self.group, name, result.detach().cpu().numpy(), attribute)
 
-    def _finalize_slab(
+    def _prepare_copy_slab(
         self,
         index: int,
+        index_augmentation: int,
         layer: torch.Tensor,
         number_of_channels_per_model: list[int] | None,
-        stages: list[_FinalizeStage],
-    ) -> tuple[torch.Tensor, Attribute]:
-        """The single-augmentation finalize chain of ``_get_output``/``get_output``, on one z-slab, up
-        to the plan's prefix boundary.
-
-        Every prefix stage passed the gate as voxel-local, so applying it slab by slab yields the same
-        voxels as applying it to the assembled volume. Each slab gets its own copy of the case
-        attribute (transform writes stay slab-local, and case-level pops repeat identically per slab).
-        """
-        attribute = Attribute(self.attributes[index][0][0])
+        dataset: DatasetIter,
+    ) -> torch.Tensor:
+        """One copy's slab through the per-copy head of ``_get_output``: un-augment it (exact on a
+        slab — the gate admitted only slab-parallel draws), split the model chunks, run
+        before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block."""
+        layer = self._unaugment(dataset, index, index_augmentation, layer)
+        attribute = Attribute(self.attributes[index][index_augmentation][0])
         if number_of_channels_per_model and layer.shape[0] == sum(number_of_channels_per_model):
             attribute["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
             chunks = list(torch.split(layer, number_of_channels_per_model, dim=0))
@@ -884,13 +973,53 @@ class OutSameAsGroupDataset(OutputDataset):
             for transform in self.before_reduction_transforms:
                 chunk = transform(self.names[index], chunk, Attribute(attribute))
             results.append(chunk)
+        # A lone chunk stacks as a view: torch.stack would copy the slab once per slab of the case.
+        if len(results) == 1:
+            return results[0].unsqueeze(0).unsqueeze(0)
+        return torch.stack(results, dim=0).unsqueeze(0)
+
+    def _finalize_slab(
+        self,
+        index: int,
+        copies: dict[int, torch.Tensor],
+        number_of_channels_per_model: list[int] | None,
+        plan: _StreamPlan,
+        dataset: DatasetIter,
+        region: slice,
+    ) -> tuple[torch.Tensor, Attribute]:
+        """The finalize chain of ``_get_output``/``get_output``, on one z-slab of every copy, up to
+        the plan's prefix boundary.
+
+        Every prefix stage passed the gate as voxel-local (a SLAB stage additionally learns where the
+        slab sits, through ``stream_slab``) and every copy as slab-parallel, so each step is the
+        whole-volume computation restricted to the slab — same ops, same order, same reduction call —
+        which is what makes the streamed output byte-identical. Each slab gets its own copy of the
+        case attribute (transform writes stay slab-local, and case-level pops repeat identically per
+        slab).
+        """
+        blocks = [
+            self._prepare_copy_slab(index, index_augmentation, layer, number_of_channels_per_model, dataset)
+            for index_augmentation, layer in copies.items()
+        ]
+        # Mixed devices can only come from a mid-case OOM fallback: reconcile on the host, exactly as
+        # ``get_output`` does.
+        if len({block.device for block in blocks}) > 1:
+            blocks = [block.cpu() if block.device.type != "cpu" else block for block in blocks]
         # Reduce, then drop the singleton stack axis; Mean/Median also drop the singleton model axis,
         # while Concat keeps the [M, C, ...] model axis for after_reduction (Sum) to merge into labels.
-        result = self.reduction([torch.stack(results, dim=0).unsqueeze(0)]).squeeze(0)
+        result = self.reduction(blocks).squeeze(0)
         if isinstance(self.reduction, Mean | Median):
             result = result.squeeze(0)
-        for stage in stages:
-            result = stage(self.names[index], result, attribute)
+        attribute = Attribute(self.attributes[index][0][0])
+        first = next(iter(copies.values()))
+        if number_of_channels_per_model and first.shape[0] == sum(number_of_channels_per_model):
+            attribute["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
+        spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
+        for position, stage in enumerate(plan.stages[: plan.boundary]):
+            if position in plan.slab_stages:
+                result = stage.transform.stream_slab(self.names[index], result, region, spatial, attribute)
+            else:
+                result = stage(self.names[index], result, attribute)
         return result, attribute
 
     def reset(self) -> None:
@@ -918,6 +1047,7 @@ class OutSameAsGroupDataset(OutputDataset):
         self._region_states.pop(index, None)
         self._stream_buffers.pop(index, None)
         self._post_prefix_attributes.pop(index, None)
+        self._aligners.pop(index, None)
         self.output_layer_accumulator.pop(index, None)
         self.attributes.pop(index, None)
         self._accum_device.pop(index, None)
@@ -938,17 +1068,7 @@ class OutSameAsGroupDataset(OutputDataset):
         self, index: int, index_augmentation: int, number_of_channels_per_model: list[int], dataset: DatasetIter
     ) -> torch.Tensor:
         layer = self.output_layer_accumulator[index][index_augmentation].assemble()  # if concat then [N*C] else [C]
-
-        if index_augmentation > 0:
-            i = 0
-            index_augmentation_tmp = index_augmentation - 1
-            for data_augmentations in dataset.data_augmentations_list:
-                if index_augmentation_tmp >= i and index_augmentation_tmp < i + data_augmentations.nb:
-                    for data_augmentation in reversed(data_augmentations.data_augmentations):
-                        layer = data_augmentation.inverse(index, index_augmentation_tmp - i, layer)
-                    break
-                i += data_augmentations.nb
-
+        layer = self._unaugment(dataset, index, index_augmentation, layer)
         base_attr = self.attributes[index][index_augmentation][0]
         if layer.shape[0] == sum(number_of_channels_per_model):
             base_attr["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
@@ -1036,6 +1156,11 @@ class OutSameAsGroupDataset(OutputDataset):
             # Flushing a slab divides it out-of-place and clones the shifted window: up to two
             # window-sized transients coexist with the resident window while a slab finalizes.
             needed += 2 * layer.shape[0] * voxels * layer.element_size()
+            if self.nb_data_augmentation > 1:
+                # Slab-aligned TTA holds up to a window of pending slabs per copy (the arrival skew)
+                # and reduces the joint interval through a float32 accumulate: budget one window per
+                # copy plus two more for the reduction's transients.
+                needed += (self.nb_data_augmentation + 2) * layer.shape[0] * voxels * layer.element_size()
         return device if needed < free * self._ACCUMULATE_MARGIN else torch.device("cpu")
 
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
