@@ -265,12 +265,14 @@ def _kind_of(case: _Case) -> LocalityKind:
     return case.transform.patch_locality(_attributes(case.group)).kind
 
 
+# The kinds the READ dispatcher cannot honour: WHOLE_VOLUME by definition, and SLAB because its side
+# effect needs the slab's place in the written OUTPUT, which a patch read has no notion of.
+_READ_REFUSED_KINDS = (LocalityKind.WHOLE_VOLUME, LocalityKind.SLAB)
+
+
 def _streamable_cases() -> list[_Case]:
     return [
-        case
-        for cls in _builtin_transforms()
-        for case in _cases_of(cls)
-        if _kind_of(case) is not LocalityKind.WHOLE_VOLUME
+        case for cls in _builtin_transforms() for case in _cases_of(cls) if _kind_of(case) not in _READ_REFUSED_KINDS
     ]
 
 
@@ -307,10 +309,18 @@ def test_no_declaration_writes_to_the_case_metadata() -> None:
 
 
 def test_every_locality_kind_is_exercised() -> None:
-    # The property below is only as good as the kinds it reaches: every streamable kind must have at
-    # least one built-in standing for it, so a regression in one kind's dispatch cannot pass unseen.
+    # The property below is only as good as the kinds it reaches: every read-streamable kind must have
+    # at least one built-in standing for it, so a regression in one kind's dispatch cannot pass unseen.
     kinds = {_kind_of(case) for case in _streamable_cases()}
-    assert kinds == set(LocalityKind) - {LocalityKind.WHOLE_VOLUME}
+    assert kinds == set(LocalityKind) - set(_READ_REFUSED_KINDS)
+
+
+def test_slab_declaration_refuses_the_read_path(dataset: Dataset) -> None:
+    # SLAB is a write-side contract (stream_slab gets the region); a read chain carrying it must fall
+    # back to the whole volume rather than run the stage without its side effect's context.
+    case = _CASES["InferenceStack"][0]
+    assert _kind_of(case) is LocalityKind.SLAB
+    assert not _manager(dataset, case).can_stream_patch(0)
 
 
 @pytest.mark.parametrize(
