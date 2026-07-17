@@ -130,7 +130,7 @@ Five conditions reject streaming:
 
 ### Why `[Clip(-200, 400), Standardize()]` does not stream
 
-This is rule 4.
+This is rule 3.
 
 `Standardize` is `GLOBAL_STAT`: it needs the volume's `Mean` and `Std`, which
 KonfAI reads once from disk. The statistic on disk is the **stored** volume's,
@@ -158,16 +158,20 @@ as: `[TensorCast('float32'), Standardize()]` streams, while
 `[TensorCast('uint8'), Standardize()]` and `[TensorCast('float16'), Standardize()]`
 do not — a half cast moves 1500.3 onto 1500.0.
 
-### Why two region stages do not stream
+### How several region stages stream together
 
-A region stage is a rewrite of *which* source voxels a target patch needs. One
-such rewrite composes with the read: KonfAI maps the patch back through it and
-asks the file for the result. A second stage's region is expressed in the first
-stage's output space, which does not exist on disk. `[Dilate(1), Gradient()]` is
-two halos; `[Canonical(), Permute('2|1|0')]` is two reorientations. Both load the
-volume.
+A region stage is a rewrite of *which* source voxels a target patch needs, and
+these rewrites **compose**. The planner folds them back to front: the target
+patch maps through the last stage's rewrite, that region maps through the stage
+before it, and so on down to one region on disk. KonfAI reads that one region
+and runs the chain forward over it. `[Dilate(1), Gradient()]` is two halos that
+add, `[Canonical(), Permute('2|1|0')]` is two reorientations that pull through
+each other — both stream from a single bounded read, as does the whole
+`[Canonical, ResampleToResolution, Padding]` reorient-resample-pad pipeline. The
+one thing a region stage cannot do is read a statistic of its own input, because
+that input never exists whole on disk (rule 3).
 
-Rule 3 is about cost, not correctness. Every patch pays its halo on every side,
+Rule 2 is about cost, not correctness. Every patch pays its halo on every side,
 so streaming reads `prod(1 + 2·halo/extent)` times the case's bytes, where the
 extent is the patch or the volume, whichever is smaller. At half the extent that
 is 8× in 3D, against the single load streaming avoids. At patch 8, `Dilate(4)`
