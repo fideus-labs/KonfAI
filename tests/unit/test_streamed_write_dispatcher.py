@@ -425,7 +425,7 @@ def test_plan_non_region_writable_format_buffers_and_writes_classically() -> Non
 # --------------------------------------------------------------------------------------
 
 
-def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, before=()):
+def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, before=(), final=()):
     """Push a whole case patch by patch through add_layer against an h5 sink and read the entry back.
 
     The forward ``transforms`` run once on ``volume`` (chained, stacking the attribute exactly as the
@@ -479,6 +479,7 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
     output_dataset.reduction = Mean()
     output_dataset.nb_data_augmentation = 1
     output_dataset.before_reduction_transforms = list(before)
+    output_dataset.final_transforms = list(final)
 
     for k in range(z):
         # Patch.get_data squeezes size-1 patch axes, so a [1, Y, X] patch reaches add_layer as [C, Y, X].
@@ -503,6 +504,28 @@ def test_add_layer_streams_a_flip_inverse_through_the_region_stage(tmp_path, mon
     reference = _drive_prediction(tmp_path / "reference", transforms, volume, monkeypatch, streamed=False)
     assert torch.equal(streamed, reference)
     assert torch.equal(streamed, volume)
+
+
+def test_add_layer_streams_a_stat_inverse_riding_the_pipe(tmp_path, monkeypatch) -> None:
+    # The common synthesis finalize: the forward Normalize stacked Min/Max, so its inverse is a
+    # per-voxel affine map riding the pipe behind the flip's region — the case the all-POINTWISE gate
+    # used to refuse outright.
+    volume = torch.from_numpy(np.random.default_rng(2).standard_normal((1, 6, 4, 3)).astype(np.float32))
+    transforms = [Normalize(inverse=True), Flip("0", inverse=True)]
+    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True)
+    reference = _drive_prediction(tmp_path / "reference", transforms, volume, monkeypatch, streamed=False)
+    assert torch.equal(streamed, reference)
+
+
+def test_add_layer_streams_a_forward_region_final_transform(tmp_path, monkeypatch) -> None:
+    # A region transform applied FORWARD in final_transforms (reorient the written output): the pull
+    # map is stream_region_source, the same declaration the read dispatcher uses.
+    volume = torch.from_numpy(np.random.default_rng(3).standard_normal((1, 6, 4, 3)).astype(np.float32))
+    final = [Flip("0", inverse=False)]
+    streamed = _drive_prediction(tmp_path / "streamed", [], volume, monkeypatch, streamed=True, final=final)
+    reference = _drive_prediction(tmp_path / "reference", [], volume, monkeypatch, streamed=False, final=final)
+    assert torch.equal(streamed, reference)
+    assert torch.equal(streamed, volume.flip(1))
 
 
 def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_path, monkeypatch) -> None:
