@@ -28,10 +28,10 @@ import tqdm
 from torch.utils.data import DataLoader
 
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
-from konfai.data.data_manager import BatchSample, DataMetric
+from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
 from konfai.network.network import build_configured_criterions
 from konfai.utils.config import apply_config, config
-from konfai.utils.dataset import Dataset
+from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, EvaluatorError
 from konfai.utils.runtime import (
     DistributedObject,
@@ -312,6 +312,11 @@ class Evaluator(DistributedObject):
         self._pending: dict[tuple[str, str, int], tuple] = {}
         self._pending_name: str | None = None
         self._last_result: dict[str, float] = {}
+        # Per-voxel error maps under the patched path: one region-write sink per (metric, case),
+        # opened at the case's first patch, closed when the case flushes. Disjoint unpadded patches
+        # mean every voxel is written exactly once -- the streamed map equals the whole-volume one.
+        self._map_sinks: dict[tuple[str, str, int], DataStream] = {}
+        self._iter_dataset: DatasetIter | None = None
         self._validate_metric_groups()
 
     def _validate_metric_groups(self) -> None:
@@ -492,7 +497,62 @@ class Evaluator(DistributedObject):
                         state = metric.partial_metric(output_tensor, *targets)
                     entry = self._pending.setdefault((output_group, target_group, index), (metric, []))
                     entry[1].append(state)
+                    if getattr(metric, "dataset", None) and hasattr(metric, "partial_map"):
+                        with torch.no_grad():
+                            patch_map = metric.partial_map(output_tensor, *targets).squeeze(0)
+                        self._write_map_patch(
+                            (output_group, target_group, index),
+                            metric,
+                            batch_sample[output_group],
+                            output_group,
+                            patch_map,
+                        )
         return self._last_result
+
+    def _write_map_patch(
+        self,
+        key: tuple[str, str, int],
+        metric: Any,
+        item: BatchDataItem,
+        output_group: str,
+        patch_map: torch.Tensor,
+    ) -> None:
+        """Write one patch's per-voxel map into its case's region-write sink.
+
+        ``partial_map`` is voxel-local, so the patch's map is exactly the region of the whole-case
+        map; the disjoint unpadded evaluation grid writes every voxel once, never twice.
+        """
+        if self._iter_dataset is None:
+            raise EvaluatorError("Internal error: the streamed evaluation loop has no dataset iterator.")
+        manager = self._iter_dataset.get_dataset_from_index(output_group, int(item.x[0]))
+        array = patch_map.numpy()
+        sink = self._map_sinks.get(key)
+        if sink is None:
+            filename, _, file_format = split_path_spec(metric.dataset)
+            group = metric.group if metric.group else output_group
+            sink = Dataset(filename, file_format).open_data_stream(
+                group,
+                manager.name,
+                [array.shape[0], *manager.shapes[0]],
+                array.dtype,
+                Attribute(manager.cache_attributes[0]),
+            )
+            if sink is None:
+                raise EvaluatorError(
+                    f"The '{file_format}' backend cannot serve region writes for the "
+                    f"'{metric.get_name()}' error map under a memory_budget.",
+                    "Write the map to an mha, h5 or omezarr dataset, or drop 'memory_budget' to "
+                    "evaluate whole volumes.",
+                )
+            self._map_sinks[key] = sink
+        region = manager.patch.get_patch_slices(int(item.a[0]))[int(item.p[0])]
+        sink.write_slice((slice(0, array.shape[0]), *region), array)
+
+    def _abort_map_sinks(self, error: BaseException) -> None:
+        """Close open map sinks WITH the error so the backends remove their partial entries."""
+        for sink in self._map_sinks.values():
+            sink.__exit__(type(error), error, error.__traceback__)
+        self._map_sinks = {}
 
     def _flush_pending(self, statistics: Statistics) -> None:
         """Combine the pending case's partial states into its exact values and record them."""
@@ -505,6 +565,9 @@ class Evaluator(DistributedObject):
             direction = "max" if getattr(metric, "maximize", False) else "min"
             base_key = f"{output_group}:{target_group}:{metric.get_name()}"
             Evaluator._record_value(result, statistics, base_key, true_loss, direction)
+        for sink in self._map_sinks.values():
+            sink.__exit__(None, None, None)
+        self._map_sinks = {}
         if len(self.metrics) > 0:
             statistics.add(result, self._pending_name)
         self._pending = {}
@@ -541,23 +604,30 @@ class Evaluator(DistributedObject):
                 else "Metric TRAIN : "
             )
 
-        with tqdm.tqdm(
-            iterable=enumerate(dataloaders[0]),
-            leave=True,
-            desc=description(None),
-            total=len(dataloaders[0]),
-            ncols=0,
-        ) as batch_iter:
-            for _, batch_sample in batch_iter:
-                batch_iter.set_description(
-                    description(
-                        self.update(
-                            batch_sample,
-                            self.statistics_train,
+        self._iter_dataset = dataloaders[0].dataset
+        try:
+            with tqdm.tqdm(
+                iterable=enumerate(dataloaders[0]),
+                leave=True,
+                desc=description(None),
+                total=len(dataloaders[0]),
+                ncols=0,
+            ) as batch_iter:
+                for _, batch_sample in batch_iter:
+                    batch_iter.set_description(
+                        description(
+                            self.update(
+                                batch_sample,
+                                self.statistics_train,
+                            )
                         )
                     )
-                )
-        self._flush_pending(self.statistics_train)  # close the split's last case
+            self._flush_pending(self.statistics_train)  # close the split's last case
+        except BaseException as error:
+            # A half-written error map must not survive as a valid-looking file: abort the open
+            # region-write sinks so their backends remove the partial entries, then re-raise.
+            self._abort_map_sinks(error)
+            raise
         outputs = synchronize_data(world_size, gpu, self.statistics_train.measures)
         if global_rank == 0:
             self.statistics_train.write(outputs)
@@ -570,23 +640,28 @@ class Evaluator(DistributedObject):
                     else "Metric VALIDATION : "
                 )
 
-            with tqdm.tqdm(
-                iterable=enumerate(dataloaders[1]),
-                leave=True,
-                desc=description(None),
-                total=len(dataloaders[1]),
-                ncols=0,
-            ) as batch_iter:
-                for _, batch_sample in batch_iter:
-                    batch_iter.set_description(
-                        description(
-                            self.update(
-                                batch_sample,
-                                self.statistics_validation,
+            self._iter_dataset = dataloaders[1].dataset
+            try:
+                with tqdm.tqdm(
+                    iterable=enumerate(dataloaders[1]),
+                    leave=True,
+                    desc=description(None),
+                    total=len(dataloaders[1]),
+                    ncols=0,
+                ) as batch_iter:
+                    for _, batch_sample in batch_iter:
+                        batch_iter.set_description(
+                            description(
+                                self.update(
+                                    batch_sample,
+                                    self.statistics_validation,
+                                )
                             )
                         )
-                    )
-            self._flush_pending(self.statistics_validation)  # close the split's last case
+                self._flush_pending(self.statistics_validation)  # close the split's last case
+            except BaseException as error:
+                self._abort_map_sinks(error)
+                raise
             outputs = synchronize_data(world_size, gpu, self.statistics_validation.measures)
             if global_rank == 0:
                 self.statistics_validation.write(outputs)

@@ -239,11 +239,33 @@ class TestMetricReductionContract:
         grids = [self._patches(shape[2:], p) for p in ([8, 8, 8], [1, 23, 17])]
         self._identity(metric, args, grids)
 
-    def test_savemap_metrics_are_not_reducible(self):
+    def test_savemap_metrics_are_reducible_and_their_maps_voxel_local(self):
+        import torch
         from konfai.metric.measure import DiceSaveMap, MAESaveMap
 
-        assert not MAESaveMap().reducible
-        assert not DiceSaveMap().reducible
+        # Scalars reduce like their parents; the map streams because it is voxel-local: a patch's
+        # map must equal the SAME region of the whole-case map, exactly (the streamed evaluation
+        # writes it region by region on that contract).
+        assert MAESaveMap().reducible
+        assert DiceSaveMap().reducible
+        rng = np.random.default_rng(3)
+        shape = (1, 1, 8, 9, 7)
+        output = torch.tensor(rng.normal(size=shape).astype(np.float32))
+        target = torch.tensor(rng.normal(size=shape).astype(np.float32))
+        mask = torch.tensor((rng.random(shape) > 0.3).astype(np.float32))
+        metric = MAESaveMap()
+        whole = metric.partial_map(output, target, mask)
+        for z0, z1 in [(0, 3), (3, 8)]:
+            patch = metric.partial_map(output[..., z0:z1, :, :], target[..., z0:z1, :, :], mask[..., z0:z1, :, :])
+            torch.testing.assert_close(patch, whole[..., z0:z1, :, :], rtol=0, atol=0)
+
+        labels_out = torch.tensor(rng.integers(0, 3, size=shape).astype(np.float32))
+        labels_ref = torch.tensor(rng.integers(0, 3, size=shape).astype(np.float32))
+        dice = DiceSaveMap()
+        whole_dice = dice.partial_map(labels_out, labels_ref)
+        assert whole_dice.dtype == torch.uint8
+        patch_dice = dice.partial_map(labels_out[..., 2:6, :, :], labels_ref[..., 2:6, :, :])
+        torch.testing.assert_close(patch_dice, whole_dice[..., 2:6, :, :], rtol=0, atol=0)
 
     def test_non_reducible_metric_raises_actionably(self):
         import torch
