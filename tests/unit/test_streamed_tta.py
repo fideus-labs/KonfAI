@@ -52,12 +52,14 @@ def _geometry_attribute() -> Attribute:
     return attribute
 
 
-def _augmentations(augmentation, nb: int = 1, shape: list[int] | None = None) -> DataAugmentationsList:
-    """A one-augmentation list with its draw made for case 0 (prob 1, so every copy is selected)."""
+def _augmentations(
+    augmentation, nb: int = 1, shape: list[int] | None = None, case_index: int = 0
+) -> DataAugmentationsList:
+    """A one-augmentation list with its draw made for ``case_index`` (prob 1, so every copy is selected)."""
     augmentation.load(1.0)
     augmentations = DataAugmentationsList(nb=nb, data_augmentations={})
     augmentations.data_augmentations = [augmentation]
-    augmentation.state_init(0, [list(shape or SHAPE) for _ in range(nb)], [Attribute() for _ in range(nb)])
+    augmentation.state_init(case_index, [list(shape or SHAPE) for _ in range(nb)], [Attribute() for _ in range(nb)])
     return augmentations
 
 
@@ -84,6 +86,7 @@ def _drive_tta(
     after=(),
     dtype: torch.dtype = torch.float32,
     patch_combine=None,
+    case_index: int = 0,
 ):
     """Push one TTA case (identity copy + one augmented copy) patch by patch through ``add_layer``
     against an h5 sink, interleaved along the slab axis exactly as the prediction mapping orders it,
@@ -100,8 +103,8 @@ def _drive_tta(
     volume = torch.from_numpy(np.random.default_rng(0).standard_normal((C, *SHAPE)).astype(np.float32)).to(dtype)
     for transform in transforms:
         volume = transform("CASE_000", volume, attribute)
-    augmentations = _augmentations(augmentation, shape=list(volume.shape[1:]))
-    copies = [volume, augmentation.compute("CASE_000", 0, 0, volume)]
+    augmentations = _augmentations(augmentation, shape=list(volume.shape[1:]), case_index=case_index)
+    copies = [volume, augmentation.compute("CASE_000", case_index, 0, volume)]
     patch_slices, _ = get_patch_slices_from_shape(PATCH_SIZE, list(volume.shape[1:]), OVERLAP)
     patches = [_make_patches(copy, patch_slices) for copy in copies]
 
@@ -114,7 +117,7 @@ def _drive_tta(
             return patch_slices
 
     class DummyManager:
-        index = 0
+        index = case_index
         name = "CASE_000"
         patch = DummyPatch()
         shapes: ClassVar[list[list[int]]] = [list(volume.shape[1:]), list(volume.shape[1:])]
@@ -358,15 +361,64 @@ def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path
     assert stack_data.shape == (2, *SHAPE)
 
 
+def test_streamed_tta_binds_the_draw_by_the_manager_case_index(tmp_path, monkeypatch) -> None:
+    # A DDP shard remaps case indices to loader-local ones, but the draw was made under the manager's
+    # own index — the only key ``who_index`` holds. Both paths must un-augment through it: with the
+    # local index (0 here) the state lookup has no entry at all.
+    streamed, whole_volume = _drive_tta(
+        tmp_path / "streamed", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, case_index=7
+    )
+    assert not whole_volume
+    reference, _ = _drive_tta(
+        tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False, case_index=7
+    )
+    assert torch.equal(streamed, reference)
+
+
+def test_streamed_inference_stack_aborts_its_sink_when_the_case_dies(monkeypatch) -> None:
+    # A case that dies between slabs must not leave the stack's region sink open: the dispatcher's
+    # error path calls stream_abort, which closes and drops whatever the stage held for the case.
+    class _Sink:
+        closed = False
+
+        def write_slice(self, target, array):
+            del target, array
+
+        def __exit__(self, *exc):
+            _Sink.closed = True
+
+    stack = InferenceStack("", "stack", mode="Seg")
+    stack._stack_sinks["CASE_000"] = cast(Dataset, _Sink())  # type: ignore[assignment]
+    stack.stream_abort("CASE_000")
+    assert _Sink.closed and not stack._stack_sinks
+    stack._stack_buffers["CASE_000"] = [np.zeros((1, 1, 1, 1), dtype=np.float32)]
+    stack.stream_abort("CASE_000")
+    assert not stack._stack_buffers
+
+
 def test_interleaved_case_entries_order_copies_by_slab_start() -> None:
     patch = DatasetPatch(patch_size=list(PATCH_SIZE), overlap=OVERLAP)
     patch.load(list(SHAPE), 0)
     patch.load(list(SHAPE), 1)
     entries = [(a, p) for a in range(2) for p in range(patch.get_size(0))]
-    ordered = _interleaved_case_entries(patch, entries)
+    ordered = _interleaved_case_entries([patch, patch], entries)
     assert sorted(ordered) == sorted(entries), "the interleave must be a permutation of the case"
     starts = [patch.get_patch_slices(a)[p][0].start for a, p in ordered]
     assert starts == sorted(starts), "arrival must be non-decreasing along the slab axis"
     for a in range(2):
         within_copy = [p for entry_a, p in ordered if entry_a == a]
         assert within_copy == sorted(within_copy), "within a copy the patch order must be untouched"
+
+
+def test_interleaved_case_entries_keep_the_plain_order_when_groups_disagree() -> None:
+    # One shared arrival order must serve every destination group: when their grids disagree on the
+    # slab starts (or one cannot even index an entry), the interleave silently steps aside — it is a
+    # memory bound, never a correctness requirement.
+    patch = DatasetPatch(patch_size=list(PATCH_SIZE), overlap=OVERLAP)
+    patch.load(list(SHAPE), 0)
+    patch.load(list(SHAPE), 1)
+    other = DatasetPatch(patch_size=[3, 4, 3], overlap=OVERLAP)
+    other.load(list(SHAPE), 0)
+    other.load(list(SHAPE), 1)
+    entries = [(a, p) for a in range(2) for p in range(patch.get_size(0))]
+    assert _interleaved_case_entries([patch, other], entries) == entries

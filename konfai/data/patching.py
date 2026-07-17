@@ -740,6 +740,11 @@ class SlabAligner:
                 for start, slab in self._pending[key]
                 if start < joint and start + slab.shape[self._lead] > self._consumed
             ]
+            if not pieces:
+                raise PatchError(
+                    f"SlabAligner stream {key} holds no rows for [{self._consumed}, {joint}).",
+                    "Push the slabs exactly as the accumulators finalize them, without skipping a stream.",
+                )
             rows[key] = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=self._lead)
             self._pending[key] = [
                 (start, slab) for start, slab in self._pending[key] if start + slab.shape[self._lead] > joint
