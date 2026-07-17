@@ -165,3 +165,89 @@ class TestPatchedReductionIdentity:
         assert count == out.size  # disjoint AND exhaustive tiling
         assert abs_sum / count == pytest.approx(np.abs(out - tgt).mean(), rel=1e-12)
         assert sq_sum / count == pytest.approx(((out - tgt) ** 2).mean(), rel=1e-12)
+
+
+class TestMetricReductionContract:
+    """partial_metric/combine_metric must reproduce forward exactly on disjoint patches."""
+
+    @staticmethod
+    def _patches(shape, patch):
+        slices, _ = get_patch_slices_from_shape(patch, list(shape), 0)
+        return [(slice(None), slice(None), *sl) for sl in slices]
+
+    @staticmethod
+    def _identity(metric, whole_args, patch_grids):
+
+        expected = metric(*whole_args)
+        expected_value = expected[1] if isinstance(expected, tuple) else expected.item()
+        for grid in patch_grids:
+            states = [metric.partial_metric(*[t[sl] for t in whole_args]) for sl in grid]
+            combined = metric.combine_metric(states)
+            got = combined[1] if isinstance(combined, tuple) else combined
+            if isinstance(expected_value, dict):
+                assert set(got) == set(expected_value)
+                for k, v in expected_value.items():
+                    if np.isnan(v):
+                        assert np.isnan(got[k])
+                    else:
+                        assert got[k] == pytest.approx(v, rel=1e-5)
+            elif isinstance(expected_value, float) and np.isnan(expected_value):
+                assert np.isnan(got)
+            else:
+                assert got == pytest.approx(expected_value, rel=1e-5)
+
+    @pytest.mark.parametrize("batch", [1, 2])
+    @pytest.mark.parametrize("masked", [False, True])
+    def test_masked_losses(self, batch, masked):
+        import torch
+        from konfai.metric.measure import MAE, ME, MSE, PSNR
+
+        torch.manual_seed(0)
+        shape = (batch, 2, 19, 23, 17)
+        out, tgt = torch.rand(*shape) * 100, torch.rand(*shape) * 100
+        args = [out, tgt]
+        if masked:
+            args.append((torch.rand(batch, 2, 19, 23, 17) > 0.4).float())
+        grids = [self._patches(shape[2:], p) for p in ([8, 8, 8], [1, 23, 17], [19, 23, 17])]
+        for metric in (MSE(), MAE(), MSE("sum"), MAE("sum"), ME(), PSNR()):
+            assert metric.reducible
+            self._identity(metric, args, grids)
+
+    def test_masked_loss_with_empty_mask_is_nan(self):
+        import torch
+        from konfai.metric.measure import MAE
+
+        out, tgt = torch.rand(1, 1, 8, 8, 8), torch.rand(1, 1, 8, 8, 8)
+        mask = torch.zeros(1, 1, 8, 8, 8)
+        self._identity(MAE(), [out, tgt, mask], [self._patches((8, 8, 8), [4, 4, 4])])
+
+    @pytest.mark.parametrize("explicit_labels", [None, [1, 2, 5]])
+    @pytest.mark.parametrize("masked", [False, True])
+    def test_dice(self, explicit_labels, masked):
+        import torch
+        from konfai.metric.measure import Dice
+
+        torch.manual_seed(1)
+        shape = (1, 1, 19, 23, 17)
+        out = torch.randint(0, 4, shape).float()  # label 5 never present -> nan branch with explicit labels
+        tgt = torch.randint(0, 4, shape).float()
+        args = [out, tgt]
+        if masked:
+            args.append((torch.rand(*shape) > 0.3).float())
+        metric = Dice(labels=explicit_labels)
+        assert metric.reducible
+        grids = [self._patches(shape[2:], p) for p in ([8, 8, 8], [1, 23, 17])]
+        self._identity(metric, args, grids)
+
+    def test_savemap_metrics_are_not_reducible(self):
+        from konfai.metric.measure import DiceSaveMap, MAESaveMap
+
+        assert not MAESaveMap().reducible
+        assert not DiceSaveMap().reducible
+
+    def test_non_reducible_metric_raises_actionably(self):
+        import torch
+        from konfai.metric.measure import GradientImages
+
+        with pytest.raises(NotImplementedError, match="not reducible"):
+            GradientImages().partial_metric(torch.rand(1, 1, 4, 4, 4))

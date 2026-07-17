@@ -296,7 +296,22 @@ class Evaluator(DistributedObject):
         self.metrics = {k: v.get_targets_criterions(k) for k, v in self.metricsLoader.items()}
         self.statistics_train = Statistics(self.metric_path / "Metric_TRAIN.json")
         self.statistics_validation = Statistics(self.metric_path / "Metric_VALIDATION.json")
+        # A memory budget may patch the evaluation, but only when EVERY metric can rebuild its
+        # whole-case value from partial states; one non-reducible metric keeps the whole-volume path
+        # for everything (correct beats bounded).
+        self.dataset.auto_patch_allowed = all(
+            getattr(metric, "reducible", False)
+            for targets in self.metrics.values()
+            for criterions in targets.values()
+            for metric in criterions
+        )
         self.dataset.prepare()
+        # Set iff the budget actually patched: batches then carry one disjoint patch of a case, and
+        # update() accumulates partial states until the case's last patch before recording it.
+        self._streamed = self.dataset.patch is not None
+        self._pending: dict[tuple[str, str, int], tuple] = {}
+        self._pending_name: str | None = None
+        self._last_result: dict[str, float] = {}
         self._validate_metric_groups()
 
     def _validate_metric_groups(self) -> None:
@@ -357,7 +372,9 @@ class Evaluator(DistributedObject):
             dict[str, float]: Dictionary of computed metric values with keys in the format
                             'output_group:target_group:MetricName'.
         """
-        result = {}
+        if self._streamed:
+            return self._update_streamed(batch_sample, statistics)
+        result: dict[str, float] = {}
         for output_group in self.metrics:
             output_tensor = batch_sample[output_group].tensor
             metric_device = output_tensor.device
@@ -413,26 +430,86 @@ class Evaluator(DistributedObject):
                         true_loss = loss.item()
 
                     direction = "max" if getattr(metric, "maximize", False) else "min"
-                    if isinstance(true_loss, dict):
-                        loss = 0
-                        c = 0
-                        for k, v in true_loss.items():
-                            component_key = f"{output_group}:{target_group}:{metric.get_name()}:{k}"
-                            result[component_key] = v
-                            statistics.directions[component_key] = direction
-                            if not np.isnan(v):
-                                loss += v
-                                c += 1
-                        base_key = f"{output_group}:{target_group}:{metric.get_name()}"
-                        result[base_key] = loss / c if c > 0 else np.nan
-                        statistics.directions[base_key] = direction
-                    else:
-                        base_key = f"{output_group}:{target_group}:{metric.get_name()}"
-                        result[base_key] = true_loss
-                        statistics.directions[base_key] = direction
+                    base_key = f"{output_group}:{target_group}:{metric.get_name()}"
+                    Evaluator._record_value(result, statistics, base_key, true_loss, direction)
         if len(self.metrics) > 0:
             statistics.add(result, name)
         return result
+
+    @staticmethod
+    def _record_value(
+        result: dict[str, float],
+        statistics: Statistics,
+        base_key: str,
+        true_loss: float | dict,
+        direction: str,
+    ) -> None:
+        """Record one metric value: a dict records each component plus their NaN-skipping mean."""
+        if isinstance(true_loss, dict):
+            total = 0.0
+            count = 0
+            for k, v in true_loss.items():
+                component_key = f"{base_key}:{k}"
+                result[component_key] = v
+                statistics.directions[component_key] = direction
+                if not np.isnan(v):
+                    total += v
+                    count += 1
+            result[base_key] = total / count if count > 0 else np.nan
+            statistics.directions[base_key] = direction
+        else:
+            result[base_key] = true_loss
+            statistics.directions[base_key] = direction
+
+    def _update_streamed(self, batch_sample: BatchSample, statistics: Statistics) -> dict[str, float]:
+        """Accumulate one PATCH's partial states; record the case when its next sibling arrives.
+
+        The evaluation loader walks a case's disjoint patches contiguously (cases shard whole per
+        rank), so a change of case name marks the previous case complete -- ``_flush_pending`` at the
+        end of the split closes the last one.
+        """
+        name = next(batch_sample[output_group].name[0] for output_group in self.metrics)
+        if self._pending_name is not None and name != self._pending_name:
+            self._flush_pending(statistics)
+        self._pending_name = name
+        for output_group in self.metrics:
+            output_tensor = batch_sample[output_group].tensor
+            metric_device = output_tensor.device
+            for target_group in self.metrics[output_group]:
+                targets = [
+                    (
+                        batch_sample[group].tensor.to(
+                            metric_device, non_blocking=batch_sample[group].tensor.device.type == "cpu"
+                        )
+                        if batch_sample[group].tensor.device != metric_device
+                        else batch_sample[group].tensor
+                    )
+                    for group in target_group.split(";")
+                    if group in batch_sample
+                ]
+                for index, metric in enumerate(self.metrics[output_group][target_group]):
+                    with torch.no_grad():
+                        state = metric.partial_metric(output_tensor, *targets)
+                    entry = self._pending.setdefault((output_group, target_group, index), (metric, []))
+                    entry[1].append(state)
+        return self._last_result
+
+    def _flush_pending(self, statistics: Statistics) -> None:
+        """Combine the pending case's partial states into its exact values and record them."""
+        if self._pending_name is None:
+            return
+        result: dict[str, float] = {}
+        for (output_group, target_group, _index), (metric, states) in self._pending.items():
+            loss = metric.combine_metric(states)
+            true_loss = loss[1] if isinstance(loss, tuple) else float(loss.item())
+            direction = "max" if getattr(metric, "maximize", False) else "min"
+            base_key = f"{output_group}:{target_group}:{metric.get_name()}"
+            Evaluator._record_value(result, statistics, base_key, true_loss, direction)
+        if len(self.metrics) > 0:
+            statistics.add(result, self._pending_name)
+        self._pending = {}
+        self._pending_name = None
+        self._last_result = result
 
     def run_process(self, world_size: int, global_rank: int, gpu: int, dataloaders: list[DataLoader]):
         """
@@ -480,6 +557,7 @@ class Evaluator(DistributedObject):
                         )
                     )
                 )
+        self._flush_pending(self.statistics_train)  # close the split's last case
         outputs = synchronize_data(world_size, gpu, self.statistics_train.measures)
         if global_rank == 0:
             self.statistics_train.write(outputs)
@@ -508,6 +586,7 @@ class Evaluator(DistributedObject):
                             )
                         )
                     )
+            self._flush_pending(self.statistics_validation)  # close the split's last case
             outputs = synchronize_data(world_size, gpu, self.statistics_validation.measures)
             if global_rank == 0:
                 self.statistics_validation.write(outputs)

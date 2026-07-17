@@ -51,7 +51,7 @@ from konfai.utils.runtime import (
     get_memory_info,
     memory_forecast,
 )
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, OverlapSpec, split_path_spec
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, OverlapSpec, resolve_patch, split_path_spec
 
 # A cached case is a float32 tensor (torch's default dtype, and the default TensorCast's target), so
 # bytes are counted at 4/element from the header shape alone -- not the on-disk dtype, and without
@@ -852,6 +852,9 @@ class Data(ABC):
         self.batch_size = batch_size
         self.inline_augmentations = inline_augmentations
         self.memory_budget = memory_budget
+        # The evaluation workflow may veto budget-driven auto-patching (a non-reducible metric
+        # needs whole volumes); harmless default for every other workflow.
+        self.auto_patch_allowed = True
         self.requires_single_process_loading = self._groups_require_single_process_loading(groups_src)
 
         # A window keeps ``shuffle_window`` cases resident, so the FIFO buffer must be at least that
@@ -1558,7 +1561,72 @@ class DataPrediction(Data):
 
 @config("Dataset")
 class DataMetric(Data):
-    """Dataset configuration used by the evaluation workflow."""
+    """Dataset configuration used by the evaluation workflow.
+
+    Evaluation never exposes a patch: with a ``memory_budget`` set, each run sizes its own -- a case
+    that fits the budget is evaluated whole (exact); one that does not is cut into the
+    largest DISJOINT patches that fit (overlap 0, no padding) and the reducible metrics combine their
+    running partials into the exact whole-case value. The evaluator disables this sizing when any of
+    its metrics is not reducible, so a metric that needs the whole volume always gets it.
+    """
+
+    #: Working copies a metric makes of the patch pair (float casts, the difference, a masked select):
+    #: measured ~<= 2x the resident tensors; the sizing keeps this conservative and the 0.8 safety
+    #: fraction absorbs the rest.
+    _METRIC_INTERMEDIATE_FACTOR = 2.0
+
+    def _maybe_auto_patch(self) -> None:
+        if self.memory_budget is None or self.patch is not None or not getattr(self, "auto_patch_allowed", True):
+            return
+        sources = self._resolve_dataset_sources()
+        # Header-only scan: for each case, its resident bytes per spatial voxel is the sum of its
+        # groups' channels (output + targets + masks all arrive as groups); the WORST case sizes the
+        # one patch every case then shares (a smaller case simply yields fewer patches).
+        channels_by_name: dict[str, int] = {}
+        spatial_by_name: dict[str, list[int]] = {}
+        for group, entries in sources.items():
+            for filename, _append in entries:
+                dataset = self.datasets[filename]
+                for name in dataset.get_names(group):
+                    shape, _ = dataset.get_infos(group, name)
+                    channels_by_name[name] = channels_by_name.get(name, 0) + int(shape[0])
+                    spatial = [int(s) for s in shape[1:]]
+                    known = spatial_by_name.setdefault(name, spatial)
+                    spatial_by_name[name] = [max(a, b) for a, b in zip(known, spatial, strict=False)]
+        if not spatial_by_name:
+            return
+        worst = max(
+            spatial_by_name,
+            key=lambda name: channels_by_name[name] * int(np.prod(spatial_by_name[name], dtype=np.int64)),
+        )
+        if isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto":
+            node_bytes, _source = available_memory_bytes()
+            budget = node_bytes * _AUTO_MEMORY_SAFETY_FRACTION
+        else:
+            budget = float(_parse_memory_budget_bytes(self.memory_budget))
+        sized = resolve_patch(
+            [0] * len(spatial_by_name[worst]),
+            spatial_by_name[worst],
+            channels_by_name[worst],
+            _CACHE_ELEMENT_BYTES,
+            budget,
+            resident_images=1,
+            intermediate_factor=DataMetric._METRIC_INTERMEDIATE_FACTOR,
+        )
+        if sized == spatial_by_name[worst]:
+            return  # every case fits whole: the exact whole-volume path
+        patch = DatasetPatch(patch_size=sized, overlap=0)
+        patch.pad_to_patch = False  # reduced, not modelled: only in-volume voxels may reach the sums
+        self.patch = patch
+        print(
+            f"[KonfAI] memory_budget: worst case '{worst}' "
+            f"({channels_by_name[worst]}ch x {spatial_by_name[worst]}) exceeds the budget -> "
+            f"evaluating in disjoint patches of {sized} (overlap 0), metrics combined exactly."
+        )
+
+    def prepare(self) -> None:
+        self._maybe_auto_patch()
+        super().prepare()
 
     def __init__(
         self,
