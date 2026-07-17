@@ -1690,7 +1690,10 @@ class DataMetric(Data):
             dataset_filenames=dataset_filenames,
             groups_src=groups_src,
             patch=None,
-            use_cache=True,
+            # Evaluation reads each case exactly once (no augmentations, one pass): a cache is never
+            # re-read, it only fronts the whole dataset's RAM. Stream instead; a ``memory_budget``
+            # whose fit-test passes may still flip the cache on.
+            use_cache=False,
             subset=subset,
             batch_size=1,
             validation=validation,
@@ -1700,6 +1703,8 @@ class DataMetric(Data):
             num_workers=num_workers,
             pin_memory=pin_memory,
             prefetch_factor=prefetch_factor,
-            persistent_workers=persistent_workers,
+            # One pass: workers are never reused across epochs, and persistent workers race the
+            # process teardown (the terminated worker trips torch's failure handler at exit).
+            persistent_workers=False if persistent_workers is None else persistent_workers,
             memory_budget=memory_budget,
         )
