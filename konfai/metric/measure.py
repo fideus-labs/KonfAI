@@ -23,7 +23,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import partial
 from types import ModuleType
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -67,11 +67,27 @@ class Criterion(torch.nn.Module, ABC):
     # selection) read it via getattr instead of guessing the direction from the metric's name.
     maximize: bool = False
 
+    # Streamed-evaluation contract, the metric mirror of ``Reduction.voxel_local``: ``True`` declares
+    # that this metric's whole-case value can be rebuilt from per-patch PARTIAL states (running sums,
+    # never per-patch final values), so evaluation may feed it disjoint patches instead of the whole
+    # volume. Default ``False``: an unknown metric evaluates whole -- a wrong ``True`` would corrupt
+    # the reported value, so only a metric whose ``partial_metric``/``combine_metric`` reproduce
+    # ``forward`` exactly may set it.
+    reducible: bool = False
+
     def __init__(self) -> None:
         super().__init__()
 
     def get_name(self):
         return self.__class__.__name__
+
+    def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
+        """Sufficient statistics of one disjoint patch (only meaningful when ``reducible``)."""
+        raise NotImplementedError(f"{self.get_name()} is not reducible: it has no partial state.")
+
+    def combine_metric(self, states: list[Any]) -> Any:
+        """Combine per-patch states into exactly what ``forward`` returns on the whole volume."""
+        raise NotImplementedError(f"{self.get_name()} is not reducible: it cannot combine states.")
 
     @abstractmethod
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
@@ -180,6 +196,68 @@ class MaskedLoss(Criterion):
         loss = loss / true_nb
         return loss, loss.detach().item()
 
+    # -- Streamed-evaluation hooks -------------------------------------------------------------------
+    # A subclass whose ``loss`` reduces to a running sum provides its sufficient statistic and its
+    # finisher, and declares itself ``reducible``; the generic partial/combine below then reproduces
+    # ``forward`` exactly from disjoint patches (masked and unmasked paths alike).
+
+    def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
+        """Sum-contribution of one (output, target) pair to this loss's running total."""
+        raise NotImplementedError()
+
+    def _finish(self, total: float, count: int) -> float:
+        """The value ``self.loss`` would return from a running (total, count)."""
+        raise NotImplementedError()
+
+    def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
+        if len(targets) == 0:
+            raise ValueError("MaskedLoss expects at least one target tensor.")
+        target = targets[0].to(device=output.device)
+        mask = self.get_mask(list(targets[1:]))
+        if mask is None:
+            x, y = output.float(), target.float()
+            return ("whole", self._stat(x, y), x.numel())
+        mask = mask.to(device=output.device)
+        items = []
+        for batch in range(output.shape[0]):
+            mask_b = mask[batch, ...] == 1
+            if not torch.any(mask_b):
+                items.append((0.0, 0, False))
+                continue
+            output_b, target_b = output[batch, ...].float(), target[batch, ...].float()
+            if self.mode_image_masked:
+                mask_f = mask_b.to(dtype=output_b.dtype)
+                items.append((self._stat(output_b * mask_f, target_b * mask_f), output_b.numel(), True))
+            else:
+                items.append(
+                    (
+                        self._stat(torch.masked_select(output_b, mask_b), torch.masked_select(target_b, mask_b)),
+                        int(mask_b.sum().item()),
+                        True,
+                    )
+                )
+        return ("items", items)
+
+    def combine_metric(self, states: list[Any]) -> Any:
+        if states[0][0] == "whole":
+            total = sum(state[1] for state in states)
+            count = sum(state[2] for state in states)
+            value = self._finish(total, count)
+            return torch.tensor(value), value
+        # Masked: sum each batch item's statistic across patches, finish per item, then average the
+        # items that saw any masked voxel -- the exact structure of ``forward``.
+        n_items = len(states[0][1])
+        values = []
+        for item in range(n_items):
+            total = sum(state[1][item][0] for state in states)
+            count = sum(state[1][item][1] for state in states)
+            if any(state[1][item][2] for state in states):
+                values.append(self._finish(total, count))
+        if not values:
+            return torch.tensor(0.0), np.nan
+        value = float(np.mean(values))
+        return torch.tensor(value), value
+
 
 class MSE(MaskedLoss):
     @staticmethod
@@ -188,6 +266,14 @@ class MSE(MaskedLoss):
 
     def __init__(self, reduction: str = "mean") -> None:
         super().__init__(partial(MSE._loss, reduction), False)
+        self._reduction = reduction
+        self.reducible = reduction in ("mean", "sum")
+
+    def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
+        return float((x - y).pow(2).sum().item())
+
+    def _finish(self, total: float, count: int) -> float:
+        return total / count if self._reduction == "mean" else total
 
 
 class MAE(MaskedLoss):
@@ -197,9 +283,19 @@ class MAE(MaskedLoss):
 
     def __init__(self, reduction: str = "mean") -> None:
         super().__init__(partial(MAE._loss, reduction), False)
+        self._reduction = reduction
+        self.reducible = reduction in ("mean", "sum")
+
+    def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
+        return float((x - y).abs().sum().item())
+
+    def _finish(self, total: float, count: int) -> float:
+        return total / count if self._reduction == "mean" else total
 
 
 class ME(MaskedLoss):
+    reducible = True
+
     @staticmethod
     def _loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return (x - y).mean()
@@ -207,12 +303,21 @@ class ME(MaskedLoss):
     def __init__(self) -> None:
         super().__init__(ME._loss, False)
 
+    def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
+        return float((x - y).sum().item())
+
+    def _finish(self, total: float, count: int) -> float:
+        return total / count
+
 
 class MAESaveMap(MAE):
     def __init__(self, reduction: str = "mean", dataset: str | None = None, group: str | None = None) -> None:
         super().__init__(reduction)
         self.dataset = dataset
         self.group = group
+        # The per-voxel error map is a whole-volume output; until it streams through a region write,
+        # this metric needs the whole case.
+        self.reducible = False
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
         loss, true_loss = super().forward(output, *targets)
@@ -234,6 +339,8 @@ class MAESaveMap(MAE):
 
 
 class PSNR(MaskedLoss):
+    reducible = True
+
     @staticmethod
     def _loss(dynamic_range: float, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         mse = torch.mean((x - y).pow(2))
@@ -243,6 +350,14 @@ class PSNR(MaskedLoss):
     def __init__(self, dynamic_range: float | None = None) -> None:
         dynamic_range = dynamic_range if dynamic_range else 1024 + 3071
         super().__init__(partial(PSNR._loss, dynamic_range), False)
+        self._dynamic_range = float(dynamic_range)
+
+    def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
+        return float((x - y).pow(2).sum().item())
+
+    def _finish(self, total: float, count: int) -> float:
+        # The log is a function of the RUNNING mean, applied once at the end -- never per patch.
+        return float(10 * np.log10(self._dynamic_range**2 / (total / count)))
 
 
 class SSIM(MaskedLoss):
@@ -355,8 +470,11 @@ class Dice(Criterion):
             return loss, result
         return 1 - loss / count, result
 
+    reducible = True
+
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
+        self._labels = labels
         self.loss = partial(Dice._loss, labels)
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
@@ -370,12 +488,65 @@ class Dice(Criterion):
         else:
             return self.loss(output, targets[0])
 
+    def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
+        mask = MaskedLoss.get_mask(list(targets[1:]))
+        target = targets[0]
+        if mask is not None:
+            mask01 = torch.where(mask == 1, 1, 0)
+            output = output * mask01.to(output.dtype)
+            target = target * mask01.to(target.dtype)
+        if tuple(target.shape[2:]) != tuple(output.shape[2:]):
+            raise MeasureError(
+                "Dice can only stream patches when output and target share the spatial grid",
+                f"output {tuple(output.shape[2:])} vs target {tuple(target.shape[2:])}",
+                "Evaluate this pair whole (unset the memory budget) or resample the prediction first.",
+            )
+        labels = self._labels if self._labels is not None else [int(v) for v in torch.unique(target) if int(v) != 0]
+        state: dict[int, tuple[float, float, float, bool]] = {}
+        for label in labels:
+            tp = target == label
+            pp = output[:, label].unsqueeze(1) if output.shape[1] > 1 else (output == label)
+            ppf, tpf = pp.float(), tp.float()
+            state[label] = (
+                float((ppf * tpf).sum().item()),
+                float(ppf.sum().item()),
+                float(tpf.sum().item()),
+                bool(tp.any().item()),
+            )
+        return state
+
+    def combine_metric(self, states: list[Any]) -> Any:
+        # The whole volume's label set is exactly the union of the patches' label sets (sorted, as
+        # torch.unique returns them); every dice is the ratio of GLOBAL sums, the smooth term applied
+        # once here -- never a mean of per-patch dices.
+        labels = self._labels if self._labels is not None else sorted({label for state in states for label in state})
+        result: dict[int, float] = {}
+        total = 0.0
+        count = 0
+        for label in labels:
+            inter = sum(state[label][0] for state in states if label in state)
+            output_sum = sum(state[label][1] for state in states if label in state)
+            target_sum = sum(state[label][2] for state in states if label in state)
+            if any(state[label][3] for state in states if label in state):
+                dice = (2.0 * inter + 1e-6) / (output_sum + target_sum + 1e-6)
+                result[label] = dice
+                total += dice
+                count += 1
+            else:
+                result[label] = np.nan
+        if count == 0:
+            return torch.tensor(0.0), result
+        return torch.tensor(1 - total / count), result
+
 
 class DiceSaveMap(Dice):
     def __init__(self, labels: list[int] | None = None, dataset: str | None = None, group: str | None = None) -> None:
         super().__init__(labels)
         self.dataset = dataset
         self.group = group
+        # The per-voxel error map is a whole-volume output; until it streams through a region write,
+        # this metric needs the whole case.
+        self.reducible = False
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
         loss, true_loss = super().forward(output, *targets)

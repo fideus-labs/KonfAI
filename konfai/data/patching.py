@@ -712,6 +712,10 @@ class Patch(ABC):
         self._nb_patch_per_dim: dict[int, list[tuple[int, bool]]] = {}
         self.pad_value = pad_value
         self.extend_slice = extend_slice
+        # Models need every patch at the declared size, so the last patch of an axis is padded up to it.
+        # A consumer that REDUCES patches instead (streamed evaluation) must see only in-volume voxels:
+        # padded ones would pollute its running sums, so it turns this off and takes the cropped patch.
+        self.pad_to_patch = True
 
     def load(self, shape: list[int], a: int = 0) -> None:
         self._patch_slices[a], self._nb_patch_per_dim[a] = get_patch_slices_from_shape(
@@ -754,7 +758,7 @@ class Patch(ABC):
                 reflect_padding[-1] = self._patch_slices[a][index][0].stop + top - data_shape[len(slices_pre)]
 
         constant_padding = []
-        if self.patch_size is not None and not all(p == 0 for p in self.patch_size):
+        if self.pad_to_patch and self.patch_size is not None and not all(p == 0 for p in self.patch_size):
             for dim_it, _slice in enumerate(reversed(slices)):
                 p = (
                     0
@@ -898,6 +902,10 @@ class DatasetManager:
             if patch
             else DatasetPatch(_shape)
         )
+        if patch is not None:
+            # The manager works on its own copy (per-case grids); carry the reduction-vs-model contract
+            # with it, or a streamed evaluation would silently get padded border patches back.
+            self.patch.pad_to_patch = patch.pad_to_patch
         self.patch.load(_shape, 0)
         # The spatial grid each copy's patches are cut on: the un-augmented copy's is the source shape
         # folded by the transforms, and a copy whose draw changes shape (Permute, Mask) has its own.
