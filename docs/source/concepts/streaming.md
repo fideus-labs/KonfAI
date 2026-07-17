@@ -45,7 +45,7 @@ Two keys under `Dataset:`:
 
 | Key | Default | Where | Effect |
 | --- | --- | --- | --- |
-| `memory_budget` | `null` | all three workflows | Derives the regime from the dataset's size. |
+| `memory_budget` | `null` = `auto` | all three workflows | Derives the regime from the dataset's size; an absent key means `auto`. |
 | `subset.shuffle_window` | `null` | `Trainer:` | Bounds how many cases stay resident on the buffer path. |
 
 Both are listed in {doc}`../config_guide/training`.
@@ -53,14 +53,16 @@ Both are listed in {doc}`../config_guide/training`.
 `memory_budget` compares the estimated per-rank dataset size against the budget
 and picks the regime accordingly, printing its decision once. A bare number is
 GiB (`24` means 24 GiB), a string may name its unit (`"24GB"`, `"32 GiB"`,
-`"512mb"`), and `"auto"` offers 80% of the detected node memory, cgroup limit
-included, divided by the ranks sharing it. `null` keeps the workflow's default.
+`"512mb"`), and `"auto"` — also what an absent key means — offers 80% of the
+detected node memory, cgroup limit included, divided by the ranks sharing it.
 
-The budget decides in both directions and in every workflow: a prediction under
-`memory_budget: auto` caches its dataset whenever it fits the budget; a training
-under a budget smaller than its dataset streams instead of caching — declaring a
-deliberately small budget is how you force the streaming path. Set the budget on
-the workflow you mean to bound:
+The budget's cache side applies to training only: a training dataset that fits
+caches, one that does not streams — declaring a budget smaller than the dataset
+is how you force the streaming path. Prediction and evaluation are one-pass
+workflows: each case is read once, a cache is never re-read, so they always
+stream whatever the budget says; in evaluation the same budget instead sizes the
+disjoint patches a too-large case is cut into. Set the budget on the workflow
+you mean to bound:
 
 ```yaml
 Dataset:

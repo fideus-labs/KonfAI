@@ -128,7 +128,7 @@ Common fields:
 | `augmentations` | mapping or null | one default augmentation list | Data augmentations sampled during training. |
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
-| `memory_budget` | number / string / null | `null` | RAM budget the loading regime is derived from: the dataset caches when its per-rank share fits, streams otherwise. `null` keeps the training default (cache). |
+| `memory_budget` | number / string / null | `null` = `auto` | RAM budget the loading regime is derived from: the dataset caches when its per-rank share fits, streams otherwise. An absent key (`null`) means `auto`: 80% of the detected memory decides. |
 | `subset` | object | `TrainSubset()` | Restricts which cases are used. |
 | `batch_size` | int | `1` | Batch size. |
 | `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` on the cache regime, and to `max(1, min(cpu_count, 4))` on the stream/buffer regime. A `KonfAIInference` transform in any group forces `0` whatever the value. |
@@ -176,7 +176,8 @@ per-rank share fits the budget, and takes the streaming/buffer path otherwise â€
 a budget below the dataset's size therefore forces streaming. The decision
 is made once on the launcher, before any rank is spawned, and the estimate, the
 budget, its source, and the chosen regime are printed. `null` (the default)
-keeps the training default: the cache.
+means `auto`: the detected memory decides -- a dataset that fits caches exactly
+as before, one that does not streams instead of overrunning the node.
 
 | Value | Read as |
 | --- | --- |

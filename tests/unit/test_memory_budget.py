@@ -180,13 +180,28 @@ def test_budget_smaller_than_dataset_does_not_cache() -> None:
     assert data.resolved_num_workers > 0  # the streaming/buffer path spins workers up
 
 
-def test_none_budget_leaves_declared_use_cache_untouched() -> None:
-    train = _make_train(None)
-    train.use_cache = True
-    train._resolve_cache_regime(world_size=1)
-    assert train.use_cache is True  # compat default: the declared regime is honoured verbatim
+def test_none_budget_means_auto_for_training(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No key declared -> "auto": the tiny dataset fits the detected memory, so training caches; on
+    # a node too small for it, the same absent key streams instead of blowing past the RAM.
+    roomy = _make_train(None)
+    monkeypatch.setattr(data_manager, "available_memory_bytes", lambda: (_DATASET_BYTES * 10, "host"))
+    roomy._resolve_cache_regime(world_size=1)
+    assert roomy.use_cache is True
 
-    prediction = DataPrediction(augmentations=None)  # use_cache hardwired False, memory_budget None
+    tight = _make_train(None)
+    monkeypatch.setattr(
+        data_manager,
+        "available_memory_bytes",
+        lambda: (int(_DATASET_BYTES / _AUTO_MEMORY_SAFETY_FRACTION) - 1, "cgroup limit"),
+    )
+    tight._resolve_cache_regime(world_size=1)
+    assert tight.use_cache is False
+
+
+def test_one_pass_workflows_never_cache_whatever_the_budget() -> None:
+    # Prediction and evaluation read each case exactly once: a cache is never re-read, so even a
+    # budget the dataset comfortably fits keeps them on the stream/buffer path.
+    prediction = DataPrediction(augmentations=None, memory_budget=f"{_DATASET_BYTES * 100}b")
     prediction._prepared_data = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2])]}  # type: ignore[assignment]
     prediction._prepared_validation_data = {}
     prediction._prepared_train_names = ["case_a"]
