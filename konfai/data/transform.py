@@ -202,6 +202,55 @@ class TransformInverse(Transform, ABC):
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         pass
 
+    def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """Declare how ``inverse``'s output depends on its input, for the streamed-write dispatcher.
+
+        The write mirror of :meth:`patch_locality`: a prediction's finalize chain applies transforms
+        INVERTED, so the streamed-write gate asks each one about its inverse. ``cache_attribute`` is the
+        finalize-time state — the case's attribute as ``inverse`` will receive it, with everything the
+        forward pass pushed still stacked on it — under the same three rules (read-only, no I/O, total).
+
+        The default derives from the forward contract where the derivation is safe for any subclass: a
+        per-voxel value map inverts to a per-voxel value map, and an index remap inverts to an index
+        remap. Every other kind falls to ``WHOLE_VOLUME`` — an inverse that is streamable anyway
+        (``Padding``'s crop, ``Resample``'s rescale) declares itself.
+        """
+        forward = self.patch_locality(cache_attribute)
+        if forward.kind in (LocalityKind.POINTWISE, LocalityKind.ORIENTATION):
+            return forward
+        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+
+    def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        """The spatial shape ``inverse`` produces from ``shape`` (write mirror of ``transform_shape``).
+
+        ``cache_attribute`` is the finalize-time state, as in :meth:`inverse_patch_locality`. The
+        default is the identity, exactly as (in)exact as ``transform_shape``'s: a shape-changing
+        inverse must override it, and the streamed-write dispatcher only trusts it for the kinds
+        :meth:`inverse_patch_locality` declared streamable.
+        """
+        return shape
+
+    def stream_region_target(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        """Map a region of ``inverse``'s OUTPUT to the region of its INPUT it is computed from.
+
+        The write mirror of :meth:`stream_region_source`, with the same direction of travel: the slices
+        are in the space being produced (here the written image), the shape is the space being consumed
+        (here the finalized accumulator), and the answer is the consumed region. The streamed-write
+        dispatcher holds a sliding window of finalized slabs and emits each output region once the
+        region this returns has arrived. ``cache_attribute`` is the finalize-time state; a transform
+        whose remap is read from what its own ``inverse`` pops accounts for those pops on a copy.
+        """
+        raise TransformError(
+            f"{type(self).__name__} declared a region inverse patch-locality but does not implement"
+            " stream_region_target().",
+            "Implement stream_region_target() or declare a non-region inverse_patch_locality().",
+        )
+
 
 class TransformLoader:
     """Resolve and instantiate transform classes from KonfAI configuration."""
@@ -441,6 +490,11 @@ class Normalize(TransformInverse):
 
         return tensor
 
+    def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # The forward needs the volume's Min/Max (GLOBAL_STAT); the inverse only pops what the forward
+        # stacked, so on the finalize-time attribute it is a per-voxel affine map.
+        return PatchLocality(LocalityKind.POINTWISE)
+
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if self.lazy:
             return tensor
@@ -539,6 +593,10 @@ class Standardize(TransformInverse):
             return stat.reshape(-1, *([1] * (tensor.dim() - 1)))
         return stat
 
+    def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Mask or not, the inverse only pops the Mean/Std the forward stacked: a per-voxel affine map.
+        return PatchLocality(LocalityKind.POINTWISE)
+
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if self.lazy:
             return tensor
@@ -610,6 +668,29 @@ class Padding(TransformInverse):
         for dim in range(len(self.padding) // 2):
             shape[-dim - 1] += sum(self.padding[dim * 2 : dim * 2 + 2])
         return shape
+
+    def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # The inverse drops the padded border and keeps a translated copy of what remains: a CROP.
+        return PatchLocality(LocalityKind.CROP)
+
+    def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        shape = list(shape)
+        for dim in range(len(self.padding) // 2):
+            shape[-dim - 1] -= sum(self.padding[dim * 2 : dim * 2 + 2])
+        return shape
+
+    def stream_region_target(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        # Output index o holds input index o + pad_before: a written region pulls its own slices stepped
+        # forward by the leading pad (padding pairs are in reversed axis order, like F.pad).
+        before = [0] * len(target_slices)
+        for dim in range(min(len(self.padding) // 2, len(before))):
+            before[-dim - 1] = self.padding[dim * 2]
+        return [slice(t.start + b, t.stop + b) for t, b in zip(target_slices, before, strict=False)]
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: dict[str, torch.Tensor]) -> torch.Tensor:
         if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
@@ -684,12 +765,44 @@ class Resample(TransformInverse, ABC):
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         pass
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+    def _inverse_geometry(self, cache_attribute: Attribute) -> list[int]:
+        """Pop the Size/Spacing stack the forward pushed and return the size the inverse restores."""
         cache_attribute.pop_np_array("Size")
         size_1 = cache_attribute.pop_np_array("Size")
         if "Spacing" in cache_attribute:
             cache_attribute.pop_np_array("Spacing")
-        return self._resample(tensor, [int(size) for size in size_1])
+        return [int(size) for size in size_1]
+
+    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return self._resample(tensor, self._inverse_geometry(cache_attribute))
+
+    def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # The inverse rescales back to the size the forward stacked: patch-native (RESCALE) whenever
+        # that stack is on the finalize-time attribute, judged on a copy (a declaration never pops).
+        try:
+            self._inverse_geometry(Attribute(cache_attribute))
+        except NameError:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(LocalityKind.RESCALE)
+
+    def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        try:
+            return self._inverse_geometry(Attribute(cache_attribute))
+        except NameError:
+            return shape
+
+    def stream_region_target(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        # The inverse rescales the accumulator (n_in) back to the stored size: a written region pulls
+        # through the same coordinate formula as the forward read, with the roles swapped.
+        n_in = [int(s) for s in source_spatial_shape]
+        n_out = self.inverse_transform_shape(list(n_in), cache_attribute)
+        scales = [n_in[k] / n_out[k] for k in range(len(n_in))]
+        return Resample.source_window(target_slices, scales, n_in)
 
     # Every patch derives its source coordinates from the same global scale (n_in / n_out, from the
     # truncated integer sizes F.interpolate itself uses), which is what makes the streamed patches
@@ -715,17 +828,23 @@ class Resample(TransformInverse, ABC):
         n_in = [int(s) for s in source_spatial_shape]
         n_out = [int(s) for s in self.transform_shape("", "", list(n_in), cache_attribute)]
         scales = [n_in[k] / n_out[k] for k in range(len(n_in))]
+        source_slices = Resample.source_window(target_slices, scales, n_in, halo)
+        return source_slices, [s.start for s in source_slices], scales, n_in, n_out
+
+    @staticmethod
+    def source_window(
+        target_slices: tuple[slice, ...] | list[slice],
+        scales: list[float],
+        n_in: list[int],
+        halo: int = 1,
+    ) -> list[slice]:
+        """The clamped source region a target region interpolates from, per axis, given the scales."""
         source_slices: list[slice] = []
-        region_starts: list[int] = []
         for k, sl in enumerate(target_slices):
-            o0, o1 = sl.start, sl.stop
-            smin = int(np.floor(scales[k] * (o0 + 0.5) - 0.5))
-            smax = int(np.floor(scales[k] * ((o1 - 1) + 0.5) - 0.5))
-            a = max(0, smin - halo)
-            b = min(n_in[k], smax + 2 + halo)
-            source_slices.append(slice(a, b))
-            region_starts.append(a)
-        return source_slices, region_starts, scales, n_in, n_out
+            smin = int(np.floor(scales[k] * (sl.start + 0.5) - 0.5))
+            smax = int(np.floor(scales[k] * ((sl.stop - 1) + 0.5) - 0.5))
+            source_slices.append(slice(max(0, smin - halo), min(n_in[k], smax + 2 + halo)))
+        return source_slices
 
     def resample_region(
         self,
@@ -746,16 +865,17 @@ class Resample(TransformInverse, ABC):
         dev = sub_tensor.device
         ndim = len(target_slices)
         if mode == "nearest":
-            out = sub_tensor
+            indices = []
             for k in range(ndim):
                 # Take the axis's index map from F.interpolate itself, so streamed nearest picks the
                 # same source voxel as the whole-volume call for every size ratio.
                 src = torch.arange(n_in[k], device=dev, dtype=torch.float32).reshape(1, 1, -1)
                 n_out_k = round(n_in[k] / scales[k])
                 index = F.interpolate(src, size=n_out_k, mode="nearest").long().flatten()
-                index = index[target_slices[k].start : target_slices[k].stop] - region_starts[k]
-                out = out.index_select(k + 1, index)
-            return out
+                indices.append(index[target_slices[k].start : target_slices[k].stop] - region_starts[k])
+            # One gather over broadcast index views instead of one volume copy per axis (nearest is a
+            # pure coordinate gather, so composing the axes changes no value).
+            return sub_tensor[(slice(None), *torch.meshgrid(*indices, indexing="ij"))]
 
         if not sub_tensor.is_floating_point() or (
             sub_tensor.device.type == "cpu" and sub_tensor.dtype in (torch.float16, torch.bfloat16)
@@ -1258,6 +1378,22 @@ class Permute(TransformInverse):
             source_slices[self.dims[k + 1] - 1] = slice(sl.start, sl.stop)
         return source_slices
 
+    def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        result = list(shape)
+        for k, d in enumerate(self.dims[1:]):
+            result[d - 1] = shape[k]
+        return result
+
+    def stream_region_target(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        # Input axis k carries output axis ``dims[k + 1] - 1``: a written region pulls, per input axis,
+        # the slice of the output axis it came from.
+        return [slice(target_slices[d - 1].start, target_slices[d - 1].stop) for d in self.dims[1:]]
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.permute(tuple(self.dims))
 
@@ -1290,6 +1426,15 @@ class Flip(TransformInverse):
             else:
                 source_slices.append(slice(sl.start, sl.stop))
         return source_slices
+
+    def stream_region_target(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        # A flip is its own inverse: a written region pulls exactly the region the forward would read.
+        return self.stream_region_source(target_slices, source_spatial_shape, cache_attribute)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.flip(tuple(self.dims))
@@ -1475,6 +1620,60 @@ class Canonical(TransformInverse):
         # tensor's shape.
         center = initial_matrix @ half_extent + initial_origin
         cache_attribute["Origin"] = center - self.canonical_direction @ Canonical._carried(half_extent, remap)
+
+    def _inverse_remap(self, cache_attribute: Attribute) -> list[tuple[int, bool]] | None:
+        """The forward remap judged on the state ``inverse`` runs from: the popped-to source direction.
+
+        The inverse pops the canonical geometry and reorients back through the SOURCE direction under
+        it, so its streamability is the popped state's — evaluated on a copy, since a declaration
+        never mutates the case. A matrix and its inverse are signed permutations together, so the
+        forward remap answers for both; ``None`` where the case is oblique or carries no direction.
+        """
+        scoped = Attribute(cache_attribute)
+        if "Direction" not in scoped:
+            return None
+        scoped.pop("Direction")
+        return self._orthogonal_remap(scoped)
+
+    def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        if self._inverse_remap(cache_attribute) is None:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(LocalityKind.ORIENTATION)
+
+    def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        # transform_shape reads target axis k's extent from source axis ``source``; the inverse puts
+        # each extent back on the axis it came from.
+        remap = self._inverse_remap(cache_attribute)
+        if remap is None:
+            return shape
+        result = list(shape)
+        for k, (source, _) in enumerate(remap):
+            result[source] = shape[k]
+        return result
+
+    def stream_region_target(
+        self,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        # Canonical axis k holds source axis ``source``'s content: a written region pulls, per input
+        # axis, the slice of the output axis it carries — taken mirrored within the input extent where
+        # the remap reads that axis backwards (a flip restricted to a region is that region reversed).
+        remap = self._inverse_remap(cache_attribute)
+        if remap is None:
+            raise TransformError(
+                "Canonical declared a region inverse patch-locality for a direction it cannot remap exactly.",
+                "Report this: inverse_patch_locality() and stream_region_target() disagree about the case.",
+            )
+        source_slices: list[slice] = []
+        for k, (source, mirrored) in enumerate(remap):
+            target = target_slices[source]
+            extent = source_spatial_shape[k]
+            source_slices.append(
+                slice(extent - target.stop, extent - target.start) if mirrored else slice(target.start, target.stop)
+            )
+        return source_slices
 
     def _reorient(self, tensor: torch.Tensor, reorientation: torch.Tensor) -> torch.Tensor:
         """Apply a reorientation: an exact index remap where it is one, a resample where it is not.
