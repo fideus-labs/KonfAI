@@ -24,6 +24,24 @@ class Head(network.ModuleArgsDict):
         self.add_module("Tanh", torch.nn.Tanh())
 
 
+class Affine(torch.nn.Module):
+    """Per-voxel ``y = w * x + b`` as elementwise ops.
+
+    The same input value gives the same output bits whatever the tensor shape, which is what the
+    patched-equals-whole byte-identity tests compare across. A 1x1 convolution is not that: it
+    routes through shape-dependent GEMM kernels whose FMA tail handling can differ by one ULP
+    between patch sizes (observed on macOS arm64 Accelerate).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(1))
+        self.bias = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.weight + self.bias
+
+
 class TinySynthNet(network.Network):
     def __init__(
         self,
@@ -38,8 +56,5 @@ class TinySynthNet(network.Network):
             outputs_criterions=outputs_criterions,
             dim=2,
         )
-        self.add_module(
-            "Projection",
-            torch.nn.Conv2d(1, 1, kernel_size=1, bias=True),
-        )
+        self.add_module("Projection", Affine())
         self.add_module("Head", Head())
