@@ -37,11 +37,11 @@ except ImportError:
 
 from konfai import config_file, cuda_visible_devices, konfai_root, predictions_directory
 from konfai.data.data_manager import BatchSample, DataPrediction, DatasetIter
-from konfai.data.patching import Accumulator, PathCombine
-from konfai.data.transform import Transform, TransformInverse, TransformLoader
+from konfai.data.patching import Accumulator, PathCombine, StreamingAccumulator
+from konfai.data.transform import LocalityKind, Transform, TransformInverse, TransformLoader
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import apply_config, config
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, PredictorError
 from konfai.utils.runtime import (
     DataLog,
@@ -58,7 +58,26 @@ from konfai.utils.utils import get_module, split_path_spec
 
 
 class Reduction(ABC):
-    """Abstract reduction applied across model ensemble or augmentation outputs."""
+    """Aggregate a list of predictions (one per model in an ensemble, or per TTA augmentation) into one.
+
+    A ``Reduction`` is a KonfAI extension point: subclass it and reference it by classpath in the
+    ``OutputDataset`` config. ``__call__`` receives the stacked predictions and returns the aggregate.
+    """
+
+    #: Streamed-write contract. ``True`` declares this reduction a **pure per-voxel** operation over the
+    #: model/TTA (stack) axis — every output voxel depends only on the SAME voxel of each input, never on
+    #: a spatial neighbour. The streamed-write gate reads this flag to decide whether the finalize chain
+    #: may run slab by slab.
+    #:
+    #: Rules for a custom reduction:
+    #: - **Default False.** Leave it False unless you are sure: an unknown reduction then takes the
+    #:   whole-volume path, costing the streaming optimisation but never correctness.
+    #: - **Set True only if voxel-local.** Reducing/stacking along the stack axis (dim 0) or the channel
+    #:   axis (dim 1) is fine — those are orthogonal to the spatial slab axis. Anything that reads across
+    #:   spatial positions (a spatial blur, a resample, a global-argmax over Z) must stay False.
+    #: - **A wrong True corrupts the streamed output** (each slab would be reduced with only its own data);
+    #:   the gate trusts this flag and checks nothing else.
+    voxel_local: bool = False
 
     @abstractmethod
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
@@ -67,6 +86,8 @@ class Reduction(ABC):
 
 class Mean(Reduction):
     """Average ensemble or augmentation predictions element-wise."""
+
+    voxel_local = True
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         # A single element (no TTA / a lone model) is its own mean; skip the float32 clone + accumulate,
@@ -84,6 +105,8 @@ class Mean(Reduction):
 class Median(Reduction):
     """Compute the element-wise median across prediction tensors."""
 
+    voxel_local = True
+
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         # A single element is its own median; skip the float32 stack (a large no-op for whole volumes).
         if len(tensors) == 1:
@@ -93,6 +116,9 @@ class Median(Reduction):
 
 class Concat(Reduction):
     """Concatenate prediction tensors along the channel dimension."""
+
+    # Cats along the channel axis, orthogonal to the spatial slab axis -- per-voxel, so slab-local.
+    voxel_local = True
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         return torch.cat(tensors, dim=1)
@@ -274,11 +300,14 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         layer: torch.Tensor,
         dataset: DatasetIter,
         attribute: Attribute | None = None,
+        number_of_channels_per_model: list[int] | None = None,
     ):
         raise NotImplementedError()
 
     def is_done(self, index: int) -> bool:
-        return len(self.output_layer_accumulator[index]) == self.nb_data_augmentation and all(
+        # ``.get``: a streamed case cleans itself up inside ``add_layer`` (its slabs are already on
+        # disk), so by the time the run loop asks, the index is gone and the answer is "nothing to do".
+        return len(self.output_layer_accumulator.get(index, {})) == self.nb_data_augmentation and all(
             acc.is_full() for acc in self.output_layer_accumulator[index].values()
         )
 
@@ -335,6 +364,15 @@ class OutSameAsGroupDataset(OutputDataset):
             reduction,
         )
         self.group_src, self.group_dest = same_as_group.split(":")
+        # Slab streaming has no config knob: it is applied automatically, per case, whenever it is
+        # byte-identical to the assembled path (``_stream_refusal is None`` -- pointwise finalize, single
+        # augmentation, region-writable backend), finalizing and writing each z-slab as its patches
+        # complete so RAM is bounded at one patch window; otherwise the whole-volume path is used
+        # transparently. ``KONFAI_STREAMED_WRITES=0`` is a global ops/debug kill-switch (also how a test
+        # gets the assembled reference), not a per-output option.
+        self._streaming_enabled = os.environ.get("KONFAI_STREAMED_WRITES", "1").lower() not in ("0", "false")
+        self._stream_active: dict[int, bool] = {}
+        self._stream_sinks: dict[int, DataStream] = {}
 
     def add_layer(
         self,
@@ -344,6 +382,7 @@ class OutSameAsGroupDataset(OutputDataset):
         layer: torch.Tensor,
         dataset: DatasetIter,
         attribute: Attribute | None = None,
+        number_of_channels_per_model: list[int] | None = None,
     ):
         if (
             index_dataset not in self.output_layer_accumulator
@@ -357,9 +396,16 @@ class OutSameAsGroupDataset(OutputDataset):
                 self.output_layer_accumulator[index_dataset] = {}
                 self.attributes[index_dataset] = {}
                 self.names[index_dataset] = input_dataset.name
+                # Stream this case iff enabled and byte-identical to the assembled path. No warning on a
+                # refusal: streaming is transparent, so the whole-volume path is a normal outcome, not a
+                # misconfiguration.
+                self._stream_active[index_dataset] = (
+                    self._streaming_enabled and self._stream_refusal(dataset, source_attribute) is None
+                )
             self.attributes[index_dataset][index_augmentation] = {}
 
-            self.output_layer_accumulator[index_dataset][index_augmentation] = Accumulator(
+            accumulator_type = StreamingAccumulator if self._stream_active[index_dataset] else Accumulator
+            self.output_layer_accumulator[index_dataset][index_augmentation] = accumulator_type(
                 input_dataset.patch.get_patch_slices(index_augmentation),
                 input_dataset.patch.patch_size,
                 self.patch_combine,
@@ -388,7 +434,7 @@ class OutSameAsGroupDataset(OutputDataset):
         elif str(layer.device) != str(target):
             layer = layer.to(target)
         try:
-            accumulator.add_layer(index_patch, layer)
+            slabs = accumulator.add_layer(index_patch, layer) or []
         except torch.cuda.OutOfMemoryError:
             # The gate samples free VRAM once per case: another process can reclaim it before this
             # volume-sized first allocation lands. Nothing is blended yet, so fall back to the
@@ -398,7 +444,131 @@ class OutSameAsGroupDataset(OutputDataset):
                 raise
             self._accum_device[index_dataset] = torch.device("cpu")
             torch.cuda.empty_cache()
-            accumulator.add_layer(index_patch, self._offload_to_cpu(layer))
+            slabs = accumulator.add_layer(index_patch, self._offload_to_cpu(layer)) or []
+        if not self._stream_active.get(index_dataset, False):
+            return
+        finished = accumulator.is_full()
+        if finished:
+            slabs = slabs + cast(StreamingAccumulator, accumulator).finalize()
+        try:
+            self._flush_slabs(index_dataset, slabs, number_of_channels_per_model, dataset)
+        except BaseException as error:
+            sink = self._stream_sinks.pop(index_dataset, None)
+            if sink is not None:
+                sink.__exit__(type(error), error, error.__traceback__)
+            raise
+        if finished:
+            self._close_stream(index_dataset)
+
+    def _stream_refusal(self, dataset: DatasetIter, attribute: Attribute) -> str | None:
+        """Why this case cannot be written slab by slab (``None`` = it can).
+
+        Streaming is only byte-identical to the assembled-volume path when every finalize stage is
+        voxel-local: single augmentation (TTA inverses apply to the assembled volume), a Mean/Median
+        reduction, and a POINTWISE ``patch_locality`` for every transform of the finalize chain — a
+        pointwise transform is a per-voxel value map, so its inverse is voxel-local too. Anything else
+        falls back to the proven whole-volume path.
+        """
+        if self.nb_data_augmentation != 1:
+            return "test-time augmentation inverses apply to the assembled volume"
+        # The reduction declares its own slab-locality (like a transform declares patch_locality) rather
+        # than the gate hardcoding a whitelist: any voxel-local reduction streams, an unknown one does not.
+        if not self.reduction.voxel_local:
+            return f"reduction '{type(self.reduction).__name__}' is not voxel-local"
+        chain: list[Transform] = [
+            *self.before_reduction_transforms,
+            *self.after_reduction_transforms,
+            *[
+                transform
+                for transform in dataset.groups_src[self.group_src][self.group_dest].transforms
+                if isinstance(transform, TransformInverse) and transform.apply_inverse
+            ],
+            *self.final_transforms,
+        ]
+        for transform in chain:
+            if transform.patch_locality(Attribute(attribute)).kind is not LocalityKind.POINTWISE:
+                return f"transform '{type(transform).__name__}' is not pointwise"
+        if not self.can_stream_data(attribute):
+            return f"write format '{self.file_format}' cannot serve region writes"
+        return None
+
+    def _flush_slabs(
+        self,
+        index: int,
+        slabs: list[tuple[slice, torch.Tensor]],
+        number_of_channels_per_model: list[int] | None,
+        dataset: DatasetIter,
+    ) -> None:
+        """Finalize each slab and write it into the case's sink (opened at the first slab, once the
+        finalize chain has fixed the output's channel count and dtype)."""
+        for region, slab in slabs:
+            result, attribute = self._finalize_slab(index, slab, number_of_channels_per_model, dataset)
+            array = result.detach().cpu().numpy()
+            if index not in self._stream_sinks:
+                spatial = self.output_layer_accumulator[index][0].shape
+                sink = self.open_data_stream(
+                    self.group, self.names[index], [array.shape[0], *spatial], array.dtype, attribute
+                )
+                if sink is None:
+                    raise PredictorError(
+                        f"Streamed write refused by the '{self.file_format}' backend for dtype"
+                        f" '{array.dtype}' on output '{self.group}': write it to an h5 or omezarr"
+                        f" dataset, or set KONFAI_STREAMED_WRITES=0 to force the whole-volume path."
+                    )
+                self._stream_sinks[index] = sink
+            self._stream_sinks[index].write_slice(
+                (slice(0, array.shape[0]), region, *(slice(0, extent) for extent in array.shape[2:])),
+                array,
+            )
+
+    def _finalize_slab(
+        self,
+        index: int,
+        layer: torch.Tensor,
+        number_of_channels_per_model: list[int] | None,
+        dataset: DatasetIter,
+    ) -> tuple[torch.Tensor, Attribute]:
+        """The single-augmentation finalize chain of ``_get_output``/``get_output``, on one z-slab.
+
+        Every stage passed ``_stream_refusal`` as voxel-local, so applying it slab by slab yields the
+        same voxels as applying it to the assembled volume. Each slab gets its own copy of the case
+        attribute (transform writes stay slab-local).
+        """
+        attribute = Attribute(self.attributes[index][0][0])
+        if number_of_channels_per_model and layer.shape[0] == sum(number_of_channels_per_model):
+            attribute["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
+            chunks = list(torch.split(layer, number_of_channels_per_model, dim=0))
+        else:
+            chunks = [layer]
+        results = []
+        for chunk in chunks:
+            for transform in self.before_reduction_transforms:
+                chunk = transform(self.names[index], chunk, Attribute(attribute))
+            results.append(chunk)
+        # Reduce, then drop the singleton stack axis; Mean/Median also drop the singleton model axis,
+        # while Concat keeps the [M, C, ...] model axis for after_reduction (Sum) to merge into labels.
+        result = self.reduction([torch.stack(results, dim=0).unsqueeze(0)]).squeeze(0)
+        if isinstance(self.reduction, Mean | Median):
+            result = result.squeeze(0)
+        for transform in self.after_reduction_transforms:
+            result = transform(self.names[index], result, attribute)
+        for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].transforms):
+            if isinstance(transform, TransformInverse) and transform.apply_inverse:
+                result = transform.inverse(self.names[index], result, attribute)
+        for transform in self.final_transforms:
+            result = transform(self.names[index], result, attribute)
+        return result, attribute
+
+    def _close_stream(self, index: int) -> None:
+        """Finalize the case's sink and drop its bookkeeping (``is_done`` then reports nothing left)."""
+        sink = self._stream_sinks.pop(index, None)
+        if sink is not None:
+            sink.__exit__(None, None, None)
+        self._stream_active.pop(index, None)
+        self.output_layer_accumulator.pop(index, None)
+        self.attributes.pop(index, None)
+        self._accum_device.pop(index, None)
+        self._reduce_device.pop(index, None)
 
     def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
         super().setup(datasets, groups)
@@ -434,20 +604,17 @@ class OutSameAsGroupDataset(OutputDataset):
             chunks = [layer]
 
         # The per-model channel reduction (softmax/argmax over the class dimension of a whole-volume
-        # multi-class output) is a strided reduction over billions of elements — slow on CPU, trivial on
-        # the GPU. If the accumulator blended on the GPU, the volume is already on-device: reduce there
-        # directly (no host round-trip, no ``empty_cache``). Otherwise it is on CPU; move the assembled
-        # chunk to the device only when it fits free VRAM, else keep the whole reduction on CPU.
-        if layer.device.type == "cuda":
-            reduce_device = layer.device
-        else:
-            # One decision per case (cached): deciding per augmentation would let free VRAM shrinking
-            # between augmentations flip the device mid-case and hand the reduction a mixed-device list.
-            if index not in self._reduce_device:
-                self._reduce_device[index] = (
-                    self._reduction_device(chunks[0], len(chunks)) if chunks else torch.device("cpu")
-                )
-            reduce_device = self._reduce_device[index]
+        # multi-class output) materialises a working volume on top of the resident accumulator. Decide
+        # once per case whether it fits free VRAM, with the accumulator already resident whatever device
+        # it sits on: if it fits, reduce on the GPU (a no-op move when the volume is already there); else
+        # move the finalize to the host. One decision per case -- deciding per augmentation would let free
+        # VRAM shrinking between augmentations flip the device mid-case and hand the reduction a
+        # mixed-device list.
+        if index not in self._reduce_device:
+            self._reduce_device[index] = (
+                self._reduction_device(chunks[0], len(chunks)) if chunks else torch.device("cpu")
+            )
+        reduce_device = self._reduce_device[index]
         results = []
         for i, layer in enumerate(chunks):
             attr = base_attr if (i == len(chunks) - 1) else Attribute(base_attr)
@@ -481,34 +648,38 @@ class OutSameAsGroupDataset(OutputDataset):
         needed = chunk.numel() * chunk.element_size() * (2 * max(1, nb_chunks) + 1)
         return device if needed < free else torch.device("cpu")
 
+    # A forward runs alongside the resident accumulator on every patch; the memory queries below happen
+    # before those allocations land, so keep ~10 % of free VRAM in reserve for fragmentation and a
+    # concurrent process.
+    _ACCUMULATE_MARGIN = 0.9
+
     def _accumulate_device(self, layer: torch.Tensor, accumulator: Accumulator) -> torch.device:
-        """Device on which to blend a case's patches. Keeping the accumulator on the GPU (nnU-Net style)
-        avoids the per-patch GPU->CPU offload and the CPU blend, and leaves the assembled volume on the
-        device for the reduction (no host round-trip, no ``empty_cache``). Only chosen when the full
-        combined volume of every augmentation, its weight map, and headroom for the ongoing forward
-        passes fit free VRAM; otherwise the memory-safe CPU accumulation is used."""
+        """Device on which to blend a case's patches. On the GPU the accumulator stays resident through
+        the case (no per-patch offload, no CPU blend, and the reduction runs where the volume already is).
+        Decided once per case, at the first patch, when the accumulator fits alongside the memory a
+        forward needs; else the accumulation runs on the CPU."""
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
         if device.type != "cuda" or layer.device.type != "cuda":
             return torch.device("cpu")
         try:
-            # Release the forward pass's reserved-but-unused cache so ``mem_get_info`` reports the memory
-            # actually available (this runs once, on the first patch of the case).
+            # Return the reserved-but-unused cache so ``mem_get_info`` reports the memory actually free.
             torch.cuda.empty_cache()
             free, _ = torch.cuda.mem_get_info(device)
+            # A forward's transient footprint above the resident set, measured on the batch that just ran
+            # (its activations are already freed). ``max_memory_allocated`` is a high-water mark, so this
+            # bounds the next forward from above -- the gate errs toward the CPU, never toward an OOM.
+            transient = torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device)
         except Exception:  # nosec B110 - any CUDA query failure keeps the blend on CPU
             return torch.device("cpu")
-        voxels = int(np.prod(accumulator.shape))
+        voxels = int(np.prod(accumulator.footprint_shape))
         # result [C, volume] + weight_sum [volume] at the patch dtype, for EVERY augmentation of the
         # case: ``is_done`` requires all augmentations complete before ``get_output``, so their
         # accumulators are resident simultaneously and the per-case device decision must budget them all.
-        needed = (layer.shape[0] + 1) * voxels * layer.element_size() * max(1, self.nb_data_augmentation)
-        # Keep the accumulator to a bit over a quarter of free VRAM (``needed * 2 < free * 0.56``): the
-        # ``* 2`` reserves a same-size reduction temp, and the rest leaves room for every remaining
-        # patch's forward while the accumulator stays resident. ``free`` is read after the first batch's
-        # forward, so a larger batch (which leaves less free) is rejected here -- exactly when the
-        # forward + resident accumulator would otherwise OOM mid-case. A many-channel volume whose
-        # accumulator dwarfs free (e.g. a 100+ class head) also falls back to the memory-safe CPU blend.
-        return device if needed * 2 < free * 0.56 else torch.device("cpu")
+        accumulator_bytes = (layer.shape[0] + 1) * voxels * layer.element_size() * max(1, self.nb_data_augmentation)
+        # During accumulation the resident accumulator and one forward coexist. The channel reduction's
+        # working volume is budgeted separately, at ``get_output`` time, by ``_reduction_device``.
+        needed = accumulator_bytes + transient
+        return device if needed < free * self._ACCUMULATE_MARGIN else torch.device("cpu")
 
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
         results = [
@@ -732,6 +903,7 @@ class _Predictor:
                                     output[i],
                                     self.dataset,
                                     batch_sample[group].attribute[i],
+                                    number_of_channels_per_model,
                                 )
                                 if output_dataset.is_done(index):
                                     output_dataset.write_prediction(
