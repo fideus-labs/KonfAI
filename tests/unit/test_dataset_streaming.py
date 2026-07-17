@@ -306,8 +306,7 @@ def test_dataset_iter_streams_patch_reads_when_cache_disabled() -> None:
 
 
 def test_data_train_enables_worker_prefetch_when_cache_is_disabled() -> None:
-    # The cache regime is no longer a config knob; the budget resolver flips it through the same
-    # re-entry point used here.
+    # The budget resolver flips the regime through this same re-entry point.
     dataset = DataTrain(augmentations=None)
     dataset._configure_data_loading(use_cache=False)
 

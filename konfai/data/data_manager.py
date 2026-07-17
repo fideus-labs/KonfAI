@@ -106,8 +106,8 @@ def _parse_memory_budget_bytes(value: str | float) -> int:
         return int(float(match.group("number")) * factor)
     raise ConfigError(
         f"memory_budget: '{value}' is not a valid memory size.",
-        "Use a number in GiB (e.g. 24), a unit string ('24GB', '32GiB', '512MB'), 'auto', or None to "
-        "keep the workflow's default loading regime.",
+        "Use a number in GiB (e.g. 24), a unit string ('24GB', '32GiB', '512MB'), 'auto', or None "
+        "(the default) -- which means 'auto': size from the detected memory.",
     )
 
 
@@ -937,24 +937,33 @@ class Data(ABC):
                     total += int(np.prod(manager.base_shape, dtype=np.int64)) * _CACHE_ELEMENT_BYTES * copies
         return total
 
-    def _resolve_cache_regime(self, world_size: int) -> None:
-        """Derive ``use_cache`` from ``memory_budget``, or leave the declared value untouched.
+    #: Whether a ``memory_budget`` that fits may choose the cache. True for training (epochs
+    #: re-read every case); overridden False by the one-pass workflows, where a cache is never
+    #: re-read and the regime is always stream/buffer.
+    _budget_caches_when_fit = True
 
-        ``None`` keeps today's behaviour exactly. Otherwise the cache is chosen iff the per-rank
-        dataset (``dataset / world_size`` -- ``Data._split`` shards cases across ranks) fits the
-        per-rank budget: an explicit budget is taken as declared per rank; ``"auto"`` divides the
-        detected node memory (cgroup-capped) by the ranks sharing it, so its ``world_size`` cancels
-        and it reduces to "does the whole dataset fit the node". The decision is logged once here --
-        ``get_data`` runs on the launcher alone, before any worker is spawned.
+    def _resolve_cache_regime(self, world_size: int) -> None:
+        """Derive ``use_cache`` from ``memory_budget``. ``None`` means ``"auto"``.
+
+        The cache is chosen iff the per-rank dataset (``dataset / world_size`` -- ``Data._split``
+        shards cases across ranks) fits the per-rank budget: an explicit budget is taken as declared
+        per rank; ``"auto"`` -- also what an absent key means -- divides the detected node memory
+        (cgroup-capped) by the ranks sharing it, so its ``world_size`` cancels and it reduces to
+        "does the whole dataset fit the node". The decision is logged once here -- ``get_data`` runs
+        on the launcher alone, before any worker is spawned.
         """
-        if self.memory_budget is None:
+        if not self._budget_caches_when_fit:
+            # One-pass workflows (prediction, evaluation) read each case exactly once: a cache is
+            # never re-read, so the regime is always stream/buffer and there is nothing to derive.
             return
         world_size = max(1, world_size)
         n_cases = len(self._prepared_train_names) + len(self._prepared_validation_names)
         dataset_bytes = self._estimate_cached_bytes()
         per_rank_bytes = dataset_bytes / world_size
 
-        if isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto":
+        if self.memory_budget is None or (
+            isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto"
+        ):
             node_bytes, source = available_memory_bytes()
             per_rank_budget = node_bytes * _AUTO_MEMORY_SAFETY_FRACTION / world_size
             budget_desc = f"auto: {_format_gib(node_bytes)} {source} x {_AUTO_MEMORY_SAFETY_FRACTION:.0%}, per-rank"
@@ -1550,9 +1559,8 @@ class DataTrain(Data):
             dataset_filenames,
             groups_src,
             patch,
-            # Training re-reads every case each epoch, so the cache is the right default; the config
-            # no longer exposes the mechanism -- 'memory_budget' replaces it with the fit-test, which
-            # streams whenever the dataset outgrows the budget (an old 'use_cache' key is inert).
+            # Training re-reads every case each epoch: cache when the dataset fits the
+            # 'memory_budget' fit-test, stream when it does not.
             True,
             subset,
             batch_size,
@@ -1571,6 +1579,9 @@ class DataTrain(Data):
 @config("Dataset")
 class DataPrediction(Data):
     """Dataset configuration used by the prediction workflow."""
+
+    # One pass: each case is read once, a cache is never re-read -- always stream/buffer.
+    _budget_caches_when_fit = False
 
     def __init__(
         self,
@@ -1610,12 +1621,16 @@ class DataPrediction(Data):
 class DataMetric(Data):
     """Dataset configuration used by the evaluation workflow.
 
-    Evaluation never exposes a patch: with a ``memory_budget`` set, each run sizes its own -- a case
-    that fits the budget is evaluated whole (exact); one that does not is cut into the
-    largest DISJOINT patches that fit (overlap 0, no padding) and the reducible metrics combine their
-    running partials into the exact whole-case value. The evaluator disables this sizing when any of
-    its metrics is not reducible, so a metric that needs the whole volume always gets it.
+    Evaluation never exposes a patch: each run sizes its own from ``memory_budget`` (a missing key
+    means ``"auto"``) -- a case that fits the budget is evaluated whole (exact); one
+    that does not is cut into the largest DISJOINT patches that fit (overlap 0, no padding) and the
+    reducible metrics combine their running partials into the exact whole-case value. The evaluator
+    disables this sizing when any of its metrics is not reducible, so a metric that needs the whole
+    volume always gets it.
     """
+
+    # One pass: each case is read once, a cache is never re-read -- always stream/buffer.
+    _budget_caches_when_fit = False
 
     #: Working copies a metric makes of the patch pair (float casts, the difference, a masked select):
     #: measured ~<= 2x the resident tensors; the sizing keeps this conservative and the 0.8 safety
@@ -1623,7 +1638,9 @@ class DataMetric(Data):
     _METRIC_INTERMEDIATE_FACTOR = 2.0
 
     def _maybe_auto_patch(self) -> None:
-        if self.memory_budget is None or self.patch is not None or not getattr(self, "auto_patch_allowed", True):
+        # A missing budget means "auto": evaluation bounds itself by default. An explicit patch or a
+        # non-reducible metric (auto_patch_allowed) vetoes the sizing.
+        if self.patch is not None or not getattr(self, "auto_patch_allowed", True):
             return
         sources = self._resolve_dataset_sources()
         # Header-only scan: for each case, its resident bytes per spatial voxel is the sum of its
@@ -1646,7 +1663,9 @@ class DataMetric(Data):
             spatial_by_name,
             key=lambda name: channels_by_name[name] * int(np.prod(spatial_by_name[name], dtype=np.int64)),
         )
-        if isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto":
+        if self.memory_budget is None or (
+            isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto"
+        ):
             node_bytes, _source = available_memory_bytes()
             budget = node_bytes * _AUTO_MEMORY_SAFETY_FRACTION
         else:
@@ -1693,8 +1712,7 @@ class DataMetric(Data):
             groups_src=groups_src,
             patch=None,
             # Evaluation reads each case exactly once (no augmentations, one pass): a cache is never
-            # re-read, it only fronts the whole dataset's RAM. Stream instead; a ``memory_budget``
-            # whose fit-test passes may still flip the cache on.
+            # re-read, it only fronts the whole dataset's RAM. Stream.
             use_cache=False,
             subset=subset,
             batch_size=1,

@@ -143,8 +143,9 @@ memory or dimensionality requirement. See {doc}`../concepts/model-graph`.
 
 ## Tune in this order
 
-1. Set a `memory_budget` (`auto`, or a value below the dataset's size to
-   force the stream/buffer path).
+1. The default `memory_budget` (`auto`) already decides from the dataset's
+   size; set an explicit value below the dataset's size to force the
+   stream/buffer path.
 2. Leave `patch_size` axes at `0` so the framework sizes them (the whole volume
    when it fits, a measured shrink on OOM), or pin the largest size that fits
    the model and required context.
