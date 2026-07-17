@@ -1752,7 +1752,7 @@ class Predictor(DistributedObject):
                 measured = self._transient_at_oom(device)
                 for output_dataset in self.outputs_dataset.values():
                     output_dataset.reset()
-                candidate = self._shrunken_patch(measured, self._usable_vram_after_oom(device))
+                candidate = self._shrunken_patch(measured, device)
                 if candidate is None:
                     raise
                 print(
@@ -1763,11 +1763,15 @@ class Predictor(DistributedObject):
                 self.dataset.replan_patch(candidate)
                 dataloader = self.dataset.get_data(world_size)[0][global_rank][0]
 
-    def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
+    def _shrunken_patch(self, measured: int | None, device: int | None) -> list[int] | None:
         """One shrink step for the free patch axes after a CUDA OOM (``None`` = not auto, or floor).
 
         The first OOM starts from the worst prepared case at full extent (the size the failed grid
-        effectively ran); later ones shrink the current candidate further.
+        effectively ran); later ones shrink the current candidate further. When the framework picks
+        the size, it must also leave the blend on the GPU: the accumulation footprint is RESERVED
+        beside the forward, so the sized patch passes the accumulation gate. Only when that reserve
+        fits at no size (or cannot be priced) is the forward sized alone -- the gate's memory-safe
+        CPU blend absorbs that case.
         """
         if self._vram_patch_template is None:
             return None
@@ -1775,7 +1779,34 @@ class Predictor(DistributedObject):
         if worst is None:
             return None
         candidate = self._vram_patch_candidate or concretize_patch_size(self._vram_patch_template, worst)
+        usable = self._usable_vram_after_oom(device)
+        reserve = self._accumulation_reserve(candidate, worst)
+        if reserve is not None:
+            shrunk = next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable - reserve)
+            if shrunk is not None:
+                return shrunk
         return next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable)
+
+    def _accumulation_reserve(self, candidate: list[int], worst: list[int]) -> float | None:
+        """Bytes each case keeps resident while its patches accumulate, per output writer: the
+        streamed window (one patch extent x the cross-section) when the writer will stream --
+        single augmentation, voxel-local reduction -- the assembled volume otherwise. ``None``
+        when a writer's channels cannot be read off the model trace (no reserve, gate decides).
+        """
+        trace = {name: args.out_channels for name, _, args in self.model.named_module_args_dict()}
+        elem = 2  # ModelComposite casts float32 outputs to float16 before accumulation
+        reserve = 0.0
+        for name, writer in self.outputs_dataset.items():
+            out_channels = trace.get(name.replace(";accu;", ""))
+            if not out_channels:
+                return None
+            if isinstance(self.combine, Concat):
+                out_channels *= max(1, len(self.path_to_models))
+            nb_augmentation = max(1, writer.nb_data_augmentation)
+            streams = nb_augmentation == 1 and writer.reduction.voxel_local
+            voxels = candidate[0] * np.prod(worst[1:], dtype=np.int64) if streams else np.prod(worst, dtype=np.int64)
+            reserve += float((out_channels + 1) * voxels * elem * nb_augmentation)
+        return reserve
 
     def _transient_at_oom(self, device: int | None) -> int | None:
         """The failed step's measured transient (CUDA peak over resident), ``None`` when unreadable."""

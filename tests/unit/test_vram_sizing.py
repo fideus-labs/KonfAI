@@ -24,6 +24,7 @@ primitive itself runs on a real CUDA device when one is present.
 import numpy as np
 import pytest
 import torch
+from konfai.predictor import Mean, Predictor, Reduction
 from konfai.utils.utils import concretize_patch_size
 from konfai.utils.vram import measure_transient_bytes, next_patch_candidate, usable_vram
 
@@ -124,6 +125,85 @@ class TestUsableVram:
     def test_resident_exceeding_the_margin_goes_negative(self):
         # The kernel then answers None -- the caller raises with its own context.
         assert usable_vram(1000.0, resident_bytes=900.0) < 0
+
+
+class _SpatialReduction(Reduction):
+    """A reduction that reads across voxels: its writer can never stream."""
+
+    voxel_local = False
+
+    def __call__(self, tensors):
+        return tensors[0]
+
+
+class _Args:
+    def __init__(self, out_channels):
+        self.out_channels = out_channels
+
+
+class _Model:
+    def __init__(self, out_channels):
+        self._out_channels = out_channels
+
+    def named_module_args_dict(self):
+        yield "Head.Tanh", None, _Args(self._out_channels)
+
+
+class _Writer:
+    def __init__(self, nb_data_augmentation, reduction):
+        self.nb_data_augmentation = nb_data_augmentation
+        self.reduction = reduction
+
+
+class _Data:
+    def __init__(self, worst):
+        self._worst = worst
+
+    def worst_case_shape(self):
+        return self._worst
+
+
+def _predictor(out_channels, nb_augmentation, reduction, margined, candidate=None):
+    predictor = Predictor.__new__(Predictor)
+    predictor._vram_patch_template = [0, 0, 0]
+    predictor._vram_patch_candidate = candidate
+    predictor.dataset = _Data([100, 100, 100])
+    predictor.model = _Model(out_channels)
+    predictor.combine = Mean()
+    predictor.path_to_models = ["model.pt"]
+    predictor.outputs_dataset = {"Head.Tanh": _Writer(nb_augmentation, reduction)}
+    predictor._usable_vram_after_oom = lambda device: margined
+    return predictor
+
+
+class TestPredictorShrinkBudget:
+    """The shrink budget reserves the accumulation footprint so the sized patch keeps the blend on
+    the GPU; only an unfittable (or unpriceable) reserve falls back to sizing the forward alone."""
+
+    def test_an_assembled_writer_reserves_the_whole_volume(self):
+        # reserve = (3+1)ch x 100^3 x 2B x 2aug = 1.6e7 -> usable 1e6 of the 1.7e7 margined budget;
+        # measured 8e6 -> exact isotropic step (1/8)^(1/3) halves each axis. Without the reserve the
+        # measurement would claim a fit and only the fixed 0.8 step would apply.
+        predictor = _predictor(3, nb_augmentation=2, reduction=Mean(), margined=1.7e7)
+        assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
+
+    def test_a_streaming_writer_reserves_only_its_window(self):
+        # Single augmentation + voxel-local reduction -> window = candidate_z x cross-section:
+        # reserve 8e5 -> usable 3.2e6, measured 6.4e6 -> per-axis (1/2)^(1/3). A volume reserve
+        # (8e6) would not fit the 4e6 budget and would have fallen back to [8, 85, 85].
+        predictor = _predictor(3, nb_augmentation=1, reduction=Mean(), margined=4e6, candidate=[10, 100, 100])
+        assert predictor._shrunken_patch(6_400_000, device=None) == [7, 79, 79]
+
+    def test_an_unfittable_reserve_falls_back_to_the_forward_alone(self):
+        # The non-streamable volume reserve (1.6e7) exceeds the whole budget (1e6): the writer will
+        # blend on the CPU, and the patch is still sized for the forward instead of refusing.
+        predictor = _predictor(3, nb_augmentation=2, reduction=_SpatialReduction(), margined=1e6)
+        assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
+
+    def test_unpriceable_channels_skip_the_reserve(self):
+        predictor = _predictor(None, nb_augmentation=2, reduction=Mean(), margined=1e6)
+        assert predictor._accumulation_reserve([100, 100, 100], [100, 100, 100]) is None
+        assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
