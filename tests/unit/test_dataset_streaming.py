@@ -1054,6 +1054,29 @@ def test_stream_resample_border_patch_matches_padded_whole_volume() -> None:
         np.testing.assert_allclose(got.numpy(), expected.numpy(), atol=1e-3)
 
 
+def test_stream_resample_nearest_strong_downsampling_matches_whole_volume() -> None:
+    # Strong downsampling of a uint8 label map (nearest mode): the nearest voxel of the first output
+    # column (floor(o*scale)) falls BELOW the linear tap window's start, so the source read must widen
+    # to include it -- otherwise the gather indexed a negative local offset and wrapped onto the far
+    # edge, silently returning a wrong label. A regular ratio (a plain integer scale) hides the bug;
+    # 40 -> 6 (scale 6.67) exposes the sub-pixel offset that pushes the linear start past voxel 0.
+    volume = (np.arange(1 * 40 * 40).reshape(1, 40, 40) % 7).astype(np.uint8)
+    shape = [6, 6]
+    patch = [3, 3]
+    stream_manager = _build_streaming_manager(volume, [ResampleToShape(shape=shape)], patch)
+    assert stream_manager.can_stream_patch(0)
+
+    reference_manager = _build_streaming_manager(volume, [ResampleToShape(shape=shape)], patch)
+    reference_manager.load(reference_manager.transforms, [], load_augmentations=False)
+
+    size = stream_manager.patch.get_size(0)
+    for index in range(size):
+        got = stream_manager._get_streamed_data(index, 0, True)[0]
+        expected = reference_manager.patch.get_data(reference_manager.data[0], index, 0, True)
+        # Nearest is a pure gather: the streamed patch must equal the whole-volume pick bit for bit.
+        assert torch.equal(got, expected)
+
+
 # --------------------------------------------------------------------------------------
 # patch_transforms — the per-patch opt-in, guarded by the patch-locality contract
 #

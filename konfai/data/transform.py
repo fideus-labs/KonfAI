@@ -838,12 +838,24 @@ class Resample(TransformInverse, ABC):
         n_in: list[int],
         halo: int = 1,
     ) -> list[slice]:
-        """The clamped source region a target region interpolates from, per axis, given the scales."""
+        """The clamped source region a target region reads from, per axis, given the scales.
+
+        Covers BOTH samplers, because the same window serves either mode: the linear taps around the
+        half-pixel source (``scale * (o + 0.5) - 0.5``, plus the ``+2``/``halo`` margin for the i1
+        neighbour) AND the voxel nearest picks (``floor(o * scale)`` -- F.interpolate's own nearest
+        index). Under strong downsampling the nearest voxel of the first output column falls BELOW the
+        linear window's start, so omitting it read one voxel short and the gather wrapped a negative
+        local index onto the far edge.
+        """
         source_slices: list[slice] = []
         for k, sl in enumerate(target_slices):
             smin = int(np.floor(scales[k] * (sl.start + 0.5) - 0.5))
             smax = int(np.floor(scales[k] * ((sl.stop - 1) + 0.5) - 0.5))
-            source_slices.append(slice(max(0, smin - halo), min(n_in[k], smax + 2 + halo)))
+            near_lo = int(np.floor(sl.start * scales[k]))
+            near_hi = int(np.floor((sl.stop - 1) * scales[k]))
+            start = min(smin - halo, near_lo)
+            stop = max(smax + 2 + halo, near_hi + 1)
+            source_slices.append(slice(max(0, start), min(n_in[k], stop)))
         return source_slices
 
     def resample_region(
