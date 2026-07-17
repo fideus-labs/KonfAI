@@ -865,6 +865,7 @@ class Trainer(DistributedObject):
                 )
                 self._vram_patch_candidate = agreed
                 self.dataset.replan_patch(agreed)
+                self._reset_cuda_peak(device)
                 dataloaders = self.dataset.get_data(world_size)[0][global_rank]
 
     def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
@@ -880,6 +881,16 @@ class Trainer(DistributedObject):
             return None
         candidate = self._vram_patch_candidate or concretize_patch_size(self._vram_patch_template, worst)
         return next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable)
+
+    @staticmethod
+    def _reset_cuda_peak(device: int | None) -> None:
+        """Drop the failed attempt's high-water mark so the rerun measures its own steps."""
+        if device is None:
+            return
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:  # nosec B110 - stale stats only cost precision, never correctness
+            pass
 
     def _transient_at_oom(self, device: int | None) -> int | None:
         """The failed step's measured transient (CUDA peak over resident), ``None`` when unreadable."""

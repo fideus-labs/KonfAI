@@ -898,7 +898,10 @@ class OutSameAsGroupDataset(OutputDataset):
         # the partial entry (a reader must never see a half-written volume); the restart rewrites it.
         abort = PredictorError("prediction restart: the partial streamed output is discarded")
         for sink in self._stream_sinks.values():
-            sink.__exit__(type(abort), abort, None)
+            try:
+                sink.__exit__(type(abort), abort, None)
+            except Exception:  # nosec B110 - one sink failing to abort must not leak the others
+                pass
         self._stream_sinks.clear()
         self._stream_plans.clear()
         self._region_states.clear()
@@ -1743,18 +1746,21 @@ class Predictor(DistributedObject):
                     p.run()
                 return
             except torch.cuda.OutOfMemoryError:
-                if self._vram_patch_template is None:
-                    raise  # no free axis declared: not auto-patched, the OOM propagates unchanged
                 # The restart loop IS the sizing iteration (no probe phase): the run that just OOMed
                 # already measured the step's transient for free. Read it BEFORE the reset (the peak
                 # still includes the resident accumulators on both sides of the difference), free the
-                # in-flight state, then read the honest free VRAM.
+                # in-flight state -- open streamed sinks abort and remove their partial entries, so a
+                # reader never sees a half-written volume even when the OOM is fatal -- then read the
+                # honest free VRAM.
                 measured = self._transient_at_oom(device)
                 for output_dataset in self.outputs_dataset.values():
                     output_dataset.reset()
+                if self._vram_patch_template is None:
+                    raise  # no free axis declared: not auto-patched, the OOM propagates unchanged
                 candidate = self._shrunken_patch(measured, device)
                 if candidate is None:
                     raise
+                self._reset_cuda_peak(device)
                 print(
                     f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> "
                     f"re-planning the free patch axes to {candidate} and restarting this rank's cases."
@@ -1807,6 +1813,21 @@ class Predictor(DistributedObject):
             voxels = candidate[0] * np.prod(worst[1:], dtype=np.int64) if streams else np.prod(worst, dtype=np.int64)
             reserve += float((out_channels + 1) * voxels * elem * nb_augmentation)
         return reserve
+
+    @staticmethod
+    def _reset_cuda_peak(device: int | None) -> None:
+        """Drop the failed attempt's high-water mark so the rerun measures its own steps.
+
+        ``max_memory_allocated`` only rises: left in place, the full-extent attempt's peak would
+        overstate every later transient -- a second shrink would overshoot, and the accumulation
+        gate would keep the rerun's blend on the CPU.
+        """
+        if device is None:
+            return
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:  # nosec B110 - stale stats only cost precision, never correctness
+            pass
 
     def _transient_at_oom(self, device: int | None) -> int | None:
         """The failed step's measured transient (CUDA peak over resident), ``None`` when unreadable."""
