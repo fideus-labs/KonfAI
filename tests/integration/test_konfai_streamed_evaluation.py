@@ -57,6 +57,10 @@ EVALUATION_TEMPLATE = """Evaluator:
               reduction: mean
             PSNR:
               dynamic_range: 2.0
+            MAESaveMap:
+              reduction: mean
+              dataset: ./ErrorMaps:mha
+              group: None
   Dataset:
     groups_src:
       CT:
@@ -192,3 +196,20 @@ def test_streamed_evaluation_matches_whole_volume(tmp_path: Path) -> None:
                 assert got == pytest.approx(value, rel=1e-4), f"{case}:{key}: whole={value} streamed={got}"
             compared += 1
     assert compared >= 9  # 3 cases x 3 metrics: the comparison actually exercised the report
+
+    # The per-voxel error map streams region by region under the budget; being voxel-local over a
+    # disjoint unpadded grid, it must land byte-identical to the whole-volume map.
+    for idx in range(3):
+        case = f"CASE_{idx:03d}"
+        whole_map_path = whole_dir / "ErrorMaps" / case / "sCT.mha"
+        streamed_map_path = streamed_dir / "ErrorMaps" / case / "sCT.mha"
+        assert whole_map_path.exists(), f"whole-volume run wrote no error map for {case}"
+        assert streamed_map_path.exists(), f"streamed run wrote no error map for {case}"
+        whole_map = SimpleITK.ReadImage(str(whole_map_path))
+        streamed_map = SimpleITK.ReadImage(str(streamed_map_path))
+        assert streamed_map.GetSpacing() == whole_map.GetSpacing(), case
+        np.testing.assert_array_equal(
+            SimpleITK.GetArrayFromImage(streamed_map),
+            SimpleITK.GetArrayFromImage(whole_map),
+            err_msg=case,
+        )

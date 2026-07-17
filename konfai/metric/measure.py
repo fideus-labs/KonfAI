@@ -315,14 +315,13 @@ class MAESaveMap(MAE):
         super().__init__(reduction)
         self.dataset = dataset
         self.group = group
-        # The per-voxel error map is a whole-volume output; until it streams through a region write,
-        # this metric needs the whole case.
-        self.reducible = False
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
-        loss, true_loss = super().forward(output, *targets)
+    def partial_map(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        """Per-voxel |output - target| (masked where a mask is given). VOXEL-LOCAL by construction:
+        a patch's map equals the same region of the whole-case map, which is what lets the streamed
+        evaluation write it region by region instead of needing the whole case."""
         if len(targets) == 2:
-            error_map = (
+            return (
                 torch.nn.L1Loss(reduction="none")(
                     output.float() * torch.where(targets[1] == 1, 1, 0),
                     targets[0].float() * torch.where(targets[1] == 1, 1, 0),
@@ -330,9 +329,11 @@ class MAESaveMap(MAE):
                 .to(output.dtype)
                 .cpu()
             )
-        else:
-            error_map = torch.nn.L1Loss(reduction="none")(output.float(), targets[0].float()).to(output.dtype).cpu()
-        return loss, true_loss, error_map
+        return torch.nn.L1Loss(reduction="none")(output.float(), targets[0].float()).to(output.dtype).cpu()
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
+        loss, true_loss = super().forward(output, *targets)
+        return loss, true_loss, self.partial_map(output, *targets)
 
     def get_name(self) -> str:
         return "MAE"
@@ -544,23 +545,24 @@ class DiceSaveMap(Dice):
         super().__init__(labels)
         self.dataset = dataset
         self.group = group
-        # The per-voxel error map is a whole-volume output; until it streams through a region write,
-        # this metric needs the whole case.
-        self.reducible = False
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
-        loss, true_loss = super().forward(output, *targets)
+    def partial_map(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        """Per-voxel label disagreement (masked where a mask is given). VOXEL-LOCAL by construction:
+        a patch's map equals the same region of the whole-case map, which is what lets the streamed
+        evaluation write it region by region instead of needing the whole case."""
         if len(targets) == 2:
-            error_map = (
+            return (
                 torch.nn.L1Loss(reduction="none")(
                     output * torch.where(targets[1] == 1, 1, 0), targets[0] * torch.where(targets[1] == 1, 1, 0)
                 )
                 .to(torch.uint8)
                 .cpu()
             )
-        else:
-            error_map = torch.nn.L1Loss(reduction="none")(output, targets[0]).to(torch.uint8).cpu()
-        return loss, true_loss, error_map
+        return torch.nn.L1Loss(reduction="none")(output, targets[0]).to(torch.uint8).cpu()
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
+        loss, true_loss = super().forward(output, *targets)
+        return loss, true_loss, self.partial_map(output, *targets)
 
     def get_name(self) -> str:
         return "Dice"
