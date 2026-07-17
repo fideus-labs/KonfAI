@@ -1016,6 +1016,51 @@ class Data(ABC):
                 data_augmentations.prepare(key)
         self._prepare_datasets()
 
+    def worst_case_shape(self) -> list[int] | None:
+        """Per-axis maximum spatial extent over every prepared case and augmentation copy.
+
+        A provisional auto-patch grid starts from this worst case at full extent: one GLOBAL patch
+        size, which smaller cases clamp to fewer (or single whole-volume) patches for free.
+        """
+        shapes = [
+            shape
+            for prepared in (self._prepared_data, self._prepared_validation_data)
+            for managers in (prepared or {}).values()
+            for manager in managers
+            for shape in manager.shapes
+        ]
+        if not shapes:
+            return None
+        return [max(int(shape[axis]) for shape in shapes) for axis in range(len(shapes[0]))]
+
+    def replan_patch(self, patch_size: list[int]) -> None:
+        """Re-cut every prepared grid for a new GLOBAL patch size (the OOM-restart path).
+
+        The managers are rebuilt against the already-resolved sources and the SAME case lists --
+        NOT through ``prepare()`` (its idempotence guard would skip the rebuild) -- so a later
+        ``get_data`` shards cases identically across the restart: only the grids and the patch mapping change.
+        Each manager copies the shared ``DatasetPatch`` (with ``pad_to_patch``) at construction,
+        which is why the new sizes are written into that shared list IN PLACE -- the loader factory
+        holds a reference to it too.
+        """
+        if self.patch is None or self._prepared_data is None or self._prepared_validation_data is None:
+            raise DatasetManagerError(
+                "replan_patch requires a prepared dataset with a patch definition.",
+                "Call prepare() first; a dataset without 'patch' has no grid to re-cut.",
+            )
+        self.patch.patch_size[:] = [int(size) for size in patch_size]
+        datasets = self._resolve_dataset_sources()
+        dataset_name = {
+            group: {filename: self.datasets[filename].get_names(group) for filename, _ in entries}
+            for group, entries in datasets.items()
+        }
+        self._prepared_data, self._prepared_mapping = self._get_datasets(
+            self._prepared_train_names, dataset_name, self._get_data_augmentations(True)
+        )
+        self._prepared_validation_data, self._prepared_validation_mapping = self._get_datasets(
+            self._prepared_validation_names, dataset_name, self._get_data_augmentations(self.validation_augmentations)
+        )
+
     def _resolve_dataset_sources(self) -> dict[str, list[tuple[str, bool]]]:
         datasets: dict[str, list[tuple[str, bool]]] = {}
         if self.dataset_filenames is None or len(self.dataset_filenames) == 0:

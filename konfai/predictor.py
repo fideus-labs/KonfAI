@@ -73,7 +73,8 @@ from konfai.utils.runtime import (
     run_distributed_app,
     safe_torch_load,
 )
-from konfai.utils.utils import get_module, split_path_spec
+from konfai.utils.utils import concretize_patch_size, get_module, split_path_spec
+from konfai.utils.vram import next_patch_candidate, usable_vram
 
 
 class Reduction(ABC):
@@ -337,6 +338,15 @@ class OutputDataset(Dataset, NeedDevice, ABC):
     def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
         super().write(self.group, name, layer.detach().cpu().numpy(), self.attributes[index][0][0])
         self.attributes.pop(index)
+
+    def reset(self) -> None:
+        """Drop every in-flight accumulation (the OOM-restart path re-runs the rank's cases from scratch)."""
+        self.output_layer_accumulator.clear()
+        self.attributes.clear()
+        self.names.clear()
+        self._accum_device.clear()
+        self._reduce_device.clear()
+        self._pin_buffer = None
 
     def __str__(self) -> str:
         params = {
@@ -882,6 +892,19 @@ class OutSameAsGroupDataset(OutputDataset):
         for stage in stages:
             result = stage(self.names[index], result, attribute)
         return result, attribute
+
+    def reset(self) -> None:
+        # Aborting an attempt mid-stream: exit each open sink WITH an error so the backend removes
+        # the partial entry (a reader must never see a half-written volume); the restart rewrites it.
+        abort = PredictorError("prediction restart: the partial streamed output is discarded")
+        for sink in self._stream_sinks.values():
+            sink.__exit__(type(abort), abort, None)
+        self._stream_sinks.clear()
+        self._stream_plans.clear()
+        self._region_states.clear()
+        self._stream_buffers.clear()
+        self._post_prefix_attributes.clear()
+        super().reset()
 
     def _close_stream(self, index: int) -> None:
         """Finalize the case's sink and drop its bookkeeping (``is_done`` then reports nothing left)."""
@@ -1521,6 +1544,15 @@ class Predictor(DistributedObject):
         super().__init__(train_name)
         self.manual_seed = manual_seed
         self.dataset = dataset
+        # Auto-patching (VRAM): a per-axis 0 in the user's patch_size marks a FREE axis and opts into
+        # the OOM restart loop -- captured before any re-plan materialises concrete sizes over it.
+        patch = dataset.patch
+        self._vram_patch_template: list[int] | None = (
+            [int(size) for size in patch.patch_size]
+            if patch is not None and patch.patch_size is not None and any(size == 0 for size in patch.patch_size)
+            else None
+        )
+        self._vram_patch_candidate: list[int] | None = None
         module, name = get_module(combine, "konfai.predictor")
         if module.__name__ == "konfai.predictor":
             self.combine = getattr(module, name)()
@@ -1693,18 +1725,78 @@ class Predictor(DistributedObject):
             for output_dataset in self.outputs_dataset.values():
                 output_dataset.to(local_rank * self.size)
         model_composite = Model(model_composite)
-        with _Predictor(
-            world_size,
-            global_rank,
-            local_rank,
-            self.autocast,
-            self.predict_path,
-            self.data_log,
-            self.outputs_dataset,
-            model_composite,
-            *dataloaders,
-        ) as p:
-            p.run()
+        device = local_rank * self.size if len(cuda_visible_devices()) else None
+        dataloader = dataloaders[0]
+        while True:
+            try:
+                with _Predictor(
+                    world_size,
+                    global_rank,
+                    local_rank,
+                    self.autocast,
+                    self.predict_path,
+                    self.data_log,
+                    self.outputs_dataset,
+                    model_composite,
+                    dataloader,
+                ) as p:
+                    p.run()
+                return
+            except torch.cuda.OutOfMemoryError:
+                if self._vram_patch_template is None:
+                    raise  # no free axis declared: not auto-patched, the OOM propagates unchanged
+                # The restart loop IS the sizing iteration (no probe phase): the run that just OOMed
+                # already measured the step's transient for free. Read it BEFORE the reset (the peak
+                # still includes the resident accumulators on both sides of the difference), free the
+                # in-flight state, then read the honest free VRAM.
+                measured = self._transient_at_oom(device)
+                for output_dataset in self.outputs_dataset.values():
+                    output_dataset.reset()
+                candidate = self._shrunken_patch(measured, self._usable_vram_after_oom(device))
+                if candidate is None:
+                    raise
+                print(
+                    f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> "
+                    f"re-planning the free patch axes to {candidate} and restarting this rank's cases."
+                )
+                self._vram_patch_candidate = candidate
+                self.dataset.replan_patch(candidate)
+                dataloader = self.dataset.get_data(world_size)[0][global_rank][0]
+
+    def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
+        """One shrink step for the free patch axes after a CUDA OOM (``None`` = not auto, or floor).
+
+        The first OOM starts from the worst prepared case at full extent (the size the failed grid
+        effectively ran); later ones shrink the current candidate further.
+        """
+        if self._vram_patch_template is None:
+            return None
+        worst = self.dataset.worst_case_shape()
+        if worst is None:
+            return None
+        candidate = self._vram_patch_candidate or concretize_patch_size(self._vram_patch_template, worst)
+        return next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable)
+
+    def _transient_at_oom(self, device: int | None) -> int | None:
+        """The failed step's measured transient (CUDA peak over resident), ``None`` when unreadable."""
+        if device is None:
+            return None
+        try:
+            transient = int(torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device))
+        except Exception:  # nosec B110 - an unreadable measurement just falls back to the fixed step
+            return None
+        return transient if transient > 0 else None
+
+    def _usable_vram_after_oom(self, device: int | None) -> float:
+        """The VRAM budget the next attempt's step may claim, read once the failed state is freed."""
+        if device is None:
+            return 0.0
+        try:
+            torch.cuda.empty_cache()
+            free, _ = torch.cuda.mem_get_info(device)
+        except Exception:  # nosec B110 - an unreadable budget refuses the restart (the OOM re-raises)
+            return 0.0
+        return usable_vram(free)
 
     def __str__(self) -> str:
         params = {
