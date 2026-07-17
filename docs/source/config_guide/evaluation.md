@@ -73,6 +73,20 @@ Common fields:
 | `subset` | object | Restricts evaluated cases. |
 | `validation` | string / list / null | Optional validation selector for a separate JSON report. Supports a case-list file, a list of case names, or a list of case-list files. |
 
+### `memory_budget`: memory-bounded evaluation
+
+With a `memory_budget` (a bare number in GiB, `"24GB"`, `"auto"`), each run
+sizes itself from image headers alone: a case that fits the budget is evaluated
+whole, and a case that does not is cut into the largest
+DISJOINT patches that fit. Metrics accumulate running partial sums per patch and
+combine them into the exact whole-case value (never a mean of per-patch values).
+MAE, MSE, ME, PSNR and Dice — masked or not — support this, and the SaveMap
+error maps stream region by region into their `dataset` (mha, h5 or omezarr).
+One metric that cannot recombine (SSIM, LPIPS, or any custom metric that does
+not declare `reducible`) keeps the whole-volume path for the entire run: correct
+beats bounded. The same budget also decides the loading regime, as in every
+workflow.
+
 ## Output files
 
 Evaluation writes JSON files, not CSV files. The main outputs are:
