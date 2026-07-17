@@ -26,6 +26,7 @@ import glob
 import math
 import os
 import re
+import shutil
 import threading
 import warnings
 from abc import ABC, abstractmethod
@@ -217,6 +218,10 @@ def data_to_image(data: np.ndarray, attributes: Attribute) -> sitk.Image:
         data = data.detach().cpu().numpy()
     if not is_an_image(attributes):
         raise NameError("Data is not an image")
+    if data.dtype == np.float16:
+        # ITK has no half-float pixel type (GetImageFromArray rejects float16), so widen to float32 --
+        # exact and lossless. The streamed .mha writer widens the same way, so both write identical bytes.
+        data = data.astype(np.float32)
     if data.shape[0] == 1:
         image = sitk.GetImageFromArray(data[0])
     else:
@@ -303,6 +308,117 @@ def write_landmarks(data: np.ndarray, filename: Path) -> None:
         f.close()
 
 
+class DataStream(ABC):
+    """One dataset entry written incrementally, region by region. Obtained from
+    ``Dataset.open_data_stream``, which returns ``None`` when the write format cannot serve region writes
+    (the caller then assembles the volume and uses ``Dataset.write``). Use as a context manager: a clean
+    exit finalizes the entry, an exception removes the partial one so a reader never sees a half-written
+    volume."""
+
+    _file: Dataset.File | None = None
+
+    def __enter__(self) -> DataStream:
+        return self
+
+    @abstractmethod
+    def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
+        """Write ``data`` into the region ``slices`` (channel-first indices, step 1)."""
+
+    @abstractmethod
+    def _close(self, success: bool) -> None:
+        """Finalize the entry, or remove the partial one when ``success`` is False."""
+
+    def __exit__(self, exc_type, value, traceback) -> None:
+        try:
+            self._close(exc_type is None)
+        finally:
+            if self._file is not None:
+                self._file.__exit__(exc_type, value, traceback)
+
+
+class _H5DataStream(DataStream):
+    def __init__(self, dataset: h5py.Dataset) -> None:
+        self._dataset = dataset
+
+    def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
+        self._dataset[slices] = data
+
+    def _close(self, success: bool) -> None:
+        if not success:
+            del self._dataset.parent[self._dataset.name.rsplit("/", 1)[-1]]
+
+
+# MetaImage ElementType for each NumPy dtype a streamed .mha can hold.
+_MHA_ELEMENT_TYPES = {
+    "int8": "MET_CHAR",
+    "uint8": "MET_UCHAR",
+    "int16": "MET_SHORT",
+    "uint16": "MET_USHORT",
+    "int32": "MET_INT",
+    "uint32": "MET_UINT",
+    "int64": "MET_LONG_LONG",
+    "uint64": "MET_ULONG_LONG",
+    "float32": "MET_FLOAT",
+    "float64": "MET_DOUBLE",
+}
+
+
+class _MhaDataStream(DataStream):
+    """Uncompressed local-data MetaImage written region by region: a hand-written ASCII header, then a
+    memmap over the flat raw block. MetaIO stores vector pixels interleaved (channel fastest), so the
+    map is spatial-first ``[.., Y, X, C]`` and ``write_slice`` moves the channel axis last."""
+
+    def __init__(self, path: str, shape: list[int], dtype: np.dtype, attributes: Attribute) -> None:
+        self.path = path
+        spatial = list(shape[1:])
+        # The header declares BinaryDataByteOrderMSB=False, so the map must be explicitly little-endian.
+        self._dtype = np.dtype(dtype).newbyteorder("<")
+        fields: list[tuple[str, str]] = [
+            ("ObjectType", "Image"),
+            ("NDims", str(len(spatial))),
+            ("BinaryData", "True"),
+            ("BinaryDataByteOrderMSB", "False"),
+            ("CompressedData", "False"),
+            ("TransformMatrix", " ".join(str(v) for v in attributes.get_np_array("Direction"))),
+            ("Offset", " ".join(str(v) for v in attributes.get_np_array("Origin"))),
+            ("ElementSpacing", " ".join(str(v) for v in attributes.get_np_array("Spacing"))),
+            ("DimSize", " ".join(str(v) for v in reversed(spatial))),
+        ]
+        if shape[0] > 1:
+            fields.append(("ElementNumberOfChannels", str(shape[0])))
+        # Attribute entries ride along as MetaIO user fields, like WriteImage embeds image metadata.
+        fields += [(k, str(v)) for k, v in attributes.items() if str(v) and "\n" not in str(v) and " " not in k]
+        fields += [("ElementType", _MHA_ELEMENT_TYPES[self._dtype.name]), ("ElementDataFile", "LOCAL")]
+        header = "".join(f"{key} = {value}\n" for key, value in fields).encode("utf-8")
+        with open(path, "wb") as file:
+            file.write(header)
+            # Reserve the pixel block up front (sparse where the filesystem allows it).
+            file.truncate(len(header) + int(np.prod([*spatial, shape[0]], dtype=np.int64)) * self._dtype.itemsize)
+        self._memmap = np.memmap(path, dtype=self._dtype, mode="r+", offset=len(header), shape=(*spatial, shape[0]))
+
+    def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
+        self._memmap[(*slices[1:], slices[0])] = np.moveaxis(data, 0, -1)
+
+    def _close(self, success: bool) -> None:
+        self._memmap.flush()
+        del self._memmap
+        if not success:
+            os.remove(self.path)
+
+
+class _OmeZarrDataStream(DataStream):
+    def __init__(self, array: Any, store_path: Path) -> None:
+        self._array = array
+        self._store_path = store_path
+
+    def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
+        self._array[slices] = data
+
+    def _close(self, success: bool) -> None:
+        if not success:
+            shutil.rmtree(self._store_path, ignore_errors=True)
+
+
 class Dataset:
     """Filesystem or HDF5-backed dataset abstraction used across KonfAI."""
 
@@ -344,6 +460,16 @@ class Dataset:
             attributes: Attribute | None = None,
         ) -> None:
             pass
+
+        def open_data_stream(
+            self,
+            name: str,
+            shape: list[int],
+            dtype: np.dtype,
+            attributes: Attribute,
+        ) -> DataStream | None:
+            """Open ``name`` for incremental region writes; ``None`` when this backend cannot."""
+            return None
 
         @abstractmethod
         def get_names(self, group: str) -> list[str]:
@@ -489,6 +615,28 @@ class Dataset:
 
             dataset = h5_group.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
             dataset.attrs.update({k: str(v) for k, v in attributes.items()})
+
+        def open_data_stream(
+            self,
+            name: str,
+            shape: list[int],
+            dtype: np.dtype,
+            attributes: Attribute,
+        ) -> DataStream | None:
+            if self.h5 is None:
+                return None
+            h5_group = self.h5
+            if len(name.split("/")) > 1:
+                group = "/".join(name.split("/")[:-1])
+                if group not in self.h5:
+                    self.h5.create_group(group)
+                h5_group = self.h5[group]
+            name = name.split("/")[-1]
+            if name in h5_group:
+                del h5_group[name]
+            dataset = h5_group.create_dataset(name, shape=tuple(shape), dtype=dtype, chunks=None)
+            dataset.attrs.update({k: str(v) for k, v in attributes.items()})
+            return _H5DataStream(dataset)
 
         def is_exist(self, group: str, name: str | None = None) -> bool:
             if self.h5 is not None:
@@ -869,6 +1017,31 @@ class Dataset:
             else:
                 np.save(f"{self.filename}{name}.npy", data)
 
+        def open_data_stream(
+            self,
+            name: str,
+            shape: list[int],
+            dtype: np.dtype,
+            attributes: Attribute,
+        ) -> DataStream | None:
+            # Only an uncompressed local-data MetaImage is region-writable (ASCII header + flat raw
+            # block); every other SimpleITK format writes the whole image in one WriteImage call.
+            if self.file_format != "mha" or not is_an_image(attributes) or len(shape) < 3:
+                return None
+            element_dtype = np.dtype(dtype)
+            if element_dtype == np.float16:
+                # MetaImage has no half-float type; widen float16 to float32 (exact), as data_to_image
+                # does, so streamed and whole-volume writes hold identical bytes.
+                element_dtype = np.dtype(np.float32)
+            if element_dtype.name not in _MHA_ELEMENT_TYPES:
+                return None
+            dimension = len(shape) - 1
+            geometry = (("Origin", dimension), ("Spacing", dimension), ("Direction", dimension * dimension))
+            if any(len(attributes.get_np_array(key)) != n for key, n in geometry):
+                return None
+            os.makedirs(self.filename, exist_ok=True)
+            return _MhaDataStream(f"{self.filename}{name}.{self.file_format}", shape, element_dtype, attributes)
+
         def is_exist(self, group: str, name: str | None = None) -> bool:
             base = f"{self.filename}{group}"
             return any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS)
@@ -1005,6 +1178,31 @@ class Dataset:
                 origin=origin,
                 attributes=dict(attributes),
             )
+
+        def open_data_stream(
+            self,
+            name: str,
+            shape: list[int],
+            dtype: np.dtype,
+            attributes: Attribute,
+        ) -> DataStream | None:
+            from konfai.utils.ome_zarr import create_ome_zarr_store
+
+            if len(shape) not in (3, 4):
+                return None
+            dimension = len(shape) - 1
+            spacing = attributes.get_np_array("Spacing") if "Spacing" in attributes else np.ones(dimension)
+            origin = attributes.get_np_array("Origin") if "Origin" in attributes else np.zeros(dimension)
+            store_path = self._path(name, writing=True)
+            array = create_ome_zarr_store(
+                store_path,
+                shape,
+                dtype,
+                spacing=spacing,
+                origin=origin,
+                attributes=dict(attributes),
+            )
+            return _OmeZarrDataStream(array, store_path)
 
         def get_names(self, group: str) -> list[str]:
             return self.get_group()
@@ -1275,6 +1473,57 @@ class Dataset:
         else:
             with Dataset.File(self.filename, False, self.file_format, self.level) as file:
                 file.data_to_file(f"{group}/{name}", data, attributes)
+
+    def can_stream_data(self, attributes: Attribute) -> bool:
+        """Whether ``open_data_stream`` can serve this dataset's write format.
+
+        H5 and OME-Zarr always can; MetaImage ``mha`` needs image geometry to write its header up
+        front; every other format only writes whole volumes (use ``write``).
+        """
+        if self.file_format in ("h5", "omezarr"):
+            return True
+        return self.file_format == "mha" and is_an_image(attributes)
+
+    def open_data_stream(
+        self,
+        group: str,
+        name: str,
+        shape: list[int],
+        dtype: np.dtype,
+        attributes: Attribute | None = None,
+    ) -> DataStream | None:
+        """Open one entry for incremental region writes.
+
+        Returns ``None`` when the write format cannot serve region writes; the caller then assembles
+        the volume and uses ``write``. The returned stream is a context manager: a clean exit
+        finalizes the entry, an exception removes the partial one.
+        """
+        self._names_cache.clear()
+        self._infos_cache.clear()
+        if attributes is None:
+            attributes = Attribute()
+        if self.is_directory:
+            os.makedirs(self.filename, exist_ok=True)
+            s_group = group.split("/")
+            if len(s_group) > 1:
+                name = f"{'/'.join(s_group[:-1])}/{name}"
+                group = s_group[-1]
+            file = Dataset.File(f"{self.filename}{name}", False, self.file_format, self.level)
+            entry = group
+        else:
+            file = Dataset.File(self.filename, False, self.file_format, self.level)
+            entry = f"{group}/{name}"
+        backend = file.__enter__()
+        try:
+            stream = backend.open_data_stream(entry, shape, dtype, attributes)
+        except BaseException:
+            file.__exit__(None, None, None)
+            raise
+        if stream is None:
+            file.__exit__(None, None, None)
+            return None
+        stream._file = file
+        return stream
 
     def read_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
         if not self._exists_on_disk():

@@ -210,6 +210,74 @@ def write_ome_zarr(
         group.attrs[_KONFAI_ATTR_KEY] = {"attributes": dict(attributes)}
 
 
+def create_ome_zarr_store(
+    store_path: str | Path,
+    shape: Sequence[int],
+    dtype: Any,
+    *,
+    spacing: Sequence[float] | None = None,
+    origin: Sequence[float] | None = None,
+    attributes: dict[str, Any] | None = None,
+    chunks: Sequence[int] | None = None,
+) -> Any:
+    """Create an empty single-level OME-NGFF store for region-by-region writes.
+
+    Returns the level-0 zarr array: chunks materialise as regions are assigned, and unwritten regions
+    read back as zeros. Metadata (the 0.4 multiscales entry plus the KonfAI attribute sidecar) is
+    complete from the start, so the store is readable at any point during the write.
+    """
+    _require_zarr()
+    if len(shape) not in {3, 4}:
+        raise DatasetManagerError(f"OME-Zarr writing expects a C-Y-X or C-Z-Y-X shape, got {list(shape)}.")
+
+    spatial_axes = ["y", "x"] if len(shape) == 3 else ["z", "y", "x"]
+    dimension = len(spatial_axes)
+    spacing_xyz = list(spacing if spacing is not None else [1.0] * dimension)
+    origin_xyz = list(origin if origin is not None else [0.0] * dimension)
+    if len(spacing_xyz) != dimension or len(origin_xyz) != dimension:
+        raise DatasetManagerError(
+            f"OME-Zarr geometry must contain {dimension} spacing and origin values for shape {list(shape)}."
+        )
+
+    coordinate = {"x": (spacing_xyz[0], origin_xyz[0]), "y": (spacing_xyz[1], origin_xyz[1])}
+    if dimension == 3:
+        coordinate["z"] = (spacing_xyz[2], origin_xyz[2])
+    scale = [1.0, *[float(coordinate[axis][0]) for axis in spatial_axes]]
+    translation = [0.0, *[float(coordinate[axis][1]) for axis in spatial_axes]]
+
+    if chunks is None:
+        spatial_chunks = [min(extent, 128) for extent in shape[1:]]
+        # Keep one chunk around 32 MiB: full 128-wide spatial tiles, channels split to fit the budget.
+        tile_bytes = int(np.prod(spatial_chunks, dtype=np.int64)) * np.dtype(dtype).itemsize
+        chunks = [min(shape[0], max(1, (32 << 20) // max(1, tile_bytes))), *spatial_chunks]
+
+    try:
+        group = zarr.open_group(str(store_path), mode="w", zarr_format=2)
+    except TypeError:  # zarr-python 2.x: the v2 layout is its only format
+        group = zarr.open_group(str(store_path), mode="w")
+    create_array = getattr(group, "create_array", None) or group.create_dataset
+    array = create_array("0", shape=tuple(shape), chunks=tuple(chunks), dtype=np.dtype(dtype), fill_value=0)
+    group.attrs["multiscales"] = [
+        {
+            "version": "0.4",
+            "name": "image",
+            "axes": [{"name": "c", "type": "channel"}, *[{"name": axis, "type": "space"} for axis in spatial_axes]],
+            "datasets": [
+                {
+                    "path": "0",
+                    "coordinateTransformations": [
+                        {"type": "scale", "scale": scale},
+                        {"type": "translation", "translation": translation},
+                    ],
+                }
+            ],
+        }
+    ]
+    if attributes:
+        group.attrs[_KONFAI_ATTR_KEY] = {"attributes": dict(attributes)}
+    return array
+
+
 def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
     """Return OME-Zarr metadata (raw axis-order shape) without reading pixel data."""
     image = _load_image(store_path, level)
