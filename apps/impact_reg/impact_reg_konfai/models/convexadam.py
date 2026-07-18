@@ -102,8 +102,10 @@ class ModelSpec:
     ref: Annotated[
         str,
         Choices(registry_choices),
-        "IMPACT feature model that drives the similarity (TorchScript 'repo:file' on Hugging Face); "
-        "different models capture different anatomy/contrast.",
+        "IMPACT feature model that drives the similarity (TorchScript 'repo:file' on Hugging Face); different "
+        "models capture different anatomy/contrast. Suggested priors (from the IMPACT study, not forced): "
+        "TotalSegmentator (TS/M730) is the general default; a model trained on the target structure (e.g. lung "
+        "or vessels) sharpens local alignment there; add MIND for MR/CT to recover intra-organ detail.",
     ]
     voxel_size: Annotated[
         list[float],
@@ -113,7 +115,9 @@ class ModelSpec:
     layers_mask: Annotated[
         str,
         "Per-layer on/off bitmask over the feature model's layers ('1' = use, '0' = skip), one char per layer; "
-        "selects which feature depths drive the metric.",
+        "selects which feature depths drive the metric. Suggested priors (not forced): CT/CBCT favours EARLY "
+        "layers (they denoise and enhance anatomical structures across modalities, robust to artifacts); MR/CT "
+        "favours HIGH-LEVEL layers (contour/segmentation-driven alignment).",
     ] = "1"
     layers_weight: Annotated[
         float, "Relative weight of this feature model in the multi-model fusion (all models are compared jointly)."
@@ -126,7 +130,8 @@ class ModelSpec:
     ] = 0
     distance: Annotated[
         Literal["L1", "L2", "Dice", "Cosine", "NCC"],
-        "Similarity measure compared on the extracted features between fixed and moving.",
+        "Similarity measure compared on the extracted features between fixed and moving. Suggested prior (not "
+        "forced): when the task is scored on Dice, choosing 'Dice' aligns the loss with the metric.",
     ] = "L1"
 
 

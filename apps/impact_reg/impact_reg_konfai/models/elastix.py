@@ -73,8 +73,11 @@ class ModelSpec:
     ref: Annotated[
         str,
         Choices(registry_choices),
-        "IMPACT feature model compared at this resolution (TorchScript 'repo:file' on Hugging Face); "
-        "different models capture different anatomy/contrast.",
+        "IMPACT feature model compared at this resolution (TorchScript 'repo:file' on Hugging Face); different "
+        "models capture different anatomy/contrast. Suggested priors (from the IMPACT study, not forced): "
+        "TotalSegmentator (TS/M730) is the general default; a model trained on the target structure (e.g. lung "
+        "or vessels) sharpens local alignment there; add MIND for MR/CT to recover intra-organ detail; SAM2.1 "
+        "for fast 2D exploration.",
     ]
     voxel_size: Annotated[
         list[float], "Working resolution (mm) this model is evaluated at (empty = the resolution level's default)."
@@ -92,12 +95,15 @@ class ModelSpec:
     ] = 0
     distance: Annotated[
         Literal["L1", "L2", "Dice", "Cosine", "NCC"],
-        "Similarity measure compared on this model's features.",
+        "Similarity measure compared on this model's features. Suggested prior (not forced): when the task is "
+        "scored on Dice, choosing 'Dice' aligns the loss with the metric.",
     ] = "L1"
     layers_mask: Annotated[
         str,
         "Per-layer on/off bitmask over the model's layers ('1' = use, '0' = skip); also sets the Jacobian FOV "
-        "(the deepest selected layer's receptive field).",
+        "(the deepest selected layer's receptive field). Suggested priors (not forced): CT/CBCT favours EARLY "
+        "layers (they denoise and enhance structures across modalities, robust to artifacts) with 'Jacobian' "
+        "mode; MR/CT favours HIGH-LEVEL layers (contour/segmentation-driven) with 'Static' mode.",
     ] = ""
 
 
@@ -317,8 +323,11 @@ class RegistrationNet(network.Network):
         resolutions: dict[str, ResolutionSpec] = {},
         mode: Annotated[
             Literal["Static", "Jacobian"],
-            "IMPACT feature-extraction mode: 'Static' (whole-image features) or 'Jacobian' (patch-wise, sized "
-            "to each model's receptive field).",
+            "IMPACT feature-extraction mode: 'Static' (whole-image features, computed once per resolution -- "
+            "fast, inference-only) or 'Jacobian' (patch-wise, differentiable, precise, slower). Suggested "
+            "priors (not forced): early/downsampling layers -> 'Jacobian'; high-level layers -> 'Static'. "
+            "Avoid 'Static' for large-stride/transformer models (SAM, DINOv2): frozen features lose local "
+            "alignment.",
         ] = "Static",
     ) -> None:
         # The registration is fully described by ``resolutions`` (config = source of truth): each resolution
