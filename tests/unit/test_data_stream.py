@@ -279,7 +279,9 @@ def test_abort_after_close_is_a_noop(tmp_path: Path, file_format: str) -> None:
     assert stream is not None
     for start in range(0, volume.shape[1], 2):
         region = slice(start, min(start + 2, volume.shape[1]))
-        stream.write_slice((slice(0, volume.shape[0]), region, *(slice(0, e) for e in volume.shape[2:])), volume[:, region])
+        stream.write_slice(
+            (slice(0, volume.shape[0]), region, *(slice(0, e) for e in volume.shape[2:])), volume[:, region]
+        )
     stream.close()
     stream.abort(RuntimeError("late"))  # must be inert, not undo the publish
     result, _ = dataset.read_data("CT", "CASE_001")
