@@ -51,7 +51,7 @@ resident set; peak VRAM = over baseline.
 
 ### 📈 Key observations
 
-- **1.5–3.5× faster** whole-body inference across sizes, **2.7–4.1× less host RAM**.
+- **1.5–3.6× faster** whole-body inference across sizes, **2.7–4.1× less host RAM**.
 - KonfAI trades **more VRAM on small/medium cases** (larger patches, GPU accumulation)
   for the speed-up, while it stays inside a 24 GB card.
 - On **large** cases the streaming reassembly **bounds VRAM** (10.4 GB) where the
