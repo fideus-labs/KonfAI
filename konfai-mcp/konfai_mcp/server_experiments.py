@@ -119,6 +119,19 @@ class SessionService:
             workspace / "AppPipelines",
         ]
 
+    def _metric_run_name(self, metrics_path: Path, layout: WorkspaceLayout | None = None) -> str:
+        """The run identifier of a metric file: its run directory's name — except an app trial
+        (``AppEvaluations/<trial>/Evaluations/RUN/…``), identified by its parameter-suffixed trial
+        directory, because every trial shares the same inner ``RUN``."""
+        layout = layout or self.workspace_layout
+        workspace = layout.workspace_dir()
+        for root in (workspace / "AppEvaluations", workspace / "AppPipelines"):
+            try:
+                return metrics_path.relative_to(root).parts[0]
+            except ValueError:
+                continue
+        return metrics_path.parent.name
+
     def _resolve_session_layout(self, session: str | None) -> WorkspaceLayout:
         """Resolve a metrics-lookup layout: the current session, or another named one."""
         if session is None or session == self.workspace_layout.current_session:
@@ -1805,13 +1818,19 @@ class SessionService:
         layout = self._resolve_session_layout(session)
         split_name = split.upper()
         metrics_path = next(
-            (path for path in self._evaluation_metric_files(split_name, layout) if path.parent.name == run_name),
+            (
+                path
+                for path in self._evaluation_metric_files(split_name, layout)
+                # An app trial answers to its trial label; the inner directory name keeps working for
+                # plain runs (and stays an ambiguous-but-compatible alias for trials).
+                if run_name in (self._metric_run_name(path, layout), path.parent.name)
+            ),
             None,
         )
         if metrics_path is None:
             available_runs = sorted(
                 {
-                    path.parent.name
+                    self._metric_run_name(path, layout)
                     for root in self._metric_search_roots(layout)
                     if root.exists()
                     for pattern in ("Metric_*.json", "METRIC_*.json")
@@ -1856,7 +1875,7 @@ class SessionService:
         warnings: list[str] = []
 
         for metrics_path in metric_files:
-            run_name = metrics_path.parent.name
+            run_name = self._metric_run_name(metrics_path, layout)
             extracted = self._extract_metric_scoreboards(metrics_path)
             available_metrics.update(extracted)
             updated_at = self._isoformat(metrics_path.stat().st_mtime)

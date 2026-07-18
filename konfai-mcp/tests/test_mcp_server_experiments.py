@@ -214,6 +214,15 @@ def test_leaderboard_ranks_app_evaluation_trials(tmp_path: Path) -> None:
     paths = " ".join(row["metrics_path"] for row in payload["leaderboard"])
     assert "iterations_100" in paths
     assert "iterations_300" in paths
+    # Every trial shares the inner 'RUN' directory, so the row identity must be the trial label —
+    # two rows both named 'RUN' cannot be told apart, let alone addressed by get_run_metrics.
+    assert {row["run_name"] for row in payload["leaderboard"]} == {
+        "eval_app__iterations_100",
+        "eval_app__iterations_300",
+    }
+    # And a specific trial is addressable by that label (not just the newest 'RUN' on mtime).
+    trial = service.run_metrics_payload("eval_app__iterations_100")
+    assert trial["metrics"]["aggregates"]["Dice"]["mean"] == 0.70
 
 
 def test_session_summary_blocks_evaluation_without_prediction_artifacts(tmp_path: Path) -> None:
