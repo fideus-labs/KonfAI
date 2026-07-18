@@ -2507,16 +2507,24 @@ def read_template_file(
     description=(
         "Use to read the FULL evaluation metrics (per-case values + aggregates) of ONE named run, instead of the "
         "newest-file-only view of session://current/metrics — essential when comparing specific past runs. "
-        "This reads Evaluations/<run_name>/Metric_<SPLIT>.json in the current session. It does not rerun "
-        "evaluation. "
-        "Inputs: run_name (the train_name of the run), optional split (default TRAIN; the error lists available "
-        "runs and splits on a miss), optional session (read another session's run without switching). "
+        "This reads Evaluations/<run_name>/Metric_<SPLIT>.json in the current session — or an app trial's "
+        "metrics when run_name is a trial label as returned by leaderboard (an AppEvaluations/AppPipelines "
+        "directory such as 'eval_app__iterations_300-1a2b3c4d'). It does not rerun evaluation. "
+        "Inputs: run_name (a run's train_name OR an app-trial label from leaderboard), optional split (default "
+        "TRAIN; the error lists available runs and splits on a miss), optional session (read another session's "
+        "run without switching). "
         "Outputs: run_name, split, path, updated_at, metrics (full JSON), summary, next_actions. "
         "Next: leaderboard or summarize_session."
     )
 )
 def get_run_metrics(
-    run_name: Annotated[str, Field(description="The run's train_name (the Evaluations/<run_name> folder).")],
+    run_name: Annotated[
+        str,
+        Field(
+            description="The run's train_name (the Evaluations/<run_name> folder) — or an app-trial label as "
+            "returned by leaderboard."
+        ),
+    ],
     split: Annotated[
         str,
         Field(
@@ -2543,8 +2551,11 @@ def get_run_metrics(
     )
 )
 def compare_runs(
-    run_a: Annotated[str, Field(description="train_name of the baseline run (deltas are reported as B minus A).")],
-    run_b: Annotated[str, Field(description="train_name of the run compared against run_a.")],
+    run_a: Annotated[
+        str,
+        Field(description="train_name or app-trial label of the baseline run (deltas are reported as B minus A)."),
+    ],
+    run_b: Annotated[str, Field(description="train_name or app-trial label of the run compared against run_a.")],
     split: Annotated[
         str, Field(description="Metric split, uppercased to Metric_<SPLIT>.json (default 'TRAIN').")
     ] = "TRAIN",

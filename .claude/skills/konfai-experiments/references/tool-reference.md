@@ -80,7 +80,7 @@ Use when you need the latest state for one job without waiting. This returns the
 
 ### `get_run_metrics`
 
-Use to read the FULL evaluation metrics (per-case values + aggregates) of ONE named run, instead of the newest-file-only view of session://current/metrics — essential when comparing specific past runs. This reads Evaluations/<run_name>/Metric_<SPLIT>.json in the current session. It does not rerun evaluation. Inputs: run_name (the train_name of the run), optional split (default TRAIN; the error lists available runs and splits on a miss), optional session (read another session's run without switching). Outputs: run_name, split, path, updated_at, metrics (full JSON), summary, next_actions. Next: leaderboard or summarize_session.
+Use to read the FULL evaluation metrics (per-case values + aggregates) of ONE named run, instead of the newest-file-only view of session://current/metrics — essential when comparing specific past runs. This reads Evaluations/<run_name>/Metric_<SPLIT>.json in the current session — or an app trial's metrics when run_name is a trial label as returned by leaderboard (an AppEvaluations/AppPipelines directory such as 'eval_app__iterations_300-1a2b3c4d'). It does not rerun evaluation. Inputs: run_name (a run's train_name OR an app-trial label from leaderboard), optional split (default TRAIN; the error lists available runs and splits on a miss), optional session (read another session's run without switching). Outputs: run_name, split, path, updated_at, metrics (full JSON), summary, next_actions. Next: leaderboard or summarize_session.
 
 ### `import_experiment`
 

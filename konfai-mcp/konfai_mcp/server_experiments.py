@@ -107,6 +107,12 @@ class SessionService:
             "evaluation": self.workspace_layout.evaluations_dir(),
         }[normalized_workflow]
 
+    # App evaluate/pipeline runs write their metric trees under these workspace subdirs; every trial's
+    # inner run dir repeats the bundle's train_name, so a trial's IDENTITY is its top-level trial dir.
+    # One constant feeds both the search roots and the identity rule — a root added to only one of them
+    # would silently reintroduce the shared-inner-name ambiguity.
+    _APP_TRIAL_SUBDIRS = ("AppEvaluations", "AppPipelines")
+
     def _metric_search_roots(self, layout: WorkspaceLayout | None = None) -> list[Path]:
         layout = layout or self.workspace_layout
         workspace = layout.workspace_dir()
@@ -115,19 +121,18 @@ class SessionService:
         return [
             layout.evaluations_dir(),
             workspace / "Evaluation",
-            workspace / "AppEvaluations",
-            workspace / "AppPipelines",
+            *(workspace / subdir for subdir in self._APP_TRIAL_SUBDIRS),
         ]
 
     def _metric_run_name(self, metrics_path: Path, layout: WorkspaceLayout | None = None) -> str:
         """The run identifier of a metric file: its run directory's name — except an app trial
-        (``AppEvaluations/<trial>/Evaluations/RUN/…``), identified by its parameter-suffixed trial
-        directory, because every trial shares the same inner ``RUN``."""
+        (``AppEvaluations/<label>-<uuid>/…/Metric_*.json``), identified by its parameter-suffixed trial
+        directory, because every trial's inner run dir repeats the same bundle train_name."""
         layout = layout or self.workspace_layout
         workspace = layout.workspace_dir()
-        for root in (workspace / "AppEvaluations", workspace / "AppPipelines"):
+        for subdir in self._APP_TRIAL_SUBDIRS:
             try:
-                return metrics_path.relative_to(root).parts[0]
+                return metrics_path.relative_to(workspace / subdir).parts[0]
             except ValueError:
                 continue
         return metrics_path.parent.name
@@ -1817,16 +1822,14 @@ class SessionService:
         """Return the full per-case + aggregate metric JSON for ONE named run, not just the newest file."""
         layout = self._resolve_session_layout(session)
         split_name = split.upper()
+        # Canonical identity first (the labels leaderboard hands out), THEN the inner-dir alias: in one
+        # merged pass a newer trial's alias could shadow a plain run bearing that exact name, and a
+        # leaderboard row would not round-trip through get_run_metrics.
+        candidates = self._evaluation_metric_files(split_name, layout)
         metrics_path = next(
-            (
-                path
-                for path in self._evaluation_metric_files(split_name, layout)
-                # An app trial answers to its trial label; the inner directory name keeps working for
-                # plain runs (and stays an ambiguous-but-compatible alias for trials).
-                if run_name in (self._metric_run_name(path, layout), path.parent.name)
-            ),
+            (path for path in candidates if self._metric_run_name(path, layout) == run_name),
             None,
-        )
+        ) or next((path for path in candidates if path.parent.name == run_name), None)
         if metrics_path is None:
             available_runs = sorted(
                 {

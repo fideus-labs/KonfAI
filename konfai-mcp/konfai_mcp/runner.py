@@ -230,6 +230,10 @@ def run_workflow_api(
         _ensure_local_imports()
         if single_process:
             _apply_single_process_patches()
+        # Build-time sizing (the evaluation auto-patch) divides the auto memory budget by the per-node
+        # rank count it finds in the environment. KonfAI's own launcher exports it, but this child
+        # entrypoint builds the workflow itself — export it here too (the spawn child owns its env).
+        os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, len(gpu or []) or int(cpu or 1)))
         workflow = _build_workflow(command, config, models, model=model, lr=lr)
         execute_distributed_object(
             workflow,
