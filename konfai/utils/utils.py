@@ -123,6 +123,23 @@ def concretize_patch_size(
     return [resolve(d, p) for d, p in enumerate(patch_size)]
 
 
+def size_free_axes(
+    template: list[int] | None,
+    worst: list[int] | None,
+    multiple: list[int] | None,
+) -> list[int] | None:
+    """The up-front concrete patch for a free (``0``) axis config: the worst case with each free axis
+    rounded up to the model's ``multiple`` (its ``downsampling_factor``), so the first attempt is a
+    valid model input. ``None`` when there is nothing to size — no free axis, unknown worst case, or
+    every free extent is already a valid multiple (the raw path already works). Shared by the
+    prediction and training auto-patch loops so the rounding lives in one place.
+    """
+    if template is None or worst is None:
+        return None
+    sized = concretize_patch_size(template, worst, multiple)
+    return sized if sized != concretize_patch_size(template, worst) else None
+
+
 def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int] | tuple[int, ...]) -> list[int]:
     """Resolve an overlap spec into per-axis voxels for a CONCRETE ``patch_size``.
 

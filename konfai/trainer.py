@@ -57,7 +57,7 @@ from konfai.utils.runtime import (
     safe_torch_load,
     synchronize_data,
 )
-from konfai.utils.utils import concretize_patch_size
+from konfai.utils.utils import concretize_patch_size, size_free_axes
 from konfai.utils.vram import next_patch_candidate, usable_vram
 
 
@@ -667,6 +667,8 @@ class Trainer(DistributedObject):
             else None
         )
         self._vram_patch_candidate: list[int] | None = None
+        # Per-axis input multiple the model needs (its downsampling factor); a free axis is sized to it.
+        self._downsampling_factor: list[int] | None = None
         self.autocast = autocast
         self.epochs = epochs
         self.epoch = 0
@@ -698,6 +700,8 @@ class Trainer(DistributedObject):
             self.gradient_checkpoints,
             self.gpu_checkpoints,
         )
+        # The per-axis multiple a free patch axis rounds up to, read off the model's downsampling graph.
+        self._downsampling_factor = self.model.downsampling_factor()
 
     def setup(self, world_size: int):
         """
@@ -815,6 +819,17 @@ class Trainer(DistributedObject):
         if self.model_ema is not None:
             self.model_ema.module = Network.to(self.model_ema.module, local_rank * self.size)
         device = local_rank * self.size if len(cuda_visible_devices()) else None
+        # Round a free patch axis up to the model's valid input multiple before the first step, so the
+        # network's skips align instead of crashing on a non-divisible extent; every rank rounds the
+        # same worst case to the same size, so no rendezvous is needed here (unlike the OOM shrink).
+        if self._vram_patch_candidate is None:
+            sized = size_free_axes(
+                self._vram_patch_template, self.dataset.worst_case_shape(), self._downsampling_factor
+            )
+            if sized is not None:
+                self._vram_patch_candidate = sized
+                self.dataset.replan_patch(sized)
+                dataloaders = self.dataset.get_data(world_size)[0][global_rank]
         while True:
             try:
                 with _Trainer(
@@ -879,8 +894,12 @@ class Trainer(DistributedObject):
         worst = self.dataset.worst_case_shape()
         if worst is None:
             return None
-        candidate = self._vram_patch_candidate or concretize_patch_size(self._vram_patch_template, worst)
-        return next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable)
+        candidate = self._vram_patch_candidate or concretize_patch_size(
+            self._vram_patch_template, worst, self._downsampling_factor
+        )
+        return next_patch_candidate(
+            candidate, self._vram_patch_template, worst, measured, usable, self._downsampling_factor
+        )
 
     @staticmethod
     def _reset_cuda_peak(device: int | None) -> None:

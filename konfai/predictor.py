@@ -78,7 +78,7 @@ from konfai.utils.runtime import (
     run_distributed_app,
     safe_torch_load,
 )
-from konfai.utils.utils import concretize_patch_size, get_module, split_path_spec
+from konfai.utils.utils import concretize_patch_size, get_module, size_free_axes, split_path_spec
 from konfai.utils.vram import next_patch_candidate, usable_vram
 
 
@@ -1990,16 +1990,16 @@ class Predictor(DistributedObject):
         dataloader = dataloaders[0]
         # Round a free patch axis up to the model's valid input multiple before the first attempt, so
         # the network's encoder/decoder skips align instead of crashing on a non-divisible extent (the
-        # border padding fills the round-up, cropped back after the forward). A whole-axis extent that
-        # is still too large for VRAM OOMs into the shrink loop below, which keeps the size valid too.
-        if self._vram_patch_template is not None and self._downsampling_factor and self._vram_patch_candidate is None:
-            worst = self.dataset.worst_case_shape()
-            if worst is not None:
-                sized = concretize_patch_size(self._vram_patch_template, worst, self._downsampling_factor)
-                if sized != concretize_patch_size(self._vram_patch_template, worst):
-                    self._vram_patch_candidate = sized
-                    self.dataset.replan_patch(sized)
-                    dataloader = self.dataset.get_data(world_size)[0][global_rank][0]
+        # border padding fills the round-up, cropped back after the forward). A whole-axis extent still
+        # too large for VRAM OOMs into the shrink loop below, which keeps the size valid too.
+        if self._vram_patch_candidate is None:
+            sized = size_free_axes(
+                self._vram_patch_template, self.dataset.worst_case_shape(), self._downsampling_factor
+            )
+            if sized is not None:
+                self._vram_patch_candidate = sized
+                self.dataset.replan_patch(sized)
+                dataloader = self.dataset.get_data(world_size)[0][global_rank][0]
         while True:
             try:
                 with _Predictor(
