@@ -239,6 +239,29 @@ def test_broadcast_stop_adopts_rank_zero_decision(tmp_path: Path, monkeypatch) -
     assert trainer._broadcast_stop(True) is False  # a non-zero rank keeps going when rank 0 does
 
 
+# ---- OOM shrink rendezvous agreement ----
+
+
+def test_agreed_patch_takes_the_per_axis_min_of_the_proposals() -> None:
+    # Ranks at their floor propose None and abstain; the survivors agree on the per-axis MIN so
+    # every rank trains the same grid.
+    assert trainer_module._agreed_patch([None, [1, 16, 16], [1, 12, 24]], [0, 0, 0]) == [1, 12, 16]
+
+
+def test_agreed_patch_is_none_when_every_rank_is_at_the_floor() -> None:
+    assert trainer_module._agreed_patch([None, None], [0, 0, 0]) is None
+
+
+def test_agreed_patch_diagnoses_a_crossed_collective_instead_of_a_type_error() -> None:
+    # An asymmetric OOM pairs this rendezvous with a still-training rank's own collective: the
+    # gathered payload is then not a candidate list. That must fail as a diagnosis, not as an
+    # opaque TypeError from min() or ValueError from zip().
+    with pytest.raises(TrainerError, match="not a patch candidate"):
+        trainer_module._agreed_patch([{"loss": 0.5}, [1, 16, 16]], [0, 0, 0])
+    with pytest.raises(TrainerError, match="not a patch candidate"):
+        trainer_module._agreed_patch([[1, 16], [1, 16, 16]], [0, 0, 0])  # wrong length = same diagnosis
+
+
 # ---- EarlyStopping ----
 
 

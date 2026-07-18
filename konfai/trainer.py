@@ -607,6 +607,32 @@ class _Trainer:
         return self._log("Validation", batch_sample)
 
 
+def _agreed_patch(gathered: list, template: list[int]) -> list[int] | None:
+    """The per-axis MIN of the candidates gathered at the OOM shrink rendezvous, ``None`` when no rank
+    proposed one (every rank is at its floor: the OOM is not recoverable).
+
+    A gathered entry that is not a patch candidate means another rank was still training and its own
+    collective crossed this rendezvous -- an asymmetric OOM. That is not recoverable either, but it
+    must fail as a diagnosis, not as an opaque ``TypeError`` from ``min``.
+    """
+    proposals = [proposal for proposal in gathered if proposal is not None]
+    if not proposals:
+        return None
+    if any(
+        not isinstance(proposal, list)
+        or len(proposal) != len(template)
+        or not all(isinstance(size, int) for size in proposal)
+        for proposal in proposals
+    ):
+        raise TrainerError(
+            "The OOM shrink rendezvous gathered data that is not a patch candidate:",
+            f"gathered: {gathered}",
+            "Another rank was still training, so its collective crossed this rendezvous.",
+            "An asymmetric OOM is not recoverable; rerun with a smaller patch or fewer ranks.",
+        )
+    return [min(sizes) for sizes in zip(*proposals, strict=True)]
+
+
 @config()
 class Trainer(DistributedObject):
     """
@@ -805,7 +831,8 @@ class Trainer(DistributedObject):
         Wraps model with DDP or CPU fallback, attaches EMA, and starts training.
 
         Args:
-            world_size (int): Total number of distributed processes.
+            world_size (int): Number of model replicas sharding the data -- the spawned process count
+                already divided by the model-parallel size (``gpu_checkpoints``), NOT the GPU count.
             global_rank (int): Global rank of the current process.
             local_rank (int): Local rank within the node.
             dataloaders (list[DataLoader]): Training and validation dataloaders.
@@ -863,16 +890,19 @@ class Trainer(DistributedObject):
                 # Every rank must train the same grid, so the shrink is agreed at a rendezvous: each
                 # failing rank proposes its own candidate and all adopt the per-axis MIN. A rank that
                 # did NOT run out never reaches this all-gather; the job then dies at the collective
-                # timeout, exactly as an unhandled OOM kills it. Ranks failing together -- the
-                # common case, they share the patch size -- recover together.
-                proposals = [
-                    proposal
-                    for proposal in synchronize_data(world_size, local_rank * self.size, candidate)
-                    if proposal is not None
-                ]
-                if not proposals:
+                # timeout, exactly as an unhandled OOM kills it. Ranks failing together recover
+                # together when they fail at the same collective offset (the common case -- they
+                # share the patch size); an offset mismatch pairs foreign payloads, caught below.
+                if world_size > 1:
+                    print(
+                        f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> waiting at the shrink"
+                        " rendezvous (a rank that did NOT run out aborts the job at the collective timeout)."
+                    )
+                agreed = _agreed_patch(
+                    synchronize_data(world_size, local_rank * self.size, candidate), self._vram_patch_template
+                )
+                if agreed is None:
                     raise
-                agreed = [min(sizes) for sizes in zip(*proposals, strict=True)]
                 print(
                     f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> "
                     f"re-planning the free patch axes to {agreed} and restarting the training run."

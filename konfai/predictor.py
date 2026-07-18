@@ -2061,7 +2061,8 @@ class Predictor(DistributedObject):
         Launch prediction on the given process rank.
 
         Args:
-            world_size (int): Total number of processes.
+            world_size (int): Number of model replicas sharding the data -- the spawned process count
+                already divided by the model-parallel size (``gpu_checkpoints``), NOT the GPU count.
             global_rank (int): Rank of the current process.
             local_rank (int): Local device rank.
             dataloaders (list[DataLoader]): List of data loaders for prediction.
