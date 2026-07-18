@@ -880,9 +880,6 @@ class Data(ABC):
         self.batch_size = batch_size
         self.inline_augmentations = inline_augmentations
         self.memory_budget = memory_budget
-        # The evaluation workflow may veto budget-driven auto-patching (a non-reducible metric
-        # needs whole volumes); harmless default for every other workflow.
-        self.auto_patch_allowed = True
         self.requires_single_process_loading = self._groups_require_single_process_loading(groups_src)
 
         # A window keeps ``shuffle_window`` cases resident, so the FIFO buffer must be at least that
@@ -906,6 +903,23 @@ class Data(ABC):
         self._prepared_validation_mapping: list[tuple[int, int, int]] = []
         self._prepared_train_names: list[str] = []
         self._prepared_validation_names: list[str] = []
+
+    def _resolved_budget_bytes(self) -> tuple[float, str, bool]:
+        """The configured memory budget as ``(bytes, description, is_auto)``.
+
+        ``None``/``"auto"`` offers ``_AUTO_MEMORY_SAFETY_FRACTION`` of the node's allocatable
+        memory — a NODE budget, which ranks sharing the node split; an explicit budget is the
+        caller's own figure, taken as is."""
+        if self.memory_budget is None or (
+            isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto"
+        ):
+            node_bytes, source = available_memory_bytes()
+            return (
+                node_bytes * _AUTO_MEMORY_SAFETY_FRACTION,
+                f"auto: {_format_gib(node_bytes)} {source} x {_AUTO_MEMORY_SAFETY_FRACTION:.0%}",
+                True,
+            )
+        return float(_parse_memory_budget_bytes(self.memory_budget)), f"{self.memory_budget!r}", False
 
     def _configure_data_loading(self, use_cache: bool) -> None:
         """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
@@ -989,15 +1003,9 @@ class Data(ABC):
         dataset_bytes = self._estimate_cached_bytes()
         per_rank_bytes = dataset_bytes / world_size
 
-        if self.memory_budget is None or (
-            isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto"
-        ):
-            node_bytes, source = available_memory_bytes()
-            per_rank_budget = node_bytes * _AUTO_MEMORY_SAFETY_FRACTION / world_size
-            budget_desc = f"auto: {_format_gib(node_bytes)} {source} x {_AUTO_MEMORY_SAFETY_FRACTION:.0%}, per-rank"
-        else:
-            per_rank_budget = float(_parse_memory_budget_bytes(self.memory_budget))
-            budget_desc = f"{self.memory_budget!r}, per-rank"
+        budget, budget_desc, is_auto = self._resolved_budget_bytes()
+        per_rank_budget = budget / world_size if is_auto else budget
+        budget_desc = f"{budget_desc}, per-rank"
 
         use_cache = per_rank_bytes <= per_rank_budget
         self._configure_data_loading(use_cache)
@@ -1671,10 +1679,13 @@ class DataMetric(Data):
     #: fraction absorbs the rest.
     _METRIC_INTERMEDIATE_FACTOR = 2.0
 
+    # The evaluator clears this when any of its metrics is not reducible: that metric needs whole
+    # volumes, so the budget sizing must not cut the case.
+    auto_patch_allowed = True
+
     def _maybe_auto_patch(self) -> None:
-        # A missing budget means "auto": evaluation bounds itself by default. An explicit patch or a
-        # non-reducible metric (auto_patch_allowed) vetoes the sizing.
-        if self.patch is not None or not getattr(self, "auto_patch_allowed", True):
+        # An explicit patch or a non-reducible metric vetoes the sizing.
+        if self.patch is not None or not self.auto_patch_allowed:
             return
         sources = self._resolve_dataset_sources()
         # Header-only scan: for each case, its resident bytes per spatial voxel is the sum of its
@@ -1697,13 +1708,7 @@ class DataMetric(Data):
             spatial_by_name,
             key=lambda name: channels_by_name[name] * int(np.prod(spatial_by_name[name], dtype=np.int64)),
         )
-        if self.memory_budget is None or (
-            isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto"
-        ):
-            node_bytes, _source = available_memory_bytes()
-            budget = node_bytes * _AUTO_MEMORY_SAFETY_FRACTION
-        else:
-            budget = float(_parse_memory_budget_bytes(self.memory_budget))
+        budget, _budget_desc, _is_auto = self._resolved_budget_bytes()
         sized = resolve_patch(
             [0] * len(spatial_by_name[worst]),
             spatial_by_name[worst],

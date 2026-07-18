@@ -822,14 +822,11 @@ class Trainer(DistributedObject):
         # Round a free patch axis up to the model's valid input multiple before the first step, so the
         # network's skips align instead of crashing on a non-divisible extent; every rank rounds the
         # same worst case to the same size, so no rendezvous is needed here (unlike the OOM shrink).
-        if self._vram_patch_candidate is None:
-            sized = size_free_axes(
-                self._vram_patch_template, self.dataset.worst_case_shape(), self._downsampling_factor
-            )
-            if sized is not None:
-                self._vram_patch_candidate = sized
-                self.dataset.replan_patch(sized)
-                dataloaders = self.dataset.get_data(world_size)[0][global_rank]
+        sized = size_free_axes(self._vram_patch_template, self.dataset.worst_case_shape(), self._downsampling_factor)
+        if sized is not None:
+            self._vram_patch_candidate = sized
+            self.dataset.replan_patch(sized)
+            dataloaders = self.dataset.get_data(world_size)[0][global_rank]
         while True:
             try:
                 with _Trainer(
