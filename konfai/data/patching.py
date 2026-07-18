@@ -17,7 +17,6 @@
 """Patch extraction, accumulation, and patch-combination helpers for KonfAI."""
 
 import copy
-import os
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
@@ -37,6 +36,7 @@ from konfai.utils.errors import PatchError
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
     OverlapSpec,
+    env_flag,
     get_module,
     get_patch_slices_from_shape,
     resolve_overlap,
@@ -209,9 +209,8 @@ class _PatchStreamSource:
 @dataclass(frozen=True)
 class _PendingSweep:
     """One unsatisfied :class:`Save` and the segment that feeds it. Materializing reads each slab of
-    the Save's own space through the segment and region-writes it to ``destination``, after which the
-    Save is a satisfied source boundary. The segment is re-planned at sweep time — its source is
-    materialized by then, so a deferred statistic seeds from the real entry."""
+    the Save's own space through the segment — re-planned at sweep time, see ``_materialize_save`` —
+    and region-writes it to ``destination``, after which the Save is a satisfied source boundary."""
 
     destination: Dataset
     group: str
@@ -373,26 +372,35 @@ class Accumulator:
         self._weight_patch: torch.Tensor | None = None
         self._weighted: torch.Tensor | None = None
 
-    def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]] | None:
+    def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
+        """Blend one patch in; returns the slabs this completes (none for the whole-volume base)."""
         # Blend each patch straight into the running accumulator and drop the patch, rather than
         # storing all patches for a single assemble() at the end. The overlap blend is a weighted sum,
         # so accumulating incrementally is equivalent; re-adding an index is a no-op (last-write wins is
         # not possible once blended, and the prediction pipeline adds each patch exactly once).
         if self._done[index]:
-            return None
-        n = self._n
+            return []
         if self._result is None:
             # Allocate to the ACTUAL volume extent (self.shape), not the patch-size-extended grid. The
             # last patch of each axis is padded up to patch_size for the model, but that padded tail lies
             # OUTSIDE the volume; blending it would over-allocate the accumulator by up to
             # (patch_size - overlap) per axis (then get cropped away). We crop each patch to its in-volume
             # part at blend time instead, so nothing outside the volume is ever allocated.
+            n = self._n
             self._result = torch.zeros(list(layer.shape[:n]) + list(self.shape), dtype=layer.dtype, device=layer.device)
             if self.patch_combine is not None:
                 # Match the result dtype so the final ``result / weight_sum`` does not promote the whole
                 # (channels x volume) accumulator to float32.
                 self._weight_sum = torch.zeros(list(self.shape), dtype=layer.dtype, device=layer.device)
-        patch_slice = self.patch_slices[index]
+        self._blend(layer, self.patch_slices[index])
+        self._done[index] = True
+        self._filled += 1
+        return []
+
+    def _blend(self, layer: torch.Tensor, patch_slice: tuple[slice, ...], row_offset: int = 0) -> None:
+        """Blend one patch at its in-volume destination, ``row_offset`` rows down on the first spatial
+        axis (the streaming window origin — 0 for the whole-volume base)."""
+        n = self._n
         data = layer
         for dim, s in enumerate(patch_slice):
             if s.stop - s.start == 1:
@@ -401,12 +409,14 @@ class Accumulator:
         # matching in-volume extent so the padded tail of border patches is discarded, not stored.
         dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
         crop = tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])
-        slices_dest = tuple([slice(self._result.shape[i]) for i in range(n)] + dest)
+        dest[0] = slice(dest[0].start - row_offset, dest[0].stop - row_offset)
+        slices_dest = tuple([slice(cast(torch.Tensor, self._result).shape[i]) for i in range(n)] + dest)
         # Overlap blending weights each patch (edge bands < 1 so interior overlaps sum to unity).
         # A voxel covered by fewer patches (a volume border without whole-image padding) would sum
         # to < 1 and come out darkened (x0.5 edges, x0.25 corners), so divide by the accumulated weight.
+        result = cast(torch.Tensor, self._result)
         if self.patch_combine is not None and self._weight_sum is not None:
-            self._result[slices_dest] += self._weighted_patch(data)[crop]
+            result[slices_dest] += self._weighted_patch(data)[crop]
             if self._weight_patch is None:
                 # Spatial-only ones: the weight is per-voxel, and deriving it from a channel-sized
                 # ones_like would allocate (and weight) C copies just to index one back out.
@@ -415,16 +425,13 @@ class Accumulator:
                 )
             self._weight_sum[tuple(dest)] += self._weight_patch[crop[n:]]
         else:
-            self._result[slices_dest] = data[crop]
-        self._done[index] = True
-        self._filled += 1
-        return None
+            result[slices_dest] = data[crop]
 
     def _weighted_patch(self, data: torch.Tensor) -> torch.Tensor:
-        """``patch_combine(data)`` into a staging buffer the patches share.
+        """``patch_combine(data)`` into a staging buffer the patches share, one patch-sized allocation
+        per accumulator instead of per blend.
 
-        A weighted copy per patch was one patch-sized allocation per blend; one reused buffer per
-        accumulator serves them all. The multiply stays out of place: the caller's tensor is never
+        The multiply stays out of place: the caller's tensor is never
         touched, so the OOM retry (which re-blends the same patch on the CPU) never re-weights it.
         """
         combine = cast(PathCombine, self.patch_combine)
@@ -471,13 +478,16 @@ class Accumulator:
             result.div_(self._weight_sum.clamp(min=torch.finfo(self._weight_sum.dtype).tiny))
         # No final crop: patches are cropped to the volume at blend time, so result is already self.shape.
 
+        self._reset()
+        return result
+
+    def _reset(self) -> None:
         self._result = None
         self._weight_sum = None
         self._weight_patch = None
         self._weighted = None
         self._filled = 0
         self._done = [False] * self._count
-        return result
 
 
 class StreamingAccumulator(Accumulator):
@@ -536,27 +546,7 @@ class StreamingAccumulator(Accumulator):
             )
             if self.patch_combine is not None:
                 self._weight_sum = torch.zeros(self._result.shape[n:], dtype=layer.dtype, device=layer.device)
-        data = layer
-        for dim, s in enumerate(patch_slice):
-            if s.stop - s.start == 1:
-                data = data.unsqueeze(dim=dim + n)
-        # Same blend as the parent (clamped destination, cropped patch, weighted overlap); the only
-        # difference is that the destination's first spatial index is relative to the window origin.
-        dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
-        crop = tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])
-        dest[0] = slice(dest[0].start - self._flushed, dest[0].stop - self._flushed)
-        slices_dest = tuple([slice(self._result.shape[i]) for i in range(n)] + dest)
-        if self.patch_combine is not None and self._weight_sum is not None:
-            self._result[slices_dest] += self.patch_combine(data)[crop]
-            if self._weight_patch is None:
-                # Spatial-only ones: the weight is per-voxel, and deriving it from a channel-sized
-                # ones_like would allocate (and weight) C copies just to index one back out.
-                self._weight_patch = self.patch_combine(
-                    torch.ones(data.shape[n:], dtype=data.dtype, device=data.device)
-                )
-            self._weight_sum[tuple(dest)] += self._weight_patch[crop[n:]]
-        else:
-            self._result[slices_dest] = data[crop]
+        self._blend(layer, patch_slice, row_offset=self._flushed)
         self._done[index] = True
         self._filled += 1
         return slabs
@@ -564,12 +554,7 @@ class StreamingAccumulator(Accumulator):
     def finalize(self) -> list[tuple[slice, torch.Tensor]]:
         """Flush the remaining window and reset for reuse; call once ``is_full()``."""
         slabs = self._advance_to(self.shape[0])
-        self._result = None
-        self._weight_sum = None
-        self._weight_patch = None
-        self._weighted = None
-        self._filled = 0
-        self._done = [False] * self._count
+        self._reset()
         self._flushed = 0
         return slabs
 
@@ -1323,8 +1308,6 @@ class DatasetManager:
                 # from the evolving 'Spacing' (a free geometry stat, no read_data_statistics).
                 return False, (), evolved
             plan = self._plan_read_stage(stage, loc, shape, evolved)
-            if plan is None:
-                return False, (), evolved
             plans.append(plan)
             shape = list(plan.out_shape)
         expected = landing_shape if landing_shape is not None else self.shapes[a]
@@ -1334,7 +1317,7 @@ class DatasetManager:
 
     def _plan_read_stage(
         self, stage: Stage, loc: PatchLocality, shape: list[int], evolved: Attribute
-    ) -> "_ReadStagePlan | None":
+    ) -> "_ReadStagePlan":
         """One stage's slot in the composed plan: its shapes, its pull map, and — for a region stage —
         the geometry it leaves for the stages after it (``write_stream_cache_attribute``)."""
         if loc.kind not in _REGION_KINDS:
@@ -1455,7 +1438,7 @@ class DatasetManager:
         whole-volume path: the segment feeding it must itself stream, and the destination must serve
         region writes (probed by capability, so a refusal costs nothing). Returns the pending sweep
         and the case state its cache will carry, which the stages after the Save plan against."""
-        if self._sweep_failed or os.environ.get("KONFAI_STREAMED_WRITES", "1").lower() in ("0", "false"):
+        if self._sweep_failed or not env_flag("KONFAI_STREAMED_WRITES", True):
             return None
         landing = [int(extent) for extent in source_shape[1:]]
         probe = Attribute(base_attributes)
@@ -1515,10 +1498,12 @@ class DatasetManager:
 
         Each slab of the Save's own space is read through the segment — the same composed replay a
         patch uses — and region-written. The segment is re-planned here: its source is materialized
-        by now, so a statistic the pending plan deferred seeds from the real entry. The cache appears
-        only when complete (a DataStream renames on finalize), so a concurrent resolve never takes a
-        partial entry as a source boundary; on failure the partial entry is removed and the case
-        falls back to the whole-volume path, which writes the cache classically."""
+        by now, so a statistic the pending plan deferred seeds from the real entry (a disk-scan seed,
+        so a GLOBAL_STAT segment matches the classic cache to float rounding — the streamed read's
+        own contract — where every other kind matches it exactly). The cache appears only when
+        complete (a DataStream renames on finalize), so a concurrent resolve never takes a partial
+        entry as a source boundary; on failure the partial entry is removed and the case falls back
+        to the whole-volume path, which writes the cache classically."""
         if sweep.destination.is_dataset_exist(sweep.group, self.name):
             return True
         streamable, stage_plans, evolved = self._plan_stream_region(
@@ -1540,8 +1525,11 @@ class DatasetManager:
         try:
             for start in range(0, spatial[0], _SWEEP_SLAB_ROWS):
                 target = (slice(start, min(start + _SWEEP_SLAB_ROWS, spatial[0])), *(slice(0, e) for e in spatial[1:]))
+                # The first slab hands a throwaway case scope to the replay so the region-geometry
+                # check runs: a region stage recording geometry nowhere the case can read refuses the
+                # sweep (PatchError -> whole-volume fallback), exactly as the patch path refuses it.
                 tensor, slab_attribute, keys_before = self._replay_streamed_region(
-                    source, target, Attribute(sweep.base_attributes), None
+                    source, target, Attribute(sweep.base_attributes), Attribute(evolved) if start == 0 else None
                 )
                 block = tensor.numpy()
                 if stream is None:
@@ -1559,11 +1547,11 @@ class DatasetManager:
                     stream.__enter__()
                 stream.write_slice((slice(0, int(block.shape[0])), *target), block)
             if stream is not None:
-                stream.__exit__(None, None, None)
+                stream.close()
             return True
         except Exception as exception:
             if stream is not None:
-                stream.__exit__(type(exception), exception, exception.__traceback__)
+                stream.abort(exception)
             warnings.warn(
                 f"Streamed materialization of Save cache '{sweep.group}/{self.name}' failed"
                 f" ({type(exception).__name__}: {exception}); falling back to the whole-volume path.",

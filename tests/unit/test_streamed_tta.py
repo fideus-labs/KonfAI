@@ -402,18 +402,19 @@ def test_streamed_inference_stack_aborts_its_sink_when_the_case_dies(monkeypatch
     # A case that dies between slabs must not leave the stack's region sink open: the dispatcher's
     # error path calls stream_abort, which closes and drops whatever the stage held for the case.
     class _Sink:
-        closed = False
+        aborted = False
 
         def write_slice(self, target, array):
             del target, array
 
-        def __exit__(self, *exc):
-            _Sink.closed = True
+        def abort(self, error=None):
+            # The partial stack must be REMOVED, never finalized under its final name.
+            _Sink.aborted = True
 
     stack = InferenceStack("", "stack", mode="Seg")
     stack._stack_sinks["CASE_000"] = cast(Dataset, _Sink())  # type: ignore[assignment]
     stack.stream_abort("CASE_000")
-    assert _Sink.closed and not stack._stack_sinks
+    assert _Sink.aborted and not stack._stack_sinks
     stack._stack_buffers["CASE_000"] = [np.zeros((1, 1, 1, 1), dtype=np.float32)]
     stack.stream_abort("CASE_000")
     assert not stack._stack_buffers
