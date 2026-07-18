@@ -37,6 +37,7 @@ from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
     OverlapSpec,
     env_flag,
+    free_axis_rounding,
     get_module,
     get_patch_slices_from_shape,
     resolve_overlap,
@@ -900,11 +901,7 @@ class Patch(ABC):
                     # A FREE axis pads up to THIS case's extent rounded to the model's downsampling
                     # multiple, so a small heterogeneous case still reaches the network at a valid input
                     # size (the up-front worst-case sizing only guarantees the largest case).
-                    m = (
-                        int(self.free_axis_multiple[axis])
-                        if self.free_axis_multiple is not None and axis < len(self.free_axis_multiple)
-                        else 1
-                    )
+                    m = free_axis_rounding(self.free_axis_multiple, axis, nspatial)
                     target = ((extent + m - 1) // m) * m if m > 1 else extent
                 p = 0 if _slice.start + target <= extent else target - (extent - _slice.start)
                 constant_padding.append(0)

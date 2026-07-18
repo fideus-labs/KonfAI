@@ -1721,8 +1721,11 @@ class DataMetric(Data):
             # The auto budget is the NODE's memory, shared by every rank evaluating on it. Sizing runs
             # at build time -- before the spawn where world_size exists -- so the launcher leaves the
             # per-node rank count in the environment (an explicit budget is per-rank by contract, and a
-            # direct-API caller without the launcher keeps today's undivided behaviour).
-            budget //= max(1, int(os.environ.get("KONFAI_LOCAL_RANKS", "1")))
+            # caller without the launcher -- or with a garbled variable -- keeps the undivided default).
+            try:
+                budget //= max(1, int(os.environ.get("KONFAI_LOCAL_RANKS", "1")))
+            except ValueError:
+                pass
         sized = resolve_patch(
             [0] * len(spatial_by_name[worst]),
             spatial_by_name[worst],
