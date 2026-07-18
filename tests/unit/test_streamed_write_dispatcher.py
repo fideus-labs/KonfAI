@@ -468,6 +468,8 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
     monkeypatch.setenv("KONFAI_STREAMED_WRITES", "1" if streamed else "0")
     monkeypatch.setenv("KONFAI_config_file", "unused.yml")
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    # Toy volumes sit far below the worth gate: zero it so the streamed machinery is exercised.
+    monkeypatch.setenv("KONFAI_STREAM_WORTH_THRESHOLD", "0")
 
     attribute = _geometry_attribute()
     model_volume = volume.clone()
@@ -489,6 +491,7 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
     class DummyManager:
         name = "CASE_000"
         patch = DummyPatch()
+        shapes: ClassVar[list[list[int]]] = [list(model_volume.shape[1:])]
         cache_attributes: ClassVar[list[Attribute]] = [Attribute()]
 
     class DummyDatasetIter:

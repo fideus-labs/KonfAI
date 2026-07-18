@@ -103,9 +103,9 @@ def _drive_tta(
     # Toy volumes are far below the production worth-streaming threshold: zero it so these tests
     # exercise the streamed machinery; ``worth_gate`` keeps the production threshold instead.
     if worth_gate:
-        monkeypatch.delenv("KONFAI_STREAMED_TTA_THRESHOLD", raising=False)
+        monkeypatch.delenv("KONFAI_STREAM_WORTH_THRESHOLD", raising=False)
     else:
-        monkeypatch.setenv("KONFAI_STREAMED_TTA_THRESHOLD", "0")
+        monkeypatch.setenv("KONFAI_STREAM_WORTH_THRESHOLD", "0")
 
     attribute = _geometry_attribute()
     volume = torch.from_numpy(np.random.default_rng(0).standard_normal((C, *SHAPE)).astype(np.float32)).to(dtype)
