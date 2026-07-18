@@ -282,11 +282,12 @@ def _no_texpr_fuser():
     fuser trips on shape ops (``aten::size`` INTERNAL ASSERT). Scoped and restored so no other torch/JIT
     user is affected; the modern profiling executor stays on (this is NOT the legacy executor).
     """
+    prev = torch._C._jit_texpr_fuser_enabled()
     torch._C._jit_set_texpr_fuser_enabled(False)
     try:
         yield
     finally:
-        torch._C._jit_set_texpr_fuser_enabled(True)
+        torch._C._jit_set_texpr_fuser_enabled(prev)
 
 
 class _ImpactCore(IMPACTReg):

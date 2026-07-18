@@ -37,7 +37,7 @@ from huggingface_hub import hf_hub_download
 from .elastix_install import get_elastix_bin, install_elastix_impact, try_elastix
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
 
-from Model import _sorted_specs, generate_impact_parameter_map, load_models_registry
+from .elastix import _sorted_specs, generate_impact_parameter_map, load_models_registry
 
 # Elastix + IMPACT binary is cached once here (heavy: binary + LibTorch) and reused across runs.
 # Set KONFAI_ELASTIX_DIR to point at an existing install and skip the download.
@@ -258,11 +258,22 @@ class ElastixEngine:
             for pmap in self._stage_parameter_maps(work, device_index):
                 args += ["-p", str(pmap)]
 
-            # Make the elastix binary's bundled libs (libtorch under <install>/lib) and any extra
-            # libtorch/CUDA dirs (KONFAI_ELASTIX_EXTRA_LIB) findable so the IMPACT metric plugin loads.
+            # The IMPACT metric plugin links LibTorch, taken from the environment's pip ``torch`` package
+            # (its ``lib/`` dir) -- the same LibTorch the elastix asset is built against in CI -- instead of a
+            # separately downloaded standalone libtorch. ``<install>/lib`` (the elastix runtime) and any extra
+            # dirs (KONFAI_ELASTIX_EXTRA_LIB) are still searched. On Windows the loader reads PATH, not
+            # LD_LIBRARY_PATH.
+            import torch
+
             env = os.environ.copy()
-            extra_libs = [str(self._elastix_bin.parent.parent / "lib"), os.environ.get("KONFAI_ELASTIX_EXTRA_LIB", "")]
-            env["LD_LIBRARY_PATH"] = os.pathsep.join(p for p in [*extra_libs, env.get("LD_LIBRARY_PATH", "")] if p)
+            torch_lib = str(Path(torch.__file__).resolve().parent / "lib")
+            extra_libs = [
+                str(self._elastix_bin.parent.parent / "lib"),
+                torch_lib,
+                os.environ.get("KONFAI_ELASTIX_EXTRA_LIB", ""),
+            ]
+            lib_var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
+            env[lib_var] = os.pathsep.join(p for p in [*extra_libs, env.get(lib_var, "")] if p)
             proc = subprocess.Popen(  # nosec B603
                 args,
                 cwd=str(work),
