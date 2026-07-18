@@ -183,6 +183,15 @@ transcendental-terminated float chain can differ by ~1 ULP between a GPU window
 and a CPU whole-volume run. `KONFAI_STREAMED_WRITES=0` forces the whole-volume
 path globally.
 
+Streaming bounds the reassembly *accumulator*, not the *reduction*. A
+multi-model ensemble with `combine: Concat` — used when the members must stay
+separate, e.g. to write an `InferenceStack` for uncertainty — keeps every
+member's channels resident through the finalize, so on a large volume the
+channel-reduction working set, not the accumulator, is the memory peak, and
+streaming does not shrink it. For a memory-tight run, `combine: Mean` (or
+`Median`) collapses the members first and streams within a patch window; keep
+`combine: Concat` only when you need the per-member stack.
+
 ## Verify the behaviour you care about
 
 Do not infer streaming from a successful run alone—the fallback is designed to

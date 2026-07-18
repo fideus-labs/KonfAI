@@ -12,9 +12,9 @@ every kind but a resample, which gathers the same samples through a different
 coordinate frame and lands within the tolerance stated below. They differ in
 memory and speed.
 
-A 16 GiB uncompressed `.mha` at patch 64³, batch 2, two workers, cache off,
-under an 8 GiB memory cap trains at a peak anonymous RSS of **0.46 GiB**, stable
-across epochs, with VRAM equal to one batch.
+A 16 GiB uncompressed `.mha` at patch 64³, batch 2, two workers, under an 8 GiB
+`memory_budget` (below the dataset size, so the run streams) trains at a peak
+anonymous RSS of **0.46 GiB**, stable across epochs, with VRAM equal to one batch.
 
 ## The three regimes
 

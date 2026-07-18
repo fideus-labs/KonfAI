@@ -174,7 +174,7 @@ def _extract_error_excerpt(log_path: Path, max_scan_lines: int = 400) -> str | N
         excerpt += (
             " [KonfAI hint] A DataLoader worker crashed, so the real error is hidden by multiprocessing "
             "(usually out-of-memory, or an exception inside a dataset transform). Re-run with "
-            "'Dataset.num_workers: 0' (or 'Dataset.use_cache: true', which also loads without workers) to "
+            "'Dataset.num_workers: 0' to "
             "surface the real traceback; if it then trains, the crash was worker memory pressure — reduce "
             "Dataset.num_workers, batch_size, or patch_size."
         )
