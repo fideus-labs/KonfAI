@@ -758,6 +758,10 @@ class RegistrationNet(network.Network):
             outputs_criterions=outputs_criterions,
             dim=3,
         )
+        # Fail at build time: with no feature model the IMPACT loss would surface as a None-loss crash
+        # deep in the deformable stage, minutes after the rigid/affine stages already ran.
+        if deformable_metric == "impact" and not models:
+            raise ValueError("deformable_metric='impact' requires at least one feature model under 'models'.")
         engine = FireANTsEngine(
             scales,
             affine_iterations,

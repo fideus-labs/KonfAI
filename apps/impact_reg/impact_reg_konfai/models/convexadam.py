@@ -254,11 +254,14 @@ class ConvexAdamEngine:
 
     @staticmethod
     def _download_models(models: list[str]) -> list[str]:
-        """Fetch the TorchScript feature models (``repo:filename``); return their local paths."""
+        """Fetch the TorchScript feature models (``repo:filename``, or a local file); return their paths."""
         paths = []
         for ref in models:
-            repo, filename = ref.split(":", 1)
-            paths.append(str(hf_hub_download(repo_id=repo, filename=filename, repo_type="model")))  # nosec B615
+            if ":" in ref:
+                repo, filename = ref.split(":", 1)
+                paths.append(str(hf_hub_download(repo_id=repo, filename=filename, repo_type="model")))  # nosec B615
+            else:
+                paths.append(str(Path(ref).expanduser().resolve()))
         return paths
 
     def _model_configurations(self) -> list["itk.ModelConfiguration"]:

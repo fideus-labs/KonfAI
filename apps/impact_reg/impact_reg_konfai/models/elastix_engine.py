@@ -78,6 +78,13 @@ class ElastixEngine:
         # module's directory, which is the installed package, not next to the .txt.
         self._bundle_dir = Path.cwd()
         self._parameter_maps = [self._bundle_dir / Path(p).name for p in parameter_maps]
+        # Matrix mode rewrites a template's resolution-dependent lines; it never creates one. Without a
+        # map, elastix would launch with no -p and die in a cryptic subprocess error — fail here instead.
+        if not self._parameter_maps:
+            raise ValueError(
+                "at least one parameter-map template is required; 'resolutions' rewrites a template, "
+                "it does not replace it."
+            )
         self._max_iterations = max_iterations
         self._final_grid_spacing = final_grid_spacing
         self._subset_features = subset_features
@@ -128,12 +135,17 @@ class ElastixEngine:
         return get_elastix_bin(ELASTIX_CACHE).resolve()
 
     def _download_models(self) -> list[tuple[str, Path]]:
-        """Fetch the TorchScript feature models (``repo:filename``); keep (relative_name, local_path)."""
+        """Fetch the TorchScript feature models (``repo:filename``, or a local file); keep
+        ``(staged_name, local_path)``. The staged name equals ``_model_key(ref)`` -- the path the
+        generated/preset map references -- so a local ref stages under the very name the map resolves."""
         models = []
         for ref in self._models:
-            repo, filename = ref.split(":", 1)
-            local = Path(hf_hub_download(repo_id=repo, filename=filename, repo_type="model"))  # nosec B615
-            models.append((filename, local))
+            if ":" in ref:
+                repo, filename = ref.split(":", 1)
+                local = Path(hf_hub_download(repo_id=repo, filename=filename, repo_type="model"))  # nosec B615
+                models.append((filename, local))
+            else:
+                models.append((ref, Path(ref).expanduser().resolve()))
         return models
 
     def _parameter_map_overrides(self, global_only: bool = False) -> tuple[dict[str, str], list[tuple[str, str]]]:
