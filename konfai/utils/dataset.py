@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
 import csv
 import functools
@@ -364,7 +365,12 @@ class DataStream(ABC):
     ``Dataset.open_data_stream``, which returns ``None`` when the write format cannot serve region writes
     (the caller then assembles the volume and uses ``Dataset.write``). Use as a context manager: a clean
     exit finalizes the entry, an exception removes the partial one so a reader never sees a half-written
-    volume."""
+    volume.
+
+    The entry lives under a temporary name until the clean exit renames it into place: an existence
+    probe (``is_dataset_exist``) or a concurrent reader never sees the entry while it is being written,
+    a replaced entry stays readable until its replacement is complete, and a hard-killed writer leaves
+    only temporary debris, never a plausible-looking partial volume under the final name."""
 
     _file: Dataset.File | None = None
 
@@ -388,15 +394,22 @@ class DataStream(ABC):
 
 
 class _H5DataStream(DataStream):
-    def __init__(self, dataset: h5py.Dataset) -> None:
+    def __init__(self, dataset: h5py.Dataset, final_name: str) -> None:
         self._dataset = dataset
+        self._final_name = final_name
 
     def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
         self._dataset[slices] = data
 
     def _close(self, success: bool) -> None:
+        parent = self._dataset.parent
+        temporary_name = self._dataset.name.rsplit("/", 1)[-1]
         if not success:
-            del self._dataset.parent[self._dataset.name.rsplit("/", 1)[-1]]
+            del parent[temporary_name]
+            return
+        if self._final_name in parent:
+            del parent[self._final_name]
+        parent.move(temporary_name, self._final_name)
 
 
 # MetaImage ElementType for each NumPy dtype a streamed .mha can hold.
@@ -421,6 +434,7 @@ class _MhaDataStream(DataStream):
 
     def __init__(self, path: str, shape: list[int], dtype: np.dtype, attributes: Attribute) -> None:
         self.path = path
+        self._temporary_path = f"{path}.tmp"
         spatial = list(shape[1:])
         # The header declares BinaryDataByteOrderMSB=False, so the map must be explicitly little-endian.
         self._dtype = np.dtype(dtype).newbyteorder("<")
@@ -441,11 +455,13 @@ class _MhaDataStream(DataStream):
         fields += [(k, str(v)) for k, v in attributes.items() if str(v) and "\n" not in str(v) and " " not in k]
         fields += [("ElementType", _MHA_ELEMENT_TYPES[self._dtype.name]), ("ElementDataFile", "LOCAL")]
         header = "".join(f"{key} = {value}\n" for key, value in fields).encode("utf-8")
-        with open(path, "wb") as file:
+        with open(self._temporary_path, "wb") as file:
             file.write(header)
             # Reserve the pixel block up front (sparse where the filesystem allows it).
             file.truncate(len(header) + int(np.prod([*spatial, shape[0]], dtype=np.int64)) * self._dtype.itemsize)
-        self._memmap = np.memmap(path, dtype=self._dtype, mode="r+", offset=len(header), shape=(*spatial, shape[0]))
+        self._memmap = np.memmap(
+            self._temporary_path, dtype=self._dtype, mode="r+", offset=len(header), shape=(*spatial, shape[0])
+        )
 
     def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
         self._memmap[(*slices[1:], slices[0])] = np.moveaxis(data, 0, -1)
@@ -454,13 +470,22 @@ class _MhaDataStream(DataStream):
         self._memmap.flush()
         del self._memmap
         if not success:
-            os.remove(self.path)
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(self._temporary_path)
+            return
+        try:
+            os.replace(self._temporary_path, self.path)
+        except FileNotFoundError:
+            # A concurrent writer of the same entry finalized first; keep its identical result.
+            if not os.path.exists(self.path):
+                raise
 
 
 class _OmeZarrDataStream(DataStream):
-    def __init__(self, array: Any, store_path: Path) -> None:
+    def __init__(self, array: Any, store_path: Path, final_path: Path) -> None:
         self._array = array
         self._store_path = store_path
+        self._final_path = final_path
 
     def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
         self._array[slices] = data
@@ -468,6 +493,10 @@ class _OmeZarrDataStream(DataStream):
     def _close(self, success: bool) -> None:
         if not success:
             shutil.rmtree(self._store_path, ignore_errors=True)
+            return
+        if self._final_path.exists():
+            shutil.rmtree(self._final_path)
+        os.rename(self._store_path, self._final_path)
 
 
 class Dataset:
@@ -697,11 +726,14 @@ class Dataset:
                     self.h5.create_group(group)
                 h5_group = self.h5[group]
             name = name.split("/")[-1]
-            if name in h5_group:
-                del h5_group[name]
-            dataset = h5_group.create_dataset(name, shape=tuple(shape), dtype=dtype, chunks=None)
+            # Write under a temporary key and move on finalize: the final key never names a partial
+            # entry, and a replaced entry stays readable until its replacement is complete.
+            temporary_name = f"{name}.tmp"
+            if temporary_name in h5_group:
+                del h5_group[temporary_name]
+            dataset = h5_group.create_dataset(temporary_name, shape=tuple(shape), dtype=dtype, chunks=None)
             dataset.attrs.update({k: str(v) for k, v in attributes.items()})
-            return _H5DataStream(dataset)
+            return _H5DataStream(dataset, name)
 
         def is_exist(self, group: str, name: str | None = None) -> bool:
             if self.h5 is not None:
@@ -1258,7 +1290,9 @@ class Dataset:
             dimension = len(shape) - 1
             spacing = attributes.get_np_array("Spacing") if "Spacing" in attributes else np.ones(dimension)
             origin = attributes.get_np_array("Origin") if "Origin" in attributes else np.zeros(dimension)
-            store_path = self._path(name, writing=True)
+            final_path = self._path(name, writing=True)
+            store_path = Path(f"{final_path}.tmp")
+            shutil.rmtree(store_path, ignore_errors=True)
             array = create_ome_zarr_store(
                 store_path,
                 shape,
@@ -1267,7 +1301,7 @@ class Dataset:
                 origin=origin,
                 attributes=dict(attributes),
             )
-            return _OmeZarrDataStream(array, store_path)
+            return _OmeZarrDataStream(array, store_path, final_path)
 
         def get_names(self, group: str) -> list[str]:
             return self.get_group()

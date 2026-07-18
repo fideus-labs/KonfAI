@@ -145,6 +145,70 @@ def test_mha_float16_is_stored_as_float32_matching_the_whole_volume_path(tmp_pat
     np.testing.assert_array_equal(result, volume.astype(np.float32))
 
 
+@pytest.mark.parametrize("file_format", FORMATS)
+def test_entry_is_invisible_until_the_stream_finalizes(tmp_path: Path, file_format: str) -> None:
+    """The entry must not exist under its final name while the stream is open: an existence probe
+    taken mid-write (another worker resolving the same case) would otherwise stream from a partial
+    volume."""
+    _skip_unavailable(file_format)
+    volume = _volume()
+    dataset = Dataset(tmp_path / "streamed", file_format)
+    stream = dataset.open_data_stream("CT", "CASE_001", list(volume.shape), volume.dtype, _image_attributes())
+    assert stream is not None
+    with stream:
+        stream.write_slice(
+            (slice(0, volume.shape[0]), slice(0, 2), slice(0, 5), slice(0, 4)),
+            volume[:, 0:2],
+        )
+        assert not Dataset(tmp_path / "streamed", file_format).is_dataset_exist("CT", "CASE_001")
+        for start in range(2, volume.shape[1], 2):
+            region = slice(start, min(start + 2, volume.shape[1]))
+            slices = (slice(0, volume.shape[0]), region, *(slice(0, extent) for extent in volume.shape[2:]))
+            stream.write_slice(slices, volume[:, region])
+    assert dataset.is_dataset_exist("CT", "CASE_001")
+    result, _ = dataset.read_data("CT", "CASE_001")
+    np.testing.assert_array_equal(result, volume)
+
+
+@pytest.mark.parametrize("file_format", FORMATS)
+def test_replaced_entry_stays_readable_until_its_replacement_is_complete(tmp_path: Path, file_format: str) -> None:
+    _skip_unavailable(file_format)
+    first = _volume()
+    second = first + 1
+    dataset = Dataset(tmp_path / "streamed", file_format)
+    _write_by_slabs(dataset, first, _image_attributes())
+    stream = dataset.open_data_stream("CT", "CASE_001", list(second.shape), second.dtype, _image_attributes())
+    assert stream is not None
+    with stream:
+        stream.write_slice(
+            (slice(0, second.shape[0]), slice(0, 2), slice(0, 5), slice(0, 4)),
+            second[:, 0:2],
+        )
+        mid_write, _ = dataset.read_data("CT", "CASE_001")
+        np.testing.assert_array_equal(mid_write, first)
+        for start in range(2, second.shape[1], 2):
+            region = slice(start, min(start + 2, second.shape[1]))
+            slices = (slice(0, second.shape[0]), region, *(slice(0, extent) for extent in second.shape[2:]))
+            stream.write_slice(slices, second[:, region])
+    result, _ = dataset.read_data("CT", "CASE_001")
+    np.testing.assert_array_equal(result, second)
+
+
+@pytest.mark.parametrize("file_format", FORMATS)
+def test_aborted_stream_leaves_an_existing_entry_untouched(tmp_path: Path, file_format: str) -> None:
+    _skip_unavailable(file_format)
+    first = _volume()
+    dataset = Dataset(tmp_path / "streamed", file_format)
+    _write_by_slabs(dataset, first, _image_attributes())
+    stream = dataset.open_data_stream("CT", "CASE_001", list(first.shape), first.dtype, _image_attributes())
+    assert stream is not None
+    with pytest.raises(RuntimeError, match="boom"):
+        with stream:
+            raise RuntimeError("boom")
+    result, _ = dataset.read_data("CT", "CASE_001")
+    np.testing.assert_array_equal(result, first)
+
+
 def test_can_stream_data_matches_open_support(tmp_path: Path) -> None:
     geometry = _image_attributes()
     assert Dataset(tmp_path / "a", "mha").can_stream_data(geometry)
