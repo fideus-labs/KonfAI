@@ -252,18 +252,28 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self._accum_device: dict[int, torch.device] = {}
         # Same single-decision rule for the CPU-blend reduction device (see ``_reduction_device``).
         self._reduce_device: dict[int, torch.device] = {}
-        # Disk writes go to a background writer whenever the destination serves disjoint files per
-        # entry (see ``Dataset.concurrent_write_safe``): the device-to-host copy and the write then
-        # overlap the next forward, byte-identically — same operations, same order. A single-store
-        # destination stays inline, so nothing ever writes one store from two threads.
-        # ``KONFAI_ASYNC_WRITES=0`` is the ops/debug kill-switch, mirroring KONFAI_STREAMED_WRITES.
-        self._async_writes = (
-            os.environ.get("KONFAI_ASYNC_WRITES", "1").lower() not in ("0", "false") and self.concurrent_write_safe()
-        )
+        # Disk writes go to a background writer when the destination serves disjoint files per entry
+        # (see ``Dataset.concurrent_write_safe``) AND the output runs on a GPU: the device-to-host
+        # copy and the write then overlap the next forward, byte-identically — same operations, same
+        # order. A single-store destination stays inline, so nothing ever writes one store from two
+        # threads; a CPU-only loop stays inline too — its blend shares the memory bandwidth the
+        # writer would consume, so there is nothing to overlap and something to lose.
+        # ``KONFAI_ASYNC_WRITES`` is tri-state: unset = automatic, ``0`` kills, ``1`` forces (tests).
+        raw = os.environ.get("KONFAI_ASYNC_WRITES", "").lower()
+        self._async_writes: bool | None
+        if raw in ("0", "false") or not self.concurrent_write_safe():
+            self._async_writes = False
+        elif raw in ("1", "true"):
+            self._async_writes = True
+        else:
+            self._async_writes = None  # decided at the first write, once the device is placed
         self._writer: _AsyncWriter | None = None
 
     def _submit_write(self, operation: Callable[[], None]) -> None:
         """Run ``operation`` on the background writer, or inline when the destination must stay serial."""
+        if self._async_writes is None:
+            device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
+            self._async_writes = device.type == "cuda"
         if not self._async_writes:
             operation()
             return
