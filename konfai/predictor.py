@@ -577,6 +577,7 @@ class OutSameAsGroupDataset(OutputDataset):
         self._region_states: dict[int, _RegionState] = {}
         self._stream_buffers: dict[int, torch.Tensor] = {}
         self._post_prefix_attributes: dict[int, Attribute] = {}
+        self._reported_paths: set[str] = set()
         # One aligner per streamed case: the copies' accumulators emit slabs at their own pace, and
         # the finalize needs every copy's rows together (the cross-copy reduction). A single copy is
         # simply a one-stream aligner — same path, no special case.
@@ -604,11 +605,19 @@ class OutSameAsGroupDataset(OutputDataset):
                 self.output_layer_accumulator[index_dataset] = {}
                 self.attributes[index_dataset] = {}
                 self.names[index_dataset] = input_dataset.name
-                self._stream_plans[index_dataset] = (
+                plan = (
                     self._plan_stream(dataset, index_dataset, source_attribute, layer, number_of_channels_per_model)
                     if self._streaming_enabled
                     else None
                 )
+                self._stream_plans[index_dataset] = plan
+                if self._streaming_enabled and (plan is None or not plan.to_sink):
+                    # The whole-volume fallback is a normal outcome, but a silent one hides that a
+                    # large case pays it: say so, once per distinct path.
+                    path = (
+                        "whole-volume" if plan is None else "buffered (the prefix streams, the tail runs whole-volume)"
+                    )
+                    self._report_once(path, f"streaming: case '{input_dataset.name}' takes the {path} path.")
             self.attributes[index_dataset][index_augmentation] = {}
 
             accumulator_type = StreamingAccumulator if self._stream_plans[index_dataset] else Accumulator
@@ -632,6 +641,12 @@ class OutSameAsGroupDataset(OutputDataset):
         accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
         if index_dataset not in self._accum_device:
             self._accum_device[index_dataset] = self._accumulate_device(layer, accumulator)
+            if layer.device.type != "cpu" and self._accum_device[index_dataset].type == "cpu":
+                self._report_once(
+                    "host-accumulate",
+                    f"streaming: case '{self.names[index_dataset]}' accumulates on the host"
+                    " (the accumulator does not fit the VRAM budget).",
+                )
         target = self._accum_device[index_dataset]
         # When the accumulator lives on the GPU, blend the patch straight in (no host round-trip);
         # otherwise offload each patch to CPU so its device memory is released after post-processing.
@@ -690,6 +705,12 @@ class OutSameAsGroupDataset(OutputDataset):
         if locality.kind is LocalityKind.POINTWISE:
             return True
         return locality.kind is LocalityKind.GLOBAL_STAT and all(key in attribute for key in locality.stat_keys)
+
+    def _report_once(self, key: str, message: str) -> None:
+        """One line the first time a distinct non-window-bounded outcome appears; repeats are silent."""
+        if key not in self._reported_paths:
+            self._reported_paths.add(key)
+            print(f"[KonfAI] {message}")
 
     def _tta_worth_streaming(
         self,
