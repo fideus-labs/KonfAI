@@ -35,6 +35,7 @@ Optional dependencies: ``zarr`` + ``ngff-zarr`` (``pip install konfai[omezarr]``
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -88,8 +89,14 @@ def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
         return {}
 
 
-def _load_image(store_path: str | Path, level: int) -> Any:
-    """Return the ``NgffImage`` for ``level`` of an OME-Zarr store.
+@lru_cache(maxsize=8)
+def _load_image(store_path: str, level: int) -> Any:
+    """Return the ``NgffImage`` for ``level`` of an OME-Zarr store, memoised per (store, level).
+
+    A streamed run reads one patch per call, and re-parsing the NGFF metadata and rebuilding the
+    lazy array graph per patch is pure per-read overhead: the image object is lazy (no voxel data),
+    so a handful of them is cheap to keep. Every write path calls ``_load_image.cache_clear()`` —
+    a store just written must be re-read, never served from the memo.
 
     ``@N`` selects among the levels a store offers, so a single-level store has nothing to select: its
     one level is read whatever ``N`` says (as every other backend does -- ``SitkFile`` ignores
@@ -128,7 +135,7 @@ def read_ome_zarr_data_slice(
     timepoint: int = 0,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Read a KonfAI channel-first ``C[Z]YX`` patch from an OME-Zarr store (lazy)."""
-    image = _load_image(store_path, level)
+    image = _load_image(str(store_path), level)
     dims = [str(axis).lower() for axis in image.dims]
     canonical_shape = _canonical_shape(dims, image.data.shape)
     if len(slices) != len(canonical_shape):
@@ -176,6 +183,7 @@ def write_ome_zarr(
     chunks: Sequence[int] | None = None,
 ) -> None:
     """Write one channel-first KonfAI array as a single-level OME-NGFF store."""
+    _load_image.cache_clear()
     _require_ngff_zarr()
     array_data = np.asarray(data)
     if array_data.ndim not in {3, 4}:
@@ -226,6 +234,7 @@ def create_ome_zarr_store(
     read back as zeros. Metadata (the 0.4 multiscales entry plus the KonfAI attribute sidecar) is
     complete from the start, so the store is readable at any point during the write.
     """
+    _load_image.cache_clear()
     _require_zarr()
     if len(shape) not in {3, 4}:
         raise DatasetManagerError(f"OME-Zarr writing expects a C-Y-X or C-Z-Y-X shape, got {list(shape)}.")
@@ -280,7 +289,7 @@ def create_ome_zarr_store(
 
 def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
     """Return OME-Zarr metadata (raw axis-order shape) without reading pixel data."""
-    image = _load_image(store_path, level)
+    image = _load_image(str(store_path), level)
     dims = [str(axis).lower() for axis in image.dims]
     try:
         n_levels = len(ngff_zarr.from_ngff_zarr(str(store_path)).images)
