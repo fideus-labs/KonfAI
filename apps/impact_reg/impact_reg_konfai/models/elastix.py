@@ -292,8 +292,9 @@ class RegistrationNet(network.Network):
         ] = "elastix",
         parameter_maps: Annotated[
             list[str],
-            "elastix parameter-map preset(s) run in sequence (e.g. rigid then bspline); empty = derived from "
-            "'resolutions'.",
+            "elastix parameter-map preset template(s) run in sequence (e.g. rigid then bspline); at least one "
+            "is required — 'resolutions' regenerates a template's resolution-dependent lines, it does not "
+            "replace it.",
         ] = [],
         max_iterations: Annotated[
             int,
