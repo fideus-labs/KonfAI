@@ -88,6 +88,7 @@ def _drive_tta(
     patch_combine=None,
     case_index: int = 0,
     file_format: str = "h5",
+    worth_gate: bool = False,
 ):
     """Push one TTA case (identity copy + one augmented copy) patch by patch through ``add_layer``
     against an h5 sink, interleaved along the slab axis exactly as the prediction mapping orders it,
@@ -99,6 +100,12 @@ def _drive_tta(
     monkeypatch.setenv("KONFAI_STREAMED_WRITES", "1" if streamed else "0")
     monkeypatch.setenv("KONFAI_config_file", "unused.yml")
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    # Toy volumes are far below the production worth-streaming threshold: zero it so these tests
+    # exercise the streamed machinery; ``worth_gate`` keeps the production threshold instead.
+    if worth_gate:
+        monkeypatch.delenv("KONFAI_STREAMED_TTA_THRESHOLD", raising=False)
+    else:
+        monkeypatch.setenv("KONFAI_STREAMED_TTA_THRESHOLD", "0")
 
     attribute = _geometry_attribute()
     volume = torch.from_numpy(np.random.default_rng(0).standard_normal((C, *SHAPE)).astype(np.float32)).to(dtype)
@@ -222,6 +229,17 @@ def test_streamed_tta_composes_with_a_region_pipe(tmp_path, monkeypatch) -> None
     reference, _ = _drive_tta(
         tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False, **kwargs
     )
+    assert torch.equal(streamed, reference)
+
+
+def test_light_tta_case_takes_the_whole_volume_path_by_the_worth_gate(tmp_path, monkeypatch) -> None:
+    # A TTA case whose assembled accumulators are a sliver of allocatable memory has nothing for the
+    # slab-synchronized reduce to save: the worth gate routes it whole-volume, output unchanged.
+    streamed, whole_volume = _drive_tta(
+        tmp_path / "gated", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, worth_gate=True
+    )
+    assert whole_volume, "a toy TTA case should not pay the streamed reduce"
+    reference, _ = _drive_tta(tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False)
     assert torch.equal(streamed, reference)
 
 
