@@ -190,9 +190,18 @@ These transforms load the volume because their answer needs it:
   a patch cannot locate itself in.
 - `Clip` with percentile bounds needs the whole histogram, as does
   `HistogramMatching`.
-- `Save` writes the whole preprocessed volume. A `Save` whose cache already
-  exists becomes the streaming source instead, and only the transforms after it
-  are planned.
+- `Save` writes the whole preprocessed volume — but rarely loads it. A `Save`
+  whose cache exists becomes the streaming source, and only the transforms
+  after it are planned. A `Save` whose cache is missing is **materialized slab
+  by slab** when the transforms before it stream: each slab of the Save's own
+  space is read through the composed region plan and region-written, the entry
+  appears only once complete, and the case then streams from it as if the
+  cache had always existed. This runs the prefix once — instead of once per
+  patch per epoch — and lets a global statistic seed after a value-changing
+  stage (`[Clip, Save, Standardize]` streams; `[Clip, Standardize]` cannot).
+  Only a `Save` fed by an unstreamable prefix, or writing to a format without
+  region writes (anything but uncompressed `mha`, `h5`, OME-Zarr), still loads
+  the volume.
 - `Argmax`, `Softmax`, and `Sum` over a spatial `dim` reduce across the whole
   extent.
 - `Canonical` on an oblique direction resamples.
