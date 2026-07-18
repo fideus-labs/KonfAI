@@ -68,6 +68,8 @@ from konfai.network import network
 from konfai.utils.config import Choices, Range
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
 
+from .elastix import _is_local_ref
+
 DIM = 3
 
 # Feature-model registry (models.json): the available IMPACT feature models, fetched from HF (NOT bundled).
@@ -366,11 +368,11 @@ class _ImpactCore(IMPACTReg):
         self.pca = int(pca)  # PCA lives in KonfAI's IMPACTReg._compute (same behaviour as itk-impact)
         self.dim = DIM
         self.shape = None  # score the whole (downsampled) tensor — no ModelPatch tiling
-        if ":" in ref:  # a "repo:path" HF reference; otherwise a local model file
+        if _is_local_ref(ref):  # otherwise a "repo:path" HF reference
+            self.model_path = ref
+        else:
             repo, filename = ref.split(":", 1)
             self.model_path = hf_hub_download(repo, filename, repo_type="model")  # nosec B615
-        else:
-            self.model_path = ref
         self.model = None  # lazy-loaded on the first forward, like IMPACTReg
 
     @staticmethod
@@ -759,8 +761,9 @@ class RegistrationNet(network.Network):
             dim=3,
         )
         # Fail at build time: with no feature model the IMPACT loss would surface as a None-loss crash
-        # deep in the deformable stage, minutes after the rigid/affine stages already ran.
-        if deformable_metric == "impact" and not models:
+        # deep in the deformable stage, minutes after the rigid/affine stages already ran. With
+        # deformable_method 'none' the metric is never consumed, so a stale 'impact' stays harmless.
+        if deformable_method != "none" and deformable_metric == "impact" and not models:
             raise ValueError("deformable_metric='impact' requires at least one feature model under 'models'.")
         engine = FireANTsEngine(
             scales,

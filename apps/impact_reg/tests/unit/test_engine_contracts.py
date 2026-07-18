@@ -40,6 +40,26 @@ def test_download_models_accepts_a_local_file_beside_hf_refs(tmp_path: Path, mon
     assert staged == [(str(local), local.resolve()), ("MIND/R1D2.pt", fetched)]
 
 
+def test_download_models_refuses_a_missing_local_file_at_build(tmp_path: Path) -> None:
+    # A typo'd local path must fail HERE: staged later it would plant a dangling symlink at the
+    # user-supplied location and crash the SECOND case with an unrelated FileExistsError.
+    engine = SimpleNamespace(_models=[str(tmp_path / "typo.pt")])
+    with pytest.raises(ValueError, match="does not exist"):
+        ElastixEngine._download_models(engine)
+
+
+def test_a_windows_drive_letter_is_a_local_path_not_an_hf_repo() -> None:
+    # 'C:/models/m.pt' contains ':' but is a path — splitting it as repo 'C' would send a Windows
+    # user's local ref to Hugging Face. The same rule keys the registry/staged name.
+    from impact_reg_konfai.models.elastix import _is_local_ref, _model_key
+
+    assert _is_local_ref("C:/models/m.pt") and _is_local_ref(r"D:\models\m.pt")
+    assert _is_local_ref("/abs/model.pt") and _is_local_ref("relative/model.pt")
+    assert not _is_local_ref("org/repo:MIND/R1D2.pt")
+    assert _model_key("C:/models/m.pt") == "C:/models/m.pt"
+    assert _model_key("org/repo:MIND/R1D2.pt") == "MIND/R1D2.pt"
+
+
 def test_elastix_engine_refuses_an_empty_parameter_map_list() -> None:
     # 'resolutions' rewrites a template's resolution-dependent lines; it never creates one. Without a
     # map elastix would launch with no -p and die in a cryptic subprocess error.

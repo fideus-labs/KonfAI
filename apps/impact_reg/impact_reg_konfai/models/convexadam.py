@@ -50,6 +50,8 @@ from konfai.network import network
 from konfai.utils.config import Choices, Range
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
 
+from .elastix import _is_local_ref
+
 DIM = 3
 # The feature model's input channel count is an intrinsic property of the pretrained model (grayscale
 # medical images), not a tunable — so it's fixed here, never a config/signature parameter.
@@ -254,14 +256,18 @@ class ConvexAdamEngine:
 
     @staticmethod
     def _download_models(models: list[str]) -> list[str]:
-        """Fetch the TorchScript feature models (``repo:filename``, or a local file); return their paths."""
+        """Fetch the TorchScript feature models (``repo:filename``, or a local file); return their paths.
+        A missing local file fails here, at build, not as an itk load error mid-registration."""
         paths = []
         for ref in models:
-            if ":" in ref:
+            if _is_local_ref(ref):
+                local = Path(ref).expanduser().resolve()
+                if not local.is_file():
+                    raise ValueError(f"local model ref '{ref}' does not exist (resolved to '{local}').")
+                paths.append(str(local))
+            else:
                 repo, filename = ref.split(":", 1)
                 paths.append(str(hf_hub_download(repo_id=repo, filename=filename, repo_type="model")))  # nosec B615
-            else:
-                paths.append(str(Path(ref).expanduser().resolve()))
         return paths
 
     def _model_configurations(self) -> list["itk.ModelConfiguration"]:
