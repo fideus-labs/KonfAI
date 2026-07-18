@@ -1081,6 +1081,13 @@ class OutSameAsGroupDataset(OutputDataset):
             else:
                 resample.write_stream_cache_attribute(attribute, in_shape)
             return result
+        if kind is LocalityKind.ORIENTATION and not stage.inverted:
+            # A forward orientation writes the case origin/direction from the extent it is handed; run
+            # the tensor action on a throwaway scope so it does not record the SLAB's extent, then write
+            # the case geometry from the full ``in_shape`` (its documented contract) -- as RESCALE does.
+            result = stage(name, block, Attribute(attribute))
+            cast(TransformInverse, stage.transform).write_stream_cache_attribute(attribute, in_shape)
+            return result
         result = stage(name, block, attribute)
         if kind is LocalityKind.HALO:
             lead = (slice(None),) * (result.dim() - len(target))

@@ -48,7 +48,7 @@ from konfai.data.transform import (
     Transform,
     TransformInverse,
 )
-from konfai.predictor import Mean, OutSameAsGroupDataset, Reduction
+from konfai.predictor import Mean, OutSameAsGroupDataset, Reduction, _FinalizeStage
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import PatchError
 
@@ -149,6 +149,42 @@ def test_stream_orientation_canonical_inverse_matches_whole_volume(seed: int) ->
         _partitions(Z, rng),
     )
     assert torch.equal(got, reference)
+
+
+def test_forward_orientation_records_case_geometry_from_the_volume_not_the_slab() -> None:
+    # A FORWARD orientation in the write pipe records the output origin from the extent it is handed;
+    # streamed, that is a slab window, so it must be given the FULL volume extent instead (Canonical
+    # documents "the extent is the VOLUME's, never a patch's"). Without the fix the sink origin was
+    # derived from the slab height and diverged from the whole-volume path.
+    ds = _output_dataset()
+    canonical = Canonical()
+    stage = _FinalizeStage(transform=canonical, inverted=False)
+    in_shape = [Z, Y, X]
+    direction = np.array([[1.0, 0, 0], [0, 0, 1], [0, 1, 0]]).flatten()  # swap y/z: origin then depends on the z-extent
+
+    def _attr() -> Attribute:
+        attribute = Attribute()
+        attribute["Direction"] = direction
+        attribute["Spacing"] = np.ones(3)
+        attribute["Origin"] = np.array([7.0, 5.0, 3.0])
+        return attribute
+
+    reference = _attr()
+    canonical.write_stream_cache_attribute(reference, in_shape)  # the whole-volume path's geometry
+
+    slab_derived = _attr()
+    canonical.write_stream_cache_attribute(slab_derived, [2, Y, X])  # what the slab shape would produce
+
+    got = _attr()
+    target = (slice(0, 2), slice(0, Y), slice(0, X))  # a 2-row slab, height != Z
+    ds._apply_pipe_stage(
+        stage, LocalityKind.ORIENTATION, torch.zeros(C, 2, Y, X), target, list(target), in_shape, in_shape, got, "case"
+    )
+
+    assert np.allclose(got.get_np_array("Origin"), reference.get_np_array("Origin"))
+    assert not np.allclose(
+        reference.get_np_array("Origin"), slab_derived.get_np_array("Origin")
+    )  # the test distinguishes
 
 
 @pytest.mark.parametrize("seed", range(4))

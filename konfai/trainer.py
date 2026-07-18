@@ -884,6 +884,10 @@ class Trainer(DistributedObject):
                     raise  # no free axis declared: not auto-patched
                 # The restart loop IS the sizing iteration: the step that just OOMed already measured
                 # its transient for free. Drop the failed step's gradients before reading free VRAM.
+                # The auto-patch OOM fires on the first batch's FORWARD (the memory peak), before any
+                # optimizer.step(), so no weights are updated. The rare case where it fires mid-step
+                # instead leaves that first batch's partial update in place (the restart continues from
+                # it); this is a bounded one-batch perturbation, not worth a whole-run state snapshot.
                 measured = self._transient_at_oom(device)
                 self.model.zero_grad(set_to_none=True)
                 candidate = self._shrunken_patch(measured, self._usable_vram_after_oom(device))
