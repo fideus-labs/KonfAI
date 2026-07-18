@@ -914,8 +914,8 @@ class KonfAIApp(AbstractKonfAIApp):
         - directories are removed (unless they are symlinks)
         - files are unlinked
 
-        On platforms or filesystems that do not support symlinks (e.g. some Windows
-        environments), this falls back to copying:
+        On platforms or filesystems that do not support symlinks (Windows without
+        Developer Mode raises OSError WinError 1314), this falls back to copying:
         - directories via copytree
         - files via copy2
 
@@ -926,7 +926,9 @@ class KonfAIApp(AbstractKonfAIApp):
         dst : Path
             Destination symlink path.
         """
-        if dst.exists():
+        # ``is_symlink()`` also catches a BROKEN link (its target is gone), which ``exists()`` reports
+        # as absent -- left in place it makes both os.symlink and the copy fallback fail on FileExists.
+        if dst.is_symlink() or dst.exists():
             if dst.is_dir() and not dst.is_symlink():
                 shutil.rmtree(dst)
             else:
@@ -936,7 +938,7 @@ class KonfAIApp(AbstractKonfAIApp):
         try:
             os.symlink(src, dst, target_is_directory=src.is_dir())
         except OSError:
-            # fallback Windows / FS without symlink
+            # Windows without Developer Mode (WinError 1314), or a filesystem without symlink support.
             if src.is_dir():
                 shutil.copytree(src, dst)
             else:
