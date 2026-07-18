@@ -1142,9 +1142,11 @@ class ResampleTransform(TransformInverse):
 class Mask(Transform):
     """Set everything outside a mask to a constant.
 
-    Whole-volume: ``__call__`` does not know where its tensor sits, so it cannot read the matching
-    region of the mask (``Clip(mask=)`` and ``Standardize(mask=)`` load whole volumes for the same
-    reason).
+    Per-voxel, so it declares ``SLAB``: the value map is exact on a slab, and the only thing that
+    needs the slab's place in the volume is *which rows of the mask to read*. The mask is assumed
+    aligned to the volume at this point, so a slab reads the matching rows of the mask (a dataset mask
+    region-read, a ``.mha`` mask sliced from the one cached copy) instead of loading the whole volume.
+    ``__call__`` (the whole-volume path, and the read side, which has no region to place) stays exact.
     """
 
     def __init__(self, path: str = "./default.mha", value_outside: int = 0) -> None:
@@ -1153,24 +1155,49 @@ class Mask(Transform):
         self.value_outside = value_outside
         self._cached_mask: torch.Tensor | None = None
 
-    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        if self.path.endswith(".mha"):
-            _require_simpleitk()
-            if self._cached_mask is None:
-                self._cached_mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
-            mask = self._cached_mask
-        else:
-            mask = None
-            for dataset in self.datasets:
-                if dataset.is_dataset_exist(self.path, name):
-                    mask, _ = dataset.read_data(self.path, name)
-                    break
-            if mask is None:
-                raise NameError(f"Mask : {self.path}/{name} not found")
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.SLAB)
+
+    def _apply(self, tensor: torch.Tensor, mask: torch.Tensor | np.ndarray) -> torch.Tensor:
         # Index on the tensor's own device so the mask works whether the volume is on CPU or GPU
         # (``torch.as_tensor`` keeps a torch mask as-is and wraps a numpy one, moving it to the device).
         tensor[torch.as_tensor(mask, device=tensor.device) == 0] = self.value_outside
         return tensor
+
+    def _cached_mha(self) -> torch.Tensor:
+        _require_simpleitk()
+        if self._cached_mask is None:
+            self._cached_mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
+        return self._cached_mask
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if self.path.endswith(".mha"):
+            return self._apply(tensor, self._cached_mha())
+        for dataset in self.datasets:
+            if dataset.is_dataset_exist(self.path, name):
+                mask, _ = dataset.read_data(self.path, name)
+                return self._apply(tensor, mask)
+        raise NameError(f"Mask : {self.path}/{name} not found")
+
+    def stream_slab(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        region: slice,
+        spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> torch.Tensor:
+        # Read only the slab's rows of the (aligned) mask, so the output streams within a window: a
+        # dataset mask is region-read; a ``.mha`` mask is sliced from the single cached copy (the mask
+        # is 1-channel, far smaller than the C-channel output it would otherwise hold whole).
+        if self.path.endswith(".mha"):
+            return self._apply(tensor, self._cached_mha()[:, region])
+        slices = (slice(None), region, *(slice(0, extent) for extent in spatial_shape[1:]))
+        for dataset in self.datasets:
+            if dataset.is_dataset_exist(self.path, name):
+                mask, _ = dataset.read_data_slice(self.path, name, slices)
+                return self._apply(tensor, mask)
+        raise NameError(f"Mask : {self.path}/{name} not found")
 
 
 class Dilate(Transform):
