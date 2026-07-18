@@ -196,15 +196,25 @@ def test_leaderboard_payload_reads_latest_metrics(tmp_path: Path) -> None:
 
 def test_leaderboard_ranks_app_evaluation_trials(tmp_path: Path) -> None:
     """An app evaluate/pipeline writes its metrics under AppEvaluations/AppPipelines; the leaderboard must
-    rank those tuned trials alongside train-branch runs so a refine loop can compare them."""
+    rank those tuned trials alongside train-branch runs so a refine loop can compare them.
+
+    The fixture mirrors the REAL trees: an evaluate trial copies the bundle's Evaluations tree into
+    AppEvaluations/<label>-<uuid8>/<train_name>/Metric_*.json (no intermediate 'Evaluations' level), a
+    pipeline trial nests one (AppPipelines/<label>-<uuid8>/Evaluations/<train_name>/...). Every trial's
+    inner directory repeats the SAME bundle train_name, so the trial dir is the only usable identity."""
     service = _service(tmp_path)
     workspace = service.workspace_layout.workspace_dir()
-    for label, score in (("eval_app__iterations_100", 0.70), ("eval_app__iterations_300", 0.88)):
-        metric_dir = workspace / "AppEvaluations" / label / "Evaluations" / "RUN"
+    for label, score in (("eval_app__iterations_100-aaaa1111", 0.70), ("eval_app__iterations_300-bbbb2222", 0.88)):
+        metric_dir = workspace / "AppEvaluations" / label / "SEG_EVAL"
         metric_dir.mkdir(parents=True)
         (metric_dir / "Metric_TRAIN.json").write_text(
             json.dumps({"aggregates": {"Dice": {"mean": score}}}), encoding="utf-8"
         )
+    pipeline_dir = workspace / "AppPipelines" / "pipe_app__spacing_2-cccc3333" / "Evaluations" / "SEG_EVAL"
+    pipeline_dir.mkdir(parents=True)
+    (pipeline_dir / "Metric_TRAIN.json").write_text(
+        json.dumps({"aggregates": {"Dice": {"mean": 0.75}}}), encoding="utf-8"
+    )
 
     payload = service.leaderboard_payload(metric="Dice")
 
@@ -214,15 +224,20 @@ def test_leaderboard_ranks_app_evaluation_trials(tmp_path: Path) -> None:
     paths = " ".join(row["metrics_path"] for row in payload["leaderboard"])
     assert "iterations_100" in paths
     assert "iterations_300" in paths
-    # Every trial shares the inner 'RUN' directory, so the row identity must be the trial label —
-    # two rows both named 'RUN' cannot be told apart, let alone addressed by get_run_metrics.
+    # Every trial repeats the inner 'SEG_EVAL' train_name, so the row identity must be the trial label —
+    # three rows all named 'SEG_EVAL' cannot be told apart, let alone addressed by get_run_metrics.
     assert {row["run_name"] for row in payload["leaderboard"]} == {
-        "eval_app__iterations_100",
-        "eval_app__iterations_300",
+        "eval_app__iterations_100-aaaa1111",
+        "eval_app__iterations_300-bbbb2222",
+        "pipe_app__spacing_2-cccc3333",
     }
-    # And a specific trial is addressable by that label (not just the newest 'RUN' on mtime).
-    trial = service.run_metrics_payload("eval_app__iterations_100")
+    # A specific trial is addressable by its label (not just the newest inner dir on mtime) — the
+    # leaderboard's labels must round-trip through get_run_metrics.
+    trial = service.run_metrics_payload("eval_app__iterations_100-aaaa1111")
     assert trial["metrics"]["aggregates"]["Dice"]["mean"] == 0.70
+    assert service.run_metrics_payload("pipe_app__spacing_2-cccc3333")["metrics"]["aggregates"]["Dice"]["mean"] == 0.75
+    # The inner train_name keeps working as a compatibility alias (newest on mtime wins).
+    assert service.run_metrics_payload("SEG_EVAL")["run_name"] == "SEG_EVAL"
 
 
 def test_session_summary_blocks_evaluation_without_prediction_artifacts(tmp_path: Path) -> None:
