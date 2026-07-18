@@ -247,14 +247,15 @@ def resolve_patch(
 
 
 def get_patch_slices_from_shape(
-    patch_size: list[int], shape: list[int], overlap_tmp: OverlapSpec
+    patch_size: list[int], shape: list[int], overlap_tmp: OverlapSpec, multiple: list[int] | None = None
 ) -> tuple[list[tuple[slice, ...]], list[tuple[int, bool]]]:
 
-    has_free_axis = patch_size is not None and any(p == 0 for p in patch_size) and not all(p == 0 for p in patch_size)
-    if patch_size is None or all(p == 0 for p in patch_size):
-        patch_size = shape
-    else:
-        patch_size = concretize_patch_size(patch_size, shape)
+    # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple`` so a
+    # small case still reaches the network at a valid input size -- the up-front worst-case sizing only
+    # guarantees the largest case, and a heterogeneous smaller one would otherwise arrive non-divisible.
+    template = [0] * len(shape) if patch_size is None else patch_size
+    has_free_axis = any(p == 0 for p in template) and not all(p == 0 for p in template)
+    patch_size = concretize_patch_size(template, shape, multiple)
     if len(shape) != len(patch_size):
         raise DatasetManagerError(
             f"Dimension mismatch: 'patch_size' has {len(patch_size)} dimensions, but 'shape' has {len(shape)}.",

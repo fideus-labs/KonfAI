@@ -13,11 +13,13 @@
 # limitations under the License.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""``Network.downsampling_factor`` reads the per-axis input divisor off the graph (the product of the
-encoder's downsampling strides), used to size a free patch axis to a valid extent for the model."""
+"""``Network.downsampling_factor`` reads the per-axis input divisor off the graph -- the coarsest
+downsampling the branch register reaches -- used to size a free patch axis to a valid extent for the
+model. Parallel branches (a residual shortcut beside the main path) reduce the same level once."""
 
 import pytest
 import torch
+from konfai.models.python.classification.resnet import ResBlock
 from konfai.models.python.segmentation.plainconvunet import PlainConvUNet
 from konfai.network.network import Network
 
@@ -65,3 +67,19 @@ def test_downsampling_factor_ignores_the_residual_avgpool_and_transpose_upsample
             self.add_module("up", torch.nn.ConvTranspose3d(4, 4, 2, stride=2))  # must NOT count
 
     assert _OneLevel().downsampling_factor() == [2, 2, 2]
+
+
+def test_downsampling_factor_counts_a_parallel_strided_shortcut_once():
+    """A torchvision-style residual block (KonfAI ``ResBlock``) strides its main conv AND its
+    projection shortcut in parallel -- both reduce the SAME level, merged by the residual ``Add``. A
+    flat ``modules()`` walk multiplies the two strides and double-counts the level; the branch trace
+    follows the two parallel branches to their merge and counts it once. Two strided blocks reduce by
+    2 each -> [4, 4, 4], not the [16, 16, 16] the double-count would report."""
+
+    class _TwoStridedResiduals(Network):
+        def __init__(self) -> None:
+            super().__init__()
+            self.add_module("Block_0", ResBlock(1, 4, downsample=True, dim=3))
+            self.add_module("Block_1", ResBlock(4, 8, downsample=True, dim=3))
+
+    assert _TwoStridedResiduals().downsampling_factor() == [4, 4, 4]

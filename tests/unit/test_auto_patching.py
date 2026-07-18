@@ -127,6 +127,43 @@ class TestPatchGrid:
         assert all(s[0].stop <= 37 and s[1].stop <= 41 and s[2].stop <= 29 for s in fixed)
 
 
+class TestFreeAxisReachesTheModelAsAValidMultiple:
+    """The up-front sizing rounds the WORST case to the model multiple; a smaller heterogeneous case
+    must still round on its OWN grid, or it reaches the network at a non-divisible extent and crashes
+    the encoder/decoder skips. The rounding lives on the per-case read, keyed by ``free_axis_multiple``."""
+
+    def test_whole_volume_free_axis_stays_a_single_clamped_patch(self):
+        # The grid is unchanged: one whole-volume patch whose slice is clamped to the extent. The
+        # round-up to the multiple is a PADDING target, not extra patches.
+        slices, nb = get_patch_slices_from_shape([0, 0, 0], [122, 250, 250], None, [16, 16, 16])
+        assert slices == [(slice(0, 122), slice(0, 250), slice(0, 250))]
+        assert all(count == 1 for count, _ in nb)
+
+    def test_small_case_is_padded_up_to_the_model_multiple(self):
+        import torch
+        from konfai.data.patching import DatasetPatch
+
+        patch = DatasetPatch(patch_size=[0, 0, 0], overlap=0)
+        patch.free_axis_multiple = [16, 16, 16]
+        patch.load([122, 250, 250], 0)
+        data = torch.zeros(1, 122, 250, 250)  # [C, Z, Y, X]
+        plan = patch.get_read_plan(data.shape, 0, 0, is_input=True)
+        model_input = patch.apply_read_plan(data[tuple(plan.data_slices)], plan)
+        assert list(model_input.shape) == [1, 128, 256, 256]
+
+    def test_no_multiple_leaves_the_extent_raw(self):
+        # Evaluation has no model, so no multiple: the free axis stays at its raw extent (unchanged).
+        import torch
+        from konfai.data.patching import DatasetPatch
+
+        patch = DatasetPatch(patch_size=[0, 0, 0], overlap=0)  # free_axis_multiple stays None
+        patch.load([122, 250, 250], 0)
+        data = torch.zeros(1, 122, 250, 250)
+        plan = patch.get_read_plan(data.shape, 0, 0, is_input=True)
+        model_input = patch.apply_read_plan(data[tuple(plan.data_slices)], plan)
+        assert list(model_input.shape) == [1, 122, 250, 250]
+
+
 class TestResolvePatch:
     def test_whole_volume_when_it_fits(self):
         # 64^3 float32 single channel = 1 MiB; a 100 MiB budget swallows it whole.

@@ -690,6 +690,9 @@ class Trainer(DistributedObject):
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
 
         state = State[konfai_state()]
+        # Cut the grids with the model's downsampling multiple already known, so each case's free axis
+        # rounds up to a valid input size (the graph -- hence the factor -- is final before init()).
+        self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
         self.dataset.prepare()
         self.model.init(self.autocast, state, self.dataset.get_groups_dest())
         self.model.init_outputs_group()
