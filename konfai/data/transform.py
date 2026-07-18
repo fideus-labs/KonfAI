@@ -877,8 +877,8 @@ class Resample(TransformInverse, ABC):
         half-pixel source (``scale * (o + 0.5) - 0.5``, plus the ``+2``/``halo`` margin for the i1
         neighbour) AND the voxel nearest picks (``floor(o * scale)`` -- F.interpolate's own nearest
         index). Under strong downsampling the nearest voxel of the first output column falls BELOW the
-        linear window's start, so omitting it read one voxel short and the gather wrapped a negative
-        local index onto the far edge.
+        linear window's start: the window must include it, or the gather wraps a negative local index
+        onto the far edge.
         """
         source_slices: list[slice] = []
         for k, sl in enumerate(target_slices):

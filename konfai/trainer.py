@@ -667,7 +667,6 @@ class Trainer(DistributedObject):
             else None
         )
         self._vram_patch_candidate: list[int] | None = None
-        # Per-axis input multiple the model needs (its downsampling factor); a free axis is sized to it.
         self._downsampling_factor: list[int] | None = None
         self.autocast = autocast
         self.epochs = epochs
@@ -852,7 +851,7 @@ class Trainer(DistributedObject):
                 return
             except torch.cuda.OutOfMemoryError:
                 if self._vram_patch_template is None:
-                    raise  # no free axis declared: not auto-patched, the OOM propagates unchanged
+                    raise  # no free axis declared: not auto-patched
                 # The restart loop IS the sizing iteration: the step that just OOMed already measured
                 # its transient for free. Drop the failed step's gradients before reading free VRAM.
                 measured = self._transient_at_oom(device)

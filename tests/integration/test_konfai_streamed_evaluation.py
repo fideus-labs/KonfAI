@@ -23,7 +23,6 @@ feature stands on -- and that the budget run actually took the patched path.
 """
 
 import json
-import os
 import subprocess
 import sys
 import textwrap
@@ -34,15 +33,9 @@ import pytest
 
 SimpleITK = pytest.importorskip("SimpleITK")
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from test_konfai_core_workflows import _subprocess_env  # noqa: E402
+
 TRAIN_NAME = "STREAMED_EVAL_01"
-
-
-def _subprocess_env() -> dict[str, str]:
-    env = os.environ.copy()
-    pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(REPO_ROOT) if not pythonpath else f"{REPO_ROOT}{os.pathsep}{pythonpath}"
-    return env
 
 
 EVALUATION_TEMPLATE = """Evaluator:

@@ -94,7 +94,10 @@ The backend must also serve a disk region efficiently. HDF5 and OME-Zarr do so
 natively, DICOM reads selected slices, and SimpleITK supports regional reads for
 uncompressed MetaImage and non-gzipped NIfTI. Compressed/unsupported formats
 still return correct patches but may decode the volume for every request, with
-a warning. The complete planner rules, built-in declarations, equivalence
+a warning. A single-store HDF5 file is serialized per process: a streamed write
+into it (a `Save` materialization, a prediction sink) holds the store for its
+whole duration, so same-process threads reading other cases from that file wait.
+The complete planner rules, built-in declarations, equivalence
 tolerances, and custom-transform contract live in {doc}`../concepts/streaming`.
 
 ## OME-Zarr layout and levels
@@ -175,9 +178,10 @@ slab by slab without ever being held whole. A masked finalize (`Mask`) streams
 too: each slab reads only its aligned mask region. What streaming cannot honour
 (a whole-volume transform or a destination without region writes) splits
 instead: the pointwise prefix still streams into a light post-reduction buffer
-and the remaining stages run once on it. Only several augmentations (TTA inverses
-apply to the assembled volume) or a non-voxel-local reduction keep the
-whole-volume path. A streamed case is voxel-identical to the assembled path on a
+and the remaining stages run once on it. Only a TTA draw whose inverse moves the
+slab axis (a z-flip, a z-moving permute), a TTA case too light to be worth the
+slab-synchronized reduce, or a non-voxel-local reduction keep the whole-volume
+path. A streamed case is voxel-identical to the assembled path on a
 given device, except a linear-resample inverse, which streams by default and
 matches the whole-volume `F.interpolate` to float rounding rather than
 bit-for-bit. `KONFAI_STREAMED_WRITES=0` forces the whole-volume path globally.
