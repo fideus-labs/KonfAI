@@ -19,7 +19,9 @@
 import copy
 import importlib
 import os
+import queue
 import shutil
+import threading
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable
@@ -147,6 +149,53 @@ class Concat(Reduction):
         return torch.cat(tensors, dim=1)
 
 
+class _AsyncWriter:
+    """A background thread owning one output dataset's disk writes, in submission order.
+
+    The prediction loop otherwise waits on every device-to-host copy and destination write between
+    two forwards; submitting them here overlaps that tail with the next batch. The queue is bounded,
+    so a slow destination back-pressures the loop instead of buffering the run; the first failure is
+    kept, later operations drain unexecuted, and the failure re-raises at the next submission and at
+    ``close`` — a run never ends with a write silently missing.
+    """
+
+    _CAPACITY = 4
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue[Callable[[], None] | None] = queue.Queue(maxsize=self._CAPACITY)
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, name="konfai-writer", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            operation = self._queue.get()
+            try:
+                if operation is None:
+                    return
+                if self._error is None:
+                    operation()
+            except BaseException as error:  # kept and re-raised on the loop thread
+                self._error = error
+            finally:
+                self._queue.task_done()
+
+    def submit(self, operation: Callable[[], None]) -> None:
+        self._raise_pending()
+        self._queue.put(operation)
+
+    def close(self) -> None:
+        """Drain every submitted operation, stop the thread, and surface any failure."""
+        self._queue.put(None)
+        self._thread.join()
+        self._raise_pending()
+
+    def _raise_pending(self) -> None:
+        if self._error is not None:
+            error, self._error = self._error, None
+            raise error
+
+
 class OutputDataset(Dataset, NeedDevice, ABC):
     """
     Abstract prediction sink that accumulates model outputs and writes them to disk.
@@ -203,6 +252,30 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self._accum_device: dict[int, torch.device] = {}
         # Same single-decision rule for the CPU-blend reduction device (see ``_reduction_device``).
         self._reduce_device: dict[int, torch.device] = {}
+        # Disk writes go to a background writer whenever the destination serves disjoint files per
+        # entry (see ``Dataset.concurrent_write_safe``): the device-to-host copy and the write then
+        # overlap the next forward, byte-identically — same operations, same order. A single-store
+        # destination stays inline, so nothing ever writes one store from two threads.
+        # ``KONFAI_ASYNC_WRITES=0`` is the ops/debug kill-switch, mirroring KONFAI_STREAMED_WRITES.
+        self._async_writes = (
+            os.environ.get("KONFAI_ASYNC_WRITES", "1").lower() not in ("0", "false") and self.concurrent_write_safe()
+        )
+        self._writer: _AsyncWriter | None = None
+
+    def _submit_write(self, operation: Callable[[], None]) -> None:
+        """Run ``operation`` on the background writer, or inline when the destination must stay serial."""
+        if not self._async_writes:
+            operation()
+            return
+        if self._writer is None:
+            self._writer = _AsyncWriter()
+        self._writer.submit(operation)
+
+    def finalize_writes(self) -> None:
+        """Drain and stop the background writer; every submitted write is on disk when this returns."""
+        if self._writer is not None:
+            writer, self._writer = self._writer, None
+            writer.close()
 
     # A pageable D2H copy on a large multi-class patch is a slow, fully synchronous PCIe transfer;
     # staging through page-locked memory only pays off once the patch is large enough that the copy,
@@ -339,8 +412,14 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         raise NotImplementedError()
 
     def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
-        super().write(self.group, name, layer.detach().cpu().numpy(), self.attributes[index][0][0])
+        attribute = self.attributes[index][0][0]
         self.attributes.pop(index)
+        write = super().write
+
+        def operation() -> None:
+            write(self.group, name, layer.detach().cpu().numpy(), attribute)
+
+        self._submit_write(operation)
 
     def reset(self) -> None:
         """Drop every in-flight accumulation (the OOM-restart path re-runs the rank's cases from scratch)."""
@@ -569,9 +648,14 @@ class OutSameAsGroupDataset(OutputDataset):
             if finished:
                 self._finish_stream(index_dataset)
         except BaseException as error:
-            sink = self._stream_sinks.pop(index_dataset, None)
-            if sink is not None:
-                sink.__exit__(type(error), error, error.__traceback__)
+
+            def abort(error: BaseException = error, index: int = index_dataset) -> None:
+                sink = self._stream_sinks.pop(index, None)
+                if sink is not None:
+                    sink.__exit__(type(error), error, error.__traceback__)
+
+            with suppress(Exception):
+                self._submit_write(abort)
             plan = self._stream_plans.get(index_dataset)
             if plan is not None:
                 for position in plan.slab_stages:
@@ -917,26 +1001,35 @@ class OutSameAsGroupDataset(OutputDataset):
         self, index: int, target: tuple[slice, ...], block: torch.Tensor, attribute: Attribute
     ) -> None:
         """Write one finalized output block into the case's sink (opened at the first block, once the
-        chain has fixed the output's shape, channel count and dtype)."""
-        array = block.detach().cpu().numpy()
-        if index not in self._stream_sinks:
-            state = self._region_states.get(index)
-            spatial = (
-                state.shapes[-1]
-                if state is not None
-                else [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
-            )
-            sink = self.open_data_stream(
-                self.group, self.names[index], [array.shape[0], *spatial], array.dtype, attribute
-            )
+        chain has fixed the output's shape, channel count and dtype).
+
+        The whole write — device-to-host copy, lazy sink open, region write — is one submitted
+        operation, so ``_stream_sinks`` is only ever touched in submission order; the attribute is
+        snapshotted because the region state's evolves with later emissions."""
+        state = self._region_states.get(index)
+        spatial = (
+            state.shapes[-1]
+            if state is not None
+            else [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
+        )
+        name = self.names[index]
+        attribute = Attribute(attribute)
+
+        def operation() -> None:
+            array = block.detach().cpu().numpy()
+            sink = self._stream_sinks.get(index)
             if sink is None:
-                raise PredictorError(
-                    f"Streamed write refused by the '{self.file_format}' backend for dtype"
-                    f" '{array.dtype}' on output '{self.group}': write it to an h5 or omezarr"
-                    f" dataset, or set KONFAI_STREAMED_WRITES=0 to force the whole-volume path."
-                )
-            self._stream_sinks[index] = sink
-        self._stream_sinks[index].write_slice((slice(0, array.shape[0]), *target), array)
+                sink = self.open_data_stream(self.group, name, [array.shape[0], *spatial], array.dtype, attribute)
+                if sink is None:
+                    raise PredictorError(
+                        f"Streamed write refused by the '{self.file_format}' backend for dtype"
+                        f" '{array.dtype}' on output '{self.group}': write it to an h5 or omezarr"
+                        f" dataset, or set KONFAI_STREAMED_WRITES=0 to force the whole-volume path."
+                    )
+                self._stream_sinks[index] = sink
+            sink.write_slice((slice(0, array.shape[0]), *target), array)
+
+        self._submit_write(operation)
 
     def _finish_stream(self, index: int) -> None:
         """Complete the case: flush the region scheduler, or run the whole-volume tail on the buffer
@@ -954,7 +1047,12 @@ class OutSameAsGroupDataset(OutputDataset):
         name = self.names[index]
         for stage in plan.stages[plan.tail_start :]:
             result = stage(name, result, attribute)
-        super().write(self.group, name, result.detach().cpu().numpy(), attribute)
+        write = super().write
+
+        def operation() -> None:
+            write(self.group, name, result.detach().cpu().numpy(), attribute)
+
+        self._submit_write(operation)
 
     def _prepare_copy_slab(
         self,
@@ -1046,9 +1144,13 @@ class OutSameAsGroupDataset(OutputDataset):
 
     def _close_stream(self, index: int) -> None:
         """Finalize the case's sink and drop its bookkeeping (``is_done`` then reports nothing left)."""
-        sink = self._stream_sinks.pop(index, None)
-        if sink is not None:
-            sink.__exit__(None, None, None)
+
+        def operation() -> None:
+            sink = self._stream_sinks.pop(index, None)
+            if sink is not None:
+                sink.__exit__(None, None, None)
+
+        self._submit_write(operation)
         self._stream_plans.pop(index, None)
         self._region_states.pop(index, None)
         self._stream_buffers.pop(index, None)
@@ -1355,6 +1457,15 @@ class _Predictor:
         self.model_composite.eval()
         self.model_composite.module.set_state(NetState.PREDICTION)
         self.dataloader_prediction.dataset.load("Prediction")
+        try:
+            self._run_batches()
+        finally:
+            # Every submitted write must be on disk before the run returns — including on the error
+            # path, where the drain also closes the sinks the abort operations enqueued.
+            for output_dataset in self.outputs_dataset.values():
+                output_dataset.finalize_writes()
+
+    def _run_batches(self) -> None:
         with tqdm.tqdm(
             iterable=enumerate(self.dataloader_prediction),
             leave=True,

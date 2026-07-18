@@ -87,6 +87,7 @@ def _drive_tta(
     dtype: torch.dtype = torch.float32,
     patch_combine=None,
     case_index: int = 0,
+    file_format: str = "h5",
 ):
     """Push one TTA case (identity copy + one augmented copy) patch by patch through ``add_layer``
     against an h5 sink, interleaved along the slab axis exactly as the prediction mapping orders it,
@@ -135,7 +136,7 @@ def _drive_tta(
 
     output_dataset = OutSameAsGroupDataset(
         same_as_group="src:dest",
-        dataset_filename=f"{tmp_path}/output.h5:h5",
+        dataset_filename=f"{tmp_path}/output.h5:h5" if file_format == "h5" else f"{tmp_path}/output:{file_format}",
         group="out",
         patch_combine=None,
         reduction="Mean",
@@ -159,7 +160,9 @@ def _drive_tta(
             output_dataset.write_prediction(0, "CASE_000", result)
             whole_volume = True
 
-    data, _ = Dataset(f"{tmp_path}/output.h5", "h5").read_data("out", "CASE_000")
+    output_dataset.finalize_writes()
+    store = f"{tmp_path}/output.h5" if file_format == "h5" else f"{tmp_path}/output"
+    data, _ = Dataset(store, file_format).read_data("out", "CASE_000")
     return torch.from_numpy(data), whole_volume
 
 

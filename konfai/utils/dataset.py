@@ -1449,6 +1449,17 @@ class Dataset:
             return True
         return self.file_format == "h5" and os.path.exists(f"{self.filename}.h5")
 
+    def concurrent_write_safe(self) -> bool:
+        """Whether writes to different entries land in disjoint files, so a background writer may
+        flush one entry while another thread writes elsewhere in the dataset.
+
+        Mirrors the backend dispatch in ``File.__enter__``: everything that is not a single-store
+        backend is a :class:`SitkFile` directory, one image file per ``(group, name)``. A single
+        store (one HDF5 file, one zarr hierarchy, a DICOM series) shares handles and metadata across
+        entries and must stay serial.
+        """
+        return self.file_format not in ("h5", "omezarr", "dicom")
+
     def write(
         self,
         group: str,

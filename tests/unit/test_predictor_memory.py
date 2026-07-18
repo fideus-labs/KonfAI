@@ -260,6 +260,9 @@ def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_out
             assert layer.shape == (1, 2, 2)
             self.writes += 1
 
+        def finalize_writes(self) -> None:
+            pass
+
     class DummyCompositeModule:
         @staticmethod
         def set_state(state) -> None:
