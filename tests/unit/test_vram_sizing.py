@@ -167,6 +167,7 @@ def _predictor(out_channels, nb_augmentation, reduction, margined, candidate=Non
     predictor = Predictor.__new__(Predictor)
     predictor._vram_patch_template = [0, 0, 0]
     predictor._vram_patch_candidate = candidate
+    predictor._downsampling_factor = None
     predictor.dataset = _Data([100, 100, 100])
     predictor.model = _Model(out_channels)
     predictor.combine = Mean()

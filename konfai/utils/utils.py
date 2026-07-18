@@ -88,11 +88,20 @@ DEFAULT_OVERLAP_FRACTION = 0.2
 OverlapSpec = int | float | str | list["int | float | str"] | None
 
 
-def concretize_patch_size(patch_size: list[int] | None, shape: list[int] | tuple[int, ...]) -> list[int]:
+def concretize_patch_size(
+    patch_size: list[int] | None,
+    shape: list[int] | tuple[int, ...],
+    multiple: list[int] | None = None,
+) -> list[int]:
     """Resolve the per-axis patch convention onto a concrete shape: ``0`` = free axis -> full extent.
 
     ``[0,0,0]`` (or ``None``) is the whole volume; ``[1,0,0]`` is a full 2D slice; a positive entry is
     fixed by the user and passes through (clamped to the extent so a patch never exceeds the volume).
+
+    ``multiple`` (the model's per-axis ``downsampling_factor``) rounds a free axis UP to a valid input
+    size for the network — 122 -> 128 for a factor 16 — so its encoder/decoder skips align. The rounded
+    size may exceed the extent; the border padding (``pad_to_patch``) fills it and the accumulator crops
+    it back, exactly as it does for any patch larger than its case.
     """
     if patch_size is None:
         return list(shape)
@@ -103,7 +112,15 @@ def concretize_patch_size(patch_size: list[int] | None, shape: list[int] | tuple
             f"shape: {shape}",
             "Both must have the same number of dimensions (e.g., 3D patch for 3D volume).",
         )
-    return [int(shape[d]) if p == 0 else min(int(p), int(shape[d])) for d, p in enumerate(patch_size)]
+
+    def resolve(d: int, p: int) -> int:
+        if p != 0:
+            return min(int(p), int(shape[d]))
+        extent = int(shape[d])
+        m = int(multiple[d]) if multiple is not None and d < len(multiple) else 1
+        return ((extent + m - 1) // m) * m if m > 1 else extent
+
+    return [resolve(d, p) for d, p in enumerate(patch_size)]
 
 
 def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int] | tuple[int, ...]) -> list[int]:

@@ -46,6 +46,15 @@ class TestConcretize:
     def test_none_is_the_whole_volume(self):
         assert concretize_patch_size(None, [10, 20, 30]) == [10, 20, 30]
 
+    def test_free_axis_rounds_up_to_the_model_multiple(self):
+        # A free axis is sized to a valid model input: the extent rounded UP to the downsampling factor
+        # (122 -> 128 for factor 8), which may exceed the extent (padding fills it, cropped back).
+        assert concretize_patch_size([0, 128, 128], [122, 130, 130], multiple=[8, 1, 1]) == [128, 128, 128]
+        assert concretize_patch_size([96, 0, 0], [200, 220, 240], multiple=[32, 32, 32]) == [96, 224, 256]
+        # An already-valid extent is unchanged; a fixed axis is never rounded (only clamped).
+        assert concretize_patch_size([0, 0, 0], [64, 128, 256], multiple=[32, 32, 32]) == [64, 128, 256]
+        assert concretize_patch_size([48, 0, 0], [50, 100, 100], multiple=[16, 16, 16]) == [48, 112, 112]
+
 
 class TestResolveOverlap:
     def test_default_is_a_fifth_of_the_patch_per_axis(self):
