@@ -384,17 +384,7 @@ class Evaluator(DistributedObject):
             output_tensor = batch_sample[output_group].tensor
             metric_device = output_tensor.device
             for target_group in self.metrics[output_group]:
-                targets = [
-                    (
-                        batch_sample[group].tensor.to(
-                            metric_device, non_blocking=batch_sample[group].tensor.device.type == "cpu"
-                        )
-                        if batch_sample[group].tensor.device != metric_device
-                        else batch_sample[group].tensor
-                    )
-                    for group in target_group.split(";")
-                    if group in batch_sample
-                ]
+                targets = self._targets_on(batch_sample, target_group, metric_device)
                 target_attribute = [batch_sample[output_group].attribute] + [
                     batch_sample[group].attribute for group in target_group.split(";") if group in batch_sample
                 ]
@@ -442,6 +432,21 @@ class Evaluator(DistributedObject):
         return result
 
     @staticmethod
+    def _targets_on(batch_sample: BatchSample, target_group: str, metric_device: torch.device) -> list[torch.Tensor]:
+        """The target tensors of a ``;``-joined group spec, moved to the metric's device."""
+        return [
+            (
+                batch_sample[group].tensor.to(
+                    metric_device, non_blocking=batch_sample[group].tensor.device.type == "cpu"
+                )
+                if batch_sample[group].tensor.device != metric_device
+                else batch_sample[group].tensor
+            )
+            for group in target_group.split(";")
+            if group in batch_sample
+        ]
+
+    @staticmethod
     def _record_value(
         result: dict[str, float],
         statistics: Statistics,
@@ -473,7 +478,7 @@ class Evaluator(DistributedObject):
         rank), so a change of case name marks the previous case complete -- ``_flush_pending`` at the
         end of the split closes the last one.
         """
-        name = next(batch_sample[output_group].name[0] for output_group in self.metrics)
+        name = batch_sample[next(iter(self.metrics))].name[0]
         if self._pending_name is not None and name != self._pending_name:
             self._flush_pending(statistics)
         self._pending_name = name
@@ -481,17 +486,7 @@ class Evaluator(DistributedObject):
             output_tensor = batch_sample[output_group].tensor
             metric_device = output_tensor.device
             for target_group in self.metrics[output_group]:
-                targets = [
-                    (
-                        batch_sample[group].tensor.to(
-                            metric_device, non_blocking=batch_sample[group].tensor.device.type == "cpu"
-                        )
-                        if batch_sample[group].tensor.device != metric_device
-                        else batch_sample[group].tensor
-                    )
-                    for group in target_group.split(";")
-                    if group in batch_sample
-                ]
+                targets = self._targets_on(batch_sample, target_group, metric_device)
                 for index, metric in enumerate(self.metrics[output_group][target_group]):
                     with torch.no_grad():
                         state = metric.partial_metric(output_tensor, *targets)
@@ -597,74 +592,46 @@ class Evaluator(DistributedObject):
             - Only the main process (`global_rank == 0`) writes final results to disk.
         """
 
+        self._evaluate_split(dataloaders[0], self.statistics_train, "TRAIN", world_size, gpu, global_rank)
+        if len(dataloaders) == 2:
+            self._evaluate_split(dataloaders[1], self.statistics_validation, "VALIDATION", world_size, gpu, global_rank)
+
+    def _evaluate_split(
+        self,
+        dataloader: DataLoader,
+        statistics: Statistics,
+        label: str,
+        world_size: int,
+        gpu: int,
+        global_rank: int,
+    ) -> None:
         def description(measure):
             return (
-                f"Metric TRAIN : {' | '.join(f'{k}: {v:.4f}' for k, v in measure.items())}"
+                f"Metric {label} : {' | '.join(f'{k}: {v:.4f}' for k, v in measure.items())}"
                 if measure is not None
-                else "Metric TRAIN : "
+                else f"Metric {label} : "
             )
 
-        self._iter_dataset = dataloaders[0].dataset
+        self._iter_dataset = dataloader.dataset
         try:
             with tqdm.tqdm(
-                iterable=enumerate(dataloaders[0]),
+                iterable=enumerate(dataloader),
                 leave=True,
                 desc=description(None),
-                total=len(dataloaders[0]),
+                total=len(dataloader),
                 ncols=0,
             ) as batch_iter:
                 for _, batch_sample in batch_iter:
-                    batch_iter.set_description(
-                        description(
-                            self.update(
-                                batch_sample,
-                                self.statistics_train,
-                            )
-                        )
-                    )
-            self._flush_pending(self.statistics_train)  # close the split's last case
+                    batch_iter.set_description(description(self.update(batch_sample, statistics)))
+            self._flush_pending(statistics)  # close the split's last case
         except BaseException as error:
             # A half-written error map must not survive as a valid-looking file: abort the open
             # region-write sinks so their backends remove the partial entries, then re-raise.
             self._abort_map_sinks(error)
             raise
-        outputs = synchronize_data(world_size, gpu, self.statistics_train.measures)
+        outputs = synchronize_data(world_size, gpu, statistics.measures)
         if global_rank == 0:
-            self.statistics_train.write(outputs)
-        if len(dataloaders) == 2:
-
-            def description(measure):
-                return (
-                    f"Metric VALIDATION : {' | '.join(f'{k}: {v:.4f}' for k, v in measure.items())}"
-                    if measure is not None
-                    else "Metric VALIDATION : "
-                )
-
-            self._iter_dataset = dataloaders[1].dataset
-            try:
-                with tqdm.tqdm(
-                    iterable=enumerate(dataloaders[1]),
-                    leave=True,
-                    desc=description(None),
-                    total=len(dataloaders[1]),
-                    ncols=0,
-                ) as batch_iter:
-                    for _, batch_sample in batch_iter:
-                        batch_iter.set_description(
-                            description(
-                                self.update(
-                                    batch_sample,
-                                    self.statistics_validation,
-                                )
-                            )
-                        )
-                self._flush_pending(self.statistics_validation)  # close the split's last case
-            except BaseException as error:
-                self._abort_map_sinks(error)
-                raise
-            outputs = synchronize_data(world_size, gpu, self.statistics_validation.measures)
-            if global_rank == 0:
-                self.statistics_validation.write(outputs)
+            statistics.write(outputs)
 
 
 def build_evaluate(
