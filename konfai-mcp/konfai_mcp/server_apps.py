@@ -483,6 +483,15 @@ class AppService:
         return str(self.workspace_layout.workspace_dir() / subdir / f"{label}-{uuid.uuid4().hex[:8]}")
 
     @staticmethod
+    def _param_label_suffix(config_overrides: list[str] | None) -> str:
+        """A short signature of the applied ``--set`` overrides, appended to a tuned trial's output label so
+        its leaderboard ``metrics_path`` says which parameters produced its score (``sanitize_name`` turns
+        the ``=`` into ``_``). Bounded so a many-override trial cannot blow up the directory name."""
+        if not config_overrides:
+            return ""
+        return "__" + "_".join(config_overrides)[:40]
+
+    @staticmethod
     def _require_trust(mode: str, allow_untrusted_code: bool, verb: str) -> None:
         """Enforce the code-execution gate for local/HuggingFace apps (remote runs on the user's server)."""
         if mode == "local" and not allow_untrusted_code:
@@ -531,7 +540,9 @@ class AppService:
         if cpu is not None and gpu is None:
             gpu = []
 
-        label = self.workspace_layout.sanitize_name(f"app_{self._app_label(ref, mode)}")
+        label = self.workspace_layout.sanitize_name(
+            f"app_{self._app_label(ref, mode)}{self._param_label_suffix(config_overrides)}"
+        )
         resolved_output = (
             str(Path(output).expanduser().resolve()) if output else self._default_output("AppOutputs", label)
         )
@@ -606,7 +617,9 @@ class AppService:
         if cpu is not None:
             merged_extra["cpu"] = cpu
 
-        label = self.workspace_layout.sanitize_name(f"{label_prefix}_{self._app_label(ref, mode)}")
+        label = self.workspace_layout.sanitize_name(
+            f"{label_prefix}_{self._app_label(ref, mode)}{self._param_label_suffix(merged_extra.get('config_overrides'))}"
+        )
         resolved_output = (
             str(Path(output).expanduser().resolve()) if output else self._default_output(output_subdir, label)
         )
@@ -753,6 +766,7 @@ class AppService:
         it_validation: int = 1000,
         models: list[str] | None = None,
         lr: float | None = None,
+        config_overrides: list[str] | None = None,
         gpu: list[int] | None = None,
         cpu: int | None = None,
         config_file: str = "Config.yml",
@@ -763,7 +777,8 @@ class AppService:
 
         Fine-tuning starts training from an existing app's checkpoint(s) on the user's dataset and
         produces a resolvable app bundle in ``output``. Same trust gate as inference: a local/HF app
-        imports code and pip-installs; a remote app trains on the user's own server.
+        imports code and pip-installs; a remote app trains on the user's own server. ``config_overrides``
+        (model/config ``--set`` tweaks) is local/HuggingFace only, mirroring infer/pipeline.
         """
         dataset_path = Path(dataset).expanduser().resolve()
         if not dataset_path.is_dir():
@@ -772,12 +787,18 @@ class AppService:
             raise ValueError("epochs must be a positive integer.")
 
         mode = self._infer_mode(ref)
+        if mode == "remote" and config_overrides:
+            raise ValueError(
+                "config_overrides (--set) is only supported for local/HuggingFace apps, not a remote server."
+            )
         self._require_trust(mode, allow_untrusted_code, "Fine-tuning")
 
         if cpu is not None and gpu is None:
             gpu = []
 
-        label = self.workspace_layout.sanitize_name(f"finetune_{self._app_label(ref, mode)}")
+        label = self.workspace_layout.sanitize_name(
+            f"finetune_{self._app_label(ref, mode)}{self._param_label_suffix(config_overrides)}"
+        )
         resolved_output = (
             str(Path(output).expanduser().resolve()) if output else self._default_output("AppBundles", label)
         )
@@ -792,6 +813,7 @@ class AppService:
             "it_validation": it_validation,
             "models": models or [],
             "lr": lr,
+            "config_overrides": config_overrides if mode == "local" else None,
             "gpu": gpu,
             "cpu": cpu,
             "config_file": config_file,

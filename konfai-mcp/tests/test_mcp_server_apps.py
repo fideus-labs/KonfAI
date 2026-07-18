@@ -302,6 +302,36 @@ def test_prepare_finetune_remote_and_bad_dataset(tmp_path: Path) -> None:
         service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset), epochs=0)
 
 
+def test_prepare_finetune_bakes_set_parameters_local(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+    service = _service(tmp_path)
+
+    spec = service.prepare_finetune(
+        ref=str(app_dir),
+        dataset=str(dataset),
+        allow_untrusted_code=True,
+        config_overrides=["iterations=300"],
+    )
+    # The overrides reach the runner (so they bake into the training config) ...
+    assert spec["kwargs"]["config_overrides"] == ["iterations=300"]
+    # ... and the default output dir is param-legible, so the leaderboard metrics_path names the trial.
+    assert "finetune_TinyLocalApp__iterations_300" in spec["output"]
+
+
+def test_prepare_finetune_remote_rejects_set_parameters(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+
+    spec = service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset))
+    assert spec["kwargs"]["config_overrides"] is None
+
+    with pytest.raises(ValueError, match="only supported for local/HuggingFace"):
+        service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset), config_overrides=["iterations=1"])
+
+
 def test_list_parameters_gates_and_reads(tmp_path: Path) -> None:
     app_dir = _write_local_app(tmp_path)
     service = _service(tmp_path)

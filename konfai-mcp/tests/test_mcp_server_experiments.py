@@ -194,6 +194,28 @@ def test_leaderboard_payload_reads_latest_metrics(tmp_path: Path) -> None:
     assert payload["best"]["value"] == 0.82
 
 
+def test_leaderboard_ranks_app_evaluation_trials(tmp_path: Path) -> None:
+    """An app evaluate/pipeline writes its metrics under AppEvaluations/AppPipelines; the leaderboard must
+    rank those tuned trials alongside train-branch runs so a refine loop can compare them."""
+    service = _service(tmp_path)
+    workspace = service.workspace_layout.workspace_dir()
+    for label, score in (("eval_app__iterations_100", 0.70), ("eval_app__iterations_300", 0.88)):
+        metric_dir = workspace / "AppEvaluations" / label / "Evaluations" / "RUN"
+        metric_dir.mkdir(parents=True)
+        (metric_dir / "Metric_TRAIN.json").write_text(
+            json.dumps({"aggregates": {"Dice": {"mean": score}}}), encoding="utf-8"
+        )
+
+    payload = service.leaderboard_payload(metric="Dice")
+
+    assert payload["selected_metric"] == "Dice"
+    assert payload["best"]["value"] == 0.88
+    # Both trials are visible, and their metrics_path names which parameters produced each score.
+    paths = " ".join(row["metrics_path"] for row in payload["leaderboard"])
+    assert "iterations_100" in paths
+    assert "iterations_300" in paths
+
+
 def test_session_summary_blocks_evaluation_without_prediction_artifacts(tmp_path: Path) -> None:
     service = _service(tmp_path)
     service.workspace_layout.train_config_path().write_text(
