@@ -232,15 +232,17 @@ def test_streamed_tta_composes_with_a_region_pipe(tmp_path, monkeypatch) -> None
     assert torch.equal(streamed, reference)
 
 
-def test_light_tta_case_takes_the_whole_volume_path_by_the_worth_gate(tmp_path, monkeypatch) -> None:
+def test_light_tta_case_takes_the_whole_volume_path_by_the_worth_gate(tmp_path, monkeypatch, capsys) -> None:
     # A TTA case whose assembled accumulators are a sliver of allocatable memory has nothing for the
-    # slab-synchronized reduce to save: the worth gate routes it whole-volume, output unchanged.
+    # slab-synchronized reduce to save: the worth gate routes it whole-volume, output unchanged, and
+    # the fallback is said once (a silent one would hide that a large case pays it).
     streamed, whole_volume = _drive_tta(
         tmp_path / "gated", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, worth_gate=True
     )
     assert whole_volume, "a toy TTA case should not pay the streamed reduce"
     reference, _ = _drive_tta(tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False)
     assert torch.equal(streamed, reference)
+    assert capsys.readouterr().out.count("takes the whole-volume path") == 1
 
 
 def test_streamed_tta_slab_axis_flip_falls_back_to_whole_volume(tmp_path, monkeypatch) -> None:
