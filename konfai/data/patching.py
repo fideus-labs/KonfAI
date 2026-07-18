@@ -219,7 +219,8 @@ class PathCombine(ABC):
             data = data.unsqueeze(-1) * window
         self.data = data
 
-    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+    def weight(self, tensor: torch.Tensor) -> torch.Tensor:
+        """The per-voxel blend window on ``tensor``'s device and dtype (cached per pair)."""
         key = (tensor.device, tensor.dtype)
         if key not in self._data_per_device:
             # Match the tensor dtype: the weight has no reason to carry more precision than the data it
@@ -231,7 +232,10 @@ class PathCombine(ABC):
                 # the weight at the dtype's smallest normal so single-coverage voxels stay recoverable.
                 weight = weight.clamp(min=torch.finfo(weight.dtype).tiny)
             self._data_per_device[key] = weight
-        return self._data_per_device[key] * tensor
+        return self._data_per_device[key]
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        return self.weight(tensor) * tensor
 
     @abstractmethod
     def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
@@ -325,6 +329,7 @@ class Accumulator:
         self._result: torch.Tensor | None = None
         self._weight_sum: torch.Tensor | None = None
         self._weight_patch: torch.Tensor | None = None
+        self._weighted: torch.Tensor | None = None
 
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]] | None:
         # Blend each patch straight into the running accumulator and drop the patch, rather than
@@ -359,7 +364,7 @@ class Accumulator:
         # A voxel covered by fewer patches (a volume border without whole-image padding) would sum
         # to < 1 and come out darkened (x0.5 edges, x0.25 corners), so divide by the accumulated weight.
         if self.patch_combine is not None and self._weight_sum is not None:
-            self._result[slices_dest] += self.patch_combine(data)[crop]
+            self._result[slices_dest] += self._weighted_patch(data)[crop]
             if self._weight_patch is None:
                 # Spatial-only ones: the weight is per-voxel, and deriving it from a channel-sized
                 # ones_like would allocate (and weight) C copies just to index one back out.
@@ -372,6 +377,24 @@ class Accumulator:
         self._done[index] = True
         self._filled += 1
         return None
+
+    def _weighted_patch(self, data: torch.Tensor) -> torch.Tensor:
+        """``patch_combine(data)`` into a staging buffer the patches share.
+
+        A weighted copy per patch was one patch-sized allocation per blend; one reused buffer per
+        accumulator serves them all. The multiply stays out of place: the caller's tensor is never
+        touched, so the OOM retry (which re-blends the same patch on the CPU) never re-weights it.
+        """
+        combine = cast(PathCombine, self.patch_combine)
+        if (
+            self._weighted is None
+            or self._weighted.shape != data.shape
+            or self._weighted.dtype != data.dtype
+            or self._weighted.device != data.device
+        ):
+            self._weighted = torch.empty_like(data)
+        torch.mul(data, combine.weight(data), out=self._weighted)
+        return self._weighted
 
     def is_empty(self) -> bool:
         """True until the first patch has been blended in (no volume-sized buffer allocated yet)."""
@@ -409,6 +432,7 @@ class Accumulator:
         self._result = None
         self._weight_sum = None
         self._weight_patch = None
+        self._weighted = None
         self._filled = 0
         self._done = [False] * self._count
         return result
@@ -435,13 +459,30 @@ class StreamingAccumulator(Accumulator):
         super().__init__(patch_slices, patch_size, patch_combine, batch)
         self._window = min(max(patch[0].stop - patch[0].start for patch in self.patch_slices), self.shape[0])
         starts = [patch[0].start for patch in self.patch_slices]
-        if any(0 > current - previous or current - previous > self._window for previous, current in pairwise(starts)):
+        if (starts and starts[0] != 0) or any(
+            0 > current - previous or current - previous > self._window for previous, current in pairwise(starts)
+        ):
             raise PatchError(
-                "StreamingAccumulator requires patches ordered by non-decreasing start on the first spatial axis,"
-                " advancing by at most one patch extent per step.",
+                "StreamingAccumulator requires patches starting at row 0 and ordered by non-decreasing start on"
+                " the first spatial axis, advancing by at most one patch extent per step.",
                 "get_patch_slices_from_shape generates this order; a custom patch source must preserve it.",
             )
         self._flushed = 0
+        # The window is a ring: emitted rows are zeroed and reused in place, and ``_origin`` is the
+        # buffer row holding absolute row ``_flushed`` — advancing moves the origin, never the data
+        # (the shift previously cloned the whole retained window on every advance).
+        self._origin = 0
+
+    def _segments(self, start: int, stop: int) -> list[tuple[slice, slice]]:
+        """Buffer-row and window-relative-row slice pairs covering absolute rows [start, stop), split
+        at the ring's wrap point."""
+        row = (self._origin + (start - self._flushed)) % self._window
+        length = stop - start
+        first = min(length, self._window - row)
+        segments = [(slice(row, row + first), slice(0, first))]
+        if first < length:
+            segments.append((slice(0, length - first), slice(first, length)))
+        return segments
 
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
         if self._done[index]:
@@ -473,22 +514,24 @@ class StreamingAccumulator(Accumulator):
             if s.stop - s.start == 1:
                 data = data.unsqueeze(dim=dim + n)
         # Same blend as the parent (clamped destination, cropped patch, weighted overlap); the only
-        # difference is that the destination's first spatial index is relative to the window origin.
+        # difference is that the destination rows live in the ring, split at its wrap point.
         dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
-        crop = tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])
-        dest[0] = slice(dest[0].start - self._flushed, dest[0].stop - self._flushed)
-        slices_dest = tuple([slice(self._result.shape[i]) for i in range(n)] + dest)
+        crop = [slice(0, d.stop - d.start) for d in dest]
+        lead = tuple(slice(self._result.shape[i]) for i in range(n))
         if self.patch_combine is not None and self._weight_sum is not None:
-            self._result[slices_dest] += self.patch_combine(data)[crop]
+            weighted = self._weighted_patch(data)
             if self._weight_patch is None:
                 # Spatial-only ones: the weight is per-voxel, and deriving it from a channel-sized
                 # ones_like would allocate (and weight) C copies just to index one back out.
                 self._weight_patch = self.patch_combine(
                     torch.ones(data.shape[n:], dtype=data.dtype, device=data.device)
                 )
-            self._weight_sum[tuple(dest)] += self._weight_patch[crop[n:]]
+            for rows, patch_rows in self._segments(dest[0].start, dest[0].stop):
+                self._result[(*lead, rows, *dest[1:])] += weighted[(*(slice(None),) * n, patch_rows, *crop[1:])]
+                self._weight_sum[(rows, *dest[1:])] += self._weight_patch[(patch_rows, *crop[1:])]
         else:
-            self._result[slices_dest] = data[crop]
+            for rows, patch_rows in self._segments(dest[0].start, dest[0].stop):
+                self._result[(*lead, rows, *dest[1:])] = data[(*(slice(None),) * n, patch_rows, *crop[1:])]
         self._done[index] = True
         self._filled += 1
         return slabs
@@ -499,9 +542,11 @@ class StreamingAccumulator(Accumulator):
         self._result = None
         self._weight_sum = None
         self._weight_patch = None
+        self._weighted = None
         self._filled = 0
         self._done = [False] * self._count
         self._flushed = 0
+        self._origin = 0
         return slabs
 
     @property
@@ -519,26 +564,34 @@ class StreamingAccumulator(Accumulator):
         )
 
     def _advance_to(self, z: int) -> list[tuple[slice, torch.Tensor]]:
-        """Finalize the window up to ``z`` (absolute) and shift the window origin there."""
+        """Finalize the ring up to ``z`` (absolute) and move the origin there."""
         z = min(z, self.shape[0])
         if self._result is None or z <= self._flushed:
             return []
         n = self._n
         length = z - self._flushed
+        if length > self._window:
+            raise PatchError(
+                f"StreamingAccumulator asked to finalize {length} rows at once with a {self._window}-row window.",
+                "Patch starts may advance by at most one patch extent per step (checked at construction).",
+            )
         lead = (slice(None),) * n
-        slab = self._result[(*lead, slice(0, length))]
-        if self.patch_combine is not None and self._weight_sum is not None:
-            # Same division and fp16 floor as Accumulator.assemble, applied to the finalized slab.
-            slab = slab / self._weight_sum[:length].clamp(min=torch.finfo(self._weight_sum.dtype).tiny)
-        else:
-            slab = slab.clone()
-        keep = self._window - length
-        # .clone(): source and destination views overlap when length < window.
-        self._result[(*lead, slice(0, keep))] = self._result[(*lead, slice(length, self._window))].clone()
-        self._result[(*lead, slice(keep, self._window))] = 0
-        if self._weight_sum is not None:
-            self._weight_sum[:keep] = self._weight_sum[length : self._window].clone()
-            self._weight_sum[keep:] = 0
+        slab = torch.empty(
+            [*self._result.shape[:n], length, *self.shape[1:]], dtype=self._result.dtype, device=self._result.device
+        )
+        for rows, out_rows in self._segments(self._flushed, z):
+            if self.patch_combine is not None and self._weight_sum is not None:
+                # Same division and fp16 floor as Accumulator.assemble, applied to the finalized rows.
+                torch.div(
+                    self._result[(*lead, rows)],
+                    self._weight_sum[rows].clamp(min=torch.finfo(self._weight_sum.dtype).tiny),
+                    out=slab[(*lead, out_rows)],
+                )
+                self._weight_sum[rows] = 0
+            else:
+                slab[(*lead, out_rows)].copy_(self._result[(*lead, rows)])
+            self._result[(*lead, rows)] = 0
+        self._origin = (self._origin + length) % self._window
         region = slice(self._flushed, z)
         self._flushed = z
         return [(region, slab)]
