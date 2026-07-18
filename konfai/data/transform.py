@@ -737,6 +737,9 @@ class Squeeze(TransformInverse):
         super().__init__(inverse)
         self.dim = dim
 
+    # WHOLE_VOLUME on purpose: squeeze/unsqueeze changes the tensor rank, and the streamed write sizes
+    # each slab from the pre-finalize accumulator grid -- a rank change past it cannot region-stream.
+
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         # ``shape`` is the channel-stripped spatial shape (patching strips [C, *spatial] before folding),
         # so the runtime tensor is [C, *shape] and ``self.dim`` indexes into that. Squeezing the channel
@@ -2031,6 +2034,9 @@ class Norm(Transform):
 
     def __init__(self) -> None:
         super().__init__()
+
+    # WHOLE_VOLUME on purpose: the magnitude drops the trailing spatial axis, and the streamed write
+    # sizes each slab from the pre-finalize accumulator grid -- a rank change past it cannot region-stream.
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Origin" in cache_attribute:
