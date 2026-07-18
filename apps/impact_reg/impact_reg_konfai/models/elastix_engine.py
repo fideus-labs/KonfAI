@@ -37,7 +37,7 @@ from huggingface_hub import hf_hub_download
 from .elastix_install import get_elastix_bin, install_elastix_impact, try_elastix
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
 
-from .elastix import _sorted_specs, generate_impact_parameter_map, load_models_registry
+from .elastix import _is_local_ref, _model_key, _sorted_specs, generate_impact_parameter_map, load_models_registry
 
 # Elastix + IMPACT binary is cached once here (heavy: binary + LibTorch) and reused across runs.
 # Set KONFAI_ELASTIX_DIR to point at an existing install and skip the download.
@@ -104,6 +104,15 @@ class ElastixEngine:
                 if model.ref not in models:
                     models.append(model.ref)
         self._models = models
+        # Matrix mode reads each model's fixed properties (dimension, channels, FOV) from the registry
+        # at map-generation time — an absent key would surface as a bare KeyError mid-register, after
+        # the binary install and the first case already ran. Refuse at build instead.
+        missing = [ref for ref in models if _model_key(ref) not in self._registry]
+        if missing:
+            raise ValueError(
+                f"model ref(s) {missing} have no entry in the models registry; a local model needs one "
+                "(point KONFAI_IMPACT_MODELS_REGISTRY at a models.json that includes it)."
+            )
         # ``iterations`` (the progress-bar total) is DERIVED: the sum of per-resolution iteration budgets.
         self._iterations = self._total_iterations()
         self._elastix_bin = self._ensure_binary()
@@ -137,15 +146,20 @@ class ElastixEngine:
     def _download_models(self) -> list[tuple[str, Path]]:
         """Fetch the TorchScript feature models (``repo:filename``, or a local file); keep
         ``(staged_name, local_path)``. The staged name equals ``_model_key(ref)`` -- the path the
-        generated/preset map references -- so a local ref stages under the very name the map resolves."""
+        generated/preset map references -- so a local ref stages under the very name the map resolves.
+        A missing local file fails HERE, at build: staging a broken path later would plant a dangling
+        symlink at the user-supplied location and crash the second case with an unrelated error."""
         models = []
         for ref in self._models:
-            if ":" in ref:
+            if _is_local_ref(ref):
+                local = Path(ref).expanduser().resolve()
+                if not local.is_file():
+                    raise ValueError(f"local model ref '{ref}' does not exist (resolved to '{local}').")
+                models.append((ref, local))
+            else:
                 repo, filename = ref.split(":", 1)
                 local = Path(hf_hub_download(repo_id=repo, filename=filename, repo_type="model"))  # nosec B615
                 models.append((filename, local))
-            else:
-                models.append((ref, Path(ref).expanduser().resolve()))
         return models
 
     def _parameter_map_overrides(self, global_only: bool = False) -> tuple[dict[str, str], list[tuple[str, str]]]:
@@ -252,8 +266,12 @@ class ElastixEngine:
             sitk.WriteImage(moving, str(moving_path))
 
             # Stage the feature models at the relative path the maps reference (e.g. ImpactModelsPath0
-            # "MIND/R1D2_3D.pt"), resolved from the elastix working directory.
+            # "MIND/R1D2_3D.pt"), resolved from the elastix working directory. An ABSOLUTE staged name
+            # (a local ref) needs no staging: the map references the real file directly, and `work /`
+            # would discard `work` and write at the user-supplied path.
             for rel_name, model_path in self._local_models:
+                if Path(rel_name).is_absolute():
+                    continue
                 dst = work / rel_name
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 if not dst.exists():

@@ -142,9 +142,16 @@ def load_models_registry(ref: str = _IMPACT_MODELS_REGISTRY) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _is_local_ref(ref: str) -> bool:
+    """A model ref without a ``:`` is a local file — and so is a Windows drive-letter path
+    (``C:/models/m.pt``), whose ``:`` is not the ``repo:filename`` separator."""
+    return ":" not in ref or bool(re.match(r"^[A-Za-z]:[\\/]", ref))
+
+
 def _model_key(ref: str) -> str:
-    """Registry key / staged relative path = the model file within the repo (strip a 'repo:' prefix)."""
-    return ref.split(":", 1)[1] if ":" in ref else ref
+    """Registry key / staged relative path = the model file within the repo (strip a 'repo:' prefix);
+    a local ref is its own key."""
+    return ref if _is_local_ref(ref) else ref.split(":", 1)[1]
 
 
 def _deepest_active_layer(layers_mask: str) -> int:
