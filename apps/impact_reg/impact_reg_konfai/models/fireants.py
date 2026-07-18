@@ -75,7 +75,53 @@ DIM = 3
 # for dev/offline. Mirrors the ConvexAdam preset so the same 30-model catalogue and picker are shared.
 _IMPACT_MODELS_REGISTRY = "VBoussot/impact-torchscript-models:models.json"
 
-_DISTANCES: dict[str, type[torch.nn.Module]] = {"L1": torch.nn.L1Loss, "L2": torch.nn.MSELoss}
+# Feature distances, mirroring the itk-impact C++ metric (ITKIMPACT ImpactLoss.h) so FireANTs offers the same
+# set as the ConvexAdam / elastix presets. The channel axis is dim 1 (features are [B, C, *spatial]). itk-impact
+# computes gradients analytically; FireANTs optimises by autograd, so each loss is the plain differentiable
+# value -- for Dice this means the SOFT overlap (the C++ rounds activations to {0, 1} and cannot be autograd'd).
+_EPS = 1e-6
+
+
+class _CosineDistance(torch.nn.Module):
+    """Per-voxel cosine distance over channels: minimise ``-cos`` (itk-impact ``Cosine``)."""
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        cosine = (x * y).sum(1) / (x.norm(2, 1) * y.norm(2, 1) + _EPS)
+        return -cosine.mean()
+
+
+class _SoftDiceDistance(torch.nn.Module):
+    """Soft (differentiable) Dice over channels: ``1 - dice`` on clamped activations (itk-impact ``Dice`` rounds
+    to {0, 1} and uses an explicit gradient; autograd needs the round dropped)."""
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        x = x.clamp(min=0.0)
+        y = y.clamp(min=0.0)
+        intersection = (x * y).sum(1)
+        union = (x + y).sum(1)
+        return 1.0 - ((2 * intersection + _EPS) / (union + _EPS)).mean()
+
+
+class _NCCDistance(torch.nn.Module):
+    """Per-channel normalised cross-correlation across all voxels: minimise ``-NCC`` (itk-impact ``NCC``)."""
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        channels = x.shape[1]
+        xf = x.transpose(0, 1).reshape(channels, -1)
+        yf = y.transpose(0, 1).reshape(channels, -1)
+        xf = xf - xf.mean(1, keepdim=True)
+        yf = yf - yf.mean(1, keepdim=True)
+        ncc = (xf * yf).sum(1) / (torch.sqrt(xf.pow(2).sum(1) * yf.pow(2).sum(1)) + _EPS)
+        return -ncc.mean()
+
+
+_DISTANCES: dict[str, type[torch.nn.Module]] = {
+    "L1": torch.nn.L1Loss,
+    "L2": torch.nn.MSELoss,
+    "Dice": _SoftDiceDistance,
+    "Cosine": _CosineDistance,
+    "NCC": _NCCDistance,
+}
 
 
 def _fireants_git_ref() -> str:
@@ -253,12 +299,16 @@ class ModelSpec:
         str,
         Choices(registry_choices),
         "IMPACT feature model driving the 'impact' deformable metric (TorchScript 'repo:file' on Hugging Face); "
-        "different models capture different anatomy/contrast.",
+        "different models capture different anatomy/contrast. Suggested priors (from the IMPACT study, not "
+        "forced): TotalSegmentator (TS/M730) is the general default; a model trained on the target structure "
+        "(e.g. lung or vessels) sharpens local alignment there; add MIND for MR/CT to recover intra-organ detail.",
     ]
     layers_mask: Annotated[
         str,
         "Per-layer on/off bitmask over the feature model's layers ('1' = use, '0' = skip), one char per layer; "
-        "selects which feature depths drive the metric.",
+        "selects which feature depths drive the metric. Suggested priors (not forced): CT/CBCT favours EARLY "
+        "layers (they denoise and enhance anatomical structures across modalities, robust to artifacts); MR/CT "
+        "favours HIGH-LEVEL layers (contour/segmentation-driven alignment).",
     ] = "01"
     layers_weight: Annotated[
         float, "Relative weight of this feature model in the multi-model fusion (all models are compared jointly)."
@@ -270,7 +320,10 @@ class ModelSpec:
         "trims redundant/noisy channels and cost.",
     ] = 0
     distance: Annotated[
-        Literal["L1", "L2"], "Per-feature distance combined into the IMPACT similarity."
+        Literal["L1", "L2", "Dice", "Cosine", "NCC"],
+        "Per-feature distance combined into the IMPACT similarity (Dice is the differentiable soft-Dice). "
+        "Suggested prior (not forced): when the task is scored on Dice, choosing 'Dice' aligns the loss with "
+        "the metric.",
     ] = "L1"
 
 
