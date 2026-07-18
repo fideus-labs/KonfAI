@@ -469,12 +469,6 @@ class StreamingAccumulator(Accumulator):
                 "get_patch_slices_from_shape generates this order; a custom patch source must preserve it.",
             )
         self._flushed = 0
-        # The window slides through a double-length buffer: ``_origin`` is the buffer row holding
-        # absolute row ``_flushed``, emissions advance it, and a blend about to run off the end
-        # slides the live rows back to row 0 — one bounded copy per buffer traversed, instead of one
-        # per advance, while every blend and emission stays a single contiguous row range (a modulo
-        # ring splits them at its wrap point, which costs more than the copies it saves).
-        self._origin = 0
 
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
         if self._done[index]:
@@ -495,7 +489,7 @@ class StreamingAccumulator(Accumulator):
         slabs = self._advance_to(patch_slice[0].start)
         if self._result is None:
             self._result = torch.zeros(
-                [*layer.shape[:n], 2 * self._window, *self.shape[1:]],
+                [*layer.shape[:n], self._window, *self.shape[1:]],
                 dtype=layer.dtype,
                 device=layer.device,
             )
@@ -506,26 +500,13 @@ class StreamingAccumulator(Accumulator):
             if s.stop - s.start == 1:
                 data = data.unsqueeze(dim=dim + n)
         # Same blend as the parent (clamped destination, cropped patch, weighted overlap); the only
-        # difference is that the destination's first spatial index is relative to the sliding origin.
+        # difference is that the destination's first spatial index is relative to the window origin.
         dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
         crop = tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])
-        lead = (slice(None),) * n
-        first = self._origin + (dest[0].start - self._flushed)
-        if first + (dest[0].stop - dest[0].start) > 2 * self._window:
-            # Written rows never reach past the buffer (a blend that would slides first), so the live
-            # region is [origin, 2 * window): move it back to row 0 and clear the rest.
-            live = 2 * self._window - self._origin
-            self._result[(*lead, slice(0, live))] = self._result[(*lead, slice(self._origin, None))].clone()
-            self._result[(*lead, slice(live, None))] = 0
-            if self._weight_sum is not None:
-                self._weight_sum[:live] = self._weight_sum[self._origin :].clone()
-                self._weight_sum[live:] = 0
-            first -= self._origin
-            self._origin = 0
-        dest[0] = slice(first, first + (dest[0].stop - dest[0].start))
+        dest[0] = slice(dest[0].start - self._flushed, dest[0].stop - self._flushed)
         slices_dest = tuple([slice(self._result.shape[i]) for i in range(n)] + dest)
         if self.patch_combine is not None and self._weight_sum is not None:
-            self._result[slices_dest] += self._weighted_patch(data)[crop]
+            self._result[slices_dest] += self.patch_combine(data)[crop]
             if self._weight_patch is None:
                 # Spatial-only ones: the weight is per-voxel, and deriving it from a channel-sized
                 # ones_like would allocate (and weight) C copies just to index one back out.
@@ -549,17 +530,15 @@ class StreamingAccumulator(Accumulator):
         self._filled = 0
         self._done = [False] * self._count
         self._flushed = 0
-        self._origin = 0
         return slabs
 
     @property
     def footprint_shape(self) -> list[int]:
-        # Only the sliding buffer (two windows) is resident, so the blend-device budget is bounded by
-        # it whatever the volume: a huge case streams on the GPU within bounded VRAM. Blend and
-        # IEEE-correctly-rounded finalize ops (+, *, /, argmax, cast) are bit-identical CPU/CUDA; only
-        # a transcendental-terminated float output (Softmax/Sigmoid) can differ by ~1 ULP between a
-        # window on the GPU and a whole-volume reference on the CPU.
-        return [2 * self._window, *self.shape[1:]]
+        # Only the window is resident, so the blend-device budget is the window's: a huge volume streams
+        # on the GPU within bounded VRAM. Blend and IEEE-correctly-rounded finalize ops (+, *, /, argmax,
+        # cast) are bit-identical CPU/CUDA; only a transcendental-terminated float output (Softmax/Sigmoid)
+        # can differ by ~1 ULP between a window on the GPU and a whole-volume reference on the CPU.
+        return [self._window, *self.shape[1:]]
 
     def assemble(self) -> torch.Tensor:
         raise PatchError(
@@ -568,7 +547,7 @@ class StreamingAccumulator(Accumulator):
         )
 
     def _advance_to(self, z: int) -> list[tuple[slice, torch.Tensor]]:
-        """Finalize the buffer up to ``z`` (absolute) and advance the origin past the emitted rows."""
+        """Finalize the window up to ``z`` (absolute) and shift the window origin there."""
         z = min(z, self.shape[0])
         if self._result is None or z <= self._flushed:
             return []
@@ -580,22 +559,19 @@ class StreamingAccumulator(Accumulator):
                 "Patch starts may advance by at most one patch extent per step (checked at construction).",
             )
         lead = (slice(None),) * n
-        rows = slice(self._origin, self._origin + length)
-        slab = torch.empty(
-            [*self._result.shape[:n], length, *self.shape[1:]], dtype=self._result.dtype, device=self._result.device
-        )
+        slab = self._result[(*lead, slice(0, length))]
         if self.patch_combine is not None and self._weight_sum is not None:
-            # Same division and fp16 floor as Accumulator.assemble, applied to the finalized rows.
-            torch.div(
-                self._result[(*lead, rows)],
-                self._weight_sum[rows].clamp(min=torch.finfo(self._weight_sum.dtype).tiny),
-                out=slab,
-            )
-            self._weight_sum[rows] = 0
+            # Same division and fp16 floor as Accumulator.assemble, applied to the finalized slab.
+            slab = slab / self._weight_sum[:length].clamp(min=torch.finfo(self._weight_sum.dtype).tiny)
         else:
-            slab.copy_(self._result[(*lead, rows)])
-        self._result[(*lead, rows)] = 0
-        self._origin += length
+            slab = slab.clone()
+        keep = self._window - length
+        # .clone(): source and destination views overlap when length < window.
+        self._result[(*lead, slice(0, keep))] = self._result[(*lead, slice(length, self._window))].clone()
+        self._result[(*lead, slice(keep, self._window))] = 0
+        if self._weight_sum is not None:
+            self._weight_sum[:keep] = self._weight_sum[length : self._window].clone()
+            self._weight_sum[keep:] = 0
         region = slice(self._flushed, z)
         self._flushed = z
         return [(region, slab)]
