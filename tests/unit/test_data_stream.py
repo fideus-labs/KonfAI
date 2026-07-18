@@ -194,6 +194,59 @@ def test_replaced_entry_stays_readable_until_its_replacement_is_complete(tmp_pat
     np.testing.assert_array_equal(result, second)
 
 
+@pytest.mark.parametrize("file_format", ["mha", "omezarr"])
+def test_two_concurrent_streams_of_one_entry_publish_a_complete_volume(tmp_path: Path, file_format: str) -> None:
+    """Two writers of the same entry (a case landing on two workers) must not share a temporary:
+    each owns its own, and whichever finalizes last publishes a COMPLETE volume — never an
+    interleaving where one writer's open truncated the other's in-flight file."""
+    _skip_unavailable(file_format)
+    volume = _volume()
+    dataset = Dataset(tmp_path / "streamed", file_format)
+    shape, dtype = list(volume.shape), volume.dtype
+    first = dataset.open_data_stream("CT", "CASE_001", shape, dtype, _image_attributes())
+    assert first is not None
+    with first:
+        first.write_slice(
+            (slice(0, volume.shape[0]), slice(0, 3), slice(0, 5), slice(0, 4)),
+            volume[:, 0:3],
+        )
+        # A second writer starts while the first is mid-write.
+        second = dataset.open_data_stream("CT", "CASE_001", shape, dtype, _image_attributes())
+        assert second is not None
+        with second:
+            for start in range(0, volume.shape[1], 2):
+                region = slice(start, min(start + 2, volume.shape[1]))
+                slices = (slice(0, volume.shape[0]), region, *(slice(0, extent) for extent in volume.shape[2:]))
+                second.write_slice(slices, volume[:, region])
+        for start in range(3, volume.shape[1], 2):
+            region = slice(start, min(start + 2, volume.shape[1]))
+            slices = (slice(0, volume.shape[0]), region, *(slice(0, extent) for extent in volume.shape[2:]))
+            first.write_slice(slices, volume[:, region])
+
+    result, _ = dataset.read_data("CT", "CASE_001")
+    np.testing.assert_array_equal(result, volume)
+
+
+def test_h5_stream_temporary_key_is_invisible_to_name_listing(tmp_path: Path) -> None:
+    pytest.importorskip("h5py")
+    volume = _volume()
+    dataset = Dataset(tmp_path / "streamed", "h5")
+    dataset.write("CT", "CASE_000", volume, _image_attributes())
+    stream = dataset.open_data_stream("CT", "CASE_001", list(volume.shape), volume.dtype, _image_attributes())
+    assert stream is not None
+    with stream:
+        stream.write_slice(
+            (slice(0, volume.shape[0]), slice(0, 2), slice(0, 5), slice(0, 4)),
+            volume[:, 0:2],
+        )
+        assert Dataset(tmp_path / "streamed", "h5").get_names("CT") == ["CASE_000"]
+        for start in range(2, volume.shape[1], 2):
+            region = slice(start, min(start + 2, volume.shape[1]))
+            slices = (slice(0, volume.shape[0]), region, *(slice(0, extent) for extent in volume.shape[2:]))
+            stream.write_slice(slices, volume[:, region])
+    assert sorted(dataset.get_names("CT")) == ["CASE_000", "CASE_001"]
+
+
 @pytest.mark.parametrize("file_format", FORMATS)
 def test_aborted_stream_leaves_an_existing_entry_untouched(tmp_path: Path, file_format: str) -> None:
     _skip_unavailable(file_format)

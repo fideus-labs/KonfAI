@@ -2014,14 +2014,15 @@ class InferenceStack(Transform):
             target = (slice(0, stack.shape[0]), region, *(slice(0, extent) for extent in spatial_shape[1:]))
             self._stack_sinks[name].write_slice(target, stack)
             if region.stop == spatial_shape[0]:
-                self._stack_sinks.pop(name).__exit__(None, None, None)
+                self._stack_sinks.pop(name).close()
         return self._reduce(tensor)
 
     def stream_abort(self, name: str) -> None:
         self._stack_buffers.pop(name, None)
         sink = self._stack_sinks.pop(name, None)
         if sink is not None:
-            sink.__exit__(None, None, None)
+            # Abort, not close: finalizing would publish the partial stack under its final name.
+            sink.abort()
 
 
 class Norm(Transform):

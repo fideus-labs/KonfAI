@@ -551,7 +551,7 @@ class Evaluator(DistributedObject):
     def _abort_map_sinks(self, error: BaseException) -> None:
         """Close open map sinks WITH the error so the backends remove their partial entries."""
         for sink in self._map_sinks.values():
-            sink.__exit__(type(error), error, error.__traceback__)
+            sink.abort(error)
         self._map_sinks = {}
 
     def _flush_pending(self, statistics: Statistics) -> None:
@@ -566,7 +566,7 @@ class Evaluator(DistributedObject):
             base_key = f"{output_group}:{target_group}:{metric.get_name()}"
             Evaluator._record_value(result, statistics, base_key, true_loss, direction)
         for sink in self._map_sinks.values():
-            sink.__exit__(None, None, None)
+            sink.close()
         self._map_sinks = {}
         if len(self.metrics) > 0:
             statistics.add(result, self._pending_name)
