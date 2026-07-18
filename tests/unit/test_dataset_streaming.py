@@ -80,6 +80,45 @@ def test_dataset_read_data_slice_h5_reads_only_requested_region(tmp_path: Path) 
     np.testing.assert_array_equal(patch, volume[:, 1:3, 2:5])
 
 
+def test_h5_read_handle_is_pooled_across_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The chunk cache lives on the open handle: repeated patch reads must reuse one handle, not
+    rebuild an empty cache per read."""
+    import h5py
+
+    dataset = Dataset(tmp_path / "Pooled", "h5")
+    volume = np.arange(1 * 6 * 5, dtype=np.float32).reshape(1, 6, 5)
+    dataset.write("CT", "CASE_000", volume, _image_attributes([1.0, 2.0], [0.5, 1.5]))
+
+    real_file = h5py.File
+    read_opens = 0
+
+    def counting(name, mode="r", *args, **kwargs):
+        nonlocal read_opens
+        if mode == "r":
+            read_opens += 1
+        return real_file(name, mode, *args, **kwargs)
+
+    monkeypatch.setattr(h5py, "File", counting)
+    for start in range(3):
+        patch, _ = dataset.read_data_slice("CT", "CASE_000", (slice(None), slice(start, start + 2), slice(0, 5)))
+        np.testing.assert_array_equal(patch, volume[:, start : start + 2])
+    assert read_opens == 1
+
+
+def test_h5_write_invalidates_the_pooled_reader(tmp_path: Path) -> None:
+    dataset = Dataset(tmp_path / "Invalidated", "h5")
+    attrs = _image_attributes([1.0, 2.0], [0.5, 1.5])
+    volume = np.zeros((1, 4, 5), dtype=np.float32)
+    dataset.write("CT", "CASE_000", volume, attrs)
+    first, _ = dataset.read_data_slice("CT", "CASE_000", (slice(None), slice(0, 4), slice(0, 5)))
+    np.testing.assert_array_equal(first, volume)
+
+    replacement = volume + 7
+    dataset.write("CT", "CASE_000", replacement, attrs)
+    second, _ = dataset.read_data_slice("CT", "CASE_000", (slice(None), slice(0, 4), slice(0, 5)))
+    np.testing.assert_array_equal(second, replacement)
+
+
 def test_dataset_read_data_statistics_h5_returns_global_stats_without_loading_full_array(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Volumes", "h5")
     volume = np.arange(1 * 4 * 5, dtype=np.float32).reshape(1, 4, 5)

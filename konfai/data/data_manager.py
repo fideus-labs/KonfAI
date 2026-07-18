@@ -1426,8 +1426,9 @@ class Data(ABC):
 
         # PREDICTION walks the mapping in order, and the copies of a TTA case must advance together
         # along the slab axis for the streamed write to hold a bounded window (see
-        # ``_interleaved_case_entries``). TRAIN shuffles the mapping anyway and keeps the plain order.
-        interleave = nb_augmentation > 1 and konfai_state() == str(State.PREDICTION)
+        # ``_interleaved_case_entries``). TRAIN shuffles the mapping anyway and keeps the plain
+        # order — as does a dataset prepared outside any workflow, where no state is set at all.
+        interleave = nb_augmentation > 1 and os.environ.get("KONFAI_STATE") == str(State.PREDICTION)
         for x in range(nb_dataset):
             entries = [(y, z) for y in range(nb_augmentation) for z in range(nb_patch[x][y])]
             if interleave:

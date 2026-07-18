@@ -64,6 +64,57 @@ def _get_h5_file_lock(filename: str) -> threading.RLock:
         return lock
 
 
+class _H5ReadPool:
+    """Pooled read handles, one per file per process, LRU-bounded.
+
+    The HDF5 chunk cache lives on the open handle, so reusing the handle across patch reads is what
+    makes the cache effective — a per-read open rebuilds it empty every time. ``get``/``drop`` must be
+    called under the file's lock; a write drops the file's reader so it never serves stale metadata;
+    handles inherited across ``fork`` are dropped unused (closing them would flush another process's
+    state)."""
+
+    _MAX = 8
+
+    def __init__(self) -> None:
+        self._handles: dict[str, Any] = {}
+        self._guard = threading.Lock()
+        self._pid = os.getpid()
+
+    def get(self, filename: str, **open_kwargs: Any) -> Any:
+        with self._guard:
+            if os.getpid() != self._pid:
+                self._handles.clear()
+                self._pid = os.getpid()
+            handle = self._handles.pop(filename, None)
+            if handle is None or not handle.id.valid:
+                handle = h5py.File(filename, "r", **open_kwargs)
+            self._handles[filename] = handle
+            evicted = [self._handles.pop(oldest) for oldest in list(self._handles)[: -self._MAX]]
+        for stale in evicted:
+            self._close_idle(stale)
+        return handle
+
+    def drop(self, filename: str) -> None:
+        with self._guard:
+            handle = self._handles.pop(filename, None)
+        if handle is not None and handle.id.valid:
+            handle.close()
+
+    @staticmethod
+    def _close_idle(handle: Any) -> None:
+        # An evicted handle may be mid-read under its file's lock: close only when that lock is free,
+        # otherwise leave it open (it falls out of the pool and dies with the process).
+        lock = _get_h5_file_lock(handle.filename)
+        if lock.acquire(blocking=False):
+            try:
+                handle.close()
+            finally:
+                lock.release()
+
+
+_h5_read_pool = _H5ReadPool()
+
+
 class Attribute(dict[str, Any]):
     """Metadata container storing repeated values with a stack-like naming scheme."""
 
@@ -488,6 +539,14 @@ class Dataset:
             pass
 
     class H5File(AbstractFile):
+        # Read-side HDF5 chunk cache, per opened dataset. The library default (1 MB) holds barely one
+        # medical-imaging chunk, so overlapping patch reads on a chunked (compressed) store
+        # re-decompress the same chunks once per patch. KonfAI writes its own h5 contiguous
+        # (unaffected); this serves third-party chunked stores read through the streamed patch path.
+        # nslots per the h5py guidance: a prime, well above the chunks the cache can hold.
+        _READ_CHUNK_CACHE_BYTES = 128 * 1024 * 1024
+        _READ_CHUNK_CACHE_SLOTS = 100003
+
         def __init__(self, filename: str, read: bool) -> None:
             self.h5: h5py.File | None = None
             self.filename = filename
@@ -505,15 +564,21 @@ class Dataset:
             self._lock.acquire()
             try:
                 if self.read:
-                    self.h5 = h5py.File(self.filename, "r")
+                    # Pooled: the chunk cache lives on the handle, and only a handle that survives
+                    # this enter/exit makes overlapping patch reads hit it.
+                    self.h5 = _h5_read_pool.get(
+                        self.filename,
+                        rdcc_nbytes=self._READ_CHUNK_CACHE_BYTES,
+                        rdcc_nslots=self._READ_CHUNK_CACHE_SLOTS,
+                    )
                 else:
+                    _h5_read_pool.drop(self.filename)
                     if not os.path.exists(self.filename):
                         Path(self.filename).parent.mkdir(parents=True, exist_ok=True)
                         self.h5 = h5py.File(self.filename, "w")
                     else:
                         self.h5 = h5py.File(self.filename, "r+")
                     self.h5.attrs["Date"] = current_date()
-                self.h5.__enter__()
             except BaseException:
                 self._lock.release()
                 self._lock = None
@@ -522,7 +587,7 @@ class Dataset:
 
         def __exit__(self, exc_type, value, traceback):
             try:
-                if self.h5 is not None:
+                if self.h5 is not None and not self.read:
                     self.h5.close()
             finally:
                 if self._lock is not None:
