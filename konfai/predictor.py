@@ -1810,6 +1810,8 @@ class Predictor(DistributedObject):
             else None
         )
         self._vram_patch_candidate: list[int] | None = None
+        # Per-axis input multiple the model needs (its downsampling factor); a free axis is sized to it.
+        self._downsampling_factor: list[int] | None = None
         module, name = get_module(combine, "konfai.predictor")
         if module.__name__ == "konfai.predictor":
             self.combine = getattr(module, name)()
@@ -1851,6 +1853,8 @@ class Predictor(DistributedObject):
         self.model.init(self.autocast, State.PREDICTION, self.dataset.get_groups_dest())
         self.model.init_outputs_group()
         self.model._compute_channels_trace(self.model, self.model.in_channels, None, self.gpu_checkpoints)
+        # The per-axis multiple a free patch axis rounds up to, read off the model's downsampling graph.
+        self._downsampling_factor = self.model.downsampling_factor()
         self.output_modules = [name for name, _, _ in self.model.named_module_args_dict()]
 
         for output_group in self.outputs_dataset.keys():
@@ -1984,6 +1988,18 @@ class Predictor(DistributedObject):
         model_composite = Model(model_composite)
         device = local_rank * self.size if len(cuda_visible_devices()) else None
         dataloader = dataloaders[0]
+        # Round a free patch axis up to the model's valid input multiple before the first attempt, so
+        # the network's encoder/decoder skips align instead of crashing on a non-divisible extent (the
+        # border padding fills the round-up, cropped back after the forward). A whole-axis extent that
+        # is still too large for VRAM OOMs into the shrink loop below, which keeps the size valid too.
+        if self._vram_patch_template is not None and self._downsampling_factor and self._vram_patch_candidate is None:
+            worst = self.dataset.worst_case_shape()
+            if worst is not None:
+                sized = concretize_patch_size(self._vram_patch_template, worst, self._downsampling_factor)
+                if sized != concretize_patch_size(self._vram_patch_template, worst):
+                    self._vram_patch_candidate = sized
+                    self.dataset.replan_patch(sized)
+                    dataloader = self.dataset.get_data(world_size)[0][global_rank][0]
         while True:
             try:
                 with _Predictor(
@@ -2038,14 +2054,17 @@ class Predictor(DistributedObject):
         worst = self.dataset.worst_case_shape()
         if worst is None:
             return None
-        candidate = self._vram_patch_candidate or concretize_patch_size(self._vram_patch_template, worst)
+        candidate = self._vram_patch_candidate or concretize_patch_size(
+            self._vram_patch_template, worst, self._downsampling_factor
+        )
         usable = self._usable_vram_after_oom(device)
         reserve = self._accumulation_reserve(candidate, worst)
+        snap = self._downsampling_factor
         if reserve is not None:
-            shrunk = next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable - reserve)
+            shrunk = next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable - reserve, snap)
             if shrunk is not None:
                 return shrunk
-        return next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable)
+        return next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable, snap)
 
     def _accumulation_reserve(self, candidate: list[int], worst: list[int]) -> float | None:
         """Bytes each case keeps resident while its patches accumulate, per output writer: the
