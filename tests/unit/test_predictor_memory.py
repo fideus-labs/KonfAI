@@ -102,6 +102,24 @@ def test_model_composite_runs_a_weightless_model_without_a_checkpoint() -> None:
     assert ran_model.load_history == []
 
 
+def test_model_composite_refuses_empty_sources_for_a_model_with_weights() -> None:
+    """Defense in depth: load([]) is only for a weightless model. A model WITH parameters and no checkpoint
+    would run random weights, so the composite refuses it rather than relying on the Predictor's guard."""
+    from konfai.predictor import PredictorError
+
+    class WeightedNetwork(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1)
+            # KonfAI registers weights through the add_module graph, as a real model does.
+            self.add_module("Conv", torch.nn.Conv2d(1, 2, 3), in_branch=[0], out_branch=[0])
+
+    weighted = WeightedNetwork()
+    assert list(weighted.parameters())  # sanity: it really has trainable weights
+    composite = ModelComposite(weighted, Mean())
+    with pytest.raises(PredictorError, match="trainable parameters"):
+        composite.load([])
+
+
 def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> None:
     class DummyPatch:
         patch_size: ClassVar[list[int]] = [2, 2]

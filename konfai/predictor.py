@@ -1755,6 +1755,7 @@ class ModelComposite(Network):
         self._model_name = "Model_0"
         self._base_model_name = model.get_name()
         self._state_sources: list[dict[str, Any] | Path | str] = []
+        self._loaded = False  # load() has run: distinguishes "not loaded yet" from "loaded, weightless"
         self._loaded_state_index: int | None = None
         # Cache the CPU state_dict per index so a local-path ensemble is read from
         # disk once, not re-read + re-unpickled on every batch (the index cycles
@@ -1808,10 +1809,18 @@ class ModelComposite(Network):
         Load weights for each sub-model in the composite from the corresponding state dictionaries.
 
         Args:
-            state_sources (list): One checkpoint source per model replica. Empty for a weightless model,
-                which is then run once with its constructed weights.
+            state_sources (list): One checkpoint source per model replica. Empty ONLY for a weightless model
+                (0 parameters), which is then run once with its constructed weights; empty sources for a model
+                that has trainable parameters is refused here, so a caller cannot silently run random weights.
         """
+        if not state_sources and any(parameter.numel() for parameter in self._get_model().parameters()):
+            raise PredictorError(
+                "ModelComposite.load() received no checkpoint sources for a model with trainable parameters.",
+                "A weightless model (0 parameters) may run with no checkpoint; a parameterised one may not.",
+                "Pass at least one checkpoint source, or wrap a model that has no parameters.",
+            )
         self._state_sources = state_sources
+        self._loaded = True
         self._loaded_state_index = None
         self._state_cache = {}
         if len(self._state_sources) == 1:
@@ -1834,7 +1843,13 @@ class ModelComposite(Network):
             list[tuple[str, torch.Tensor]]: Aggregated output for each layer, after applying the reduction.
         """
         final_outputs: list[tuple[str, list[int], torch.Tensor]] = []
-        # A weightless model (no checkpoint sources) is a single replica: the model as constructed.
+        if not self._loaded:
+            raise PredictorError(
+                "ModelComposite.forward() called before load().",
+                "Prediction ran before the composite's checkpoint sources were set.",
+                "Call load(...) first (load([]) for a weightless model).",
+            )
+        # A weightless model (loaded with no checkpoint sources) is a single replica: the model as constructed.
         n_replicas = len(self._state_sources) or 1
         if isinstance(self.combine, Mean):
             sum_acc: dict[str, torch.Tensor] = {}
