@@ -391,6 +391,7 @@ class DataStream(ABC):
         return f"{os.getpid()}-{next(DataStream._sequence)}.tmp"
 
     _file: Dataset.File | None = None
+    _finished: bool = False
 
     def __enter__(self) -> DataStream:
         return self
@@ -418,6 +419,12 @@ class DataStream(ABC):
         self._finish(exc_type is None, exc_type, value, traceback)
 
     def _finish(self, success: bool, exc_type, value, traceback) -> None:
+        # Single-shot: a caller may both close() and, on the error path, abort() the same stream (or
+        # exit a ``with`` that already closed). Only the first call acts, so the backing file is exited
+        # once and a failed close is not overwritten by a second _close on already-released state.
+        if self._finished:
+            return
+        self._finished = True
         try:
             self._close(success)
         finally:

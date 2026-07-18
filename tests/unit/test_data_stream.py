@@ -200,31 +200,36 @@ def test_two_concurrent_streams_of_one_entry_publish_a_complete_volume(tmp_path:
     each owns its own, and whichever finalizes last publishes a COMPLETE volume — never an
     interleaving where one writer's open truncated the other's in-flight file."""
     _skip_unavailable(file_format)
-    volume = _volume()
+    # DISTINCT volumes: if the two temporaries interleaved into one final file, the result would equal
+    # neither whole -- writing the same values both times could not tell an interleaving from a clean
+    # publish. ``first`` finalizes last (its ``with`` closes after ``second``'s), so it must win whole.
+    volume_a = _volume()
+    volume_b = volume_a + 100
     dataset = Dataset(tmp_path / "streamed", file_format)
-    shape, dtype = list(volume.shape), volume.dtype
+    shape, dtype = list(volume_a.shape), volume_a.dtype
     first = dataset.open_data_stream("CT", "CASE_001", shape, dtype, _image_attributes())
     assert first is not None
     with first:
         first.write_slice(
-            (slice(0, volume.shape[0]), slice(0, 3), slice(0, 5), slice(0, 4)),
-            volume[:, 0:3],
+            (slice(0, volume_a.shape[0]), slice(0, 3), slice(0, 5), slice(0, 4)),
+            volume_a[:, 0:3],
         )
-        # A second writer starts while the first is mid-write.
+        # A second writer starts while the first is mid-write, with its own values.
         second = dataset.open_data_stream("CT", "CASE_001", shape, dtype, _image_attributes())
         assert second is not None
         with second:
-            for start in range(0, volume.shape[1], 2):
-                region = slice(start, min(start + 2, volume.shape[1]))
-                slices = (slice(0, volume.shape[0]), region, *(slice(0, extent) for extent in volume.shape[2:]))
-                second.write_slice(slices, volume[:, region])
-        for start in range(3, volume.shape[1], 2):
-            region = slice(start, min(start + 2, volume.shape[1]))
-            slices = (slice(0, volume.shape[0]), region, *(slice(0, extent) for extent in volume.shape[2:]))
-            first.write_slice(slices, volume[:, region])
+            for start in range(0, volume_b.shape[1], 2):
+                region = slice(start, min(start + 2, volume_b.shape[1]))
+                slices = (slice(0, volume_b.shape[0]), region, *(slice(0, extent) for extent in volume_b.shape[2:]))
+                second.write_slice(slices, volume_b[:, region])
+        for start in range(3, volume_a.shape[1], 2):
+            region = slice(start, min(start + 2, volume_a.shape[1]))
+            slices = (slice(0, volume_a.shape[0]), region, *(slice(0, extent) for extent in volume_a.shape[2:]))
+            first.write_slice(slices, volume_a[:, region])
 
     result, _ = dataset.read_data("CT", "CASE_001")
-    np.testing.assert_array_equal(result, volume)
+    # A complete volume, never a per-slab mixture of the two.
+    np.testing.assert_array_equal(result, volume_a)
 
 
 def test_h5_stream_temporary_key_is_invisible_to_name_listing(tmp_path: Path) -> None:
@@ -260,6 +265,25 @@ def test_aborted_stream_leaves_an_existing_entry_untouched(tmp_path: Path, file_
             raise RuntimeError("boom")
     result, _ = dataset.read_data("CT", "CASE_001")
     np.testing.assert_array_equal(result, first)
+
+
+@pytest.mark.parametrize("file_format", FORMATS)
+def test_abort_after_close_is_a_noop(tmp_path: Path, file_format: str) -> None:
+    """The finalize lifecycle is single-shot: streamed Save materialization close()s, then abort()s on
+    the error path. The second call must not re-run _close on already-released state (which would try
+    to remove the entry it just published, or double-exit the backing file)."""
+    _skip_unavailable(file_format)
+    volume = _volume()
+    dataset = Dataset(tmp_path / "streamed", file_format)
+    stream = dataset.open_data_stream("CT", "CASE_001", list(volume.shape), volume.dtype, _image_attributes())
+    assert stream is not None
+    for start in range(0, volume.shape[1], 2):
+        region = slice(start, min(start + 2, volume.shape[1]))
+        stream.write_slice((slice(0, volume.shape[0]), region, *(slice(0, e) for e in volume.shape[2:])), volume[:, region])
+    stream.close()
+    stream.abort(RuntimeError("late"))  # must be inert, not undo the publish
+    result, _ = dataset.read_data("CT", "CASE_001")
+    np.testing.assert_array_equal(result, volume)
 
 
 def test_can_stream_data_matches_open_support(tmp_path: Path) -> None:

@@ -163,7 +163,10 @@ def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int
             text = spec.strip()
             if not text.endswith("%"):
                 raise ConfigError(f"overlap: '{spec}' is not a percentage; use e.g. '20%', a voxel int or a fraction.")
-            spec = float(text[:-1]) / 100.0
+            try:
+                spec = float(text[:-1]) / 100.0
+            except ValueError:
+                raise ConfigError(f"overlap: '{spec}' is not a numeric percentage; use e.g. '20%'.") from None
         if isinstance(spec, float):
             if not 0.0 <= spec < 1.0:
                 raise ConfigError(f"overlap: fraction {spec} must be in [0, 1[.")
