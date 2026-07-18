@@ -1271,14 +1271,16 @@ class OutSameAsGroupDataset(OutputDataset):
         # working volume is budgeted separately, at ``get_output`` time, by ``_reduction_device``.
         needed = accumulator_bytes + transient
         if isinstance(accumulator, StreamingAccumulator):
-            # Flushing a slab divides it out-of-place and clones the shifted window: up to two
-            # window-sized transients coexist with the resident window while a slab finalizes.
+            # Transients on top of the resident buffer (``voxels`` is the double-window footprint):
+            # the slide's clone of the live rows, the emission slab and its weight clamp, and — when
+            # the background writer engages — up to ``_AsyncWriter._CAPACITY`` emitted blocks alive
+            # on the device until their device-to-host copy runs. Two footprints bound the sum.
             needed += 2 * layer.shape[0] * voxels * layer.element_size()
             if self.nb_data_augmentation > 1:
-                # Slab-aligned TTA holds up to a window of pending slabs per copy (the arrival skew)
-                # and reduces the joint interval through a float32 accumulate: budget one window per
-                # copy plus two more for the reduction's transients.
-                needed += (self.nb_data_augmentation + 2) * layer.shape[0] * voxels * layer.element_size()
+                # Slab-aligned TTA holds pending slabs per copy (the arrival skew) and reduces the
+                # joint interval through a float32 accumulate: budget half a footprint per copy plus
+                # one more for the reduction's transients.
+                needed += (self.nb_data_augmentation + 2) * layer.shape[0] * (voxels // 2) * layer.element_size()
         return device if needed < free * self._ACCUMULATE_MARGIN else torch.device("cpu")
 
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
