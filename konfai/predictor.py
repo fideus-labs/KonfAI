@@ -917,12 +917,21 @@ class ModelComposite(Network):
             self._loaded_state_index = index
         return model
 
+    def _model_for_index(self, index: int) -> Network:
+        # With no checkpoint sources the model is weightless (0 parameters, e.g. a classical/optimisation
+        # engine): run it as constructed, once. The Predictor guards this -- it only reaches here with empty
+        # sources when the model has no parameters to load -- so there is nothing to stream.
+        if not self._state_sources:
+            return self._get_model()
+        return self._ensure_model_loaded(index)
+
     def load(self, state_sources: list[dict[str, Any] | Path | str]):
         """
         Load weights for each sub-model in the composite from the corresponding state dictionaries.
 
         Args:
-            state_sources (list): One checkpoint source per model replica.
+            state_sources (list): One checkpoint source per model replica. Empty for a weightless model,
+                which is then run once with its constructed weights.
         """
         self._state_sources = state_sources
         self._loaded_state_index = None
@@ -947,14 +956,14 @@ class ModelComposite(Network):
             list[tuple[str, torch.Tensor]]: Aggregated output for each layer, after applying the reduction.
         """
         final_outputs: list[tuple[str, list[int], torch.Tensor]] = []
-        if not self._state_sources:
-            return final_outputs
+        # A weightless model (no checkpoint sources) is a single replica: the model as constructed.
+        n_replicas = len(self._state_sources) or 1
         if isinstance(self.combine, Mean):
             sum_acc: dict[str, torch.Tensor] = {}
             count: dict[str, int] = defaultdict(int)
             channels: dict[str, list[int]] = defaultdict(list)
-            for model_index in range(len(self._state_sources)):
-                for key, tensor in self._ensure_model_loaded(model_index)(data_dict, output_layers):
+            for model_index in range(n_replicas):
+                for key, tensor in self._model_for_index(model_index)(data_dict, output_layers):
                     if tensor.dtype == torch.float32:
                         tensor = tensor.to(torch.float16)
                     channels[key].append(tensor.shape[1])
@@ -967,8 +976,8 @@ class ModelComposite(Network):
                 final_outputs.append((key, channels[key], (acc / count[key])))
         else:
             aggregated = defaultdict(list)
-            for model_index in range(len(self._state_sources)):
-                for key, tensor in self._ensure_model_loaded(model_index)(data_dict, output_layers):
+            for model_index in range(n_replicas):
+                for key, tensor in self._model_for_index(model_index)(data_dict, output_layers):
                     if tensor.dtype == torch.float32:
                         tensor = tensor.to(torch.float16)
                     aggregated[key].append(tensor)
@@ -1115,12 +1124,15 @@ class Predictor(DistributedObject):
         shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
 
         self.model_composite = ModelComposite(self.model, self.combine)
-        if not self.path_to_models:
+        if not self.path_to_models and any(parameter.numel() for parameter in self.model.parameters()):
+            # A model WITH weights but no checkpoint would run with random weights and silently produce
+            # garbage -- refuse it. A WEIGHTLESS model (0 parameters, e.g. a classical/optimisation engine
+            # such as registration) is legitimate with no checkpoint: it is run once as constructed.
             raise PredictorError(
                 "No model checkpoint available for prediction.",
-                "At least one '.pt' checkpoint must be provided (for KonfAI Apps, declare it via the "
-                "'models' field in app.json).",
-                "Without a checkpoint the model is never executed and prediction would silently produce no output.",
+                "This model has trainable weights, so at least one '.pt' checkpoint must be provided (for "
+                "KonfAI Apps, declare it via the 'models' field in app.json).",
+                "Without a checkpoint its weights are random and prediction would silently produce garbage.",
             )
         self.model_composite.load(self._load())
 

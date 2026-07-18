@@ -72,6 +72,36 @@ def test_model_composite_streams_ensemble_through_a_single_loaded_model() -> Non
     assert streamed_model.load_name_history == ["DummyPredictNetwork", "DummyPredictNetwork"]
 
 
+def test_model_composite_runs_a_weightless_model_without_a_checkpoint() -> None:
+    """A model with no trainable weights (0 parameters) runs once, as constructed, with no state sources -- a
+    classical/optimisation engine (e.g. registration) needs no checkpoint."""
+    model = DummyPredictNetwork()  # scale=1.0, held as a plain float -> 0 parameters
+    assert not list(model.parameters())
+    composite = ModelComposite(model, Mean())
+    composite.load([])  # no checkpoints
+
+    batch_sample = {
+        "input": BatchDataItem(
+            name=["CASE_000"],
+            tensor=torch.ones(1, 1, 2, 2),
+            attribute=[Attribute()],
+            x=[0],
+            a=[0],
+            p=[0],
+            is_input=True,
+        )
+    }
+
+    outputs = composite(batch_sample, ["out"])
+    ran_model = cast(DummyPredictNetwork, composite["Model_0"])
+
+    assert len(outputs) == 1
+    assert outputs[0][0] == "out"
+    # Runs with the constructed scale (1.0); no state was ever loaded.
+    assert torch.allclose(outputs[0][2], torch.ones(1, 1, 2, 2, dtype=outputs[0][2].dtype))
+    assert ran_model.load_history == []
+
+
 def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> None:
     class DummyPatch:
         patch_size: ClassVar[list[int]] = [2, 2]
