@@ -51,11 +51,13 @@ def test_concurrent_write_safety_is_declared_per_backend(tmp_path) -> None:
 
 
 def test_async_streamed_writes_match_the_inline_reference(tmp_path, monkeypatch) -> None:
-    # A per-file destination goes through the background writer; the kill-switch forces the inline
-    # path on the same store. Same operations, same order — the files must match bit for bit.
+    # A per-file destination goes through the background writer (forced here — the automatic gate
+    # also requires a GPU-placed output); the kill-switch runs the same store inline. Same
+    # operations, same order — the files must match bit for bit.
     used: list[int] = []
     submit = _AsyncWriter.submit
     monkeypatch.setattr(_AsyncWriter, "submit", lambda self, op: (used.append(1), submit(self, op))[1])
+    monkeypatch.setenv("KONFAI_ASYNC_WRITES", "1")
     asynchronous, whole_volume = _drive_tta(
         tmp_path / "async", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="mha"
     )
@@ -67,9 +69,16 @@ def test_async_streamed_writes_match_the_inline_reference(tmp_path, monkeypatch)
     assert torch.equal(asynchronous, inline)
 
 
-def test_single_store_destination_stays_inline(tmp_path, monkeypatch) -> None:
+def test_async_gate_stays_inline_for_single_stores_and_cpu_outputs(tmp_path, monkeypatch) -> None:
     used: list[int] = []
     submit = _AsyncWriter.submit
     monkeypatch.setattr(_AsyncWriter, "submit", lambda self, op: (used.append(1), submit(self, op))[1])
-    _drive_tta(tmp_path, monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="h5")
+    # Even forced, a single-store destination never crosses threads.
+    monkeypatch.setenv("KONFAI_ASYNC_WRITES", "1")
+    _drive_tta(tmp_path / "h5", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="h5")
     assert not used, "an h5 store must never be written from the background thread"
+    # Automatic mode on a CPU-placed output stays inline: the blend already saturates the memory
+    # bandwidth the writer would consume.
+    monkeypatch.delenv("KONFAI_ASYNC_WRITES", raising=False)
+    _drive_tta(tmp_path / "cpu", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="mha")
+    assert not used, "a CPU-only output must stay inline in automatic mode"
