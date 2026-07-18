@@ -27,6 +27,15 @@ import numpy as np
 from konfai.utils.errors import ConfigError, DatasetManagerError
 
 
+def env_flag(name: str, default: bool) -> bool:
+    """A ``KONFAI_*`` boolean switch: ``0``/``false`` is off, anything else set is on, unset is
+    ``default`` — one parser, so a switch read in two places accepts the same spellings."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() not in ("0", "false")
+
+
 def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]:
     """Import the module a classpath names and return it with the name to take from it.
 

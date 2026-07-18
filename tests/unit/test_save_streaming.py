@@ -114,6 +114,59 @@ def test_streamed_patches_after_the_sweep_match_the_whole_volume_path(tmp_path: 
     assert not manager.loaded
 
 
+def test_multi_slab_sweep_writes_the_same_cache_as_the_whole_volume_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three slabs instead of one: slab targets at non-zero offsets, the header written on the first
+    slab only, and a region stage composed across slab boundaries."""
+    from konfai.data import patching as patching_module
+
+    monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 4)
+    source = _source(tmp_path)
+    classic = [Permute("2|1|0"), Clip(0.0, 50.0), Save(str(tmp_path / "cache_classic"))]
+    swept = [Permute("2|1|0"), Clip(0.0, 50.0), Save(str(tmp_path / "cache_swept"))]
+
+    _manager(source, classic).load(classic, [], load_augmentations=False)
+    manager = _manager(source, swept)
+    manager.get_data(0, 0, [], True)
+    assert not manager.loaded
+
+    expected, expected_attributes = Dataset(tmp_path / "cache_classic", "mha").read_data("CT", "CASE_000")
+    result, result_attributes = Dataset(tmp_path / "cache_swept", "mha").read_data("CT", "CASE_000")
+    np.testing.assert_array_equal(result, expected)
+    assert set(result_attributes.keys()) == set(expected_attributes.keys())
+
+
+def test_failed_multi_slab_sweep_leaves_no_partial_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure after the first slab is written must remove the partial entry, not publish it."""
+    from konfai.data import patching as patching_module
+    from konfai.utils import dataset as dataset_module
+
+    monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 4)
+    source = _source(tmp_path)
+    manager = _manager(source, [Clip(0.0, 50.0), Save(str(tmp_path / "cache"))])
+    reference = _whole_volume_patches(manager, [Clip(0.0, 50.0)])
+
+    calls = 0
+    real_write = dataset_module._MhaDataStream.write_slice
+
+    def failing_after_first(self, slices, data):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise OSError("disk full")
+        real_write(self, slices, data)
+
+    monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", failing_after_first)
+    with pytest.warns(UserWarning, match="falling back to the whole-volume path"):
+        patch = manager.get_data(0, 0, [], True)
+    monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", real_write)
+
+    assert calls > 1
+    assert torch.equal(patch, reference[0])
+    assert not list((tmp_path / "cache").glob("**/*.tmp"))
+
+
 def test_sweep_composes_region_stages_before_the_save(tmp_path: Path) -> None:
     # A Permute is an ORIENTATION stage: the sweep's slabs of the Save space pull remapped source
     # regions, and the materialized cache must still equal the whole-volume pass byte for byte.

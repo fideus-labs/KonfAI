@@ -22,6 +22,7 @@ import os
 import queue
 import shutil
 import threading
+import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable
@@ -79,7 +80,7 @@ from konfai.utils.runtime import (
     run_distributed_app,
     safe_torch_load,
 )
-from konfai.utils.utils import concretize_patch_size, get_module, size_free_axes, split_path_spec
+from konfai.utils.utils import concretize_patch_size, env_flag, get_module, size_free_axes, split_path_spec
 from konfai.utils.vram import next_patch_candidate, usable_vram
 
 
@@ -270,11 +271,14 @@ class OutputDataset(Dataset, NeedDevice, ABC):
             self._async_writes = None  # decided at the first write, once the device is placed
         self._writer: _AsyncWriter | None = None
 
+    def _torch_device(self) -> torch.device:
+        """The placed device as ``torch.device`` (``NeedDevice`` may hold a bare CUDA ordinal)."""
+        return torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
+
     def _submit_write(self, operation: Callable[[], None]) -> None:
         """Run ``operation`` on the background writer, or inline when the destination must stay serial."""
         if self._async_writes is None:
-            device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
-            self._async_writes = device.type == "cuda"
+            self._async_writes = self._torch_device().type == "cuda"
         if not self._async_writes:
             operation()
             return
@@ -414,23 +418,28 @@ class OutputDataset(Dataset, NeedDevice, ABC):
     def is_done(self, index: int) -> bool:
         # ``.get``: a streamed case cleans itself up inside ``add_layer`` (its slabs are already on
         # disk), so by the time the run loop asks, the index is gone and the answer is "nothing to do".
-        return len(self.output_layer_accumulator.get(index, {})) == self.nb_data_augmentation and all(
-            acc.is_full() for acc in self.output_layer_accumulator[index].values()
-        )
+        accumulators = self.output_layer_accumulator.get(index)
+        if accumulators is None or len(accumulators) != self.nb_data_augmentation:
+            return False
+        return all(acc.is_full() for acc in accumulators.values())
 
     @abstractmethod
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
         raise NotImplementedError()
 
-    def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
-        attribute = self.attributes[index][0][0]
-        self.attributes.pop(index)
+    def _submit_final_write(self, name: str, tensor: torch.Tensor, attribute: Attribute) -> None:
+        """Queue one whole-volume entry write (D2H copy included) on the write path."""
         write = super().write
 
         def operation() -> None:
-            write(self.group, name, layer.detach().cpu().numpy(), attribute)
+            write(self.group, name, tensor.detach().cpu().numpy(), attribute)
 
         self._submit_write(operation)
+
+    def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
+        attribute = self.attributes[index][0][0]
+        self.attributes.pop(index)
+        self._submit_final_write(name, layer, attribute)
 
     def reset(self) -> None:
         """Drop every in-flight accumulation (the OOM-restart path re-runs the rank's cases from scratch)."""
@@ -526,11 +535,10 @@ class _RegionState:
 
     ``shapes[i]`` is the spatial shape between pipe stage ``i - 1`` and ``i`` (``shapes[0]`` the
     accumulator's, ``shapes[-1]`` the written image's); a pointwise stage leaves it unchanged, so the
-    per-stage region bookkeeping folds through the same list the pull map composes over.
+    per-stage region bookkeeping folds through the same list the pull map composes over. The pipe's
+    stages themselves live in the ``produce``/``pull`` closures the stream was built on.
     """
 
-    stages: list[_FinalizeStage]
-    kinds: list[LocalityKind]
     shapes: list[list[int]]
     stream: SlabRegionStream | None = None
     # The attribute the latest emission ran the pipe on: what the sink opens with.
@@ -571,7 +579,7 @@ class OutSameAsGroupDataset(OutputDataset):
         # patches complete so RAM is bounded at one patch window; otherwise the whole-volume path is
         # used transparently. ``KONFAI_STREAMED_WRITES=0`` is a global ops/debug kill-switch (also how
         # a test gets the assembled reference), not a per-output option.
-        self._streaming_enabled = os.environ.get("KONFAI_STREAMED_WRITES", "1").lower() not in ("0", "false")
+        self._streaming_enabled = env_flag("KONFAI_STREAMED_WRITES", True)
         self._stream_plans: dict[int, _StreamPlan | None] = {}
         self._stream_sinks: dict[int, DataStream] = {}
         self._region_states: dict[int, _RegionState] = {}
@@ -644,8 +652,7 @@ class OutSameAsGroupDataset(OutputDataset):
             if layer.device.type != "cpu" and self._accum_device[index_dataset].type == "cpu":
                 self._report_once(
                     "host-accumulate",
-                    f"streaming: case '{self.names[index_dataset]}' accumulates on the host"
-                    " (the accumulator does not fit the VRAM budget).",
+                    f"case '{self.names[index_dataset]}' accumulates on the host.",
                 )
         target = self._accum_device[index_dataset]
         # When the accumulator lives on the GPU, blend the patch straight in (no host round-trip);
@@ -684,7 +691,7 @@ class OutSameAsGroupDataset(OutputDataset):
             def abort(error: BaseException = error, index: int = index_dataset) -> None:
                 sink = self._stream_sinks.pop(index, None)
                 if sink is not None:
-                    sink.__exit__(type(error), error, error.__traceback__)
+                    sink.abort(error)
 
             with suppress(Exception):
                 self._submit_write(abort)
@@ -712,20 +719,26 @@ class OutSameAsGroupDataset(OutputDataset):
             self._reported_paths.add(key)
             print(f"[KonfAI] {message}")
 
-    def _tta_worth_streaming(
-        self,
-        dataset: DatasetIter,
-        index: int,
-        layer: torch.Tensor,
-        number_of_channels_per_model: list[int] | None,
-    ) -> bool:
+    def _tta_worth_streaming(self, dataset: DatasetIter, index: int, layer: torch.Tensor) -> bool:
         """Whether this case's TTA accumulators are heavy enough for the slab-synchronized reduce to
         pay: every copy holds a volume-sized accumulator, and when all of them together are a sliver
-        of allocatable memory (a 2.5D case) the assembled path costs nothing to hold."""
+        of allocatable memory (a 2.5D case) the assembled path costs nothing to hold.
+
+        ``layer`` carries the accumulator's channel count and dtype whatever the ensemble combine is
+        (a Concat layer arrives already concatenated); the estimate is taken before the patch-level
+        inverses, so a dtype-widening inverse under-counts by at most 2x — inside the threshold's
+        margin."""
         spatial = dataset.get_dataset_from_index(self.group_dest, index).shapes[0]
-        channels = sum(number_of_channels_per_model) if number_of_channels_per_model else int(layer.shape[0])
-        assembled = channels * int(np.prod(spatial)) * layer.element_size() * self.nb_data_augmentation
-        fraction = float(os.environ.get("KONFAI_STREAMED_TTA_THRESHOLD", _STREAMED_TTA_MIN_FRACTION))
+        assembled = int(layer.shape[0]) * int(np.prod(spatial)) * layer.element_size() * self.nb_data_augmentation
+        raw = os.environ.get("KONFAI_STREAMED_TTA_THRESHOLD")
+        try:
+            fraction = float(raw) if raw is not None else _STREAMED_TTA_MIN_FRACTION
+        except ValueError:
+            warnings.warn(
+                f"KONFAI_STREAMED_TTA_THRESHOLD={raw!r} is not a number; using {_STREAMED_TTA_MIN_FRACTION}.",
+                stacklevel=2,
+            )
+            fraction = _STREAMED_TTA_MIN_FRACTION
         return assembled >= fraction * available_memory_bytes()[0]
 
     def _plan_stream(
@@ -754,7 +767,7 @@ class OutSameAsGroupDataset(OutputDataset):
         if not self.reduction.voxel_local:
             return None
         if self.nb_data_augmentation != 1:
-            if layer is not None and not self._tta_worth_streaming(dataset, index, layer, number_of_channels_per_model):
+            if layer is not None and not self._tta_worth_streaming(dataset, index, layer):
                 return None
             if not self._tta_streamable(dataset, index, attribute):
                 return None
@@ -974,9 +987,7 @@ class OutSameAsGroupDataset(OutputDataset):
                     # sent back to native) instead of holding it whole. KONFAI_STREAM_LINEAR_RESAMPLE=0
                     # forces the exact whole-volume resample for a run that needs bit-identity. Nearest
                     # (uint8) is byte-identical either way.
-                    if probe.dtype is not torch.uint8 and os.environ.get(
-                        "KONFAI_STREAM_LINEAR_RESAMPLE", "1"
-                    ).lower() in ("0", "false"):
+                    if probe.dtype is not torch.uint8 and not env_flag("KONFAI_STREAM_LINEAR_RESAMPLE", True):
                         return None
                     resample = cast(Resample, stage.transform)
                     if stage.inverted:
@@ -1014,7 +1025,7 @@ class OutSameAsGroupDataset(OutputDataset):
         except Exception:  # nosec B110 - an unplannable pipe just keeps the case on the buffered path
             return None
 
-        state = _RegionState(pipe, kinds, shapes)
+        state = _RegionState(shapes)
 
         def spans_for(target: tuple[slice, ...]) -> list[list[slice]]:
             """The region of each inter-stage space behind ``target``, folded back to the accumulator."""
@@ -1126,12 +1137,7 @@ class OutSameAsGroupDataset(OutputDataset):
         name = self.names[index]
         for stage in plan.stages[plan.tail_start :]:
             result = stage(name, result, attribute)
-        write = super().write
-
-        def operation() -> None:
-            write(self.group, name, result.detach().cpu().numpy(), attribute)
-
-        self._submit_write(operation)
+        self._submit_final_write(name, result, attribute)
 
     def _prepare_copy_slab(
         self,
@@ -1150,11 +1156,7 @@ class OutSameAsGroupDataset(OutputDataset):
         grid, where before_reduction runs), so it reads its slab region instead of the whole volume."""
         layer = self._unaugment(dataset, index, index_augmentation, layer)
         attribute = Attribute(self.attributes[index][index_augmentation][0])
-        if number_of_channels_per_model and layer.shape[0] == sum(number_of_channels_per_model):
-            attribute["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
-            chunks = list(torch.split(layer, number_of_channels_per_model, dim=0))
-        else:
-            chunks = [layer]
+        chunks = self._split_model_chunks(layer, number_of_channels_per_model, attribute)
         results = []
         for chunk in chunks:
             for transform in self.before_reduction_transforms:
@@ -1194,19 +1196,9 @@ class OutSameAsGroupDataset(OutputDataset):
             )
             for index_augmentation, layer in copies.items()
         ]
-        # Mixed devices can only come from a mid-case OOM fallback: reconcile on the host, exactly as
-        # ``get_output`` does.
-        if len({block.device for block in blocks}) > 1:
-            blocks = [block.cpu() if block.device.type != "cpu" else block for block in blocks]
-        # Reduce, then drop the singleton stack axis; Mean/Median also drop the singleton model axis,
-        # while Concat keeps the [M, C, ...] model axis for after_reduction (Sum) to merge into labels.
-        result = self.reduction(blocks).squeeze(0)
-        if isinstance(self.reduction, Mean | Median):
-            result = result.squeeze(0)
+        result = self._reduce_copies(blocks)
         attribute = Attribute(self.attributes[index][0][0])
-        first = next(iter(copies.values()))
-        if number_of_channels_per_model and first.shape[0] == sum(number_of_channels_per_model):
-            attribute["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
+        self._split_model_chunks(next(iter(copies.values())), number_of_channels_per_model, attribute)
         for position, stage in enumerate(plan.stages[: plan.boundary]):
             if position in plan.slab_stages:
                 result = stage.transform.stream_slab(self.names[index], result, region, spatial, attribute)
@@ -1215,12 +1207,12 @@ class OutSameAsGroupDataset(OutputDataset):
         return result, attribute
 
     def reset(self) -> None:
-        # Aborting an attempt mid-stream: exit each open sink WITH an error so the backend removes
-        # the partial entry (a reader must never see a half-written volume); the restart rewrites it.
-        abort = PredictorError("prediction restart: the partial streamed output is discarded")
+        # Aborting an attempt mid-stream: abort each open sink so the backend removes the partial
+        # entry (a reader must never see a half-written volume); the restart rewrites it.
+        error = PredictorError("prediction restart: the partial streamed output is discarded")
         for sink in self._stream_sinks.values():
             try:
-                sink.__exit__(type(abort), abort, None)
+                sink.abort(error)
             except Exception:  # nosec B110 - one sink failing to abort must not leak the others
                 pass
         self._stream_sinks.clear()
@@ -1228,6 +1220,7 @@ class OutSameAsGroupDataset(OutputDataset):
         self._region_states.clear()
         self._stream_buffers.clear()
         self._post_prefix_attributes.clear()
+        self._aligners.clear()
         super().reset()
 
     def _close_stream(self, index: int) -> None:
@@ -1236,7 +1229,7 @@ class OutSameAsGroupDataset(OutputDataset):
         def operation() -> None:
             sink = self._stream_sinks.pop(index, None)
             if sink is not None:
-                sink.__exit__(None, None, None)
+                sink.close()
 
         self._submit_write(operation)
         self._stream_plans.pop(index, None)
@@ -1260,17 +1253,39 @@ class OutSameAsGroupDataset(OutputDataset):
                 f"Destination group '{self.group_dest}' not found. Available groups: {groups[self.group_src]}."
             )
 
+    @staticmethod
+    def _split_model_chunks(
+        layer: torch.Tensor, number_of_channels_per_model: list[int] | None, attribute: Attribute
+    ) -> list[torch.Tensor]:
+        """Split an ensemble layer into per-model chunk views and tag the attribute with the layout; a
+        layer whose channels do not match the ensemble layout stays whole. One splitter serves the
+        whole-volume and slab paths, so the two cannot drift."""
+        if number_of_channels_per_model and layer.shape[0] == sum(number_of_channels_per_model):
+            attribute["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
+            return list(torch.split(layer, number_of_channels_per_model, dim=0))
+        return [layer]
+
+    def _reduce_copies(self, copies: list[torch.Tensor]) -> torch.Tensor:
+        """The cross-copy reduction, identical for a slab and a whole volume — the streamed path's
+        byte-identity rests on the two staying in lockstep.
+
+        Mixed devices can only come from a mid-case OOM fallback: reconcile on the host. Reduce, then
+        drop the singleton stack axis; Mean/Median also drop the singleton model axis, while Concat
+        keeps the ``[M, C, ...]`` model axis for after_reduction (Sum) to merge into labels."""
+        if len({copy.device for copy in copies}) > 1:
+            copies = [copy.cpu() if copy.device.type != "cpu" else copy for copy in copies]
+        result = self.reduction(copies).squeeze(0)
+        if isinstance(self.reduction, Mean | Median):
+            result = result.squeeze(0)
+        return result
+
     def _get_output(
         self, index: int, index_augmentation: int, number_of_channels_per_model: list[int], dataset: DatasetIter
     ) -> torch.Tensor:
         layer = self.output_layer_accumulator[index][index_augmentation].assemble()  # if concat then [N*C] else [C]
         layer = self._unaugment(dataset, index, index_augmentation, layer)
         base_attr = self.attributes[index][index_augmentation][0]
-        if layer.shape[0] == sum(number_of_channels_per_model):
-            base_attr["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
-            chunks = list(torch.split(layer, number_of_channels_per_model, dim=0))
-        else:
-            chunks = [layer]
+        chunks = self._split_model_chunks(layer, number_of_channels_per_model, base_attr)
 
         # The per-model channel reduction (softmax/argmax over the class dimension of a whole-volume
         # multi-class output) materialises a working volume on top of the resident accumulator. Decide
@@ -1372,13 +1387,7 @@ class OutSameAsGroupDataset(OutputDataset):
         # The volume stays on whatever device it was blended on (GPU when it fit VRAM, else CPU): the
         # reduction and every finalize transform are device- and dtype-transparent, so the whole finalize
         # simply runs where the volume already is. Only the final result is returned to the host.
-        # The per-case device decisions above make the list single-device; if VRAM pressure ever mixes
-        # devices anyway, fall back to the host — the one device guaranteed to fit everything.
-        if len({r.device for r in results}) > 1:
-            results = [r.cpu() if r.device.type != "cpu" else r for r in results]
-        result = self.reduction(results).squeeze(0)
-        if isinstance(self.reduction, Mean) or isinstance(self.reduction, Median):
-            result = result.squeeze(0)
+        result = self._reduce_copies(results)
         # Reduction strategy overview:
         #
         # Terminology:
