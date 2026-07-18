@@ -171,31 +171,29 @@ a `Canonical`/`Flip`/`Permute` inverse remaps each slab to its written region, a
 `Padding` inverse crops it in flight, a `ResampleToResolution`/`ResampleToShape`
 inverse resamples back through a sliding window — chained in any number, each
 pulling through the next — so a huge output at ORIGINAL resolution is written
-slab by slab without ever being held whole. What streaming cannot honour (a
-whole-volume transform, a float resample — whose interpolation is only bit-equal
-whole-volume — or a destination without region writes) splits instead: the
-pointwise prefix still streams into a light post-reduction buffer and the
-remaining stages run once on it. Only several augmentations (TTA inverses apply
-to the assembled volume) or a non-voxel-local reduction keep the whole-volume
-path. Every streamed or split case is voxel-identical to the
-assembled path on a given device; as with the assembled path, only a
-transcendental-terminated float chain can differ by ~1 ULP between a GPU window
-and a CPU whole-volume run. `KONFAI_STREAMED_WRITES=0` forces the whole-volume
-path globally.
+slab by slab without ever being held whole. A masked finalize (`Mask`) streams
+too: each slab reads only its aligned mask region. What streaming cannot honour
+(a whole-volume transform or a destination without region writes) splits
+instead: the pointwise prefix still streams into a light post-reduction buffer
+and the remaining stages run once on it. Only several augmentations (TTA inverses
+apply to the assembled volume) or a non-voxel-local reduction keep the
+whole-volume path. A streamed case is voxel-identical to the assembled path on a
+given device, except a linear-resample inverse, which streams by default and
+matches the whole-volume `F.interpolate` to float rounding rather than
+bit-for-bit. `KONFAI_STREAMED_WRITES=0` forces the whole-volume path globally.
 
-Streaming bounds the reassembly *accumulator* and the streamable finalize
-stages, but one stage stays whole-volume by choice: a **float (linear)
-resample inverse**. The streamed resample is bit-identical to the whole-volume
-`F.interpolate` only in `nearest` mode, so a linear resample — resampling
-probabilities/logits back to the native grid, before an `argmax` — is run once
-on the whole volume rather than trade exactness for a window. On a large
-multi-class output that whole-volume `F.interpolate` is the memory peak (tens
-of GB), and a `combine: Concat` ensemble makes it worse by keeping every
-member's channels in the tensor being resampled. To bound it on a memory-tight
-run: resample the `argmax`'d labels (a `nearest`, streaming resample) instead
-of the probabilities where the task allows, and use `combine: Mean`/`Median` to
-collapse the members first; keep `combine: Concat` only when you need the
-per-member stack.
+A **float (linear) resample inverse** — resampling probabilities/logits back to
+the native grid before an `argmax` — streams within the sliding window by
+default like the other geometry inverses. On a large multi-class output the
+whole-volume `F.interpolate` is otherwise the memory peak (tens of GB), and a
+`combine: Concat` ensemble makes it worse by keeping every member's channels in
+the tensor being resampled; streaming bounds both. It matches the whole-volume
+`F.interpolate` to float rounding, not bit-for-bit — `argmax`'d labels absorb it
+(a boundary voxel or two may flip; a raw float output differs by ~float-rounding).
+Set `KONFAI_STREAM_LINEAR_RESAMPLE=0` to force the exact whole-volume linear
+resample when you need bit-identity or the per-member stack; resampling the
+`argmax`'d labels (a `nearest`, streaming resample) or collapsing members with
+`combine: Mean`/`Median` first also avoids the peak.
 
 ## Verify the behaviour you care about
 

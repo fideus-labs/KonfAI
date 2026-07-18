@@ -21,9 +21,9 @@ when the gate refuses.
 
 The geometry variants exercise the write dispatcher end to end, one per region kind and then in
 composition: a ``Canonical`` inverse (ORIENTATION — in-slab mirrors), a ``Padding`` inverse (CROP), a
-``ResampleToResolution`` inverse on a uint8 chain (RESCALE, streamed through in nearest mode) and on a
-float chain (demoted to the buffered tail, since interpolation is only byte-identical whole-volume),
-a two-inverse pipe, and the full three-inverse stack (crop + rescale + reorient composed, streamed
+``ResampleToResolution`` inverse on a uint8 chain (RESCALE, streamed in nearest mode, byte-exact) and on
+a float chain (RESCALE, streamed in linear mode, matching the reference to float-rounding), a
+two-inverse pipe, and the full three-inverse stack (crop + rescale + reorient composed, streamed
 end to end). The TTA variants exercise the slab-synchronized cross-copy reduce: an in-plane flip
 streams (each copy's window reduced slab by slab), while a slab-axis flip must refuse and complete
 whole-volume. Every variant is compared voxel for voxel against its own kill-switch reference."""
@@ -148,8 +148,8 @@ _VARIANT_TRANSFORMS = {
 }
 
 # ResampleLabel/GeometryStack cast to uint8 before the reduction, so the tensor reaching the RESCALE
-# stage resamples in nearest mode — the exactness the streamed resample requires. ResampleFloat keeps
-# the float chain: the dispatcher must demote it to the buffered tail and stay byte-identical.
+# stage resamples in nearest mode (byte-exact). ResampleFloat keeps the float chain, so it resamples in
+# linear mode and matches the reference to float-rounding.
 _UINT8_BEFORE_REDUCTION = """        before_reduction_transforms:
           TensorCast:
             dtype: uint8
@@ -164,7 +164,7 @@ _VARIANT_USES_STREAMED_WRITER = {
     "Canonical": True,
     "Padding": True,
     "ResampleLabel": True,
-    "ResampleFloat": False,
+    "ResampleFloat": True,
     "GeometryPair": True,
     "GeometryStack": True,
     "TTA": True,
@@ -258,15 +258,20 @@ def test_streamed_prediction_is_voxel_identical_to_reference(
         reference_array = SimpleITK.GetArrayFromImage(reference)
         streamed_array = SimpleITK.GetArrayFromImage(streamed)
         assert streamed_array.dtype == reference_array.dtype, (variant, case)
-        np.testing.assert_array_equal(streamed_array, reference_array, err_msg=f"{variant}/{case}")
+        if variant == "ResampleFloat":
+            # A float rescale streams its linear interpolation, matching the whole-volume reference to
+            # float-rounding rather than bit for bit.
+            np.testing.assert_allclose(streamed_array, reference_array, atol=1e-2, err_msg=f"{variant}/{case}")
+        else:
+            np.testing.assert_array_equal(streamed_array, reference_array, err_msg=f"{variant}/{case}")
 
 
 @pytest.mark.parametrize("variant", _ALL_VARIANTS)
 def test_streamed_prediction_takes_the_expected_writer(streamed_experiment: dict[str, Path], variant: str) -> None:
     """SimpleITK always writes ``CenterOfRotation`` into a MetaImage header; the streamed region writer
     never does. Its absence proves the variant streamed to the sink (for TTA: the slab-synchronized
-    cross-copy reduce); its presence proves the buffered (chain-split / demoted) and refused (TTAZ —
-    a slab-axis flip) variants assembled and wrote classically."""
+    cross-copy reduce); its presence proves a refused variant (TTAZ — a slab-axis flip that cannot act
+    slab by slab) assembled the whole volume and wrote it classically."""
     experiment_dir = streamed_experiment["experiment_dir"]
     case = _case_names(streamed_experiment["dataset_dir"])[0]
     streamed_header = _prediction_path(experiment_dir / f"Predictions_{variant}_streamed", case).read_bytes()[:2048]
