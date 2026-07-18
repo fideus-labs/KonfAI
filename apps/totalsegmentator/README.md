@@ -36,19 +36,27 @@ It provides **fast and efficient inference** for segmentation tasks, including o
 
 ### 🔬 Performance comparison
 
-**Setup**
-- **Input:** real whole-body CT, `295 × 259 × 219` (2 mm)
-- **GPU:** single NVIDIA RTX PRO 5000 (24 GB)
+Same input, same weights (Datasets 291–295, 1.5 mm, 5-model `total`), same PyTorch
+build (cu13.0), single **NVIDIA RTX PRO 5000 (24 GB)**. Peak RAM = process-tree
+resident set; peak VRAM = over baseline.
 
-| Tool (`total`, 5-model) | Time | Peak RAM | Peak VRAM |
-|---|------|----------|-----------|
-| **TotalSegmentator-KonfAI** | **~42 s** | ~19 GB | ~20 GB |
-| Original TotalSegmentator | ~76 s | ~9 GB | ~7 GB |
+| Case (voxels) | Tool | Time | Peak RAM | Peak VRAM |
+|---|---|---|---|---|
+| **S** — 240 × 220 × 200 | **KonfAI** | **12 s** | **6.0 GB** | 12.0 GB |
+| | Original | 35 s | 21 GB | 3.7 GB |
+| **M** — 533 × 390 × 177 | **KonfAI** | **17 s** | **6.5 GB** | 12.9 GB |
+| | Original | 61 s | 26.5 GB | 5.1 GB |
+| **L** — 512 × 512 × 531 | **KonfAI** | **314 s** | **19.3 GB** | **10.4 GB** |
+| | Original | 459 s | 51.8 GB | 23.3 GB |
 
 ### 📈 Key observations
 
-- **~1.8× faster** whole-body inference (`total`, 5-model ensemble)
-- The 117-class head keeps the accumulator on the host, so KonfAI trades higher system RAM for the speed-up
+- **1.5–3.5× faster** whole-body inference across sizes, **2.7–4.1× less host RAM**.
+- KonfAI trades **more VRAM on small/medium cases** (larger patches, GPU accumulation)
+  for the speed-up, while it stays inside a 24 GB card.
+- On **large** cases the streaming reassembly **bounds VRAM** (10.4 GB) where the
+  original nears the card limit (23.3 GB / 24 GB) — KonfAI is then lighter on **both**
+  RAM and VRAM.
 
 ---
 
