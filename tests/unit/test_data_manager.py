@@ -85,6 +85,43 @@ def test_train_split_single_process_keeps_everything(monkeypatch: pytest.MonkeyP
 
 
 # --------------------------------------------------------------------------------------
+# Data._split — PREDICTION/EVALUATION shards must keep every case whole on one rank
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("state", [State.PREDICTION, State.EVALUATION])
+@pytest.mark.parametrize("world_size", [2, 3])
+def test_prediction_split_keeps_every_case_on_one_rank(
+    monkeypatch: pytest.MonkeyPatch, state: State, world_size: int
+) -> None:
+    # The streamed write (and the TTA aligner) reassemble a case from ALL its patches: a case split
+    # across ranks would leave every rank's accumulator forever incomplete.
+    monkeypatch.setenv("KONFAI_STATE", str(state))
+    mapping = [(case, a, p) for case in range(5) for a in range(2) for p in range(3)]
+
+    shards = Data._split(mapping, world_size)
+
+    assert sorted(entry for shard in shards for entry in shard) == sorted(mapping)
+    owner: dict[int, int] = {}
+    for rank, shard in enumerate(shards):
+        for entry in shard:
+            assert owner.setdefault(entry[0], rank) == rank, f"case {entry[0]} split across ranks"
+
+
+def test_prediction_split_more_ranks_than_cases_leaves_spare_ranks_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    mapping = [(case, 0, p) for case in range(2) for p in range(4)]
+
+    shards = Data._split(mapping, 4)
+
+    assert sorted(entry for shard in shards for entry in shard) == sorted(mapping)
+    non_empty = [shard for shard in shards if shard]
+    assert len(non_empty) == 2
+    for shard in non_empty:
+        assert len({entry[0] for entry in shard}) == 1  # one whole case per busy rank
+
+
+# --------------------------------------------------------------------------------------
 # DataTrain train/validation split — reproducible and seeded from sorted names
 # --------------------------------------------------------------------------------------
 
