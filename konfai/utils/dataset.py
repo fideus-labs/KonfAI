@@ -19,11 +19,11 @@
 from __future__ import annotations
 
 import ast
-import contextlib
 import copy
 import csv
 import functools
 import glob
+import itertools
 import math
 import os
 import re
@@ -32,7 +32,7 @@ import threading
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -72,7 +72,10 @@ class _H5ReadPool:
     makes the cache effective — a per-read open rebuilds it empty every time. ``get``/``drop`` must be
     called under the file's lock; a write drops the file's reader so it never serves stale metadata;
     handles inherited across ``fork`` are dropped unused (closing them would flush another process's
-    state)."""
+    state). Pooled handles open with ``locking=False``: a held HDF5 read lock would block every other
+    process's write-open of the file for as long as the handle lives — the pool's whole lifetime.
+    Same-process access is serialized by the per-file thread lock; cross-process read-under-write
+    coherence is the store's own caveat, unchanged by the pool."""
 
     _MAX = 8
 
@@ -88,11 +91,14 @@ class _H5ReadPool:
                 self._pid = os.getpid()
             handle = self._handles.pop(filename, None)
             if handle is None or not handle.id.valid:
-                handle = h5py.File(filename, "r", **open_kwargs)
+                handle = h5py.File(filename, "r", locking=False, **open_kwargs)
             self._handles[filename] = handle
-            evicted = [self._handles.pop(oldest) for oldest in list(self._handles)[: -self._MAX]]
-        for stale in evicted:
-            self._close_idle(stale)
+            evicted = []
+            while len(self._handles) > self._MAX:
+                oldest = next(iter(self._handles))
+                evicted.append((oldest, self._handles.pop(oldest)))
+        for stale_name, stale in evicted:
+            self._close_idle(stale_name, stale)
         return handle
 
     def drop(self, filename: str) -> None:
@@ -101,16 +107,18 @@ class _H5ReadPool:
         if handle is not None and handle.id.valid:
             handle.close()
 
-    @staticmethod
-    def _close_idle(handle: Any) -> None:
+    def _close_idle(self, filename: str, handle: Any) -> None:
         # An evicted handle may be mid-read under its file's lock: close only when that lock is free,
-        # otherwise leave it open (it falls out of the pool and dies with the process).
-        lock = _get_h5_file_lock(handle.filename)
+        # otherwise put it back in the pool — an untracked open handle could never be dropped again.
+        lock = _get_h5_file_lock(filename)
         if lock.acquire(blocking=False):
             try:
                 handle.close()
             finally:
                 lock.release()
+        else:
+            with self._guard:
+                self._handles.setdefault(filename, handle)
 
 
 _h5_read_pool = _H5ReadPool()
@@ -370,7 +378,17 @@ class DataStream(ABC):
     The entry lives under a temporary name until the clean exit renames it into place: an existence
     probe (``is_dataset_exist``) or a concurrent reader never sees the entry while it is being written,
     a replaced entry stays readable until its replacement is complete, and a hard-killed writer leaves
-    only temporary debris, never a plausible-looking partial volume under the final name."""
+    only temporary debris, never a plausible-looking partial volume under the final name. The
+    temporary name is unique per stream (PID + sequence): two writers of the same entry (a case
+    landing on two workers) each own their temporary, and whichever finalizes last publishes — a
+    complete entry either way, never an interleaving of the two."""
+
+    _sequence = itertools.count()
+
+    @staticmethod
+    def temporary_suffix() -> str:
+        """The per-stream unique suffix a backend appends to its temporary name."""
+        return f"{os.getpid()}-{next(DataStream._sequence)}.tmp"
 
     _file: Dataset.File | None = None
 
@@ -385,9 +403,23 @@ class DataStream(ABC):
     def _close(self, success: bool) -> None:
         """Finalize the entry, or remove the partial one when ``success`` is False."""
 
+    def close(self) -> None:
+        """Finalize the entry under its final name."""
+        self._finish(True, None, None, None)
+
+    def abort(self, error: BaseException | None = None) -> None:
+        """Remove the partial entry."""
+        if error is None:
+            self._finish(False, None, None, None)
+        else:
+            self._finish(False, type(error), error, error.__traceback__)
+
     def __exit__(self, exc_type, value, traceback) -> None:
+        self._finish(exc_type is None, exc_type, value, traceback)
+
+    def _finish(self, success: bool, exc_type, value, traceback) -> None:
         try:
-            self._close(exc_type is None)
+            self._close(success)
         finally:
             if self._file is not None:
                 self._file.__exit__(exc_type, value, traceback)
@@ -434,7 +466,7 @@ class _MhaDataStream(DataStream):
 
     def __init__(self, path: str, shape: list[int], dtype: np.dtype, attributes: Attribute) -> None:
         self.path = path
-        self._temporary_path = f"{path}.tmp"
+        self._temporary_path = f"{path}.{self.temporary_suffix()}"
         spatial = list(shape[1:])
         # The header declares BinaryDataByteOrderMSB=False, so the map must be explicitly little-endian.
         self._dtype = np.dtype(dtype).newbyteorder("<")
@@ -469,16 +501,10 @@ class _MhaDataStream(DataStream):
     def _close(self, success: bool) -> None:
         self._memmap.flush()
         del self._memmap
-        if not success:
-            with contextlib.suppress(FileNotFoundError):
-                os.remove(self._temporary_path)
-            return
-        try:
+        if success:
             os.replace(self._temporary_path, self.path)
-        except FileNotFoundError:
-            # A concurrent writer of the same entry finalized first; keep its identical result.
-            if not os.path.exists(self.path):
-                raise
+        else:
+            os.remove(self._temporary_path)
 
 
 class _OmeZarrDataStream(DataStream):
@@ -496,7 +522,14 @@ class _OmeZarrDataStream(DataStream):
             return
         if self._final_path.exists():
             shutil.rmtree(self._final_path)
-        os.rename(self._store_path, self._final_path)
+        try:
+            os.rename(self._store_path, self._final_path)
+        except OSError:
+            # A concurrent writer of the same entry renamed its complete, identical store into place
+            # between the rmtree and this rename; keep it and drop ours.
+            if not self._final_path.exists():
+                raise
+            shutil.rmtree(self._store_path, ignore_errors=True)
 
 
 class Dataset:
@@ -593,8 +626,6 @@ class Dataset:
             self._lock.acquire()
             try:
                 if self.read:
-                    # Pooled: the chunk cache lives on the handle, and only a handle that survives
-                    # this enter/exit makes overlapping patch reads hit it.
                     self.h5 = _h5_read_pool.get(
                         self.filename,
                         rdcc_nbytes=self._READ_CHUNK_CACHE_BYTES,
@@ -602,11 +633,14 @@ class Dataset:
                     )
                 else:
                     _h5_read_pool.drop(self.filename)
+                    # locking=False on every KonfAI open (the HDF5 flag must agree across a file's
+                    # handles): same-process access is serialized by the per-file thread lock, and a
+                    # pooled reader must not hold a lock that blocks another process's write-open.
                     if not os.path.exists(self.filename):
                         Path(self.filename).parent.mkdir(parents=True, exist_ok=True)
-                        self.h5 = h5py.File(self.filename, "w")
+                        self.h5 = h5py.File(self.filename, "w", locking=False)
                     else:
-                        self.h5 = h5py.File(self.filename, "r+")
+                        self.h5 = h5py.File(self.filename, "r+", locking=False)
                     self.h5.attrs["Date"] = current_date()
             except BaseException:
                 self._lock.release()
@@ -696,19 +730,23 @@ class Dataset:
                     datas.append(np.asarray(transform.GetParameters()))
                 data = np.asarray(datas)
 
-            h5_group = self.h5
-            if len(name.split("/")) > 1:
-                group = "/".join(name.split("/")[:-1])
-                if group not in self.h5:
-                    self.h5.create_group(group)
-                h5_group = self.h5[group]
-
-            name = name.split("/")[-1]
+            h5_group, name = self._resolve_group(name)
             if name in h5_group:
                 del h5_group[name]
 
             dataset = h5_group.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
             dataset.attrs.update({k: str(v) for k, v in attributes.items()})
+
+        def _resolve_group(self, name: str) -> tuple[h5py.Group, str]:
+            """The (created) parent group a slash-qualified entry name writes into, and its leaf name."""
+            h5 = cast(h5py.File, self.h5)
+            h5_group: h5py.Group = h5
+            if len(name.split("/")) > 1:
+                group = "/".join(name.split("/")[:-1])
+                if group not in h5:
+                    h5.create_group(group)
+                h5_group = h5[group]
+            return h5_group, name.split("/")[-1]
 
         def open_data_stream(
             self,
@@ -719,18 +757,8 @@ class Dataset:
         ) -> DataStream | None:
             if self.h5 is None:
                 return None
-            h5_group = self.h5
-            if len(name.split("/")) > 1:
-                group = "/".join(name.split("/")[:-1])
-                if group not in self.h5:
-                    self.h5.create_group(group)
-                h5_group = self.h5[group]
-            name = name.split("/")[-1]
-            # Write under a temporary key and move on finalize: the final key never names a partial
-            # entry, and a replaced entry stays readable until its replacement is complete.
-            temporary_name = f"{name}.tmp"
-            if temporary_name in h5_group:
-                del h5_group[temporary_name]
+            h5_group, name = self._resolve_group(name)
+            temporary_name = f"{name}.{DataStream.temporary_suffix()}"
             dataset = h5_group.create_dataset(temporary_name, shape=tuple(shape), dtype=dtype, chunks=None)
             dataset.attrs.update({k: str(v) for k, v in attributes.items()})
             return _H5DataStream(dataset, name)
@@ -753,7 +781,10 @@ class Dataset:
             group = groups.split("/")[0]
             if group == "":
                 names = [
-                    dataset.name.split("/")[-1] for dataset in h5_group.values() if isinstance(dataset, h5py.Dataset)
+                    dataset.name.split("/")[-1]
+                    for dataset in h5_group.values()
+                    # ``.tmp`` keys are in-flight (or hard-kill-orphaned) DataStream writes, not entries.
+                    if isinstance(dataset, h5py.Dataset) and not dataset.name.endswith(".tmp")
                 ]
             elif group == "*":
                 for k in h5_group.keys():
@@ -1265,14 +1296,11 @@ class Dataset:
                 attributes.update(image_attributes)
             if not isinstance(data, np.ndarray):
                 raise DatasetManagerError("OME-Zarr datasets can only store image arrays.")
-            dimension = data.ndim - 1
-            spacing = attributes.get_np_array("Spacing") if "Spacing" in attributes else np.ones(dimension)
-            origin = attributes.get_np_array("Origin") if "Origin" in attributes else np.zeros(dimension)
             write_ome_zarr(
                 self._path(name, writing=True),
                 data,
-                spacing=spacing,
-                origin=origin,
+                spacing=attributes.get_np_array("Spacing") if "Spacing" in attributes else None,
+                origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
                 attributes=dict(attributes),
             )
 
@@ -1287,18 +1315,14 @@ class Dataset:
 
             if len(shape) not in (3, 4):
                 return None
-            dimension = len(shape) - 1
-            spacing = attributes.get_np_array("Spacing") if "Spacing" in attributes else np.ones(dimension)
-            origin = attributes.get_np_array("Origin") if "Origin" in attributes else np.zeros(dimension)
             final_path = self._path(name, writing=True)
-            store_path = Path(f"{final_path}.tmp")
-            shutil.rmtree(store_path, ignore_errors=True)
+            store_path = Path(f"{final_path}.{DataStream.temporary_suffix()}")
             array = create_ome_zarr_store(
                 store_path,
                 shape,
                 dtype,
-                spacing=spacing,
-                origin=origin,
+                spacing=attributes.get_np_array("Spacing") if "Spacing" in attributes else None,
+                origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
                 attributes=dict(attributes),
             )
             return _OmeZarrDataStream(array, store_path, final_path)
@@ -1559,6 +1583,23 @@ class Dataset:
         """
         return self.file_format not in ("h5", "omezarr", "dicom")
 
+    def _write_target(self, group: str, name: str) -> tuple[Dataset.File, str]:
+        """The file a ``(group, name)`` write lands in and the entry name inside it, caches dropped.
+
+        A directory dataset routes any sub-directory prefix of ``group`` into the file path (one file
+        per case); a single store keeps one file and a ``group/name`` entry.
+        """
+        self._names_cache.clear()
+        self._infos_cache.clear()
+        if self.is_directory:
+            os.makedirs(self.filename, exist_ok=True)
+            s_group = group.split("/")
+            if len(s_group) > 1:
+                name = f"{'/'.join(s_group[:-1])}/{name}"
+                group = s_group[-1]
+            return Dataset.File(f"{self.filename}{name}", False, self.file_format, self.level), group
+        return Dataset.File(self.filename, False, self.file_format, self.level), f"{group}/{name}"
+
     def write(
         self,
         group: str,
@@ -1566,23 +1607,9 @@ class Dataset:
         data: sitk.Image | sitk.Transform | np.ndarray,
         attributes: Attribute | None = None,
     ) -> None:
-        self._names_cache.clear()
-        self._infos_cache.clear()
-        if attributes is None:
-            attributes = Attribute()
-        if self.is_directory:
-            os.makedirs(self.filename, exist_ok=True)
-        if self.is_directory:
-            s_group = group.split("/")
-            if len(s_group) > 1:
-                sub_directory = "/".join(s_group[:-1])
-                name = f"{sub_directory}/{name}"
-                group = s_group[-1]
-            with Dataset.File(f"{self.filename}{name}", False, self.file_format, self.level) as file:
-                file.data_to_file(group, data, attributes)
-        else:
-            with Dataset.File(self.filename, False, self.file_format, self.level) as file:
-                file.data_to_file(f"{group}/{name}", data, attributes)
+        target, entry = self._write_target(group, name)
+        with target as file:
+            file.data_to_file(entry, data, attributes if attributes is not None else Attribute())
 
     def can_stream_data(self, attributes: Attribute) -> bool:
         """Whether ``open_data_stream`` can serve this dataset's write format.
@@ -1608,21 +1635,9 @@ class Dataset:
         the volume and uses ``write``. The returned stream is a context manager: a clean exit
         finalizes the entry, an exception removes the partial one.
         """
-        self._names_cache.clear()
-        self._infos_cache.clear()
         if attributes is None:
             attributes = Attribute()
-        if self.is_directory:
-            os.makedirs(self.filename, exist_ok=True)
-            s_group = group.split("/")
-            if len(s_group) > 1:
-                name = f"{'/'.join(s_group[:-1])}/{name}"
-                group = s_group[-1]
-            file = Dataset.File(f"{self.filename}{name}", False, self.file_format, self.level)
-            entry = group
-        else:
-            file = Dataset.File(self.filename, False, self.file_format, self.level)
-            entry = f"{group}/{name}"
+        file, entry = self._write_target(group, name)
         backend = file.__enter__()
         try:
             stream = backend.open_data_stream(entry, shape, dtype, attributes)

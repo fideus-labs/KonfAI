@@ -173,6 +173,32 @@ def read_ome_zarr_data_slice(
     return np.asarray(patch), metadata
 
 
+def _spatial_geometry(
+    ndim: int,
+    shape_label: str,
+    spacing: Sequence[float] | None,
+    origin: Sequence[float] | None,
+) -> tuple[list[str], list[float], list[float]]:
+    """The NGFF spatial axes of a channel-first array with ``ndim`` dims, and its per-axis
+    scale/translation in axis order — geometry arrives ``(x, y, z)`` (SimpleITK order)."""
+    if ndim not in {3, 4}:
+        raise DatasetManagerError(f"OME-Zarr writing expects a C-Y-X or C-Z-Y-X array, got {shape_label}.")
+    spatial_axes = ["y", "x"] if ndim == 3 else ["z", "y", "x"]
+    dimension = len(spatial_axes)
+    spacing_xyz = list(spacing if spacing is not None else [1.0] * dimension)
+    origin_xyz = list(origin if origin is not None else [0.0] * dimension)
+    if len(spacing_xyz) != dimension or len(origin_xyz) != dimension:
+        raise DatasetManagerError(
+            f"OME-Zarr geometry must contain {dimension} spacing and origin values for {shape_label}."
+        )
+    coordinate = {"x": (spacing_xyz[0], origin_xyz[0]), "y": (spacing_xyz[1], origin_xyz[1])}
+    if dimension == 3:
+        coordinate["z"] = (spacing_xyz[2], origin_xyz[2])
+    scale_values = [float(coordinate[axis][0]) for axis in spatial_axes]
+    translation_values = [float(coordinate[axis][1]) for axis in spatial_axes]
+    return spatial_axes, scale_values, translation_values
+
+
 def write_ome_zarr(
     store_path: str | Path,
     data: np.ndarray,
@@ -186,24 +212,12 @@ def write_ome_zarr(
     _load_image.cache_clear()
     _require_ngff_zarr()
     array_data = np.asarray(data)
-    if array_data.ndim not in {3, 4}:
-        raise DatasetManagerError(f"OME-Zarr writing expects a C-Y-X or C-Z-Y-X array, got shape {array_data.shape}.")
-
-    spatial_axes = ["y", "x"] if array_data.ndim == 3 else ["z", "y", "x"]
+    spatial_axes, scale_values, translation_values = _spatial_geometry(
+        array_data.ndim, f"shape {array_data.shape}", spacing, origin
+    )
     dims = ["c", *spatial_axes]
-    dimension = len(spatial_axes)
-    spacing_xyz = list(spacing if spacing is not None else [1.0] * dimension)
-    origin_xyz = list(origin if origin is not None else [0.0] * dimension)
-    if len(spacing_xyz) != dimension or len(origin_xyz) != dimension:
-        raise DatasetManagerError(
-            f"OME-Zarr geometry must contain {dimension} spacing and origin values for shape {array_data.shape}."
-        )
-
-    coordinate = {"x": (spacing_xyz[0], origin_xyz[0]), "y": (spacing_xyz[1], origin_xyz[1])}
-    if dimension == 3:
-        coordinate["z"] = (spacing_xyz[2], origin_xyz[2])
-    scale = {"c": 1.0, **{axis: float(coordinate[axis][0]) for axis in spatial_axes}}
-    translation = {"c": 0.0, **{axis: float(coordinate[axis][1]) for axis in spatial_axes}}
+    scale = {"c": 1.0, **dict(zip(spatial_axes, scale_values, strict=True))}
+    translation = {"c": 0.0, **dict(zip(spatial_axes, translation_values, strict=True))}
 
     image = ngff_zarr.to_ngff_image(array_data, dims=dims, scale=scale, translation=translation)
     multiscales = ngff_zarr.to_multiscales(
@@ -236,23 +250,11 @@ def create_ome_zarr_store(
     """
     _load_image.cache_clear()
     _require_zarr()
-    if len(shape) not in {3, 4}:
-        raise DatasetManagerError(f"OME-Zarr writing expects a C-Y-X or C-Z-Y-X shape, got {list(shape)}.")
-
-    spatial_axes = ["y", "x"] if len(shape) == 3 else ["z", "y", "x"]
-    dimension = len(spatial_axes)
-    spacing_xyz = list(spacing if spacing is not None else [1.0] * dimension)
-    origin_xyz = list(origin if origin is not None else [0.0] * dimension)
-    if len(spacing_xyz) != dimension or len(origin_xyz) != dimension:
-        raise DatasetManagerError(
-            f"OME-Zarr geometry must contain {dimension} spacing and origin values for shape {list(shape)}."
-        )
-
-    coordinate = {"x": (spacing_xyz[0], origin_xyz[0]), "y": (spacing_xyz[1], origin_xyz[1])}
-    if dimension == 3:
-        coordinate["z"] = (spacing_xyz[2], origin_xyz[2])
-    scale = [1.0, *[float(coordinate[axis][0]) for axis in spatial_axes]]
-    translation = [0.0, *[float(coordinate[axis][1]) for axis in spatial_axes]]
+    spatial_axes, scale_values, translation_values = _spatial_geometry(
+        len(shape), f"shape {list(shape)}", spacing, origin
+    )
+    scale = [1.0, *scale_values]
+    translation = [0.0, *translation_values]
 
     if chunks is None:
         spatial_chunks = [min(extent, 128) for extent in shape[1:]]
