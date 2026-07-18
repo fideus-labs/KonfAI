@@ -24,7 +24,7 @@ from types import ModuleType
 
 import numpy as np
 
-from konfai.utils.errors import DatasetManagerError
+from konfai.utils.errors import ConfigError, DatasetManagerError
 
 
 def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]:
@@ -153,14 +153,14 @@ def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int
         if isinstance(spec, str):
             text = spec.strip()
             if not text.endswith("%"):
-                raise ValueError(f"overlap: '{spec}' is not a percentage; use e.g. '20%', a voxel int or a fraction.")
+                raise ConfigError(f"overlap: '{spec}' is not a percentage; use e.g. '20%', a voxel int or a fraction.")
             spec = float(text[:-1]) / 100.0
         if isinstance(spec, float):
             if not 0.0 <= spec < 1.0:
-                raise ValueError(f"overlap: fraction {spec} must be in [0, 1[.")
+                raise ConfigError(f"overlap: fraction {spec} must be in [0, 1[.")
             return int(size * spec)
         if spec < 0:
-            raise ValueError(f"overlap: {spec} must be >= 0 voxels.")
+            raise ConfigError(f"overlap: {spec} must be >= 0 voxels.")
         return int(spec)
 
     if overlap is None:
@@ -169,14 +169,14 @@ def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int
         list(overlap) if isinstance(overlap, list) else [overlap] * len(patch_size)  # scalar broadcast
     )
     if len(specs) != len(patch_size):
-        raise ValueError(f"overlap: {len(specs)} entries for {len(patch_size)} axes; give one per axis or a scalar.")
+        raise ConfigError(f"overlap: {len(specs)} entries for {len(patch_size)} axes; give one per axis or a scalar.")
     resolved = []
     for spec, size, extent in zip(specs, patch_size, shape, strict=True):
         # No overlap on an axis that is not tiled (one patch spans it) nor on a length-1 patch axis
         # (2D slicing: nothing to blend along a single-voxel patch).
         voxels = one(spec, size) if 1 < size < extent else 0
         if voxels >= size:
-            raise ValueError(f"overlap: {voxels} voxels must be smaller than the patch size {size}.")
+            raise ConfigError(f"overlap: {voxels} voxels must be smaller than the patch size {size}.")
         resolved.append(voxels)
     return resolved
 
@@ -275,7 +275,7 @@ def get_patch_slices_from_shape(
 
     for dim in range(len(shape)):
         if overlap[dim] >= patch_size[dim]:
-            raise ValueError(
+            raise ConfigError(
                 f"Overlap must be less than patch size, got overlap={overlap[dim]}",
                 f" ≥ patch_size={patch_size[dim]} at dim={dim}",
             )
