@@ -54,34 +54,6 @@ ELX_ASSET_TEMPLATE = {
 #   (except the NVIDIA driver, which must be installed system-wide).
 # -----------------------------------------------------------------------------
 
-LIBTORCH_URL = {
-    (
-        "Linux",
-        "x86_64",
-        "cpu",
-    ): "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-2.8.0%2Bcpu.zip",
-    (
-        "Windows",
-        "x86_64",
-        "cpu",
-    ): "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.8.0%2Bcpu.zip",
-    (
-        "Darwin",
-        "arm64",
-        "cpu",
-    ): "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.8.0%2Bcpu.zip",
-    (
-        "Linux",
-        "x86_64",
-        "cu128",
-    ): "https://download.pytorch.org/libtorch/cu128/libtorch-shared-with-deps-2.8.0%2Bcu128.zip",
-    (
-        "Windows",
-        "x86_64",
-        "cu128",
-    ): "https://download.pytorch.org/libtorch/cu128/libtorch-win-shared-with-deps-2.8.0%2Bcu128.zip",
-}
-
 # -----------------------------------------------------------------------------
 # Minimum NVIDIA driver versions required for CUDA 12.8.
 #
@@ -192,10 +164,18 @@ def download_file(url: str, dst: Path) -> None:
 def extract_archive(archive: Path, dst_dir: Path) -> None:
     """
     Extract a ZIP archive to the destination directory.
+
+    Each member is validated to resolve inside ``dst_dir`` before extraction, so a tampered archive with
+    absolute or ``../`` entries cannot write outside the install root (Zip Slip).
     """
     dst_dir.mkdir(parents=True, exist_ok=True)
     print(f"Extracting: {archive} -> {dst_dir}", flush=True)
+    root = dst_dir.resolve()
     with zipfile.ZipFile(archive, "r") as z:
+        for member in z.namelist():
+            target = (root / member).resolve()
+            if target != root and root not in target.parents:
+                raise ValueError(f"Refusing to extract '{member}': it escapes '{root}'.")
         z.extractall(dst_dir)
     archive.unlink()
 
@@ -232,8 +212,6 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
     key = (os_name, arch, flavor)
     if key not in ELX_ASSET_TEMPLATE:
         raise NameError(f"No elastix asset configured for {key}")
-    if flavor != "cpu" and key not in LIBTORCH_URL:
-        raise NameError(f"No libtorch url configured for {key}")
 
     install_path = install_path.resolve()
     install_path.mkdir(parents=True, exist_ok=True)
@@ -254,25 +232,10 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
             if p.exists():
                 p.chmod(p.stat().st_mode | stat.S_IEXEC)
 
-    # ---------------------------------------------------------------------
-    # - Download matching LibTorch 12.8 with or without CUDA 12.8
-    # - Extract it
-    # - Move runtime libraries to a location visible to the dynamic loader
-    #
-    # Linux / macOS : prefix/lib
-    # Windows       : prefix (next to elastix.exe)
-    # ---------------------------------------------------------------------
-    lt_url = LIBTORCH_URL[key]
-    lt_archive = install_path / Path(lt_url).name
-    download_file(lt_url, lt_archive)
-    extract_archive(lt_archive, install_path)
-    for p in (install_path / "libtorch" / "lib").iterdir():
-        if ".so" in p.name or ".dll" in p.name or ".dylib" in p.name:
-            shutil.move(p, (install_path if os_name == "Windows" else install_path / "lib") / p.name)
-
-    shutil.rmtree(install_path / "libtorch")
-    if os_name == "Linux" and flavor == "cu128":
-        shutil.copy(install_path / "lib" / "libcudart-c3a75b33.so.12", install_path / "lib" / "libcudart.so.12")
+    # LibTorch is NOT downloaded: the IMPACT metric plugin loads it at runtime from the environment's pip
+    # ``torch`` package (see elastix_engine.py, which adds torch's lib/ dir to the loader path) -- the same
+    # LibTorch the elastix asset is built against in CI. This avoids a large, version-pinned standalone
+    # download and keeps elastix and the rest of the stack on one torch.
 
 
 def get_elastix_bin(install_path: Path) -> Path:
