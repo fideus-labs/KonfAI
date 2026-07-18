@@ -211,7 +211,9 @@ implemented and tested; general speedup claims require separate evidence.
 - **RSS still scales with case size:** the planner selected the bounded
   whole-volume path for that case or augmentation draw. Inspect the locality
   rules, or preprocess the unsupported operation once with `Save` and stream
-  from that materialised dataset.
+  from that materialised dataset. The `Save` itself streams: when the
+  transforms before it stream, its cache is written slab by slab on first
+  access — the volume is never assembled, even the first time.
 - **OME-Zarr is slow:** inspect chunk shape, compression, pyramid level, worker
   count, and overlap. Avoid assuming more workers always improve remote storage.
 - **Output seams are visible:** add overlap and select a compatible
