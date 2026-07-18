@@ -53,7 +53,8 @@ from konfai.trainer import train
 
 def run_prediction(prediction_file: Path, predictions_dir: Path, disable_streaming: bool = False) -> None:
     # Streaming has no config knob -- it is automatic. The whole-volume reference is obtained through the
-    # global ops kill-switch KONFAI_STREAMED_WRITES=0; the streamed run just leaves it unset. The TTA
+    # global ops kill-switch KONFAI_STREAMED_WRITES=0, pinned in both directions so an inherited
+    # value cannot leak into either run. The TTA
     # worth gate would route these toy volumes whole-volume, so zero its threshold to exercise the
     # streamed reduce.
     os.environ["KONFAI_STREAMED_WRITES"] = "0" if disable_streaming else "1"

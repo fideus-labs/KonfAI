@@ -2113,7 +2113,7 @@ class Predictor(DistributedObject):
                 for output_dataset in self.outputs_dataset.values():
                     output_dataset.reset()
                 if self._vram_patch_template is None:
-                    raise  # no free axis declared: not auto-patched, the OOM propagates unchanged
+                    raise  # no free axis declared: not auto-patched
                 candidate = self._shrunken_patch(measured, device)
                 if candidate is None:
                     raise
