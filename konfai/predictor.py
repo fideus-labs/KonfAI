@@ -72,6 +72,7 @@ from konfai.utils.runtime import (
     DistributedObject,
     NeedDevice,
     State,
+    available_memory_bytes,
     configure_workflow_environment,
     confirm_overwrite_or_raise,
     description,
@@ -460,6 +461,12 @@ class OutputDataset(Dataset, NeedDevice, ABC):
 # same set the read dispatcher accepts as its region stages; on both sides they compose).
 _REGION_KINDS = (LocalityKind.HALO, LocalityKind.ORIENTATION, LocalityKind.CROP, LocalityKind.RESCALE)
 
+# Streamed TTA pays a slab-synchronized reduce; when the assembled accumulators of all copies are
+# below this fraction of allocatable memory (a 2.5D case), holding them whole costs nothing and the
+# case takes the whole-volume path. KONFAI_STREAMED_TTA_THRESHOLD overrides the fraction (tests set
+# 0 to exercise the streamed reduce on toy volumes). See OutSameAsGroupDataset._tta_worth_streaming.
+_STREAMED_TTA_MIN_FRACTION = 0.05
+
 
 @dataclass(frozen=True)
 class _FinalizeStage:
@@ -597,10 +604,10 @@ class OutSameAsGroupDataset(OutputDataset):
                 self.output_layer_accumulator[index_dataset] = {}
                 self.attributes[index_dataset] = {}
                 self.names[index_dataset] = input_dataset.name
-                # Plan how (or whether) this case streams. No warning on a refusal: streaming is
-                # transparent, so the whole-volume path is a normal outcome, not a misconfiguration.
                 self._stream_plans[index_dataset] = (
-                    self._plan_stream(dataset, index_dataset, source_attribute) if self._streaming_enabled else None
+                    self._plan_stream(dataset, index_dataset, source_attribute, layer, number_of_channels_per_model)
+                    if self._streaming_enabled
+                    else None
                 )
             self.attributes[index_dataset][index_augmentation] = {}
 
@@ -684,7 +691,30 @@ class OutSameAsGroupDataset(OutputDataset):
             return True
         return locality.kind is LocalityKind.GLOBAL_STAT and all(key in attribute for key in locality.stat_keys)
 
-    def _plan_stream(self, dataset: DatasetIter, index: int, attribute: Attribute) -> _StreamPlan | None:
+    def _tta_worth_streaming(
+        self,
+        dataset: DatasetIter,
+        index: int,
+        layer: torch.Tensor,
+        number_of_channels_per_model: list[int] | None,
+    ) -> bool:
+        """Whether this case's TTA accumulators are heavy enough for the slab-synchronized reduce to
+        pay: every copy holds a volume-sized accumulator, and when all of them together are a sliver
+        of allocatable memory (a 2.5D case) the assembled path costs nothing to hold."""
+        spatial = dataset.get_dataset_from_index(self.group_dest, index).shapes[0]
+        channels = sum(number_of_channels_per_model) if number_of_channels_per_model else int(layer.shape[0])
+        assembled = channels * int(np.prod(spatial)) * layer.element_size() * self.nb_data_augmentation
+        fraction = float(os.environ.get("KONFAI_STREAMED_TTA_THRESHOLD", _STREAMED_TTA_MIN_FRACTION))
+        return assembled >= fraction * available_memory_bytes()[0]
+
+    def _plan_stream(
+        self,
+        dataset: DatasetIter,
+        index: int,
+        attribute: Attribute,
+        layer: torch.Tensor | None = None,
+        number_of_channels_per_model: list[int] | None = None,
+    ) -> _StreamPlan | None:
         """The streaming plan for this case, or ``None`` for the whole-volume path.
 
         The streamed part of the finalize chain is ``[pointwise*][region and pointwise stages]``:
@@ -694,15 +724,19 @@ class OutSameAsGroupDataset(OutputDataset):
         into a light post-reduction buffer and the tail runs once on that buffer. A destination that
         cannot serve region writes buffers too, and writes classically. Only a non-streamable start
         refuses outright: a reduction that is not voxel-local, a non-voxel-local before-reduction
-        transform (it runs per model chunk inside the slab prefix), or a TTA copy whose un-augment
-        does not act slab by slab (see ``_tta_streamable``).
+        transform (it runs per model chunk inside the slab prefix), a TTA copy whose un-augment does
+        not act slab by slab (see ``_tta_streamable``), or a TTA case too light for the reduce to pay
+        (``_tta_worth_streaming`` — gauged from ``layer`` when the caller has one).
         """
         if self.nb_data_augmentation < 1:
             return None
         if not self.reduction.voxel_local:
             return None
-        if self.nb_data_augmentation != 1 and not self._tta_streamable(dataset, index, attribute):
-            return None
+        if self.nb_data_augmentation != 1:
+            if layer is not None and not self._tta_worth_streaming(dataset, index, layer, number_of_channels_per_model):
+                return None
+            if not self._tta_streamable(dataset, index, attribute):
+                return None
         for transform in self.before_reduction_transforms:
             locality = transform.patch_locality(Attribute(attribute))
             # A SLAB before-reduction transform (e.g. Mask) streams per slab through ``stream_slab`` in
