@@ -183,14 +183,19 @@ transcendental-terminated float chain can differ by ~1 ULP between a GPU window
 and a CPU whole-volume run. `KONFAI_STREAMED_WRITES=0` forces the whole-volume
 path globally.
 
-Streaming bounds the reassembly *accumulator*, not the *reduction*. A
-multi-model ensemble with `combine: Concat` — used when the members must stay
-separate, e.g. to write an `InferenceStack` for uncertainty — keeps every
-member's channels resident through the finalize, so on a large volume the
-channel-reduction working set, not the accumulator, is the memory peak, and
-streaming does not shrink it. For a memory-tight run, `combine: Mean` (or
-`Median`) collapses the members first and streams within a patch window; keep
-`combine: Concat` only when you need the per-member stack.
+Streaming bounds the reassembly *accumulator* and the streamable finalize
+stages, but one stage stays whole-volume by choice: a **float (linear)
+resample inverse**. The streamed resample is bit-identical to the whole-volume
+`F.interpolate` only in `nearest` mode, so a linear resample — resampling
+probabilities/logits back to the native grid, before an `argmax` — is run once
+on the whole volume rather than trade exactness for a window. On a large
+multi-class output that whole-volume `F.interpolate` is the memory peak (tens
+of GB), and a `combine: Concat` ensemble makes it worse by keeping every
+member's channels in the tensor being resampled. To bound it on a memory-tight
+run: resample the `argmax`'d labels (a `nearest`, streaming resample) instead
+of the probabilities where the task allows, and use `combine: Mean`/`Median` to
+collapse the members first; keep `combine: Concat` only when you need the
+per-member stack.
 
 ## Verify the behaviour you care about
 
