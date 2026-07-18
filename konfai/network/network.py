@@ -513,6 +513,28 @@ def _leaf_spatial_stride(module: torch.nn.Module) -> list[int] | None:
     return [int(s) for s in (stride if isinstance(stride, (tuple, list)) else [stride] * ndim)]
 
 
+def _flat_downsampling(module: torch.nn.Module, ndim: int) -> list[int]:
+    """Product of every strided ``Conv``/``MaxPool`` inside ``module`` (itself included), each
+    trailing-aligned to ``ndim`` -- a leaf of lower dimensionality acts on the LAST axes, so a 2D conv in
+    a 3D graph leaves the leading axis untouched.
+
+    This is the factor for an OPAQUE child: a plain torch module whose internal graph the branch trace
+    cannot see (a wrapped torchvision/MONAI/smp net added as one ``add_module`` leaf). The flat product
+    over-counts a parallel strided shortcut inside it, but over-padding is safe where under-counting
+    crashes the model's skip reassembly.
+    """
+    factor = [1] * ndim
+    for leaf in module.modules():
+        stride = _leaf_spatial_stride(leaf)
+        if stride is None:
+            continue
+        offset = ndim - len(stride)
+        for axis, size in enumerate(stride):
+            if axis + offset >= 0:
+                factor[axis + offset] *= size
+    return factor
+
+
 class ModuleArgsDict(torch.nn.Module, ABC):
     """Named module graph container supporting KonfAI branch routing metadata."""
 
@@ -824,8 +846,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         """Propagate the per-axis downsampling factor through the branch register, recording each branch
         value in ``seen``. Parallel branches -- a residual shortcut beside the main path -- accumulate from
         the SAME seed and merge at their ``Add`` without multiplying, so a strided projection is not
-        double-counted the way a flat ``modules()`` walk would. An unwritten branch reads the block input,
-        exactly as ``named_forward`` seeds it. Returns the factor at this block's last output.
+        double-counted the way a flat ``modules()`` walk would. A child that is NOT a routed block is
+        opaque and contributes its flat internal product (``_flat_downsampling``). An unwritten branch
+        reads the block input, exactly as ``named_forward`` seeds it. Returns the last output's factor.
         """
         branches: dict[str, list[int]] = {"0": seed}
         out_f = seed
@@ -835,8 +858,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             if isinstance(module, ModuleArgsDict):
                 out_f = module._trace_downsampling(in_f, seen)
             else:
-                stride = _leaf_spatial_stride(module)
-                out_f = [a * b for a, b in zip(in_f, stride, strict=False)] if stride is not None else in_f
+                out_f = [a * b for a, b in zip(in_f, _flat_downsampling(module, len(seed)), strict=True)]
             for out_branch in module_args.out_branch:
                 branches[out_branch] = out_f
             seen.append(out_f)
@@ -1207,13 +1229,10 @@ class Network(ModuleArgsDict, ABC):
         (parallel to its strided main conv, merged by ``Add``) counts ONCE, not twice. Used to size a
         free (``0``) patch axis to a valid extent (padded up, cropped back after the forward).
         """
-        ndim: int | None = None
-        for module in self.modules():
-            stride = _leaf_spatial_stride(module)
-            if stride is not None:
-                ndim = len(stride)
-                break
-        if ndim is None:
+        # The graph's spatial rank = the WIDEST strided leaf (a 2D side head in a 3D net must not lock
+        # the rank to 2); every leaf stride then aligns to the trailing axes of that rank.
+        ndim = max((len(s) for s in map(_leaf_spatial_stride, self.modules()) if s is not None), default=0)
+        if ndim == 0:
             return None
         seen: list[list[int]] = []
         self._trace_downsampling([1] * ndim, seen)

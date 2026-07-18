@@ -83,3 +83,38 @@ def test_downsampling_factor_counts_a_parallel_strided_shortcut_once():
             self.add_module("Block_1", ResBlock(4, 8, downsample=True, dim=3))
 
     assert _TwoStridedResiduals().downsampling_factor() == [4, 4, 4]
+
+
+def test_downsampling_factor_sees_inside_an_opaque_wrapped_module():
+    """A third-party net added as ONE plain leaf (the smp/torchvision wrapping pattern) hides its graph
+    from the branch trace; its internal strides must still count — a lost factor disables the free-axis
+    rounding entirely and the model crashes on a non-divisible extent."""
+
+    class _Wrapped(Network):
+        def __init__(self) -> None:
+            super().__init__()
+            self.add_module(
+                "Model",
+                torch.nn.Sequential(
+                    torch.nn.Conv2d(1, 8, 3, stride=2, padding=1),
+                    torch.nn.Conv2d(8, 16, 3, stride=2, padding=1),
+                    torch.nn.ConvTranspose2d(16, 8, 2, stride=2),
+                ),
+            )
+
+    assert _Wrapped().downsampling_factor() == [4, 4]
+
+
+def test_downsampling_factor_aligns_mixed_dimensionalities_to_the_trailing_axes():
+    """A leaf of lower dimensionality (a 2D side head in a 3D graph) acts on the LAST axes: it must
+    neither crash the computation nor lock the factor's rank to 2."""
+
+    class _Mixed(Network):
+        def __init__(self) -> None:
+            super().__init__()
+            self.add_module("head2d", torch.nn.Conv2d(1, 4, 3, stride=1, padding=1))  # stride 1: inert
+            self.add_module("down_a", torch.nn.Conv3d(1, 4, 3, stride=2, padding=1))
+            self.add_module("down_b", torch.nn.Conv3d(4, 8, 3, stride=2, padding=1))
+            self.add_module("slice_pool", torch.nn.MaxPool2d(2))  # 2D stride 2 -> trailing [1, 2, 2]
+
+    assert _Mixed().downsampling_factor() == [4, 8, 8]

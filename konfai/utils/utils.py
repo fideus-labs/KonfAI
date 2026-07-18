@@ -110,7 +110,8 @@ def concretize_patch_size(
     ``multiple`` (the model's per-axis ``downsampling_factor``) rounds a free axis UP to a valid input
     size for the network — 122 -> 128 for a factor 16 — so its encoder/decoder skips align. The rounded
     size may exceed the extent; the border padding (``pad_to_patch``) fills it and the accumulator crops
-    it back, exactly as it does for any patch larger than its case.
+    it back, exactly as it does for any patch larger than its case. A factor shorter than the patch rank
+    aligns to the TRAILING axes (a 2D model in a ``[1,0,0]`` slice regime constrains Y and X, not Z).
     """
     if patch_size is None:
         return list(shape)
@@ -126,10 +127,20 @@ def concretize_patch_size(
         if p != 0:
             return min(int(p), int(shape[d]))
         extent = int(shape[d])
-        m = int(multiple[d]) if multiple is not None and d < len(multiple) else 1
+        m = free_axis_rounding(multiple, d, len(patch_size))
         return ((extent + m - 1) // m) * m if m > 1 else extent
 
     return [resolve(d, p) for d, p in enumerate(patch_size)]
+
+
+def free_axis_rounding(multiple: list[int] | None, axis: int, rank: int) -> int:
+    """The rounding factor a free axis at spatial index ``axis`` (of ``rank`` axes) takes from the
+    model's per-axis ``multiple`` — trailing-aligned: a 2D model's ``[fy, fx]`` in a 3-axis patch
+    constrains Y and X and leaves Z at 1."""
+    if multiple is None:
+        return 1
+    aligned = axis - (rank - len(multiple))
+    return int(multiple[aligned]) if 0 <= aligned < len(multiple) else 1
 
 
 def size_free_axes(

@@ -163,6 +163,25 @@ class TestFreeAxisReachesTheModelAsAValidMultiple:
         model_input = patch.apply_read_plan(data[tuple(plan.data_slices)], plan)
         assert list(model_input.shape) == [1, 122, 250, 250]
 
+    def test_a_2d_multiple_aligns_to_the_trailing_axes(self):
+        # A 2D model's factor has two entries but the slice regime's patch has three axes: the factor
+        # constrains Y and X (the axes the model sees), never Z — front-indexing would leave X raw and
+        # round Y by the X factor.
+        import torch
+        from konfai.data.patching import DatasetPatch
+
+        assert concretize_patch_size([1, 0, 0], [10, 250, 250], multiple=[8, 8]) == [1, 256, 256]
+        assert concretize_patch_size([1, 0, 0], [10, 248, 250], multiple=[4, 16]) == [1, 248, 256]
+
+        patch = DatasetPatch(patch_size=[1, 0, 0], overlap=0)
+        patch.free_axis_multiple = [4, 4]
+        patch.load([3, 250, 250], 0)
+        data = torch.zeros(1, 3, 250, 250)
+        plan = patch.get_read_plan(data.shape, 0, 0, is_input=True)
+        model_input = patch.apply_read_plan(data[tuple(plan.data_slices)], plan)
+        # apply_read_plan squeezes the length-1 patch axis: a full 2D slice, both axes rounded to 252.
+        assert list(model_input.shape) == [1, 252, 252]
+
 
 class TestResolvePatch:
     def test_whole_volume_when_it_fits(self):

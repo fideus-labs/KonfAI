@@ -272,6 +272,12 @@ def test_eval_explicit_budget_is_per_rank_and_never_divided(monkeypatch: pytest.
     assert _metric_sizing_budget(monkeypatch, "1GiB", "4") == float(2**30)
 
 
+def test_a_garbled_local_ranks_variable_keeps_the_undivided_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A user-exported junk value must not crash the build: any unparsable content falls back to 1.
+    node_auto = 100 * 2**30 * _AUTO_MEMORY_SAFETY_FRACTION
+    assert _metric_sizing_budget(monkeypatch, None, "two") == node_auto
+
+
 def test_run_distributed_app_exports_and_restores_local_ranks(monkeypatch: pytest.MonkeyPatch) -> None:
     # The wrapper leaves the per-node rank count in the environment while the workflow is built
     # (the KeyboardInterrupt escapes the factory before any spawn), and restores it after -- a
@@ -291,6 +297,18 @@ def test_run_distributed_app_exports_and_restores_local_ranks(monkeypatch: pytes
     monkeypatch.setenv("KONFAI_LOCAL_RANKS", "7")
     factory(gpu=[0])
     assert captured[-1] == "1" and os.environ["KONFAI_LOCAL_RANKS"] == "7"
+
+    # A genuine factory failure (not the swallowed KeyboardInterrupt) must restore the variable too —
+    # the restore lives in a finally, not in the interrupt handler.
+    monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
+
+    @runtime.run_distributed_app
+    def broken(config=None, gpu: list[int] = [], cpu: int = 1):
+        raise ValueError("factory died")
+
+    with pytest.raises(ValueError, match="factory died"):
+        broken(gpu=[0, 1])
+    assert "KONFAI_LOCAL_RANKS" not in os.environ
 
 
 def test_auto_budget_uses_detected_memory(monkeypatch: pytest.MonkeyPatch) -> None:
