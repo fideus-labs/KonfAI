@@ -700,8 +700,18 @@ class LocalAppRepository(AppRepositoryInfo):
 
     def _import_model_class(self, module_stem: str, class_name: str, filenames: list[str]) -> type:
         """Import the app's model module (the ``classpath`` stem) and return the CLASS without instantiating
-        it — only its typed signature is read. The bundle dir is on ``sys.path`` so its sibling imports load."""
-        path = Path(self._download(self._require_repo_filename(f"{module_stem}.py", filenames)))
+        it — only its typed signature is read.
+
+        The stem is either a bundle-local ``.py`` file (``model:MyNet`` -> ``model.py`` next to the config, the
+        bundle dir on ``sys.path`` so its sibling imports load) OR an installed package module
+        (``impact_reg_konfai.models.convexadam:RegistrationNet``), which the app's requirements provide and
+        which is imported normally. The latter is why a preset that keeps only config + weights still exposes
+        its parameters' constraints/descriptions.
+        """
+        bundle_file = self._find_repo_filename(f"{module_stem}.py", filenames)
+        if bundle_file is None:
+            return getattr(importlib.import_module(module_stem), class_name)
+        path = Path(self._download(bundle_file))
         sys.path.insert(0, str(path.parent))
         try:
             spec = importlib.util.spec_from_file_location(f"_konfai_app_model_{module_stem}", path)

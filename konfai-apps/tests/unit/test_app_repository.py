@@ -884,6 +884,37 @@ def test_get_parameters_constraints_read_from_model_types(tmp_path: Path) -> Non
     }
 
 
+def test_get_parameters_constraints_from_an_installed_package_classpath(tmp_path: Path) -> None:
+    """A preset that keeps only config + weights points its classpath at an INSTALLED package module (its
+    requirements provide it), not a bundled .py. get_parameters must still read the constraints/descriptions
+    from that module's typed signature -- otherwise moving the model code out of the bundle would silently
+    strip an agent's whole parameter surface."""
+    import importlib
+    import sys
+
+    module_name = "konfai_test_pkg_model_xyz"
+    pkg_dir = tmp_path / "site"
+    pkg_dir.mkdir()
+    (pkg_dir / f"{module_name}.py").write_text(_TYPED_MODEL_PY, encoding="utf-8")
+    config = _TYPED_MODEL_CONFIG.replace("classpath: Model:RegistrationNet", f"classpath: {module_name}:RegistrationNet")
+
+    sys.path.insert(0, str(pkg_dir))
+    importlib.invalidate_caches()
+    try:
+        repo, _prediction = _local_repo_with_config(tmp_path, config)  # NOTE: no Model.py written into the bundle
+        result = repo.get_parameters()
+    finally:
+        sys.path.remove(str(pkg_dir))
+        sys.modules.pop(module_name, None)
+
+    # Same constraints as the bundle-local case: the classpath resolved to the installed module.
+    assert result["constraints"] == {
+        "mode": {"choices": ["Static", "Jacobian"]},
+        "spatial_samples": {"min": 0, "max": 100000},
+        "ref": {"choices": ["a:x.pt", "b:y.pt"]},
+    }
+
+
 def test_save_default_parameters_persists_to_local_config(tmp_path: Path) -> None:
     from ruamel.yaml import YAML
 
