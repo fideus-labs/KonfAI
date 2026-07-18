@@ -1155,6 +1155,37 @@ class Network(ModuleArgsDict, ABC):
 
         return in_channels, in_is_channel, out_channels, out_is_channel
 
+    def downsampling_factor(self) -> list[int] | None:
+        """Per-axis factor the input spatial size must be a multiple of, or ``None`` if the graph never
+        downsamples.
+
+        An encoder/decoder graph (U-Net) only reassembles its skip connections when the input divides
+        evenly at every level, so the input must be a multiple of the product of the encoder's
+        downsampling strides. That product is read straight off the graph: every ``MaxPool`` and every
+        stride>1 ``Conv`` multiplies the factor. The residual branch's ``AvgPool`` and the decoder's
+        ``ConvTranspose``/``Upsample`` do not shrink the skip path, so they are not counted. Used to
+        size a free (``0``) patch axis to a valid extent (padded up, cropped back after the forward).
+        """
+        factor: list[int] | None = None
+        for module in self.modules():
+            stride: int | tuple[int, ...] | None = None
+            if isinstance(module, (torch.nn.MaxPool1d, torch.nn.MaxPool2d, torch.nn.MaxPool3d)):
+                stride = module.stride if module.stride is not None else module.kernel_size
+            elif isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)):
+                stride = module.stride
+            if stride is None:
+                continue
+            name = type(module).__name__
+            ndim = 3 if name.endswith("3d") else 2 if name.endswith("2d") else 1
+            strides = list(stride) if isinstance(stride, (tuple, list)) else [stride] * ndim
+            if all(s <= 1 for s in strides):
+                continue
+            if factor is None:
+                factor = [1] * len(strides)
+            for axis, s in enumerate(strides):
+                factor[axis] *= s
+        return factor
+
     @_function_network()
     def init(self, autocast: bool, state: State, group_dest: list[str], key: str) -> None:
         if self.outputs_criterions_loader:
