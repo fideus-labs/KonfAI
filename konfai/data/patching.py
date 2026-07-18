@@ -305,17 +305,18 @@ class Accumulator:
         batch: bool = True,
     ) -> None:
         self.patch_slices: list[tuple[slice, ...]] = []
+        self.shape = max([[v.stop for v in patch] for patch in patch_slices])
 
         if patch_size is not None and not all(p == 0 for p in patch_size):
+            # The last patch of an axis is padded up to the patch size for the model, then cropped; a
+            # free axis (0) spans the full extent, so concretise it here or ``s.start + 0`` would
+            # collapse the axis to a zero-width slice.
+            concrete = [size if size > 0 else self.shape[dim] for dim, size in enumerate(patch_size)]
             for patch in patch_slices:
-                slices: list[slice] = []
-                for s, shape in zip(patch, patch_size, strict=False):
-                    slices.append(slice(s.start, s.start + shape))
+                slices = [slice(s.start, s.start + concrete[dim]) for dim, s in enumerate(patch)]
                 self.patch_slices.append(tuple(slices))
         else:
             self.patch_slices = patch_slices
-
-        self.shape = max([[v.stop for v in patch] for patch in patch_slices])
         self.patch_size = patch_size
         self.patch_combine = patch_combine
         self.batch = batch
@@ -970,7 +971,10 @@ class ModelPatch(Patch):
             self.patch_combine = apply_config(key)(getattr(module, name))()
         if self.patch_size is not None and self.overlap is not None:
             if self.patch_combine is not None:
-                kept = [i for i in self.patch_size if i > 1]
+                # Keep every axis so the weight broadcasts against the patch whatever the axis position
+                # (dropping trailing axes misaligns the broadcast); a singleton (1) or free (0) axis
+                # carries a uniform weight, a >1 axis its tapered window.
+                kept = [i if i > 1 else 1 for i in self.patch_size]
                 self.patch_combine.set_patch_config(kept, blend_overlap(self.overlap, kept))
         else:
             self.patch_combine = None

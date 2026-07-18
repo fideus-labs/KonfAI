@@ -20,7 +20,7 @@ import itertools
 
 import pytest
 import torch
-from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean, StreamingAccumulator
+from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean, StreamingAccumulator, blend_overlap
 from konfai.utils.errors import PatchError
 from konfai.utils.utils import get_patch_slices_from_shape
 
@@ -125,6 +125,42 @@ def test_accumulator_gpu_blend_matches_cpu(combine_cls):
 # --------------------------------------------------------------------------------------
 # Blending windows (Mean / Cosinus)
 # --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("combine_cls", [None, Gaussian])
+@pytest.mark.parametrize("free_axis", [0, 1, 2])
+def test_free_axis_reassembles_like_its_concrete_extent(free_axis, combine_cls):
+    """A free (``0``) axis spans the full extent and must reassemble identically to the concrete-extent
+    patch: the Accumulator must not collapse the axis to a zero-width slice, and the blend window must
+    broadcast at any axis position (a *trailing* free axis is what a rank-collapsed window misaligns)."""
+    torch.manual_seed(0)
+    # 8 = 4 + 2 + 2 tiles at step (patch-overlap)=2, so every tiled patch is full patch_size (the model
+    # emits full-size patches; the Accumulator crops the border tail only after blending).
+    full = torch.rand(1, 1, 8, 8, 8)
+    spatial = list(full.shape[2:])
+    free = [4, 4, 4]
+    free[free_axis] = 0  # one free axis (single full-extent patch); the other two tile with overlap
+    concrete = [p if p > 0 else spatial[i] for i, p in enumerate(free)]
+    # A free axis is a single patch spanning the extent -> no taper. The concrete reference mirrors that
+    # with overlap 0 on that axis (the free version zeroes it itself via the size-1 kept entry).
+    concrete_overlap = [2, 2, 2]
+    concrete_overlap[free_axis] = 0
+
+    def assemble(patch_size: list[int], overlap: int | list[int]) -> torch.Tensor:
+        slices, _ = get_patch_slices_from_shape(patch_size, spatial, overlap)
+        combine = None
+        if combine_cls is not None:
+            combine = combine_cls()
+            kept = [i if i > 1 else 1 for i in patch_size]  # the ModelPatch.init blend-window contract
+            combine.set_patch_config(kept, blend_overlap(overlap, kept))
+        acc = Accumulator(slices, patch_size, patch_combine=combine, batch=True)
+        for i, sl in enumerate(slices):
+            acc.add_layer(i, full[(slice(None), slice(None), *sl)].clone())
+        return acc.assemble()
+
+    out = assemble(free, 2)
+    assert out.shape == full.shape, out.shape
+    assert torch.equal(out, assemble(concrete, concrete_overlap))
 
 
 @pytest.mark.parametrize("combine_cls", [Mean, Cosinus])
