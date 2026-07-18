@@ -359,6 +359,7 @@ def run_finetune_api(
     it_validation: int = 1000,
     models: list[str] | None = None,
     lr: float | None = None,
+    config_overrides: list[str] | None = None,
     gpu: list[int] | None = None,
     cpu: int | None = None,
     config_file: str = "Config.yml",
@@ -396,6 +397,8 @@ def run_finetune_api(
 
             from .server_apps import parse_remote_ref
 
+            # The remote client has no config_overrides (the server does not accept --set); the parent
+            # already forbids remote + config_overrides, so it is None here and simply not forwarded.
             host, port, remote_name, token = parse_remote_ref(ref)
             client = KonfAIAppClient(remote_name, RemoteServer(host, port, token))
             client.fine_tune(**common)
@@ -403,7 +406,7 @@ def run_finetune_api(
             from konfai_apps.app import KonfAIApp
 
             app = KonfAIApp(ref, download=True, force_update=force_update)
-            app.fine_tune(**common)
+            app.fine_tune(**common, config_overrides=config_overrides)
 
 
 def app_parameters_api(*, ref: str, force_update: bool = False) -> dict[str, Any]:

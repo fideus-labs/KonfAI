@@ -109,7 +109,15 @@ class SessionService:
 
     def _metric_search_roots(self, layout: WorkspaceLayout | None = None) -> list[Path]:
         layout = layout or self.workspace_layout
-        return [layout.evaluations_dir(), layout.workspace_dir() / "Evaluation"]
+        workspace = layout.workspace_dir()
+        # App evaluate/pipeline runs write their KonfAI Evaluations tree (Metric_<SPLIT>.json) under these
+        # dirs, so leaderboard/compare_runs rank tuned app trials alongside train-branch runs.
+        return [
+            layout.evaluations_dir(),
+            workspace / "Evaluation",
+            workspace / "AppEvaluations",
+            workspace / "AppPipelines",
+        ]
 
     def _resolve_session_layout(self, session: str | None) -> WorkspaceLayout:
         """Resolve a metrics-lookup layout: the current session, or another named one."""

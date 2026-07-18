@@ -222,6 +222,9 @@ class Job:
     devices: list[str] | None = None
     runtime_log_path: Path | None = None
     output_path: Path | None = None
+    # The applied model/config --set overrides ("NAME=VALUE" strings) for a tuned app run; None/empty means
+    # the run was not tuned. Carried so payload() can echo the trial's parameters and gate refine hints.
+    set_parameters: list[str] | None = None
     proc_create_time: float | None = None  # process create-time at launch, to detect pid reuse on recovery
     job_dir: Path | None = None
     manifest_path: Path | None = None
@@ -259,6 +262,7 @@ class JobRegistry:
             "devices": job.devices,
             "runtime_log_path": str(job.runtime_log_path) if job.runtime_log_path is not None else None,
             "output_path": str(job.output_path) if job.output_path is not None else None,
+            "set_parameters": job.set_parameters,
             "job_dir": str(job.job_dir) if job.job_dir is not None else None,
             "manifest_path": str(job.manifest_path) if job.manifest_path is not None else None,
             "recovered": job.recovered,
@@ -288,6 +292,7 @@ class JobRegistry:
                 Path(payload["runtime_log_path"]) if payload.get("runtime_log_path") is not None else None
             ),
             output_path=Path(payload["output_path"]) if payload.get("output_path") is not None else None,
+            set_parameters=payload.get("set_parameters"),
             job_dir=Path(payload["job_dir"]) if payload.get("job_dir") is not None else None,
             manifest_path=(Path(payload["manifest_path"]) if payload.get("manifest_path") is not None else None),
             recovered=bool(payload.get("recovered", False)),
@@ -474,10 +479,23 @@ class JobRegistry:
                 ["wait_for_job", "cancel_job"] if app_kind else ["wait_for_job", "read_live_metrics", "cancel_job"]
             )
         elif job.status == "done":
-            # An app job writes its outputs to a directory recorded in the manifest, not the
-            # session leaderboard, so point at the manifest instead of summarize_session/leaderboard.
+            # An app job writes its outputs to a directory recorded in the manifest, so point at it.
             if app_kind:
                 next_resources.append(f"job://{job.job_id}/manifest")
+                # Refine loop: incite iterating ONLY on the axis the user can actually turn, and ONLY when
+                # they signalled intent. A plain one-shot infer (no set_parameters) is a plain result and
+                # gets no evaluate/refine push — the loop never starts spontaneously.
+                if job.kind in ("evaluate", "pipeline"):
+                    # There is a score: rank the trials, re-tune, keep the best.
+                    next_actions.extend(["leaderboard", "compare_runs", "run_app_pipeline", "export_app"])
+                elif job.kind == "infer" and job.set_parameters:
+                    # Already tuning inference parameters: help close the loop toward a score.
+                    next_actions.extend(["run_app_evaluate", "run_app_pipeline", "compare_runs"])
+                elif job.kind == "finetune":
+                    # A fine-tune produces a bundle but keeps its training metrics out of it, so there is
+                    # nothing to rank yet: use the bundle, then evaluate it -- that evaluation lands where
+                    # leaderboard/compare_runs can rank this fine-tune against other training trials.
+                    next_actions.extend(["run_app_infer", "run_app_evaluate"])
             else:
                 next_actions.extend(["summarize_session", "leaderboard"])
         else:
@@ -502,6 +520,9 @@ class JobRegistry:
             "command": job.command,
             "error": job.error,
             "recovered": job.recovered,
+            # The tuned trial's applied --set overrides, so the agent sees which parameters produced this
+            # run's score without a separate manifest read (None for an untuned run).
+            "set_parameters": job.set_parameters,
             # True from the moment cancel_job is called; while the job is still active it signals
             # cancellation-in-progress. A finished job is 'killed' iff this is True — external kills
             # (OOM killer, manual signal) surface as status='error'.
@@ -576,6 +597,7 @@ class JobRegistry:
         extra_manifest: dict[str, object] | None = None,
         target: str | None = None,
         kwargs: dict[str, object] | None = None,
+        set_parameters: list[str] | None = None,
     ) -> Job:
         if target is None:
             raise ValueError("Job launch requires a Python target.")
@@ -590,6 +612,7 @@ class JobRegistry:
             run_name=run_name,
             devices=devices,
             runtime_log_path=runtime_log_path,
+            set_parameters=set_parameters or None,
         )
         # Generic: any job that declares an explicit output location (its runner kwargs carry "output")
         # gets it recorded, so refresh() can verify the output actually materialised. No per-kind logic.

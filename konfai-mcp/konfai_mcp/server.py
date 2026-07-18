@@ -452,6 +452,9 @@ def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace()
     WORKSPACE_LAYOUT.jobs_dir().mkdir(parents=True, exist_ok=True)
     kwargs = dict(spec["kwargs"])
+    # config_overrides live directly in kwargs (infer / finetune) or nested under extra (pipeline). Recording
+    # them links this trial's tuned parameters to the score it produces and gates the refine next_actions.
+    set_parameters = kwargs.get("config_overrides") or (kwargs.get("extra") or {}).get("config_overrides")
     job = JOB_REGISTRY.launch(
         session=WORKSPACE_LAYOUT.current_session or "default",
         kind=kind,
@@ -469,10 +472,12 @@ def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
             "app_ref": kwargs.get("ref"),
             "app_mode": spec["mode"],
             "output": spec["output"],
+            "set_parameters": set_parameters,
             "environment": _environment_snapshot(),
         },
         target=spec["target"],
         kwargs={**kwargs, "cwd": str(workspace)},
+        set_parameters=set_parameters,
     )
     payload = _job_payload(job)
     payload["mode"] = spec["mode"]
@@ -1899,9 +1904,11 @@ def run_app_pipeline(
         "It does not author a config or adapt the dataset layout for you. "
         "Inputs: ref (app id, local app folder path, or 'host:port:name[|token]'); dataset (a KonfAI-style dataset "
         "directory); optional output bundle dir; optional name, epochs, it_validation, models (which checkpoints to "
-        "fine-tune), lr, gpu/cpu; allow_untrusted_code; force_update. "
+        "fine-tune), lr; optional set_parameters (NAME->VALUE model/config tweaks baked into the training config, "
+        "e.g. {'iterations': 300}; local/HuggingFace only); gpu/cpu; allow_untrusted_code; force_update. "
         "Outputs: a job payload (status, resources, next_actions) plus mode and the bundle output path. "
-        "Next: wait_for_job, then run_app_infer on the produced bundle."
+        "Next: wait_for_job, then run_app_infer on the produced bundle (then run_app_evaluate to score and rank "
+        "this fine-tune against other training trials via leaderboard / compare_runs)."
     )
 )
 def fine_tune_app(
@@ -1930,6 +1937,13 @@ def fine_tune_app(
     lr: Annotated[
         float | None, Field(description="Learning-rate override; omit to keep the app config's value.")
     ] = None,
+    set_parameters: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description="Model/config tuning NAME->VALUE overrides baked into the training config before fine-tuning "
+            "(e.g. {'iterations': 300}); local/HuggingFace apps only."
+        ),
+    ] = None,
     gpu: Annotated[
         list[int] | None,
         Field(description="GPU indices to train on (default: every visible GPU); an empty list forces CPU."),
@@ -1949,6 +1963,11 @@ def fine_tune_app(
     ] = False,
 ) -> dict[str, Any]:
     """Fine-tune a published KonfAI app on the user's dataset and produce a resolvable app bundle."""
+    # json.dumps keeps each value's type through the YAML re-parse in _apply_config_overrides: an int
+    # stays an int, but a string "true"/"1" stays a string instead of being coerced to a bool/int.
+    config_overrides = (
+        [f"{key}={json.dumps(value)}" for key, value in set_parameters.items()] if set_parameters else None
+    )
     spec = APP_SERVICE.prepare_finetune(
         ref=ref,
         dataset=dataset,
@@ -1958,6 +1977,7 @@ def fine_tune_app(
         it_validation=it_validation,
         models=models,
         lr=lr,
+        config_overrides=config_overrides,
         gpu=gpu,
         cpu=cpu,
         config_file=config_file,
