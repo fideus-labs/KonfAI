@@ -73,10 +73,9 @@ class ElastixEngine:
         resolutions: dict = {},
         mode: str = "Static",
     ) -> None:
-        # The parameter-map .txt files are per-preset config that stays in the bundle, not shared code, so
-        # they are resolved against the run's working directory (where konfai stages the bundle: KonfAIApp
-        # chdir's into the app workspace before building the model) -- NOT against this module's location,
-        # which now lives in the installed impact_reg_konfai package, away from the bundle.
+        # The parameter-map .txt files are per-preset config staged into the run's working directory (KonfAIApp
+        # chdir's into the app workspace before building the model), so resolve them against cwd -- not this
+        # module's directory, which is the installed package, not next to the .txt.
         self._bundle_dir = Path.cwd()
         self._parameter_maps = [self._bundle_dir / Path(p).name for p in parameter_maps]
         self._max_iterations = max_iterations
@@ -258,11 +257,9 @@ class ElastixEngine:
             for pmap in self._stage_parameter_maps(work, device_index):
                 args += ["-p", str(pmap)]
 
-            # The IMPACT metric plugin links LibTorch, taken from the environment's pip ``torch`` package
-            # (its ``lib/`` dir) -- the same LibTorch the elastix asset is built against in CI -- instead of a
-            # separately downloaded standalone libtorch. ``<install>/lib`` (the elastix runtime) and any extra
-            # dirs (KONFAI_ELASTIX_EXTRA_LIB) are still searched. On Windows the loader reads PATH, not
-            # LD_LIBRARY_PATH.
+            # The IMPACT metric plugin links LibTorch from the environment's pip ``torch`` (its ``lib/`` dir) --
+            # the same LibTorch the elastix asset is built against in CI. ``<install>/lib`` (the elastix runtime)
+            # and any extra dirs (KONFAI_ELASTIX_EXTRA_LIB) are also searched; on Windows the loader reads PATH.
             import torch
 
             env = os.environ.copy()

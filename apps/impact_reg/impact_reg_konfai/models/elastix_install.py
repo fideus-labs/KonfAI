@@ -232,10 +232,9 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
             if p.exists():
                 p.chmod(p.stat().st_mode | stat.S_IEXEC)
 
-    # LibTorch is NOT downloaded: the IMPACT metric plugin loads it at runtime from the environment's pip
-    # ``torch`` package (see elastix_engine.py, which adds torch's lib/ dir to the loader path) -- the same
-    # LibTorch the elastix asset is built against in CI. This avoids a large, version-pinned standalone
-    # download and keeps elastix and the rest of the stack on one torch.
+    # LibTorch comes from the environment's pip ``torch`` at runtime (elastix_engine.py adds torch's lib/ dir
+    # to the loader path) -- the same LibTorch the elastix asset is built against in CI, so elastix and the
+    # rest of the stack stay on one torch. The elastix asset is the only download here.
 
 
 def get_elastix_bin(install_path: Path) -> Path:
