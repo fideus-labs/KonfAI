@@ -1078,6 +1078,14 @@ class Data(ABC):
             return None
         return [max(int(shape[axis]) for shape in shapes) for axis in range(len(shapes[0]))]
 
+    def set_free_axis_multiple(self, multiple: list[int] | None) -> None:
+        """Record the model's per-axis downsampling factor on the shared patch BEFORE ``prepare()`` cuts
+        the grids, so every case's free (``0``) axis rounds up to a valid model input. A no-op without a
+        patch (evaluation) or without a free axis; harmless once a re-plan has made the sizes concrete.
+        """
+        if self.patch is not None:
+            self.patch.free_axis_multiple = multiple
+
     def replan_patch(self, patch_size: list[int]) -> None:
         """Re-cut every prepared grid for a new GLOBAL patch size (the OOM-restart path).
 

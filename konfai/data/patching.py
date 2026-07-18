@@ -842,10 +842,14 @@ class Patch(ABC):
         # A consumer that REDUCES patches instead (streamed evaluation) must see only in-volume voxels:
         # padded ones would pollute its running sums, so it turns this off and takes the cropped patch.
         self.pad_to_patch = True
+        # The model's per-axis downsampling factor a FREE (``0``) axis rounds up to, set before the grids
+        # are cut so each case's whole-axis extent lands on a valid model input. ``None`` outside a model
+        # (evaluation) or for a network that never downsamples.
+        self.free_axis_multiple: list[int] | None = None
 
     def load(self, shape: list[int], a: int = 0) -> None:
         self._patch_slices[a], self._nb_patch_per_dim[a] = get_patch_slices_from_shape(
-            self.patch_size, shape, self.overlap
+            self.patch_size, shape, self.overlap, self.free_axis_multiple
         )
 
     @abstractmethod
@@ -884,13 +888,25 @@ class Patch(ABC):
                 reflect_padding[-1] = self._patch_slices[a][index][0].stop + top - data_shape[len(slices_pre)]
 
         constant_padding = []
-        if self.pad_to_patch and self.patch_size is not None and not all(p == 0 for p in self.patch_size):
+        if self.pad_to_patch and self.patch_size is not None:
+            nspatial = len(slices)
             for dim_it, _slice in enumerate(reversed(slices)):
-                p = (
-                    0
-                    if _slice.start + self.patch_size[-dim_it - 1] <= data_shape[-dim_it - 1]
-                    else self.patch_size[-dim_it - 1] - (data_shape[-dim_it - 1] - _slice.start)
-                )
+                axis = nspatial - 1 - dim_it
+                extent = data_shape[-dim_it - 1]
+                declared = self.patch_size[axis]
+                if declared != 0:
+                    target = declared
+                else:
+                    # A FREE axis pads up to THIS case's extent rounded to the model's downsampling
+                    # multiple, so a small heterogeneous case still reaches the network at a valid input
+                    # size (the up-front worst-case sizing only guarantees the largest case).
+                    m = (
+                        int(self.free_axis_multiple[axis])
+                        if self.free_axis_multiple is not None and axis < len(self.free_axis_multiple)
+                        else 1
+                    )
+                    target = ((extent + m - 1) // m) * m if m > 1 else extent
+                p = 0 if _slice.start + target <= extent else target - (extent - _slice.start)
                 constant_padding.append(0)
                 constant_padding.append(p)
 
@@ -1035,6 +1051,9 @@ class DatasetManager:
             # The manager works on its own copy (per-case grids); carry the reduction-vs-model contract
             # with it, or a streamed evaluation would silently get padded border patches back.
             self.patch.pad_to_patch = patch.pad_to_patch
+            # Carry the model's downsampling multiple too, so each per-case free axis rounds up to a valid
+            # input size on this copy's grid, not just on the up-front worst-case sizing.
+            self.patch.free_axis_multiple = patch.free_axis_multiple
         self.patch.load(_shape, 0)
         # The spatial grid each copy's patches are cut on: the un-augmented copy's is the source shape
         # folded by the transforms, and a copy whose draw changes shape (Permute, Mask) has its own.

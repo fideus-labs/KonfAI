@@ -495,6 +495,24 @@ class Measure:
         return _scheduler
 
 
+def _leaf_spatial_stride(module: torch.nn.Module) -> list[int] | None:
+    """Per-axis stride of a leaf that shrinks the grid (a ``Conv`` or ``MaxPool``), else ``None``.
+
+    ``ConvTranspose``/``Upsample`` (they grow the grid) and a residual branch's ``AvgPool`` (it does not
+    shrink the skip the graph reassembles) are not strided-down leaves, so they read ``None`` and the
+    downsampling trace passes their input factor straight through.
+    """
+    if isinstance(module, (torch.nn.MaxPool1d, torch.nn.MaxPool2d, torch.nn.MaxPool3d)):
+        stride = module.stride if module.stride is not None else module.kernel_size
+    elif isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)):
+        stride = module.stride
+    else:
+        return None
+    name = type(module).__name__
+    ndim = 3 if name.endswith("3d") else 2 if name.endswith("2d") else 1
+    return [int(s) for s in (stride if isinstance(stride, (tuple, list)) else [stride] * ndim)]
+
+
 class ModuleArgsDict(torch.nn.Module, ABC):
     """Named module graph container supporting KonfAI branch routing metadata."""
 
@@ -801,6 +819,28 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                 keys.remove(name)
                 if len(keys) == 0:
                     break
+
+    def _trace_downsampling(self, seed: list[int], seen: list[list[int]]) -> list[int]:
+        """Propagate the per-axis downsampling factor through the branch register, recording each branch
+        value in ``seen``. Parallel branches -- a residual shortcut beside the main path -- accumulate from
+        the SAME seed and merge at their ``Add`` without multiplying, so a strided projection is not
+        double-counted the way a flat ``modules()`` walk would. An unwritten branch reads the block input,
+        exactly as ``named_forward`` seeds it. Returns the factor at this block's last output.
+        """
+        branches: dict[str, list[int]] = {"0": seed}
+        out_f = seed
+        for name, module in self.items():
+            module_args = self._modulesArgs[name]
+            in_f = branches.get(module_args.in_branch[0], seed)
+            if isinstance(module, ModuleArgsDict):
+                out_f = module._trace_downsampling(in_f, seen)
+            else:
+                stride = _leaf_spatial_stride(module)
+                out_f = [a * b for a, b in zip(in_f, stride, strict=False)] if stride is not None else in_f
+            for out_branch in module_args.out_branch:
+                branches[out_branch] = out_f
+            seen.append(out_f)
+        return out_f
 
 
 class OutputsGroup(list):
@@ -1160,31 +1200,25 @@ class Network(ModuleArgsDict, ABC):
         downsamples.
 
         An encoder/decoder graph (U-Net) only reassembles its skip connections when the input divides
-        evenly at every level, so the input must be a multiple of the product of the encoder's
-        downsampling strides. That product is read straight off the graph: every ``MaxPool`` and every
-        stride>1 ``Conv`` multiplies the factor. The residual branch's ``AvgPool`` and the decoder's
-        ``ConvTranspose``/``Upsample`` do not shrink the skip path, so they are not counted. Used to
-        size a free (``0``) patch axis to a valid extent (padded up, cropped back after the forward).
+        evenly at every level, so the input must be a multiple of the coarsest downsampling the graph
+        reaches. That factor is traced through the branch register: a strided ``Conv`` or a ``MaxPool``
+        multiplies the branch it writes, while ``ConvTranspose``/``Upsample`` and a residual branch's
+        ``AvgPool`` pass through. Because the trace follows branches, a residual block's strided shortcut
+        (parallel to its strided main conv, merged by ``Add``) counts ONCE, not twice. Used to size a
+        free (``0``) patch axis to a valid extent (padded up, cropped back after the forward).
         """
-        factor: list[int] | None = None
+        ndim: int | None = None
         for module in self.modules():
-            stride: int | tuple[int, ...] | None = None
-            if isinstance(module, (torch.nn.MaxPool1d, torch.nn.MaxPool2d, torch.nn.MaxPool3d)):
-                stride = module.stride if module.stride is not None else module.kernel_size
-            elif isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)):
-                stride = module.stride
-            if stride is None:
-                continue
-            name = type(module).__name__
-            ndim = 3 if name.endswith("3d") else 2 if name.endswith("2d") else 1
-            strides = list(stride) if isinstance(stride, (tuple, list)) else [stride] * ndim
-            if all(s <= 1 for s in strides):
-                continue
-            if factor is None:
-                factor = [1] * len(strides)
-            for axis, s in enumerate(strides):
-                factor[axis] *= s
-        return factor
+            stride = _leaf_spatial_stride(module)
+            if stride is not None:
+                ndim = len(stride)
+                break
+        if ndim is None:
+            return None
+        seen: list[list[int]] = []
+        self._trace_downsampling([1] * ndim, seen)
+        factor = [max((f[axis] for f in seen), default=1) for axis in range(ndim)]
+        return factor if any(f > 1 for f in factor) else None
 
     @_function_network()
     def init(self, autocast: bool, state: State, group_dest: list[str], key: str) -> None:
