@@ -56,21 +56,30 @@ def _plain(value: Any) -> Any:
 
 
 def _constraint_of_annotation(annotation: Any) -> dict[str, Any] | None:
-    """UI constraint for one type: ``Literal`` -> ``{choices}``, ``Annotated[.., Range|Choices]`` ->
-    ``{min,max}`` / ``{choices}``, ``dict[str, <class>]`` -> ``{"*": <class constraints>}``. Else ``None``."""
-    if get_origin(annotation) is Literal:
-        return {"choices": list(get_args(annotation))}
-    for meta in getattr(annotation, "__metadata__", ()):  # Annotated[T, *metas]
-        if isinstance(meta, Range):
-            return {"min": meta.min, "max": meta.max}
-        if isinstance(meta, Choices):
-            return {"choices": meta.resolve()}
-    if get_origin(annotation) is dict:
-        args = get_args(annotation)
+    """UI/agent constraint for one type: ``Literal`` -> ``{choices}``, ``Annotated[.., Range|Choices]`` ->
+    ``{min,max}`` / ``{choices}``, ``dict[str, <class>]`` -> ``{"*": <class constraints>}``. A bare string in
+    ``Annotated[T, .., "text"]`` adds ``{"description": text}`` -- the human meaning of the knob, for any base
+    type including ``Annotated[Literal[...], "text"]``, so an agent tuning it knows WHAT it does, not only its
+    bounds. ``{min,max}`` / ``{choices}`` stay exactly as before when no description is given. Else ``None``."""
+    metadata = getattr(annotation, "__metadata__", ())  # Annotated[base, *metadata]
+    base = get_args(annotation)[0] if metadata else annotation
+    constraint: dict[str, Any] = {}
+    if get_origin(base) is Literal:
+        constraint["choices"] = list(get_args(base))
+    elif get_origin(base) is dict:
+        args = get_args(base)
         if len(args) == 2 and inspect.isclass(args[1]):
             inner = _constraints_of_class(args[1])
-            return {"*": inner} if inner else None
-    return None
+            if inner:
+                constraint["*"] = inner
+    for meta in metadata:
+        if isinstance(meta, Range):
+            constraint["min"], constraint["max"] = meta.min, meta.max
+        elif isinstance(meta, Choices):
+            constraint["choices"] = meta.resolve()
+        elif isinstance(meta, str) and meta.strip():
+            constraint["description"] = meta.strip()
+    return constraint or None
 
 
 def _constraints_of_class(cls: type) -> dict[str, Any]:
@@ -705,12 +714,15 @@ class LocalAppRepository(AppRepositoryInfo):
 
     @staticmethod
     def _model_param_block(data: Any) -> tuple[str | None, Any]:
-        """Return ``(class_name, params_mapping)`` for ``Predictor.Model.<ClassName>``, or ``(None, None)``.
+        """Return ``(class_name, params_mapping)`` for ``<Root>.Model.<ClassName>``, or ``(None, None)``.
 
         The model's constructor arguments live under a single ``<ClassName>`` mapping next to ``classpath``;
         this is both the source of the tunable list and the target a bare ``--set NAME=VALUE`` resolves into.
+        ``<Root>`` is ``Predictor`` for a prediction config and ``Trainer`` for a training config, so the same
+        bare-name override resolves whether the app is being run or fine-tuned.
         """
-        model = ((data or {}).get("Predictor") or {}).get("Model") or {}
+        root = ((data or {}).get("Predictor") or (data or {}).get("Trainer")) or {}
+        model = (root or {}).get("Model") or {}
         for key, value in model.items():
             if key != "classpath" and isinstance(value, dict):
                 return key, value
@@ -1052,6 +1064,7 @@ class LocalAppRepository(AppRepositoryInfo):
         epochs: int,
         it_validation: int | None,
         name_of_models: list[str],
+        overrides: list[str] | None = None,
     ) -> list[tuple[str, Path]]:
         """
         Install the app assets needed for fine-tuning and resolve the selected checkpoint(s).
@@ -1059,8 +1072,9 @@ class LocalAppRepository(AppRepositoryInfo):
         Shared assets (config, code, ``app.json``, ``requirements.txt``) are installed into
         ``path``; ``app.json`` is rewritten with the new ``display_name`` and a ``models`` list
         limited to the selected checkpoints, and the training config's ``epochs``/``it_validation``
-        are updated. Only the selected ``.pt`` checkpoints are downloaded. Returns ``(basename,
-        source_path)`` pairs for the checkpoints to fine-tune.
+        are updated. ``overrides`` are ``--set NAME=VALUE`` model/config tweaks baked into the training
+        config before training (same syntax as :meth:`_apply_config_overrides`). Only the selected ``.pt``
+        checkpoints are downloaded. Returns ``(basename, source_path)`` pairs for the checkpoints to fine-tune.
         """
         filenames = self._get_filenames()
         models = self._resolve_fine_tune_models(filenames, name_of_models)
@@ -1105,6 +1119,10 @@ class LocalAppRepository(AppRepositoryInfo):
 
         with open(config_file_path, "w") as file:
             yaml.dump(data, file)
+
+        # Apply the model/config --set tweaks after the epochs/it_validation rewrite so both land in the
+        # same training config the fine-tune then trains on.
+        self._apply_config_overrides(str(config_file_path), overrides)
 
         return models
 
