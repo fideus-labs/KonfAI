@@ -204,6 +204,36 @@ def test_stream_rescale_nearest_is_byte_identical_to_the_whole_volume_inverse(se
 
 
 @pytest.mark.parametrize("seed", range(4))
+def test_stream_rescale_linear_matches_the_whole_volume_inverse_to_float_rounding(seed: int) -> None:
+    # A float (linear) rescale is not byte-identical to F.interpolate windowed, but resample_region
+    # computes the same linear taps, so the streamed inverse matches the whole-volume one to
+    # ~float-rounding (KONFAI_STREAM_LINEAR_RESAMPLE trades exactly this for a bounded window).
+    rng = np.random.default_rng(seed)
+    volume = torch.from_numpy(rng.standard_normal((C, Z, Y, X)).astype(np.float32)) * 100.0
+    resample = ResampleToResolution([1.0, 1.0, 1.0])
+    attribute = Attribute()
+    attribute["Spacing"] = torch.tensor([1.0, 1.0, 1.0])
+    attribute["Size"] = np.asarray([12, 9, 7])
+    attribute["Size"] = np.asarray([Z, Y, X])
+    in_shape = [Z, Y, X]
+    out_shape = resample.inverse_transform_shape(in_shape, attribute)
+    scales = [in_shape[k] / out_shape[k] for k in range(3)]
+    reference = resample.inverse("case", volume.clone(), Attribute(attribute))
+    got = _run_stream(
+        lambda target: resample.stream_region_target(target, in_shape, Attribute(attribute)),
+        lambda window, target, source: resample.resample_region(
+            window, target, [s.start for s in source], scales, in_shape
+        ),
+        in_shape,
+        out_shape,
+        volume,
+        _partitions(Z, rng),
+    )
+    assert got.shape == reference.shape
+    torch.testing.assert_close(got, reference, atol=1e-2, rtol=0)  # ~1e-4 relative on values ~100
+
+
+@pytest.mark.parametrize("seed", range(4))
 def test_stream_halo_dilate_matches_whole_volume(seed: int) -> None:
     # A forward HALO stage (Dilate) rides the same window: the pull enlarges by the declared radius,
     # the stage runs on the window, and the halo is cropped back — seams must agree bit for bit.

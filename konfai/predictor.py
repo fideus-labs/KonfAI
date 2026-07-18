@@ -849,9 +849,10 @@ class OutSameAsGroupDataset(OutputDataset):
         """Fix the case's streaming state at its first slab, when the prefix output is known.
 
         A RESCALE stage streams through ``resample_region``, which matches ``F.interpolate`` bit for
-        bit only in nearest mode (uint8): a pipe whose rescale would interpolate is demoted here to
-        the buffered tail, where the true inverse runs whole-volume — byte-identity is never traded
-        for streaming. The demotion leaves the prefix untouched (the pipe was never part of it).
+        bit in nearest mode (uint8) and to ~float-rounding in linear mode, so a rescale streams by
+        default and bounds a large float resample to a window. ``KONFAI_STREAM_LINEAR_RESAMPLE=0``
+        demotes a float rescale here to the buffered whole-volume tail for a run that needs exactness;
+        the demotion leaves the prefix untouched (the pipe was never part of it).
         """
         self._post_prefix_attributes[index] = Attribute(attribute)
         spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
@@ -886,8 +887,8 @@ class OutSameAsGroupDataset(OutputDataset):
         with one evolving attribute: each stage declares against, and remaps from, the state the
         stages before it left — a second resample pops the Size stack the first one already popped,
         a reorientation after a permute reads the moved axes — and the walk carries the dtype, so a
-        RESCALE that would interpolate (``resample_region`` matches ``F.interpolate`` bit for bit
-        only in nearest mode) answers ``None`` instead: byte-identity is never traded for streaming.
+        float RESCALE (``resample_region`` matches ``F.interpolate`` only to ~float-rounding) answers
+        ``None`` — demoting to the whole-volume tail — only under ``KONFAI_STREAM_LINEAR_RESAMPLE=0``.
         ``produce`` then replays the same transitions on a fresh copy per emission (the same
         slab-local scoping as the prefix).
         """
@@ -911,7 +912,16 @@ class OutSameAsGroupDataset(OutputDataset):
                     shapes.append(list(shape))
                     probe = stage(name, probe, walking)
                 elif locality.kind is LocalityKind.RESCALE:
-                    if probe.dtype is not torch.uint8:
+                    # A float rescale streams within a window: resample_region computes the same linear
+                    # taps the read side already streams, matching the whole-volume F.interpolate to
+                    # ~float-rounding (a boundary voxel or two flips after argmax; a raw float output
+                    # differs by ~1 ULP) -- which bounds a large float resample (a probability volume
+                    # sent back to native) instead of holding it whole. KONFAI_STREAM_LINEAR_RESAMPLE=0
+                    # forces the exact whole-volume resample for a run that needs bit-identity. Nearest
+                    # (uint8) is byte-identical either way.
+                    if probe.dtype is not torch.uint8 and os.environ.get(
+                        "KONFAI_STREAM_LINEAR_RESAMPLE", "1"
+                    ).lower() in ("0", "false"):
                         return None
                     resample = cast(Resample, stage.transform)
                     if stage.inverted:
