@@ -98,8 +98,12 @@ If the split looks wrong, check which form your config is actually using.
 ### The streaming regime still uses memory proportional to a case
 
 The stream/buffer regime bounds retention across cases; direct regional reads depend
-on the transforms. The current fast path supports `TensorCast` and unmasked
-`Normalize`, `Standardize`, and `Clip`. Other transforms and augmentations use
+on the transforms. Any chain of pointwise transforms (`TensorCast`, unmasked
+`Normalize`/`Standardize`/`Clip`) and region transforms (`Flip`, `Permute`,
+`Canonical`, `Padding`, `ResampleToShape`/`ResampleToResolution`, `Dilate`,
+`Gradient`) streams — each declares its locality (see the transform reference).
+A transform that reads a second volume (`Mask`, masked `Clip`/`Standardize`), a
+global histogram (`HistogramMatching`), or an undeclared custom transform uses
 the bounded full-volume path.
 
 Reduce the transform chain to identify the boundary, or materialise expensive

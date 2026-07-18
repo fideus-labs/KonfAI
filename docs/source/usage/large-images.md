@@ -43,7 +43,9 @@ lead each case and augmentation draw to one of three regimes:
 | **Stream** | predict/eval default or budget exceeded; chain streamable | The source region for one patch. |
 | **Buffer** | same triggers; the chain needs a whole volume | A FIFO of `max(batch_size + 1, shuffle_window)` cases. |
 
-`memory_budget` replaces the workflow's default regime in any workflow.
+`memory_budget` drives the memory lever of each workflow: in **training** it
+chooses cache versus stream/buffer; in **evaluation** it sizes the auto-patch.
+Prediction and evaluation are always one-pass (stream/buffer), never cached.
 A number is interpreted as GiB, strings may include units, and `auto` offers
 80% of the detected per-rank memory limit. It is a size estimate—not a hard
 allocator limit—because transformed shapes, augmented copies, and transient
@@ -84,11 +86,12 @@ requested output patch back to the source region on disk.
 | Rescale | `ResampleToShape`, `ResampleToResolution` | Map through scale and add interpolation context. |
 | Whole volume | masked transforms, histogram matching, arbitrary displacement | Use the bounded buffer. |
 
-One region stage may appear in a streamable chain. Two remaps/halos/rescales,
-an undeclared custom transform, an excessively large halo, or a global
-statistic after a value-changing stage selects the safe whole-volume path.
-`WHOLE_VOLUME` is the default for custom transforms, so missing locality
-metadata reduces performance rather than silently changing results.
+Region stages compose — any number of them, each pulling its read through the
+one before it — so a chain of remaps/halos/rescales still streams. An undeclared
+custom transform, an excessively large halo, or a global statistic after a
+value-changing stage selects the safe whole-volume path. `WHOLE_VOLUME` is the
+default for custom transforms, so missing locality metadata reduces performance
+rather than silently changing results.
 
 The backend must also serve a disk region efficiently. HDF5 and OME-Zarr do so
 natively, DICOM reads selected slices, and SimpleITK supports regional reads for

@@ -36,10 +36,11 @@ def test_async_writer_runs_in_order_and_surfaces_failures() -> None:
     done: list[int] = []
     writer.submit(lambda: done.append(1))
     writer.submit(lambda: (_ for _ in ()).throw(PredictorError("destination died")))
-    # Operations submitted after a failure drain unexecuted; the failure surfaces at the latest at
-    # close(), so a run can never end with a write silently missing.
-    writer.submit(lambda: done.append(2))
+    # Operations submitted after a failure drain unexecuted; the failure surfaces at the LATEST at
+    # close(), possibly earlier at this submit if the worker already recorded it -- accept it wherever
+    # it lands, so a run can never end with a write silently missing.
     with pytest.raises(PredictorError, match="destination died"):
+        writer.submit(lambda: done.append(2))
         writer.close()
     assert done == [1]
 

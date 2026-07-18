@@ -26,6 +26,7 @@ from konfai.data import data_manager
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager import (
     _AUTO_MEMORY_SAFETY_FRACTION,
+    DataMetric,
     DataPrediction,
     DataTrain,
     _parse_memory_budget_bytes,
@@ -199,15 +200,18 @@ def test_none_budget_means_auto_for_training(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_one_pass_workflows_never_cache_whatever_the_budget() -> None:
-    # Prediction and evaluation read each case exactly once: a cache is never re-read, so even a
+    # Prediction AND evaluation read each case exactly once: a cache is never re-read, so even a
     # budget the dataset comfortably fits keeps them on the stream/buffer path.
-    prediction = DataPrediction(augmentations=None, memory_budget=f"{_DATASET_BYTES * 100}b")
-    prediction._prepared_data = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2])]}  # type: ignore[assignment]
-    prediction._prepared_validation_data = {}
-    prediction._prepared_train_names = ["case_a"]
-    prediction._prepared_validation_names = []
-    prediction._resolve_cache_regime(world_size=1)
-    assert prediction.use_cache is False
+    for data in (
+        DataPrediction(augmentations=None, memory_budget=f"{_DATASET_BYTES * 100}b"),
+        DataMetric(memory_budget=f"{_DATASET_BYTES * 100}b"),
+    ):
+        data._prepared_data = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2])]}  # type: ignore[assignment]
+        data._prepared_validation_data = {}
+        data._prepared_train_names = ["case_a"]
+        data._prepared_validation_names = []
+        data._resolve_cache_regime(world_size=1)
+        assert data.use_cache is False, type(data).__name__
 
 
 def test_budget_is_per_rank_so_world_size_flips_the_decision() -> None:

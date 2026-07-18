@@ -106,7 +106,9 @@ out-of-memory the run reads what the failed forward cost (the measurement is
 free — it already ran), shrinks the free axes by that ratio (pinned axes never
 move), re-plans the patch grid and re-runs the rank's cases — typically one
 restart. The chosen size also reserves room for the accumulation, so the blend
-stays on the GPU. `overlap` accepts voxels, a fraction (`0.2`), a percent string
+stays on the GPU; when that reservation cannot fit (or cannot be measured), the
+forward is sized alone and the writer blends on the host instead. `overlap`
+accepts voxels, a fraction (`0.2`), a percent string
 (`"20%"`) or a per-axis list, resolved after the size; an axis a single patch
 spans gets none. A `patch_size` without a `0` is never resized: the OOM
 propagates.

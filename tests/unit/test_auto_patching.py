@@ -87,6 +87,10 @@ class TestResolveOverlap:
     def test_bad_forms_are_refused(self):
         with pytest.raises(ConfigError, match="percentage"):
             resolve_overlap("big", [64, 64, 64], [512, 512, 512])
+        # A "%"-suffixed but non-numeric value must still raise ConfigError, not a bare ValueError
+        # from float("big").
+        with pytest.raises(ConfigError, match="numeric percentage"):
+            resolve_overlap("big%", [64, 64, 64], [512, 512, 512])
         with pytest.raises(ConfigError, match=r"\[0, 1\["):
             resolve_overlap(1.5, [64, 64, 64], [512, 512, 512])
         with pytest.raises(ConfigError, match="one per axis"):
