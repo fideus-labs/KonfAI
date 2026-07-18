@@ -1407,8 +1407,9 @@ class Save(Transform):
         self.dataset = dataset
         self.group = group
 
-    # WHOLE_VOLUME on purpose: a Save still in the chain must WRITE the preprocessed volume, and the
-    # streamed path never has one to write. (A Save whose cache exists is a source boundary instead.)
+    # WHOLE_VOLUME by declaration, yet the case may still stream: a Save whose cache exists is a
+    # source boundary, and an unsatisfied Save with a streamable prefix is materialized slab by slab
+    # first (DatasetManager._materialize_save). Only an unsweepable prefix loads the whole volume.
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor
