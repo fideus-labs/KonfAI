@@ -24,6 +24,7 @@ single patch spans.
 
 import numpy as np
 import pytest
+from konfai.utils.errors import ConfigError
 from konfai.utils.utils import (
     concretize_patch_size,
     get_patch_slices_from_shape,
@@ -80,15 +81,15 @@ class TestResolveOverlap:
         assert resolve_overlap(16, [1, 128, 128], [300, 512, 512]) == [0, 16, 16]
 
     def test_overlap_not_smaller_than_patch_is_refused(self):
-        with pytest.raises(ValueError, match="smaller than the patch"):
+        with pytest.raises(ConfigError, match="smaller than the patch"):
             resolve_overlap(64, [64, 64, 64], [512, 512, 512])
 
     def test_bad_forms_are_refused(self):
-        with pytest.raises(ValueError, match="percentage"):
+        with pytest.raises(ConfigError, match="percentage"):
             resolve_overlap("big", [64, 64, 64], [512, 512, 512])
-        with pytest.raises(ValueError, match=r"\[0, 1\["):
+        with pytest.raises(ConfigError, match=r"\[0, 1\["):
             resolve_overlap(1.5, [64, 64, 64], [512, 512, 512])
-        with pytest.raises(ValueError, match="one per axis"):
+        with pytest.raises(ConfigError, match="one per axis"):
             resolve_overlap([1, 2], [64, 64, 64], [512, 512, 512])
 
 
