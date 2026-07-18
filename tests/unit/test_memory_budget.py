@@ -18,6 +18,7 @@
 estimates the dataset size from headers alone, and -- for ``"auto"`` -- reads the cgroup limit rather
 than the host so a container/SLURM job is not OOM-killed."""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -225,6 +226,71 @@ def test_budget_is_per_rank_so_world_size_flips_the_decision() -> None:
     sharded = _make_train(half)
     sharded._resolve_cache_regime(world_size=4)
     assert sharded.use_cache is True
+
+
+# --------------------------------------------------------------------------------------
+# The evaluation auto-patch -- an AUTO budget is a NODE budget, split across the local ranks
+# --------------------------------------------------------------------------------------
+
+
+def _metric_sizing_budget(
+    monkeypatch: pytest.MonkeyPatch, memory_budget: str | float | None, local_ranks: str | None
+) -> float:
+    """Drive DataMetric._maybe_auto_patch over a fake one-case dataset and capture the budget it
+    actually hands to resolve_patch."""
+    data = DataMetric(memory_budget=memory_budget)
+    data.datasets = {
+        "f": SimpleNamespace(get_names=lambda group: ["case"], get_infos=lambda group, name: ([1, 64, 64, 64], None))
+    }
+    monkeypatch.setattr(DataMetric, "_resolve_dataset_sources", lambda self: {"CT": [("f", False)]}, raising=False)
+    monkeypatch.setattr(data_manager, "available_memory_bytes", lambda: (100 * 2**30, "host"))
+    captured: dict[str, float] = {}
+
+    def capture(template, shape, channels, element_bytes, budget, **kwargs):
+        captured["budget"] = budget
+        return list(shape)  # "fits whole": the sizing exits without installing a patch
+
+    monkeypatch.setattr(data_manager, "resolve_patch", capture)
+    if local_ranks is None:
+        monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
+    else:
+        monkeypatch.setenv("KONFAI_LOCAL_RANKS", local_ranks)
+    data._maybe_auto_patch()
+    return captured["budget"]
+
+
+def test_eval_auto_budget_is_divided_by_the_local_ranks(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 4 ranks evaluating on one node share its RAM: each sizes its patch from a quarter of the
+    # auto budget, or together they over-commit the host 4-fold.
+    node_auto = 100 * 2**30 * _AUTO_MEMORY_SAFETY_FRACTION
+    assert _metric_sizing_budget(monkeypatch, None, "4") == node_auto // 4
+    # Without the launcher's hint (direct API use), today's undivided behaviour is preserved.
+    assert _metric_sizing_budget(monkeypatch, None, None) == node_auto
+
+
+def test_eval_explicit_budget_is_per_rank_and_never_divided(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _metric_sizing_budget(monkeypatch, "1GiB", "4") == float(2**30)
+
+
+def test_run_distributed_app_exports_and_restores_local_ranks(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The wrapper leaves the per-node rank count in the environment while the workflow is built
+    # (the KeyboardInterrupt escapes the factory before any spawn), and restores it after -- a
+    # leak would silently shrink a later in-process run's patches.
+    captured: list[str] = []
+
+    @runtime.run_distributed_app
+    def factory(config=None, gpu: list[int] = [], cpu: int = 1):
+        captured.append(os.environ["KONFAI_LOCAL_RANKS"])
+        raise KeyboardInterrupt
+
+    monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
+    factory(gpu=[0, 1])
+    factory(gpu=[], cpu=3)
+    assert captured == ["2", "3"]
+    assert "KONFAI_LOCAL_RANKS" not in os.environ
+    monkeypatch.setenv("KONFAI_LOCAL_RANKS", "7")
+    factory(gpu=[0])
+    assert captured[-1] == "1" and os.environ["KONFAI_LOCAL_RANKS"] == "7"
 
 
 def test_auto_budget_uses_detected_memory(monkeypatch: pytest.MonkeyPatch) -> None:

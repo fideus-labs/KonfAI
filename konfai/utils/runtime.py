@@ -663,6 +663,13 @@ def run_distributed_app(
         bound = sig.bind_partial(*args, **kwargs_fun)
         bound.apply_defaults()
         is_cluster = "resubmit" in kwargs
+        # The auto memory budget is a NODE budget, but build-time sizing (the evaluation auto-patch)
+        # runs while ``func(...)`` constructs the workflow -- before the spawn where world_size exists.
+        # The launcher therefore leaves the per-node rank count in the environment, and restores it
+        # after: a leak would silently shrink a later in-process run (tests, embedded Python).
+        local_ranks = len(list(bound.arguments.get("gpu") or [])) or int(bound.arguments.get("cpu") or 1)
+        previous_local_ranks = os.environ.get("KONFAI_LOCAL_RANKS")
+        os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, local_ranks))
         try:
             execute_distributed_object(
                 func(*args, **kwargs_fun),
@@ -685,6 +692,11 @@ def run_distributed_app(
             )
         except KeyboardInterrupt:
             print("\n[KonfAI] Manual interruption (Ctrl+C)")
+        finally:
+            if previous_local_ranks is None:
+                os.environ.pop("KONFAI_LOCAL_RANKS", None)
+            else:
+                os.environ["KONFAI_LOCAL_RANKS"] = previous_local_ranks
 
     return wrapper
 
