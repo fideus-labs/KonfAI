@@ -1375,6 +1375,7 @@ class KonfAIApp(AbstractKonfAIApp):
         quiet: bool = False,
         config_file: str = "Config.yml",
         lr: float | None = None,
+        config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
     ) -> None:
         """
@@ -1402,7 +1403,7 @@ class KonfAIApp(AbstractKonfAIApp):
         import torch
 
         selected_models = self.app_repository.install_fine_tune(
-            config_file, Path("./"), name, epochs, it_validation, models
+            config_file, Path("./"), name, epochs, it_validation, models, config_overrides
         )
         KonfAIApp.symlink(dataset, Path("./Dataset").absolute())
 

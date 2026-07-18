@@ -94,6 +94,55 @@ def test_local_fine_tune_forwards_lr_to_train(monkeypatch: pytest.MonkeyPatch, t
     assert captured == [0.03]
 
 
+def test_local_fine_tune_forwards_config_overrides_to_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``config_overrides`` must reach ``install_fine_tune`` so the tweaks bake into the training config."""
+    src_ckpt = tmp_path / "CV_0_src.pt"
+    _write_src_checkpoint(src_ckpt)
+
+    dataset_dir = tmp_path / "Dataset"
+    dataset_dir.mkdir()
+    output_dir = tmp_path / "Output"
+    output_dir.mkdir()
+    (output_dir / "Config.yml").write_text("Trainer:\n  train_name: PLACEHOLDER\n", encoding="utf-8")
+
+    captured: dict = {}
+
+    def fake_install_fine_tune(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["overrides"] = args[6] if len(args) > 6 else kwargs.get("overrides")
+        return [("CV_0.pt", str(src_ckpt))]
+
+    def fake_train(*args, **kwargs):  # type: ignore[no-untyped-def]
+        model_config = Path(args[7])
+        with open(model_config) as file:
+            data = YAML().load(file)
+        produced_dir = Path(args[8]) / data["Trainer"]["train_name"]
+        produced_dir.mkdir(parents=True, exist_ok=True)
+        torch.save({"epoch": 0, "it": 5, "loss": 0.0, "Model": {}}, produced_dir / "out.pt")
+
+    monkeypatch.setattr("konfai.trainer.train", fake_train)
+    monkeypatch.setattr(app_module.KonfAIApp, "symlink", staticmethod(lambda *a, **k: None))
+
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app.app_repository = types.SimpleNamespace(install_fine_tune=fake_install_fine_tune)  # type: ignore[attr-defined]
+
+    app.fine_tune(
+        dataset=dataset_dir,
+        name="Run",
+        output=output_dir,
+        epochs=1,
+        it_validation=1,
+        models=["CV_0"],
+        gpu=[],
+        cpu=1,
+        quiet=True,
+        config_file="Config.yml",
+        config_overrides=["iterations=300"],
+        tmp_dir=output_dir,
+    )
+
+    assert captured["overrides"] == ["iterations=300"]
+
+
 def test_local_fine_tune_defaults_lr_to_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured = _run_local_fine_tune(monkeypatch, tmp_path, lr=None, pass_lr=False)
     assert captured == [None]

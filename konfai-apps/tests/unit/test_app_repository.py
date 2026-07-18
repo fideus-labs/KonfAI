@@ -511,7 +511,9 @@ def _write_two_checkpoint_app(app_root: Path) -> None:
     (app_root / "CV_1.pt").write_text("weights-1", encoding="utf-8")
 
 
-def _install_fine_tune(app_root: Path, workspace: Path, name_of_models: list[str]) -> list[tuple[str, Path]]:
+def _install_fine_tune(
+    app_root: Path, workspace: Path, name_of_models: list[str], overrides: list[str] | None = None
+) -> list[tuple[str, Path]]:
     workspace.mkdir(parents=True, exist_ok=True)
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
     return repo.install_fine_tune(
@@ -521,6 +523,7 @@ def _install_fine_tune(app_root: Path, workspace: Path, name_of_models: list[str
         epochs=3,
         it_validation=5,
         name_of_models=name_of_models,
+        overrides=overrides,
     )
 
 
@@ -546,6 +549,39 @@ def test_install_fine_tune_defaults_to_first_checkpoint(tmp_path: Path) -> None:
 
     with open(workspace / "Config.yml") as file:
         config = YAML().load(file)
+    assert config["Trainer"]["epochs"] == 3
+    assert config["Trainer"]["it_validation"] == 5
+
+
+def test_install_fine_tune_applies_model_and_dotted_overrides(tmp_path: Path) -> None:
+    """A bare ``--set`` resolves into ``Trainer.Model.<Class>``; a dotted one hits the config root."""
+    from ruamel.yaml import YAML
+
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    # A training config with a model block, so a bare-name override has a Trainer.Model.<Class> to land in.
+    (app_root / "Config.yml").write_text(
+        "Trainer:\n"
+        "  epochs: 100\n"
+        "  it_validation: 2500\n"
+        "  train_name: FT_0\n"
+        "  Model:\n"
+        "    classpath: net:UNet\n"
+        "    UNet:\n"
+        "      iterations: 100\n"
+        "  Dataset:\n"
+        "    batch_size: 1\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+
+    _install_fine_tune(app_root, workspace, [], overrides=["iterations=300", "Trainer.Dataset.batch_size=4"])
+
+    with open(workspace / "Config.yml") as file:
+        config = YAML().load(file)
+    assert config["Trainer"]["Model"]["UNet"]["iterations"] == 300
+    assert config["Trainer"]["Dataset"]["batch_size"] == 4
+    # The epochs/it_validation rewrite still applies alongside the overrides.
     assert config["Trainer"]["epochs"] == 3
     assert config["Trainer"]["it_validation"] == 5
 

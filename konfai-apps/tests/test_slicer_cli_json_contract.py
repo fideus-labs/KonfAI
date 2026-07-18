@@ -182,6 +182,33 @@ def test_constraint_vocabulary_matches_slicer_value_editor() -> None:
     constraints = app_repository_module._constraints_of_class(_TypedModel)
 
     # Exactly the keys Slicer's _build_value_editor consumes: choices -> dropdown, {min,max} -> spinbox bounds.
+    # No description was given, so the shape stays exactly as Slicer expects (no extra keys).
     assert constraints["mode"] == {"choices": ["a", "b"]}
     assert constraints["iters"] == {"min": 0, "max": 10}
     assert constraints["kind"] == {"choices": ["x", "y"]}
+
+
+def test_constraint_surfaces_parameter_description() -> None:
+    """A bare string in Annotated adds the knob's meaning to its constraint, for any base type -- so an agent
+    tuning it knows what it does. It is additive: Slicer ignores the extra key, bounds/choices are unchanged."""
+
+    class _DocumentedModel:
+        def __init__(
+            self,
+            iterations: Annotated[int, Range(0, 1000), "Optimization steps; higher = more accurate, slower."] = 150,
+            metric: Annotated[Literal["L1", "L2"], "Similarity metric on the MIND features."] = "L1",
+        ) -> None:
+            pass
+
+    constraints = app_repository_module._constraints_of_class(_DocumentedModel)
+
+    assert constraints["iterations"] == {
+        "min": 0,
+        "max": 1000,
+        "description": "Optimization steps; higher = more accurate, slower.",
+    }
+    # A described Literal keeps its choices AND gains the meaning -- the case a description= field could not cover.
+    assert constraints["metric"] == {
+        "choices": ["L1", "L2"],
+        "description": "Similarity metric on the MIND features.",
+    }
