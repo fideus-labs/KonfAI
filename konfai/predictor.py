@@ -704,7 +704,11 @@ class OutSameAsGroupDataset(OutputDataset):
         if self.nb_data_augmentation != 1 and not self._tta_streamable(dataset, index, attribute):
             return None
         for transform in self.before_reduction_transforms:
-            if not self._voxel_local(transform.patch_locality(Attribute(attribute)), attribute):
+            locality = transform.patch_locality(Attribute(attribute))
+            # A SLAB before-reduction transform (e.g. Mask) streams per slab through ``stream_slab`` in
+            # ``_prepare_copy_slab``, so it does not force the whole-volume path; anything else that is
+            # not voxel-local (a spatial mix, an unseeded statistic) still refuses outright.
+            if not self._voxel_local(locality, attribute) and locality.kind is not LocalityKind.SLAB:
                 return None
         stages = [
             *(_FinalizeStage(transform, False) for transform in self.after_reduction_transforms),
@@ -1071,10 +1075,14 @@ class OutSameAsGroupDataset(OutputDataset):
         layer: torch.Tensor,
         number_of_channels_per_model: list[int] | None,
         dataset: DatasetIter,
+        region: slice,
+        spatial: list[int],
     ) -> torch.Tensor:
         """One copy's slab through the per-copy head of ``_get_output``: un-augment it (exact on a
         slab — the gate admitted only slab-parallel draws), split the model chunks, run
-        before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block."""
+        before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block. A SLAB
+        before-reduction transform learns where the slab sits through ``stream_slab`` (the accumulator
+        grid, where before_reduction runs), so it reads its slab region instead of the whole volume."""
         layer = self._unaugment(dataset, index, index_augmentation, layer)
         attribute = Attribute(self.attributes[index][index_augmentation][0])
         if number_of_channels_per_model and layer.shape[0] == sum(number_of_channels_per_model):
@@ -1085,7 +1093,10 @@ class OutSameAsGroupDataset(OutputDataset):
         results = []
         for chunk in chunks:
             for transform in self.before_reduction_transforms:
-                chunk = transform(self.names[index], chunk, Attribute(attribute))
+                if transform.patch_locality(Attribute(attribute)).kind is LocalityKind.SLAB:
+                    chunk = transform.stream_slab(self.names[index], chunk, region, spatial, Attribute(attribute))
+                else:
+                    chunk = transform(self.names[index], chunk, Attribute(attribute))
             results.append(chunk)
         # A lone chunk stacks as a view: torch.stack would copy the slab once per slab of the case.
         if len(results) == 1:
@@ -1111,8 +1122,11 @@ class OutSameAsGroupDataset(OutputDataset):
         case attribute (transform writes stay slab-local, and case-level pops repeat identically per
         slab).
         """
+        spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
         blocks = [
-            self._prepare_copy_slab(index, index_augmentation, layer, number_of_channels_per_model, dataset)
+            self._prepare_copy_slab(
+                index, index_augmentation, layer, number_of_channels_per_model, dataset, region, spatial
+            )
             for index_augmentation, layer in copies.items()
         ]
         # Mixed devices can only come from a mid-case OOM fallback: reconcile on the host, exactly as
@@ -1128,7 +1142,6 @@ class OutSameAsGroupDataset(OutputDataset):
         first = next(iter(copies.values()))
         if number_of_channels_per_model and first.shape[0] == sum(number_of_channels_per_model):
             attribute["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
-        spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
         for position, stage in enumerate(plan.stages[: plan.boundary]):
             if position in plan.slab_stages:
                 result = stage.transform.stream_slab(self.names[index], result, region, spatial, attribute)
