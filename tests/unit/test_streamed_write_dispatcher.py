@@ -539,8 +539,7 @@ def test_add_layer_streams_a_flip_inverse_through_the_region_stage(tmp_path, mon
 
 def test_add_layer_streams_a_stat_inverse_riding_the_pipe(tmp_path, monkeypatch) -> None:
     # The common synthesis finalize: the forward Normalize stacked Min/Max, so its inverse is a
-    # per-voxel affine map riding the pipe behind the flip's region — the case the all-POINTWISE gate
-    # used to refuse outright.
+    # per-voxel affine map riding the pipe behind the flip's region.
     volume = torch.from_numpy(np.random.default_rng(2).standard_normal((1, 6, 4, 3)).astype(np.float32))
     transforms = [Normalize(inverse=True), Flip("0", inverse=True)]
     streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True)
