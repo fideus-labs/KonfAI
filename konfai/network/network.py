@@ -496,13 +496,25 @@ class Measure:
 
 
 def _leaf_spatial_stride(module: torch.nn.Module) -> list[int] | None:
-    """Per-axis stride of a leaf that shrinks the grid (a ``Conv`` or ``MaxPool``), else ``None``.
+    """Per-axis stride of a leaf that shrinks the grid (a ``Conv``, ``MaxPool`` or ``AvgPool``), else
+    ``None``.
 
-    ``ConvTranspose``/``Upsample`` (they grow the grid) and a residual branch's ``AvgPool`` (it does not
-    shrink the skip the graph reassembles) are not strided-down leaves, so they read ``None`` and the
-    downsampling trace passes their input factor straight through.
+    ``ConvTranspose``/``Upsample`` grow the grid, so they read ``None`` and the trace passes their input
+    factor straight through. ``AvgPool`` IS a downsampler (a model may pool on its main path) and is
+    counted: a residual branch's ``AvgPool`` does not inflate the factor because the branch-aware trace
+    merges the parallel main path and shortcut by their per-axis MAX, not their product.
     """
-    if isinstance(module, (torch.nn.MaxPool1d, torch.nn.MaxPool2d, torch.nn.MaxPool3d)):
+    if isinstance(
+        module,
+        (
+            torch.nn.MaxPool1d,
+            torch.nn.MaxPool2d,
+            torch.nn.MaxPool3d,
+            torch.nn.AvgPool1d,
+            torch.nn.AvgPool2d,
+            torch.nn.AvgPool3d,
+        ),
+    ):
         stride = module.stride if module.stride is not None else module.kernel_size
     elif isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)):
         stride = module.stride
@@ -842,23 +854,28 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                 if len(keys) == 0:
                     break
 
-    def _trace_downsampling(self, seed: list[int], seen: list[list[int]]) -> list[int]:
+    def _trace_downsampling(self, seeds: list[list[int]], seen: list[list[int]]) -> list[int]:
         """Propagate the per-axis downsampling factor through the branch register, recording each branch
         value in ``seen``. Parallel branches -- a residual shortcut beside the main path -- accumulate from
         the SAME seed and merge at their ``Add`` without multiplying, so a strided projection is not
         double-counted the way a flat ``modules()`` walk would. A child that is NOT a routed block is
-        opaque and contributes its flat internal product (``_flat_downsampling``). An unwritten branch
-        reads the block input, exactly as ``named_forward`` seeds it. Returns the last output's factor.
+        opaque and contributes its flat internal product (``_flat_downsampling``).
+
+        ``seeds`` are this block's input factors, one per positional input; the register is seeded from
+        all of them (a decoder block reading ``[upsampled, skip]`` keeps each at its own resolution) and
+        an unwritten branch falls back to the first, exactly as ``named_forward`` seeds it. A module
+        downsamples along its FIRST input branch; the others only route. Returns the last output's factor.
         """
-        branches: dict[str, list[int]] = {"0": seed}
-        out_f = seed
+        branches: dict[str, list[int]] = {str(i): seed for i, seed in enumerate(seeds)}
+        default = seeds[0]
+        out_f = default
         for name, module in self.items():
             module_args = self._modulesArgs[name]
-            in_f = branches.get(module_args.in_branch[0], seed)
+            in_factors = [branches.get(in_branch, default) for in_branch in module_args.in_branch]
             if isinstance(module, ModuleArgsDict):
-                out_f = module._trace_downsampling(in_f, seen)
+                out_f = module._trace_downsampling(in_factors, seen)
             else:
-                out_f = [a * b for a, b in zip(in_f, _flat_downsampling(module, len(seed)), strict=True)]
+                out_f = [a * b for a, b in zip(in_factors[0], _flat_downsampling(module, len(default)), strict=True)]
             for out_branch in module_args.out_branch:
                 branches[out_branch] = out_f
             seen.append(out_f)
@@ -1235,7 +1252,7 @@ class Network(ModuleArgsDict, ABC):
         if ndim == 0:
             return None
         seen: list[list[int]] = []
-        self._trace_downsampling([1] * ndim, seen)
+        self._trace_downsampling([[1] * ndim], seen)
         factor = [max((f[axis] for f in seen), default=1) for axis in range(ndim)]
         return factor if any(f > 1 for f in factor) else None
 
