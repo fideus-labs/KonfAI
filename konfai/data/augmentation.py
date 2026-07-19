@@ -614,6 +614,9 @@ class Foreign(DataAugmentation):
         the same -- and torch's seed reaches the devices, where the model draws its own.
         """
         states = (random.getstate(), np.random.get_state(), torch.random.get_rng_state())
+        # torch.manual_seed also (re)seeds every CUDA generator, so snapshot those too -- but only when
+        # CUDA is already initialised, so a CPU data-loader worker is never forced to spin CUDA up.
+        cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
         try:
             torch.manual_seed(seed)
             np.random.seed(seed)
@@ -626,6 +629,8 @@ class Foreign(DataAugmentation):
             random.setstate(states[0])
             np.random.set_state(states[1])
             torch.random.set_rng_state(states[2])
+            if cuda_states is not None:
+                torch.cuda.set_rng_state_all(cuda_states)
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         with self._seeded(self.seeds[index][a]):

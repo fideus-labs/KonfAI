@@ -138,7 +138,7 @@ names = [f"CASE_{i:03d}" for i in range(20)]
 data = DataTrain(augmentations=None, validation="0:4")
 data._resolve_dataset_sources = lambda: {}
 data._resolve_common_names = lambda datasets: ({}, set(names))
-data._get_datasets = lambda case_names, dataset_name, augmentations: ({}, [])
+data._get_datasets = lambda case_names, dataset_name, augmentations, index_offset=0: ({}, [])
 random.seed(1234)
 data._prepare_datasets()
 print(";".join(data._prepared_train_names))
@@ -181,7 +181,7 @@ def test_train_split_shuffle_draws_from_sorted_names(monkeypatch):
     names = {"CASE_010", "CASE_002", "CASE_001", "CASE_005", "CASE_003"}
     data._resolve_dataset_sources = lambda: {}
     data._resolve_common_names = lambda datasets: ({}, names)
-    data._get_datasets = lambda case_names, dataset_name, augmentations: ({}, [])
+    data._get_datasets = lambda case_names, dataset_name, augmentations, index_offset=0: ({}, [])
     data._prepare_datasets()
 
     assert captured["population"] == sorted(names)
