@@ -323,3 +323,14 @@ def test_fid_preprocess_images_runs() -> None:
     out = FID.preprocess_images(torch.zeros(2, 1, 64, 64))
 
     assert out.shape == (2, 3, 299, 299)
+
+
+def test_lpips_preprocessing_follows_input_device() -> None:
+    # LPIPS.preprocessing hardcoded .to(0), crashing on a CPU-only host and pinning every DDP rank to
+    # GPU 0. It now keeps the input's device (the model is moved to it lazily in _loss).
+    from konfai.metric.measure import LPIPS
+
+    out = LPIPS.preprocessing(torch.zeros(1, 1, 8, 8))
+
+    assert out.device == torch.device("cpu")
+    assert out.shape == (1, 3, 8, 8)

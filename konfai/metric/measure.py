@@ -399,10 +399,12 @@ class LPIPS(MaskedLoss):
 
     @staticmethod
     def preprocessing(tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.repeat((1, 3, 1, 1)).to(0)
+        return tensor.repeat((1, 3, 1, 1))
 
     @staticmethod
     def _loss(loss_fn_alex, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        # Follow the input's device (the DDP rank's GPU, or CPU) instead of a hardcoded device 0.
+        loss_fn_alex = loss_fn_alex.to(x.device)
         dataset_patch = ModelPatch([1, 320, 320])
         dataset_patch.load(x.shape[2:])
 
@@ -421,7 +423,7 @@ class LPIPS(MaskedLoss):
     def __init__(self, model: str = "alex") -> None:
         lpips = _require_optional("lpips", criterion="LPIPS", extra="lpips")
 
-        super().__init__(partial(LPIPS._loss, lpips.LPIPS(net=model).to(0)), True)
+        super().__init__(partial(LPIPS._loss, lpips.LPIPS(net=model)), True)
 
 
 class TRE(Criterion):
@@ -1017,9 +1019,11 @@ class IMPACTReg(CriterionWithAttribute):
         self.shape = shape if all(s > 0 for s in shape) else None
         self.modules_loss: dict[str, dict[torch.nn.Module, float]] = {}
 
-        dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim))).to(0)
+        # The sanity check only probes the model's output structure and then discards it, so run it on the
+        # CPU: forcing device 0 crashed on a CPU-only host and pinned every DDP rank to the same GPU.
+        dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim)))
         try:
-            out = self.model.to(0)(dummy_input, torch.tensor([self.nb_layer]))
+            out = self.model(dummy_input, torch.tensor([self.nb_layer]))
             if not isinstance(out, (list, tuple)):
                 raise TypeError(f"Expected model output to be a list or tuple, but got {type(out)}.")
             if len(weights) != len(out):
