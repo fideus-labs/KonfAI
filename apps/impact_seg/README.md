@@ -1,7 +1,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/impact_seg_konfai.svg?color=blue)](https://pypi.org/project/impact_seg_konfai/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml)
+[![CI](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://www.arxiv.org/abs/2508.09823)
 
 # IMPACT-Seg-KonfAI
@@ -13,7 +13,7 @@
 ## 🧩 Overview
 
 **IMPACT-Seg-KonfAI** is a lightweight **command-line interface (CLI)** for running **IMPACT-Seg** models through the
-[KonfAI](https://github.com/vboussot/KonfAI) deep learning framework.
+[KonfAI](https://github.com/fideus-labs/KonfAI) deep learning framework.
 
 It provides a simple way to perform **anatomical segmentation inference**, **evaluation**, **ensembling**, and
 **uncertainty estimation** on medical image volumes.
@@ -29,7 +29,7 @@ Pretrained models are automatically downloaded from
 
 ## 🧠 Features
 
-- ⚡ **Fast inference** powered by [KonfAI](https://github.com/vboussot/KonfAI)
+- ⚡ **Fast inference** powered by [KonfAI](https://github.com/fideus-labs/KonfAI)
 - 🤗 **Automatic model download** from Hugging Face
 - 🧩 **Multi-model ensembling** and **test-time augmentation (TTA)**
 - 🧠 **Supports evaluation workflows with reference data, and uncertainty estimation without reference**
@@ -70,7 +70,7 @@ python -m pip install impact-seg-konfai
 From source:
 
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
+git clone https://github.com/fideus-labs/KonfAI.git
 python -m pip install -e apps/impact_seg
 ```
 
@@ -156,4 +156,4 @@ Single-model body segmentation keeps **system RAM ~1.6 GB**. The thin 2-D patche
 
 - 🤗 **Model Hub:** [huggingface.co/VBoussot/ImpactSeg](https://huggingface.co/VBoussot/ImpactSeg)
 - 📦 **PyPI Package:** [pypi.org/project/impact_seg_konfai](https://pypi.org/project/impact_seg_konfai)
-- 🧠 **KonfAI Repository:** [github.com/vboussot/KonfAI](https://github.com/vboussot/KonfAI)
+- 🧠 **KonfAI Repository:** [github.com/fideus-labs/KonfAI](https://github.com/fideus-labs/KonfAI)

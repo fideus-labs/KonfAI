@@ -4,7 +4,7 @@ This example shows **pairwise image registration** with [IMPACT-Reg](https://git
 run through the KonfAI runtime — including **patch tiling + overlap blending**, the mechanism KonfAI uses to
 register a volume too large to process in one pass.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vboussot/KonfAI/blob/main/examples/ImpactReg/register_demo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/ImpactReg/register_demo.ipynb)
 
 Unlike the `Segmentation` and `Synthesis` examples (raw `konfai TRAIN -> PREDICTION -> EVALUATION`), a
 registration *preset* is a self-contained KonfAI **app**: it produces, on the fixed grid, the moving image
