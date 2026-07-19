@@ -334,3 +334,31 @@ def test_lpips_preprocessing_follows_input_device() -> None:
 
     assert out.device == torch.device("cpu")
     assert out.shape == (1, 3, 8, 8)
+
+
+def test_perceptual_loss_applies_every_loss_to_the_target() -> None:
+    # The inner loop zipped the losses against the targets, so the default {Gram, L1Loss} on a single
+    # reference silently used only Gram. Every configured loss must reach the (single) target layer.
+    from unittest.mock import MagicMock
+
+    loss = object.__new__(PerceptualLoss)
+    loss.preprocessing = lambda tensor: tensor  # type: ignore[method-assign]
+
+    model = MagicMock()
+    model.get_layers.return_value = [("L", torch.zeros(1, 1, 2, 2))]
+    loss.models = {None: model}
+
+    applied: list[str] = []
+
+    def make_loss(tag: str):
+        def loss_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            applied.append(tag)
+            return torch.zeros(1)
+
+        return loss_fn
+
+    loss.modules_loss = {"L": {make_loss("gram"): 1.0, make_loss("l1"): 1.0}}
+
+    loss._compute(torch.zeros(1, 1, 2, 2), torch.zeros(1, 1, 2, 2))
+
+    assert set(applied) == {"gram", "l1"}  # both, not just the first

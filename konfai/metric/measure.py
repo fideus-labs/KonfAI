@@ -742,18 +742,22 @@ class PerceptualLoss(Criterion):
                     zipped_layers[0][1].shape[1],
                     int(np.prod(zipped_layers[0][1].shape[2:])),
                 )
-                for (loss_function, loss_value), target_layer in zip(
-                    self.modules_loss[zipped_layers[0][0]].items(), zipped_layers[1:], strict=False
-                ):
-                    target_layer = target_layer[1].view(
-                        target_layer[1].shape[0],
-                        target_layer[1].shape[1],
-                        int(np.prod(target_layer[1].shape[2:])),
+                # Apply every configured loss to every target layer. Zipping the losses against the
+                # targets instead dropped losses whenever there were fewer targets than losses -- so the
+                # default {Gram, L1Loss} on a single reference silently used only Gram.
+                for target_entry in zipped_layers[1:]:
+                    target_layer = target_entry[1].view(
+                        target_entry[1].shape[0],
+                        target_entry[1].shape[1],
+                        int(np.prod(target_entry[1].shape[2:])),
                     )
-                    loss = (
-                        loss
-                        + loss_value * loss_function(output_layer.float(), target_layer.float()) / output_layer.shape[0]
-                    )
+                    for loss_function, loss_value in self.modules_loss[zipped_layers[0][0]].items():
+                        loss = (
+                            loss
+                            + loss_value
+                            * loss_function(output_layer.float(), target_layer.float())
+                            / output_layer.shape[0]
+                        )
         return loss
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
