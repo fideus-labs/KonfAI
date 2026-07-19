@@ -296,3 +296,30 @@ class TestImpactRegPCA:
         centred_ch0 = (fixed[0, 0] - fixed[0, 0].mean()).flatten()
         corr = torch.corrcoef(torch.stack([proj, centred_ch0]))[0, 1].abs()
         assert corr > 0.99
+
+
+def test_accuracy_reports_per_batch_not_a_lifetime_running_fraction() -> None:
+    # Accuracy used to accumulate n/corrects on the instance forever, so it reported one fraction that
+    # blended every epoch and both splits. It must now report the current batch (the logging window means
+    # and resets it), so an all-correct batch is 1.0 and a following all-wrong batch is 0.0 -- not 0.5.
+    from konfai.metric.measure import Accuracy
+
+    accuracy = Accuracy()
+    logits = torch.tensor([[9.0, 0.0, 0.0], [0.0, 9.0, 0.0]])  # argmax -> [0, 1]
+
+    all_correct = accuracy(logits, torch.tensor([0, 1]))
+    all_wrong = accuracy(logits, torch.tensor([1, 0]))
+
+    assert all_correct.item() == pytest.approx(1.0)
+    assert all_wrong.item() == pytest.approx(0.0)  # not blended with the previous batch
+
+
+def test_fid_preprocess_images_runs() -> None:
+    # FID.preprocess_images called torch.nn.functional.resize / .normalize(mean, std), neither of which
+    # exists there -- the metric could not execute. It now uses torchvision.transforms.functional.
+    pytest.importorskip("torchvision")
+    from konfai.metric.measure import FID
+
+    out = FID.preprocess_images(torch.zeros(2, 1, 64, 64))
+
+    assert out.shape == (2, 3, 299, 299)
