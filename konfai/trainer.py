@@ -18,10 +18,12 @@
 
 import math
 import os
+import random
 import shutil
 from pathlib import Path
 from typing import cast
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import tqdm
@@ -722,6 +724,14 @@ class Trainer(DistributedObject):
         # Cut the grids with the model's downsampling multiple already known, so each case's free axis
         # rounds up to a valid input size (the graph -- hence the factor -- is final before init()).
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
+        if self.manual_seed is not None:
+            # The train/validation split is drawn inside prepare() here on the launcher, before spawn.
+            # Without seeding, the global RNG is unseeded, so every run -- a fresh TRAIN or a RESUME --
+            # redraws a different split and leaks validation cases into training. Per-rank seeding for the
+            # actual training happens later in the distributed runtime.
+            random.seed(self.manual_seed)
+            np.random.seed(self.manual_seed)
+            torch.manual_seed(self.manual_seed)
         self.dataset.prepare()
         self.model.init(self.autocast, state, self.dataset.get_groups_dest())
         self.model.init_outputs_group()
