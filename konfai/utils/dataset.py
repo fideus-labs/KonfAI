@@ -1418,7 +1418,7 @@ class Dataset:
             from konfai.utils.dicom import get_dicom_info, read_dicom_series_slice
 
             path = self._path(name)
-            info = get_dicom_info(path)
+            info = dict(get_dicom_info(path))  # copy: get_dicom_info is memoised, and we update it below
             data, origin, spacing, direction = read_dicom_series_slice(
                 path, slices, series_uid=info["series_uid"], info=info
             )
