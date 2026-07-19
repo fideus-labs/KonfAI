@@ -806,16 +806,12 @@ class KLDivergence(CriterionWithInit):
 class Accuracy(Criterion):
     maximize = True  # reported value is the accuracy fraction (higher-is-better)
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.n: int = 0
-        self.corrects = torch.zeros(1)
-
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        target_0 = targets[0]
-        self.n += output.shape[0]
-        self.corrects += (torch.argmax(torch.softmax(output, dim=1), dim=1) == target_0).sum().float().cpu()
-        return self.corrects / self.n
+        # Return this batch's accuracy; the logging window means it over the batches and resets between
+        # train and validation. Accumulating n/corrects on the instance instead reported one lifetime
+        # fraction that blended every epoch and both splits.
+        predicted = torch.argmax(torch.softmax(output, dim=1), dim=1)
+        return (predicted == targets[0]).float().mean()
 
 
 class TripletLoss(Criterion):
@@ -895,11 +891,11 @@ class FID(Criterion):
 
     @staticmethod
     def preprocess_images(image: torch.Tensor) -> torch.Tensor:
-        return F.normalize(
-            F.resize(image, (299, 299)).repeat((1, 3, 1, 1)),
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ).cuda()
+        # resize/normalise-with-mean-std live in torchvision.transforms.functional, not torch.nn.functional
+        # (which has no ``resize`` and whose ``normalize`` takes no mean/std) -- the old calls raised at once.
+        tvf = _require_optional("torchvision.transforms.functional", criterion="FID", extra="fid")
+        resized = tvf.resize(image, [299, 299]).repeat((1, 3, 1, 1))
+        return tvf.normalize(resized, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
     @staticmethod
     def get_features(images: torch.Tensor, model: torch.nn.Module) -> np.ndarray:
