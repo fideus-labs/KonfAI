@@ -30,7 +30,7 @@ from konfai.metric.schedulers import Constant
 from konfai.network.blocks import Add
 from konfai.network.network import Measure, ModuleArgsDict, Network
 from konfai.utils.dataset import Attribute
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, MeasureError
 
 # --------------------------------------------------------------------------------------
 # ModuleArgsDict branch routing (named_forward / forward)
@@ -493,3 +493,39 @@ def test_load_restores_nested_network_optimizer_and_counters() -> None:
     assert loaded_sub._it == 123
     assert loaded_sub._nb_lr_update == 7
     assert loaded_sub.optimizer.state_dict()["state"] == saved_sub.optimizer.state_dict()["state"]
+
+
+def test_measure_validates_a_nested_loss_target_against_the_root_graph() -> None:
+    # A nested network's loss may address a module of a sibling branch -- a GAN generator's adversarial
+    # loss on the discriminator -- which exists only in the root's module namespace and is where runtime
+    # matching happens. Measure.init used to validate against the owning network, so the shipped GAN
+    # example failed to build; init now threads the root graph in.
+    from konfai.network.network import Measure
+
+    class Generator(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Head", torch.nn.Conv2d(1, 1, 1))
+
+    class Discriminator(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Head", torch.nn.Conv2d(1, 1, 1))
+
+    class Gan(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Generator", Generator())
+            self.add_module("Discriminator", Discriminator())
+
+    gan = Gan()
+    generator = next(net for name, net in gan.get_networks().items() if name.endswith(".Generator"))
+
+    def adversarial_measure() -> Measure:
+        measure = Measure("Generator", {})
+        measure.outputs_criterions = {"Discriminator.Head": {"CT": {}}}  # a sibling-branch module (root coords)
+        return measure
+
+    with pytest.raises(MeasureError):
+        adversarial_measure().init(generator, ["CT"])  # owner scope: the discriminator is invisible here
+    adversarial_measure().init(gan, ["CT"])  # root scope: Discriminator.Head resolves -> no error

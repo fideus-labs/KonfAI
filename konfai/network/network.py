@@ -909,8 +909,13 @@ class Network(ModuleArgsDict, ABC):
         key: str,
         function: Callable,
         *args,
+        root: "Network | None" = None,
         **kwargs,
     ) -> dict[str, object]:
+        # The first caller in the recursion is the root graph; thread it (and the dotted key) down so a
+        # nested network can address the whole graph -- e.g. a GAN generator whose loss targets a module
+        # of a sibling discriminator branch, which only exists in the root's module namespace.
+        root = root if root is not None else self
         results: dict[str, object] = {}
         for module in self.values():
             if isinstance(module, Network):
@@ -922,11 +927,15 @@ class Network(ModuleArgsDict, ABC):
                         key + "." + name_function(module),
                         function,
                         *args,
+                        root=root,
                         **kwargs,
                     ).items():
                         results.update({name_function(self) + "." + k: v})
-        if len([param.name for param in list(inspect.signature(function).parameters.values()) if param.name == "key"]):
+        param_names = {param.name for param in inspect.signature(function).parameters.values()}
+        if "key" in param_names:
             function = partial(function, key=key)
+        if "root" in param_names:
+            function = partial(function, root=root)
 
         results[name_function(self)] = function(self, *args, **kwargs)
         return results
@@ -1262,10 +1271,13 @@ class Network(ModuleArgsDict, ABC):
         return factor if any(f > 1 for f in factor) else None
 
     @_function_network()
-    def init(self, autocast: bool, state: State, group_dest: list[str], key: str) -> None:
+    def init(self, autocast: bool, state: State, group_dest: list[str], key: str, root: "Network") -> None:
         if self.outputs_criterions_loader:
             self.measure = Measure(key, self.outputs_criterions_loader)
-            self.measure.init(self, group_dest)
+            # Validate the criterion targets against the ROOT graph, where runtime matching also happens:
+            # a nested network's loss may address a module in a sibling branch (a GAN generator's
+            # adversarial loss on the discriminator) that exists only in the root's module namespace.
+            self.measure.init(root, group_dest)
         if self.patch is not None:
             self.patch.init(f"{konfai_root()}.Model.{key}.Patch")
         if state != State.PREDICTION:
