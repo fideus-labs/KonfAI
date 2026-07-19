@@ -1091,7 +1091,12 @@ class Network(ModuleArgsDict, ABC):
         init: bool = True,
         ema: bool = False,
         override_lr: float | None = None,
+        key: str | None = None,
     ):
+        # `checkpoint_save` writes the optimizer/iteration/LR-schedule state under the network's DOTTED path
+        # (its get_networks() key, e.g. "Gan.Generator"). `_apply_network` injects that same dotted path as
+        # `key` here, so a nested network resumes its own state instead of silently missing the bare-name key.
+        state_key = key if key is not None else self.get_name()
         if init:
             self.apply(
                 partial(
@@ -1127,14 +1132,14 @@ class Network(ModuleArgsDict, ABC):
                 else:
                     model_state_dict[alias] = model_state_dict_tmp[alias]
             self.load_state_dict(model_state_dict)
-        if f"{self.get_name()}_optimizer_state_dict" in state_dict and self.optimizer:
-            self.optimizer.load_state_dict(state_dict[f"{self.get_name()}_optimizer_state_dict"])
-        if f"{self.get_name()}_it" in state_dict:
-            _it = state_dict.get(f"{self.get_name()}_it")
+        if f"{state_key}_optimizer_state_dict" in state_dict and self.optimizer:
+            self.optimizer.load_state_dict(state_dict[f"{state_key}_optimizer_state_dict"])
+        if f"{state_key}_it" in state_dict:
+            _it = state_dict.get(f"{state_key}_it")
             if isinstance(_it, int):
                 self._it = _it
-        if f"{self.get_name()}_nb_lr_update" in state_dict:
-            _nb_lr_update = state_dict.get(f"{self.get_name()}_nb_lr_update")
+        if f"{state_key}_nb_lr_update" in state_dict:
+            _nb_lr_update = state_dict.get(f"{state_key}_nb_lr_update")
             if isinstance(_nb_lr_update, int):
                 self._nb_lr_update = _nb_lr_update
 

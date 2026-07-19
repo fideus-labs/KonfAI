@@ -445,3 +445,51 @@ def test_model_patch_deep_supervision_heads_each_reassemble_their_own_patches() 
 
     assert torch.equal(outputs["Aux"], x)
     assert torch.equal(outputs["Head"], x * 2.0)
+
+
+def test_load_restores_nested_network_optimizer_and_counters() -> None:
+    # checkpoint_save writes a nested network's optimizer/iteration/LR-schedule state under its DOTTED
+    # get_networks() key ("Root.Sub_optimizer_state_dict"), while load used to look it up under the bare
+    # class name ("Sub_..."), so every composite model (GAN family) silently resumed with a fresh Adam and
+    # _it == 0. load now consumes the dotted key injected by _apply_network.
+    from konfai.network.network import OptimizerLoader
+
+    class Sub(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, optimizer=OptimizerLoader(), dim=2)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, optimizer=None, dim=2)
+            self.add_module("Sub", Sub())
+
+    def with_optimizers(root: Network) -> Network:
+        for sub in root.get_networks().values():
+            if isinstance(sub, Sub):
+                sub.optimizer = torch.optim.AdamW(sub.parameters())
+        return root
+
+    source = with_optimizers(Root())
+    saved_sub = next(net for name, net in source.get_networks().items() if name.endswith(".Sub"))
+    sum(param.sum() for param in saved_sub.parameters()).backward()
+    saved_sub.optimizer.step()
+    saved_sub._it = 123
+    saved_sub._nb_lr_update = 7
+
+    # Mirror checkpoint_save: dotted get_networks() keys.
+    state_dict: dict = {"Model": source.state_dict()}
+    for name, net in source.get_networks().items():
+        if net.optimizer is not None:
+            state_dict[f"{name}_optimizer_state_dict"] = net.optimizer.state_dict()
+            state_dict[f"{name}_it"] = net._it
+            state_dict[f"{name}_nb_lr_update"] = net._nb_lr_update
+    assert "Root.Sub_optimizer_state_dict" in state_dict  # the dotted key checkpoint_save actually writes
+
+    target = with_optimizers(Root())
+    target.load(state_dict, init=False)
+
+    loaded_sub = next(net for name, net in target.get_networks().items() if name.endswith(".Sub"))
+    assert loaded_sub._it == 123
+    assert loaded_sub._nb_lr_update == 7
+    assert loaded_sub.optimizer.state_dict()["state"] == saved_sub.optimizer.state_dict()["state"]
