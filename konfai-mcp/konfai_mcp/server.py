@@ -79,6 +79,7 @@ from .server_support import (
     workflow_root_name,
     write_config,
 )
+from .workflows import WORKFLOW_SPECS, JobKind, WorkflowKind
 
 mcp = FastMCP("KonfAI")
 
@@ -97,7 +98,7 @@ WORKSPACE_LAYOUT = WorkspaceLayout(WORKSPACES_ROOT)
 MAX_LOG_TAIL_LINES = int(os.environ.get("KONFAI_MCP_LOG_TAIL_LINES", "200"))
 ACTIVE_JOB_STATES = {"queued", "running"}
 VALIDATION_LEVELS = {"instantiate", "setup", "train_step"}
-WORKFLOWS = {"train", "prediction", "evaluation"}
+WORKFLOWS = set(WORKFLOW_SPECS)
 JOB_REGISTRY = JobRegistry(ACTIVE_JOB_STATES, workspace_layout=WORKSPACE_LAYOUT)
 _JOBS_LOCK = JOB_REGISTRY.lock
 _JOBS = JOB_REGISTRY.jobs
@@ -168,7 +169,7 @@ def _job_payload(job: Job) -> dict[str, Any]:
 
 
 def _write_workflow_config(
-    workflow: Literal["train", "prediction", "evaluation"],
+    workflow: WorkflowKind,
     content: str,
     overwrite: bool,
 ) -> dict[str, Any]:
@@ -353,7 +354,7 @@ def _device_args(gpu: int | list[int] | None, cpu: int | None) -> list[str]:
 
 def _runtime_job_spec(
     *,
-    kind: Literal["train", "prediction", "evaluation"],
+    kind: WorkflowKind,
     config_path: Path,
     gpu: int | list[int] | None,
     cpu: int | None,
@@ -366,7 +367,7 @@ def _runtime_job_spec(
     lr: float | None = None,
     cluster: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    runner_command = {"train": "TRAIN", "prediction": "PREDICTION", "evaluation": "EVALUATION"}[kind]
+    runner_command = WORKFLOW_SPECS[kind].command
     if resume_model is not None:
         if kind != "train":
             raise ValueError("resume_model is only valid for training jobs.")
@@ -408,7 +409,7 @@ def _runtime_job_spec(
 
 
 def _launch_job(
-    kind: Literal["train", "prediction", "evaluation", "infer", "finetune", "evaluate", "uncertainty", "pipeline"],
+    kind: JobKind,
     command: list[str],
     config_path: Path,
     extra_manifest: dict[str, Any] | None = None,
@@ -887,7 +888,7 @@ def read_session_summary() -> dict[str, Any]:
 
 
 @mcp.resource("session://current/config/{workflow}")
-def read_workflow_config_resource(workflow: Literal["train", "prediction", "evaluation"]) -> str:
+def read_workflow_config_resource(workflow: WorkflowKind) -> str:
     """Read one current-session config chosen by workflow."""
     return read_text(SESSION.config_path(workflow))
 
@@ -2940,7 +2941,7 @@ def validate_config_semantics(
 )
 def review_config_semantics(
     workflow: Annotated[
-        Literal["train", "prediction", "evaluation"],
+        WorkflowKind,
         Field(description="Which session config to review (default 'train')."),
     ] = "train",
 ) -> dict[str, Any]:
@@ -3035,7 +3036,7 @@ def summarize_session(
 )
 def write_workflow_config(
     workflow: Annotated[
-        Literal["train", "prediction", "evaluation"],
+        WorkflowKind,
         Field(
             description="Which config file to write: train -> Config.yml, prediction -> Prediction.yml, evaluation -> Evaluation.yml."
         ),
@@ -3795,7 +3796,7 @@ def read_job_log(
 )
 def read_live_metrics(
     kind: Annotated[
-        Literal["train", "prediction", "evaluation"],
+        WorkflowKind,
         Field(description="Job kind used to discover the latest job when job_id is omitted (default 'train')."),
     ] = "train",
     job_id: Annotated[

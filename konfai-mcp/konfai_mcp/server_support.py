@@ -32,6 +32,8 @@ from typing import Any
 import numpy as np
 from ruamel.yaml import YAML
 
+from konfai_mcp.workflows import WORKFLOW_SPECS
+
 YAML_SAFE = YAML(typ="safe")
 YAML_DUMP = YAML()
 YAML_DUMP.default_flow_style = False
@@ -137,17 +139,9 @@ def aggregate_case_statistics(stats: dict[str, dict[str, Any]]) -> dict[str, dic
     return result
 
 
-WORKFLOW_CONFIG_FILES = {
-    "train": "Config.yml",
-    "prediction": "Prediction.yml",
-    "evaluation": "Evaluation.yml",
-}
+WORKFLOW_CONFIG_FILES = {kind: spec.config_file for kind, spec in WORKFLOW_SPECS.items()}
 
-WORKFLOW_ROOT_KEYS = {
-    "train": "Trainer",
-    "prediction": "Predictor",
-    "evaluation": "Evaluator",
-}
+WORKFLOW_ROOT_KEYS = {kind: spec.root_key for kind, spec in WORKFLOW_SPECS.items()}
 
 CONFIG_AUTHORING_QUESTIONS = [
     "Ask only if uncertain: which dataset groups are inputs, targets, or support-only groups for this task?",
