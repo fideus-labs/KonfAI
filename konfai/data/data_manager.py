@@ -557,13 +557,14 @@ class DatasetIter(data.Dataset):
     def reset_augmentation(self, label):
         if self.inline_augmentations and self.has_augmented_samples and len(self.data_augmentations_list) > 0:
             for index in range(self.nb_dataset):
-                # Augmentation objects are shared across destination groups, so the
-                # random parameters for a case are drawn once here; each group then
-                # rebuilds its patch grid from that single draw, keeping every group
-                # of the case aligned on the same transform.
+                # Augmentation objects are shared across destination groups AND across the train and
+                # validation loaders, so the per-case draw is cached by the manager's own augmentation
+                # index (globally unique, offset for validation), not the loader-local position -- else a
+                # validation case would reset (and reuse) a train case's draw and folded shape.
+                case_index = next(iter(self.data.values()))[index].index
                 for data_augmentations in self.data_augmentations_list:
                     for data_augmentation in data_augmentations.data_augmentations:
-                        data_augmentation.reset_state(index)
+                        data_augmentation.reset_state(case_index)
                 for group_src in self.groups_src:
                     for group_dest in self.groups_src[group_src]:
                         self.data[group_dest][index].unload_augmentation()
@@ -951,9 +952,15 @@ class Data(ABC):
         }
         if resolved_num_workers > 0:
             self.dataLoader_args["prefetch_factor"] = 2 if self._prefetch_factor is None else self._prefetch_factor
-            self.dataLoader_args["persistent_workers"] = (
-                True if self._persistent_workers is None else self._persistent_workers
-            )
+            if self._persistent_workers is not None:
+                persistent_workers = self._persistent_workers
+            else:
+                # Persistent workers keep a fork-time copy of the dataset and never see the main process's
+                # per-epoch reset_augmentation redraw, so inline augmentations freeze at their first-epoch
+                # draw. Default them off when inline augmentations are active so the redraw takes effect.
+                inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
+                persistent_workers = not inline_augmentation_active
+            self.dataLoader_args["persistent_workers"] = persistent_workers
 
     def _estimate_cached_bytes(self) -> int:
         """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read).
@@ -1401,6 +1408,7 @@ class Data(ABC):
             validation_names,
             dataset_name,
             self._get_data_augmentations(self.validation_augmentations),
+            index_offset=len(train_names),
         )
 
         self._prepared_data = train_data
@@ -1415,6 +1423,7 @@ class Data(ABC):
         names: list[str],
         dataset_name: dict[str, dict[str, list[str]]],
         data_augmentations_list: list[DataAugmentationsList],
+        index_offset: int = 0,
     ) -> tuple[dict[str, list[DatasetManager]], list[tuple[int, int, int]]]:
         nb_dataset = len(names)
         nb_patch: list[list[int]]
@@ -1427,7 +1436,9 @@ class Data(ABC):
             for group_dest in self.groups_src[group_src]:
                 data[group_dest] = [
                     DatasetManager(
-                        i,
+                        # A globally-unique augmentation index (offset for validation) so the shared
+                        # augmentation objects do not collide train and validation draws in their cache.
+                        index_offset + i,
                         group_src,
                         group_dest,
                         name,
