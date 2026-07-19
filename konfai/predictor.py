@@ -1645,21 +1645,21 @@ class _Predictor:
                 - metadata (list of strings),
                 - `requires_grad` flag (as a tensor).
         """
-        if self.tb is None:
+        if self.tb is None or self.global_rank != 0:
+            # Prediction logging is a rank-0 progress indicator; gate before touching the measures so a
+            # non-zero rank never enters a cross-rank collective the unequal shards would deadlock on.
             return
 
         measures: dict[str, tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]] = {}
         if self._has_runtime_measures:
             measures = DistributedObject.get_measure(
-                self.world_size,
-                self.global_rank,
+                1,
+                0,
                 self.local_rank,
                 {"": self.model_composite.module},
                 1,
+                sync=False,
             )
-
-        if self.global_rank != 0:
-            return
 
         images_log = []
         if len(self.data_log):
