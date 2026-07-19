@@ -133,8 +133,17 @@ class Attribute(dict[str, Any]):
         for k, v in attributes.items():
             super().__setitem__(copy.deepcopy(k), copy.deepcopy(v))
 
+    @staticmethod
+    def _is_stack_member(stored_key: str, key: str) -> bool:
+        # Values are stacked as ``{key}_{n}``; match that exact pattern (or the bare key) so a sibling that
+        # merely shares a prefix -- ``SpacingOriginal`` vs ``Spacing`` -- is not miscounted as another entry.
+        if stored_key == key:
+            return True
+        prefix = f"{key}_"
+        return stored_key.startswith(prefix) and stored_key[len(prefix) :].isdigit()
+
     def _count_key(self, key: str) -> int:
-        return len([k for k in super().keys() if k.startswith(key)])
+        return sum(1 for k in super().keys() if Attribute._is_stack_member(k, key))
 
     def __getitem__(self, key: str) -> Any:
         i = self._count_key(key)
@@ -180,7 +189,7 @@ class Attribute(dict[str, Any]):
     def __contains__(self, key: object) -> bool:
         if not isinstance(key, str):
             return False
-        return any(k.startswith(key) for k in super().keys())
+        return any(Attribute._is_stack_member(k, key) for k in super().keys())
 
     def is_info(self, key: str, value: str) -> bool:
         return key in self and self[key] == value
