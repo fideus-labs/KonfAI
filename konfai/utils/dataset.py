@@ -550,16 +550,24 @@ class _OmeZarrDataStream(DataStream):
         if not success:
             shutil.rmtree(self._store_path, ignore_errors=True)
             return
-        if self._final_path.exists():
-            shutil.rmtree(self._final_path)
+        # Move an existing store aside instead of deleting it up front, so a replaced entry stays
+        # recoverable (at <name>.replaced-<pid>) until the new store is renamed into place -- a directory
+        # swap is not atomic, and the old rmtree-then-rename lost both on a crash in the window.
+        replaced = self._final_path.exists()
+        backup = self._final_path.with_name(f"{self._final_path.name}.replaced-{os.getpid()}")
+        if replaced:
+            shutil.rmtree(backup, ignore_errors=True)
+            os.rename(self._final_path, backup)
         try:
             os.rename(self._store_path, self._final_path)
         except OSError:
-            # A concurrent writer of the same entry renamed its complete, identical store into place
-            # between the rmtree and this rename; keep it and drop ours.
+            # A concurrent writer of the same entry renamed its complete, identical store into place;
+            # keep it and drop ours.
             if not self._final_path.exists():
                 raise
             shutil.rmtree(self._store_path, ignore_errors=True)
+        if replaced:
+            shutil.rmtree(backup, ignore_errors=True)
 
 
 class Dataset:
