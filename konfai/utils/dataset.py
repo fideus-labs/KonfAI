@@ -336,6 +336,42 @@ def _flatten_transforms(transform: sitk.Transform) -> list[sitk.Transform]:
     return [transform]
 
 
+def _transform_codec() -> list[tuple[type, str, Any]]:
+    """(sitk class, serialized type tag, decode factory) for every supported transform kind.
+
+    Built lazily because ``sitk`` is an optional import.
+    """
+    return [
+        (sitk.Euler3DTransform, "Euler3DTransform_double_3_3", sitk.Euler3DTransform),
+        (sitk.AffineTransform, "AffineTransform_double_3_3", lambda: sitk.AffineTransform(3)),
+        (sitk.BSplineTransform, "BSplineTransform_double_3_3", lambda: sitk.BSplineTransform(3)),
+    ]
+
+
+def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: Attribute) -> list[np.ndarray]:
+    """Serialize a (possibly composite) transform: record each leaf's type tag and fixed parameters
+    into ``attributes`` (``{i}:Transform`` / ``{i}:FixedParameters``) and return the per-leaf
+    parameter arrays, in application order."""
+    datas: list[np.ndarray] = []
+    for i, leaf in enumerate(_flatten_transforms(transform)):
+        type_tag = next((tag for sitk_class, tag, _ in _transform_codec() if isinstance(leaf, sitk_class)), None)
+        if type_tag is None:
+            raise DatasetManagerError(f"Unsupported transform type '{type(leaf).__name__}' for entry '{name}'.")
+        attributes[f"{i}:Transform"] = type_tag
+        attributes[f"{i}:FixedParameters"] = leaf.GetFixedParameters()
+
+        datas.append(np.asarray(leaf.GetParameters()))
+    return datas
+
+
+def _decode_transform(transform_type: str, name: str) -> sitk.Transform:
+    """A fresh transform instance for a serialized type tag."""
+    for _, type_tag, factory in _transform_codec():
+        if transform_type == type_tag:
+            return factory()
+    raise DatasetManagerError(f"Unsupported transform type '{transform_type}' for entry '{name}'.")
+
+
 def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     """Read shape and metadata from an image file without loading its full pixel data."""
     attributes = Attribute()
@@ -744,24 +780,7 @@ class Dataset:
                 data, attributes_tmp = image_to_data(data)
                 attributes.update(attributes_tmp)
             elif isinstance(data, sitk.Transform):
-                transforms = _flatten_transforms(data)
-                datas = []
-                for i, transform in enumerate(transforms):
-                    if isinstance(transform, sitk.Euler3DTransform):
-                        transform_type = "Euler3DTransform_double_3_3"
-                    elif isinstance(transform, sitk.AffineTransform):
-                        transform_type = "AffineTransform_double_3_3"
-                    elif isinstance(transform, sitk.BSplineTransform):
-                        transform_type = "BSplineTransform_double_3_3"
-                    else:
-                        raise DatasetManagerError(
-                            f"Unsupported transform type '{type(transform).__name__}' for entry '{name}'."
-                        )
-                    attributes[f"{i}:Transform"] = transform_type
-                    attributes[f"{i}:FixedParameters"] = transform.GetFixedParameters()
-
-                    datas.append(np.asarray(transform.GetParameters()))
-                data = np.asarray(datas)
+                data = np.asarray(_encode_transform_leaves(data, name, attributes))
 
             h5_group, name = self._resolve_group(name)
             if name in h5_group:
@@ -979,25 +998,7 @@ class Dataset:
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             attributes = Attribute()
             if os.path.exists(f"{self.filename}{name}.itk.txt"):
-                data = sitk.ReadTransform(f"{self.filename}{name}.itk.txt")
-                transforms = _flatten_transforms(data)
-                datas = []
-                for i, transform in enumerate(transforms):
-                    if isinstance(transform, sitk.Euler3DTransform):
-                        transform_type = "Euler3DTransform_double_3_3"
-                    elif isinstance(transform, sitk.AffineTransform):
-                        transform_type = "AffineTransform_double_3_3"
-                    elif isinstance(transform, sitk.BSplineTransform):
-                        transform_type = "BSplineTransform_double_3_3"
-                    else:
-                        raise DatasetManagerError(
-                            f"Unsupported transform type '{type(transform).__name__}' for entry '{name}'."
-                        )
-                    attributes[f"{i}:Transform"] = transform_type
-                    attributes[f"{i}:FixedParameters"] = transform.GetFixedParameters()
-
-                    datas.append(np.asarray(transform.GetParameters()))
-
+                datas = _encode_transform_leaves(sitk.ReadTransform(f"{self.filename}{name}.itk.txt"), name, attributes)
                 max_len = max(len(v) for v in datas)
 
                 padded_datas = np.array([np.pad(v, (0, max_len - len(v)), constant_values=np.nan) for v in datas])
@@ -1763,14 +1764,7 @@ class Dataset:
         transforms_type = [v for k, v in attribute.items() if k.endswith(":Transform_0")]
         transforms = []
         for i, transform_type in enumerate(transforms_type):
-            if transform_type == "Euler3DTransform_double_3_3":
-                transform = sitk.Euler3DTransform()
-            elif transform_type == "AffineTransform_double_3_3":
-                transform = sitk.AffineTransform(3)
-            elif transform_type == "BSplineTransform_double_3_3":
-                transform = sitk.BSplineTransform(3)
-            else:
-                raise DatasetManagerError(f"Unsupported transform type '{transform_type}' for entry '{name}'.")
+            transform = _decode_transform(transform_type, name)
             transform.SetFixedParameters(ast.literal_eval(attribute[f"{i}:FixedParameters"]))
             transform.SetParameters(tuple(transform_parameters[i]))
             transforms.append(transform)
