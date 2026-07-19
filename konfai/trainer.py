@@ -559,17 +559,20 @@ class _Trainer:
                             self.it,
                         )
 
-                    if len(images_log):
-                        for name, layer, _ in model.get_layers(
-                            [v.tensor for v in batch_sample.values() if v.is_input],
-                            images_log,
-                        ):
-                            self.data_log[name][0](
-                                self.tb,
-                                f"{type_log}/{name}{label}",
-                                layer[: self.data_log[name][1]].detach().cpu().numpy(),
-                                self.it,
-                            )
+                if len(images_log):
+                    # get_layers is model-scoped, not per-network: run it once per model, or a
+                    # multi-network model (a GAN's generator + discriminator) repeats the forward
+                    # extraction and writes each image event once per network.
+                    for name, layer, _ in model.get_layers(
+                        [v.tensor for v in batch_sample.values() if v.is_input],
+                        images_log,
+                    ):
+                        self.data_log[name][0](
+                            self.tb,
+                            f"{type_log}/{name}{label}",
+                            layer[: self.data_log[name][1]].detach().cpu().numpy(),
+                            self.it,
+                        )
 
             if type_log == "Training":
                 for name, network in self.model.module.get_networks().items():
