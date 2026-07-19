@@ -185,6 +185,9 @@ def test_forward_orientation_records_case_geometry_from_the_volume_not_the_slab(
     assert not np.allclose(
         reference.get_np_array("Origin"), slab_derived.get_np_array("Origin")
     )  # the test distinguishes
+    # The whole stack must match, not just the top Origin: a bug that pushed the slab geometry and then
+    # the full-volume one would leave a stale entry lower in the stack for the later inverse pop to hit.
+    assert got == reference
 
 
 @pytest.mark.parametrize("seed", range(4))
