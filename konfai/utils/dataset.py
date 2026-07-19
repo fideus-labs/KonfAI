@@ -1523,10 +1523,7 @@ class Dataset:
         base_format, self.level = split_format_level(file_format)
         normalized_format = base_format.lower().removeprefix(".").replace("_", "-")
         file_format = {"ome-zarr": "omezarr", "zarr": "omezarr"}.get(normalized_format, normalized_format)
-        if file_format != "h5" and not str(filename).endswith("/"):
-            filename = f"{filename}/"
-        self.is_directory = str(filename).endswith("/")
-        self.filename = str(filename)
+        self.filename, self.is_directory = Dataset._normalize_path(filename, file_format)
         self.file_format = file_format
         # The store backend is auto-detected from what is actually on disk (like SitkFile already probes
         # every supported extension) — an OME-Zarr / Zarr / DICOM store is a directory whose type is
@@ -1537,6 +1534,20 @@ class Dataset:
             self.file_format = detected
         self._names_cache: dict[str, list[str]] = {}
         self._infos_cache: dict[tuple[str, str], tuple[list[int], Attribute]] = {}
+
+    @staticmethod
+    def _normalize_path(filename: str | Path, file_format: str) -> tuple[str, bool]:
+        # A single-store h5 is one file, every other backend a directory of cases: only the latter gets the
+        # trailing slash that marks ``is_directory``. Keep the two in lock-step so a path never ends up a
+        # directory-flagged h5 (which would write the hidden dotfile ``<dir>/.h5``).
+        path = str(filename)
+        if file_format != "h5" and not path.endswith("/"):
+            path += "/"
+        return path, path.endswith("/")
+
+    def rebase(self, prefix: Path) -> None:
+        """Prepend ``prefix`` to this dataset's path, re-deriving ``is_directory`` from the format."""
+        self.filename, self.is_directory = Dataset._normalize_path(prefix / self.filename, self.file_format)
 
     @staticmethod
     def _detect_directory_store_format(root: str) -> str | None:
