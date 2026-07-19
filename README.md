@@ -1,13 +1,13 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/vboussot/KonfAI/main/logo.png" alt="KonfAI" width="360" />
+  <img src="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/logo.png" alt="KonfAI" width="360" />
   <h1>Medical-imaging workflows, executable end to end</h1>
   <p><strong>From images on disk to reproducible experiments, production inference, and reusable clinical applications.</strong></p>
   <p>
     <a href="https://pypi.org/project/konfai/"><img src="https://img.shields.io/pypi/v/konfai" alt="PyPI version" /></a>
     <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+" /></a>
-    <a href="https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml"><img src="https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml/badge.svg" alt="CI" /></a>
+    <a href="https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml"><img src="https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml/badge.svg" alt="CI" /></a>
     <a href="https://konfai.readthedocs.io/en/latest/"><img src="https://readthedocs.org/projects/konfai/badge/?version=latest" alt="Documentation" /></a>
-    <a href="https://github.com/vboussot/KonfAI/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0" /></a>
+    <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0" /></a>
   </p>
   <p>
     <a href="https://konfai.readthedocs.io/en/latest/quickstart.html"><strong>Quickstart</strong></a>
@@ -69,6 +69,14 @@ registration, and synthesis:
 
 ---
 
+## Where to start
+
+- **Evaluating KonfAI?** → the App benchmark table below, then [the docs landing](https://konfai.readthedocs.io/en/latest/).
+- **Running a published model?** → the one-command App install ([Real workloads](#real-workloads-one-app-contract)).
+- **Adapting an experiment?** → the [Quickstart](#quickstart-first-smoke-run) (train → predict → evaluate).
+- **Building an App?** → [`konfai-apps`](https://konfai.readthedocs.io/en/latest/usage/apps.html).
+- **Contributing?** → [`AGENTS.md`](AGENTS.md).
+
 ## Why KonfAI?
 
 - **Scale.** Dataset patches can be read regionally from ITK, HDF5, DICOM, and
@@ -108,15 +116,16 @@ registration systems—not reduced demonstration networks:
 
 | App | Workload | Published RTX PRO 5000 benchmark |
 | --- | --- | --- |
-| **TotalSegmentator-KonfAI** | CT: 117 labels / 5 models · MRI: 50 labels / 2 models | **CT `total`: ≈42 s / ≈20 GB VRAM / ≈19 GB RAM** vs ≈76 s for the original |
-| **MRSegmentator-KonfAI** | MRI: 40 labels, 5-fold ensemble | **≈27 s / ≈22 GB VRAM / ≈2 GB RAM** vs ≈35 s / ≈11 GB RAM for the original |
+| **TotalSegmentator-KonfAI** | CT: 117 labels / 5 models · MRI: 50 labels / 2 models | **CT `total`: ≈42 s / ≈20 GB VRAM / ≈19 GB RAM** — 1.5–3.6× faster, 2.7–4.1× less host RAM than the original |
+| **MRSegmentator-KonfAI** | MRI: 40 labels, 5-fold ensemble | **≈27 s / ≈22 GB VRAM** — 1.6–2.6× faster, up to ~6× less host RAM than the original |
 | **ImpactSynth** | four MR/CBCT→sCT variants, 2.5D UNet++, 5 models each | ≈24 s / ≈16 GB VRAM for the benchmark inference; ≈82 s full ensemble; ≈2 GB RAM |
 | **ImpactSeg** | one model segments 11 structures from CT, MRI, or CBCT | ≈7 s / ≈10 GB VRAM / ≈1.6 GB RAM |
 | **IMPACT-Reg** | 13 multimodal presets across elastix+IMPACT, ConvexAdam, and FireANTs | `ConvexAdam_Composite`: ≈5.1 s / ≈2.1 GB VRAM |
 
 These figures retain each bundle's stated case, ensemble and hardware
 conditions; they are evidence of executable scale, not a cross-task
-leaderboard. The bundles share the same App contract across local directories,
+leaderboard. The per-app time and RAM ratios come from each bundle's own
+small/medium/large benchmark table (see the bundle READMEs under `apps/`). The bundles share the same App contract across local directories,
 Hugging Face and HTTP, with SlicerKonfAI for general Apps and SlicerImpactReg
 for dedicated registration.
 
@@ -167,7 +176,7 @@ Full CLI reference (flags, `konfai-cluster`, `konfai-apps`):
 ## Quickstart (first smoke run)
 
 ```bash
-git clone https://github.com/vboussot/KonfAI.git && cd KonfAI
+git clone https://github.com/fideus-labs/KonfAI.git && cd KonfAI
 pip install -e ".[imaging]"
 cd examples/Segmentation
 
@@ -289,7 +298,7 @@ for what is shipped vs. in-progress.
 ## Development & contributing
 
 ```bash
-git clone https://github.com/vboussot/KonfAI.git && cd KonfAI
+git clone https://github.com/fideus-labs/KonfAI.git && cd KonfAI
 pixi install
 pixi run test      # run the test suite
 pixi run check     # lint + format-check + test (run before pushing)

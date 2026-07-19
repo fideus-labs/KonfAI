@@ -24,7 +24,7 @@ python -m pip install "konfai[imaging]"   # all imaging backends: SimpleITK, h5p
 python -m pip install "konfai[dicom]"     # pydicom — DICOM series reader
 python -m pip install "konfai[omezarr]"   # zarr + ngff-zarr — OME-Zarr dataset read/write
 python -m pip install "konfai[all]"       # every optional extra at once
-python -m pip install "konfai[dev]"       # test, docs, lint, and server tooling
+python -m pip install "konfai[dev]"       # test, docs, and lint tooling
 ```
 
 ### Optional extras
@@ -49,7 +49,7 @@ covers all four).
 | `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export (experimental; see {doc}`../reference/python-api`) |
 | `cluster` | `submitit` | `konfai-cluster` job submission |
 | `all` | all of the above | install every optional extra at once |
-| `dev` | pytest, ruff, sphinx, fastapi, … | local development, tests, docs, and the app server |
+| `dev` | pytest, ruff, mypy, sphinx, … | local development, tests, docs, and linting |
 
 ```{tip}
 `konfai[imaging]` already covers DICOM and OME-Zarr — you do **not** need to add
@@ -84,7 +84,7 @@ pixi add konfai
 Or, for a fully locked development environment from the repository:
 
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
+git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 pixi install        # resolves and installs all environments
 pixi run test       # run the test suite
@@ -101,7 +101,7 @@ Use an editable pip install when Pixi is not available or when you need to
 install into an existing environment:
 
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
+git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 python -m pip install -e ".[imaging,dev]"
 pytest -q tests/    # verify

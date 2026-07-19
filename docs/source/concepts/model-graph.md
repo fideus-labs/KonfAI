@@ -84,7 +84,7 @@ This structure lets you express:
 KonfAI supports patching at two different levels:
 
 - **dataset patching** with `Dataset.Patch`
-- **model patching** with `Model.<Class>.Patch`
+- **model patching** with `Model.<Class>.ModelPatch`
 
 Dataset patching controls what reaches the model. Model patching controls how a
 network internally re-processes those tensors.
@@ -92,7 +92,7 @@ network internally re-processes those tensors.
 The `examples/Synthesis` GAN variant is the clearest example:
 
 - `Dataset.Patch` provides a 3D chunk to the whole GAN
-- `Model.Gan.UNetpp5.Patch` reprocesses the chunk slice-wise inside the generator
+- `Model.Gan.UNetpp5.ModelPatch` reprocesses the chunk slice-wise inside the generator
 
 ## `;accu;` outputs
 

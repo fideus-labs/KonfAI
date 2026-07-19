@@ -2,7 +2,7 @@
 
 This example shows how to run a complete **medical image synthesis workflow** with KonfAI in its low-level, YAML-driven mode.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vboussot/KonfAI/blob/main/examples/Synthesis/Synthesis_demo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/Synthesis/Synthesis_demo.ipynb)
 
 It is the best starting point if you want to understand how KonfAI combines:
 
@@ -196,7 +196,7 @@ Because the generator class name stays `UNetpp5` in both cases, the same `Predic
 In `Config_GAN.yml`, there are two different patching scopes:
 
 - `Dataset.Patch`: the **global 3D patch** given to the whole GAN
-- `Model.Gan.UNetpp5.Patch`: the **internal generator patch**
+- `Model.Gan.UNetpp5.ModelPatch`: the **internal generator patch**
 
 The idea is:
 
@@ -205,8 +205,8 @@ The idea is:
 
 In practice:
 
-- the dataset patch extracts a chunk like `[16, 320, 320]`
-- the generator patch reprocesses that chunk as `[1, 320, 320]` with `extend_slice: 4`
+- the dataset patch extracts a chunk like `[32, 128, 128]`
+- the generator patch reprocesses that chunk as `[1, 128, 128]` with `extend_slice: 4`
 - this gives the generator a 2D prediction target with neighboring slices as context
 
 ### What `;accu;` means here

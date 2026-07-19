@@ -79,7 +79,8 @@ A third independent package (depends only on KonfAI's public API) exposing a **F
 
 **Working on the MCP server — how to validate a change:**
 
-- **Synthetic fixtures:** `pixi run --environment dev python audit/make_fixtures.py` builds a segmentation
+- **Synthetic fixtures:** `pixi run --environment dev python audit/make_fixtures.py` (note: `audit/` is
+  currently local-only/untracked — commit it or regenerate it before relying on this flow elsewhere) builds a segmentation
   dataset, a registration pair with a known translation, a synthesis pair, a 3-level OME-Zarr store, and
   corrupted/unsupported inputs under `audit/fixtures/` (procedural, no patient data). Reuse these, do not
   invent ad-hoc data in `/tmp`.
@@ -113,7 +114,7 @@ A third independent package (depends only on KonfAI's public API) exposing a **F
 ## 6. Running things
 
 ```bash
-pixi run check                                                    # lint + format-check + test (run before finalising)
+pixi run check                                                    # lint + format-check + core tests + apps tests (run before finalising)
 pixi run test                                                     # core unit + integration (tests/)
 pixi run --environment dev typecheck                              # mypy konfai
 pip install -e ./konfai-apps && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate)
@@ -143,7 +144,9 @@ by installing it **non-editable** in a clean venv (an editable install hides PEP
 - **`outputs_criterions` keys equal a module's dotted path**; the `:`/`.` separators are load-bearing.
 - **`state_dict` load/save does not recurse into nested `Network`s** (each owns its optimizer/state); alias lists are positional.
 - **The YAML model builder is the trusted/untrusted boundary** — only registry types; module names contain no `.`.
-- **`konfai-apps` is a separate package**; `apps/` is excluded from the `konfai` wheel. Core must never import `konfai_apps`.
+- **`konfai-apps` is a separate package**; `apps/` is excluded from the `konfai` wheel. Core must never import
+  `konfai_apps` **at module level**. Known exception: `data/transform.py` `KonfAIInference.infer_entry` does a
+  lazy, guarded import — a layering inversion pending an owner decision (see `REFACTORING.md` §C); do not add more.
 - **The pretrained bridge fills every target tensor or raises** — never report a partial load as success.
 - **The config write is atomic** (temp + `os.replace`); a reader must never see a truncated config and bind all-defaults.
 
@@ -179,7 +182,16 @@ Three, and only three, places decide trust — keep them honest:
   `level='train_step'` does a real forward+backward.
 - **`transform_shape()` must be exact** — patch planning trusts it; a wrong prediction corrupts reassembly.
 - **Reading a config mutates it** — snapshot bytes before any validation that builds a workflow.
-- **Adding a workflow kind touches ~7 registries** — prefer one descriptor table over editing each.
+- **Adding a workflow kind touches ~12 registries + ~8 `Literal`s** — prefer one descriptor table over editing each.
+- **Union coercion in the config binder is declaration-order-driven** — until the fix lands, `overlap: 0.25`
+  binds `0` and `list`-typed union members never bind (AUDIT 2026-07-19 P0). Test any new union-typed config key.
+- **Nested-`Network` save/load use different key coordinates** — `checkpoint_save` writes dotted paths,
+  `Network.load` looks up bare class names, so composite models (GAN family) silently lose optimizer/scheduler
+  state on RESUME until fixed. Any change near `get_networks()`/`load` must keep the two in agreement.
+- **Per-epoch augmentation redraws never reach persistent DataLoader workers** — `persistent_workers=True`
+  (the `num_workers>0` default) freezes inline augmentations at their first-epoch draw.
+- **The train/val split is drawn from the unseeded global RNG at `Trainer.__init__`** (before per-rank
+  seeding) — `manual_seed` does not cover it and RESUME re-splits.
 
 ## 8. Conventions & rules
 
