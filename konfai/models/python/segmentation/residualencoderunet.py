@@ -53,37 +53,14 @@ weight-exact comparison point.
 from typing import Any
 
 from konfai.data.patching import ModelPatch
+from konfai.models.python.segmentation._nnunet_common import (
+    as_kernel_list,
+    as_stage_list,
+    build_unet_decoder,
+    validate_topology,
+)
 from konfai.network import blocks, network
 from konfai.utils.config import config
-from konfai.utils.errors import ConfigError
-
-
-def _as_stage_list(value: int | list[int], length: int, name: str) -> list[int]:
-    """Broadcast an int to a per-stage list, or validate a list of the expected length."""
-    values = [value] * length if isinstance(value, int) else list(value)
-    if len(values) != length:
-        raise ConfigError(
-            f"'{name}' must have {length} entries (got {len(values)}: {values}).",
-            "It is broadcast per resolution stage, so its length must match the topology.",
-        )
-    if any(count < 1 for count in values):
-        raise ConfigError(
-            f"'{name}' entries must all be >= 1 (got {values}).",
-            "Each stage must contain at least one block; a zero count builds an invalid graph.",
-        )
-    return values
-
-
-def _as_kernel_list(kernel_sizes: int | list[Any], n_stages: int) -> list[Any]:
-    """Broadcast an int kernel to all stages, or validate a per-stage list (each int or per-axis list)."""
-    if isinstance(kernel_sizes, int):
-        return [kernel_sizes] * n_stages
-    if len(kernel_sizes) != n_stages:
-        raise ConfigError(
-            f"'kernel_sizes' must have n_stages={n_stages} entries (got {len(kernel_sizes)}: {kernel_sizes}).",
-            "One kernel per resolution stage; each entry is an int or a per-axis list.",
-        )
-    return list(kernel_sizes)
 
 
 def _kernel_padding(kernel_size: int | list[int]) -> int | list[int]:
@@ -145,30 +122,10 @@ class ResidualEncoderUNet(network.Network):
         negative_slope: float = 1e-2,
         deep_supervision: bool = True,
     ) -> None:
-        if dim not in (2, 3):
-            raise ConfigError(
-                f"ResidualEncoderUNet supports dim 2 or 3, got dim={dim}.",
-                "Use dim: 2 for slice-wise / 2.5D inputs or dim: 3 for volumetric inputs.",
-            )
-        if n_stages < 2:
-            raise ConfigError(
-                f"ResidualEncoderUNet needs at least 2 stages (got n_stages={n_stages}).",
-                "A U-Net requires one encoder stage above the bottleneck to form a decoder stage.",
-            )
-        if len(features_per_stage) != n_stages:
-            raise ConfigError(
-                f"'features_per_stage' must have n_stages={n_stages} entries "
-                f"(got {len(features_per_stage)}: {features_per_stage}).",
-                "One feature width per resolution stage; the last entry is the bottleneck.",
-            )
-        if len(strides) != n_stages:
-            raise ConfigError(
-                f"'strides' must have n_stages={n_stages} entries (got {len(strides)}: {strides}).",
-                "One stride per resolution stage; entry 0 is the full-resolution stage (usually 1).",
-            )
-        kernel_list = _as_kernel_list(kernel_sizes, n_stages)
-        n_blocks_encoder = _as_stage_list(n_blocks_per_stage, n_stages, "n_blocks_per_stage")
-        n_conv_decoder = _as_stage_list(n_conv_per_stage_decoder, n_stages - 1, "n_conv_per_stage_decoder")
+        validate_topology("ResidualEncoderUNet", dim, n_stages, features_per_stage, strides)
+        kernel_list = as_kernel_list(kernel_sizes, n_stages)
+        n_blocks_encoder = as_stage_list(n_blocks_per_stage, n_stages, "n_blocks_per_stage", "block")
+        n_conv_decoder = as_stage_list(n_conv_per_stage_decoder, n_stages - 1, "n_conv_per_stage_decoder", "block")
 
         super().__init__(
             in_channels=in_channels,
@@ -224,68 +181,23 @@ class ResidualEncoderUNet(network.Network):
                 )
 
         # ----- Decoder (identical to PlainConvUNet -- nnU-Net shares UNetDecoder) ------------ #
-        # Decoder stage j runs coarsest-first (j=0 upsamples the bottleneck), matching nnU-Net's
-        # ``UNetDecoder`` execution order: transpose conv, concat(skip), conv blocks, then the 1x1
-        # seg head -- before moving to the next (finer) stage.
-        for j in range(n_stages - 1):
-            below_index = n_stages - 1 - j  # encoder feature feeding the transpose conv
-            skip_index = n_stages - 2 - j  # encoder stage providing the skip connection
-            below_channels = features_per_stage[below_index]
-            skip_channels = features_per_stage[skip_index]
-            transpose_stride: Any = strides[below_index]
-
-            self.add_module(
-                f"Up_{j}",
-                blocks.get_torch_module("ConvTranspose", dim)(
-                    in_channels=below_channels,
-                    out_channels=skip_channels,
-                    kernel_size=transpose_stride,
-                    stride=transpose_stride,
-                    padding=0,
-                    bias=conv_bias,
-                ),
-                in_branch=[f"enc{n_stages - 1}" if j == 0 else f"dec{j - 1}"],
-                out_branch=[f"up{j}"],
-            )
-            self.add_module(
-                f"Skip_{j}",
-                blocks.Concat(),
-                in_branch=[f"up{j}", f"enc{skip_index}"],
-                out_branch=[f"up{j}"],
-            )
-            self.add_module(
-                f"Decoder_{j}",
-                blocks.ConvBlock(
-                    in_channels=2 * skip_channels,
-                    out_channels=skip_channels,
-                    block_configs=[
-                        _conv_block_config(1, kernel_list[skip_index], conv_bias, negative_slope)
-                        for _ in range(n_conv_decoder[j])
-                    ],
-                    dim=dim,
-                ),
-                in_branch=[f"up{j}"],
-                out_branch=[f"dec{j}"],
-            )
-            # 1x1 seg head at this resolution -- raw logits, a named terminal output. With
-            # ``deep_supervision`` (default) every decoder stage gets a head, matching nnU-Net's
-            # full parameter count. With ``deep_supervision=False`` only the finest (full-resolution,
-            # j == n_stages - 2) head is built and traversed -- the single-output configuration used
-            # e.g. by the ImpactSeg body model, so a checkpoint trained that way pairs leaf-for-leaf.
-            if deep_supervision or j == n_stages - 2:
-                self.add_module(
-                    f"SegHead_{j}",
-                    blocks.get_torch_module("Conv", dim)(
-                        in_channels=skip_channels,
-                        out_channels=num_classes,
-                        kernel_size=1,
-                        stride=1,
-                        padding=0,
-                        bias=True,
-                    ),
-                    in_branch=[f"dec{j}"],
-                    out_branch=[-1],
-                )
+        # With ``deep_supervision`` (default) every decoder stage gets a head, matching nnU-Net's
+        # full parameter count. With ``deep_supervision=False`` only the finest (full-resolution,
+        # j == n_stages - 2) head is built and traversed -- the single-output configuration used
+        # e.g. by the ImpactSeg body model, so a checkpoint trained that way pairs leaf-for-leaf.
+        build_unet_decoder(
+            self,
+            n_stages=n_stages,
+            features_per_stage=features_per_stage,
+            strides=strides,
+            kernel_list=kernel_list,
+            n_conv_decoder=n_conv_decoder,
+            num_classes=num_classes,
+            dim=dim,
+            conv_bias=conv_bias,
+            block_config=lambda stride, kernel: _conv_block_config(stride, kernel, conv_bias, negative_slope),
+            build_head=lambda j: deep_supervision or j == n_stages - 2,
+        )
 
     def load(
         self,
