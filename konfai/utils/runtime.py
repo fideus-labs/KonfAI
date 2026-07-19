@@ -597,6 +597,7 @@ class DistributedObject(ABC):
         gpu: int,
         models: dict[str, torch.nn.Module],
         n: int,
+        sync: bool = True,
     ) -> dict[str, tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]]:
         data = {}
         for label, model in models.items():
@@ -606,7 +607,9 @@ class DistributedObject(ABC):
                         network.measure.format_loss(True, n),
                         network.measure.format_loss(False, n),
                     )
-        outputs = synchronize_data(world_size, gpu, data)
+        # `sync=False` skips the cross-rank all_gather: prediction shards whole cases per rank with unequal
+        # batch counts, so a per-batch collective would hang once the shortest shard stops calling it.
+        outputs = synchronize_data(world_size, gpu, data) if sync else [data]
         result: dict[str, tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]] = {}
         if global_rank == 0:
             for output in outputs:
