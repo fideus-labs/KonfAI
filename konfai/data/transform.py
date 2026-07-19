@@ -1075,14 +1075,9 @@ class ResampleTransform(TransformInverse):
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if len(tensor.shape) != 4:
             raise NameError("Input size should be 5 dim")
+        _require_simpleitk()
         image = data_to_image(tensor, cache_attribute)
 
-        vectors = [torch.arange(0, s) for s in tensor.shape[1:]]
-        grids = torch.meshgrid(vectors, indexing="ij")
-        grid = torch.stack(grids)
-        grid = torch.unsqueeze(grid, 0)
-
-        _require_simpleitk()
         transforms = []
         for transform_group, invert in self.transforms.items():
             transform = None
@@ -1111,29 +1106,15 @@ class ResampleTransform(TransformInverse):
             transforms.append(transform)
         result_transform = sitk.CompositeTransform(transforms)
 
-        transform_to_displacement_field_filter = sitk.TransformToDisplacementFieldFilter()
-        transform_to_displacement_field_filter.SetReferenceImage(image)
-        transform_to_displacement_field_filter.SetNumberOfThreads(16)
-        new_locs = grid + torch.tensor(
-            sitk.GetArrayFromImage(transform_to_displacement_field_filter.Execute(result_transform))
-        ).unsqueeze(0).permute(0, 4, 1, 2, 3)
-        shape = new_locs.shape[2:]
-        for i in range(len(shape)):
-            new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
-        new_locs = new_locs.permute(0, 2, 3, 4, 1)
-        new_locs = new_locs[..., [2, 1, 0]]
-        result = (
-            F.grid_sample(
-                tensor.to(self.device).unsqueeze(0).float(),
-                new_locs.to(self.device).float(),
-                align_corners=True,
-                padding_mode="border",
-                mode="nearest" if tensor.dtype == torch.uint8 else "bilinear",
-            )
-            .squeeze(0)
-            .cpu()
-        )
-        return result.type(torch.uint8) if tensor.dtype == torch.uint8 else result
+        # Resample through SimpleITK so the stored transform is applied in physical space: spacing,
+        # direction and the (x, y, z) mm units of the displacement are all honoured. The previous
+        # hand-rolled grid_sample added the physical (dx, dy, dz) displacement straight onto a (z, y, x)
+        # voxel-index grid, transposing the x/z axes and treating millimetres as voxels.
+        interpolator = sitk.sitkNearestNeighbor if tensor.dtype == torch.uint8 else sitk.sitkLinear
+        resampled = sitk.Resample(image, image, result_transform, interpolator, 0.0)
+        data, _ = image_to_data(resampled)
+        result = torch.from_numpy(np.ascontiguousarray(data))
+        return result.to(torch.uint8) if tensor.dtype == torch.uint8 else result.float()
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         raise NotImplementedError(
