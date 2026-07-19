@@ -529,3 +529,33 @@ def test_measure_validates_a_nested_loss_target_against_the_root_graph() -> None
     with pytest.raises(MeasureError):
         adversarial_measure().init(generator, ["CT"])  # owner scope: the discriminator is invisible here
     adversarial_measure().init(gan, ["CT"])  # root scope: Discriminator.Head resolves -> no error
+
+
+class TestUnknownStringBranch:
+    """A named in_branch nobody produced is a miswired graph and must raise, not silently route the
+    raw network input; numeric branches keep the input fallback (branch '0' = input, extra indices
+    are legitimate scratch wiring)."""
+
+    @staticmethod
+    def _graph(in_branch):
+        graph = ModuleArgsDict()
+        graph.add_module("Producer", torch.nn.Identity(), in_branch=[0], out_branch=["feat"])
+        graph.add_module("Consumer", torch.nn.Identity(), in_branch=in_branch, out_branch=[-1])
+        return graph
+
+    def test_typoed_string_label_raises(self):
+        from konfai.utils.errors import ConfigError
+
+        graph = self._graph(["faet"])  # typo of "feat"
+        with pytest.raises(ConfigError, match="no earlier module has produced"):
+            list(graph.named_forward(torch.zeros(1, 1, 4)))
+
+    def test_declared_string_label_still_routes(self):
+        graph = self._graph(["feat"])
+        outputs = dict(graph.named_forward(torch.zeros(1, 1, 4)))
+        assert set(outputs) == {"Producer", "Consumer"}
+
+    def test_numeric_fallback_is_preserved(self):
+        graph = self._graph([1])  # no second input: falls back to inputs[0]
+        outputs = dict(graph.named_forward(torch.zeros(1, 1, 4)))
+        assert torch.equal(outputs["Consumer"], torch.zeros(1, 1, 4))

@@ -762,6 +762,16 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     target_gpu = self._modulesArgs[name].gpu
                     for ib in self._modulesArgs[name].in_branch:
                         if ib not in branchs:
+                            # Numeric branches fall back to the network input (branch '0' = input; extra
+                            # indices are legitimate scratch wiring). A NAMED branch nobody produced is a
+                            # miswired graph -- routing the raw input silently would hide it.
+                            if not ib.lstrip("-").isdigit():
+                                raise ConfigError(
+                                    f"Module '{name}' reads branch '{ib}', which no earlier module has produced.",
+                                    f"Known branches here: {sorted(branchs)}. A named branch must be written "
+                                    "(out_branch) by a module that runs earlier; check the label for a typo "
+                                    "and the producer's training gate.",
+                                )
                             branchs[ib] = inputs[0]
                         if target_gpu != "cpu" and str(branchs[ib].device) != f"cuda:{target_gpu}":
                             branchs[ib] = branchs[ib].to(
@@ -1055,7 +1065,7 @@ class Network(ModuleArgsDict, ABC):
                                     if child.bias is not None and bias_key in state_dict:
                                         child.bias[:overlap] = state_dict[bias_key][:overlap]
                                 # Skip the normal load for this resized leaf, but keep
-                                # loading its siblings (was an early `return` that aborted them).
+                                # loading its siblings.
                                 continue
                         load(child, prefix + name + ".")
 
@@ -1331,7 +1341,7 @@ class Network(ModuleArgsDict, ABC):
                     accumulators[buffer[0][0]].add_layer(i, buffer[0][1])
                 # The leftover entry must not leak into the next patch iteration: the name-transition
                 # branch above would re-add patch i's end-module output at index i+1, and Accumulator
-                # blends incrementally so a spurious first add can no longer be overwritten.
+                # blends incrementally, so a spurious first add cannot be overwritten later.
                 buffer.clear()
             for name, accumulator in accumulators.items():
                 yield name, accumulator.assemble()
@@ -1547,8 +1557,8 @@ class Network(ModuleArgsDict, ABC):
     def to(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):
         # `_counter` is a single-element box holding the next GPU index, shared by
         # reference through the recursion so model-parallel `isGPU_Checkpoint` splits
-        # advance it. Each top-level call starts fresh at `device` (replacing a previous
-        # `os.environ["device"]` counter that leaked across independent placements).
+        # advance it. Each top-level call starts fresh at `device` so the counter never
+        # leaks across independent placements.
         if _counter is None:
             _counter = [device]
         for k, v in module.items():
@@ -1706,9 +1716,9 @@ class ModelLoader:
             return model
 
         classpath = self.classpath
-        # v1.6.0 moved konfai/models/<kind> to konfai/models/python/<kind>. A config that referenced a
-        # built-in model by its old absolute path (konfai.models.<kind>.<file>:<Class>) keeps working:
-        # rewrite the prefix once, with a deprecation warning, instead of failing on ModuleNotFoundError.
+        # A config that references a built-in model by the absolute path konfai.models.<kind>.<file>:<Class>
+        # keeps working: rewrite the prefix once to konfai.models.python, with a deprecation warning,
+        # instead of failing on ModuleNotFoundError.
         if classpath.startswith("konfai.models.") and not classpath.startswith(
             ("konfai.models.python.", "konfai.models.yaml.")
         ):
