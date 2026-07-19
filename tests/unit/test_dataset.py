@@ -392,3 +392,21 @@ def test_directory_store_detects_extensionless_dicom(tmp_path: Path) -> None:
     (series / "IM000001").write_bytes(b"\x00" * 128 + b"DICM" + b"\x00" * 32)
 
     assert Dataset._detect_directory_store_format(f"{tmp_path}/ds/") == "dicom"
+
+
+def test_dataset_rebase_keeps_h5_a_file_and_directory_formats_a_directory() -> None:
+    # Predictor.rebase used to string-append "/" unconditionally, so an h5 output became a
+    # directory-flagged path and the single-store writer wrote the hidden dotfile <dir>/.h5.
+    from pathlib import Path
+
+    from konfai.utils.dataset import Dataset
+
+    h5 = Dataset("Dataset", "h5")
+    h5.rebase(Path("Predictions/run"))
+    assert h5.filename == "Predictions/run/Dataset"  # a file, not "…/Dataset/" -> ".h5"
+    assert h5.is_directory is False
+
+    mha = Dataset("Dataset", "mha")
+    mha.rebase(Path("Predictions/run"))
+    assert mha.filename == "Predictions/run/Dataset/"
+    assert mha.is_directory is True
