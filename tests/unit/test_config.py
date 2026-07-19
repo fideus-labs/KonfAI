@@ -314,6 +314,33 @@ def test_apply_config_converts_sequence_of_union_scalars(write_config) -> None:
     assert all(isinstance(value, int) for value in root.values)
 
 
+def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_config) -> None:
+    # A value whose YAML type already matches a union member must bind unchanged: coercing in
+    # declaration order used to turn ``overlap: 0.25`` into ``int(0.25) == 0`` (silent no overlap),
+    # let ``str`` swallow a list, and never reach a ``list[...]`` member at all.
+    write_config("Root:\n  frac: 0.25\n  voxels: 8\n  percent: '20%'\n  per_axis:\n    - 10\n    - 20\n    - 0\n")
+
+    class Root:
+        def __init__(
+            self,
+            frac: int | float | str | list[int] | None = None,
+            voxels: int | float | str | list[int] | None = None,
+            percent: int | float | str | list[int] | None = None,
+            per_axis: int | float | str | list[int] | None = None,
+        ) -> None:
+            self.frac = frac
+            self.voxels = voxels
+            self.percent = percent
+            self.per_axis = per_axis
+
+    root = apply_config("Root")(Root)()
+
+    assert root.frac == 0.25 and isinstance(root.frac, float)  # not int(0.25) == 0
+    assert root.voxels == 8 and isinstance(root.voxels, int)
+    assert root.percent == "20%"
+    assert list(root.per_axis) == [10, 20, 0] and isinstance(root.per_axis, list)  # not the string "[10, 20, 0]"
+
+
 def test_apply_config_binds_scalar_float_or_str_union(write_config) -> None:
     # Mirrors the Clip transform (``min_value``/``max_value: float | str``) which accepts numeric
     # bounds as well as string sentinels such as ``min`` / ``percentile:99.5``.
