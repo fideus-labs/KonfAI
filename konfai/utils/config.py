@@ -405,6 +405,21 @@ def _convert_union_sequence_value(
     valid_types: tuple[type | object, ...],
     param_name: str,
 ) -> object:
+    # Keep a value whose runtime type already satisfies a union member. Coercing in declaration order is
+    # lossy: int(0.25) == 0 silently beats a float member, str([1, 2]) swallows a list member, and a
+    # list[...] member is never a `type`, so a list value could otherwise never bind through it.
+    if value not in (None, "None"):
+        for candidate_type in valid_types:
+            origin = get_origin(candidate_type)
+            if origin is not None:
+                if isinstance(value, origin):
+                    return value
+            elif isinstance(candidate_type, type) and candidate_type not in (type(None), types.NoneType):
+                # bool subclasses int: only a bool member accepts a bool, never int/float.
+                matched = candidate_type is bool if isinstance(value, bool) else isinstance(value, candidate_type)
+                if matched:
+                    return value
+
     converted = None
     last_error: Exception | None = None
     for candidate_type in valid_types:
