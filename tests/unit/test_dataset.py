@@ -410,3 +410,17 @@ def test_dataset_rebase_keeps_h5_a_file_and_directory_formats_a_directory() -> N
     mha.rebase(Path("Predictions/run"))
     assert mha.filename == "Predictions/run/Dataset/"
     assert mha.is_directory is True
+
+
+def test_attribute_lookup_is_not_fooled_by_a_prefixing_sibling_key() -> None:
+    # Values stack as {key}_{n}; the count used startswith(key), so SpacingOriginal was miscounted as a
+    # second Spacing entry and a["Spacing"] then raised while "Spacing" in a still answered True.
+    from konfai.utils.dataset import Attribute
+
+    attribute = Attribute()
+    attribute["Spacing"] = "1.0 1.0 2.0"
+    attribute["SpacingOriginal"] = "0.5 0.5 1.0"
+
+    assert "Spacing" in attribute
+    assert attribute["Spacing"] == "1.0 1.0 2.0"
+    assert attribute["SpacingOriginal"] == "0.5 0.5 1.0"
