@@ -35,20 +35,25 @@ Pretrained models are automatically downloaded from [Hugging Face Hub](https://h
 
 ### 🔬 Performance comparison
 
-**Setup**
-- **Input:** real whole-body MR, `295 × 259 × 219` (2 mm)
-- **GPU:** single NVIDIA RTX PRO 5000 (24 GB)
+Same input, same weights (5-fold ensemble), same PyTorch build (cu13.0), single
+**NVIDIA RTX PRO 5000 (24 GB)**. Peak RAM = process-tree resident set; peak VRAM = over baseline.
 
-| Tool (5-fold ensemble) | Time | Peak RAM | Peak VRAM |
-|---|------|----------|-----------|
-| **MRSegmentator-KonfAI** | **~27 s** | **~2 GB** | ~18 GB |
-| Original MRSegmentator | ~35 s | ~11 GB | ~5 GB |
+| Case (voxels) | Tool | Time | Peak RAM | Peak VRAM |
+|---|---|---|---|---|
+| **S** — 249 × 246 × 246 | **KonfAI** | **14 s** | **6.0 GB** | 13.0 GB |
+| | Original | 26 s | 8.6 GB | 3.7 GB |
+| **M** — 533 × 390 × 177 | **KonfAI** | **25 s** | **7.5 GB** | 15.7 GB |
+| | Original | 65 s | 14.6 GB | 5.3 GB |
+| **L** — 512 × 512 × 531 | **KonfAI** | **120 s** | **6.2 GB** | 16.7 GB |
+| | Original | 192 s | 37.5 GB | 14.6 GB |
 
 ### 📈 Key observations
 
-- **Faster** whole-body inference at equal accuracy
-- **~5× lower system RAM** — the accumulator stays on the GPU, not in host memory
-- **Byte-identical** segmentation to the CPU reassembly path  
+- **1.6–2.6× faster** whole-body inference, **1.4–6.0× less host RAM**.
+- The GPU-resident accumulator trades **more VRAM** for the speed and low host RAM,
+  while streaming keeps it **bounded** — on the **large** case host RAM stays at
+  **6.2 GB** where the original grows to **37.5 GB**.
+- **Byte-identical** to KonfAI's own CPU reassembly path.
 
 ---
 
@@ -139,7 +144,7 @@ Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body M
 | 16 GB | 8 | ~15 GB | — |
 | 24 GB | 8 | ~22 GB | **~27 s** |
 
-On a 24 GB card the accumulator stays **on the GPU**, keeping **system RAM ~2 GB** with a **byte-identical** result. The plan stops short of filling the card — a still-larger batch (12 → ~24 GB) saturates the allocator and *slows* inference ~2× without running faster. Inference scales with the case size.
+On a 24 GB card the accumulator stays **on the GPU**, keeping host RAM low with a **byte-identical** result. The plan stops short of filling the card — a still-larger batch (12 → ~24 GB) saturates the allocator and *slows* inference ~2× without running faster. Inference scales with the case size.
 
 ---
 
