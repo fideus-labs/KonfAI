@@ -6,9 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-ARG KONFAI_EXTRAS=server
+ARG KONFAI_EXTRAS=imaging
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
-ARG KONFAI_PYPI_VERSION=1.5.3
+ARG KONFAI_PYPI_VERSION=1.6.0
 
 WORKDIR /tmp
 
@@ -21,7 +21,7 @@ COPY docker/entrypoint.sh /usr/local/bin/konfai-entrypoint
 RUN chmod +x /usr/local/bin/konfai-entrypoint \
     && pip install --upgrade pip setuptools wheel \
     && pip install --index-url "${TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple torch \
-    && pip install "konfai[${KONFAI_EXTRAS}]==${KONFAI_PYPI_VERSION}"
+    && pip install "konfai[${KONFAI_EXTRAS}]==${KONFAI_PYPI_VERSION}" "konfai-apps==${KONFAI_PYPI_VERSION}"
 
 WORKDIR /workspace
 
