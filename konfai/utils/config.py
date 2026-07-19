@@ -449,6 +449,149 @@ def _convert_union_sequence_value(
     return converted
 
 
+# Sentinel: the parameter must not be bound at all (the callable's own default applies).
+_SKIP = object()
+
+
+def _bind_literal(config: Config, param: inspect.Parameter, annotation) -> object:
+    allowed_values = get_args(annotation)
+    default_value = param.default if param.default != inspect._empty else allowed_values[0]
+    value = config.get_value(param.name, f"default|{default_value}")
+    # get_value can hand back the raw "default|X" marker or the stringified "X"; recover the
+    # correctly-typed Literal member so NON-string Literals (Literal[1, 2], Literal[True, False])
+    # bind and round-trip through the resolved-config write-back instead of failing the
+    # membership check.
+    if isinstance(value, str) and value.startswith("default|"):
+        value = value.split("|", 1)[1]
+    if value not in allowed_values:
+        matched = [allowed for allowed in allowed_values if str(allowed) == str(value)]
+        if matched:
+            value = matched[0]
+    if value not in allowed_values:
+        raise ConfigError(f"Invalid value '{value}' for parameter '{param.name}' expected one of: {allowed_values}.")
+    return value
+
+
+def _parse_bool(value: object) -> bool:
+    """A YAML/CLI boolean: bool as-is, 0/1, or the usual true/false spellings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+        raise ValueError("unsupported boolean literal")
+    raise TypeError("unsupported boolean value")
+
+
+def _bind_primitive(config: Config, param: inspect.Parameter, annotation, section_key: str) -> object:
+    value = config.get_value(param.name, param.default)
+    if annotation in {int, float, bool, str} and value is not None:
+        try:
+            value = _parse_bool(value) if annotation is bool else annotation(value)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError(
+                f"Invalid value '{value}' for field '{param.name}' "
+                f"(expected {annotation.__name__}, got {type(value).__name__}) "
+                f"in config section '{section_key}'."
+            ) from exc
+    return value
+
+
+def _bind_path(config: Config, param: inspect.Parameter) -> Path | None:
+    raw = config.get_value(param.name, param.default)
+    if raw is None:
+        return None
+    path = Path(str(raw))
+    if not path.exists():
+        _log.warning(
+            "[Config] Path '%s' for field '%s' does not exist (resolved: '%s'; %s).",
+            raw,
+            param.name,
+            path.resolve(),
+            "absolute" if path.is_absolute() else "relative path",
+        )
+    return path
+
+
+def _bind_sequence(config: Config, param: inspect.Parameter, annotation) -> object:
+    values: Any = config.get_value(param.name, param.default)
+    if values is None:
+        return None
+    args_annotation = get_args(annotation)
+    elem_type = args_annotation[0] if args_annotation else Any
+    if get_origin(elem_type) in {Union, types.UnionType}:
+        return [_convert_union_sequence_value(value, get_args(elem_type), param.name) for value in values]
+    if elem_type in {int, str, bool, float, torch.Tensor, Any}:
+        return values
+    raise ConfigError(_CONFIG_SUPPORTED_TYPES_MESSAGE)
+
+
+def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key: str) -> object:
+    key_type, value_type = get_args(annotation)
+    if key_type is not str:
+        raise ConfigError(_CONFIG_SUPPORTED_TYPES_MESSAGE)
+    values: Any = config.get_value(param.name, param.default)
+    if values is None or value_type in {int, str, bool, float, Any}:
+        return values
+    try:
+        return {
+            value: apply_config(f"{section_key}.{param.name}.{_escape_key_component(value)}")(value_type)()
+            for value in values
+        }
+    except Exception as exc:
+        raise ConfigError(f"{values} {exc}") from exc
+
+
+def _bind_config_object(config: Config, param: inspect.Parameter, annotation, is_optional: bool, section_key: str):
+    # ``X | None = None`` declares an object the config must ASK for: binding it anyway would build
+    # X's defaults and write them back, turning "no patch" into a patch nobody configured. A non-None
+    # default (``X | None = X()``) is the opposite declaration and still binds.
+    if is_optional and param.default is None:
+        annotation_key = getattr(annotation, "_key", None)
+        if annotation_key is None or config.get_value(annotation_key, None) is None:
+            return None
+    try:
+        return apply_config(section_key)(annotation)()
+    except Exception as exc:
+        raise ConfigError(f"Failed to instantiate {param.name} with type {annotation}, error {exc}") from exc
+
+
+def _bind_parameter(function, config: Config, param: inspect.Parameter, section_key: str) -> object:
+    """The config-bound value for one signature parameter, or ``_SKIP`` (dispatch by annotation kind)."""
+    annotation = _resolve_annotation(function, param.annotation)
+    if hasattr(annotation, "__metadata__"):  # Annotated[T, meta]: bind on T, meta is a UI hint
+        annotation = get_args(annotation)[0]
+    if get_origin(annotation) is Literal:
+        return _bind_literal(config, param, annotation)
+    annotation, is_optional = _unwrap_optional(annotation)
+
+    if annotation == inspect._empty:
+        return _SKIP if param.name == "self" else config.get_value(param.name, param.default)
+
+    if get_origin(annotation) in {Union, types.UnionType}:
+        value = config.get_value(param.name, param.default)
+        return None if value is None else _convert_union_sequence_value(value, get_args(annotation), param.name)
+
+    if annotation in _CONFIG_PRIMITIVE_TYPES or annotation is Any:
+        return _bind_primitive(config, param, annotation, section_key)
+
+    if annotation is Path:
+        return _bind_path(config, param)
+
+    origin = get_origin(annotation)
+    if origin in {list, tuple, Sequence, collections.abc.Sequence}:
+        return _bind_sequence(config, param, annotation)
+    if origin is dict:
+        return _bind_dict(config, param, annotation, section_key)
+
+    return _bind_config_object(config, param, annotation, is_optional, section_key)
+
+
 def apply_config(konfai_args: str | None = None):
     """
     Recursively instantiate callables from the active KonfAI configuration.
@@ -494,171 +637,9 @@ def apply_config(konfai_args: str | None = None):
                             if param.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
                                 continue
 
-                            annotation = _resolve_annotation(function, param.annotation)
-                            if hasattr(annotation, "__metadata__"):  # Annotated[T, meta]: bind on T, meta is a UI hint
-                                annotation = get_args(annotation)[0]
-                            if get_origin(annotation) is Literal:
-                                allowed_values = get_args(annotation)
-                                default_value = param.default if param.default != inspect._empty else allowed_values[0]
-                                value = config.get_value(
-                                    param.name,
-                                    f"default|{default_value}",
-                                )
-                                # get_value can hand back the raw "default|X" marker or the stringified
-                                # "X"; recover the correctly-typed Literal member so NON-string Literals
-                                # (Literal[1, 2], Literal[True, False]) bind and round-trip through the
-                                # resolved-config write-back instead of failing the membership check.
-                                if isinstance(value, str) and value.startswith("default|"):
-                                    value = value.split("|", 1)[1]
-                                if value not in allowed_values:
-                                    matched = [allowed for allowed in allowed_values if str(allowed) == str(value)]
-                                    if matched:
-                                        value = matched[0]
-                                if value not in allowed_values:
-                                    raise ConfigError(
-                                        f"Invalid value '{value}' for "
-                                        f"parameter '{param.name}' expected "
-                                        f"one of: {allowed_values}."
-                                    )
+                            value = _bind_parameter(function, config, param, key_tmp)
+                            if value is not _SKIP:
                                 kwargs[param.name] = value
-                                continue
-                            annotation, is_optional = _unwrap_optional(annotation)
-
-                            if annotation == inspect._empty:
-                                if param.name != "self":
-                                    kwargs[param.name] = config.get_value(
-                                        param.name,
-                                        param.default,
-                                    )
-                                continue
-
-                            if get_origin(annotation) in {Union, types.UnionType}:
-                                value = config.get_value(param.name, param.default)
-                                if value is None:
-                                    kwargs[param.name] = None
-                                else:
-                                    kwargs[param.name] = _convert_union_sequence_value(
-                                        value, get_args(annotation), param.name
-                                    )
-                                continue
-
-                            if annotation in _CONFIG_PRIMITIVE_TYPES or annotation is Any:
-                                value = config.get_value(param.name, param.default)
-                                if annotation in {int, float, bool, str} and value is not None:
-                                    try:
-                                        if annotation is bool:
-                                            if isinstance(value, bool):
-                                                pass
-                                            elif isinstance(value, int) and value in {0, 1}:
-                                                value = bool(value)
-                                            elif isinstance(value, str):
-                                                normalized = value.strip().lower()
-                                                if normalized in {"true", "1", "yes", "on"}:
-                                                    value = True
-                                                elif normalized in {"false", "0", "no", "off"}:
-                                                    value = False
-                                                else:
-                                                    raise ValueError("unsupported boolean literal")
-                                            else:
-                                                raise TypeError("unsupported boolean value")
-                                        else:
-                                            value = annotation(value)
-                                    except (ValueError, TypeError) as exc:
-                                        raise ConfigError(
-                                            f"Invalid value '{value}' for field '{param.name}' "
-                                            f"(expected {annotation.__name__}, got {type(value).__name__}) "
-                                            f"in config section '{key_tmp}'."
-                                        ) from exc
-                                kwargs[param.name] = value
-                                continue
-
-                            if annotation is Path:
-                                raw = config.get_value(param.name, param.default)
-                                if raw is not None:
-                                    path = Path(str(raw))
-                                    if not path.exists():
-                                        _log.warning(
-                                            "[Config] Path '%s' for field '%s' does not exist (resolved: '%s'; %s).",
-                                            raw,
-                                            param.name,
-                                            path.resolve(),
-                                            "absolute" if path.is_absolute() else "relative path",
-                                        )
-                                    kwargs[param.name] = path
-                                else:
-                                    kwargs[param.name] = None
-                                continue
-
-                            origin = get_origin(annotation)
-                            if origin in {list, tuple, Sequence, collections.abc.Sequence}:
-                                values = config.get_value(
-                                    param.name,
-                                    param.default,
-                                )
-                                if values is None:
-                                    kwargs[param.name] = None
-                                    continue
-
-                                args_annotation = get_args(annotation)
-                                elem_type = args_annotation[0] if args_annotation else Any
-                                elem_origin = get_origin(elem_type)
-                                if elem_origin in {Union, types.UnionType}:
-                                    valid_types = get_args(elem_type)
-                                    kwargs[param.name] = [
-                                        _convert_union_sequence_value(value, valid_types, param.name)
-                                        for value in values
-                                    ]
-                                elif elem_type in {int, str, bool, float, torch.Tensor, Any}:
-                                    kwargs[param.name] = values
-                                else:
-                                    raise ConfigError(_CONFIG_SUPPORTED_TYPES_MESSAGE)
-                                continue
-
-                            if origin is dict:
-                                key_type, value_type = get_args(annotation)
-                                if key_type is not str:
-                                    raise ConfigError(_CONFIG_SUPPORTED_TYPES_MESSAGE)
-
-                                values = config.get_value(
-                                    param.name,
-                                    param.default,
-                                )
-                                if values is None or value_type in {
-                                    int,
-                                    str,
-                                    bool,
-                                    float,
-                                    Any,
-                                }:
-                                    kwargs[param.name] = values
-                                    continue
-
-                                try:
-                                    kwargs[param.name] = {
-                                        value: apply_config(f"{key_tmp}.{param.name}.{_escape_key_component(value)}")(
-                                            value_type
-                                        )()
-                                        for value in values
-                                    }
-                                except Exception as exc:
-                                    raise ConfigError(f"{values} {exc}") from exc
-                                continue
-
-                            # ``X | None = None`` declares an object the config must ASK for: binding it
-                            # anyway would build X's defaults and write them back, turning "no patch" into
-                            # a patch nobody configured. A non-None default (``X | None = X()``) is the
-                            # opposite declaration and still binds.
-                            if is_optional and param.default is None:
-                                annotation_key = getattr(annotation, "_key", None)
-                                if annotation_key is None or config.get_value(annotation_key, None) is None:
-                                    kwargs[param.name] = None
-                                    continue
-                            try:
-                                kwargs[param.name] = apply_config(key_tmp)(annotation)()
-                            except Exception as exc:
-                                raise ConfigError(
-                                    f"Failed to instantiate {param.name} with type {annotation}, error {exc}"
-                                ) from exc
                         return function(*args, **kwargs)
                 finally:
                     if previous_path is None:
