@@ -34,22 +34,12 @@ import inspect
 import types
 from typing import Any, Union, get_args, get_origin
 
-# Workflow -> (root YAML key, module, class name).
-_WORKFLOW_ROOTS = {
-    "train": ("Trainer", "konfai.trainer", "Trainer"),
-    "prediction": ("Predictor", "konfai.predictor", "Predictor"),
-    "evaluation": ("Evaluator", "konfai.evaluator", "Evaluator"),
-}
+from konfai_mcp.workflows import WORKFLOW_SPECS
 
-_WORKFLOW_ALIASES = {
-    "trainer": "train",
-    "training": "train",
-    "predict": "prediction",
-    "predictor": "prediction",
-    "eval": "evaluation",
-    "evaluate": "evaluation",
-    "evaluator": "evaluation",
-}
+# Workflow -> (root YAML key, module, class name).
+_WORKFLOW_ROOTS = {kind: (spec.root_key, spec.module, spec.class_name) for kind, spec in WORKFLOW_SPECS.items()}
+
+_WORKFLOW_ALIASES = {alias: kind for kind, spec in WORKFLOW_SPECS.items() for alias in spec.aliases}
 
 
 def describe_konfai_capabilities() -> dict[str, Any]:

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from .server_support import WorkspaceLayout
+from .workflows import APP_JOB_KINDS, JOB_RETRY_TOOLS, JobKind
 
 
 def _run_job(
@@ -205,7 +206,7 @@ def _output_missing_or_empty(path: Path) -> bool:
 class Job:
     job_id: str
     session: str
-    kind: Literal["train", "prediction", "evaluation", "infer", "finetune", "evaluate", "uncertainty", "pipeline"]
+    kind: JobKind
     command: list[str]
     cwd: Path
     log_path: Path
@@ -459,17 +460,8 @@ class JobRegistry:
 
     def payload(self, job: Job, isoformat: Callable[[float | None], str | None]) -> dict[str, Any]:
         self.refresh(job)
-        app_kind = job.kind in ("infer", "finetune", "evaluate", "uncertainty", "pipeline")
-        retry_tool = {
-            "infer": "run_app_infer",
-            "finetune": "fine_tune_app",
-            "evaluate": "run_app_evaluate",
-            "uncertainty": "run_app_uncertainty",
-            "pipeline": "run_app_pipeline",
-            "train": "run_train",
-            "prediction": "run_prediction",
-            "evaluation": "run_evaluation",
-        }.get(job.kind, f"run_{job.kind}")
+        app_kind = job.kind in APP_JOB_KINDS
+        retry_tool = JOB_RETRY_TOOLS.get(job.kind, f"run_{job.kind}")
         # next_actions holds callable tool names only; URIs live in next_resources / resources.
         next_actions = ["get_job_status"]
         next_resources = [f"job://{job.job_id}/log"]
@@ -586,7 +578,7 @@ class JobRegistry:
         self,
         *,
         session: str,
-        kind: Literal["train", "prediction", "evaluation", "infer", "finetune", "evaluate", "uncertainty", "pipeline"],
+        kind: JobKind,
         command: list[str],
         cwd: Path,
         log_path: Path,
