@@ -98,6 +98,22 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build --sdist --wheel
 
+      - name: Verify the wheel ships the model catalog and no sibling package
+        # The test job installs editable, which hides PEP 420 (konfai/models/python has no __init__.py)
+        # and package-data (the catalog *.yml) breakage. Inspect the built artifact directly.
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          py = sum(1 for n in names if "/models/python/" in n and n.endswith(".py"))
+          yml = sum(1 for n in names if "/models/yaml/" in n and n.endswith(".yml"))
+          leaked = [n for n in names if n.split("/")[0].endswith("-apps")]
+          assert py >= 16, f"models/python underpopulated in the wheel: {py} files"
+          assert yml == 14, f"catalog .yml count wrong in the wheel: {yml}"
+          assert not leaked, f"hyphenated sibling leaked into the wheel: {leaked[:3]}"
+          print(f"wheel OK: {py} models/python files, {yml} catalog .yml, no sibling leak")
+          PY
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
