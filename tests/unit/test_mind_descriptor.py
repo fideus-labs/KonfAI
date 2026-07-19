@@ -122,7 +122,7 @@ def test_konfai_mind2d_builds_and_forwards() -> None:
 
 def test_konfai_mind_constant_patch_yields_no_nan() -> None:
     # A constant patch -- background is full of them -- makes mind_var zero everywhere, and the
-    # clamp bounds are zero with it, so the division was 0/0 and fed NaN into the loss.
+    # clamp bounds are zero with it, so an unguarded division is 0/0 and feeds NaN into the loss.
     from konfai.models.python.features.mind import _MindDescriptor
 
     with torch.no_grad():

@@ -136,7 +136,7 @@ def _activate_session(name: str) -> None:
 def _activate_session_locked(name: str) -> None:
     global WORKSPACE_LAYOUT, SESSION, APP_SERVICE, JOB_REGISTRY, _JOBS_LOCK, _JOBS
     # Build the full replacement state locally, then swap every global in one consecutive block:
-    # a concurrent tool (SSE/HTTP transports) can no longer observe a half-built mix (new layout
+    # a concurrent tool (SSE/HTTP transports) must never observe a half-built mix (new layout
     # with the old session) during construction, which includes disk IO for persisted jobs. Readers
     # that grab two globals back-to-back keep a nanosecond-scale window; stdio is single-client.
     workspace_layout = WorkspaceLayout(WORKSPACES_ROOT, name)

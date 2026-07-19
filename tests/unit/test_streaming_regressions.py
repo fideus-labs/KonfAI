@@ -14,9 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Streamed-path regressions: each test encodes one reviewed failure and must keep failing loudly.
+"""Streamed-path invariants: each test encodes one failure mode and must keep failing loudly.
 
-Every scenario here was reproduced on the branch before the fix it pins down:
 - a GLOBAL_STAT after a value-preserving cast must still stream (parity with the released behaviour);
 - an augmented copy must consume the volume statistic, not each patch's own;
 - replanning after an epoch's re-draw must read the stored geometry, not the previous epoch's output;
@@ -141,9 +140,9 @@ def test_augmented_copy_consumes_the_volume_statistic() -> None:
 def test_replanning_after_epoch_redraw_keeps_the_stored_geometry(transform_case: str) -> None:
     """Epoch 2 must stream the same bytes as epoch 1, with no attribute stack growth.
 
-    Replanning used to read the live case attribute -- already carrying epoch 1's target
-    Spacing/Direction -- so a streamed Resample degraded to identity and a streamed Canonical stopped
-    reorienting from the second epoch on, while the geometry keys stacked once more per epoch.
+    Replanning must not read the live case attribute -- it already carries epoch 1's target
+    Spacing/Direction -- or a streamed Resample degrades to identity and a streamed Canonical stops
+    reorienting from the second epoch on, while the geometry keys stack once more per epoch.
     """
     volume = np.arange(1 * 8 * 8 * 8, dtype=np.float32).reshape(1, 8, 8, 8)
     transform = ResampleToShape(shape=[16, 16, 16]) if transform_case == "resample" else Canonical()

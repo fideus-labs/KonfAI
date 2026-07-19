@@ -505,7 +505,7 @@ def _distinct_cases_per_slice(order: list[int], mapping: list[tuple[int, int, in
 
 
 def test_windowed_sampler_none_is_exact_global_shuffle() -> None:
-    # window=None is the default and MUST be byte-identical to the historical global randperm so it
+    # window=None is the default and MUST be byte-identical to the plain global randperm so it
     # never silently changes training statistics.
     mapping = _case_major_mapping(6, 4)
     sampler = WindowedCaseSampler(mapping, shuffle=True, window=None, batch_size=2, num_workers=1)

@@ -410,7 +410,7 @@ class ConvexAdamEngine:
 
         ``coarse`` produces a field from scratch; ``fine`` refines the running field. So ``['coarse']`` is a
         coarse-only app, ``['fine']`` a fine-only app (zero warm-start), and ``['coarse', 'fine']`` chains both
-        (the composite, as before). Returns None when no deformable stage runs (e.g. a linear-only chain).
+        (the composite). Returns None when no deformable stage runs (e.g. a linear-only chain).
         """
         field: "itk.Image | None" = None
         for stage in self._stages:

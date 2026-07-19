@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for the performance hot-path fixes (see AUDIT.md — Performance backlog)."""
+"""Performance hot-path contracts: each fast path must stay byte-identical to its reference."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -170,8 +170,8 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
 
     dataset_file = Dataset.DicomFile(str(tmp_path), read=True)
 
-    # one COLD patch read: 1 discovery + 2 sorts (pre-fix: 3 discoveries + 4 sorts). get_dicom_info
-    # is memoised, so the cache must be cleared for the spy to see the cold cost at all.
+    # one COLD patch read costs exactly 1 discovery + 2 sorts. get_dicom_info is memoised, so the
+    # cache must be cleared for the spy to see the cold cost at all.
     calls["discover"] = calls["sort"] = 0
     dicom.get_dicom_info.cache_clear()
     data, _attr = dataset_file.file_to_data_slice("", "case", sl)
@@ -187,7 +187,7 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
     assert calls["discover"] == 0
     assert calls["sort"] == 1
 
-    # statistics over Z: 1 cold discovery (pre-fix: O(Z)); numerics preserved (Welford, ddof=1)
+    # statistics over Z: 1 cold discovery, not O(Z); numerics preserved (Welford, ddof=1)
     calls["discover"] = calls["sort"] = 0
     dicom.get_dicom_info.cache_clear()
     stats = dataset_file.file_to_data_statistics("", "case")
@@ -199,7 +199,7 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
 
 
 def _old_clip(tensor, lo, hi):
-    """The pre-fix Clip inner logic (float()-cast where-scatter), for byte-identity checks."""
+    """Reference Clip inner logic (float()-cast where-scatter), the byte-identity oracle."""
     t = tensor.clone()
     t[torch.where(t.float() < lo)] = lo
     t[torch.where(t.float() > hi)] = hi
@@ -211,14 +211,14 @@ def _eq_nan(a, b):
 
 
 def test_clip_clamp_fast_path_is_byte_identical_on_float32_and_safe_on_int():
-    """Perf batch: float32 clamp_ fast path is byte-identical; int/float64 keep the old scatter."""
+    """Perf batch: float32 clamp_ fast path is byte-identical; int/float64 keep the scatter path."""
     from konfai.data.transform import Clip
     from konfai.utils.dataset import Attribute
 
     clip = Clip(min_value=-5.0, max_value=5.0)
     lo, hi = -5.0, 5.0
 
-    # float32 with the hostile edge cases the red-team flagged: NaN, +/-inf, exact bounds
+    # float32 with hostile edge cases: NaN, +/-inf, exact bounds
     f32 = torch.tensor(
         [-1e9, -5.0, -2.0, 0.0, 2.0, 5.0, 1e9, float("nan"), float("inf"), float("-inf")], dtype=torch.float32
     )
@@ -226,13 +226,13 @@ def test_clip_clamp_fast_path_is_byte_identical_on_float32_and_safe_on_int():
     assert _eq_nan(got, _old_clip(f32, lo, hi))
     assert got.dtype == torch.float32
 
-    # int16 (CT-style) must NOT crash and must equal the old scatter (else-branch)
+    # int16 (CT-style) must NOT crash and must equal the reference scatter (else-branch)
     i16 = torch.tensor([[-2000, -5, 0, 5, 2000]], dtype=torch.int16)
     got_i = clip("x", i16.clone(), Attribute())
     assert torch.equal(got_i, _old_clip(i16, lo, hi))
     assert got_i.dtype == torch.int16
 
-    # float64 keeps the legacy float()-cast comparison path (else-branch), unchanged
+    # float64 keeps the float()-cast comparison path (else-branch), unchanged
     f64 = torch.tensor([-9.0, -5.0, 0.0, 5.0, 9.0], dtype=torch.float64)
     got_d = clip("x", f64.clone(), Attribute())
     assert _eq_nan(got_d, _old_clip(f64, lo, hi))
@@ -240,14 +240,14 @@ def test_clip_clamp_fast_path_is_byte_identical_on_float32_and_safe_on_int():
 
 
 def test_clip_float32_nan_dynamic_bound_does_not_corrupt_volume():
-    """Review catch: a dynamic bound resolving to NaN must NOT turn the whole float32 volume to NaN."""
+    """A dynamic bound resolving to NaN must NOT turn the whole float32 volume to NaN."""
     from konfai.data.transform import Clip
     from konfai.utils.dataset import Attribute
 
     # data contains a NaN voxel -> min()/max() resolve to NaN bounds
     data = torch.tensor([1.0, 2.0, float("nan"), 3.0], dtype=torch.float32)
     got = Clip(min_value="min", max_value="max")("x", data.clone(), Attribute())
-    # legacy behaviour: NaN comparisons are False, so the scatter is a no-op (values preserved)
+    # NaN comparisons are False, so the scatter is a no-op (values preserved)
     assert not bool(got.isnan().all()), "must not become all-NaN"
     assert got[0] == 1.0 and got[1] == 2.0 and got[3] == 3.0
     assert bool(got[2].isnan())

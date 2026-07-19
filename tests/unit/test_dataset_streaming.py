@@ -1090,15 +1090,15 @@ def test_stream_resample_border_patch_matches_padded_whole_volume() -> None:
     assert len(streamed) == len(reference) == size
     for got, expected in zip(streamed, reference, strict=False):
         assert tuple(got.shape) == tuple(expected.shape) == (1, 8, 8, 8)
-        # Interior values match F.interpolate to float32 interpolation-rounding; the previously
-        # short border patch is now padded to patch_size and byte-consistent in shape.
+        # Interior values match F.interpolate to float32 interpolation-rounding; the border
+        # patch is padded to patch_size and byte-consistent in shape.
         np.testing.assert_allclose(got.numpy(), expected.numpy(), atol=1e-3)
 
 
 def test_stream_resample_nearest_strong_downsampling_matches_whole_volume() -> None:
     # Strong downsampling of a uint8 label map (nearest mode): the nearest voxel of the first output
     # column (floor(o*scale)) falls BELOW the linear tap window's start, so the source read must widen
-    # to include it -- otherwise the gather indexed a negative local offset and wrapped onto the far
+    # to include it -- otherwise the gather indexes a negative local offset and wraps onto the far
     # edge, silently returning a wrong label. A regular ratio (a plain integer scale) hides the bug;
     # 40 -> 6 (scale 6.67) exposes the sub-pixel offset that pushes the linear start past voxel 0.
     volume = (np.arange(1 * 40 * 40).reshape(1, 40, 40) % 7).astype(np.uint8)

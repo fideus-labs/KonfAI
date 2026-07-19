@@ -350,7 +350,7 @@ def test_local_hf_download_inference_refreshes_selected_remote_model(
 
     assert models_path == [tmp_path / "CV_0.pt"]
     assert prediction_path == inference_yml
-    # download_inference now stages every non-model bundle file (so assets like elastix parameter maps
+    # download_inference must stage every non-model bundle file (so assets like elastix parameter maps
     # are available in the run workspace, as the apps docs promise).
     assert codes_path == [("Inference.yml", inference_yml), ("app.json", app_json)]
     assert get_filenames_calls == [False, False, True]
@@ -1014,8 +1014,8 @@ def test_remote_repository_relays_the_server_reported_finetunable(monkeypatch: p
 def test_remote_repository_finetunable_falls_back_to_inference_for_older_servers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A server predating the 'finetunable' field omits it; fall back to the inference capability,
-    # which matches the historical behavior (fine-tune offered for any inference-capable app).
+    # A server predating the 'finetunable' field omits it; fall back to the inference capability
+    # (fine-tune offered for any inference-capable app).
     repo = _remote_repo_from_payload(monkeypatch, _remote_info_payload())
     assert repo.is_finetunable() is True
 

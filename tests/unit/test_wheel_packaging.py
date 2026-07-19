@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test: the konfai wheel must not bundle sibling hyphenated packages."""
+"""The konfai wheel must not bundle sibling hyphenated packages."""
 
 from pathlib import Path
 
@@ -43,7 +43,7 @@ def test_wheel_excludes_sibling_packages_but_keeps_namespace_subpackages() -> No
     config = _packages_find_config()
     packages = find_namespace_packages(where=str(_REPO_ROOT), include=config["include"], exclude=config["exclude"])
 
-    # The wheel discovery used to match the sibling konfai-apps tree via the "konfai*" glob;
+    # A bare "konfai*" glob matches the sibling konfai-apps tree;
     # "konfai.*" (with the dot) never matches a hyphenated sibling directory.
     assert not any("-" in p.split(".")[0] for p in packages)
     assert not any(p.startswith("konfai-apps") for p in packages)

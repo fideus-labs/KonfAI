@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test: uploads sharing a basename must not silently overwrite each other."""
+"""Uploads sharing a basename must not silently overwrite each other."""
 
 import importlib.util
 import io

@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test: accepts_init is read from the criterion, not its CriterionsAttr record."""
+"""accepts_init is read from the criterion, not its CriterionsAttr record."""
 
 from konfai.metric.measure import KLDivergence
 from konfai.network.network import CriterionsAttr

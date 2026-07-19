@@ -35,7 +35,7 @@ CONTRACT = [
     ("konfai.utils.runtime", "MinimalLog", "class", []),
     ("konfai.utils.errors", "AppRepositoryError", "class", []),
     # Top-level konfai/__init__ helpers the Slicer extensions import for server-check, device/RAM/VRAM
-    # display, and the dependency self-test (unguarded until now -- same class as the current_free_vram gap).
+    # display, and the dependency self-test (same exposure class as current_free_vram).
     ("konfai", "get_available_devices", "func", ["remote_server", "timeout_s"]),
     ("konfai", "get_ram", "func", ["remote_server", "timeout_s"]),
     ("konfai", "get_vram", "func", ["devices", "remote_server", "timeout_s"]),

@@ -19,11 +19,11 @@
 This is the producer side of the ``konfai-rs`` portable-inference contract: a
 trained KonfAI model becomes ``model.onnx`` (graph + weights, single file) plus
 ``manifest.json`` (patch geometry, input/output spec) that a no-Python runtime
-consumes. The chain ``torch -> ONNX -> burn-onnx`` was validated end-to-end; the
-non-obvious steps it requires are encoded here:
+consumes. The non-obvious steps the ``torch -> ONNX -> burn-onnx`` chain requires
+are encoded here:
 
 * KonfAI ``Network`` overrides ``state_dict()`` with a custom signature that breaks
-  the legacy TorchScript exporter, so the **dynamo** exporter is used.
+  the TorchScript exporter, so the **dynamo** exporter is used.
 * ``Network.forward`` returns per-output-group results (empty without ``init()``),
   so the graph is reached via ``named_forward`` and a named head is selected.
 * The dynamo exporter writes weights as external data; they are inlined so the

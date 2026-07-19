@@ -743,8 +743,8 @@ class PerceptualLoss(Criterion):
                     int(np.prod(zipped_layers[0][1].shape[2:])),
                 )
                 # Apply every configured loss to every target layer. Zipping the losses against the
-                # targets instead dropped losses whenever there were fewer targets than losses -- so the
-                # default {Gram, L1Loss} on a single reference silently used only Gram.
+                # targets instead drops losses whenever there are fewer targets than losses -- the
+                # default {Gram, L1Loss} on a single reference would silently use only Gram.
                 for target_entry in zipped_layers[1:]:
                     target_layer = target_entry[1].view(
                         target_entry[1].shape[0],
@@ -814,8 +814,8 @@ class Accuracy(Criterion):
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         # Return this batch's accuracy; the logging window means it over the batches and resets between
-        # train and validation. Accumulating n/corrects on the instance instead reported one lifetime
-        # fraction that blended every epoch and both splits.
+        # train and validation. Accumulating n/corrects on the instance instead would report one lifetime
+        # fraction that blends every epoch and both splits.
         predicted = torch.argmax(torch.softmax(output, dim=1), dim=1)
         return (predicted == targets[0]).float().mean()
 
@@ -898,7 +898,7 @@ class FID(Criterion):
     @staticmethod
     def preprocess_images(image: torch.Tensor) -> torch.Tensor:
         # resize/normalise-with-mean-std live in torchvision.transforms.functional, not torch.nn.functional
-        # (which has no ``resize`` and whose ``normalize`` takes no mean/std) -- the old calls raised at once.
+        # (which has no ``resize`` and whose ``normalize`` takes no mean/std).
         tvf = _require_optional("torchvision.transforms.functional", criterion="FID", extra="fid")
         resized = tvf.resize(image, [299, 299]).repeat((1, 3, 1, 1))
         return tvf.normalize(resized, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])

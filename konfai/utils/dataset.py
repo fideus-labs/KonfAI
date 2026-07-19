@@ -384,7 +384,7 @@ def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     for k in file_reader.GetMetaDataKeys():
         attributes[k] = file_reader.GetMetaData(k)
     # SimpleITK GetSize() is (x, y, [z], ...); KonfAI arrays are numpy-order [C, (Z), Y, X], so the
-    # spatial size must be reversed for EVERY rank, not only 3-D (2-D/4-D used to come out transposed).
+    # spatial size must be reversed for EVERY rank -- a 3-D-only reversal transposes 2-D/4-D data.
     size = list(reversed(file_reader.GetSize()))
     size = [file_reader.GetNumberOfComponents(), *size]
     return size, attributes
@@ -588,7 +588,7 @@ class _OmeZarrDataStream(DataStream):
             return
         # Move an existing store aside instead of deleting it up front, so a replaced entry stays
         # recoverable (at <name>.replaced-<pid>) until the new store is renamed into place -- a directory
-        # swap is not atomic, and the old rmtree-then-rename lost both on a crash in the window.
+        # swap is not atomic, and deleting first loses both stores on a crash in the window.
         replaced = self._final_path.exists()
         backup = self._final_path.with_name(f"{self._final_path.name}.replaced-{os.getpid()}")
         if replaced:

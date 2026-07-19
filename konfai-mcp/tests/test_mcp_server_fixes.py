@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the review-driven fixes: directory-aware dataset scan, read-back tools,
-metric-direction correction, run_resume, and honest job failure payloads."""
+"""Directory-aware dataset scan, read-back tools, metric-direction correction,
+run_resume, and honest job failure payloads."""
 
 import asyncio
 import json

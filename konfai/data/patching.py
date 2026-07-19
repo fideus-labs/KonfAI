@@ -458,7 +458,7 @@ class Accumulator:
 
     def is_full(self) -> bool:
         # O(1): a running counter avoids re-scanning every slot after each added patch
-        # (the completion check ran once per patch, i.e. O(P^2) per case).
+        # (re-scanning per patch would be O(P^2) per case).
         return self._filled == self._count
 
     def assemble(self) -> torch.Tensor:

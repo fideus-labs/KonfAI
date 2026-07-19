@@ -117,7 +117,7 @@ def test_best_checkpoint_save_keeps_only_best_without_rescanning(tmp_path: Path,
 
 def test_best_checkpoint_keeps_highest_score_when_mode_is_max(tmp_path: Path, monkeypatch) -> None:
     # With a maximize-metric monitor (e.g. Dice), BEST retention must keep the HIGHEST score, not the
-    # lowest. Regression guard for retention hardcoding "lower is better" and keeping the worst model.
+    # lowest: retention hardcoding "lower is better" keeps the worst model.
     trainer = _build_trainer(
         tmp_path,
         monkeypatch,
@@ -458,8 +458,8 @@ def test_build_train_keeps_https_checkpoint_url(monkeypatch) -> None:
 
 
 def test_early_stopping_refuses_a_mode_that_is_not_a_direction() -> None:
-    # `is_better` and `worst_score` read it as "max" or everything-else, so a typo silently retained
-    # and deleted checkpoints by the wrong direction before anything complained.
+    # `is_better` and `worst_score` read it as "max" or everything-else, so a typo silently retains
+    # and deletes checkpoints by the wrong direction unless refused here.
     with pytest.raises(ConfigError) as error:
         EarlyStopping(monitor=None, mode="mxa")
     assert "'min' or 'max'" in str(error.value)
@@ -467,8 +467,8 @@ def test_early_stopping_refuses_a_mode_that_is_not_a_direction() -> None:
 
 @pytest.mark.parametrize("mode", ["min", "max"])
 def test_a_saved_checkpoint_with_no_score_loses_to_one_with_a_score(tmp_path: Path, monkeypatch, mode: str) -> None:
-    # A no-score epoch stored `inf`, which only loses where lower is better: under 'max' it beat every
-    # finite score, so BEST froze on the last unscored epoch and no later one could take it.
+    # A no-score epoch storing `inf` only loses where lower is better: under 'max' it beats every
+    # finite score, so BEST freezes on the last unscored epoch and no later one can take it.
     early_stopping = EarlyStopping(monitor=None, mode=mode)
     trainer = _build_trainer(tmp_path, monkeypatch, ["ckpt_a", "ckpt_b"], early_stopping=early_stopping)
     trainer.checkpoint_save(None)

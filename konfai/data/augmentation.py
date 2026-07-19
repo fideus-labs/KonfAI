@@ -796,9 +796,9 @@ class Saturation(ColorTransform):
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         saturation = torch.exp2(torch.randn(len(shapes)) * self.s_std)
         # Keep the luma component (v vT) at unit gain and scale only the orthogonal chroma component
-        # (I - v vT) by the saturation factor. The previous parenthesisation scaled the whole matrix,
-        # i.e. (v vT + (I - v vT)) * s = I * s, a uniform per-channel gain (contrast) that never mixes
-        # toward luma. With this form s=1 is identity, s=0 collapses to greyscale, s>1 boosts saturation.
+        # (I - v vT) by the saturation factor. Scaling the whole matrix instead, (v vT + (I - v vT)) * s
+        # = I * s, is a uniform per-channel gain (contrast) that never mixes toward luma. With this form
+        # s=1 is identity, s=0 collapses to greyscale, s>1 boosts saturation.
         self.matrix[index] = [
             (self.v.ger(self.v) + (torch.eye(4) - self.v.ger(self.v)) * value).unsqueeze(0) for value in saturation
         ]

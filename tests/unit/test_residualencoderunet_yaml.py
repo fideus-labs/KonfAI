@@ -196,7 +196,7 @@ def test_residualencoderunet_yaml_decoder_stage_is_a_two_input_node() -> None:
 def test_residualencoderunet_yaml_stem_tracks_kernel_size_and_negative_slope() -> None:
     # The stem is spelled out (Conv same-padding + InstanceNorm + LeakyReLU) so it tracks the exposed
     # knobs like the stages: a non-3 kernel keeps the spatial size and the stem LeakyReLU follows
-    # negative_slope (previously the stem hardcoded padding 1 and slope 0.01, breaking both).
+    # negative_slope (a stem hardcoding padding 1 and slope 0.01 breaks both).
     net = build_model_from_yaml(
         yaml_path=str(RESIDUALENCODERUNET_YML),
         parameters={"kernel_size": 5, "negative_slope": 0.2},

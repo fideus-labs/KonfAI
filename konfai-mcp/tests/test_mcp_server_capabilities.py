@@ -64,7 +64,7 @@ def test_describe_config_schema_drills_into_optional_nested_configs() -> None:
     assert es["yaml_path"] == ["Trainer", "EarlyStopping"]
 
     # A dict-valued field (augmentations) is legitimately not a single drillable level, and the error
-    # now lists the REAL drillable keys (Patch) instead of the previous misleading 'none'.
+    # must list the REAL drillable keys (Patch), never a misleading 'none'.
     with pytest.raises(ValueError, match="Drillable nested config keys here: \\['Patch'\\]"):
         describe_config_schema("train", path="Dataset.Augmentation")
 

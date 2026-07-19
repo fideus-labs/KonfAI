@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lightweight spawn target for the run_api_in_subprocess bounded-join regression test.
+"""Lightweight spawn target for the run_api_in_subprocess bounded-join test.
 
 Kept out of the test module so the spawn child imports only threading/time, not the whole test file.
 """

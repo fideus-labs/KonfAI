@@ -222,8 +222,8 @@ def test_squeeze_non_singleton_axis_is_a_no_op() -> None:
 
 
 def test_crop_transform_shape_matches_spatial_crop() -> None:
-    # The pre-fix code treated ``shape[0]`` as a channel dim and paired the crop box with
-    # ``shape[1:]``, shifting every axis by one and returning a wrong shape.
+    # ``shape`` is already channel-stripped: treating ``shape[0]`` as a channel dim pairs the crop
+    # box with ``shape[1:]``, shifting every axis by one and returning a wrong shape.
     attribute = Attribute()
     attribute["box"] = np.array([[2, 3], [1, 1], [4, 2]])  # (start, end-distance) per spatial axis
 
@@ -474,7 +474,7 @@ def test_standardize_inverse_stats_follow_the_volume_and_stay_float32() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cross-device finalize only applies on CUDA")
 def test_finalize_transforms_accept_a_cuda_resident_volume() -> None:
     # GPU accumulation keeps the assembled volume on the device through the whole finalize chain:
-    # every default finalize transform must accept a CUDA volume (1.5.8 always handed them CPU tensors).
+    # every default finalize transform must accept a CUDA volume, never assume a CPU tensor.
     volume = torch.rand(1, 4, 4, device="cuda", dtype=torch.float16)
 
     normalized = Normalize()("case", volume.clone(), Attribute())  # writes Min/Max from CUDA tensors

@@ -107,7 +107,7 @@ def test_preview_volume_streams_a_single_plane_without_full_read(
     """A 3-D scalar volume must be previewed by streaming one plane, never a full sitk.ReadImage.
 
     Guards the mandatory lazy invariant (AGENTS.md §7): the whole volume is never materialised in RAM.
-    Also pins byte-identity -- the streamed plane must equal the old full-read np.take plane on every axis.
+    Also pins byte-identity -- the streamed plane must equal the full-read np.take plane on every axis.
     """
     sitk = pytest.importorskip("SimpleITK")
     import base64

@@ -44,8 +44,8 @@ def test_colocate_is_a_safe_noop_when_model_is_all_cpu() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="device co-location only manifests on GPU")
 def test_ensemble_load_colocates_late_added_head_on_gpu() -> None:
-    # Reproduces the TotalSegmentator crash: the model is placed on the GPU, then a per-model load()
-    # appends a Head on CPU. Before the fix the forward hit "Input cuda, weight CPU".
+    # The TotalSegmentator pattern: the model is placed on the GPU, then a per-model load() appends
+    # a Head on CPU. The forward must not hit "Input cuda, weight CPU".
     composite = ModelComposite(_LateHeadNetwork(), Mean())
     Network.to(composite, 0)  # place on cuda:0, exactly as the predictor does before inference
 

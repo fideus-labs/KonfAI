@@ -131,7 +131,7 @@ def _nested_adder(value: float, inner_out: int | str) -> ModuleArgsDict:
 
 def test_later_nested_sibling_output_reaches_downstream() -> None:
     # M1 writes branch 0 via inner-match; M2 shares out_branch=[0] but its inner module writes a
-    # different branch, so it relies on the fallback. A ``tmp`` kept across siblings made the fallback
+    # different branch, so it relies on the fallback. A ``tmp`` kept across siblings makes the fallback
     # see branch 0 as already filled (by M1) and silently drop M2, leaving M1's value downstream.
     graph = ModuleArgsDict()
     graph.add_module("M1", _nested_adder(1.0, 0), in_branch=[0], out_branch=[0])
@@ -146,7 +146,7 @@ def test_later_nested_sibling_output_reaches_downstream() -> None:
 
 
 def test_init_func_centres_batchnorm_gamma_on_one() -> None:
-    # gamma initialised around 0 scaled the normalised activations to ~0, stalling early training.
+    # gamma initialised around 0 scales the normalised activations to ~0, stalling early training.
     batch_norm = torch.nn.BatchNorm2d(128)
 
     ModuleArgsDict.init_func(batch_norm, "normal", 0.02)
@@ -163,9 +163,9 @@ def test_init_func_centres_batchnorm_gamma_on_one() -> None:
 def test_load_state_dict_warm_starts_resized_layer_and_keeps_siblings():
     """#2 A resized layer must warm-start, and sibling layers must still load.
 
-    The bug checked ``isinstance(module, Linear)`` (the parent) instead of the
-    child, and used an early ``return`` that aborted loading the remaining
-    siblings of a resized layer.
+    Checking ``isinstance(module, Linear)`` on the parent instead of the child,
+    or an early ``return``, aborts loading the remaining siblings of a resized
+    layer.
     """
 
     class _Net(Network):
@@ -187,7 +187,7 @@ def test_load_state_dict_warm_starts_resized_layer_and_keeps_siblings():
     head = new["head"]
     assert fc.weight.shape == (6, 4)
     assert torch.equal(fc.weight[:4], checkpoint["fc.weight"])  # warm-started rows
-    # The sibling after the resized layer must still be loaded (old `return` skipped it).
+    # The sibling after the resized layer must still be loaded (an early `return` would skip it).
     assert torch.equal(head.weight, checkpoint["head.weight"])
     assert torch.equal(head.bias, checkpoint["head.bias"])
 
@@ -203,8 +203,8 @@ def _loss_record() -> Measure.Loss:
 
 def test_get_loss_uses_current_iteration_weight() -> None:
     # reset_loss clears _loss every iteration but _weight keeps growing for the logging windows.
-    # get_loss must pair the current loss with the current weight; the pre-fix code zipped from the
-    # front, so a loss-weight scheduler that changes the weight had no effect on the gradient.
+    # get_loss must pair the current loss with the current weight; zipping from the front leaves a
+    # loss-weight scheduler that changes the weight with no effect on the gradient.
     record = _loss_record()
 
     record.reset_loss()
@@ -231,8 +231,8 @@ def test_get_loss_handles_multiple_accumulated_patches() -> None:
 
 
 def test_loss_add_summarises_dict_metric_payload() -> None:
-    # Dice/TRE return (tensor, {label: value}); the pre-fix code stored the dict in _values, so the
-    # np.nanmean over _values in get_last_values/format_loss raised TypeError on every batch.
+    # Dice/TRE return (tensor, {label: value}); storing the dict in _values makes the
+    # np.nanmean over _values in get_last_values/format_loss raise TypeError on every batch.
     record = Measure.Loss("Dice", "out", "tgt", 0, is_loss=False, accumulation=False)
 
     record.add(1.0, (torch.tensor([0.7]), {"1": 0.6, "2": 0.8, "3": float("nan")}))
@@ -332,8 +332,8 @@ def test_accumulation_backward_not_refired_by_plain_loss_in_same_group():
 
     measure.update("out", output, {"tgt": (target, [Attribute()])}, it=0, nb_patch=1, training=True)
 
-    # Exactly one accumulated backward (for the accumulation loss). Before the fix, adding the plain
-    # loss re-satisfied the uniform-count test and fired a second backward over the freed graph.
+    # Exactly one accumulated backward (for the accumulation loss). The plain loss must not
+    # re-satisfy the uniform-count test and fire a second backward over the freed graph.
     assert scaler.scale.call_count == 1
 
 
@@ -404,9 +404,9 @@ def test_network_criterion_loader_resets_scheduler_state(monkeypatch: pytest.Mon
 
 
 def test_model_patch_reassembles_each_patch_with_its_own_prediction() -> None:
-    # Regression: the per-patch buffer leaked its end-module output into the next iteration, where the
-    # name-transition branch re-added it at index i+1. The incremental-blend Accumulator ignores
-    # re-added indices (a blended patch cannot be overwritten), so every slot > 0 silently received the
+    # A per-patch buffer leaking its end-module output into the next iteration gets re-added at
+    # index i+1 by the name-transition branch. The incremental-blend Accumulator ignores re-added
+    # indices (a blended patch cannot be overwritten), so every slot > 0 silently receives the
     # PREVIOUS patch's prediction: identity over [0..7] with patch 4 reassembled as [0,1,2,3,0,1,2,3].
     from konfai.data.patching import ModelPatch
 
@@ -449,9 +449,9 @@ def test_model_patch_deep_supervision_heads_each_reassemble_their_own_patches() 
 
 def test_load_restores_nested_network_optimizer_and_counters() -> None:
     # checkpoint_save writes a nested network's optimizer/iteration/LR-schedule state under its DOTTED
-    # get_networks() key ("Root.Sub_optimizer_state_dict"), while load used to look it up under the bare
-    # class name ("Sub_..."), so every composite model (GAN family) silently resumed with a fresh Adam and
-    # _it == 0. load now consumes the dotted key injected by _apply_network.
+    # get_networks() key ("Root.Sub_optimizer_state_dict"); load must consume that dotted key (injected
+    # by _apply_network). A bare-class-name lookup ("Sub_...") silently resumes every composite model
+    # (GAN family) with a fresh Adam and _it == 0.
     from konfai.network.network import OptimizerLoader
 
     class Sub(Network):
@@ -498,8 +498,8 @@ def test_load_restores_nested_network_optimizer_and_counters() -> None:
 def test_measure_validates_a_nested_loss_target_against_the_root_graph() -> None:
     # A nested network's loss may address a module of a sibling branch -- a GAN generator's adversarial
     # loss on the discriminator -- which exists only in the root's module namespace and is where runtime
-    # matching happens. Measure.init used to validate against the owning network, so the shipped GAN
-    # example failed to build; init now threads the root graph in.
+    # matching happens. Measure.init must validate against the root graph, not the owning network:
+    # only there does the GAN's cross-network target resolve.
     from konfai.network.network import Measure
 
     class Generator(Network):

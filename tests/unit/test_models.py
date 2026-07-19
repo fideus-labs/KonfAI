@@ -40,9 +40,9 @@ def _unet_forward_last(attention: bool) -> torch.Tensor:
 
 
 def test_layer_scaler_broadcasts_over_2d_and_3d() -> None:
-    # gamma must scale per channel over ANY spatial rank. For 3-D [B, C, D, H, W] with D != C the old
-    # (C, 1, 1) gamma paired C against the depth axis and crashed; sizing it for `dim` fixes it while
-    # keeping the 2-D (C, 1, 1) shape (checkpoint-compatible).
+    # gamma must scale per channel over ANY spatial rank: for 3-D [B, C, D, H, W] with D != C a
+    # (C, 1, 1) gamma pairs C against the depth axis and crashes. Sized for `dim`, it keeps the
+    # 2-D (C, 1, 1) shape (checkpoint-compatible).
     scaler_3d = LayerScaler(init_value=1e-6, dimensions=4, dim=3)
     assert tuple(scaler_3d.gamma.shape) == (4, 1, 1, 1)
     x3 = torch.randn(2, 4, 3, 5, 5)  # C=4 != D=3
@@ -55,8 +55,8 @@ def test_layer_scaler_broadcasts_over_2d_and_3d() -> None:
 
 
 def test_unet_attention_forwards_without_branch_collision() -> None:
-    # out_branch=[1] collided with the Attention block's internal W_g branch, so the parent captured
-    # a half-resolution projection and Concat crashed on a size mismatch. The gated skip must reach
+    # out_branch=[1] collides with the Attention block's internal W_g branch: the parent captures
+    # a half-resolution projection and Concat crashes on a size mismatch. The gated skip must reach
     # the skip connection, so the network forwards to a full-resolution output.
     attended = _unet_forward_last(attention=True)
     plain = _unet_forward_last(attention=False)
@@ -133,8 +133,8 @@ def _run_graph(model, *inputs: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("rigid", [False, True])
 @pytest.mark.parametrize("dim", [2, 3])
 def test_voxelmorph_warps_in_two_and_three_dimensions(dim: int, rigid: bool) -> None:
-    # Every warping component (SpatialTransformer, ResizeTransform, VecInt) used to be 2-D-hardcoded,
-    # so dim=3 -- the default -- raised on construction and no 3-D registration was possible at all.
+    # Every warping component (SpatialTransformer, ResizeTransform, VecInt) must support dim=3 (the
+    # default): a 2-D-hardcoded component raises on construction and forbids 3-D registration.
     shape = [32] * dim
     moved = _run_graph(
         VoxelMorph(dim=dim, shape=shape, rigid=rigid),
@@ -164,8 +164,8 @@ def test_rigid_affine_is_a_proper_rotation_and_starts_at_identity(dim: int) -> N
 
 
 def test_rigid_head_regresses_a_rotation_not_only_a_translation() -> None:
-    # The head used to emit 2 numbers wired straight into the translation column, so what was called
-    # a rigid transform could not rotate at all.
+    # The head must regress rotation parameters too: 2 numbers wired straight into the translation
+    # column make a "rigid" transform that cannot rotate at all.
     model = VoxelMorph(dim=2, shape=[32, 32], rigid=True)
     model.eval()
     model["Flow"]["Head"].bias.data = torch.tensor([1.2, 0.0, 0.0])  # rotation only, no translation
@@ -178,7 +178,7 @@ def test_rigid_head_regresses_a_rotation_not_only_a_translation() -> None:
 
 
 def test_nested_unet_refuses_attention_it_does_not_have() -> None:
-    # attention reaches every nested block and no block reads it, so asking for gates used to build
-    # the plain model and say nothing about it.
+    # attention reaches every nested block and no block reads it, so asking for gates must raise
+    # instead of silently building the plain model.
     with pytest.raises(ConfigError, match="attention"):
         NestedUNet(dim=2, channels=[1, 8, 16, 32], attention=True)

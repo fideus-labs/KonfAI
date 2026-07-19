@@ -1950,8 +1950,8 @@ class Predictor(DistributedObject):
         self.predict_path = predictions_directory() / self.name
         for output_dataset in self.outputs_dataset.values():
             self.datasets_filename.append(output_dataset.filename)
-            # Rebase under the run directory, re-deriving is_directory: a bare string + "/" turned an h5
-            # output into a directory-flagged path and wrote the hidden dotfile Predictions/<run>/Dataset/.h5.
+            # Rebase under the run directory, re-deriving is_directory: a bare string + "/" would flag an
+            # h5 output as a directory and write the hidden dotfile Predictions/<run>/Dataset/.h5.
             output_dataset.rebase(self.predict_path)
         self.data_log = data_log
         modules = []

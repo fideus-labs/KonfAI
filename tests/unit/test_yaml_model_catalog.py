@@ -50,15 +50,15 @@ def test_default_catalog_name_cannot_escape_the_shipped_directory(name: str) -> 
 
 
 def test_pre_1_6_absolute_model_classpath_still_resolves_with_deprecation() -> None:
-    # A v1.5.9 config that named a built-in model by its old absolute path keeps working after the
-    # konfai.models -> konfai.models.python move, with a DeprecationWarning.
+    # A config naming a built-in model by the deprecated absolute path (konfai.models.<kind>...)
+    # must keep resolving onto konfai.models.python, with a DeprecationWarning.
     import warnings
 
     from konfai.utils.utils import get_module
 
     old = "konfai.models.segmentation.UNet:UNet"
     with pytest.raises(ModuleNotFoundError):
-        get_module(old, "konfai.models.python")  # the raw old path no longer imports
+        get_module(old, "konfai.models.python")  # the raw deprecated path does not import
 
     loader = ModelLoader(classpath=old)
     assert loader._yaml_path() is None  # not a catalog yaml -> falls to the Python-class path + shim
