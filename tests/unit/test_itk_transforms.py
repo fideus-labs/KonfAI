@@ -53,3 +53,36 @@ def test_apply_to_data_transform_returns_ndarray() -> None:
     result = apply_to_data_transform(points, {translation: False})
     assert isinstance(result, np.ndarray)
     np.testing.assert_allclose(result, points + np.array([10.0, 20.0, 30.0]))
+
+
+def test_resample_transform_applies_displacement_in_physical_space() -> None:
+    # ResampleTransform used to add the physical (dx, dy, dz) displacement straight onto a (z, y, x)
+    # voxel-index grid, transposing x/z and treating millimetres as voxels. A +6 mm translation along X
+    # on a 2 mm-X grid must move content 3 voxels along X (not 6 voxels along Z).
+    import torch
+    from konfai.data.transform import ResampleTransform
+    from konfai.utils.dataset import Attribute
+
+    volume = torch.zeros(1, 8, 8, 8, dtype=torch.uint8)
+    volume[0, 4, 4, 6] = 1  # (z=4, y=4, x=6)
+    attribute = Attribute()
+    attribute["Origin"] = np.array([0.0, 0.0, 0.0])
+    attribute["Spacing"] = np.array([2.0, 1.0, 1.0])  # (x=2 mm, y=1, z=1)
+    attribute["Direction"] = np.eye(3).flatten()
+
+    translation = sitk.TranslationTransform(3, (6.0, 0.0, 0.0))
+
+    class _TransformStore:
+        def is_dataset_exist(self, group: str, name: str) -> bool:
+            return True
+
+        def read_transform(self, group: str, name: str) -> "sitk.Transform":
+            return translation
+
+    transform = ResampleTransform({"reg": False})
+    transform.datasets = [_TransformStore()]
+
+    out = transform("case", volume, attribute)
+    bright = torch.nonzero(out[0] > 0).tolist()
+
+    assert bright == [[4, 4, 3]]  # moved 6 mm / 2 mm = 3 voxels along X, staying on z=4, y=4
