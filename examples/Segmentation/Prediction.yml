@@ -13,15 +13,7 @@ Predictor:
         - 256
         nb_class: 41
       outputs_criterions: None
-      ModelPatch:
-        patch_size:
-        - 128
-        - 128
-        - 128
-        overlap: None
-        patch_combine: None
-        pad_value: None
-        extend_slice: 0
+      ModelPatch: None  # the model predicts a full 256x256 slice; no internal tiling (matches Config.yml)
   Dataset:
     groups_src:
       CT:
