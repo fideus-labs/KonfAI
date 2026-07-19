@@ -159,3 +159,30 @@ def test_bridge_ignores_source_branches_the_forward_skips() -> None:
     )
     assert transferred == 1
     assert torch.equal(target.used.weight, source.used.weight)
+
+
+def test_bridge_refuses_a_weight_tied_target() -> None:
+    # Two target leaves sharing one Parameter (weight tying) would each be loaded in turn, so the earlier
+    # leaf would silently keep the later leaf's source weights. The bridge must refuse, not mis-load.
+    class TwoLinear(torch.nn.Module):
+        def __init__(self, tie: bool) -> None:
+            super().__init__()
+            self.a = torch.nn.Linear(4, 4)
+            self.b = torch.nn.Linear(4, 4)
+            if tie:
+                self.b.weight = self.a.weight
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.b(self.a(x))
+
+    target = TwoLinear(tie=True)
+    source = TwoLinear(tie=False)
+    inputs = torch.randn(1, 4)
+
+    with pytest.raises(ConfigError, match=r"ties a parameter"):
+        transfer_weights_by_execution_order(
+            target=target,
+            source=source,
+            target_forward=lambda: target(inputs),
+            source_forward=lambda: source(inputs),
+        )
