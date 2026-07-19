@@ -362,3 +362,78 @@ def test_perceptual_loss_applies_every_loss_to_the_target() -> None:
     loss._compute(torch.zeros(1, 1, 2, 2), torch.zeros(1, 1, 2, 2))
 
     assert set(applied) == {"gram", "l1"}  # both, not just the first
+
+
+class _FakeFeatureModel(torch.nn.Module):
+    """model(x, nb_layer, stats) -> [x, pooled(x), ...] like an IMPACT TorchScript extractor."""
+
+    def forward(self, x: torch.Tensor, nb_layer: torch.Tensor, stats: torch.Tensor = None) -> list[torch.Tensor]:
+        feats = [x.contiguous()]
+        while len(feats) < int(nb_layer):
+            feats.append(torch.nn.functional.avg_pool2d(feats[-1], 2))
+        return feats
+
+
+class TestMaskedFeatureLoss:
+    """The single implementation behind IMPACTReg / IMPACTSynth / SAM_Perceptual."""
+
+    @staticmethod
+    def _run(weights, mask=None, patch_shape=None, project=None, x=None, y=None):
+        from konfai.metric.measure import _masked_feature_loss
+
+        torch.manual_seed(0)
+        x = torch.rand(1, 1, 32, 32) if x is None else x
+        y = torch.rand(1, 1, 32, 32) if y is None else y
+        triple = lambda t: [t, torch.tensor([len(weights)]), torch.tensor([[0.0, 0.5, 1.0, 0.2]])]  # noqa: E731
+        return _masked_feature_loss(
+            _FakeFeatureModel(), triple(x), triple(y), weights, torch.nn.L1Loss(), mask, patch_shape, project=project
+        )
+
+    def test_zero_weight_skips_the_layer(self):
+        loss_one, _ = self._run([0.0, 1.0])
+        loss_both, _ = self._run([1.0, 1.0])
+        assert loss_one.item() < loss_both.item()
+
+    def test_unmasked_equals_weighted_layer_sum(self):
+        torch.manual_seed(0)
+        x, y = torch.rand(1, 1, 32, 32), torch.rand(1, 1, 32, 32)
+        loss, true_nb = self._run([0.5, 2.0], x=x, y=y)
+        expected = 0.5 * torch.nn.functional.l1_loss(x, y) + 2.0 * torch.nn.functional.l1_loss(
+            torch.nn.functional.avg_pool2d(x, 2), torch.nn.functional.avg_pool2d(y, 2)
+        )
+        assert true_nb == 1
+        assert torch.allclose(loss, expected.reshape(1), atol=1e-6)
+
+    def test_mask_restricts_the_loss_support(self):
+        torch.manual_seed(0)
+        x = torch.rand(1, 1, 32, 32)
+        y = x.clone()
+        y[:, :, 16:, 16:] += 10.0  # large error outside the mask only
+        mask = torch.zeros(1, 1, 32, 32, dtype=torch.uint8)
+        mask[:, :, :8, :8] = 1
+        loss, _ = self._run([1.0], mask=mask, x=x, y=y)
+        assert loss.item() < 1e-6
+
+    def test_patches_without_mask_are_not_counted(self):
+        mask = torch.zeros(1, 1, 32, 32, dtype=torch.uint8)
+        mask[:, :, :16, :16] = 1  # only the first 16x16 tile
+        _, true_nb = self._run([1.0], mask=mask, patch_shape=[16, 16])
+        assert true_nb == 1  # 4 tiles, 3 skipped
+
+    def test_project_hook_is_applied(self):
+        halve = lambda a, b: (a / 2, b / 2)  # noqa: E731
+        loss_raw, _ = self._run([1.0])
+        loss_projected, _ = self._run([1.0], project=halve)
+        assert torch.allclose(loss_projected, loss_raw / 2, atol=1e-6)
+
+    def test_nan_layer_contributes_nothing(self):
+        class NaNModel(torch.nn.Module):
+            def forward(self, x, nb_layer, stats=None):
+                return [x, torch.full_like(x, torch.nan)]
+
+        from konfai.metric.measure import _masked_feature_loss
+
+        x, y = torch.rand(1, 1, 8, 8), torch.rand(1, 1, 8, 8)
+        triple = lambda t: [t, torch.tensor([2]), torch.tensor([[0.0, 0.5, 1.0, 0.2]])]  # noqa: E731
+        loss, _ = _masked_feature_loss(NaNModel(), triple(x), triple(y), [1.0, 1.0], torch.nn.L1Loss(), None, None)
+        assert torch.isfinite(loss).all()
