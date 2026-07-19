@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests: server auth env resolution must not silently disable authentication."""
+"""Server auth env resolution must not silently disable authentication."""
 
 import os
 
@@ -23,8 +23,8 @@ from konfai_apps.cli import _configure_server_auth_env
 
 
 def test_custom_token_env_is_propagated_to_the_var_the_server_reads(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The server enforces auth by reading KONFAI_API_TOKEN. A custom --token-env used to leave that
-    # var empty, so the server started with auth silently off despite a configured token.
+    # The server enforces auth by reading KONFAI_API_TOKEN. A custom --token-env must populate that
+    # var; left empty, the server starts with auth silently off despite a configured token.
     monkeypatch.delenv("KONFAI_API_TOKEN", raising=False)
     monkeypatch.setenv("MY_TOKEN", "secret")
 
@@ -34,7 +34,7 @@ def test_custom_token_env_is_propagated_to_the_var_the_server_reads(monkeypatch:
 
 
 def test_auth_off_clears_a_leftover_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    # --auth off must be deterministic: a KONFAI_API_TOKEN inherited from the environment used to
+    # --auth off must be deterministic: a KONFAI_API_TOKEN inherited from the environment must not
     # keep auth on.
     monkeypatch.setenv("KONFAI_API_TOKEN", "leftover")
 

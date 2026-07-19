@@ -113,7 +113,7 @@ def description(model, model_ema=None, show_memory: bool = True, train: bool = T
 def get_cpu_info() -> str:
     """Return current CPU utilization as a short status string."""
     # interval=None is non-blocking (utilization since the previous call). The blocking interval=0.5
-    # form stalled the caching progress-bar refresh by half a second each call, on the data-load
+    # form would stall the caching progress-bar refresh by half a second each call, on the data-load
     # critical path, purely to render a telemetry label.
     return f"CPU ({psutil.cpu_percent(interval=None):.2f} %)"
 

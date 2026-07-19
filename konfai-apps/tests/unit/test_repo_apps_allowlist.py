@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests: /repo_apps endpoints must not resolve app ids outside the allowlist."""
+"""/repo_apps endpoints must not resolve app ids outside the allowlist."""
 
 import importlib.util
 

@@ -179,9 +179,9 @@ class Config:
                 os.replace(tmp, target)
             except OSError:
                 # Windows can deny the atomic replace when the target is briefly held (a virus
-                # scanner or indexer touching the fresh temp file). Fall back to the in-place rewrite
-                # the pre-1.6 code always did: POSIX (the DDP path) keeps the atomic guarantee, and
-                # Windows keeps its original -- non-atomic -- behaviour instead of failing outright.
+                # scanner or indexer touching the fresh temp file). Fall back to an in-place rewrite:
+                # POSIX (the DDP path) keeps the atomic guarantee, and Windows keeps its non-atomic
+                # behaviour instead of failing outright.
                 with open(target, "w") as yml:
                     yaml.dump(merged, yml)
         finally:

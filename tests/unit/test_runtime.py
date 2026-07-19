@@ -221,8 +221,7 @@ def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
 
 
 # ---------------------------------------------------------------------------
-# Progress/DDP synchronisation (regression tests for the runtime audit fixes,
-# see AUDIT.md)
+# Progress/DDP synchronisation
 # ---------------------------------------------------------------------------
 
 

@@ -57,7 +57,7 @@ def test_hue_axis_rotation_preserves_luma() -> None:
 
 def test_saturation_matrix_scales_chroma_not_luma() -> None:
     # v vT + (I - v vT) * s : s=1 is identity, s=0 collapses a colour to its luma (greyscale), and luma is
-    # preserved for any s, unlike the old (v vT + (I - v vT)) * s = I * s which was a uniform gain.
+    # preserved for any s -- (v vT + (I - v vT)) * s = I * s would be a uniform gain instead.
     v = torch.tensor([1.0, 1.0, 1.0, 0.0]) / torch.sqrt(torch.tensor(3.0))
     colour = torch.tensor([0.8, 0.2, 0.5, 0.0])
     luma = colour[:3].mean()
@@ -75,7 +75,7 @@ def test_augmentation_resamples_after_reset_state():
 
     Within an epoch ``state_init`` caches the per-case draw so every patch shares
     one transform; ``reset_state`` must clear that cache so the next epoch draws
-    fresh parameters (previously ``who_index`` was never cleared → frozen forever).
+    fresh parameters (an uncleared ``who_index`` freezes the draw forever).
     """
     aug = Flip([1.0, 1.0, 1.0])
     aug.load(1.0)
@@ -111,9 +111,9 @@ def test_augmentation_inverse_uses_local_slot_for_global_index():
 
     # Unselected sample is passed through untouched.
     assert torch.equal(aug.inverse(0, 0, x.clone()), x)
-    # Global 1 -> local slot 0 -> axis 1 (previously read slot 1 -> axis 2).
+    # Global 1 -> local slot 0 -> axis 1 (a raw global read would hit slot 1 -> axis 2).
     assert torch.equal(aug.inverse(0, 1, x.clone()), torch.flip(x, [1]))
-    # Global 2 -> local slot 1 -> axis 2 (previously an out-of-range index).
+    # Global 2 -> local slot 1 -> axis 2 (a raw global read would run out of range).
     assert torch.equal(aug.inverse(0, 2, x.clone()), torch.flip(x, [2]))
 
 
@@ -121,8 +121,8 @@ def test_intensity_augmentation_inverses_are_identity():
     """Value-only augmentations must invert to the identity.
 
     ColorTransform/Noise/CutOUT do not move voxels, so the inverse applied to a
-    prediction is the tensor itself. They previously returned ``None``, which
-    crashed the prediction inverse path (``NoneType`` has no ``device``).
+    prediction is the tensor itself. Returning ``None`` instead crashes the
+    prediction inverse path (``NoneType`` has no ``device``).
     """
     x = torch.randn(3, 4, 5, 6)  # 3 channels for the ColorTransform path
 
@@ -186,7 +186,7 @@ def test_flip_scalar_data_is_layout_only() -> None:
 
 
 def test_flip_default_stays_layout_only_on_vector_data() -> None:
-    # ``vector_field`` is opt-in: existing intensity-TTA bundles keep the historical behaviour.
+    # ``vector_field`` is opt-in: existing intensity-TTA bundles keep their behaviour unchanged.
     flip = _flip_all_axes(vector_field=False)
     dvf = torch.randn(3, 4, 5, 6)
 
@@ -211,8 +211,8 @@ def test_rotate_converts_degrees_to_radians():
 def test_rotate_quarter_builds_one_signed_permutation_per_sample():
     """``is_quarter`` must draw one rotation per sample/axis.
 
-    The previous flat 9-vector produced 0-d angles that crashed
-    ``_rotation_3d_matrix`` and ignored the sample count. Each resulting matrix
+    A flat 9-vector draw produces 0-d angles that crash
+    ``_rotation_3d_matrix`` and ignore the sample count. Each resulting matrix
     must be a proper multiple-of-90-degree rotation, i.e. an orthogonal signed
     permutation matrix (integer entries, determinant +1).
     """
@@ -347,7 +347,7 @@ def test_translate_is_int_rounds_to_whole_voxels():
     column = aug._grid_matrix(0, 0, [9, 9, 9])[0, :3, 3]
     expected = torch.full((3,), 5.0 * 2 / (9 - 1))  # round(5.3) == 5, then normalized
     assert torch.allclose(column, expected, atol=1e-6)
-    # Neither the pre-fix 0.01 rounding (5.3) nor raw-voxel units survive.
+    # Neither a 0.01-precision rounding (5.3) nor raw-voxel units may survive.
     assert not torch.allclose(column, torch.full((3,), 5.3), atol=1e-6)
 
 

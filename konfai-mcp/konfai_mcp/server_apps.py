@@ -16,10 +16,9 @@
 
 """App-facing services for the KonfAI MCP server.
 
-The MCP server so far only drives the KonfAI train/predict/evaluate loop. This module adds the
-*use an app* half of the lifecycle: discover published KonfAI apps and read their ``app.json``
-manifest so the agent can decide whether an existing app already solves the user's task before
-authoring and training a config from scratch.
+The *use an app* half of the lifecycle, beside the train/predict/evaluate loop: discover published
+KonfAI apps and read their ``app.json`` manifest so the agent can decide whether an existing app
+already solves the user's task before authoring and training a config from scratch.
 
 Discovery is layered over a referenced catalogue of app sources (the same ``{"apps": [...]}`` shape
 the ``konfai-apps`` server consumes via ``--apps``): a shipped default, a per-workspace editable
@@ -292,7 +291,7 @@ class AppService:
 
         # Route by what the app can actually do instead of dead-ending on describe/design.
         # fine_tune_app is only offered when the app ships a train config to warm-start from,
-        # so an inference-only bundle no longer dead-ends the agent on a tool it cannot use.
+        # so an inference-only bundle never routes the agent to a tool it cannot use.
         next_actions: list[str] = []
         if inference:
             next_actions.extend(["run_app_infer", "list_app_parameters", "run_app_pipeline"])

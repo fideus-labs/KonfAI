@@ -56,9 +56,9 @@ def test_apply_to_data_transform_returns_ndarray() -> None:
 
 
 def test_resample_transform_applies_displacement_in_physical_space() -> None:
-    # ResampleTransform used to add the physical (dx, dy, dz) displacement straight onto a (z, y, x)
-    # voxel-index grid, transposing x/z and treating millimetres as voxels. A +6 mm translation along X
-    # on a 2 mm-X grid must move content 3 voxels along X (not 6 voxels along Z).
+    # ResampleTransform must not add the physical (dx, dy, dz) displacement straight onto a (z, y, x)
+    # voxel-index grid: that transposes x/z and treats millimetres as voxels. A +6 mm translation along
+    # X on a 2 mm-X grid must move content 3 voxels along X (not 6 voxels along Z).
     import torch
     from konfai.data.transform import ResampleTransform
     from konfai.utils.dataset import Attribute

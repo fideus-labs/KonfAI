@@ -60,7 +60,7 @@ def _constraint_of_annotation(annotation: Any) -> dict[str, Any] | None:
     ``{min,max}`` / ``{choices}``, ``dict[str, <class>]`` -> ``{"*": <class constraints>}``. A bare string in
     ``Annotated[T, .., "text"]`` adds ``{"description": text}`` -- the human meaning of the knob, for any base
     type including ``Annotated[Literal[...], "text"]``, so an agent tuning it knows WHAT it does, not only its
-    bounds. ``{min,max}`` / ``{choices}`` stay exactly as before when no description is given. Else ``None``."""
+    bounds. ``{min,max}`` / ``{choices}`` carry no description key when none is given. Else ``None``."""
     metadata = getattr(annotation, "__metadata__", ())  # Annotated[base, *metadata]
     base = get_args(annotation)[0] if metadata else annotation
     constraint: dict[str, Any] = {}
@@ -1000,9 +1000,7 @@ class LocalAppRepository(AppRepositoryInfo):
 
         shutil.copy2(inference_file_path, prediction_file)
         self._set_number_of_augmentation(prediction_file, number_of_augmentation)
-        # NOTE: `number_of_mc_dropout` is reserved for an upcoming MC-dropout feature
-        # (stochastic forward passes for models with dropout layers); it is plumbed
-        # through but not yet applied to the prediction config.
+        # `number_of_mc_dropout` is plumbed through but not applied to the prediction config.
         if not uncertainty:
             self._disable_uncertainty(prediction_file)
         # Patch/batch precedence: an explicit override wins; otherwise the app's VRAM plan (largest
@@ -1363,8 +1361,8 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
         if not data.get("available", False):
             raise AppRepositoryError(f"App '{app_name}' is not available on remote server.")
         self._has_capabilities = data["has_capabilities"]
-        # Servers older than the 'finetunable' field: fall back to the inference capability, which
-        # matches the historical behavior (fine-tune offered for any inference-capable app).
+        # Servers that omit the 'finetunable' field fall back to the inference capability
+        # (fine-tune is offered for any inference-capable app).
         self._finetunable = bool(data.get("finetunable", self._has_capabilities[0]))
 
         inputs = {

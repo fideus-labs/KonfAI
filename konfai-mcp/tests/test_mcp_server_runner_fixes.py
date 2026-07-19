@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for konfai_mcp.runner: bounded final join, config-restore visibility, and
+"""konfai_mcp.runner contracts: bounded final join, config-restore visibility, and
 propagation of a non-differentiable loss into the smoke-test ok flag."""
 
 import sys
@@ -36,7 +36,7 @@ from konfai_mcp import runner  # noqa: E402
 
 def test_run_api_in_subprocess_reaps_child_wedged_after_result() -> None:
     # A child that produced its result but will not exit must not hang the caller forever: the final
-    # join is bounded and escalates to terminate/kill. Without the fix the unbounded join hangs here.
+    # join is bounded and escalates to terminate/kill. An unbounded join would hang here.
     start = time.monotonic()
     payload = runner.run_api_in_subprocess("_runner_wedge_target:wedge_after_result", {"value": 7}, timeout_s=0)
     elapsed = time.monotonic() - start

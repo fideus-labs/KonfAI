@@ -40,7 +40,7 @@ def test_attribute_underscore_key_is_readable_and_consistent() -> None:
     attribute = Attribute()
     attribute["ITK_InputFilterName"] = "GradientAnisotropicDiffusion"
 
-    # __contains__ already reported membership; the getter must now agree with it.
+    # __contains__ reports membership; the getter must agree with it.
     assert "ITK_InputFilterName" in attribute
     assert attribute["ITK_InputFilterName"] == "GradientAnisotropicDiffusion"
     assert attribute.is_info("ITK_InputFilterName", "GradientAnisotropicDiffusion")
@@ -89,9 +89,9 @@ def test_h5_dataset_creates_nested_parent_directories(tmp_path: Path, image_attr
 
 
 def test_read_data_opens_hdf5_read_only(tmp_path: Path, image_attributes) -> None:
-    # read_data used to open HDF5 in r+ (stamping a Date attribute on every read), which mutates
-    # the file and breaks concurrent access across DataLoader/DDP processes. On a read-only file an
-    # r+ open raises PermissionError, so a successful read here proves the mode is now "r".
+    # read_data must open HDF5 in "r": an r+ open stamps a Date attribute on every read, which
+    # mutates the file and breaks concurrent access across DataLoader/DDP processes. On a read-only
+    # file an r+ open raises PermissionError, so a successful read here proves the mode is "r".
     volume = np.arange(1 * 3 * 4 * 5, dtype=np.int16).reshape(1, 3, 4, 5)
     dataset = Dataset(tmp_path / "H5DS", "h5")
     dataset.write("CT", "CASE_001", volume, image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
@@ -248,9 +248,9 @@ def test_resolve_data_path_prefers_special_format_like_full_read(tmp_path: Path,
 #
 # Patch planning strips the channel from get_infos' shape and feeds the spatial shape to
 # transform_shape and the patch reader; the actual pixel reads (image_to_data /
-# _file_to_image_slice) are numpy-order [C, (T), (Z), Y, X]. The pre-fix code reversed sitk
-# GetSize() only when len == 3, so 2-D and 4-D images kept sitk (x, y, ...) order and were
-# transposed against their own pixel data.
+# _file_to_image_slice) are numpy-order [C, (T), (Z), Y, X]. Reversing sitk GetSize() only
+# when len == 3 leaves 2-D and 4-D images in sitk (x, y, ...) order, transposed against
+# their own pixel data.
 # --------------------------------------------------------------------------------------
 
 
@@ -277,7 +277,7 @@ def test_get_infos_4d_matches_pixel_data(tmp_path: Path) -> None:
 
 
 def test_get_infos_3d_unchanged(tmp_path: Path) -> None:
-    # Regression guard: the already-correct 3-D path must stay reversed.
+    # The 3-D path must stay reversed.
     path = tmp_path / "img3d.nii.gz"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((6, 4, 10), dtype=np.float32)), str(path))
 
@@ -288,7 +288,7 @@ def test_get_infos_3d_unchanged(tmp_path: Path) -> None:
 
 
 def test_sitkfile_get_infos_2d_matches_read_data(tmp_path: Path) -> None:
-    # Same defect in SitkFile.get_infos, reached through the public Dataset API.
+    # The same contract holds for SitkFile.get_infos, reached through the public Dataset API.
     ds_dir = str(tmp_path / "ds") + "/"
     Path(ds_dir).mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((4, 10), dtype=np.float32)), ds_dir + "case0.mha")
@@ -314,8 +314,8 @@ def test_attribute_setitem_accepts_0d_and_autograd_tensors() -> None:
 
 # --------------------------------------------------------------------------------------
 # Directory store-format auto-detection: the read backend is chosen from what is on disk
-# (an OME-Zarr/Zarr store or a DICOM series directory), so a ``:mha`` token no longer
-# forces a store to be mis-read. Plain per-file volumes keep the SitkFile path.
+# (an OME-Zarr/Zarr store or a DICOM series directory), so a ``:mha`` token cannot
+# force a store to be mis-read. Plain per-file volumes keep the SitkFile path.
 # --------------------------------------------------------------------------------------
 
 
@@ -385,8 +385,8 @@ def test_a_statistics_chunk_reaches_further_on_a_thin_volume() -> None:
 
 
 def test_directory_store_detects_extensionless_dicom(tmp_path: Path) -> None:
-    # A DICOM series exported with no extension was left on the SitkFile backend, because detection
-    # only ever looked at file suffixes.
+    # A DICOM series exported with no extension must be detected by content: suffix-only
+    # detection leaves it on the SitkFile backend.
     series = tmp_path / "ds" / "case_0" / "ser"
     series.mkdir(parents=True)
     (series / "IM000001").write_bytes(b"\x00" * 128 + b"DICM" + b"\x00" * 32)
@@ -395,8 +395,8 @@ def test_directory_store_detects_extensionless_dicom(tmp_path: Path) -> None:
 
 
 def test_dataset_rebase_keeps_h5_a_file_and_directory_formats_a_directory() -> None:
-    # Predictor.rebase used to string-append "/" unconditionally, so an h5 output became a
-    # directory-flagged path and the single-store writer wrote the hidden dotfile <dir>/.h5.
+    # Predictor.rebase must not flag an h5 output as a directory: an unconditional trailing "/"
+    # makes the single-store writer write the hidden dotfile <dir>/.h5.
     from pathlib import Path
 
     from konfai.utils.dataset import Dataset
@@ -413,8 +413,8 @@ def test_dataset_rebase_keeps_h5_a_file_and_directory_formats_a_directory() -> N
 
 
 def test_attribute_lookup_is_not_fooled_by_a_prefixing_sibling_key() -> None:
-    # Values stack as {key}_{n}; the count used startswith(key), so SpacingOriginal was miscounted as a
-    # second Spacing entry and a["Spacing"] then raised while "Spacing" in a still answered True.
+    # Values stack as {key}_{n}; a startswith(key) count treats SpacingOriginal as a second Spacing
+    # entry, so a["Spacing"] raises while "Spacing" in a still answers True.
     from konfai.utils.dataset import Attribute
 
     attribute = Attribute()

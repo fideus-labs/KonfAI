@@ -69,7 +69,7 @@ def test_merge_labels_requires_number_of_channels() -> None:
 
 def test_merge_labels_overlap_takes_the_last_model_label() -> None:
     # Task-split models disagree at structure boundaries: a voxel claimed by two models must take the
-    # LAST model's global label. Adding the global ids (the pre-fix behaviour) fabricated 5 + 26 = 31,
+    # LAST model's global label. Adding the global ids instead fabricates 5 + 26 = 31,
     # a valid-looking label belonging to neither model.
     nb = [25, 27]
     tensor = torch.zeros(2, 3, dtype=torch.long)

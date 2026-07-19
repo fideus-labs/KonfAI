@@ -220,7 +220,7 @@ def test_two_saves_materialize_in_order(tmp_path: Path) -> None:
 
 
 def test_unstreamable_destination_keeps_the_whole_volume_path(tmp_path: Path) -> None:
-    # nii.gz cannot serve region writes: the Save stays on the whole-volume path, as before the sweep.
+    # nii.gz cannot serve region writes: the Save stays on the whole-volume path.
     source = _source(tmp_path)
     manager = _manager(source, [Clip(0.0, 50.0), Save(f"{tmp_path / 'cache'}:nii.gz")])
     assert not manager.can_stream_patch(0)

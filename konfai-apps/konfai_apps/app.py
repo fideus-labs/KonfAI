@@ -890,8 +890,7 @@ class KonfAIApp(AbstractKonfAIApp):
         """Detect the on-disk format token of a staged group, for reading it back.
 
         Directory-volume inputs (a DICOM series or an OME-Zarr store) need their real backend token
-        (``dicom`` / ``omezarr``); single-file inputs keep the historical ``mha`` default so existing
-        behaviour is unchanged.
+        (``dicom`` / ``omezarr``); single-file inputs use the ``mha`` default.
         """
         root = Path(dataset_dir)
         if root.is_dir():
@@ -977,7 +976,7 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Format-neutral by construction: ``split_format_level`` knows nothing about any backend, and an
         entry that declares no ``@N`` — which is every non-pyramid format — yields 0, the level those
-        backends have always been read at.
+        backends are read at.
 
         Only the entry pointing at ``dataset_dir`` counts; a config listing several sources may read each
         at its own level, and the staged inputs live in exactly one of them.
@@ -1016,8 +1015,7 @@ class KonfAIApp(AbstractKonfAIApp):
         "Like ``Volume_0``" has to include the LEVEL it is read at. On a multiscale input, level 1 is not
         the shape of level 0, so a default sized from level 0 is both the wrong shape and unopenable at
         ``@1`` — the store has one level and the reader asks for the second. Taking the level from the
-        config keeps this one code path for every format: a flat input reports level 0 and behaves exactly
-        as before.
+        config keeps this one code path for every format: a flat input reports level 0.
         """
         declared = list(self.app_repository.get_inputs().items())
         fills = {

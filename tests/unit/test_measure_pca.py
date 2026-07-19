@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for ``IMPACTReg._pca_project`` under a batch > 1.
+"""``IMPACTReg._pca_project`` under a batch > 1.
 
 itk-impact fits one PCA basis per image. KonfAI batches unrelated cases together, so the basis must be
 fitted per batch sample; a single shared basis projects every sample after the first into another case's
@@ -46,7 +46,7 @@ def _two_sample_batch() -> tuple[torch.Tensor, torch.Tensor]:
 
 def test_second_sample_uses_its_own_basis() -> None:
     """Sample 1 projected inside a B=2 batch must equal sample 1 projected alone (its own basis),
-    NOT be collapsed by sample 0's basis. Before the fix the captured variance was ~1e-4 instead of ~100."""
+    NOT be collapsed by sample 0's basis (which drops the captured variance to ~1e-4 instead of ~100)."""
     core = _core(1)
     moved, fixed = _two_sample_batch()
 

@@ -697,8 +697,8 @@ def test_save_upload_groups_maps_zip_unit_to_directory(tmp_path: Path) -> None:
 
 
 def test_save_directory_volume_rejects_dot_name_that_escapes_to_group_dir(tmp_path: Path) -> None:
-    # "..konfaidir.zip" -> dir_name "." -> target_dir == the group dir itself. The old containment check
-    # permitted that, so extraction overwrote sibling uploads and failure cleanup rmtree'd the whole group.
+    # "..konfaidir.zip" -> dir_name "." -> target_dir == the group dir itself. A containment check
+    # permitting that lets extraction overwrite sibling uploads and failure cleanup rmtree the whole group.
     dst = tmp_path / "g0"
     real = SimpleNamespace(filename="case.mha", file=io.BytesIO(b"REAL"))
 
@@ -733,7 +733,7 @@ def _make_zip_bomb_upload(uncompressed_bytes: int) -> SimpleNamespace:
 
 def test_save_directory_volume_bounds_extracted_bytes_not_compressed(tmp_path: Path) -> None:
     # A directory-volume zip that inflates far past its compressed size must be rejected on the EXTRACTED
-    # bytes: the small compressed upload sailed under the old compressed-only limit and filled the disk.
+    # bytes: a compressed-only limit lets the small upload sail under it and fill the disk.
     upload = _make_zip_bomb_upload(64 * 1024 * 1024)  # ~64MB extracted, a few KB compressed
 
     with pytest.raises(HTTPException) as exc:
@@ -747,7 +747,7 @@ def test_save_directory_volume_bounds_extracted_bytes_not_compressed(tmp_path: P
 
 def test_save_upload_groups_charges_extracted_directory_bytes(tmp_path: Path) -> None:
     # A directory-volume path is a directory whose inode st_size is a fixed block (tens of bytes to ~4KB),
-    # unrelated to the extracted store; charging that instead of the real content let a group of such volumes
+    # unrelated to the extracted store; charging that instead of the real content lets a group of such volumes
     # bypass max_total_bytes for every following group. The content is sized well above any directory inode so
     # the two behaviours diverge on every filesystem: the budget fits ONE store's real content but not two,
     # yet comfortably clears two directory inodes -- so only content-charging rejects the second group.

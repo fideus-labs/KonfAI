@@ -127,7 +127,7 @@ class TestReadSummary:
         assert "PRED:SEG:Dice:1" not in summary
 
     def test_read_skips_metrics_without_mean(self, tmp_path):
-        """A metric whose mean is null (formerly NaN) is excluded from the summary."""
+        """A metric whose mean is null is excluded from the summary."""
         path = tmp_path / "Metric.json"
         self._write_aggregates(
             path,

@@ -59,8 +59,8 @@ def test_debug_exit_block_raises_runtime_error() -> None:
 
 def test_clip_normalize_is_the_identity_until_a_checkpoint_states_it() -> None:
     # A checkpoint fills the four scalars and a model is built before one is loaded. Left as
-    # uninitialised memory they held clip_min above clip_max, so the clamp flattened every input onto
-    # one value and the node returned zeros for anything -- silently, with no NaN to notice.
+    # uninitialised memory they can hold clip_min above clip_max, so the clamp flattens every input
+    # onto one value and the node returns zeros for anything -- silently, with no NaN to notice.
     from konfai.network.blocks import ClipNormalize
 
     volume = torch.tensor([[-1000.0, 0.0, 1000.0]])
@@ -84,8 +84,8 @@ def test_clip_normalize_takes_what_a_checkpoint_states() -> None:
 
 
 def test_multi_head_self_attention_rejects_zero_heads() -> None:
-    # num_heads=0 reached the modulo before the divisibility check and died on a bare
-    # ZeroDivisionError, which says nothing about the config that caused it.
+    # num_heads=0 must not reach the modulo before the divisibility check: a bare
+    # ZeroDivisionError says nothing about the config that caused it.
     with pytest.raises(ValueError, match="num_heads"):
         MultiHeadSelfAttention(64, 0)
 

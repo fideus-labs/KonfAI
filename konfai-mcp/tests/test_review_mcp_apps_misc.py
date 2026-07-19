@@ -14,9 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for the mcp-apps-misc review fixes.
-
-Covers: ONNX export isolation, Windows-safe bundle rewrite, surfacing the app.json optional-input
+"""ONNX export isolation, Windows-safe bundle rewrite, surfacing the app.json optional-input
 ``default``, paired-group case-count validation, per-root dataset extensions, browse depth, namespace
 distribution resolution, and transport env validation.
 """

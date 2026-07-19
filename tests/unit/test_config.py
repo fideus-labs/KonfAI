@@ -316,8 +316,8 @@ def test_apply_config_converts_sequence_of_union_scalars(write_config) -> None:
 
 def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_config) -> None:
     # A value whose YAML type already matches a union member must bind unchanged: coercing in
-    # declaration order used to turn ``overlap: 0.25`` into ``int(0.25) == 0`` (silent no overlap),
-    # let ``str`` swallow a list, and never reach a ``list[...]`` member at all.
+    # declaration order turns ``overlap: 0.25`` into ``int(0.25) == 0`` (silent no overlap),
+    # lets ``str`` swallow a list, and never reaches a ``list[...]`` member at all.
     write_config("Root:\n  frac: 0.25\n  voxels: 8\n  percent: '20%'\n  per_axis:\n    - 10\n    - 20\n    - 0\n")
 
     class Root:
@@ -400,15 +400,15 @@ def test_dict_of_primitives_default_round_trips(write_config) -> None:
     written = config_path.read_text(encoding="utf-8")
     assert "mae" in written and "ssim" in written
 
-    # Run 2: reading the written file must return the same dict, not {} (the pre-fix behaviour).
+    # Run 2: reading the written file must return the same dict, never {}.
     second = apply_config("Root")(_RoundTripRoot)()
     assert second.weights == {"mae": 1, "ssim": 2}
 
 
 # A dotted dict key (e.g. a PerceptualLoss module path ``UNetBlock_0.DownConvBlock.Activation_1``)
-# must be treated as a single flat config key. Before the fix, ``Config.__init__`` split it on ``.``
-# into separate navigation levels, so the user's value was never found (code defaults were used)
-# and the write-back exploded the key into a bogus nested subtree.
+# must be treated as a single flat config key. Splitting it on ``.`` into navigation levels means
+# the user's value is never found (code defaults bind) and the write-back explodes the key into a
+# bogus nested subtree.
 
 
 class _DottedChild:
@@ -427,7 +427,7 @@ def test_apply_config_honors_value_under_dotted_dict_key(write_config) -> None:
     root = apply_config("Root")(_DottedRoot)()
 
     assert list(root.children) == ["a.b.c"]
-    # Before the fix the dotted key was split and this was silently 1 (the code default).
+    # A split dotted key would leave this silently 1 (the code default).
     assert root.children["a.b.c"].value == 99
 
 
@@ -438,7 +438,7 @@ def test_apply_config_does_not_explode_dotted_dict_key_on_writeback(write_config
 
     data = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
     children = data["Root"]["children"]
-    # Before the fix, children also contained an exploded ``a: {b: {c: {value: 1}}}`` subtree.
+    # No exploded ``a: {b: {c: {value: 1}}}`` subtree may appear beside the flat key.
     assert set(children) == {"a.b.c"}
     assert "a" not in children
     assert children["a.b.c"]["value"] == 99
@@ -459,7 +459,7 @@ def test_apply_config_dotted_dict_key_round_trips(write_config) -> None:
 
 def test_apply_config_colon_and_plain_dict_keys_unaffected(write_config) -> None:
     # Backward-compat guard: keys without ``.`` (``:``-separated module paths, plain
-    # names) must bind exactly as before and must not be escaped/exploded.
+    # names) must bind as single flat keys and must not be escaped/exploded.
     config_path = write_config("R:\n  m:\n    X:Head:Conv:\n      value: 5\n    plain:\n      value: 8\n")
 
     class R:
@@ -512,8 +512,8 @@ def test_apply_config_keeps_config_path_during_constructor_call(write_config) ->
 
 
 def test_a_block_type_outside_its_two_names_is_refused(tmp_path: Path, monkeypatch) -> None:
-    # `block_type` was a str tested only for "Conv": every other value, a typo included, built the
-    # residual model instead -- another architecture, another checkpoint, and nothing said so.
+    # A `block_type` str tested only for "Conv" builds the residual model for every other value, a
+    # typo included -- another architecture, another checkpoint, and nothing says so.
     from konfai.models.python.segmentation.UNet import UNet
     from konfai.utils.config import apply_config
 

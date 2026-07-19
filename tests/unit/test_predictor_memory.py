@@ -236,7 +236,7 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
         attribute=Attribute(),
     )
 
-    # The accumulator now blends each patch straight into a running CPU buffer (no per-patch list), so
+    # The accumulator blends each patch straight into a running CPU buffer (no per-patch list), so
     # the offloaded patch must have been moved to CPU exactly once before being blended.
     accumulator = output_dataset.output_layer_accumulator[0][0]
     assert fake_layer.cpu_calls == 1

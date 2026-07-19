@@ -154,8 +154,8 @@ def test_stream_orientation_canonical_inverse_matches_whole_volume(seed: int) ->
 def test_forward_orientation_records_case_geometry_from_the_volume_not_the_slab() -> None:
     # A FORWARD orientation in the write pipe records the output origin from the extent it is handed;
     # streamed, that is a slab window, so it must be given the FULL volume extent instead (Canonical
-    # documents "the extent is the VOLUME's, never a patch's"). Without the fix the sink origin was
-    # derived from the slab height and diverged from the whole-volume path.
+    # documents "the extent is the VOLUME's, never a patch's"). Otherwise the sink origin is
+    # derived from the slab height and diverges from the whole-volume path.
     ds = _output_dataset()
     canonical = Canonical()
     stage = _FinalizeStage(transform=canonical, inverted=False)

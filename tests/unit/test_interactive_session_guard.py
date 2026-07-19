@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test: is_interactive_session must not crash when stdout has no isatty."""
+"""is_interactive_session must not crash when stdout has no isatty."""
 
 import sys
 
@@ -37,8 +37,8 @@ class _LogProxy:
 
 
 def test_is_interactive_session_survives_stdout_without_isatty(monkeypatch) -> None:
-    # During a run stdout is swapped for a Log proxy that has no isatty; the pre-fix code called
-    # stdout.isatty() unconditionally and raised AttributeError. It must degrade to non-interactive.
+    # During a run stdout is swapped for a Log proxy that has no isatty; an unconditional
+    # stdout.isatty() call raises AttributeError. It must degrade to non-interactive.
     monkeypatch.setattr(sys, "stdin", _FakeTTY())
     monkeypatch.setattr(sys, "stdout", _LogProxy())
 

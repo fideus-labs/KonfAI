@@ -775,11 +775,10 @@ class Resample(TransformInverse, ABC):
             mode = "trilinear"
 
         # Interpolate in the tensor's own float dtype on CUDA. The model output is float16 and CUDA has
-        # had Half kernels for every mode for years — upcasting the whole (channels x volume) tensor to
-        # float32 doubled the memory of a multi-class output resample for no argmax benefit. On the CPU,
-        # keep the historical float32 compute: Half CPU kernels are missing from older torch releases and
-        # 1.5.8 always computed this path in float32. Integer inputs (uint8 labels) still need a float
-        # grid for interpolation.
+        # Half kernels for every mode, so upcasting the whole (channels x volume) tensor to float32 would
+        # double the memory of a multi-class output resample for no argmax benefit. On the CPU, compute in
+        # float32: Half CPU kernels are missing from older torch releases. Integer inputs (uint8 labels)
+        # still need a float grid for interpolation.
         if not tensor.is_floating_point() or (
             tensor.device.type == "cpu" and tensor.dtype in (torch.float16, torch.bfloat16)
         ):
@@ -1107,8 +1106,8 @@ class ResampleTransform(TransformInverse):
         result_transform = sitk.CompositeTransform(transforms)
 
         # Resample through SimpleITK so the stored transform is applied in physical space: spacing,
-        # direction and the (x, y, z) mm units of the displacement are all honoured. The previous
-        # hand-rolled grid_sample added the physical (dx, dy, dz) displacement straight onto a (z, y, x)
+        # direction and the (x, y, z) mm units of the displacement are all honoured. A hand-rolled
+        # grid_sample would add the physical (dx, dy, dz) displacement straight onto a (z, y, x)
         # voxel-index grid, transposing the x/z axes and treating millimetres as voxels.
         interpolator = sitk.sitkNearestNeighbor if tensor.dtype == torch.uint8 else sitk.sitkLinear
         resampled = sitk.Resample(image, image, result_transform, interpolator, 0.0)
@@ -2171,8 +2170,8 @@ class Crop(TransformInverse):
         if not {"Origin", "Spacing", "Direction"} <= set(cache_attribute.keys()):
             return
         # The crop keeps the box's near corner, so the new origin is the physical point that corner
-        # already sat on: the old origin stepped along each axis by its own margin. A margin is in
-        # array order and the geometry is in (x, y, z), hence the reversed indexing.
+        # already sat on. A margin is in array order and the geometry is in (x, y, z), hence the
+        # reversed indexing.
         box = Crop._parse_box(cache_attribute["box"])
         origin = torch.tensor(cache_attribute.get_np_array("Origin"))
         matrix = torch.tensor(cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin))))

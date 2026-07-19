@@ -35,7 +35,7 @@ class TestFocalLoss:
     def test_does_not_cross_pair_samples_for_batch_greater_than_one(self):
         # The alpha weighting must stay per-voxel: the per-element loss shape must match the gathered
         # log-prob shape [B, 1, *spatial], NOT broadcast to a [B, B, *spatial] cross-product between
-        # samples. Regression guard for the spurious unsqueeze that corrupted any batch > 1.
+        # samples (a spurious unsqueeze corrupts any batch > 1).
         import torch.nn.functional as F
 
         torch.manual_seed(0)
@@ -211,8 +211,8 @@ class TestVariance:
 
 def test_perceptual_loss_forward_unpacks_targets() -> None:
     # forward(output, *targets) must hand each target to _compute(output, *targets) as its own
-    # positional tensor; the pre-fix code passed the whole tuple as a single argument, so the
-    # preprocessing/feature-extraction path received a tuple and crashed.
+    # positional tensor; passing the whole tuple as a single argument hands the
+    # preprocessing/feature-extraction path a tuple and crashes.
     loss = object.__new__(PerceptualLoss)
     loss.shape = [128, 128, 128]  # len != 2 -> the non-slice branch is taken
     loss.models = {None: object()}  # short-circuit the lazy model placement on device index None
@@ -299,9 +299,9 @@ class TestImpactRegPCA:
 
 
 def test_accuracy_reports_per_batch_not_a_lifetime_running_fraction() -> None:
-    # Accuracy used to accumulate n/corrects on the instance forever, so it reported one fraction that
-    # blended every epoch and both splits. It must now report the current batch (the logging window means
-    # and resets it), so an all-correct batch is 1.0 and a following all-wrong batch is 0.0 -- not 0.5.
+    # Accuracy must report the current batch (the logging window means and resets it): accumulating
+    # n/corrects on the instance forever blends every epoch and both splits into one fraction. An
+    # all-correct batch is 1.0 and a following all-wrong batch is 0.0 -- not 0.5.
     from konfai.metric.measure import Accuracy
 
     accuracy = Accuracy()
@@ -315,8 +315,8 @@ def test_accuracy_reports_per_batch_not_a_lifetime_running_fraction() -> None:
 
 
 def test_fid_preprocess_images_runs() -> None:
-    # FID.preprocess_images called torch.nn.functional.resize / .normalize(mean, std), neither of which
-    # exists there -- the metric could not execute. It now uses torchvision.transforms.functional.
+    # FID.preprocess_images must use torchvision.transforms.functional: torch.nn.functional has no
+    # resize / normalize(mean, std), so calling them there means the metric cannot execute.
     pytest.importorskip("torchvision")
     from konfai.metric.measure import FID
 
@@ -326,8 +326,8 @@ def test_fid_preprocess_images_runs() -> None:
 
 
 def test_lpips_preprocessing_follows_input_device() -> None:
-    # LPIPS.preprocessing hardcoded .to(0), crashing on a CPU-only host and pinning every DDP rank to
-    # GPU 0. It now keeps the input's device (the model is moved to it lazily in _loss).
+    # LPIPS.preprocessing must keep the input's device (the model is moved to it lazily in _loss):
+    # a hardcoded .to(0) crashes a CPU-only host and pins every DDP rank to GPU 0.
     from konfai.metric.measure import LPIPS
 
     out = LPIPS.preprocessing(torch.zeros(1, 1, 8, 8))
@@ -337,8 +337,8 @@ def test_lpips_preprocessing_follows_input_device() -> None:
 
 
 def test_perceptual_loss_applies_every_loss_to_the_target() -> None:
-    # The inner loop zipped the losses against the targets, so the default {Gram, L1Loss} on a single
-    # reference silently used only Gram. Every configured loss must reach the (single) target layer.
+    # Every configured loss must reach the (single) target layer: zipping the losses against the
+    # targets lets the default {Gram, L1Loss} on a single reference silently use only Gram.
     from unittest.mock import MagicMock
 
     loss = object.__new__(PerceptualLoss)

@@ -19,7 +19,7 @@
 # isort: skip_file
 # Import sorting is disabled for this file. Ruff (the project's import sorter)
 # groups ``konfai`` with third-party imports for modules outside the package,
-# while the legacy pre-commit isort hook wants a separate first-party section.
+# while the pre-commit isort hook wants a separate first-party section.
 # They cannot agree on test files, so both are told to skip and the
 # ruff-compatible order below is maintained by hand.
 import pytest

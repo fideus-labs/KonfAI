@@ -76,7 +76,7 @@ def test_assemble_without_any_patch_raises_patch_error():
 
 
 def test_assemble_with_missing_first_patch_does_not_crash():
-    """#14 regression: a missing index-0 patch must not raise UnboundLocalError.
+    """#14: a missing index-0 patch must not raise UnboundLocalError.
 
     The seed tensor (shape/dtype/device) is taken from the first *present* patch,
     so any single missing patch — including index 0 — assembles cleanly.
@@ -94,7 +94,7 @@ def test_assemble_with_missing_first_patch_does_not_crash():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA for the GPU-accumulation path")
 @pytest.mark.parametrize("combine_cls", [None, Mean, Cosinus, Gaussian])
 def test_accumulator_gpu_blend_matches_cpu(combine_cls):
-    # The v1.6.0 GPU-accumulation feature blends patches on-device; it is only correct if the assembled
+    # GPU accumulation blends patches on-device; it is only correct if the assembled
     # volume matches the CPU assembly of the same patches. Nothing else in the suite compares the two,
     # so a device-dependent blend regression would pass silently. Reassemble identical overlapping
     # patches on CPU and CUDA and require the outputs to be identical.
@@ -230,8 +230,8 @@ def test_gaussian_window_favours_centre_and_reassembles_to_a_weighted_average():
 
 def test_overlap_blend_is_partition_of_unity_at_the_border() -> None:
     # 1-D volume of 20 tiled with patch 8 / overlap 2 -> patches at 0, 6, 12. The border voxels are
-    # covered by a single patch, whose edge band weights ~0.5, so the pre-fix sum-without-normalise
-    # reassembled them at 0.5 instead of 1.0. Dividing by the accumulated weight restores unity.
+    # covered by a single patch, whose edge band weights ~0.5, so a sum without normalisation
+    # reassembles them at 0.5 instead of 1.0. Dividing by the accumulated weight restores unity.
     patch_slices = [(slice(0, 8),), (slice(6, 14),), (slice(12, 20),)]
     combine = Mean()  # Cosinus needs >=2D (SimpleITK distance map), covered below.
     combine.set_patch_config([8], 2)
@@ -246,7 +246,7 @@ def test_overlap_blend_is_partition_of_unity_at_the_border() -> None:
 
 
 def test_overlap_blend_corner_not_quartered_in_2d() -> None:
-    # A 2-D corner is covered by one patch on both axes, so the pre-fix output was ~0.25 there.
+    # A 2-D corner is covered by one patch on both axes, so an unnormalised sum lands at ~0.25 there.
     patch_slices = [
         (slice(0, 8), slice(0, 8)),
         (slice(0, 8), slice(6, 14)),
@@ -268,8 +268,8 @@ def test_overlap_blend_corner_not_quartered_in_2d() -> None:
 
 def test_blended_reassembly_preserves_patch_dtype() -> None:
     # The weight-normalised reassembly must not promote a float16 accumulator to float32: a default
-    # float32 weight_sum silently doubled the peak memory of large multi-class volumes (the 118-class
-    # whole-body segmentation OOM). Many channels make the effect visible in the assembled shape.
+    # float32 weight_sum silently doubles the peak memory of large multi-class volumes (a 118-class
+    # whole-body segmentation OOMs). Many channels make the effect visible in the assembled shape.
     patch_slices = [
         (slice(0, 8), slice(0, 8)),
         (slice(0, 8), slice(6, 14)),
@@ -290,8 +290,8 @@ def test_blended_reassembly_preserves_patch_dtype() -> None:
 
 def test_gaussian_blend_in_fp16_has_no_nan_at_single_coverage_corners() -> None:
     # The 3-D Gaussian corner weight (~7e-10 for a 16^3 patch) underflows fp16 — and the 1e-8 division
-    # floor itself rounds to zero in fp16 — so corner voxels covered by a single patch reassembled as
-    # 0/0 = NaN. Weights are floored at the dtype's smallest normal instead, keeping the weighted
+    # floor itself rounds to zero in fp16 — so corner voxels covered by a single patch reassemble as
+    # 0/0 = NaN. Weights must be floored at the dtype's smallest normal instead, keeping the weighted
     # average exact wherever the true weight is representable and recoverable at the corners.
     gaussian = Gaussian()
     gaussian.set_patch_config([16, 16, 16], 8)

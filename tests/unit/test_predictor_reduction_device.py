@@ -30,7 +30,7 @@ def _dataset(device: torch.device | int, nb_data_augmentation: int = 1) -> OutSa
 
 
 def test_output_dataset_device_defaults_to_cpu_without_to(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Regression: ``Dataset.__init__`` does not forward ``super().__init__()``, so ``NeedDevice.__init__``
+    # ``Dataset.__init__`` does not forward ``super().__init__()``, so ``NeedDevice.__init__``
     # is skipped through the MRO. A real (not ``__new__``) construction must still leave ``self.device``
     # set, otherwise a CPU-only PREDICTION run (device propagation is CUDA-gated) raises AttributeError.
     monkeypatch.setenv("KONFAI_config_file", "unused.yml")
@@ -132,7 +132,7 @@ def test_accumulate_device_budgets_every_tta_augmentation(monkeypatch: pytest.Mo
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (5 * 1024**3, 25 * 1024**3))
     patch = torch.zeros(1, 8, dtype=torch.float16, device="cuda")
     voxels = 512 * 1024**2  # (C+1)=2 x 2 bytes x voxels = 2 GiB per augmentation
-    # T=1: 2 GiB < 5 x 0.9 -> GPU ; T=3: 6 GiB >= 4.5 GiB -> whole case on CPU. The accumulation gate now
+    # T=1: 2 GiB < 5 x 0.9 -> GPU ; T=3: 6 GiB >= 4.5 GiB -> whole case on CPU. The accumulation gate
     # budgets accumulator + measured forward (0 here); the reduction temp fit-checks itself at get_output.
     assert _dataset(0, nb_data_augmentation=1)._accumulate_device(patch, _FakeAccumulator([voxels])).type == "cuda"
     assert _dataset(0, nb_data_augmentation=3)._accumulate_device(patch, _FakeAccumulator([voxels])).type == "cpu"

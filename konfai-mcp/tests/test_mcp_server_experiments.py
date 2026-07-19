@@ -65,7 +65,7 @@ def test_default_prediction_checkpoint_is_scoped_to_the_run(tmp_path: Path) -> N
 
     # Scoped to RUN_A: its own checkpoint, NOT run B's newer one.
     assert service.discover_model_paths(run_name="RUN_A") == [run_a_ckpt]
-    # Unscoped falls back to the global newest (the previous behaviour), used only when no run is known.
+    # Unscoped falls back to the global newest, used only when no run is known.
     assert service.discover_model_paths() == [run_b_ckpt]
 
 
@@ -87,8 +87,8 @@ def test_extensionless_dicom_series_directory_is_detected(tmp_path: Path) -> Non
 
 
 def test_label_statistics_cover_many_class_segmentations_and_flag_intensity_groups(tmp_path: Path) -> None:
-    # A whole-body segmentation (e.g. TotalSegmentator, ~117 classes) must still get per-label stats -- the
-    # old <=64 cap silently dropped them. An intensity image stored as int16 (thousands of values) must NOT
+    # A whole-body segmentation (e.g. TotalSegmentator, ~117 classes) must still get per-label stats --
+    # a low cap would silently drop them. An intensity image stored as int16 (thousands of values) must NOT
     # produce a huge label dict; it is flagged as high-cardinality instead of silently omitted.
     sitk = pytest.importorskip("SimpleITK")
     service = _service(tmp_path)
