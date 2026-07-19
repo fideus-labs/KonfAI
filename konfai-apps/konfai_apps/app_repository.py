@@ -793,6 +793,15 @@ class LocalAppRepository(AppRepositoryInfo):
     def _get_filenames(self) -> list[str]:
         raise NotImplementedError()
 
+    def _refreshed_filenames(self) -> list[str] | None:
+        """A freshly fetched full listing from the backing remote, or None when there is none.
+
+        A directory-backed app has nothing to refresh; the Hugging Face repository overrides this
+        with a Hub tree call, so an asset missing from the lazily populated local snapshot can still
+        be found and downloaded.
+        """
+        return None
+
     @abstractmethod
     def _download(self, filename: str) -> Path:
         raise NotImplementedError()
@@ -807,11 +816,10 @@ class LocalAppRepository(AppRepositoryInfo):
         when offline.
         """
         filenames = self._get_filenames()
-        if isinstance(self, LocalAppRepositoryFromHF):
-            try:
-                filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
-            except AppRepositoryError:
-                pass
+        try:
+            filenames = self._refreshed_filenames() or filenames
+        except AppRepositoryError:
+            pass
         return filenames
 
     def has_capabilities(self) -> tuple[bool, bool, bool]:
@@ -852,17 +860,14 @@ class LocalAppRepository(AppRepositoryInfo):
         inference_file_path = self._download(self._require_repo_filename(prediction_file, filenames))
         available_models = [name for name in filenames if name.endswith(".pt")]
         if len(name_of_models):
-            if isinstance(self, LocalAppRepositoryFromHF):
-                for name in name_of_models:
-                    if self._find_repo_filename(name, filenames, suffix=".pt") is None:
-                        filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
-                        break
+            if any(self._find_repo_filename(name, filenames, suffix=".pt") is None for name in name_of_models):
+                filenames = self._refreshed_filenames() or filenames
             for name in name_of_models:
                 models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=".pt")))
         else:
             models_to_download = available_models
-            if len(available_models) < number_of_model and isinstance(self, LocalAppRepositoryFromHF):
-                remote_filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
+            remote_filenames = self._refreshed_filenames() if len(available_models) < number_of_model else None
+            if remote_filenames is not None:
                 remote_models = [name for name in remote_filenames if name.endswith(".pt")]
                 models_to_download = available_models + [name for name in remote_models if name not in available_models]
                 filenames = remote_filenames
@@ -1041,11 +1046,8 @@ class LocalAppRepository(AppRepositoryInfo):
         """
         selected: list[str] = []
         if name_of_models:
-            if isinstance(self, LocalAppRepositoryFromHF):
-                for name in name_of_models:
-                    if self._find_repo_filename(name, filenames, suffix=".pt") is None:
-                        filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
-                        break
+            if any(self._find_repo_filename(name, filenames, suffix=".pt") is None for name in name_of_models):
+                filenames = self._refreshed_filenames() or filenames
             selected = [self._require_repo_filename(name, filenames, suffix=".pt") for name in name_of_models]
         else:
             default_name: str | None = None
@@ -1056,8 +1058,8 @@ class LocalAppRepository(AppRepositoryInfo):
                     break
             if default_name is None:
                 available = sorted(name for name in filenames if name.endswith(".pt"))
-                if not available and isinstance(self, LocalAppRepositoryFromHF):
-                    filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
+                if not available:
+                    filenames = self._refreshed_filenames() or filenames
                     available = sorted(name for name in filenames if name.endswith(".pt"))
                 if not available:
                     raise AppRepositoryError(f"No checkpoint (.pt) found to fine-tune in app '{self._app_name}'.")
@@ -1267,6 +1269,9 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
 
     def _get_filenames(self) -> list[str]:
         return LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, self._force_update)
+
+    def _refreshed_filenames(self) -> list[str] | None:
+        return LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
 
     def _get_available_checkpoint_names(self, checkpoints_name: list[str], filenames: list[str]) -> list[str]:
         cached_filenames = LocalAppRepositoryFromHF.get_cached_filenames(self._repo_id, self._app_name)
