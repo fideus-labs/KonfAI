@@ -50,6 +50,7 @@ import os
 import re
 from collections.abc import Sequence
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -369,12 +370,17 @@ def read_volume(
     return volume[np.newaxis]  # (1, Z, Y, X)
 
 
+@lru_cache(maxsize=64)
 def get_dicom_info(
     directory: str | Path,
     *,
     series_uid: str | None = None,
 ) -> dict[str, Any]:
-    """Read DICOM series shape and geometry without decoding pixel data."""
+    """Read DICOM series shape and geometry without decoding pixel data.
+
+    Memoised per directory: input DICOM is read-only for a run, so the series walk and header reads are
+    done once instead of on every patch read. Callers that mutate the result must copy it first.
+    """
     selected_uid, files = _select_series_files(directory, series_uid)
     datasets = sort_series(files, stop_before_pixels=True)
     origin, spacing, direction = extract_geometry(datasets)
