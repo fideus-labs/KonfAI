@@ -34,6 +34,25 @@ def _image_attributes() -> Attribute:
     return attributes
 
 
+def test_flatten_transforms_recurses_into_nested_composites() -> None:
+    """The transform serializer walks a composite to its leaves. SimpleITK keeps a nested composite
+    nested (``GetNthTransform`` returns it as-is), so a single-level walk would hand that composite to
+    the per-leaf type switch, which rejects it -- the recursion is what keeps a nested chain storable."""
+    sitk = pytest.importorskip("SimpleITK")
+    from konfai.utils.dataset import _flatten_transforms
+
+    inner = sitk.CompositeTransform([sitk.Euler3DTransform(), sitk.AffineTransform(3)])
+    outer = sitk.CompositeTransform(3)
+    outer.AddTransform(sitk.Euler3DTransform())
+    outer.AddTransform(inner)  # the nested composite SimpleITK preserves verbatim
+
+    assert isinstance(outer.GetNthTransform(1), sitk.CompositeTransform)  # premise: nesting survives
+    leaves = _flatten_transforms(outer)
+    assert [type(t).__name__ for t in leaves] == ["Euler3DTransform", "Euler3DTransform", "AffineTransform"]
+    assert all(not isinstance(t, sitk.CompositeTransform) for t in leaves)
+    assert len(_flatten_transforms(sitk.Euler3DTransform())) == 1  # a lone transform is its own single leaf
+
+
 # ---------------------------------------------------------------------------
 # DICOM tests (no real DICOM files — uses unittest.mock)
 # ---------------------------------------------------------------------------

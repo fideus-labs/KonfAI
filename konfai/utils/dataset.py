@@ -313,6 +313,20 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     return data, attributes
 
 
+def _flatten_transforms(transform: sitk.Transform) -> list[sitk.Transform]:
+    """The leaf transforms of a (possibly nested) composite, in application order.
+
+    ``CompositeTransform.GetNthTransform`` can itself return a composite, so a single-level walk
+    leaves a nested composite in the list and the serializer rejects it. Recurse to the leaves.
+    """
+    if isinstance(transform, sitk.CompositeTransform):
+        leaves: list[sitk.Transform] = []
+        for i in range(transform.GetNumberOfTransforms()):
+            leaves.extend(_flatten_transforms(transform.GetNthTransform(i)))
+        return leaves
+    return [transform]
+
+
 def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     """Read shape and metadata from an image file without loading its full pixel data."""
     attributes = Attribute()
@@ -713,12 +727,7 @@ class Dataset:
                 data, attributes_tmp = image_to_data(data)
                 attributes.update(attributes_tmp)
             elif isinstance(data, sitk.Transform):
-                transforms = []
-                if isinstance(data, sitk.CompositeTransform):
-                    for i in range(data.GetNumberOfTransforms()):
-                        transforms.append(data.GetNthTransform(i))
-                else:
-                    transforms.append(data)
+                transforms = _flatten_transforms(data)
                 datas = []
                 for i, transform in enumerate(transforms):
                     if isinstance(transform, sitk.Euler3DTransform):
@@ -954,12 +963,7 @@ class Dataset:
             attributes = Attribute()
             if os.path.exists(f"{self.filename}{name}.itk.txt"):
                 data = sitk.ReadTransform(f"{self.filename}{name}.itk.txt")
-                transforms = []
-                if isinstance(data, sitk.CompositeTransform):
-                    for i in range(data.GetNumberOfTransforms()):
-                        transforms.append(data.GetNthTransform(i))
-                else:
-                    transforms.append(data)
+                transforms = _flatten_transforms(data)
                 datas = []
                 for i, transform in enumerate(transforms):
                     if isinstance(transform, sitk.Euler3DTransform):
