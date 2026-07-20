@@ -232,9 +232,7 @@ def test_parser_default_accepts_valid_transport_env(monkeypatch: pytest.MonkeyPa
 # -- Finding 1: ONNX export runs in the spawn subprocess, never in the server process -----------
 
 
-def test_package_from_session_runs_onnx_export_in_subprocess(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_package_from_session_runs_onnx_export_in_subprocess(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     layout = WorkspaceLayout(tmp_path / "workspaces")
     workspace = layout.workspace_dir()
     (workspace / "Checkpoints" / "run").mkdir(parents=True)

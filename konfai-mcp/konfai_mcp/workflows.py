@@ -44,16 +44,34 @@ WORKFLOW_SPECS: dict[str, WorkflowSpec] = {
     spec.kind: spec
     for spec in (
         WorkflowSpec(
-            "train", "Config.yml", "Trainer", "konfai.trainer", "Trainer", "TRAIN",
-            "run_train", ("trainer", "training"),
+            "train",
+            "Config.yml",
+            "Trainer",
+            "konfai.trainer",
+            "Trainer",
+            "TRAIN",
+            "run_train",
+            ("trainer", "training"),
         ),
         WorkflowSpec(
-            "prediction", "Prediction.yml", "Predictor", "konfai.predictor", "Predictor", "PREDICTION",
-            "run_prediction", ("predict", "predictor"),
+            "prediction",
+            "Prediction.yml",
+            "Predictor",
+            "konfai.predictor",
+            "Predictor",
+            "PREDICTION",
+            "run_prediction",
+            ("predict", "predictor"),
         ),
         WorkflowSpec(
-            "evaluation", "Evaluation.yml", "Evaluator", "konfai.evaluator", "Evaluator", "EVALUATION",
-            "run_evaluation", ("eval", "evaluate", "evaluator"),
+            "evaluation",
+            "Evaluation.yml",
+            "Evaluator",
+            "konfai.evaluator",
+            "Evaluator",
+            "EVALUATION",
+            "run_evaluation",
+            ("eval", "evaluate", "evaluator"),
         ),
     )
 }
