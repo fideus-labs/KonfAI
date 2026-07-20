@@ -383,9 +383,7 @@ def test_mcp_server_inspect_object_signature_isolates_library_import(
             assert subprocess_calls == []
 
             # Installed-library classpath -- its import MUST be isolated in the subprocess.
-            imported = await client.call_tool(
-                "inspect_object_signature", {"classpath": "json.decoder.JSONDecoder"}
-            )
+            imported = await client.call_tool("inspect_object_signature", {"classpath": "json.decoder.JSONDecoder"})
             assert imported.structured_content["source"] == "imported"
             assert imported.structured_content["ok"] is True
             assert len(subprocess_calls) == 1
@@ -395,9 +393,7 @@ def test_mcp_server_inspect_object_signature_isolates_library_import(
 
             # The colon form 'pkg:mod:Class' resolves to a dotted module ('json.decoder') and imports too --
             # its first token has no dot, so it must NOT be mistaken for a local File:Class and stay in-process.
-            colon_form = await client.call_tool(
-                "inspect_object_signature", {"classpath": "json:decoder:JSONDecoder"}
-            )
+            colon_form = await client.call_tool("inspect_object_signature", {"classpath": "json:decoder:JSONDecoder"})
             assert colon_form.structured_content["source"] == "imported"
             assert len(subprocess_calls) == 2
             assert subprocess_calls[1][1]["classpath"] == "json:decoder:JSONDecoder"

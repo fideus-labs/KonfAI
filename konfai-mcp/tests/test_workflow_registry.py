@@ -40,9 +40,7 @@ def test_derived_registries_come_from_the_table() -> None:
     assert server_support.WORKFLOW_CONFIG_FILES == {k: s.config_file for k, s in WORKFLOW_SPECS.items()}
     assert server_support.WORKFLOW_ROOT_KEYS == {k: s.root_key for k, s in WORKFLOW_SPECS.items()}
     assert server.WORKFLOWS == set(WORKFLOW_SPECS)
-    assert capabilities._WORKFLOW_ROOTS == {
-        k: (s.root_key, s.module, s.class_name) for k, s in WORKFLOW_SPECS.items()
-    }
+    assert capabilities._WORKFLOW_ROOTS == {k: (s.root_key, s.module, s.class_name) for k, s in WORKFLOW_SPECS.items()}
     assert set(JOB_RETRY_TOOLS) == set(JOB_KINDS)
 
 
