@@ -597,3 +597,57 @@ def test_polylr_fresh_run_unchanged():
     assert lrs[1] == 0.1 * (1 - 2 / 100) ** 0.9
     assert lrs[2] == 0.1 * (1 - 3 / 100) ** 0.9
     assert scheduler.last_epoch == -1
+
+
+def test_composite_criteria_are_scheduled_on_the_owning_networks_counter():
+    """A composite root never steps its own _it (only networks owning measure+optimizer do), so
+    criteria scheduled on the root's counter freeze at 0: start/stop windows and loss-weight
+    schedulers of a GAN never fire. Measure.update must receive the OWNING network's _it."""
+    from konfai.metric.schedulers import Constant
+    from konfai.network.network import CriterionsAttr, Measure
+
+    class Generator(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Head", torch.nn.Conv2d(1, 1, 1))
+
+    class Gan(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Generator", Generator())
+
+    root = Gan()
+    sub = next(net for name, net in root.get_networks().items() if name.endswith(".Generator"))
+    measure = Measure("Generator", {})
+    attr = CriterionsAttr()
+    attr.schedulers = {Constant(): None}
+    measure.outputs_criterions = {"Generator.Head": {"CT": {torch.nn.L1Loss(): attr}}}
+    measure.init(root, ["CT"])
+    sub.measure = measure
+    sub.scaler = torch.amp.GradScaler("cuda", enabled=False)
+    sub.measure.scaler = sub.scaler
+    sub.optimizer = torch.optim.AdamW(sub.parameters())
+    root.init_outputs_group()
+
+    seen_its: list[int] = []
+    original_update = sub.measure.update
+
+    def recording_update(output_group, output, batch, it, nb, training):
+        seen_its.append(it)
+        return original_update(output_group, output, batch, it, nb, training)
+
+    sub.measure.update = recording_update  # type: ignore[method-assign]
+
+    class _BatchItem:
+        def __init__(self, tensor):
+            self.tensor = tensor
+            self.is_input = True
+            self.attribute = [Attribute()]
+
+    batch = {"CT": _BatchItem(torch.ones(1, 1, 4, 4))}
+    for _step in range(3):
+        root.forward(batch)
+        root.backward(root)
+
+    assert seen_its == [0, 1, 2], f"criteria must see the owner's advancing counter, got {seen_its}"
+    assert root._it == 0  # the composite root still owns no optimizer and never steps
