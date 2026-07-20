@@ -41,6 +41,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from konfai.utils.errors import AppMetadataError, AppRepositoryError
 
 from .app_repository import get_app_repository_info
+from .remote_options import parse_remote_options, remote_options_to_cli_args
 
 MAX_ACTIVE_JOBS = 32
 
@@ -891,9 +892,11 @@ def submit_job():
     - Creates a unique temporary workspace
     - Registers a Job object in the global registry
     - Saves uploaded files with size quotas
+    - Validates the ``options`` tunables against ``REMOTE_OPTION_FIELDS`` (422 on
+      an unknown key) and appends them to the command line
     - Builds the final command line
     - Spawns the asynchronous job execution task
-    - Returns job metadata (id, URLs)
+    - Returns job metadata (id, URLs, and the ``accepted_options`` names)
 
     This provides a uniform execution model for all apps
     (infer, evaluate, pipeline, fine_tune, etc.).
@@ -908,6 +911,13 @@ def submit_job():
             app_name = kwargs.get("app_name")
             if app_name not in _APPS:
                 raise HTTPException(404, f"Unknown app '{app_name}'")
+
+            # Validate before any workspace exists; an unknown or malformed tunable must be refused
+            # loudly (422 naming it), never accepted and then ignored.
+            try:
+                options = parse_remote_options(fn.__name__, kwargs.get("options") or "{}")
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
 
             job_id = uuid.uuid4().hex[:12]
             run_dir = Path(tempfile.mkdtemp(prefix=f"konfai_job_{job_id}_")).resolve()
@@ -954,6 +964,7 @@ def submit_job():
                 quiet = kwargs.get("quiet")
 
                 cmd = await fn(*args, **kwargs)
+                cmd += remote_options_to_cli_args(fn.__name__, options)
                 cmd += ["--output", str(job.output_dir)]
 
                 requested = [int(x) for x in (gpu or "").split(",") if x.strip()]
@@ -998,6 +1009,9 @@ def submit_job():
                 "status_url": f"/jobs/{job_id}",
                 "logs_url": f"/jobs/{job_id}/logs",
                 "result_url": f"/jobs/{job_id}/result",
+                # Always present (even empty): its presence tells the client the tunables it sent
+                # were applied; an old server omits it and the client refuses to continue.
+                "accepted_options": sorted(options),
             }
 
         return wrapper
@@ -1017,6 +1031,7 @@ async def infer(
     mc: Annotated[int, Form()] = 0,
     uncertainty: Annotated[bool, Form()] = False,
     prediction_file: Annotated[str, Form()] = "Prediction.yml",
+    options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",  # CSV "0,1"
     cpu: Annotated[int, Form()] = 1,
     quiet: Annotated[bool, Form()] = False,
@@ -1094,6 +1109,7 @@ async def evaluate(
     gt_groups: Annotated[str | None, Form()] = None,
     mask_groups: Annotated[str | None, Form()] = None,
     evaluation_file: Annotated[str, Form()] = "Evaluation.yml",
+    options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",
     cpu: Annotated[int, Form()] = 1,
     quiet: Annotated[bool, Form()] = False,
@@ -1145,6 +1161,7 @@ async def uncertainty(
     inputs: Annotated[list[UploadFile], File(...)],
     inputs_groups: Annotated[str | None, Form()] = None,
     uncertainty_file: Annotated[str, Form()] = "Uncertainty.yml",
+    options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",
     cpu: Annotated[int, Form()] = 1,
     quiet: Annotated[bool, Form()] = False,
@@ -1203,6 +1220,7 @@ async def pipeline(
     evaluation_file: Annotated[str, Form()] = "Evaluation.yml",
     uncertainty: Annotated[bool, Form()] = True,
     uncertainty_file: Annotated[str, Form()] = "Uncertainty.yml",
+    options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",
     cpu: Annotated[int, Form()] = 1,
     quiet: Annotated[bool, Form()] = False,
@@ -1290,6 +1308,7 @@ async def fine_tune(
     models: Annotated[str, Form()] = "",  # CSV
     config_file: Annotated[str, Form()] = "Config.yml",
     lr: Annotated[float | None, Form()] = None,
+    options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",
     cpu: Annotated[int, Form()] = 1,
     quiet: Annotated[bool, Form()] = False,

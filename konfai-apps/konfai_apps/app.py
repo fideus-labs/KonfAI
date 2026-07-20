@@ -17,6 +17,7 @@
 """Local and remote execution helpers for packaged KonfAI Apps."""
 
 import inspect
+import json
 import os
 import shutil
 import signal
@@ -40,6 +41,7 @@ from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_format_level, split_p
 from ruamel.yaml import YAML
 
 from .app_repository import LocalAppRepository, get_app_repository_info
+from .remote_options import REMOTE_OPTION_FIELDS, collect_remote_options
 
 
 class CancelProcess(RuntimeError):
@@ -434,7 +436,11 @@ class KonfAIAppClient(AbstractKonfAIApp):
 
         1. Introspects the wrapped function signature to filter kwargs.
         2. Builds a multipart request containing file fields for inputs, ground
-           truth, and masks, plus scalar fields for other parameters.
+           truth, and masks, plus scalar fields for other parameters. The
+           operation's tunables (``REMOTE_OPTION_FIELDS``) travel as one JSON
+           ``options`` field; if the server does not acknowledge them via
+           ``accepted_options``, the submission fails instead of silently
+           running without them.
         3. Submits the job and retrieves a ``job_id``.
         4. Streams logs until completion markers are received.
         5. Downloads and extracts results into the requested output directory.
@@ -461,19 +467,23 @@ class KonfAIAppClient(AbstractKonfAIApp):
             Wrapped method that performs remote submission + monitoring + download.
         """
         sig = inspect.signature(func)
+        option_fields = REMOTE_OPTION_FIELDS.get(func.__name__, ())
 
         @wraps(func)
         def wrapper(self, *args: Any, **kwargs: Any) -> None:
             job_id: str | None = None
 
             params = sig.parameters
-            kwargs_fun = {k: v for k, v in kwargs.items() if k in params}
+            # A spec'd tunable must never be silently dropped: if it is missing from the method
+            # signature, binding raises instead of the value vanishing.
+            kwargs_fun = {k: v for k, v in kwargs.items() if k in params or k in option_fields}
 
             bound = sig.bind_partial(self, *args, **kwargs_fun)
             bound.apply_defaults()
             bound.arguments.pop("self", None)
 
             output = bound.arguments.pop("output", None)
+            options = collect_remote_options(func.__name__, bound.arguments)
             files = []
             data = {}
             dataset_zip_dir: str | None = None
@@ -526,6 +536,8 @@ class KonfAIAppClient(AbstractKonfAIApp):
                             del data["models"]
                     if "gpu" in data:
                         data["gpu"] = ",".join(str(x) for x in data["gpu"])
+                    if options:
+                        data["options"] = json.dumps(options)
                     connect_timeout = 60
                     read_timeout: int = 600
 
@@ -541,6 +553,16 @@ class KonfAIAppClient(AbstractKonfAIApp):
                         r.raise_for_status()
                         resp = r.json()
                         job_id = resp["job_id"]
+
+                    # ``job_id`` is set before raising so the ``finally`` block kills the remote job.
+                    lost = sorted(set(options) - set(resp.get("accepted_options") or []))
+                    if lost:
+                        raise KonfAIAppClientError(
+                            f"The remote server did not acknowledge these parameters: {', '.join(lost)}.",
+                            "The server is running a konfai-apps version too old to honour them; it would "
+                            "silently ignore them.",
+                            "Upgrade konfai-apps on the server, or drop these options.",
+                        )
 
                     self.stream_logs(job_id)
                     self.download_result(job_id, output)
@@ -583,6 +605,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         mc: int = 0,
         patch_size: list[int] | None = None,
         batch_size: int | None = None,
+        config_overrides: list[str] | None = None,
         uncertainty: bool = False,
         prediction_file: str = "Prediction.yml",
         gpu: list[int] = [],
@@ -632,6 +655,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         mc: int = 0,
         patch_size: list[int] | None = None,
         batch_size: int | None = None,
+        config_overrides: list[str] | None = None,
         prediction_file: str = "Prediction.yml",
         mask: list[list[Path]] | None = None,
         evaluation_file: str = "Evaluation.yml",
@@ -658,6 +682,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         quiet: bool = False,
         config_file: str = "Config.yml",
         lr: float | None = None,
+        config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
     ) -> None:
         pass
