@@ -412,7 +412,8 @@ def _convert_union_sequence_value(
         for candidate_type in valid_types:
             origin = get_origin(candidate_type)
             if origin is not None:
-                if isinstance(value, origin):
+                # A typing-only origin (Literal, Annotated, ...) is not a class: isinstance would raise.
+                if isinstance(origin, type) and isinstance(value, origin):
                     return value
             elif isinstance(candidate_type, type) and candidate_type not in (type(None), types.NoneType):
                 # bool subclasses int: only a bool member accepts a bool, never int/float.

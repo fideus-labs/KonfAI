@@ -893,7 +893,9 @@ class FID(Criterion):
     def __init__(self) -> None:
         super().__init__()
         _require_optional("scipy.linalg", criterion="FID", extra="fid")
-        self.inception_model = FID.InceptionV3().cuda()
+        # Built on the CPU and moved to the evaluated tensor's device in forward: a hardcoded .cuda()
+        # crashes CPU-only hosts and pins every DDP rank to the same GPU.
+        self.inception_model = FID.InceptionV3()
 
     @staticmethod
     def preprocess_images(image: torch.Tensor) -> torch.Tensor:
@@ -926,7 +928,8 @@ class FID(Criterion):
         return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean)
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        real_images = FID.preprocess_images(targets[0].squeeze(0).permute([1, 0, 2, 3]))
+        self.inception_model.to(output.device)
+        real_images = FID.preprocess_images(targets[0].to(output.device).squeeze(0).permute([1, 0, 2, 3]))
         generated_images = FID.preprocess_images(output.squeeze(0).permute([1, 0, 2, 3]))
 
         real_features = FID.get_features(real_images, self.inception_model)

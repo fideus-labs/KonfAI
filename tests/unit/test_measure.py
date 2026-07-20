@@ -450,3 +450,14 @@ def test_accepts_init_flag_lives_on_the_criterion_not_the_attr() -> None:
     criterion = KLDivergence(shape=[16, 16])
     assert getattr(criterion, "accepts_init", False) is True
     assert getattr(CriterionsAttr(), "accepts_init", False) is False
+
+
+def test_fid_builds_on_cpu_and_follows_the_input_device():
+    # A hardcoded .cuda() at construction crashes CPU-only hosts; the model must be built on the
+    # CPU and moved to the evaluated tensor's device in forward.
+    pytest.importorskip("torchvision")
+    pytest.importorskip("scipy")
+    from konfai.metric.measure import FID
+
+    metric = FID()
+    assert next(metric.inception_model.parameters()).device.type == "cpu"
