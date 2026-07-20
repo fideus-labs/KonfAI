@@ -707,9 +707,10 @@ class Dataset:
                     )
                 else:
                     _h5_read_pool.drop(self.filename)
-                    # locking=False on every KonfAI open (the HDF5 flag must agree across a file's
-                    # handles): same-process access is serialized by the per-file thread lock, and a
-                    # pooled reader must not hold a lock that blocks another process's write-open.
+                    # locking=False on every KonfAI open: the HDF5 file-lock flag must agree across a file's
+                    # handles, and the pooled reader (unlocked) stays open on the same file while a stream
+                    # writes it -- the "invisible until finalize" read contract reads the store mid-write.
+                    # Same-process races are held off by the per-file thread lock above.
                     if not os.path.exists(self.filename):
                         Path(self.filename).parent.mkdir(parents=True, exist_ok=True)
                         self.h5 = h5py.File(self.filename, "w", locking=False)
@@ -936,12 +937,13 @@ class Dataset:
             if os.path.exists(direct):
                 return direct
 
-            # Deprioritize sidecar halves of paired formats: .raw/.zraw (detached MetaImage/NRRD data,
-            # unreadable standalone) and .img (readable via its paired .hdr, but prefer the header half).
-            # glob order is unsorted, so a bare matches[0] could hand the .raw half of a .mhd+.raw pair
-            # to the reader.
+            # Skip a crashed writer's leftover temporary (``.tmp``): it is a header plus a reserved,
+            # zero-filled pixel block that would read back as a plausible partial volume. Deprioritize
+            # sidecar halves of paired formats: .raw/.zraw (detached MetaImage/NRRD data, unreadable
+            # standalone) and .img (readable via its paired .hdr, but prefer the header half). glob order
+            # is unsorted, so a bare matches[0] could hand the .raw half of a .mhd+.raw pair to the reader.
             matches = sorted(
-                glob.glob(f"{base}.*"),
+                (candidate for candidate in glob.glob(f"{base}.*") if not candidate.endswith(".tmp")),
                 key=lambda candidate: candidate.lower().endswith((".raw", ".zraw", ".img")),
             )
             return matches[0] if matches else None
