@@ -170,15 +170,26 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
 
     dataset_file = Dataset.DicomFile(str(tmp_path), read=True)
 
-    # one patch read: 1 discovery + 2 sorts (pre-fix: 3 discoveries + 4 sorts)
+    # one COLD patch read: 1 discovery + 2 sorts (pre-fix: 3 discoveries + 4 sorts). get_dicom_info
+    # is memoised, so the cache must be cleared for the spy to see the cold cost at all.
     calls["discover"] = calls["sort"] = 0
+    dicom.get_dicom_info.cache_clear()
     data, _attr = dataset_file.file_to_data_slice("", "case", sl)
     assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
     assert calls["discover"] == 1
     assert calls["sort"] == 2
 
-    # statistics over Z: 1 discovery (pre-fix: O(Z)); numerics preserved (Welford, ddof=1)
+    # a WARM read of the same case re-discovers nothing; only the per-read slab sort (pixel
+    # loading of the selected files) remains
     calls["discover"] = calls["sort"] = 0
+    data, _attr = dataset_file.file_to_data_slice("", "case", sl)
+    assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
+    assert calls["discover"] == 0
+    assert calls["sort"] == 1
+
+    # statistics over Z: 1 cold discovery (pre-fix: O(Z)); numerics preserved (Welford, ddof=1)
+    calls["discover"] = calls["sort"] = 0
+    dicom.get_dicom_info.cache_clear()
     stats = dataset_file.file_to_data_statistics("", "case")
     assert calls["discover"] == 1
     assert np.isclose(stats["mean"], float(vol.mean()), atol=1e-4)
