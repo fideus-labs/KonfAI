@@ -159,11 +159,12 @@ pytest konfai-apps/tests
 is likewise **not** part of `pixi run test`:
 
 ```bash
-pip install -e ./konfai-mcp
+pip install -e ".[imaging]" -e ./konfai-mcp
 pytest konfai-mcp/tests
 ```
 
-The segmentation end-to-end test needs the imaging extra (`konfai[imaging]`).
+The segmentation end-to-end test needs the imaging extra (`konfai[imaging]`),
+installed above alongside the package.
 
 ### Validate an example manually
 
