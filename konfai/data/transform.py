@@ -1845,6 +1845,7 @@ class KonfAIInference(Transform):
         number_of_tta: int = 0,
         number_of_mc: int = 0,
         per_channel: bool = False,
+        config_overrides: list[str] | None = None,
     ):
         super().__init__()
         self.repo_id = repo_id
@@ -1853,8 +1854,17 @@ class KonfAIInference(Transform):
         self.number_of_tta = number_of_tta
         self.number_of_mc = number_of_mc
         self.per_channel = per_channel
+        # Generic 'NAME=VALUE' overrides for the nested run's own config (the --set mechanism), so a caller
+        # can tune it without editing the bundle -- not a memory workaround (never shrink a trained
+        # segmentation's patch_size: it degrades the result; the allocator hint below keeps memory in check).
+        self.config_overrides = config_overrides
 
     def infer_entry(self, dataset_path: Path, output_path: Path, gpu: list[int]):
+        # Defragment the nested run's CUDA allocator: a heavy model (e.g. a 3D segmentation a metric relies
+        # on) can OOM on a large volume purely from reserved-but-unallocated blocks even though the live
+        # footprint fits -- so it runs at its trained patch_size, not a shrunk one. setdefault so an
+        # explicit caller setting still wins.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         try:
             from konfai_apps import KonfAIApp
         except ImportError as exc:  # pragma: no cover - depends on optional install
@@ -1876,6 +1886,7 @@ class KonfAIInference(Transform):
             self.checkpoints_name,
             self.number_of_tta,
             mc=0,
+            config_overrides=self.config_overrides,
             uncertainty=False,
             gpu=gpu,
         )
@@ -1901,6 +1912,11 @@ class KonfAIInference(Transform):
                 sitk.WriteImage(image, str(dataset_path / "P000" / "Volume.mha"))
 
             ctx = get_context("spawn")
+
+            # Release the caller's cached GPU blocks so the nested run (its own process, same physical
+            # device) is not squeezed by memory this process is only holding in reserve.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             p = ctx.Process(
                 target=self.infer_entry, args=(dataset_path, Path(tmpdir) / "Output", cuda_visible_devices())
