@@ -363,6 +363,23 @@ def confirm_overwrite_or_raise(path: Path, label: str, error_cls: type[Exception
         raise error_cls(message, "Overwrite was declined.", guidance)
 
 
+def clear_directory_except_logs(path: Path) -> None:
+    """Remove a run directory's contents but keep its ``log_*.txt`` files.
+
+    The rank-0 ``Log`` opens ``<dir>/log_0.txt`` before the workflow's overwrite branch runs, so an
+    ``rmtree`` of the directory unlinks the open file: every parent-process line (config binding,
+    dataset scan, a crash traceback) is written to an unlinked inode and lost -- and Windows refuses
+    to delete a directory holding an open file. Clearing around the live logs preserves them.
+    """
+    for child in path.iterdir():
+        if child.name.startswith("log_") and child.suffix == ".txt":
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def _log_signal_format(array: np.ndarray) -> dict[str, np.ndarray]:
     return {str(i): channel for i, channel in enumerate(array)}
 
@@ -494,7 +511,9 @@ class Log(MinimalLog):
             path = statistics_directory()
         self.log_path = path / name
         self.log_path.mkdir(parents=True, exist_ok=True)
-        self.file = open(self.log_path / f"log_{rank}.txt", "w", buffering=1)
+        # Append, never truncate: this file is opened BEFORE the overwrite prompt runs, so a "w" mode
+        # destroyed the previous run's log even when the user declined the overwrite.
+        self.file = open(self.log_path / f"log_{rank}.txt", "a", buffering=1)
 
     def __enter__(self):
         super().__enter__()

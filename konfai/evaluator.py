@@ -36,6 +36,7 @@ from konfai.utils.errors import ConfigError, EvaluatorError
 from konfai.utils.runtime import (
     DistributedObject,
     State,
+    clear_directory_except_logs,
     configure_workflow_environment,
     confirm_overwrite_or_raise,
     run_distributed_app,
@@ -355,7 +356,9 @@ class Evaluator(DistributedObject):
         if self.metric_path.exists() and len(list(self.metric_path.rglob("*.yml"))):
             confirm_overwrite_or_raise(self.metric_path, "metric", EvaluatorError)
             if self.metric_path.exists():
-                shutil.rmtree(self.metric_path)
+                # This directory holds the rank-0 evaluation log this process already has open:
+                # clear around it instead of rmtree'ing it out from under the live file.
+                clear_directory_except_logs(self.metric_path)
 
         os.makedirs(self.metric_path, exist_ok=True)
         shutil.copyfile(

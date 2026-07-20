@@ -424,3 +424,24 @@ def test_attribute_lookup_is_not_fooled_by_a_prefixing_sibling_key() -> None:
     assert "Spacing" in attribute
     assert attribute["Spacing"] == "1.0 1.0 2.0"
     assert attribute["SpacingOriginal"] == "0.5 0.5 1.0"
+
+
+def test_get_infos_reads_only_the_header_for_a_mismatched_extension(tmp_path: Path, monkeypatch) -> None:
+    """An entry stored with a different extension than the dataset's file_format must still take the
+    header-only path: the file_to_data fallback decodes the whole volume on the patch-planning path."""
+    sitk = pytest.importorskip("SimpleITK")
+    root = tmp_path / "Dataset"
+    root.mkdir()
+    image = sitk.GetImageFromArray(np.zeros((4, 5, 6), dtype=np.float32))
+    image.SetSpacing((1.5, 1.5, 2.0))
+    sitk.WriteImage(image, str(root / "case.nii.gz"))
+
+    with Dataset.File(f"{root}/", True, "mha", 0) as file:
+        full_reads: list[str] = []
+        original = file.file_to_data
+        monkeypatch.setattr(file, "file_to_data", lambda *a, **k: (full_reads.append("hit"), original(*a, **k))[1])
+        size, attributes = file.get_infos("", "case")
+
+    assert size == [1, 4, 5, 6]
+    assert full_reads == [], "a readable image header must never trigger a full-volume decode"
+    assert np.allclose(attributes.get_np_array("Spacing"), [1.5, 1.5, 2.0])
