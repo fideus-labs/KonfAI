@@ -847,10 +847,15 @@ class Patch(ABC):
         # are cut so each case's whole-axis extent lands on a valid model input. ``None`` outside a model
         # (evaluation) or for a network that never downsamples.
         self.free_axis_multiple: list[int] | None = None
+        # Whether a free (``0``) axis was DECLARED. Captured now because the OOM re-plan later pins
+        # ``patch_size`` to a concrete size in place, erasing the ``0`` the overlap default keys on.
+        self._declared_free_axis: bool = (
+            patch_size is not None and any(p == 0 for p in patch_size) and not all(p == 0 for p in patch_size)
+        )
 
     def load(self, shape: list[int], a: int = 0) -> None:
         self._patch_slices[a], self._nb_patch_per_dim[a] = get_patch_slices_from_shape(
-            self.patch_size, shape, self.overlap, self.free_axis_multiple
+            self.patch_size, shape, self.overlap, self.free_axis_multiple, self._declared_free_axis
         )
 
     @abstractmethod
@@ -1051,6 +1056,10 @@ class DatasetManager:
             # Carry the model's downsampling multiple too, so each per-case free axis rounds up to a valid
             # input size on this copy's grid, not just on the up-front worst-case sizing.
             self.patch.free_axis_multiple = patch.free_axis_multiple
+            # Carry the DECLARED free-axis flag: after an OOM re-plan the source patch_size is already
+            # concrete, so this fresh copy could not re-derive it -- and the free axis must keep the
+            # fraction overlap default, not fall back to the fixed-patch remainder.
+            self.patch._declared_free_axis = patch._declared_free_axis
         self.patch.load(_shape, 0)
         # The spatial grid each copy's patches are cut on: the un-augmented copy's is the source shape
         # folded by the transforms, and a copy whose draw changes shape (Permute, Mask) has its own.

@@ -163,6 +163,36 @@ def test_free_axis_reassembles_like_its_concrete_extent(free_axis, combine_cls):
     assert torch.equal(out, assemble(concrete, concrete_overlap))
 
 
+def _axis_overlaps(slices, patch_size):
+    """Per-axis overlap (patch minus tiling step) inferred from consecutive patch starts."""
+    overlaps = []
+    for d in range(len(patch_size)):
+        starts = sorted({chunk[d].start for chunk in slices})
+        step = starts[1] - starts[0] if len(starts) > 1 else patch_size[d]
+        overlaps.append(patch_size[d] - step)
+    return overlaps
+
+
+def test_declared_free_axis_keeps_the_fraction_overlap_after_restart_concretization():
+    """An OOM re-plan pins a declared free (``0``) axis to a concrete size in place; the axis must keep the
+    fraction overlap default, not fall back to the fixed-patch remainder (near-zero -> seam artifacts)."""
+    shape = [512, 256, 256]
+    declared = [0, 128, 128]  # free axis 0
+    concrete = [64, 128, 128]  # what the restart pins it to
+
+    # Baseline: passing the declared flag explicitly must not change the non-restart result.
+    declared_slices, _ = get_patch_slices_from_shape(declared, shape, None, None, True)
+    derived_slices, _ = get_patch_slices_from_shape(declared, shape, None)
+    assert _axis_overlaps(declared_slices, [512, 128, 128]) == _axis_overlaps(derived_slices, [512, 128, 128])
+
+    # Regression: on the concretized grid the derived flag is False (no ``0`` left) and would take the
+    # remainder branch; carrying declared_free_axis=True restores the fraction default on the tiled axes.
+    remainder, _ = get_patch_slices_from_shape(concrete, shape, None, None, False)
+    fixed, _ = get_patch_slices_from_shape(concrete, shape, None, None, True)
+    assert _axis_overlaps(remainder, concrete) == [0, 0, 0]
+    assert all(o > 0 for o in _axis_overlaps(fixed, concrete))
+
+
 @pytest.mark.parametrize("combine_cls", [Mean, Cosinus])
 def test_path_combine_window_is_bounded_and_unit_at_center(combine_cls):
     """Blending windows weight each voxel in [0, 1] and reach 1 at the patch centre."""
