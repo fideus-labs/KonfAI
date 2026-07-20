@@ -26,7 +26,7 @@ import konfai.network.network as network_module
 import numpy as np
 import pytest
 import torch
-from konfai.metric.schedulers import Constant
+from konfai.metric.schedulers import Constant, PolyLRScheduler
 from konfai.network.blocks import Add
 from konfai.network.network import Measure, ModuleArgsDict, Network
 from konfai.utils.dataset import Attribute
@@ -559,3 +559,41 @@ class TestUnknownStringBranch:
         graph = self._graph([1])  # no second input: falls back to inputs[0]
         outputs = dict(graph.named_forward(torch.zeros(1, 1, 4)))
         assert torch.equal(outputs["Consumer"], torch.zeros(1, 1, 4))
+
+
+# ---------------------------------------------------------------------------
+# Learning-rate schedulers in ``konfai.metric.schedulers`` (Network.load resync)
+# ---------------------------------------------------------------------------
+def test_polylr_resync_resumes_from_last_epoch():
+    """#scheduler: PolyLR must honour a resync that sets last_epoch (RESUME fast-forward)."""
+    param = torch.nn.Parameter(torch.zeros(1))
+    opt = torch.optim.SGD([param], lr=0.1)
+    scheduler = PolyLRScheduler(opt, initial_lr=0.1, max_steps=100)
+
+    # A freshly built PolyLR keeps last_epoch == -1 so the network resync guard fires.
+    assert scheduler.last_epoch == -1
+
+    # Network.load() resync: fast-forward to iteration 50.
+    scheduler.last_epoch = 50
+    scheduler.step()
+
+    expected = 0.1 * (1 - 50 / 100) ** 0.9
+    assert opt.param_groups[0]["lr"] == expected
+    assert scheduler.last_epoch == 51
+
+
+def test_polylr_fresh_run_unchanged():
+    """Fresh training (no resync) still steps from the internal counter 0, 1, 2 ..."""
+    param = torch.nn.Parameter(torch.zeros(1))
+    opt = torch.optim.SGD([param], lr=0.1)
+    scheduler = PolyLRScheduler(opt, initial_lr=0.1, max_steps=100)
+
+    lrs = []
+    for _ in range(3):
+        scheduler.step()
+        lrs.append(opt.param_groups[0]["lr"])
+
+    assert lrs[0] == 0.1 * (1 - 1 / 100) ** 0.9
+    assert lrs[1] == 0.1 * (1 - 2 / 100) ** 0.9
+    assert lrs[2] == 0.1 * (1 - 3 / 100) ** 0.9
+    assert scheduler.last_epoch == -1

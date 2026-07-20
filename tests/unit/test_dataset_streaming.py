@@ -60,6 +60,7 @@ from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import State
 
 SimpleITK = pytest.importorskip("SimpleITK")
+h5py = pytest.importorskip("h5py")
 
 
 def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
@@ -1493,3 +1494,88 @@ def test_per_patch_global_stat_without_inverse_is_allowed_at_prediction(monkeypa
     monkeypatch.setenv("KONFAI_ROOT", "Predictor")
     monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
     _check_patch_transform_invertible(Standardize(inverse=False), [], "CT", "CT")
+
+
+# --------------------------------------------------------------------------------------
+# Read-side caching of chunked stores.
+#
+# Overlapping patch reads revisit the same chunks: the HDF5 read handle carries a chunk cache
+# sized for imaging chunks (the library default holds barely one), and the OME-Zarr image
+# handle is memoised per (store, level) so a streamed run parses the NGFF metadata once, not
+# once per patch — invalidated by every write path, because a store just written must be
+# re-read.
+# --------------------------------------------------------------------------------------
+def test_h5_read_handle_carries_an_imaging_sized_chunk_cache(tmp_path) -> None:
+    dataset = Dataset(f"{tmp_path}/store.h5", "h5")
+    dataset.write("group", "CASE_000", np.zeros((1, 4, 4, 4), dtype=np.float32), Attribute())
+    with Dataset.File(f"{tmp_path}/store.h5", True, "h5") as backend:
+        _, nslots, nbytes, _ = backend.h5.id.get_access_plist().get_cache()
+    assert nbytes == Dataset.H5File._READ_CHUNK_CACHE_BYTES
+    assert nslots == Dataset.H5File._READ_CHUNK_CACHE_SLOTS
+
+
+def test_ome_zarr_image_is_memoised_per_store_and_invalidated_by_writes(tmp_path) -> None:
+    pytest.importorskip("ngff_zarr")
+    from konfai.utils.ome_zarr import _load_image, read_ome_zarr_data_slice, write_ome_zarr
+
+    store = tmp_path / "case.ome.zarr"
+    write_ome_zarr(store, np.ones((1, 4, 4, 4), dtype=np.float32))
+    first = _load_image(str(store), 0)
+    assert _load_image(str(store), 0) is first, "the image handle must be memoised per (store, level)"
+
+    write_ome_zarr(store, np.full((1, 4, 4, 4), 7.0, dtype=np.float32))
+    data, _ = read_ome_zarr_data_slice(store, tuple(slice(None) for _ in range(4)))
+    assert float(data.max()) == 7.0, "a write must invalidate the memo so the new voxels are read"
+
+
+# --------------------------------------------------------------------------------------
+# ``Mask`` streams slab by slab: ``stream_slab`` reads only the aligned mask region and
+# reassembles byte-identically to the whole-volume ``__call__``, so a finalize ``Mask`` keeps
+# the case on the streamed path.
+# --------------------------------------------------------------------------------------
+sitk = pytest.importorskip("SimpleITK")
+
+
+def _write_mask(path, z, y, x, seed=0):
+    rng = np.random.default_rng(seed)
+    arr = (rng.random((z, y, x)) > 0.4).astype(np.uint8)
+    sitk.WriteImage(sitk.GetImageFromArray(arr), str(path))
+
+
+@pytest.mark.parametrize("slab", [1, 4, 5])
+def test_mask_stream_slab_reassembles_like_whole_volume(tmp_path, slab):
+    # Single-channel output (the real case: a masked sCT); a [1,Z,Y,X] mask indexes a 1-channel volume.
+    z, y, x = 12, 8, 7
+    path = tmp_path / "mask.mha"
+    _write_mask(path, z, y, x)
+    torch.manual_seed(1)
+    volume = torch.randn(1, z, y, x)
+
+    # SLAB declaration is what routes it through the streamed-write dispatcher.
+    m = Mask(path=str(path), value_outside=-999)
+    assert m.patch_locality(Attribute()).kind is LocalityKind.SLAB
+
+    whole = m("case", volume.clone(), Attribute())
+
+    streamed = volume.clone()
+    for z0 in range(0, z, slab):
+        z1 = min(z0 + slab, z)
+        rows = m.stream_slab("case", streamed[:, z0:z1].clone(), slice(z0, z1), [z, y, x], Attribute())
+        streamed[:, z0:z1] = rows
+
+    assert torch.equal(streamed, whole)
+
+
+def test_mask_stream_slab_masks_the_right_voxels(tmp_path):
+    # A concrete check the region is aligned, not just self-consistent: outside the mask -> value_outside,
+    # inside -> untouched, and the streamed slabs land on the same voxels as the whole-volume call.
+    z, y, x = 6, 5, 4
+    path = tmp_path / "m.mha"
+    _write_mask(path, z, y, x, seed=3)
+    mask = torch.as_tensor(sitk.GetArrayFromImage(sitk.ReadImage(str(path)))).unsqueeze(0)
+    m = Mask(path=str(path), value_outside=-1)
+    out = torch.ones(1, z, y, x) * 7.0
+    for z0 in range(0, z, 2):
+        out[:, z0 : z0 + 2] = m.stream_slab("c", out[:, z0 : z0 + 2].clone(), slice(z0, z0 + 2), [z, y, x], Attribute())
+    assert torch.equal(out[mask == 0], torch.full_like(out[mask == 0], -1.0))
+    assert torch.equal(out[mask != 0], torch.full_like(out[mask != 0], 7.0))

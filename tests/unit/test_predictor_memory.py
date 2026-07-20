@@ -21,7 +21,7 @@ import pytest
 import torch
 from konfai.data.data_manager import BatchDataItem, DatasetIter
 from konfai.network.network import Network
-from konfai.predictor import Mean, ModelComposite, OutSameAsGroupDataset, _Predictor
+from konfai.predictor import Mean, ModelComposite, OutSameAsGroupDataset, _colocate_loaded_modules, _Predictor
 from konfai.utils.dataset import Attribute
 
 
@@ -494,3 +494,89 @@ def test_mid_blend_oom_stays_fatal() -> None:
             attribute=Attribute(),
         )
     assert output_dataset._accum_device[0].type == "cuda"
+
+
+# ---------------------------------------------------------------------------
+# Device co-location of modules a per-model load() adds after placement
+# ---------------------------------------------------------------------------
+class _LateHeadNetwork(Network):
+    """Model whose load() appends a checkpoint-sized module, mimicking TotalSegmentator's Head.Conv."""
+
+    def __init__(self) -> None:
+        super().__init__(in_channels=1)
+        self.add_module("Stem", torch.nn.Conv3d(1, 2, kernel_size=1))
+
+    def load(self, state_dict, init: bool = True, ema: bool = False):  # type: ignore[override]
+        # A head sized from the checkpoint, created at load time -> defaults to CPU.
+        self.add_module("Head", torch.nn.Conv3d(2, int(state_dict["nb_class"]), kernel_size=1))
+
+    def forward(self, batch_sample, output_layers=[]):  # type: ignore[override]
+        return []
+
+
+def test_colocate_is_a_safe_noop_when_model_is_all_cpu() -> None:
+    # With no device-placed parameter there is nothing to co-locate; the helper must be a no-op.
+    model = torch.nn.Sequential(torch.nn.Conv3d(1, 2, 1), torch.nn.Conv3d(2, 3, 1))
+    _colocate_loaded_modules(model)
+    assert all(not p.is_cuda for p in model.parameters())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="device co-location only manifests on GPU")
+def test_ensemble_load_colocates_late_added_head_on_gpu() -> None:
+    # The TotalSegmentator pattern: the model is placed on the GPU, then a per-model load() appends
+    # a Head on CPU. The forward must not hit "Input cuda, weight CPU".
+    composite = ModelComposite(_LateHeadNetwork(), Mean())
+    Network.to(composite, 0)  # place on cuda:0, exactly as the predictor does before inference
+
+    composite.load([{"nb_class": 5}])  # single source -> triggers _ensure_model_loaded(0)
+    model = composite["Model_0"]
+
+    head = dict(model.named_modules())["Head"]
+    assert list(head.parameters()), "test setup: Head should have parameters"
+    assert all(p.is_cuda for p in head.parameters()), "load-added Head must be co-located onto the GPU"
+    # the whole model must live on a single device
+    assert len({p.device for p in model.parameters()}) == 1
+
+
+# ---------------------------------------------------------------------------
+# CPU offload of patch predictions (pinned staging buffer)
+# ---------------------------------------------------------------------------
+def _dataset(monkeypatch: pytest.MonkeyPatch) -> OutSameAsGroupDataset:
+    monkeypatch.setenv("KONFAI_config_file", "unused.yml")
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    return OutSameAsGroupDataset(same_as_group="default:default", dataset_filename="default|./Dataset:mha")
+
+
+def test_offload_cpu_tensor_is_passed_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    ds = _dataset(monkeypatch)
+    x = torch.randn(3, 4, 4)
+    out = ds._offload_to_cpu(x)
+    assert torch.equal(out, x.detach().cpu())
+    assert ds._pin_buffer is None  # no page-locked buffer allocated for a CPU patch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned staging only applies to CUDA patches")
+def test_offload_large_cuda_patch_is_bit_identical_and_pageable(monkeypatch: pytest.MonkeyPatch) -> None:
+    ds = _dataset(monkeypatch)
+    # above _PINNED_OFFLOAD_MIN_BYTES (64 MiB): 40M fp16 elements = 80 MiB
+    x = torch.empty(40 * 1024 * 1024, dtype=torch.float16, device="cuda").normal_()
+
+    out = ds._offload_to_cpu(x)
+
+    assert torch.equal(out, x.detach().cpu())  # staging through pinned memory changes nothing numerically
+    assert out.device.type == "cpu"
+    assert not out.is_pinned()  # the stored patch must be pageable, not page-locked
+    assert ds._pin_buffer is not None and ds._pin_buffer.is_pinned()
+    # the one-patch pinned buffer is reused, not reallocated, for the next same-shape patch
+    reused = ds._pin_buffer
+    ds._offload_to_cpu(x)
+    assert ds._pin_buffer is reused
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned staging only applies to CUDA patches")
+def test_offload_small_cuda_patch_takes_plain_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    ds = _dataset(monkeypatch)
+    x = torch.randn(8, 8, 8, device="cuda")  # well under the staging threshold
+    out = ds._offload_to_cpu(x)
+    assert torch.equal(out, x.detach().cpu())
+    assert ds._pin_buffer is None  # small patches never allocate the pinned buffer

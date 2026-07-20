@@ -38,6 +38,7 @@ from konfai.utils.runtime import (
     configure_workflow_environment,
     confirm_overwrite_or_raise,
     execute_distributed_object,
+    is_interactive_session,
 )
 
 # ---------------------------------------------------------------------------
@@ -300,3 +301,37 @@ def test_execute_seeds_parent_before_setup(monkeypatch):
     _run_execute(monkeypatch, FakeObject())
 
     assert recorded[0] == recorded[1]
+
+
+# ---------------------------------------------------------------------------
+# is_interactive_session must not crash when stdout has no isatty
+# ---------------------------------------------------------------------------
+class _FakeTTY:
+    def isatty(self) -> bool:
+        return True
+
+
+class _LogProxy:
+    """Mimics Log/MinimalLog: write/flush/fileno only, no isatty."""
+
+    def write(self, msg: str) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+
+def test_is_interactive_session_survives_stdout_without_isatty(monkeypatch) -> None:
+    # During a run stdout is swapped for a Log proxy that has no isatty; an unconditional
+    # stdout.isatty() call raises AttributeError. It must degrade to non-interactive.
+    monkeypatch.setattr(sys, "stdin", _FakeTTY())
+    monkeypatch.setattr(sys, "stdout", _LogProxy())
+
+    assert is_interactive_session() is False
+
+
+def test_is_interactive_session_true_on_real_tty(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "stdin", _FakeTTY())
+    monkeypatch.setattr(sys, "stdout", _FakeTTY())
+
+    assert is_interactive_session() is True
