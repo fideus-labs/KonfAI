@@ -525,3 +525,11 @@ def test_a_block_type_outside_its_two_names_is_refused(tmp_path: Path, monkeypat
     with pytest.raises(ConfigError) as error:
         apply_config("M")(UNet)()
     assert "'Conv', 'Res'" in str(error.value)
+
+
+def test_union_with_literal_member_does_not_crash() -> None:
+    # A typing-only origin (Literal) is not a class: the runtime-match fast path must skip it
+    # instead of raising TypeError in isinstance, and let another member bind the value.
+    from konfai.utils.config import _convert_union_sequence_value
+
+    assert _convert_union_sequence_value("beta", (Literal["alpha", "beta"], str), "p") == "beta"
