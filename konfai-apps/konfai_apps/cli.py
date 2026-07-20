@@ -646,6 +646,7 @@ def main_apps() -> None:
         help="Override the learning rate. If omitted, the checkpoint learning rate is resumed and the "
         "scheduler continues; if set, the learning rate restarts from this value.",
     )
+    _add_config_overrides(ft_p)
 
     bundle_p = subparsers.add_parser(
         "bundle", help="Assemble an app bundle (HF layout), optionally with a portable ONNX model."
