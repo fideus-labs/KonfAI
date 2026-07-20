@@ -52,6 +52,7 @@ from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
     State,
+    clear_directory_except_logs,
     configure_workflow_environment,
     confirm_overwrite_or_raise,
     description,
@@ -758,16 +759,18 @@ class Trainer(DistributedObject):
         state = State[konfai_state()]
         if state != State.RESUME and (checkpoints_directory() / self.name).exists():
             confirm_overwrite_or_raise(checkpoints_directory() / self.name, "model", TrainerError)
-            for directory_path in [
-                statistics_directory(),
-                checkpoints_directory(),
-            ]:
-                path = directory_path / self.name
-                if path.exists():
-                    if path.is_dir():
-                        shutil.rmtree(path)
-                    else:
-                        path.unlink()
+            checkpoints_path = checkpoints_directory() / self.name
+            if checkpoints_path.is_dir():
+                shutil.rmtree(checkpoints_path)
+            elif checkpoints_path.exists():
+                checkpoints_path.unlink()
+            # The statistics directory holds the rank-0 log this process already has open: clear
+            # around it instead of rmtree'ing the directory out from under the live file.
+            statistics_path = statistics_directory() / self.name
+            if statistics_path.is_dir():
+                clear_directory_except_logs(statistics_path)
+            elif statistics_path.exists():
+                statistics_path.unlink()
 
         state_dict = {}
         if state != State.TRAIN:

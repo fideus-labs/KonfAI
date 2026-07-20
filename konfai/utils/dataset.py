@@ -1211,9 +1211,15 @@ class Dataset:
 
         def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
             attributes = Attribute()
-            if os.path.exists(f"{self.filename}{group if group is not None else ''}{name}.{self.file_format}"):
+            # Resolve the actual entry path (any image extension, not only the dataset's file_format):
+            # an entry stored with a different extension must still take the header-only read below --
+            # the file_to_data fallback decodes the whole volume, a hidden full load on the
+            # patch-planning path.
+            entry = f"{group if group is not None else ''}{name}"
+            path = self._resolve_data_path(entry)
+            if path is not None and not path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk", ".npy")):
                 file_reader = sitk.ImageFileReader()
-                file_reader.SetFileName(f"{self.filename}{group if group is not None else ''}{name}.{self.file_format}")
+                file_reader.SetFileName(path)
                 file_reader.ReadImageInformation()
                 attributes["Origin"] = np.asarray(file_reader.GetOrigin())
                 attributes["Spacing"] = np.asarray(file_reader.GetSpacing())
@@ -1225,7 +1231,7 @@ class Dataset:
                 size = [file_reader.GetNumberOfComponents(), *size]
             else:
                 data, attributes = self.file_to_data(group if group is not None else "", name)
-                size = data.shape
+                size = list(data.shape)
             return size, attributes
 
     class OmeZarrFile(AbstractFile):

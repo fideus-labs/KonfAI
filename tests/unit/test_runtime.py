@@ -335,3 +335,25 @@ def test_is_interactive_session_true_on_real_tty(monkeypatch) -> None:
     monkeypatch.setattr(sys, "stdout", _FakeTTY())
 
     assert is_interactive_session() is True
+
+
+def test_clear_directory_except_logs_keeps_the_live_log(tmp_path):
+    """The overwrite branch clears a run directory AROUND its open log_*.txt: an rmtree unlinks the
+    open file (parent-process lines and crash tracebacks lost; PermissionError on Windows)."""
+    from konfai.utils.runtime import clear_directory_except_logs
+
+    run_dir = tmp_path / "Statistics" / "RUN"
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "events" / "tb.bin").write_text("stale")
+    (run_dir / "Config.yml").write_text("stale")
+    log = open(run_dir / "log_0.txt", "a", buffering=1)
+    try:
+        log.write("parent line\n")
+        clear_directory_except_logs(run_dir)
+        log.write("after clear\n")
+    finally:
+        log.close()
+
+    assert not (run_dir / "events").exists()
+    assert not (run_dir / "Config.yml").exists()
+    assert (run_dir / "log_0.txt").read_text() == "parent line\nafter clear\n"
