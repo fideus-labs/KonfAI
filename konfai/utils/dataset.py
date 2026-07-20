@@ -1556,8 +1556,10 @@ class Dataset:
     def _normalize_path(filename: str | Path, file_format: str) -> tuple[str, bool]:
         # A single-store h5 is one file, every other backend a directory of cases: only the latter gets the
         # trailing slash that marks ``is_directory``. Keep the two in lock-step so a path never ends up a
-        # directory-flagged h5 (which would write the hidden dotfile ``<dir>/.h5``).
-        path = str(filename)
+        # directory-flagged h5 (which would write the hidden dotfile ``<dir>/.h5``). ``as_posix`` keeps the
+        # separator forward on every OS, so the stored filename (and the trailing-slash marker) is the same
+        # on Windows, where ``prefix / name`` would otherwise render backslashes.
+        path = Path(filename).as_posix()
         if file_format != "h5" and not path.endswith("/"):
             path += "/"
         return path, path.endswith("/")

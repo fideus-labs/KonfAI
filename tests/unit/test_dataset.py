@@ -115,7 +115,7 @@ def test_h5_writes_are_serialised_per_file(tmp_path: Path, image_attributes) -> 
     attrs = image_attributes([0.0, 0.0], [1.0, 1.0])
     dataset.write("CT", "CASE_000", np.zeros((1, 2, 2), dtype=np.float32), attrs)
 
-    lock = _get_h5_file_lock(str(tmp_path / "Volumes") + ".h5")
+    lock = _get_h5_file_lock(dataset.filename + ".h5")  # the store's own key, whatever the OS separator
     started = threading.Event()
     finished = threading.Event()
 
