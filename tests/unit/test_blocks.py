@@ -19,6 +19,7 @@
 import pytest
 import torch
 from konfai.network.blocks import (
+    ClipNormalize,
     Exit,
     LatentDistribution,
     MultiHeadSelfAttention,
@@ -26,6 +27,7 @@ from konfai.network.blocks import (
     Select,
     Unsqueeze,
 )
+from konfai.utils.model_builder import list_registered_modules
 
 
 def test_vae_latent_uses_gaussian_noise():
@@ -95,3 +97,31 @@ def test_resnet_basic_block_rejects_a_downsample_it_cannot_honour() -> None:
     # tensors of different shapes -- a graph built to crash, caught here at construction instead.
     with pytest.raises(ValueError, match="downsample=False"):
         ResNetBasicBlock(8, 16, dim=2, downsample=False)
+
+
+# --------------------------------------------------------------------------- #
+# The ClipNormalize registry block: checkpoint-restored clip + standardize.
+# --------------------------------------------------------------------------- #
+def test_clip_normalize_is_registered_and_parameter_free() -> None:
+    assert "ClipNormalize" in list_registered_modules()
+    block = ClipNormalize()
+    assert list(block.parameters()) == []  # buffers only, nothing learnable
+
+
+def test_clip_normalize_restores_constants_from_the_checkpoint() -> None:
+    # A per-checkpoint CT window: clip to [-1024, 276], then (x - mean) / std.
+    block = ClipNormalize()
+    block.load_state_dict(
+        {
+            "clip_min": torch.tensor([-1024.0]),
+            "clip_max": torch.tensor([276.0]),
+            "mean": torch.tensor([-370.0]),
+            "std": torch.tensor([436.6]),
+        }
+    )
+    x = torch.tensor([[-2000.0, -370.0, 276.0, 1000.0]])
+    out = block(x)
+    expected = (torch.clamp(x, -1024.0, 276.0) - (-370.0)) / 436.6
+    assert torch.allclose(out, expected, atol=1e-4)
+    # The clamp is active: the +1000 input is pulled down to the clip_max before standardizing.
+    assert out[0, 3].item() == expected[0, 3].item()

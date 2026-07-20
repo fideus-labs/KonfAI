@@ -41,6 +41,7 @@ from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import TensorCast, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.runtime import State
+from konfai.utils.utils import split_path_spec
 
 # --------------------------------------------------------------------------------------
 # Data._split — TRAIN/RESUME shards must be equal length to avoid a DDP hang
@@ -731,3 +732,23 @@ def test_every_rank_gets_a_shard_of_the_same_length(entries: int, world_size: in
     shards = Data._split(mapping, world_size)
     assert len({len(shard) for shard in shards}) == 1
     assert all(shard for shard in shards)
+
+
+# --------------------------------------------------------------------------------------
+# split_path_spec — the "path[:flag]:format" dataset specs the groups are configured with
+# --------------------------------------------------------------------------------------
+def test_split_path_spec_supports_unix_style_dataset_specs() -> None:
+    assert split_path_spec("./Dataset") == ("./Dataset", None, "mha")
+    assert split_path_spec("./Dataset:mha") == ("./Dataset", None, "mha")
+    assert split_path_spec("./Dataset:a:mha", allowed_flags={"a", "i"}) == ("./Dataset", "a", "mha")
+    assert split_path_spec("./Predictions/TRAIN_01/Dataset:i:mha", allowed_flags={"a", "i"}) == (
+        "./Predictions/TRAIN_01/Dataset",
+        "i",
+        "mha",
+    )
+
+
+def test_split_path_spec_supports_windows_paths_without_breaking_drive_letters() -> None:
+    assert split_path_spec(r"C:\Dataset") == (r"C:\Dataset", None, "mha")
+    assert split_path_spec(r"C:\Dataset:mha") == (r"C:\Dataset", None, "mha")
+    assert split_path_spec(r"C:\Dataset:a:mha", allowed_flags={"a", "i"}) == (r"C:\Dataset", "a", "mha")

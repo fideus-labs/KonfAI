@@ -20,7 +20,8 @@ PerceptualLoss plumbing, and optional-dependency errors)."""
 import numpy as np
 import pytest
 import torch
-from konfai.metric.measure import SSIM, Dice, FocalLoss, PerceptualLoss, Variance, _require_optional
+from konfai.metric.measure import SSIM, Dice, FocalLoss, KLDivergence, PerceptualLoss, Variance, _require_optional
+from konfai.network.network import CriterionsAttr
 from konfai.utils.errors import MeasureError
 
 
@@ -437,3 +438,15 @@ class TestMaskedFeatureLoss:
         triple = lambda t: [t, torch.tensor([2]), torch.tensor([[0.0, 0.5, 1.0, 0.2]])]  # noqa: E731
         loss, _ = _masked_feature_loss(NaNModel(), triple(x), triple(y), [1.0, 1.0], torch.nn.L1Loss(), None, None)
         assert torch.isfinite(loss).all()
+
+
+# --------------------------------------------------------------------------- #
+# accepts_init is read from the criterion, not its CriterionsAttr record.
+# --------------------------------------------------------------------------- #
+def test_accepts_init_flag_lives_on_the_criterion_not_the_attr() -> None:
+    # Measure.init must read the capability flag from the criterion (the dict key), not from the
+    # CriterionsAttr value (which never carries it) — otherwise CriterionWithInit.init() is skipped
+    # and graph-rewiring criteria such as KLDivergence train against the wrong channels silently.
+    criterion = KLDivergence(shape=[16, 16])
+    assert getattr(criterion, "accepts_init", False) is True
+    assert getattr(CriterionsAttr(), "accepts_init", False) is False
