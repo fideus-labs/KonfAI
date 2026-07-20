@@ -258,14 +258,24 @@ def resolve_patch(
 
 
 def get_patch_slices_from_shape(
-    patch_size: list[int], shape: list[int], overlap_tmp: OverlapSpec, multiple: list[int] | None = None
+    patch_size: list[int],
+    shape: list[int],
+    overlap_tmp: OverlapSpec,
+    multiple: list[int] | None = None,
+    declared_free_axis: bool | None = None,
 ) -> tuple[list[tuple[slice, ...]], list[tuple[int, bool]]]:
 
     # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple`` so a
     # small case still reaches the network at a valid input size -- the up-front worst-case sizing only
     # guarantees the largest case, and a heterogeneous smaller one would otherwise arrive non-divisible.
     template = [0] * len(shape) if patch_size is None else patch_size
-    has_free_axis = any(p == 0 for p in template) and not all(p == 0 for p in template)
+    # ``declared_free_axis`` carries the original free-axis intent when a restart has already pinned
+    # ``patch_size`` to a concrete size: the OOM re-plan erases the ``0`` this default keys on, and the
+    # free axis must still take the fraction default, not the fixed-patch remainder. Derive it from the
+    # template when the caller does not know (every non-restart call).
+    if declared_free_axis is None:
+        declared_free_axis = any(p == 0 for p in template) and not all(p == 0 for p in template)
+    has_free_axis = declared_free_axis
     patch_size = concretize_patch_size(template, shape, multiple)
     if len(shape) != len(patch_size):
         raise DatasetManagerError(
