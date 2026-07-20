@@ -243,6 +243,17 @@ def test_resolve_data_path_prefers_special_format_like_full_read(tmp_path: Path,
     assert full.shape == (1, 6)
 
 
+def test_resolve_data_path_skips_a_crashed_writer_temporary(tmp_path: Path, image_attributes) -> None:
+    # A hard-killed streamed write leaves a ``.tmp`` (header + zero-reserved pixels); the resolver must
+    # never hand it back as the volume when the final entry is absent -- glob would otherwise sort it first.
+    root = tmp_path / "Dataset"
+    (root / "CASE_000").mkdir(parents=True)
+    (root / "CASE_000" / "Transf.mha.9999-0.tmp").write_bytes(b"leftover debris")
+
+    sitk_file = Dataset.SitkFile(f"{root}/CASE_000/", True, "mha")
+    assert sitk_file._resolve_data_path("Transf") is None
+
+
 # --------------------------------------------------------------------------------------
 # get_infos returns numpy channel-first order for every rank
 #
