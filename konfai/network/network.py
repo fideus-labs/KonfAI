@@ -893,11 +893,18 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
 
 class OutputsGroup(list):
-    """Container describing one model output and its source modules."""
+    """Container describing one model output and its source modules.
 
-    def __init__(self, measure: Measure) -> None:
+    Carries the OWNING network, not just its measure: criteria are scheduled on the owner's ``_it``
+    (the counter its backward advances). A composite root never steps its own ``_it``, so scheduling
+    on the root would freeze every start/stop window and loss-weight scheduler at 0.
+    """
+
+    def __init__(self, network: "Network") -> None:
         self.layers: dict[str, torch.Tensor] = {}
-        self.measure = measure
+        self.network = network
+        # init_outputs_group only builds groups for networks that own a measure.
+        self.measure: Measure = network.measure  # type: ignore[assignment]
 
     def add_layer(self, name: str, layer: torch.Tensor):
         self.layers[name] = layer
@@ -1428,16 +1435,13 @@ class Network(ModuleArgsDict, ABC):
                 break
 
     def init_outputs_group(self):
-        metric_tmp = {
-            network.measure: network.measure.outputs_criterions.keys()
-            for network in self.get_networks().values()
-            if network.measure
-        }
-        for k, v in metric_tmp.items():
-            for a in v:
-                outputs_group = OutputsGroup(k)
-                outputs_group.append(a)
-                for targets_group in k.outputs_criterions[a].keys():
+        for network in self.get_networks().values():
+            if not network.measure:
+                continue
+            for output_name in network.measure.outputs_criterions.keys():
+                outputs_group = OutputsGroup(network)
+                outputs_group.append(output_name)
+                for targets_group in network.measure.outputs_criterions[output_name].keys():
                     if ":" in targets_group:
                         outputs_group.append(targets_group.replace(":", "."))
 
@@ -1498,7 +1502,7 @@ class Network(ModuleArgsDict, ABC):
                             output_group[0],
                             output_group.layers[output_group[0]],
                             batch_data_with_attribute,
-                            self._it,
+                            output_group.network._it,
                             nb,
                             self.training,
                         )
