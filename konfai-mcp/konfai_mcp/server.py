@@ -284,6 +284,18 @@ def _job_devices(gpu: list[int] | None, cpu: int | None, cluster: dict[str, Any]
     return ["cpu"]
 
 
+def _app_job_devices(gpu: list[int] | None, cpu: int | None) -> list[str]:
+    """Device reservation for an APP job: konfai-apps defaults an omitted gpu to every visible CUDA
+    device (``cuda_visible_devices()``), unlike core workflows which default to CPU -- register what
+    the job will actually hold so concurrent scheduling sees the real reservation."""
+    if gpu is None:
+        try:
+            gpu = konfai_pkg.cuda_visible_devices()
+        except Exception:
+            gpu = None
+    return _job_devices(gpu, cpu)
+
+
 def _cpu_fallback_warnings(gpu: list[int] | None, cluster: dict[str, Any] | None = None) -> list[str]:
     """Factual notice when a LOCAL run omits gpu while CUDA devices are visible.
 
@@ -464,7 +476,7 @@ def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
         log_path=WORKSPACE_LAYOUT.jobs_dir() / f"{kind}_{uuid.uuid4().hex[:12]}.log",
         config_path=workspace / f"app_{kind}.ref",
         run_name=spec["run_name"],
-        devices=_job_devices(
+        devices=_app_job_devices(
             kwargs.get("gpu") if kwargs.get("gpu") is not None else (kwargs.get("extra") or {}).get("gpu"),
             kwargs.get("cpu") if kwargs.get("cpu") is not None else (kwargs.get("extra") or {}).get("cpu"),
         ),

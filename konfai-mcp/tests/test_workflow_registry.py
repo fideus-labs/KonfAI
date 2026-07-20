@@ -57,3 +57,13 @@ def test_table_values_pin_the_konfai_contract() -> None:
     assert WORKFLOW_SPECS["evaluation"].root_key == "Evaluator"
     assert capabilities._WORKFLOW_ALIASES["trainer"] == "train"
     assert capabilities._WORKFLOW_ALIASES["eval"] == "evaluation"
+
+
+def test_app_job_devices_register_the_real_default_reservation(monkeypatch) -> None:
+    """konfai-apps defaults an omitted gpu to every visible CUDA device; the job registry must
+    record that reservation, not 'cpu', or concurrent scheduling double-books the GPUs."""
+    monkeypatch.setattr(server, "konfai_pkg", server.konfai_pkg)
+    monkeypatch.setattr(server.konfai_pkg, "cuda_visible_devices", lambda: [0, 1], raising=False)
+    assert server._app_job_devices(None, None) == ["0", "1"]
+    assert server._app_job_devices([], None) == ["cpu"]  # explicit empty list forces CPU
+    assert server._app_job_devices([1], None) == ["1"]
