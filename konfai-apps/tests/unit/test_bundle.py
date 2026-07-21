@@ -195,6 +195,19 @@ def test_transform_manifest_reads_canonical_and_before_reduction_post():
     assert manifest["postprocessing"] == [{"op": "softmax", "dim": 0}, {"op": "argmax", "dim": 0}]
 
 
+def test_derive_reduction_reads_the_ensemble_reduction():
+    from konfai_apps.bundle import _derive_reduction
+
+    def cfg(after):
+        return {"Predictor": {"outputs_dataset": {"H": {"OutputDataset": {"after_reduction_transforms": after}}}}}
+
+    # The multi-model reduction is read from the output transforms, never hard-coded per app.
+    assert _derive_reduction(cfg({"MergeLabels": {}}), "Predictor") == "merge_labels"
+    assert _derive_reduction(cfg({"InferenceStack": {"mode": "mean"}}), "Predictor") == "mean"
+    assert _derive_reduction(cfg("None"), "Predictor") is None
+    assert _derive_reduction({"Predictor": {}}, "Predictor") is None
+
+
 def test_transform_manifest_refuses_an_unportable_transform():
     import pytest
     from konfai_apps.bundle import AppMetadataError, _transform_manifest
