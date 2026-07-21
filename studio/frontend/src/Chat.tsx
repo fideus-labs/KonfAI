@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import FolderBrowser from "./FolderBrowser";
+import { getJson } from "./api";
+import { readSSE } from "./sse";
 
 type Part =
   | { kind: "text"; text: string }
@@ -246,22 +250,7 @@ export default function Chat({
         body: JSON.stringify({ message: text, session }),
         signal: ctrl.signal,
       });
-      const reader = resp.body!.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buf.indexOf("\n\n")) >= 0) {
-          const chunk = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          if (!chunk.startsWith("data: ")) continue;
-          const ev = JSON.parse(chunk.slice(6));
-          handleEvent(aid, ev);
-        }
-      }
+      for await (const ev of readSSE(resp)) handleEvent(aid, ev);
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError"))
         patchAssistant(aid, (p) => [...p, { kind: "error", text: String(e) }]);
@@ -329,7 +318,7 @@ export default function Chat({
   // text — a link, a note, a snippet — is dropped into the composer so it rides the next message.
   async function stat(path: string): Promise<{ exists: boolean; is_dir: boolean }> {
     try {
-      return await (await fetch(`/api/stat?path=${encodeURIComponent(path)}`)).json();
+      return await getJson<{ exists: boolean; is_dir: boolean }>(`/api/stat?path=${encodeURIComponent(path)}`);
     } catch {
       return { exists: false, is_dir: false };
     }

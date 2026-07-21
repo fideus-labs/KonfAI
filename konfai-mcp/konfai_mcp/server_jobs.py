@@ -228,9 +228,6 @@ class Job:
     devices: list[str] | None = None
     runtime_log_path: Path | None = None
     output_path: Path | None = None
-    # The applied model/config --set overrides ("NAME=VALUE" strings) for a tuned app run; None/empty means
-    # the run was not tuned. Carried so payload() can echo the trial's parameters and gate refine hints.
-    set_parameters: list[str] | None = None
     proc_create_time: float | None = None  # process create-time at launch, to detect pid reuse on recovery
     job_dir: Path | None = None
     manifest_path: Path | None = None
@@ -268,7 +265,6 @@ class JobRegistry:
             "devices": job.devices,
             "runtime_log_path": str(job.runtime_log_path) if job.runtime_log_path is not None else None,
             "output_path": str(job.output_path) if job.output_path is not None else None,
-            "set_parameters": job.set_parameters,
             "job_dir": str(job.job_dir) if job.job_dir is not None else None,
             "manifest_path": str(job.manifest_path) if job.manifest_path is not None else None,
             "recovered": job.recovered,
@@ -298,7 +294,6 @@ class JobRegistry:
                 Path(payload["runtime_log_path"]) if payload.get("runtime_log_path") is not None else None
             ),
             output_path=Path(payload["output_path"]) if payload.get("output_path") is not None else None,
-            set_parameters=payload.get("set_parameters"),
             job_dir=Path(payload["job_dir"]) if payload.get("job_dir") is not None else None,
             manifest_path=(Path(payload["manifest_path"]) if payload.get("manifest_path") is not None else None),
             recovered=bool(payload.get("recovered", False)),
@@ -495,9 +490,6 @@ class JobRegistry:
             "command": job.command,
             "error": job.error,
             "recovered": job.recovered,
-            # The tuned trial's applied --set overrides, so the agent sees which parameters produced this
-            # run's score without a separate manifest read (None for an untuned run).
-            "set_parameters": job.set_parameters,
             # True from the moment cancel_job is called; while the job is still active it signals
             # cancellation-in-progress. A finished job is 'killed' iff this is True — external kills
             # (OOM killer, manual signal) surface as status='error'.
@@ -572,7 +564,6 @@ class JobRegistry:
         extra_manifest: dict[str, object] | None = None,
         target: str | None = None,
         kwargs: dict[str, object] | None = None,
-        set_parameters: list[str] | None = None,
     ) -> Job:
         if target is None:
             raise ValueError("Job launch requires a Python target.")
@@ -587,7 +578,6 @@ class JobRegistry:
             run_name=run_name,
             devices=devices,
             runtime_log_path=runtime_log_path,
-            set_parameters=set_parameters or None,
         )
         # Generic: any job that declares an explicit output location (its runner kwargs carry "output")
         # gets it recorded, so refresh() can verify the output actually materialised. No per-kind logic.

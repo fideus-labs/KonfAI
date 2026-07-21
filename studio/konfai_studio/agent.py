@@ -495,26 +495,30 @@ def _heuristic_title(text: str) -> str:
     return _clean_title(" ".join(words[:6])) or "New experiment"
 
 
+async def _one_shot_claude(prompt: str) -> str:
+    """One isolated Claude Code query (no MCP tools, no task history) — its joined text, '' on failure."""
+    try:
+        from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+
+        parts: list[str] = []
+        async for message in query(
+            prompt=prompt,
+            options=ClaudeAgentOptions(setting_sources=[], permission_mode="bypassPermissions"),
+        ):
+            if isinstance(message, AssistantMessage):
+                parts += [b.text for b in message.content if isinstance(b, TextBlock) and b.text]
+        return "".join(parts)
+    except Exception:
+        return ""
+
+
 async def suggest_title(text: str, brain: str | None = None) -> str:
     """A short experiment title for the user's first message, named by the LLM (one-shot, isolated
     from the task conversation) with a heuristic fallback so it never fails the turn."""
     backend = (brain or os.environ.get("KONFAI_STUDIO_LLM", "claude-code")).lower()
-    prompt = _TITLE_PROMPT.format(text=text[:800])
-    try:
-        if backend in {"claude-code", "claude", "subscription", "agent-sdk"}:
-            from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
-
-            parts: list[str] = []
-            async for message in query(
-                prompt=prompt,
-                options=ClaudeAgentOptions(setting_sources=[], permission_mode="bypassPermissions"),
-            ):
-                if isinstance(message, AssistantMessage):
-                    parts += [b.text for b in message.content if isinstance(b, TextBlock) and b.text]
-            if title := _clean_title("".join(parts)):
-                return title
-    except Exception:
-        pass
+    if backend in {"claude-code", "claude", "subscription", "agent-sdk"}:
+        if title := _clean_title(await _one_shot_claude(_TITLE_PROMPT.format(text=text[:800]))):
+            return title
     return _heuristic_title(text)
 
 
@@ -564,19 +568,7 @@ async def suggest_next_prompts(
     prompt = _NEXT_PROMPTS_PROMPT.format(
         user=user_msg[:600], response=(response or "")[:1500], actions=", ".join(actions or []) or "(none)"
     )
-    try:
-        from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
-
-        parts: list[str] = []
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(setting_sources=[], permission_mode="bypassPermissions"),
-        ):
-            if isinstance(message, AssistantMessage):
-                parts += [b.text for b in message.content if isinstance(b, TextBlock) and b.text]
-        return _parse_next_prompts("".join(parts))
-    except Exception:
-        return []
+    return _parse_next_prompts(await _one_shot_claude(prompt))
 
 
 async def call_mcp_tool(session: str, tool: str, args: dict[str, Any] | None = None) -> tuple[bool, str]:

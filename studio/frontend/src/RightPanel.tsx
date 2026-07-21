@@ -1,6 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Viewer from "./Viewer";
 import type { JobStream, LiveStatus, Point, RunFeed, Series } from "./useJobStream";
+import { getJson, postJson } from "./api";
+import { useJson } from "./useJson";
+import { isRunning, jobState } from "./status";
 
 // A render error in the feed must never blank the whole app — catch it, show a line, and retry when new
 // data arrives (resetKey changes on each stream update).
@@ -54,7 +59,7 @@ function fmtClock(ms: number): string {
 // A run's status at a glance: a spinner while it runs, a coloured dot once it settles (green done, red
 // error) — so "still going" never looks like "finished".
 function StatusMark({ status }: { status: string }) {
-  if (/running|waiting|queued/i.test(status)) return <span className="rt-spin" title={status} />;
+  if (isRunning(status)) return <span className="rt-spin" title={status} />;
   return <span className={`rt-dot ${status}`} title={status} />;
 }
 
@@ -216,24 +221,16 @@ function Samples({
   refresh: number;
   onOpen: (url: string) => void;
 }) {
-  const [previews, setPreviews] = useState<Preview[]>([]);
+  const [tick, setTick] = useState(0);
   useEffect(() => {
-    let live = true;
-    const load = () =>
-      fetch(`/api/previews?session=${encodeURIComponent(session)}&base=${encodeURIComponent(base)}`)
-        .then((r) => r.json())
-        .then((d) => {
-          if (!live) return;
-          setPreviews(d.previews ?? []);
-        })
-        .catch(() => {});
-    load();
-    const id = window.setInterval(load, 12000); // konfai writes sample images mid-run — pick them up as they land
-    return () => {
-      live = false;
-      window.clearInterval(id);
-    };
-  }, [session, base, refresh]);
+    const id = window.setInterval(() => setTick((t) => t + 1), 12000); // konfai writes sample images mid-run — pick them up as they land
+    return () => window.clearInterval(id);
+  }, []);
+  const { data } = useJson<{ previews?: Preview[] }>(
+    `/api/previews?session=${encodeURIComponent(session)}&base=${encodeURIComponent(base)}`,
+    [session, base, refresh, tick],
+  );
+  const previews = data?.previews ?? [];
 
   if (previews.length === 0) return null;
   // One card per phase (Training / Validation), each assembling its outputs as labelled rows (CT, MR,
@@ -292,25 +289,16 @@ function EvaluationView({
   onHasData?: (has: boolean) => void;
   onOpenCase?: (run: string, caseName: string) => void;
 }) {
-  const [runs, setRuns] = useState<EvalRun[]>([]);
-  const [loaded, setLoaded] = useState(false);
-
+  const { data, loading } = useJson<{ runs?: EvalRun[] }>(
+    `/api/evaluations?session=${encodeURIComponent(session)}`,
+    [session, refresh],
+  );
+  const runs: EvalRun[] = data?.runs ?? [];
+  const loaded = !loading;
   useEffect(() => {
-    let live = true;
-    fetch(`/api/evaluations?session=${encodeURIComponent(session)}`)
-      .then((r) => r.json())
-      .then((d) => {
-        if (!live) return;
-        const rs: EvalRun[] = d.runs ?? [];
-        setRuns(rs);
-        onHasData?.(rs.length > 0);
-      })
-      .catch(() => live && setRuns([]))
-      .finally(() => live && setLoaded(true));
-    return () => {
-      live = false;
-    };
-  }, [session, refresh, onHasData]);
+    if (loading || !data) return; // report only on a real load, never on the error path
+    onHasData?.((data.runs ?? []).length > 0);
+  }, [loading, data, onHasData]);
 
   if (runs.length === 0) {
     if (hideWhenEmpty || !loaded) return null;
@@ -576,8 +564,7 @@ function ExperimentView({
     setNote("");
     setShowVolume(false);
     setTreeKey((k) => k + 1); // fresh tree per task
-    fetch(`/api/experiment?session=${encodeURIComponent(session)}`)
-      .then((r) => r.json())
+    getJson(`/api/experiment?session=${encodeURIComponent(session)}`)
       .then(setInfo)
       .catch(() => setInfo(null));
   }, [session]);
@@ -587,8 +574,7 @@ function ExperimentView({
   useEffect(() => {
     if (refresh === undefined) return;
     setRefreshKey((k) => k + 1);
-    fetch(`/api/experiment?session=${encodeURIComponent(session)}`)
-      .then((r) => r.json())
+    getJson(`/api/experiment?session=${encodeURIComponent(session)}`)
       .then(setInfo)
       .catch(() => {});
   }, [refresh, session]);
@@ -1069,10 +1055,9 @@ function LbDiff({ session, runs }: { session: string; runs: string[] }) {
     setLoading(true);
     setDiff(null);
     try {
-      const r = await fetch(
+      const d = await getJson(
         `/api/run/config_diff?session=${encodeURIComponent(session)}&run_a=${encodeURIComponent(a)}&run_b=${encodeURIComponent(b)}`,
       );
-      const d = await r.json();
       setDiff(d.ok ? { identical: d.identical, text: d.diff } : { identical: false, text: d.detail || "diff failed" });
     } catch {
       setDiff({ identical: false, text: "diff failed" });
@@ -1125,27 +1110,18 @@ function LbDiff({ session, runs }: { session: string; runs: string[] }) {
 }
 
 function Leaderboard({ session }: { session: string }) {
-  const [boards, setBoards] = useState<Record<string, LbRow[]>>({});
   const [splits, setSplits] = useState<string[]>(["TRAIN"]);
   const [split, setSplit] = useState("TRAIN");
-  const [loaded, setLoaded] = useState(false);
 
+  const { data, loading } = useJson<{ leaderboards?: Record<string, LbRow[]>; available_splits?: string[] }>(
+    `/api/leaderboard?session=${encodeURIComponent(session)}&split=${encodeURIComponent(split)}`,
+    [session, split],
+  );
+  const boards = data?.leaderboards ?? {};
+  const loaded = !loading;
   useEffect(() => {
-    let live = true;
-    setLoaded(false);
-    fetch(`/api/leaderboard?session=${encodeURIComponent(session)}&split=${encodeURIComponent(split)}`)
-      .then((r) => r.json())
-      .then((d) => {
-        if (!live) return;
-        setBoards(d.leaderboards ?? {});
-        if (Array.isArray(d.available_splits) && d.available_splits.length) setSplits(d.available_splits);
-      })
-      .catch(() => live && setBoards({}))
-      .finally(() => live && setLoaded(true));
-    return () => {
-      live = false;
-    };
-  }, [session, split]);
+    if (data && Array.isArray(data.available_splits) && data.available_splits.length) setSplits(data.available_splits);
+  }, [data]);
 
   const metrics = Object.keys(boards).sort();
   const runNames = [...new Set(metrics.flatMap((m) => boards[m].map((r) => r.run_name)))];
@@ -1210,12 +1186,7 @@ function TuneControls({ session }: { session: string }) {
     if (body.lr === undefined && body.it_validation === undefined) return;
     setNote("…");
     try {
-      const r = await fetch("/api/job/tunables", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const d = await r.json();
+      const d = await postJson("/api/job/tunables", body);
       setNote(d.ok ? "applied ✓" : "failed");
       if (d.ok) {
         setLr("");
@@ -1294,7 +1265,7 @@ export default function RightPanel({
     .sort((a, b) => (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9)); // one per kind under the open name
   const sel = kindsForName.find((r) => r.key === subKey) ?? kindsForName[0];
   const isActiveSel = !!sel && sel.key === stream.activeRun;
-  const running = /running|waiting|queued/i.test(active?.status ?? stream.status);
+  const running = isRunning(active?.status ?? stream.status);
   const stage = active?.live?.stage ?? "";
 
   // Once the job leaves the running state, drop the transient "Stopping…"/"Validating…" labels: the Stop
@@ -1309,11 +1280,7 @@ export default function RightPanel({
   async function stopJob() {
     setStopping(true);
     try {
-      await fetch("/api/job/cancel", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ session }),
-      });
+      await postJson("/api/job/cancel", { session });
     } catch {
       /* the status stream reflects the outcome either way */
     }
@@ -1322,11 +1289,7 @@ export default function RightPanel({
   async function deleteRun(runName: string, kind: string, what: string) {
     if (!window.confirm(`Delete ${what} of ${runName}? This removes its output folders on disk.`)) return;
     try {
-      await fetch("/api/run/delete", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ session, run_name: runName, kind }),
-      });
+      await postJson("/api/run/delete", { session, run_name: runName, kind });
     } catch {
       /* the reload reflects whatever actually happened on disk */
     }
@@ -1339,8 +1302,7 @@ export default function RightPanel({
     // window.open return null, so we could never navigate the tab to the resolved URL.
     const tab = window.open("about:blank", "_blank");
     try {
-      const r = await fetch(`/api/tensorboard?session=${encodeURIComponent(session)}`);
-      const d = await r.json();
+      const d = await getJson(`/api/tensorboard?session=${encodeURIComponent(session)}`);
       if (!tab) return;
       if (d.url) tab.location.href = d.url;
       else {
@@ -1356,11 +1318,7 @@ export default function RightPanel({
   async function validateJob() {
     setValidating(true);
     try {
-      await fetch("/api/job/validate", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ session }),
-      });
+      await postJson("/api/job/validate", { session });
     } catch {
       /* the validation metrics stream into the feed when the pass runs */
     } finally {
@@ -1564,7 +1522,7 @@ export default function RightPanel({
           comparePath={comparePath}
           onComparePathChange={onComparePathChange}
           refresh={stream.doneNonce}
-          live={/running|waiting|queued|connect/i.test(stream.status)}
+          live={jobState(stream.status) === "run"}
           focusDir={browsePath}
           focusOpen={browseOpen}
         />
