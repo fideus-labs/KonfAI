@@ -4,19 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "konfai-studio"
-dynamic = ["version"]
+# dependencies are dynamic (see setup.py): konfai-mcp is pinned to the exact release version so the BFF
+# and the MCP server it drives ship in lockstep, mirroring how the apps/* bundles pin konfai.
+dynamic = ["version", "dependencies"]
 description = "KonfAI Studio - a chatbot web UI driving the konfai-mcp server (BFF + front)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-dependencies = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",  # [standard] pulls websockets — needed for the integrated terminal socket
-    "fastmcp>=2.4",
-    "konfai-mcp",  # the BFF drives it (stdio) and reuses its live-log parser (konfai_mcp.live_parse)
-    "claude-agent-sdk>=0.2",  # default brain: drives konfai-mcp via the Claude Code subscription
-    "pywinpty>=2.0; sys_platform == 'win32'",  # Windows ConPTY for the integrated terminal (POSIX uses pty)
-]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.66"]  # Claude API with a metered key / OAuth token
@@ -27,9 +21,15 @@ konfai-studio = "konfai_studio.cli:main"
 
 [tool.setuptools_scm]
 root = ".."
+tag_regex = "^v(?P<version>.*)$"
+local_scheme = "no-local-version"
 
 [tool.setuptools.packages.find]
 include = ["konfai_studio", "konfai_studio.*"]
 
 [tool.setuptools.package-data]
-konfai_studio = ["web/*"]
+# Recursive: the built front is web/index.html + web/assets/* (JS/CSS/WASM) -- a flat "web/*" drops assets/.
+konfai_studio = ["web/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
