@@ -215,6 +215,18 @@ def test_apply_config_accepts_literal_value(write_config) -> None:
     assert root.mode == "eval"
 
 
+def test_apply_config_binds_optional_literal(write_config) -> None:
+    # Literal[...] | None unwraps to Literal[...] and must still bind as a literal, not fall through to
+    # object instantiation.
+    write_config("Root:\n  mode: eval\n")
+
+    class Root:
+        def __init__(self, mode: Literal["train", "eval"] | None = None) -> None:
+            self.mode = mode
+
+    assert apply_config("Root")(Root)().mode == "eval"
+
+
 def test_apply_config_materializes_non_string_literal_default(write_config) -> None:
     # A non-string Literal default is written back as the "default|X" marker; on re-bind it must
     # recover the correctly-typed member (int/bool), not fail the membership check on a string "X".
