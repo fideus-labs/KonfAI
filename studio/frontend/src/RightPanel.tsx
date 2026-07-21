@@ -1181,8 +1181,10 @@ function TuneControls({ session }: { session: string }) {
   const [note, setNote] = useState("");
   async function apply() {
     const body: { session: string; lr?: number; it_validation?: number } = { session };
-    if (lr.trim()) body.lr = Number(lr);
-    if (iv.trim()) body.it_validation = Number(iv);
+    const lrNum = Number(lr);
+    const ivNum = Number(iv);
+    if (lr.trim() && Number.isFinite(lrNum)) body.lr = lrNum;
+    if (iv.trim() && Number.isFinite(ivNum)) body.it_validation = ivNum;
     if (body.lr === undefined && body.it_validation === undefined) return;
     setNote("…");
     try {

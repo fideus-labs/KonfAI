@@ -65,12 +65,15 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
       setMessage("loading the model…");
       const modelBuf = await (await fetch(`/api/apps/model?ref=${encodeURIComponent(app.ref)}`)).arrayBuffer();
       let session: ort.InferenceSession;
+      let chosenBackend: string;
       try {
         session = await ort.InferenceSession.create(modelBuf, { executionProviders: ["webgpu"] });
-        setBackend("WebGPU");
+        chosenBackend = "WebGPU";
+        setBackend(chosenBackend);
       } catch {
         session = await ort.InferenceSession.create(modelBuf, { executionProviders: ["wasm"] });
-        setBackend("WASM (CPU)");
+        chosenBackend = "WASM (CPU)";
+        setBackend(chosenBackend);
       }
       const inName = session.inputNames[0];
       const outName = session.outputNames[0];
@@ -94,7 +97,7 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
       overlay.opacity = 0.6;
       nv.addVolume(overlay);
       setStage("done");
-      setMessage(`done — ${channels}×${outShape.join("×")} rendered as overlay (${backend}).`);
+      setMessage(`done — ${channels}×${outShape.join("×")} rendered as overlay (${chosenBackend}).`);
     } catch (e) {
       setStage("error");
       setMessage(`error: ${(e as Error).message}`);

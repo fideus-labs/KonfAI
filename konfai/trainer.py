@@ -309,8 +309,10 @@ class _Trainer:
         """
         # SIGUSR1 requests an on-demand validation pass (KonfAI Studio's "Validate now"); the handler only
         # flips a flag — the loop consumes it at a poll boundary, DDP-safe (see _requested_validation).
-        with suppress(ValueError, OSError):  # signals only install on the main thread
-            signal.signal(signal.SIGUSR1, lambda *_: setattr(self, "_validate_now", True))
+        sigusr1 = getattr(signal, "SIGUSR1", None)  # absent on Windows
+        if sigusr1 is not None:
+            with suppress(ValueError, OSError):  # signals only install on the main thread
+                signal.signal(sigusr1, lambda *_: setattr(self, "_validate_now", True))
         self.dataloader_training.dataset.load("Train")
         if self.dataloader_validation is not None:
             self.dataloader_validation.dataset.load("Validation")
@@ -524,7 +526,10 @@ class _Trainer:
             data = yaml.load(file)
         if not isinstance(data, dict):
             return
-        data["Interventions"] = self._interventions
+        existing = data.get("Interventions")
+        existing = list(existing) if isinstance(existing, list) else []
+        seen = {(e.get("it"), e.get("key")) for e in existing if isinstance(e, dict)}
+        data["Interventions"] = existing + [e for e in self._interventions if (e.get("it"), e.get("key")) not in seen]
         if isinstance(data.get("Trainer"), dict):
             data["Trainer"]["it_validation"] = self.it_validation
         tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")

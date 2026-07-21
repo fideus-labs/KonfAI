@@ -20,8 +20,8 @@
   --working: #d6a24f; /* amber — a tool is running */
   --good: #6bc38d; /* ready / done */
   --err: #e07b62; /* soft red — errors only */
-  --fsans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --fmono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --fsans: system-ui, -apple-system, "Segoe UI", "Roboto", "Helvetica", "Arial", sans-serif;
+  --fmono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", monospace;
 }
 
 * {
@@ -299,6 +299,12 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.modal-err {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--err);
+  border-bottom: 1px solid var(--line);
 }
 .modal-list {
   flex: 1;
@@ -601,7 +607,7 @@ body {
   padding: 9px 11px;
   color: #b9c4bd;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
   max-height: 168px;
   overflow: auto;
 }
@@ -1004,7 +1010,7 @@ body {
 }
 .console-body .ln {
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 /* metrics / evaluation panel body (scroll container) */
@@ -1432,7 +1438,7 @@ body {
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
   cursor: pointer;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 /* ---- large right pane: Live feed + Viewer ---- */
@@ -2534,7 +2540,7 @@ body {
   color: var(--ink);
   text-align: center;
   line-height: 1.25;
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 .app-src {
   font-family: var(--fmono);
@@ -2959,7 +2965,7 @@ body {
 }
 .feed-log .ln {
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 .feed-sub {
   color: var(--muted);

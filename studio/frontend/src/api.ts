@@ -5,6 +5,7 @@
 
 export async function getJson<T = any>(url: string): Promise<T> {
   const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   return r.json();
 }
 
@@ -14,5 +15,6 @@ export async function postJson<T = any>(url: string, body: unknown): Promise<T> 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   return r.json();
 }

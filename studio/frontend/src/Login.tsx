@@ -24,7 +24,7 @@ export default function Login({ onAuthed }: { onAuthed: () => void }) {
       if (r.ok) {
         // Confirm the session cookie actually stuck. Over plain http a Secure cookie is silently dropped,
         // which would otherwise bounce straight back to this screen with no explanation.
-        const st = await getJson<{ authenticated?: boolean }>("/api/auth").catch(() => ({ authenticated: true }));
+        const st = await getJson<{ authenticated?: boolean }>("/api/auth").catch(() => ({ authenticated: false }));
         if (st.authenticated) {
           onAuthed();
           return;

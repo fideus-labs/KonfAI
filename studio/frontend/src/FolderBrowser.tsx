@@ -24,18 +24,20 @@ export default function FolderBrowser({
   const [dirs, setDirs] = useState<string[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const [parent, setParent] = useState<string | null>(null);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const q = path ? `?path=${encodeURIComponent(path)}` : "";
     fetch(`/api/browse${q}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("browse failed"))))
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status} ${r.statusText}`))))
       .then((d) => {
         setResolved(d.path);
         setDirs(d.dirs);
         setFiles(d.files ?? []);
         setParent(d.parent);
+        setError("");
       })
-      .catch(() => {});
+      .catch((e) => setError(`Can't open this folder (${(e as Error).message}).`));
   }, [path]);
 
   return (
@@ -43,6 +45,7 @@ export default function FolderBrowser({
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">{title}</div>
         <div className="modal-path">{resolved || "…"}</div>
+        {error && <div className="modal-err">{error}</div>}
         <div className="modal-list">
           {parent && (
             <button className="dir up" onClick={() => setPath(parent)}>
