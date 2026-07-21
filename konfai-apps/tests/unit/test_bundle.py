@@ -204,6 +204,7 @@ def test_derive_reduction_reads_the_ensemble_reduction():
     # The multi-model reduction is read from the output transforms, never hard-coded per app.
     assert _derive_reduction(cfg({"MergeLabels": {}}), "Predictor") == "merge_labels"
     assert _derive_reduction(cfg({"InferenceStack": {"mode": "mean"}}), "Predictor") == "mean"
+    assert _derive_reduction(cfg({"InferenceStack": {"mode": "median"}}), "Predictor") == "median"
     assert _derive_reduction(cfg("None"), "Predictor") is None
     assert _derive_reduction({"Predictor": {}}, "Predictor") is None
 

@@ -387,12 +387,14 @@ def assemble_program(models: list[dict[str, Any]], *, reduce: str, classes: list
     """
     if not models:
         raise AppMetadataError("assemble_program: at least one model is required")
-    if reduce not in ("mean", "merge_labels"):
-        raise AppMetadataError(f"assemble_program: unknown reduction '{reduce}' (expected 'mean' or 'merge_labels')")
+    if reduce not in ("mean", "median", "merge_labels"):
+        raise AppMetadataError(
+            f"assemble_program: unknown reduction '{reduce}' (expected 'mean', 'median' or 'merge_labels')",
+        )
 
     manifests = [m["manifest"] for m in models]
     tail: list[dict[str, Any]] = []
-    if reduce == "mean" and len(models) > 1:
+    if reduce in ("mean", "median") and len(models) > 1:
         manifests, tail = _hoist_ensemble_tail(manifests)
 
     buffers = [f"m{i}" for i in range(len(models))]
@@ -467,11 +469,11 @@ def _derive_reduction(config: dict[str, Any], root: str) -> str | None:
     ``MergeLabels`` (models with disjoint label spaces) -> ``merge_labels``; ``InferenceStack``
     (same-class probability ensemble) -> ``mean``. ``None`` when the config declares no reduction."""
     after = _find_transforms(config.get(root, {}).get("outputs_dataset"), "after_reduction_transforms") or {}
-    names = {name.split("/", 1)[0] for name in after}
-    if "MergeLabels" in names:
+    if "MergeLabels" in {name.split("/", 1)[0] for name in after}:
         return "merge_labels"
-    if "InferenceStack" in names:
-        return "mean"
+    stack = next((p for name, p in after.items() if name.split("/", 1)[0] == "InferenceStack"), None)
+    if stack is not None:
+        return "median" if isinstance(stack, dict) and stack.get("mode") == "median" else "mean"
     return None
 
 
@@ -541,6 +543,7 @@ def _assemble_masked_tta_program(
     tta_passes: list[list[int]],
     aux: dict[str, dict[str, Any]],
     mask_specs: list[dict[str, Any]],
+    reduce: str = "mean",
 ) -> dict[str, Any]:
     """The synthesis-with-mask program: nested mask model(s) -> primary folds x TTA flip passes ->
     mean -> mask -> hoisted inverse resample -> final integer cast.
@@ -591,7 +594,7 @@ def _assemble_masked_tta_program(
             cur = nxt
         mask_buffers[name] = cur
 
-    steps.append({"op": "mean", "in": copies, "out": "synth"})
+    steps.append({"op": reduce, "in": copies, "out": "synth"})
     cur = "synth"
     for i, spec in enumerate(mask_specs):
         nxt = f"masked{i}"
@@ -750,7 +753,9 @@ def export_portable_into_bundle(
                 name: {**_export_nested_model(bundle, name, g["inference"]), "ops": g["ops"]}
                 for name, g in aux_groups.items()
             }
-            program = _assemble_masked_tta_program(models, _tta_passes(config, root), aux, _mask_specs(config, root))
+            program = _assemble_masked_tta_program(
+                models, _tta_passes(config, root), aux, _mask_specs(config, root), reduce=reduction or "mean"
+            )
             program_path = bundle / "program.json"
             program_path.write_text(json.dumps(program, indent=2))
             return program_path
