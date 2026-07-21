@@ -44,6 +44,13 @@ def _sane_session(name: str) -> str:
     return cleaned if cleaned and cleaned not in {".", ".."} else "default"
 
 
+def _jail(root: Path, rel: str) -> Path | None:
+    """Resolve ``root/rel`` and return it only when it stays under ``root`` (else None)."""
+    base = root.resolve()
+    target = (base / rel).resolve() if rel else base
+    return target if target == base or base in target.parents else None
+
+
 # --- Access gate (remote deployments) -------------------------------------------------------------
 # Studio drives konfai-mcp, which reads arbitrary host paths and runs jobs — arbitrary compute by
 # design. On loopback that is the operator's own machine; exposed on a network it is not. A single
@@ -466,6 +473,21 @@ def _device_directive(device: str) -> str:
     return ""
 
 
+async def _mcp_detail(session: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Proxy a konfai-mcp tool and surface its outcome as ``{ok, detail}``."""
+    ok, text = await call_mcp_tool(session, tool, args)
+    return {"ok": ok, "detail": text}
+
+
+async def _mcp_json(session: str, tool: str, args: dict[str, Any]) -> tuple[bool, str, Any]:
+    """Proxy a konfai-mcp tool: (ok, raw text, JSON-decoded value) — the value is {} on non-JSON text."""
+    ok, text = await call_mcp_tool(session, tool, args)
+    try:
+        return ok, text, json.loads(text)
+    except (TypeError, ValueError):
+        return ok, text, {}
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
     """Stream one user turn as Server-Sent Events. Serialised: one turn at a time."""
@@ -838,11 +860,10 @@ def _sessions_file() -> Path:
 
 
 def _delete_workspace(name: str) -> None:
-    """Delete a task's konfai-mcp workspace, jailed to a direct child of ``sessions/`` (the name is
-    already sanitized, so this never escapes the workspace root)."""
-    root = (_workspace_root() / "sessions").resolve()
-    target = (root / name).resolve()
-    if target.parent == root and target.is_dir():
+    """Delete a task's konfai-mcp workspace, jailed under ``sessions/`` (the name is already sanitized,
+    so this never escapes the workspace root)."""
+    target = _jail(_workspace_root() / "sessions", name)
+    if target is not None and target.is_dir():
         shutil.rmtree(target, ignore_errors=True)
 
 
@@ -1070,13 +1091,9 @@ async def evaluations(session: str = Query("default")) -> dict[str, list[dict[st
 async def leaderboard(session: str = Query("default"), split: str = Query("TRAIN")) -> dict[str, Any]:
     """Rank the experiment's runs by their evaluation metrics — proxies konfai-mcp's ``leaderboard`` (which
     reads the Metric_<SPLIT>.json files live; nothing extra is persisted). One ranking per metric."""
-    ok, text = await call_mcp_tool(_sane_session(session), "leaderboard", {"split": split})
+    ok, text, payload = await _mcp_json(_sane_session(session), "leaderboard", {"split": split})
     if not ok:
         return {"ok": False, "detail": text}
-    try:
-        payload = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return {"ok": True}
     return {"ok": True, **payload} if isinstance(payload, dict) else {"ok": True}
 
 
@@ -1092,7 +1109,7 @@ def _run_config_snapshot(session: str, run: str) -> Path | None:
         p
         for pattern in (f"Statistics/{run}/*.yml", f"*/Statistics/{run}/*.yml")
         for p in base.glob(pattern)
-        if p.is_file() and base in p.resolve().parents
+        if p.is_file() and _jail(base, str(p.relative_to(base))) is not None
     ]
     return max(snaps, key=lambda p: p.stat().st_mtime) if snaps else None
 
@@ -1124,12 +1141,8 @@ async def curves(session: str = Query("default"), run: str = Query(...), q: str 
     args: dict[str, Any] = {"run_name": run, "max_points": 2000}
     if q:
         args["tags"] = [q]
-    ok, text = await call_mcp_tool(_sane_session(session), "read_training_curves", args)
-    try:
-        data = json.loads(text) if ok else {}
-    except (TypeError, ValueError):
-        data = {}
-    return {"ok": ok, "curves": data.get("curves", {}) if isinstance(data, dict) else {}}
+    ok, _text, data = await _mcp_json(_sane_session(session), "read_training_curves", args)
+    return {"ok": ok, "curves": data.get("curves", {}) if ok and isinstance(data, dict) else {}}
 
 
 class ConfigSave(BaseModel):
@@ -1140,9 +1153,8 @@ class ConfigSave(BaseModel):
 
 def _session_path(session: str, rel: str) -> Path:
     """Resolve a path inside a session's workspace — jailed, never escapes the session root."""
-    root = (_workspace_root() / "sessions" / _sane_session(session)).resolve()
-    target = (root / rel).resolve() if rel else root
-    if target != root and root not in target.parents:
+    target = _jail(_workspace_root() / "sessions" / _sane_session(session), rel)
+    if target is None:
         raise HTTPException(400, "path escapes the session workspace")
     return target
 
@@ -1221,17 +1233,10 @@ def _experiment_info(session: str) -> dict[str, Any]:
     predictions = sorted(
         {p.name for pred in root.glob("**/Predictions") if pred.is_dir() for p in pred.iterdir() if p.is_dir()}
     )
-    jobs: list[dict[str, Any]] = []
-    jobs_dir = root / ".konfai_mcp" / "jobs"
-    records = (
-        sorted(jobs_dir.glob("*/job.json"), key=lambda p: p.stat().st_mtime, reverse=True) if jobs_dir.is_dir() else []
-    )
-    for record in records[:10]:
-        try:
-            payload = json.loads(record.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        jobs.append({"run": payload.get("run_name"), "kind": payload.get("kind"), "status": _live_status(payload)})
+    jobs = [
+        {"run": payload.get("run_name"), "kind": payload.get("kind"), "status": _live_status(payload)}
+        for payload in sorted(_all_jobs(session), key=_job_created, reverse=True)[:10]
+    ]
     return {
         "checkpoints": checkpoints[:50],
         "predictions": predictions[:50],
@@ -1252,11 +1257,8 @@ class AppRef(BaseModel):
     session: str = "apps"
 
 
-def _parse_apps(text: str) -> list[dict[str, Any]]:
-    try:
-        data = json.loads(text)
-    except (TypeError, ValueError):
-        return []
+def _parse_apps(data: Any) -> list[dict[str, Any]]:
+    """The ``apps`` list from a parsed ``list_apps`` payload (empty when unshaped)."""
     apps = data.get("apps") if isinstance(data, dict) else None
     return apps if isinstance(apps, list) else []
 
@@ -1264,8 +1266,8 @@ def _parse_apps(text: str) -> list[dict[str, Any]]:
 @app.get("/api/apps")
 async def apps(session: str = Query("apps")) -> dict[str, Any]:
     """The konfai-mcp app catalogue (shipped + registered sources) — a direct MCP call, no LLM."""
-    ok, text = await call_mcp_tool(_sane_session(session), "list_apps", {"include_summary": True})
-    return {"ok": ok, "apps": _parse_apps(text)}
+    ok, _text, data = await _mcp_json(_sane_session(session), "list_apps", {"include_summary": True})
+    return {"ok": ok, "apps": _parse_apps(data)}
 
 
 def _app_bundle_file(ref: str, filename: str) -> Path:
@@ -1302,20 +1304,21 @@ async def app_model(ref: str = Query(...)) -> FileResponse:
     )
 
 
+async def _apps_after(session: str, source_tool: str, ref: str) -> dict[str, Any]:
+    """Register/unregister an app source, then return that outcome with the refreshed catalogue."""
+    ok, text = await call_mcp_tool(session, source_tool, {"ref": ref})
+    _, _listed, data = await _mcp_json(session, "list_apps", {"include_summary": True})
+    return {"ok": ok, "result": text, "apps": _parse_apps(data)}
+
+
 @app.post("/api/apps/register")
 async def register_app(req: AppRef) -> dict[str, Any]:
-    session = _sane_session(req.session)
-    ok, text = await call_mcp_tool(session, "register_app_source", {"ref": req.ref})
-    listed = await call_mcp_tool(session, "list_apps", {"include_summary": True})
-    return {"ok": ok, "result": text, "apps": _parse_apps(listed[1])}
+    return await _apps_after(_sane_session(req.session), "register_app_source", req.ref)
 
 
 @app.post("/api/apps/unregister")
 async def unregister_app(req: AppRef) -> dict[str, Any]:
-    session = _sane_session(req.session)
-    ok, text = await call_mcp_tool(session, "unregister_app_source", {"ref": req.ref})
-    listed = await call_mcp_tool(session, "list_apps", {"include_summary": True})
-    return {"ok": ok, "result": text, "apps": _parse_apps(listed[1])}
+    return await _apps_after(_sane_session(req.session), "unregister_app_source", req.ref)
 
 
 _TB_IMAGE_HISTORY = 30  # steps kept per image tag (the slider's range); frames are fetched lazily
@@ -1330,10 +1333,8 @@ def _tb_image_dir(session: str, base: str = "") -> Path | None:
     if base:  # a provided base is authoritative — a traversal attempt is rejected, never fallen back on
         if ".." in Path(base).parts:
             return None
-        one = (root / base / "tb").resolve()
-        if one != root and root in one.parents and one.is_dir():
-            return one
-        return None
+        one = _jail(root, f"{base}/tb")
+        return one if one is not None and one.is_dir() else None
     tb_dirs = sorted(root.glob("**/tb"), key=lambda p: p.stat().st_mtime, reverse=True) if root.is_dir() else []
     return tb_dirs[0] if tb_dirs else None
 
@@ -1471,20 +1472,7 @@ def _job_created(job: dict[str, Any]) -> float:
 
 def _latest_job(session: str) -> dict[str, Any] | None:
     """A task's most recently created job (its ``job.json`` payload), newest ``created_at`` wins."""
-    jobs = _workspace_root() / "sessions" / session / ".konfai_mcp" / "jobs"
-    if not jobs.is_dir():
-        return None
-    best: dict[str, Any] | None = None
-    best_time = float("-inf")
-    for record in jobs.glob("*/job.json"):
-        try:
-            job = json.loads(record.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        created = _job_created(job)
-        if created >= best_time:
-            best, best_time = job, created
-    return best
+    return max(_all_jobs(session), key=_job_created, default=None)
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -1527,16 +1515,22 @@ async def cancel_running_job(req: CancelJob) -> dict[str, Any]:
     job_id = job.get("job_id") if job else None
     if not job_id:
         return {"ok": False, "detail": "no job to stop"}
-    ok, text = await call_mcp_tool(name, "cancel_job", {"job_id": job_id, "wait_s": 5})
-    return {"ok": ok, "detail": text}
+    return await _mcp_detail(name, "cancel_job", {"job_id": job_id, "wait_s": 5})
 
 
 @app.post("/api/run/delete")
 async def delete_run(req: DeleteRun) -> dict[str, Any]:
     """Delete one run's outputs — proxies konfai-mcp's jailed ``delete_run`` (never leaves the workspace)."""
-    name = _sane_session(req.session)
-    ok, text = await call_mcp_tool(name, "delete_run", {"run_name": req.run_name, "kind": req.kind})
-    return {"ok": ok, "detail": text}
+    return await _mcp_detail(_sane_session(req.session), "delete_run", {"run_name": req.run_name, "kind": req.kind})
+
+
+def _require_train_job(name: str) -> tuple[str | None, dict[str, Any] | None]:
+    """The active training job's id, or an error payload when there is no running training job."""
+    job = _latest_job(name)
+    job_id = job.get("job_id") if job else None
+    if not job_id or (job or {}).get("kind") != "train":
+        return None, {"ok": False, "detail": "no running training job"}
+    return job_id, None
 
 
 @app.post("/api/job/validate")
@@ -1544,12 +1538,10 @@ async def request_validation(req: CancelJob) -> dict[str, Any]:
     """Ask a running training job to run a validation pass now — ``request_validation`` signals the job
     (SIGUSR1); the trainer validates at its next iteration boundary and the metrics stream into Live."""
     name = _sane_session(req.session)
-    job = _latest_job(name)
-    job_id = job.get("job_id") if job else None
-    if not job_id or (job or {}).get("kind") != "train":
-        return {"ok": False, "detail": "no running training job"}
-    ok, text = await call_mcp_tool(name, "request_validation", {"job_id": job_id})
-    return {"ok": ok, "detail": text}
+    job_id, error = _require_train_job(name)
+    if error is not None:
+        return error
+    return await _mcp_detail(name, "request_validation", {"job_id": job_id})
 
 
 @app.post("/api/job/tunables")
@@ -1557,17 +1549,15 @@ async def set_tunables(req: SetTunables) -> dict[str, Any]:
     """Change a running training's lr / it_validation mid-run — proxies konfai-mcp's ``set_live_tunables``,
     which drops a jailed control file the trainer applies at its next poll boundary."""
     name = _sane_session(req.session)
-    job = _latest_job(name)
-    job_id = job.get("job_id") if job else None
-    if not job_id or (job or {}).get("kind") != "train":
-        return {"ok": False, "detail": "no running training job"}
+    job_id, error = _require_train_job(name)
+    if error is not None:
+        return error
     args: dict[str, Any] = {"job_id": job_id}
     if req.lr is not None:
         args["lr"] = req.lr
     if req.it_validation is not None:
         args["it_validation"] = req.it_validation
-    ok, text = await call_mcp_tool(name, "set_live_tunables", args)
-    return {"ok": ok, "detail": text}
+    return await _mcp_detail(name, "set_live_tunables", args)
 
 
 _LOG_BACKFILL = 32_000  # bytes: on connect, replay only the recent tail of a large log, not its full history
@@ -1865,8 +1855,8 @@ async def live(session: str = Query("default")) -> StreamingResponse:
 @app.get("/assets/{file_path:path}")
 async def assets(file_path: str) -> FileResponse:
     """Serve the built Vite assets (JS/CSS) from ``web/assets`` — jailed to that dir."""
-    target = (WEB_DIR / "assets" / file_path).resolve()
-    if not target.is_file() or (WEB_DIR / "assets").resolve() not in target.parents:
+    target = _jail(WEB_DIR / "assets", file_path)
+    if target is None or not target.is_file():
         raise HTTPException(404, "asset not found")
     return FileResponse(str(target))
 

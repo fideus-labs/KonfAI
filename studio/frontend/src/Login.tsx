@@ -1,4 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { type FormEvent, useState } from "react";
+import { getJson } from "./api";
 
 // The lock screen for a remote deployment. Exchanges the shared access token for an httpOnly session
 // cookie; the token is never stored client-side. Shown only when the server reports auth is required.
@@ -21,9 +24,7 @@ export default function Login({ onAuthed }: { onAuthed: () => void }) {
       if (r.ok) {
         // Confirm the session cookie actually stuck. Over plain http a Secure cookie is silently dropped,
         // which would otherwise bounce straight back to this screen with no explanation.
-        const st = await fetch("/api/auth")
-          .then((x) => x.json())
-          .catch(() => ({ authenticated: true }));
+        const st = await getJson<{ authenticated?: boolean }>("/api/auth").catch(() => ({ authenticated: true }));
         if (st.authenticated) {
           onAuthed();
           return;

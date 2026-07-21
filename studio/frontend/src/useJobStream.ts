@@ -1,4 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { useEffect, useRef, useState } from "react";
+import { readSSE } from "./sse";
 
 export type Point = { x: number; y: number };
 
@@ -153,88 +156,74 @@ export function useJobStream(session: string, runNonce: number): JobStream {
 
     async function pump() {
       const resp = await fetch(`/api/live?session=${encodeURIComponent(session)}`, { signal: ctrl.signal });
-      const reader = resp.body!.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buf.indexOf("\n\n")) >= 0) {
-          const chunk = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          if (!chunk.startsWith("data: ")) continue;
-          const ev = JSON.parse(chunk.slice(6));
-
-          if (ev.type === "job") {
-            // The latest job — sets the header + the default tab. It never clears runs: a new job (a
-            // prediction after a training) adds a run, it doesn't wipe the ones already followed.
-            activeKeyRef.current = rkey(ev.run || "", ev.kind || "");
-            setActiveRun(activeKeyRef.current);
-            setRun(ev.run);
-            setKind(ev.kind || "");
-            setStatus(ev.status || "running");
-            setLines([]); // console is per-job
-          } else if (ev.type === "run") {
-            // A run of the experiment was discovered — make sure its tab exists (even before any metric).
-            withRun(ev.run, ev.kind || "", (r) => ({ ...r, status: ev.status || r.status, base: ev.base || r.base }));
-          } else if (ev.type === "idle") {
-            setStatus("");
-          } else if (ev.type === "log") {
-            setLines((p) => [...p.slice(-800), ev.line]);
-          } else if (ev.type === "progress") {
-            const label: string = ev.label || "Caching";
-            const stage: string = ev.stage || "caching";
-            const key = rkey(ev.run || "", ev.kind || "");
+      for await (const ev of readSSE(resp)) {
+        if (ev.type === "job") {
+          // The latest job — sets the header + the default tab. It never clears runs: a new job (a
+          // prediction after a training) adds a run, it doesn't wipe the ones already followed.
+          activeKeyRef.current = rkey(ev.run || "", ev.kind || "");
+          setActiveRun(activeKeyRef.current);
+          setRun(ev.run);
+          setKind(ev.kind || "");
+          setStatus(ev.status || "running");
+          setLines([]); // console is per-job
+        } else if (ev.type === "run") {
+          // A run of the experiment was discovered — make sure its tab exists (even before any metric).
+          withRun(ev.run, ev.kind || "", (r) => ({ ...r, status: ev.status || r.status, base: ev.base || r.base }));
+        } else if (ev.type === "idle") {
+          setStatus("");
+        } else if (ev.type === "log") {
+          setLines((p) => [...p.slice(-800), ev.line]);
+        } else if (ev.type === "progress") {
+          const label: string = ev.label || "Caching";
+          const stage: string = ev.stage || "caching";
+          const key = rkey(ev.run || "", ev.kind || "");
+          withRun(ev.run || "", ev.kind || "", (r) => {
+            const live = liveFrom(r.live, label, stage, ev.progress, ev);
+            if (stage === "caching" && typeof ev.memory_gb === "number") {
+              const tick = (ramTick.current[key] = (ramTick.current[key] ?? 0) + 1);
+              live.ram = [...live.ram.slice(-(POINT_CAP - 1)), { x: tick, y: ev.memory_gb }];
+            }
+            return { ...r, live };
+          });
+        } else if (ev.type === "metric") {
+          const label: string = ev.label || ev.stage;
+          const stage: string = ev.stage;
+          const key = rkey(ev.run || "", ev.kind || "");
+          const p: Progress | null = ev.progress ?? null;
+          if (p) {
+            // The x-axis depends on the stage. Training: a monotonic iteration counter (the tqdm step
+            // resets each epoch, so we count training lines instead). Validation of a training: pinned to
+            // that training iteration, so its pass collapses to one point on the training axis. Evaluation
+            // / prediction: the case index (progress.step) — a running curve over cases, one point each.
+            let x: number;
+            if (stage === "training") {
+              x = itCount.current[key] = (itCount.current[key] ?? 0) + 1;
+            } else if (stage === "validation") {
+              x = itCount.current[key] ?? 0;
+            } else {
+              x = p.step;
+            }
+            const shown: Record<string, number> = {};
             withRun(ev.run || "", ev.kind || "", (r) => {
-              const live = liveFrom(r.live, label, stage, ev.progress, ev);
-              if (stage === "caching" && typeof ev.memory_gb === "number") {
-                const tick = (ramTick.current[key] = (ramTick.current[key] ?? 0) + 1);
-                live.ram = [...live.ram.slice(-(POINT_CAP - 1)), { x: tick, y: ev.memory_gb }];
+              const series = { ...r.series };
+              for (const [name, val] of Object.entries(ev.values as Record<string, number>)) {
+                const seriesKey = `${label}/${name}`;
+                series[seriesKey] = { label, stage, points: appendPoint(series[seriesKey]?.points ?? [], x, val), at: Date.now() };
+                if (!name.endsWith(":lr")) shown[name] = val;
               }
-              return { ...r, live };
+              return { ...r, series, live: liveFrom(r.live, label, stage, p, ev, shown) };
             });
-          } else if (ev.type === "metric") {
-            const label: string = ev.label || ev.stage;
-            const stage: string = ev.stage;
-            const key = rkey(ev.run || "", ev.kind || "");
-            const p: Progress | null = ev.progress ?? null;
-            if (p) {
-              // The x-axis depends on the stage. Training: a monotonic iteration counter (the tqdm step
-              // resets each epoch, so we count training lines instead). Validation of a training: pinned to
-              // that training iteration, so its pass collapses to one point on the training axis. Evaluation
-              // / prediction: the case index (progress.step) — a running curve over cases, one point each.
-              let x: number;
-              if (stage === "training") {
-                x = itCount.current[key] = (itCount.current[key] ?? 0) + 1;
-              } else if (stage === "validation") {
-                x = itCount.current[key] ?? 0;
-              } else {
-                x = p.step;
-              }
-              const shown: Record<string, number> = {};
-              withRun(ev.run || "", ev.kind || "", (r) => {
-                const series = { ...r.series };
-                for (const [name, val] of Object.entries(ev.values as Record<string, number>)) {
-                  const seriesKey = `${label}/${name}`;
-                  series[seriesKey] = { label, stage, points: appendPoint(series[seriesKey]?.points ?? [], x, val), at: Date.now() };
-                  if (!name.endsWith(":lr")) shown[name] = val;
-                }
-                return { ...r, series, live: liveFrom(r.live, label, stage, p, ev, shown) };
-              });
-            }
-            if (!sawMetric.current) {
-              sawMetric.current = true;
-              setMetricNonce((n) => n + 1);
-            }
-          } else if (ev.type === "status") {
-            if (ev.run) {
-              withRun(ev.run, ev.kind || "", (r) => ({ ...r, status: ev.status }));
-              if (rkey(ev.run, ev.kind || "") === activeKeyRef.current) setStatus(ev.status);
-            }
-            setDoneNonce((n) => n + 1);
           }
+          if (!sawMetric.current) {
+            sawMetric.current = true;
+            setMetricNonce((n) => n + 1);
+          }
+        } else if (ev.type === "status") {
+          if (ev.run) {
+            withRun(ev.run, ev.kind || "", (r) => ({ ...r, status: ev.status }));
+            if (rkey(ev.run, ev.kind || "") === activeKeyRef.current) setStatus(ev.status);
+          }
+          setDoneNonce((n) => n + 1);
         }
       }
     }

@@ -75,9 +75,6 @@ class MetricsServiceMixin:
             )
         return layout
 
-    def _parse_live_metric_line(self, line: str) -> dict[str, Any] | None:
-        return parse_live_metric_line(line)  # module-level: the single source of truth (see top of file)
-
     def _parse_live_metrics_file(self, path: Path, max_lines: int | None = None) -> list[dict[str, Any]]:
         lines = read_text_tail(path, max_lines=max_lines or self.max_log_tail_lines).splitlines()
         return [entry for line in lines if (entry := parse_live_metric_line(line)) is not None]

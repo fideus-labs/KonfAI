@@ -21,6 +21,7 @@ import os
 import random
 import shutil
 import signal
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
@@ -184,6 +185,9 @@ class _Trainer:
     This class is intended to be used via a context manager
     (`with _Trainer(...) as trainer:`)  inside the public `Trainer` class.
     """
+
+    # Rank-aligned poll cadence (iterations) shared by the validation-request and live-tunable pollers.
+    _LIVE_POLL_INTERVAL = 20
 
     def __init__(
         self,
@@ -455,15 +459,22 @@ class _Trainer:
         """
         return bool(self._broadcast_from_master(stop))
 
+    def _poll_from_rank0(self, producer: Callable[[], Any]) -> Any:
+        """Rank 0 produces the value; every rank receives the same one via broadcast, so all ranks act on
+        the same value at the same iteration. Non-master ranks contribute a neutral placeholder that the
+        broadcast overwrites; single-process runs skip the collective entirely (like _broadcast_stop)."""
+        value = producer() if self.global_rank == 0 else None
+        if self.world_size > 1:
+            value = self._broadcast_from_master(value)
+        return value
+
     def _requested_validation(self) -> bool:
         """Whether an on-demand validation (SIGUSR1) is pending. Polled at a modest cadence so the DDP
         broadcast stays rare; rank 0's flag is authoritative, so every rank validates on the same
         iteration. Single-process runs skip the collective entirely."""
-        if self.it % 20 != 0:  # bound the on-demand latency to ~20 iterations while keeping the poll cheap
+        if self.it % self._LIVE_POLL_INTERVAL != 0:  # bound the on-demand latency while keeping the poll cheap
             return False
-        requested = self._validate_now if self.global_rank == 0 else False
-        if self.world_size > 1:
-            requested = bool(self._broadcast_from_master(requested))
+        requested = bool(self._poll_from_rank0(lambda: self._validate_now))
         if requested:
             self._validate_now = False
         return requested
@@ -472,11 +483,9 @@ class _Trainer:
         """Poll the run's control file at the same coarse, rank-aligned cadence as the validation poll and
         apply any new tunables. Rank 0 reads and broadcasts, so every rank applies the same change on the
         same iteration; rank 0 also records it into the run's config snapshot. No control file → a no-op."""
-        if self.it % 20 != 0:
+        if self.it % self._LIVE_POLL_INTERVAL != 0:
             return
-        pending = self._live_control.take() if self.global_rank == 0 else None
-        if self.world_size > 1:
-            pending = self._broadcast_from_master(pending)
+        pending = self._poll_from_rank0(lambda: self._live_control.take())
         if not pending:
             return
         applied = self._apply_tunables(pending)

@@ -1195,6 +1195,21 @@ class KonfAIApp(AbstractKonfAIApp):
         elif link.is_dir():
             shutil.rmtree(link, ignore_errors=True)
 
+    @staticmethod
+    def _collect_result(output: Path, tmp_dir: Path | None, name: str) -> None:
+        """Collect a stage's results into ``output`` -- the mirror of :meth:`_stage_result_dir`.
+
+        Without a caller-owned workspace (``tmp_dir`` unset) the stage wrote ``./<name>`` in the isolated
+        temp workspace; copy it into ``output`` before the workspace is deleted. With a caller-owned
+        workspace the stage already wrote straight into ``output``; only drop the ``./Dataset`` staging.
+        """
+        if tmp_dir is None:
+            result = Path(f"./{name}")
+            if result.exists():
+                shutil.copytree(result, output, dirs_exist_ok=True)
+        else:
+            KonfAIApp._clear_dataset()
+
     @run_distributed_app
     def infer(
         self,
@@ -1269,11 +1284,7 @@ class KonfAIApp(AbstractKonfAIApp):
             Path(prediction_file).resolve(),
             predictions_dir=result_dir,
         )
-        if tmp_dir is None:
-            if Path("./Predictions").absolute().exists():
-                shutil.copytree(Path("./Predictions").absolute(), output, dirs_exist_ok=True)
-        else:
-            self._clear_dataset()
+        self._collect_result(output, tmp_dir, "Predictions")
 
     @run_distributed_app
     def evaluate(
@@ -1321,11 +1332,7 @@ class KonfAIApp(AbstractKonfAIApp):
             Path(evaluation_file).resolve(),
             evaluations_dir=result_dir,
         )
-        if tmp_dir is None:
-            if Path("./Evaluations").exists():
-                shutil.copytree("./Evaluations", output, dirs_exist_ok=True)
-        else:
-            self._clear_dataset()
+        self._collect_result(output, tmp_dir, "Evaluations")
 
     @run_distributed_app
     def uncertainty(
@@ -1359,11 +1366,7 @@ class KonfAIApp(AbstractKonfAIApp):
 
         result_dir = self._stage_result_dir(output, tmp_dir, "Uncertainties")
         evaluate(True, gpu, cpu, quiet, False, Path(uncertainty_file).resolve(), result_dir)
-        if tmp_dir is None:
-            if Path("./Uncertainties").exists():
-                shutil.copytree("./Uncertainties", output, dirs_exist_ok=True)
-        else:
-            self._clear_dataset()
+        self._collect_result(output, tmp_dir, "Uncertainties")
 
     def pipeline(
         self,
@@ -1512,15 +1515,10 @@ class KonfAIApp(AbstractKonfAIApp):
 
         from konfai.trainer import train
 
-        # Fine-tuning writes its scaffolding (per-model config copies, sanitised init checkpoints) and
-        # training artifacts (Checkpoints/Statistics) under ``train_root``. By default that is a scratch
-        # dir that is discarded, so the produced bundle stays a clean app -- konfai-apps' native isolation.
-        # When the caller keeps the full run (konfai-mcp runs in the workspace), ``train_root`` IS the
-        # workspace: no scratch dir, and no copy of the support files since they already sit there.
-        # ``train_root`` holds the scaffolding (per-model config copies, sanitised init checkpoints, the app
-        # support files). ``art_root`` holds the training run itself (Checkpoints/Statistics); it defaults to
-        # ``train_root`` but a caller (konfai-mcp) points it at the session root so the fine-tune shows up as
-        # a normal training run at the top of the workspace, not buried inside the produced bundle.
+        # ``train_root`` holds the scaffolding (per-model config copies, sanitised init checkpoints, support
+        # files): a discarded scratch dir by default (keeps the bundle a clean app), or the workspace itself
+        # when the caller keeps the full run. ``art_root`` holds the training run (Checkpoints/Statistics),
+        # defaulting to ``train_root`` unless a caller (konfai-mcp) redirects it to the session root.
         config_path = Path(config_file)
         work_dir: Path | None
         if keep_training_artifacts:
@@ -1610,11 +1608,7 @@ class KonfAIApp(AbstractKonfAIApp):
         finally:
             if work_dir is not None:
                 shutil.rmtree(work_dir, ignore_errors=True)
-            dataset_link = Path("./Dataset")
-            if dataset_link.is_symlink() or dataset_link.is_file():
-                dataset_link.unlink()
-            elif dataset_link.is_dir():
-                shutil.rmtree(dataset_link, ignore_errors=True)
+            self._clear_dataset()
 
     def __str__(self) -> str:
         return str(self.app_repository)

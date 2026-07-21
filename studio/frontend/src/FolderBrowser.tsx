@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { useEffect, useState } from "react";
 
 // Navigate the compute node's filesystem to pick a folder (or, with onPickFile, a file).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { type MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
 import AppZoo, { type StudioApp } from "./AppZoo";
 import Deploy from "./Deploy";
@@ -7,6 +9,9 @@ import FolderBrowser from "./FolderBrowser";
 import Login from "./Login";
 import RightPanel from "./RightPanel";
 import { useJobStream } from "./useJobStream";
+import { getJson, postJson } from "./api";
+import { useJson } from "./useJson";
+import { jobState } from "./status";
 
 type Gpu = { index: number; name: string; used_gb: number | null; total_gb: number | null };
 type Ram = { used_gb: number; total_gb: number };
@@ -20,15 +25,6 @@ const NEW = "__new__";
 // browser without the token. Clear the per-experiment chat keys; UI prefs (split, rail width) stay.
 function purgeStudioChat() {
   for (const k of Object.keys(localStorage)) if (k.startsWith("konfai-studio:chat:")) localStorage.removeItem(k);
-}
-
-// A job status → a rail signal: orange while it runs, red if it died, green when done, else neutral.
-function jobState(status?: string): "run" | "err" | "done" | "idle" {
-  if (!status) return "idle";
-  if (/killed|failed|error|cancel/i.test(status)) return "err";
-  if (/running|waiting|queued|connect/i.test(status)) return "run";
-  if (/done|complete|finish/i.test(status)) return "done";
-  return "idle";
 }
 
 function PanelIcon() {
@@ -123,33 +119,37 @@ function Meter({
 export default function App() {
   const [auth, setAuth] = useState<"checking" | "in" | "out">("checking");
   const [remote, setRemote] = useState(false);
+  const { data: authInfo, loading: authLoading } = useJson<{ required?: boolean; authenticated?: boolean }>(
+    "/api/auth",
+    [],
+  );
 
+  // A mid-session 401 (session expired) flips back to the lock screen via the `ks-unauth` event from main.tsx.
   useEffect(() => {
-    let live = true;
     const onUnauth = () => {
-      if (!live) return;
       purgeStudioChat(); // a session that expired must not leave transcripts behind
       setAuth("out");
     };
     window.addEventListener("ks-unauth", onUnauth);
-    fetch("/api/auth")
-      .then((r) => r.json())
-      .then((d) => {
-        if (!live) return;
-        setRemote(!!d.required);
-        if (d.required && !d.authenticated) {
-          purgeStudioChat();
-          setAuth("out");
-        } else {
-          setAuth("in");
-        }
-      })
-      .catch(() => live && setAuth("in")); // server unreachable — let the app show its own offline state
-    return () => {
-      live = false;
-      window.removeEventListener("ks-unauth", onUnauth);
-    };
+    return () => window.removeEventListener("ks-unauth", onUnauth);
   }, []);
+
+  // Decide once from /api/auth whether this deployment needs a token and whether the browser holds a valid
+  // session. A failed check (server unreachable) falls through to the app's own offline state.
+  useEffect(() => {
+    if (authLoading) return;
+    if (!authInfo) {
+      setAuth("in");
+      return;
+    }
+    setRemote(!!authInfo.required);
+    if (authInfo.required && !authInfo.authenticated) {
+      purgeStudioChat();
+      setAuth("out");
+    } else {
+      setAuth("in");
+    }
+  }, [authLoading, authInfo]);
 
   if (auth === "checking") return <div className="lock" />;
   if (auth === "out") return <Login onAuthed={() => setAuth("in")} />;
@@ -179,7 +179,11 @@ function Studio({ remote }: { remote: boolean }) {
   const [devices, setDevices] = useState<Record<string, string>>({}); // compute device per experiment
   const [defaultDevice, setDefaultDevice] = useState("auto"); // what a fresh experiment starts on
   const [menu, setMenu] = useState<{ session: string; x: number; y: number } | null>(null);
-  const [menuCaps, setMenuCaps] = useState<{ bundlable: boolean; exportable: boolean } | null>(null);
+  // What the right-clicked experiment contains — greys out actions that would just fail (fails open to null).
+  const { data: menuCaps } = useJson<{ bundlable?: boolean; exportable?: boolean }>(
+    menu ? `/api/experiment?session=${encodeURIComponent(menu.session)}` : "",
+    [menu?.session],
+  );
   const [busy, setBusy] = useState<Record<string, boolean>>({}); // which tasks' agents are working
   const [statuses, setStatuses] = useState<Record<string, string>>({}); // latest job status per task
   const [datasetBrowsing, setDatasetBrowsing] = useState(false);
@@ -191,8 +195,7 @@ function Studio({ remote }: { remote: boolean }) {
 
   function refreshApps() {
     setAppsLoading(true);
-    fetch("/api/apps?session=apps")
-      .then((r) => r.json())
+    getJson("/api/apps?session=apps")
       .then((d) => setApps(d.apps ?? []))
       .catch(() => {})
       .finally(() => setAppsLoading(false));
@@ -253,12 +256,10 @@ function Studio({ remote }: { remote: boolean }) {
   const [toast, setToast] = useState("");
 
   useEffect(() => {
-    fetch("/api/health")
-      .then((r) => r.json())
+    getJson("/api/health")
       .then((d) => setStatus(d.agent === "ready" ? "ready" : "starting…"))
       .catch(() => setStatus("offline"));
-    fetch("/api/sessions")
-      .then((r) => r.json())
+    getJson("/api/sessions")
       .then((d) => {
         if (d.sessions?.length) {
           setSessions(d.sessions);
@@ -268,17 +269,14 @@ function Studio({ remote }: { remote: boolean }) {
         setDatasets(d.datasets ?? {});
       })
       .catch(() => {});
-    fetch("/api/datasets")
-      .then((r) => r.json())
+    getJson("/api/datasets")
       .then((d) => setRecent(d.datasets ?? []))
       .catch(() => {});
-    fetch("/api/files")
-      .then((r) => r.json())
+    getJson("/api/files")
       .then((d) => setFileRecent(d.files ?? []))
       .catch(() => {});
     refreshApps();
-    fetch("/api/llm")
-      .then((r) => r.json())
+    getJson("/api/llm")
       .then((d) => {
         setBrains(d.options ?? []);
         setBrain(d.current ?? "");
@@ -286,8 +284,7 @@ function Studio({ remote }: { remote: boolean }) {
         setModelText(d.model ?? "");
       })
       .catch(() => {});
-    fetch("/api/device")
-      .then((r) => r.json())
+    getJson("/api/device")
       .then((d) => {
         setDevices(d.devices ?? {});
         setDefaultDevice(d.default ?? "auto");
@@ -298,8 +295,7 @@ function Studio({ remote }: { remote: boolean }) {
   // Live VRAM + RAM in the title bar — a light poll, co-located with training.
   useEffect(() => {
     const pull = () => {
-      fetch("/api/system")
-        .then((r) => r.json())
+      getJson("/api/system")
         .then((d) => {
           const nextGpus: Gpu[] = d.gpus ?? [];
           const nextRam: Ram | null = d.ram ?? null;
@@ -315,8 +311,7 @@ function Studio({ remote }: { remote: boolean }) {
           });
         })
         .catch(() => {});
-      fetch("/api/sessions/status")
-        .then((r) => r.json())
+      getJson("/api/sessions/status")
         .then((d) => setStatuses(d.statuses ?? {}))
         .catch(() => {});
     };
@@ -327,12 +322,7 @@ function Studio({ remote }: { remote: boolean }) {
 
   function chooseBrain(id: string) {
     setBrain(id); // optimistic; applies to each task on its next message
-    fetch("/api/llm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ brain: id }),
-    })
-      .then((r) => r.json())
+    postJson("/api/llm", { brain: id })
       .then((d) => {
         setBrains(d.options ?? []);
         setBrain(d.current ?? id);
@@ -346,12 +336,7 @@ function Studio({ remote }: { remote: boolean }) {
   function chooseModel(id: string) {
     setModel(id);
     setModelText(id);
-    fetch("/api/llm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: id }),
-    })
-      .then((r) => r.json())
+    postJson("/api/llm", { model: id })
       .then((d) => {
         setModel(d.model ?? id);
         setModelText(d.model ?? id);
@@ -367,11 +352,7 @@ function Studio({ remote }: { remote: boolean }) {
       setDefaultDevice(val); // a draft's choice becomes the default the new experiment inherits
       return;
     }
-    fetch("/api/device", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, device: val }),
-    }).catch(() => {});
+    postJson("/api/device", { session, device: val }).catch(() => {});
   }
 
   // A machine with a GPU should train on it — default a fresh experiment to GPU 0 once, so jobs don't
@@ -397,21 +378,12 @@ function Studio({ remote }: { remote: boolean }) {
   // Remember a task's dataset server-side (persists, and the Experiment tree mounts it).
   function recordDataset(session: string, path: string) {
     setDatasets((d) => ({ ...d, [session]: path }));
-    fetch("/api/sessions/dataset", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, path }),
-    }).catch(() => {});
+    postJson("/api/sessions/dataset", { session, path }).catch(() => {});
   }
 
   function chooseDataset(path: string) {
     const prompt = `Inspect the dataset at ${path} and summarize it — cases, channels, classes, splits. Preview one case; don't train yet.`;
-    fetch("/api/datasets", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    })
-      .then((r) => r.json())
+    postJson("/api/datasets", { path })
       .then((d) => setRecent(d.datasets ?? []))
       .catch(() => {});
     if (active === NEW) {
@@ -425,12 +397,7 @@ function Studio({ remote }: { remote: boolean }) {
   // The Chat composer sends the "read this file" turn itself; here we just record it in the
   // shared history so any task can reuse it.
   function recordFile(ref: string) {
-    fetch("/api/files", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: ref }),
-    })
-      .then((r) => r.json())
+    postJson("/api/files", { path: ref })
       .then((d) => setFileRecent(d.files ?? []))
       .catch(() => {});
   }
@@ -448,12 +415,7 @@ function Studio({ remote }: { remote: boolean }) {
   function startExperiment(text: string, dataset?: string) {
     if (creating.current) return;
     creating.current = true;
-    fetch("/api/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    })
-      .then((r) => r.json())
+    postJson("/api/sessions", {})
       .then((d) => {
         const id = d.current as string;
         clearChat(id); // a reused id (a deleted experiment-1 frees it) must not inherit the old chat
@@ -479,12 +441,7 @@ function Studio({ remote }: { remote: boolean }) {
       : `${base} on my dataset — ask me for the dataset path if you don't have it, then run_prediction with the imported checkpoints; ask whether I want inference, evaluation, or fine-tuning (run_resume with weights_only).`;
     if (dataset) {
       // Keep it in the recent list too; startExperiment records it per-session so it mounts in the tree.
-      fetch("/api/datasets", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: dataset }),
-      })
-        .then((r) => r.json())
+      postJson("/api/datasets", { path: dataset })
         .then((d) => setRecent(d.datasets ?? []))
         .catch(() => {});
     }
@@ -493,12 +450,7 @@ function Studio({ remote }: { remote: boolean }) {
 
   function addApp(ref: string) {
     setToast(`Registering ${ref}…`);
-    fetch("/api/apps/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ref, session: "apps" }),
-    })
-      .then((r) => r.json())
+    postJson("/api/apps/register", { ref, session: "apps" })
       .then((d) => {
         if (d.apps) setApps(d.apps);
         setToast(d.ok ? `Added ${ref}` : d.result || "Could not add that app");
@@ -508,12 +460,7 @@ function Studio({ remote }: { remote: boolean }) {
 
   function removeApp(ref: string) {
     if (!window.confirm(`Remove the app source “${ref}” from the catalogue?`)) return;
-    fetch("/api/apps/unregister", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ref, session: "apps" }),
-    })
-      .then((r) => r.json())
+    postJson("/api/apps/unregister", { ref, session: "apps" })
       .then((d) => {
         if (d.apps) setApps(d.apps);
         if (!d.ok) setToast(d.result || "Could not remove that app");
@@ -528,12 +475,7 @@ function Studio({ remote }: { remote: boolean }) {
     const title = next?.trim();
     if (!title || title === current) return;
     setTitles((t) => ({ ...t, [s]: title })); // optimistic
-    fetch("/api/sessions/rename", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: s, title }),
-    })
-      .then((r) => r.json())
+    postJson("/api/sessions/rename", { session: s, title })
       .then((d) => d.titles && setTitles(d.titles))
       .catch(() => setToast("Rename failed."));
   }
@@ -543,12 +485,7 @@ function Studio({ remote }: { remote: boolean }) {
     if (!window.confirm(`Delete “${titles[s] ?? s}” and its workspace (jobs, checkpoints)? This cannot be undone.`))
       return;
     clearChat(s); // drop its stored chat so a reused id starts clean
-    fetch("/api/sessions/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: s }),
-    })
-      .then((r) => r.json())
+    postJson("/api/sessions/delete", { name: s })
       .then((d) => {
         setSessions(d.sessions);
         setTitles(d.titles ?? {});
@@ -562,12 +499,7 @@ function Studio({ remote }: { remote: boolean }) {
     setPick(null);
     const label = titles[session] ?? session;
     setToast(`${action === "bundle" ? "Packaging" : "Exporting"} “${label}”…`);
-    fetch(`/api/sessions/${action}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, output }),
-    })
-      .then((r) => r.json())
+    postJson(`/api/sessions/${action}`, { session, output })
       .then((d) => setToast(d.result || (d.ok ? "Done." : "Failed.")))
       .catch(() => setToast("Request failed."));
   }
@@ -577,20 +509,6 @@ function Studio({ remote }: { remote: boolean }) {
     const id = setTimeout(() => setToast(""), 9000);
     return () => clearTimeout(id);
   }, [toast]);
-
-  // What the right-clicked experiment actually contains — greys out actions that would just fail.
-  useEffect(() => {
-    setMenuCaps(null);
-    if (!menu) return;
-    let live = true;
-    fetch(`/api/experiment?session=${encodeURIComponent(menu.session)}`)
-      .then((r) => r.json())
-      .then((d) => live && setMenuCaps({ bundlable: !!d.bundlable, exportable: !!d.exportable }))
-      .catch(() => live && setMenuCaps({ bundlable: true, exportable: true })); // fail open
-    return () => {
-      live = false;
-    };
-  }, [menu?.session]);
 
   const bumpRun = (s: string) => setRunNonce((r) => ({ ...r, [s]: (r[s] ?? 0) + 1 }));
 

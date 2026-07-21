@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // In-tab deployment of a KonfAI App: the app's model.onnx + manifest.json (bundled by
 // `konfai-apps bundle --onnx`) are served by the BFF; the user picks a volume and inference runs
 // 100% in the browser -- the konfai-rs core compiled to WASM runs the pipeline (the SAME Rust as the
