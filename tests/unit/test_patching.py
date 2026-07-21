@@ -22,7 +22,7 @@ import pytest
 import torch
 from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean, StreamingAccumulator, blend_overlap
 from konfai.utils.errors import PatchError
-from konfai.utils.utils import get_patch_slices_from_shape
+from konfai.utils.utils import get_patch_slices_from_shape, resolve_overlap
 
 
 def _tile_2d(full: torch.Tensor, patch_size: list[int], overlap: int):
@@ -173,7 +173,7 @@ def _axis_overlaps(slices, patch_size):
     return overlaps
 
 
-def test_declared_free_axis_keeps_the_fraction_overlap_after_restart_concretization():
+def test_declared_free_axis_keeps_the_fraction_overlap_after_restart_concretization() -> None:
     """An OOM re-plan pins a declared free (``0``) axis to a concrete size in place; the axis must keep the
     fraction overlap default, not fall back to the fixed-patch remainder (near-zero -> seam artifacts)."""
     shape = [512, 256, 256]
@@ -186,11 +186,11 @@ def test_declared_free_axis_keeps_the_fraction_overlap_after_restart_concretizat
     assert _axis_overlaps(declared_slices, [512, 128, 128]) == _axis_overlaps(derived_slices, [512, 128, 128])
 
     # Regression: on the concretized grid the derived flag is False (no ``0`` left) and would take the
-    # remainder branch; carrying declared_free_axis=True restores the fraction default on the tiled axes.
+    # remainder branch; carrying declared_free_axis=True restores the exact fraction default on the tiled axes.
     remainder, _ = get_patch_slices_from_shape(concrete, shape, None, None, False)
     fixed, _ = get_patch_slices_from_shape(concrete, shape, None, None, True)
     assert _axis_overlaps(remainder, concrete) == [0, 0, 0]
-    assert all(o > 0 for o in _axis_overlaps(fixed, concrete))
+    assert _axis_overlaps(fixed, concrete) == list(resolve_overlap(None, concrete, shape))
 
 
 @pytest.mark.parametrize("combine_cls", [Mean, Cosinus])
