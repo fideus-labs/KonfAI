@@ -952,14 +952,16 @@ class Data(ABC):
         }
         if resolved_num_workers > 0:
             self.dataLoader_args["prefetch_factor"] = 2 if self._prefetch_factor is None else self._prefetch_factor
-            if self._persistent_workers is not None:
+            # Persistent workers keep a fork-time copy of the dataset and never see the main process's
+            # per-epoch reset_augmentation redraw, so inline augmentations freeze at their first-epoch draw.
+            # An explicit persistent_workers=True cannot override that: correctness wins over the request.
+            inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
+            if inline_augmentation_active:
+                persistent_workers = False
+            elif self._persistent_workers is not None:
                 persistent_workers = self._persistent_workers
             else:
-                # Persistent workers keep a fork-time copy of the dataset and never see the main process's
-                # per-epoch reset_augmentation redraw, so inline augmentations freeze at their first-epoch
-                # draw. Default them off when inline augmentations are active so the redraw takes effect.
-                inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
-                persistent_workers = not inline_augmentation_active
+                persistent_workers = True
             self.dataLoader_args["persistent_workers"] = persistent_workers
 
     def _estimate_cached_bytes(self) -> int:
@@ -1118,7 +1120,10 @@ class Data(ABC):
             self._prepared_train_names, dataset_name, self._get_data_augmentations(True)
         )
         self._prepared_validation_data, self._prepared_validation_mapping = self._get_datasets(
-            self._prepared_validation_names, dataset_name, self._get_data_augmentations(self.validation_augmentations)
+            self._prepared_validation_names,
+            dataset_name,
+            self._get_data_augmentations(self.validation_augmentations),
+            index_offset=len(self._prepared_train_names),
         )
 
     def _resolve_dataset_sources(self) -> dict[str, list[tuple[str, bool]]]:
