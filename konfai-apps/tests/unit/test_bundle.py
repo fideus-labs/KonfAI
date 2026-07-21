@@ -48,8 +48,13 @@ def test_assemble_bundle_layout(tmp_path):
     model_py.write_text("# custom\n")
 
     bundle = assemble_bundle(
-        "MR", tmp_path / "out", app_json, [str(config)], [str(checkpoint)],
-        model_py=str(model_py), requirements=str(requirements),
+        "MR",
+        tmp_path / "out",
+        app_json,
+        [str(config)],
+        [str(checkpoint)],
+        model_py=str(model_py),
+        requirements=str(requirements),
     )
 
     assert bundle == tmp_path / "out" / "MR"
@@ -95,11 +100,105 @@ def test_derive_onnx_params_from_config():
     config = {
         "Predictor": {
             "Model": {"classpath": "Model:UNetpp", "UNetpp": {"nb_channel": 5}},
-            "Dataset": {"Patch": {"patch_size": [1, 256, 256], "extend_slice": 2}},
+            "Dataset": {"Patch": {"patch_size": [1, 256, 256], "extend_slice": 2, "pad_value": -2}},
             "Model_unused_patch": {"ModelPatch": {"patch_size": [128, 128, 128]}},
         }
     }
-    patch_size, in_channels, extend_slice = _derive_onnx_params(config, "Predictor")
+    patch_size, in_channels, extend_slice, pad_value = _derive_onnx_params(config, "Predictor")
     assert patch_size == [256, 256]  # singleton slice dim dropped (2.5D)
     assert in_channels == 5
     assert extend_slice == 2
+    assert pad_value == -2.0  # the config's border-pad value reaches the manifest
+
+
+def test_derive_overlap_broadcasts_scalar_and_drops_singleton():
+    from konfai_apps.bundle import _derive_overlap
+
+    assert _derive_overlap({"overlap": 32}, [96, 128, 160]) == [32, 32, 32]  # scalar broadcast
+    assert _derive_overlap({"overlap": [8, 8]}, [64, 64]) == [8, 8]  # per-axis list kept
+    # a full-rank overlap carrying the 2.5D singleton slice axis: kept axes match patch_size
+    assert _derive_overlap({"overlap": [0, 16, 16], "patch_size": [1, 256, 256]}, [256, 256]) == [16, 16]
+    assert _derive_overlap({}, [96, 128, 160]) is None  # no overlap declared
+
+
+def test_derive_blend_reads_patch_combine():
+    from konfai_apps.bundle import _derive_blend
+
+    cfg = {"Predictor": {"outputs_dataset": {"H": {"OutputDataset": {"patch_combine": "Gaussian"}}}}}
+    assert _derive_blend(cfg, "Predictor") == "Gaussian"
+    assert _derive_blend({"Predictor": {"outputs_dataset": {"O": {"patch_combine": "None"}}}}, "Predictor") is None
+    assert _derive_blend({"Predictor": {}}, "Predictor") is None
+
+
+def test_transform_manifest_maps_the_pipeline_to_runtime_ops():
+    from konfai_apps.bundle import _transform_manifest
+
+    config = {
+        "Predictor": {
+            "Dataset": {
+                "groups_src": {
+                    "Volume_0": {
+                        "groups_dest": {
+                            "Volume": {
+                                "transforms": {
+                                    "TensorCast": {"dtype": "float32"},
+                                    "ResampleToResolution": {"spacing": [3, 3, 3], "inverse": True},
+                                    "Standardize": {"mean": "None", "std": "None"},
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "outputs_dataset": {
+                "SegHead": {"OutputDataset": {"final_transforms": {"Softmax": {"dim": 0}, "Argmax": {"dim": 0}}}}
+            },
+        }
+    }
+    manifest, folds = _transform_manifest(config, "Predictor")
+    assert folds == []  # every transform here is a runtime op; nothing folded into the graph
+    assert manifest["preprocessing"] == [
+        {"op": "cast", "dtype": "float32"},
+        {"op": "resample", "spacing": [3.0, 3.0, 3.0], "inverse": True},
+        {"op": "standardize"},  # mean/std unset -> computed at runtime
+    ]
+    assert manifest["postprocessing"] == [{"op": "softmax", "dim": 0}, {"op": "argmax", "dim": 0}]
+
+
+def test_transform_manifest_reads_canonical_and_before_reduction_post():
+    from konfai_apps.bundle import _transform_manifest
+
+    # A disjoint (merge_labels) ensemble: Canonical -> a runtime op; the per-fold argmax lives in
+    # before_reduction_transforms (each fold argmaxes to a label map before the merge), not final_transforms.
+    config = {
+        "Predictor": {
+            "Dataset": {
+                "g": {
+                    "transforms": {
+                        "Canonical": {"inverse": True},
+                        "ResampleToResolution": {"spacing": [1.5, 1.5, 1.5], "inverse": True},
+                    }
+                }
+            },
+            "outputs_dataset": {
+                "H": {
+                    "OutputDataset": {
+                        "before_reduction_transforms": {"Softmax": {"dim": 0}, "Argmax": {"dim": 0}},
+                        "final_transforms": "None",
+                    }
+                }
+            },
+        }
+    }
+    manifest, _folds = _transform_manifest(config, "Predictor")
+    assert {"op": "canonical", "inverse": True} in manifest["preprocessing"]
+    assert manifest["postprocessing"] == [{"op": "softmax", "dim": 0}, {"op": "argmax", "dim": 0}]
+
+
+def test_transform_manifest_refuses_an_unportable_transform():
+    import pytest
+    from konfai_apps.bundle import AppMetadataError, _transform_manifest
+
+    config = {"Predictor": {"Dataset": {"g": {"transforms": {"SomeCustomTransform": {"x": 1}}}}, "outputs_dataset": {}}}
+    with pytest.raises(AppMetadataError, match="no portable runtime op"):
+        _transform_manifest(config, "Predictor")
