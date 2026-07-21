@@ -179,7 +179,34 @@ def test_bridge_refuses_a_weight_tied_target() -> None:
     source = TwoLinear(tie=False)
     inputs = torch.randn(1, 4)
 
-    with pytest.raises(ConfigError, match=r"ties a parameter"):
+    with pytest.raises(ConfigError, match=r"ties a tensor"):
+        transfer_weights_by_execution_order(
+            target=target,
+            source=source,
+            target_forward=lambda: target(inputs),
+            source_forward=lambda: source(inputs),
+        )
+
+
+def test_bridge_refuses_a_buffer_tied_target() -> None:
+    # load_state_dict writes persistent buffers too, so a buffer shared across two weighted leaves would be
+    # overwritten by the later leaf's source just like a tied parameter. The bridge must refuse that as well.
+    class TwoLinearSharedBuffer(torch.nn.Module):
+        def __init__(self, tie: bool) -> None:
+            super().__init__()
+            self.a = torch.nn.Linear(4, 4)
+            self.b = torch.nn.Linear(4, 4)
+            self.a.register_buffer("scale", torch.ones(4))
+            self.b.register_buffer("scale", self.a.scale if tie else torch.ones(4))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.b(self.a(x) * self.a.scale) * self.b.scale
+
+    target = TwoLinearSharedBuffer(tie=True)
+    source = TwoLinearSharedBuffer(tie=False)
+    inputs = torch.randn(1, 4)
+
+    with pytest.raises(ConfigError, match=r"ties a tensor"):
         transfer_weights_by_execution_order(
             target=target,
             source=source,
