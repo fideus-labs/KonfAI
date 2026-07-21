@@ -32,8 +32,9 @@ from __future__ import annotations
 import importlib.metadata as _metadata
 import importlib.util as _util
 import re
+from email.message import Message
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # How a component name/classpath is written in a KonfAI YAML config.
 YAML_REFERENCE_SYNTAX = {
@@ -257,7 +258,8 @@ def check_external_dependency(module: str, object_name: str | None = None) -> di
         distributions = _metadata.packages_distributions().get(top, [])
         distribution = _select_distribution(top, distributions, full)
         try:
-            meta = _metadata.metadata(distribution)
+            # metadata() returns an email.message.Message at runtime; the PackageMetadata stub omits .get.
+            meta = cast(Message, _metadata.metadata(distribution))
             version = meta.get("Version")
             license_name = meta.get("License") or next(
                 (

@@ -730,11 +730,13 @@ def _app_bundle_file(ref: str, filename: str) -> Path:
     the bundled files are touched). Raises 404 when the app is not an ONNX-deployable bundle.
     """
     try:
-        from konfai_apps.app_repository import AppRepositoryError, get_app_repository_info
+        from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, get_app_repository_info
     except ImportError as exc:  # pragma: no cover - konfai-apps not installed
         raise HTTPException(503, "konfai-apps is not installed") from exc
     try:
         repo = get_app_repository_info(ref, force_update=False)
+        if not isinstance(repo, LocalAppRepository):  # only local/HF bundles hold downloadable files
+            raise HTTPException(404, f"app '{ref}' has no portable ONNX bundle")
         path = Path(repo._download(filename))
     except (AppRepositoryError, FileNotFoundError, OSError, KeyError, ValueError) as exc:
         raise HTTPException(404, f"app '{ref}' has no portable ONNX bundle") from exc

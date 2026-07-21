@@ -32,7 +32,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
-from typing import Annotated, TypeVar
+from typing import Annotated, TypeVar, cast
 
 import konfai
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
@@ -941,18 +941,20 @@ def submit_job():
                 inputs = None
                 if inputs_upload_files:
                     inputs = save_upload_groups(
-                        inputs_upload_files, kwargs.get("inputs_groups"), job.input_dir / "inputs"
+                        inputs_upload_files, cast(str, kwargs.get("inputs_groups")), job.input_dir / "inputs"
                     )
 
                 gt_upload_files = kwargs.get("gt")
                 gt = None
                 if gt_upload_files:
-                    gt = save_upload_groups(gt_upload_files, kwargs.get("gt_groups"), job.input_dir / "gt")
+                    gt = save_upload_groups(gt_upload_files, cast(str, kwargs.get("gt_groups")), job.input_dir / "gt")
 
                 mask_upload_files = kwargs.get("mask")
                 mask = None
                 if mask_upload_files:
-                    mask = save_upload_groups(mask_upload_files, kwargs.get("mask_groups"), job.input_dir / "mask")
+                    mask = save_upload_groups(
+                        mask_upload_files, cast(str, kwargs.get("mask_groups")), job.input_dir / "mask"
+                    )
 
                 dataset_upload = kwargs.get("dataset")
                 dataset_dir = None
@@ -974,7 +976,7 @@ def submit_job():
                     unknown = sorted({g for g in requested if g not in SERVER_STATE.gpu_semaphores})
                     if unknown:
                         raise HTTPException(400, f"Unknown GPU id(s): {unknown}")
-                    gpu_list = requested
+                    gpu_list: list[int] | None = requested
                 else:
                     gpu_list = sorted(SERVER_STATE.gpu_semaphores) or None
 

@@ -43,7 +43,7 @@ repos:
       - id: mypy
         additional_dependencies:
           - types-requests
-        files: ^(konfai/|studio/konfai_studio/)
+        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|studio/konfai_studio/)
         args:
           - --ignore-missing-imports
           - --check-untyped-defs

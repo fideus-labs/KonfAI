@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from .live_parse import parse_live_metric_line
 from .server_jobs import Job
@@ -32,6 +32,20 @@ from .server_support import WorkspaceLayout, read_text_tail
 
 class MetricsServiceMixin:
     """Metrics/leaderboard methods mixed into ``SessionService``."""
+
+    if TYPE_CHECKING:
+        # Type-only view of the members the host ``SessionService`` supplies; declared here so mypy
+        # resolves cross-mixin references. No runtime state — ``SessionService`` owns the real ones.
+        workspace_layout: WorkspaceLayout
+        max_log_tail_lines: int
+
+        def job_runtime_log_path(self, job: Job) -> Path | None: ...
+
+        def job_payload(self, job: Job) -> dict[str, Any]: ...
+
+        def _isoformat(self, timestamp: float | None) -> str | None: ...
+
+        def session_name(self) -> str: ...
 
     # App evaluate/pipeline runs write their metric trees under these workspace subdirs; every trial's
     # inner run dir repeats the bundle's train_name, so a trial's IDENTITY is its top-level trial dir.
@@ -440,7 +454,7 @@ class MetricsServiceMixin:
                 "cases": len(common_cases),
                 "mean_a": mean_a,
                 "mean_b": mean_b,
-                "mean_delta_b_minus_a": (mean_b - mean_a) if common_cases else None,
+                "mean_delta_b_minus_a": (mean_b - mean_a) if mean_a is not None and mean_b is not None else None,
                 "cases_better_a": better_a,
                 "cases_better_b": better_b,
                 "winner": (run_b if better_b > better_a else run_a if better_a > better_b else "tie"),

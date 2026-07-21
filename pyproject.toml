@@ -171,7 +171,7 @@ test-cov = { cmd = "pytest --cov=konfai --cov-report=term-missing tests/", descr
 lint = { cmd = "ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Lint source code" }
 format = { cmd = "ruff format konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Format source code" }
 format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Check formatting without modifying files" }
-typecheck = { cmd = "python -m mypy konfai studio/konfai_studio --ignore-missing-imports --no-site-packages", description = "Type-check the konfai and studio packages" }
+typecheck = { cmd = "python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio --ignore-missing-imports --no-site-packages", description = "Type-check all packages" }
 build = { cmd = "python -m build", description = "Build sdist and wheel" }
 check = { depends-on = ["lint", "format-check", "test", "test-apps"], description = "Run all quality checks" }
 

@@ -522,7 +522,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
 
             output = bound.arguments.pop("output", None)
             options = collect_remote_options(func.__name__, bound.arguments)
-            files = []
+            files: list[tuple[str, Any]] = []
             data = {}
             dataset_zip_dir: str | None = None
             unit_zip_dirs: list[str] = []
