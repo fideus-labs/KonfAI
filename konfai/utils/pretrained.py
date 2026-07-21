@@ -139,19 +139,21 @@ def transfer_weights_by_execution_order(
             "Weight transfer requires a weight-exact architecture; check that hyperparameters "
             "(channels/depth/dim) match the reference and that both forwards ran on the same input.",
         )
-    # A parameter tied across two target leaves would be written twice by the per-leaf loads below, so the
-    # earlier leaf would silently end up with the later leaf's source weights. Refuse rather than mis-load.
-    seen_parameters: dict[int, str] = {}
+    # A tensor tied across two target leaves would be written twice by the per-leaf loads below, so the
+    # earlier leaf would silently end up with the later leaf's source weights. state_dict(keep_vars=True)
+    # yields the live parameters AND persistent buffers -- exactly what load_state_dict writes -- so a tied
+    # buffer is caught as well. Refuse rather than mis-load.
+    seen_tensors: dict[int, str] = {}
     for leaf in target_leaves:
-        for parameter_name, parameter in leaf.named_parameters():
-            if id(parameter) in seen_parameters:
+        for tensor_name, tensor in leaf.state_dict(keep_vars=True).items():
+            if id(tensor) in seen_tensors:
                 raise ConfigError(
-                    "Cannot transfer weights: the target ties a parameter across two weighted leaves "
-                    f"('{seen_parameters[id(parameter)]}' and '{parameter_name}').",
+                    "Cannot transfer weights: the target ties a tensor across two weighted leaves "
+                    f"('{seen_tensors[id(tensor)]}' and '{tensor_name}').",
                     "Execution-order pairing loads each leaf's source into the shared tensor in turn, so the "
                     "earlier leaf would silently keep the later one's weights. Transfer such a model by name.",
                 )
-            seen_parameters[id(parameter)] = parameter_name
+            seen_tensors[id(tensor)] = tensor_name
     for index, (target_leaf, source_leaf) in enumerate(zip(target_leaves, source_leaves, strict=True)):
         target_state = target_leaf.state_dict()
         source_state = source_leaf.state_dict()
