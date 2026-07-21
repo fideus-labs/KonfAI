@@ -122,3 +122,14 @@ def test_merge_labels_keeps_per_fold_post():
     for step in program["steps"][:2]:
         assert step["manifest"]["postprocessing"] == MR["postprocessing"]  # untouched
     assert program["steps"][-1] == {"op": "merge_labels", "in": ["m0", "m1"], "out": "output", "classes": [3, 2]}
+
+
+def test_multi_checkpoint_nested_model_is_refused(tmp_path):
+    # A nested mask/condition producer is copied as `<group>.onnx` + its `manifest.json`. Several
+    # checkpoints would make the nested export emit `program.json` + per-fold onnx instead, so the
+    # step refuses up front rather than failing later on a missing `model.onnx`.
+    from konfai_apps.bundle import _export_nested_model
+
+    inference = {"repo_id": "org/app", "model_name": "body", "checkpoints_name": ["a.pt", "b.pt"]}
+    with pytest.raises(AppMetadataError, match="single-checkpoint nested model"):
+        _export_nested_model(tmp_path, "MASK", inference)

@@ -481,9 +481,10 @@ def _tta_passes(config: dict[str, Any], root: str) -> list[list[int]]:
     """Flip test-time-augmentation passes: identity plus each augmentation's ``nb`` random draws, matching
     the config's pass count and per-axis Flip probabilities. Randomness is embraced -- the exact draw is
     not KonfAI's (whose torch RNG is not reproducible here), so the result is CLOSE, not byte-identical --
-    but it is reproducible from the config's ``manual_seed``. A non-Flip TTA augmentation is refused rather
-    than silently dropped (the runtime has no portable op for it yet). ``f_prob`` index ``i`` maps to
-    channel-first tensor dim ``i + 1`` and hence to spatial axis ``i``; ``[[]]`` when there is no TTA."""
+    but it is reproducible from the config's ``manual_seed``. A non-Flip TTA augmentation is skipped (the
+    runtime has no portable op for it yet), leaving the TTA lighter but never wrong. ``f_prob`` index ``i``
+    maps to channel-first tensor dim ``i + 1`` and hence to spatial axis ``i``; ``[[]]`` when there is no
+    TTA."""
     predictor = config.get(root, {})
     augmentations = predictor.get("Dataset", {}).get("augmentations")
     if not isinstance(augmentations, dict) or not augmentations:
@@ -498,7 +499,9 @@ def _tta_passes(config: dict[str, Any], root: str) -> list[list[int]]:
             (p.get("f_prob") for n, p in (chain or {}).items() if n.split("/", 1)[0] == "Flip" and isinstance(p, dict)),
             None,
         )
-        for _ in range(int(aug.get("nb", 0)) if f_prob else 0):
+        if not f_prob:
+            continue
+        for _ in range(int(aug.get("nb", 0))):
             passes.append([i for i, p in enumerate(f_prob) if rng.random() < float(p)])
     return passes
 
@@ -625,6 +628,15 @@ def _export_nested_model(main_bundle: Path, group_name: str, inference: dict[str
 
     from konfai_apps.app import KonfAIApp
 
+    # Several checkpoints would make the nested export emit `program.json` + per-fold onnx instead of the
+    # `model.onnx` + `manifest.json` this step copies, so refuse it here rather than fail on a missing file.
+    nested_checkpoints = inference.get("checkpoints_name") or []
+    if len(nested_checkpoints) > 1:
+        raise AppMetadataError(
+            f"nested model '{group_name}' declares {len(nested_checkpoints)} checkpoints; the portable "
+            "runtime supports a single-checkpoint nested model (a mask/condition producer) only.",
+        )
+
     app = KonfAIApp(f"{inference['repo_id']}:{inference['model_name']}", True, False)
     with tempfile.TemporaryDirectory() as tmp:
         # Materialise the bundle under its real filenames (the HF cache stores blobs under content hashes,
@@ -685,13 +697,17 @@ def export_portable_into_bundle(
     patch_overlap = _derive_overlap(inference_patch, patch_size) if inference_patch else None
     blend = _derive_blend(config, root)
     reduction = _derive_reduction(config, root)
-    checkpoints = checkpoints or [None]
-    ensemble = len(checkpoints) > 1
+    # `None` stands for "the config's own checkpoint", so the loop below is uniform over both cases.
+    selected: list[str | None] = list(checkpoints) if checkpoints else [None]
+    ensemble = len(selected) > 1
     if ensemble and reduction is None:
         raise AppMetadataError(
             "several checkpoints were given but the config declares no ensemble reduction "
             "(MergeLabels / InferenceStack in outputs_dataset); cannot assemble a multi-model program.",
         )
+    # Guarded above, so the fallback never applies on the ensemble path; it only names the reduction of
+    # the single-model masked/TTA program, which has nothing to combine.
+    ensemble_reduction = reduction or "mean"
 
     config_snapshot = config_path.read_text()
     env_keys = ("KONFAI_config_file", "KONFAI_CONFIG_MODE", "KONFAI_ROOT", "KONFAI_STATE")
@@ -709,7 +725,7 @@ def export_portable_into_bundle(
 
         models: list[dict[str, Any]] = []
         onnx_path = bundle / "model.onnx"
-        for checkpoint in checkpoints:
+        for checkpoint in selected:
             model = ModelLoader(classpath).get_model(train=False)
             # Export the per-patch network; the runtime does the sliding-window tiling.
             model.patch = None
@@ -729,7 +745,8 @@ def export_portable_into_bundle(
             example = torch.randn(1, in_channels, *patch_size)
             # Default to the terminal float head; the graph's last output is often an integer Argmax.
             head = output_module or select_inference_head(model, example)
-            fold_id = Path(checkpoint).stem if ensemble else "model"
+            # `ensemble` implies a real checkpoint name; the None check only narrows the type.
+            fold_id = Path(checkpoint).stem if ensemble and checkpoint is not None else "model"
             onnx_path, manifest = export_to_onnx(
                 model,
                 bundle,
@@ -754,7 +771,7 @@ def export_portable_into_bundle(
                 for name, g in aux_groups.items()
             }
             program = _assemble_masked_tta_program(
-                models, _tta_passes(config, root), aux, _mask_specs(config, root), reduce=reduction or "mean"
+                models, _tta_passes(config, root), aux, _mask_specs(config, root), reduce=ensemble_reduction
             )
             program_path = bundle / "program.json"
             program_path.write_text(json.dumps(program, indent=2))
@@ -765,7 +782,7 @@ def export_portable_into_bundle(
 
         program = assemble_program(
             models,
-            reduce=reduction,
+            reduce=ensemble_reduction,
             classes=[int(m["manifest"]["output"]["channels"]) for m in models],
         )
         program_path = bundle / "program.json"
