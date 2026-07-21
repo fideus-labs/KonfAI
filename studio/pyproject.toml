@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "konfai-studio"
+dynamic = ["version"]
+description = "KonfAI Studio - a chatbot web UI driving the konfai-mcp server (BFF + front)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",  # [standard] pulls websockets — needed for the integrated terminal socket
+    "fastmcp>=2.4",
+    "konfai-mcp",  # the BFF drives it (stdio) and reuses its live-log parser (konfai_mcp.live_parse)
+    "claude-agent-sdk>=0.2",  # default brain: drives konfai-mcp via the Claude Code subscription
+    "pywinpty>=2.0; sys_platform == 'win32'",  # Windows ConPTY for the integrated terminal (POSIX uses pty)
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.66"]  # Claude API with a metered key / OAuth token
+openai = ["openai>=1.40"]  # OpenAI-compatible local servers (vLLM / Ollama / LM Studio)
+
+[project.scripts]
+konfai-studio = "konfai_studio.cli:main"
+
+[tool.setuptools_scm]
+root = ".."
+
+[tool.setuptools.packages.find]
+include = ["konfai_studio", "konfai_studio.*"]
+
+[tool.setuptools.package-data]
+konfai_studio = ["web/*"]
