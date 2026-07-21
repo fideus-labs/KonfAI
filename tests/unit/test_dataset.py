@@ -252,6 +252,10 @@ def test_resolve_data_path_skips_a_crashed_writer_temporary(tmp_path: Path, imag
 
     sitk_file = Dataset.SitkFile(f"{root}/CASE_000/", True, "mha")
     assert sitk_file._resolve_data_path("Transf") is None
+    # The full read must agree with the slice/statistics paths: a missing entry raises, never returns the
+    # temporary as a (partial) volume.
+    with pytest.raises(NameError, match="not found"):
+        sitk_file.file_to_data("", "Transf")
 
 
 # --------------------------------------------------------------------------------------
