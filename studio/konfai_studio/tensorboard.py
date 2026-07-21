@@ -8,6 +8,7 @@ import asyncio
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,16 @@ router = APIRouter()
 
 _TB_IMAGE_HISTORY = 30  # steps kept per image tag (the slider's range); frames are fetched lazily
 _TB_SERVERS: dict[str, dict[str, Any]] = {}  # session -> {proc, url}: one lazily-started TensorBoard per task
+
+
+def reap_tb_servers() -> None:
+    """Terminate the cached TensorBoard subprocesses so they don't outlive the app (shutdown/restart)."""
+    for entry in _TB_SERVERS.values():
+        proc = entry.get("proc")
+        if proc is not None and proc.poll() is None:
+            with suppress(Exception):
+                proc.terminate()
+    _TB_SERVERS.clear()
 
 
 def _tb_image_dir(session: str, base: str = "") -> Path | None:

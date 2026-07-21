@@ -42,6 +42,7 @@ from .paths import (
     _workspace_root,
 )
 from .registry import _Registry
+from .tensorboard import reap_tb_servers
 from .tensorboard import router as tensorboard_router
 from .terminal import router as terminal_router
 
@@ -57,6 +58,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await _reg.close()
+        reap_tb_servers()
 
 
 app = FastAPI(title="KonfAI Studio", lifespan=_lifespan)

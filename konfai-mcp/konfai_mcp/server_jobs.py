@@ -76,7 +76,9 @@ def _run_job(
             # the training workers — ignore it in this wrapper so it never terminates the job. A spawned
             # worker starts fresh and the trainer installs its own SIGUSR1 handler; if training runs inline
             # here, that same handler overrides this SIG_IGN.
-            signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+            sigusr1 = getattr(signal, "SIGUSR1", None)  # absent on Windows
+            if sigusr1 is not None:
+                signal.signal(sigusr1, signal.SIG_IGN)
         try:
             module_name, function_name = target.split(":", 1)
             getattr(importlib.import_module(module_name), function_name)(**kwargs)
