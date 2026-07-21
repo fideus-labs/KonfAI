@@ -185,6 +185,14 @@ KonfAI
               train/predict/evaluate &mdash; and <em>use, fine-tune, or package apps</em>.</p>
            <span class="go">Agents &amp; MCP &rarr;</span>
          </a>
+         <a class="kf-nextcard kf-h-violet" href="usage/studio.html">
+           <span class="intent">Converse</span>
+           <h3>Chat through a run</h3>
+           <p>KonfAI Studio is a chat UI over the MCP server: point it at a dataset and
+              inspect, train, predict, evaluate, and compare &mdash; from the conversation,
+              on your own machine, with your own LLM.</p>
+           <span class="go">KonfAI Studio &rarr;</span>
+         </a>
        </div>
 
        <div class="kf-docindex">
@@ -200,6 +208,7 @@ KonfAI
            <a class="kf-h-violet" href="examples/index.html">Examples</a>
            <a class="kf-h-coral" href="usage/apps.html">Apps &amp; API server</a>
            <a class="kf-h-amber" href="usage/mcp.html">Agents &amp; MCP</a>
+           <a class="kf-h-violet" href="usage/studio.html">KonfAI Studio</a>
            <a class="kf-h-steel" href="reference/python-api.html">Python API</a>
            <a class="kf-h-amber" href="troubleshooting.html">Troubleshooting</a>
          </div>
