@@ -22,6 +22,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import tempfile
 import threading
 import time
@@ -291,18 +292,6 @@ def _job_devices(gpu: list[int] | None, cpu: int | None, cluster: dict[str, Any]
     return ["cpu"]
 
 
-def _app_job_devices(gpu: list[int] | None, cpu: int | None) -> list[str]:
-    """Device reservation for an APP job: konfai-apps defaults an omitted gpu to every visible CUDA
-    device (``cuda_visible_devices()``), unlike core workflows which default to CPU -- register what
-    the job will actually hold so concurrent scheduling sees the real reservation."""
-    if gpu is None:
-        try:
-            gpu = konfai_pkg.cuda_visible_devices()
-        except Exception:
-            gpu = None
-    return _job_devices(gpu, cpu)
-
-
 def _cpu_fallback_warnings(gpu: list[int] | None, cluster: dict[str, Any] | None = None) -> list[str]:
     """Factual notice when a LOCAL run omits gpu while CUDA devices are visible.
 
@@ -455,53 +444,6 @@ def _launch_job(
         kwargs={**(kwargs or {}), "cwd": str(workspace)},
     )
     payload = _job_payload(job)
-    preflight = _vram_preflight(job.devices)
-    if preflight is not None:
-        payload["vram_preflight"] = preflight
-    return payload
-
-
-def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
-    """Launch an app job (inference or fine-tune) from an AppService spec via the shared job registry.
-
-    Unlike workflow jobs, an app job has no session YAML: it auto-creates the session workspace,
-    tracks the run under the spec's kind ('infer' or 'finetune'), and carries its own runner target
-    and kwargs.
-    """
-    kind = spec.get("kind", "infer")
-    workspace = WORKSPACE_LAYOUT.ensure_session_workspace()
-    WORKSPACE_LAYOUT.jobs_dir().mkdir(parents=True, exist_ok=True)
-    kwargs = dict(spec["kwargs"])
-    # config_overrides live directly in kwargs (infer / finetune) or nested under extra (pipeline). Recording
-    # them links this trial's tuned parameters to the score it produces and gates the refine next_actions.
-    set_parameters = kwargs.get("config_overrides") or (kwargs.get("extra") or {}).get("config_overrides")
-    job = JOB_REGISTRY.launch(
-        session=WORKSPACE_LAYOUT.current_session or "default",
-        kind=kind,
-        command=spec["command"],
-        cwd=workspace,
-        log_path=WORKSPACE_LAYOUT.jobs_dir() / f"{kind}_{uuid.uuid4().hex[:12]}.log",
-        config_path=workspace / f"app_{kind}.ref",
-        run_name=spec["run_name"],
-        devices=_app_job_devices(
-            kwargs.get("gpu") if kwargs.get("gpu") is not None else (kwargs.get("extra") or {}).get("gpu"),
-            kwargs.get("cpu") if kwargs.get("cpu") is not None else (kwargs.get("extra") or {}).get("cpu"),
-        ),
-        runtime_log_path=None,
-        extra_manifest={
-            "app_ref": kwargs.get("ref"),
-            "app_mode": spec["mode"],
-            "output": spec["output"],
-            "set_parameters": set_parameters,
-            "environment": _environment_snapshot(),
-        },
-        target=spec["target"],
-        kwargs={**kwargs, "cwd": str(workspace)},
-        set_parameters=set_parameters,
-    )
-    payload = _job_payload(job)
-    payload["mode"] = spec["mode"]
-    payload["output"] = spec["output"]
     preflight = _vram_preflight(job.devices)
     if preflight is not None:
         payload["vram_preflight"] = preflight
@@ -1319,6 +1261,41 @@ def export_app(
     )
 
 
+@mcp.tool(description=(TOOL_DESCRIPTIONS["import_app"]))
+def import_app(
+    ref: Annotated[
+        str, Field(description="App id 'repo_id:app_name' or local app folder path (remote servers cannot be imported).")
+    ],
+    allow_untrusted_code: Annotated[
+        bool,
+        Field(
+            description="Confirm you trust this app: importing copies+runs its Python code and pip-installs its requirements."
+        ),
+    ] = False,
+    display_name: Annotated[
+        str | None, Field(description="Override the display name written into the copied app.json.")
+    ] = None,
+    set_parameters: Annotated[
+        dict[str, Any] | None,
+        Field(description="Model parameter NAME->VALUE overrides baked into the copied Prediction.yml."),
+    ] = None,
+    force_update: Annotated[
+        bool, Field(description="Re-download the app files instead of reusing the local cache.")
+    ] = False,
+) -> dict[str, Any]:
+    """Import a resolved app into the session as a normal KonfAI experiment (config + code + checkpoints)."""
+    config_overrides = (
+        [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()] if set_parameters else None
+    )
+    return APP_SERVICE.import_app(
+        ref,
+        allow_untrusted_code=allow_untrusted_code,
+        display_name=display_name,
+        config_overrides=config_overrides,
+        force_update=force_update,
+    )
+
+
 @mcp.tool(description=(TOOL_DESCRIPTIONS["register_app_source"]))
 def register_app_source(
     ref: Annotated[
@@ -1338,368 +1315,6 @@ def unregister_app_source(
 ) -> dict[str, Any]:
     """Remove an app reference from the editable workspace app catalogue."""
     return APP_SERVICE.unregister_app_source(ref)
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_infer"]))
-def run_app_infer(
-    ref: Annotated[
-        str, Field(description="App id 'repo_id:app_name', local app folder path, or remote 'host:port:name[|token]'.")
-    ],
-    inputs: Annotated[
-        list[list[str]],
-        Field(
-            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory paths, paired by order across groups."
-        ),
-    ],
-    output: Annotated[
-        str | None,
-        Field(
-            description="Output directory for the reassembled predictions (default: a unique dir under the session workspace AppOutputs/)."
-        ),
-    ] = None,
-    gpu: Annotated[
-        list[int] | None,
-        Field(description="GPU indices to run on (default: every visible GPU); an empty list forces CPU."),
-    ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count; setting it without gpu forces a CPU run.")] = None,
-    tta: Annotated[
-        int, Field(description="Number of test-time augmentations (0 disables; see the app's maximum_tta).")
-    ] = 0,
-    ensemble: Annotated[
-        int,
-        Field(description="Number of checkpoints to ensemble; 0 with no ensemble_models uses every app checkpoint."),
-    ] = 0,
-    ensemble_models: Annotated[
-        list[str] | None,
-        Field(description="Explicit checkpoint names to ensemble (see describe_app checkpoints; overrides ensemble)."),
-    ] = None,
-    patch_size: Annotated[
-        list[int] | None,
-        Field(description="Force the inference patch size (overrides the app's VRAM plan and config default)."),
-    ] = None,
-    batch_size: Annotated[
-        int | None,
-        Field(description="Force the inference batch size (overrides the app's VRAM plan and config default)."),
-    ] = None,
-    set_parameters: Annotated[
-        dict[str, Any] | None,
-        Field(
-            description="Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); local/HuggingFace apps only."
-        ),
-    ] = None,
-    uncertainty: Annotated[
-        bool,
-        Field(description="Keep the multi-channel inference stacks that run_app_uncertainty consumes (default False)."),
-    ] = False,
-    allow_untrusted_code: Annotated[
-        bool,
-        Field(
-            description="Must be True for a local/HuggingFace app: resolving imports its Python code and pip-installs its requirements."
-        ),
-    ] = False,
-    force_update: Annotated[
-        bool, Field(description="Re-download the app files instead of reusing the local cache.")
-    ] = False,
-) -> dict[str, Any]:
-    """Run a published KonfAI app on the user's data as a tracked inference job (local / HuggingFace / remote)."""
-    # json.dumps keeps each value's type through the YAML re-parse in _apply_config_overrides: an int
-    # stays an int, but a string "true"/"1" stays a string instead of being coerced to a bool/int.
-    config_overrides = (
-        [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()] if set_parameters else None
-    )
-    spec = APP_SERVICE.prepare_infer(
-        ref=ref,
-        inputs=inputs,
-        output=output,
-        gpu=gpu,
-        cpu=cpu,
-        tta=tta,
-        ensemble=ensemble,
-        ensemble_models=ensemble_models,
-        patch_size=patch_size,
-        batch_size=batch_size,
-        config_overrides=config_overrides,
-        uncertainty=uncertainty,
-        allow_untrusted_code=allow_untrusted_code,
-        force_update=force_update,
-    )
-    return _launch_app_job(spec)
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_evaluate"]))
-def run_app_evaluate(
-    ref: Annotated[
-        str, Field(description="App id 'repo_id:app_name', local app folder path, or remote 'host:port:name[|token]'.")
-    ],
-    inputs: Annotated[
-        list[list[str]],
-        Field(
-            description="Prediction volumes as GROUPS (one inner list per group, each a list of file/dir paths, paired by order)."
-        ),
-    ],
-    gt: Annotated[list[list[str]], Field(description="Ground-truth volumes as GROUPS, paired with inputs by order.")],
-    output: Annotated[
-        str | None,
-        Field(
-            description="Output directory for the metric JSON (default: a unique dir under the session workspace AppEvaluations/)."
-        ),
-    ] = None,
-    mask: Annotated[
-        list[list[str]] | None, Field(description="Mask volumes as GROUPS restricting the evaluated region.")
-    ] = None,
-    evaluation_file: Annotated[
-        str, Field(description="Which evaluation config of the app to run (default 'Evaluation.yml').")
-    ] = "Evaluation.yml",
-    gpu: Annotated[
-        list[int] | None,
-        Field(description="GPU indices to run on (default: every visible GPU); an empty list forces CPU."),
-    ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count; setting it without gpu forces a CPU run.")] = None,
-    allow_untrusted_code: Annotated[
-        bool,
-        Field(
-            description="Must be True for a local/HuggingFace app: resolving imports its Python code and pip-installs its requirements."
-        ),
-    ] = False,
-    force_update: Annotated[
-        bool, Field(description="Re-download the app files instead of reusing the local cache.")
-    ] = False,
-) -> dict[str, Any]:
-    """Score predictions vs ground truth with a published app's own evaluation config, as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_evaluate(
-            ref=ref,
-            inputs=inputs,
-            gt=gt,
-            output=output,
-            mask=mask,
-            evaluation_file=evaluation_file,
-            gpu=gpu,
-            cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_uncertainty"]))
-def run_app_uncertainty(
-    ref: Annotated[
-        str, Field(description="App id 'repo_id:app_name', local app folder path, or remote 'host:port:name[|token]'.")
-    ],
-    inputs: Annotated[
-        list[list[str]],
-        Field(
-            description="Multi-channel inference stacks as GROUPS (typically produced by run_app_infer with uncertainty=True)."
-        ),
-    ],
-    output: Annotated[
-        str | None,
-        Field(
-            description="Output directory for the uncertainty maps (default: a unique dir under the session workspace AppUncertainties/)."
-        ),
-    ] = None,
-    uncertainty_file: Annotated[
-        str, Field(description="Which uncertainty config of the app to run (default 'Uncertainty.yml').")
-    ] = "Uncertainty.yml",
-    gpu: Annotated[
-        list[int] | None,
-        Field(description="GPU indices to run on (default: every visible GPU); an empty list forces CPU."),
-    ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count; setting it without gpu forces a CPU run.")] = None,
-    allow_untrusted_code: Annotated[
-        bool,
-        Field(
-            description="Must be True for a local/HuggingFace app: resolving imports its Python code and pip-installs its requirements."
-        ),
-    ] = False,
-    force_update: Annotated[
-        bool, Field(description="Re-download the app files instead of reusing the local cache.")
-    ] = False,
-) -> dict[str, Any]:
-    """Run a published app's uncertainty estimation on inference stacks, as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_uncertainty(
-            ref=ref,
-            inputs=inputs,
-            output=output,
-            uncertainty_file=uncertainty_file,
-            gpu=gpu,
-            cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_pipeline"]))
-def run_app_pipeline(
-    ref: Annotated[
-        str, Field(description="App id 'repo_id:app_name', local app folder path, or remote 'host:port:name[|token]'.")
-    ],
-    inputs: Annotated[
-        list[list[str]],
-        Field(
-            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory paths, paired by order across groups."
-        ),
-    ],
-    gt: Annotated[
-        list[list[str]] | None,
-        Field(description="Ground-truth volumes as GROUPS; providing them enables the evaluation stage."),
-    ] = None,
-    output: Annotated[
-        str | None,
-        Field(
-            description="Output directory for the Predictions/Evaluations/Uncertainties subdirs (default: a unique dir under the session workspace AppPipelines/)."
-        ),
-    ] = None,
-    mask: Annotated[
-        list[list[str]] | None, Field(description="Mask volumes as GROUPS restricting the evaluated region.")
-    ] = None,
-    tta: Annotated[
-        int, Field(description="Number of test-time augmentations (0 disables; see the app's maximum_tta).")
-    ] = 0,
-    ensemble: Annotated[
-        int,
-        Field(description="Number of checkpoints to ensemble; 0 with no ensemble_models uses every app checkpoint."),
-    ] = 0,
-    ensemble_models: Annotated[
-        list[str] | None,
-        Field(description="Explicit checkpoint names to ensemble (see describe_app checkpoints; overrides ensemble)."),
-    ] = None,
-    patch_size: Annotated[
-        list[int] | None,
-        Field(description="Force the inference patch size (overrides the app's VRAM plan and config default)."),
-    ] = None,
-    batch_size: Annotated[
-        int | None,
-        Field(description="Force the inference batch size (overrides the app's VRAM plan and config default)."),
-    ] = None,
-    set_parameters: Annotated[
-        dict[str, Any] | None,
-        Field(
-            description="Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); local/HuggingFace apps only."
-        ),
-    ] = None,
-    uncertainty: Annotated[bool, Field(description="Run the uncertainty stage (default True).")] = True,
-    gpu: Annotated[
-        list[int] | None,
-        Field(description="GPU indices to run on (default: every visible GPU); an empty list forces CPU."),
-    ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count; setting it without gpu forces a CPU run.")] = None,
-    allow_untrusted_code: Annotated[
-        bool,
-        Field(
-            description="Must be True for a local/HuggingFace app: resolving imports its Python code and pip-installs its requirements."
-        ),
-    ] = False,
-    force_update: Annotated[
-        bool, Field(description="Re-download the app files instead of reusing the local cache.")
-    ] = False,
-) -> dict[str, Any]:
-    """Run a published app's full infer -> evaluate -> uncertainty pipeline as a tracked job."""
-    # json.dumps keeps each value's type through the YAML re-parse in _apply_config_overrides: an int
-    # stays an int, but a string "true"/"1" stays a string instead of being coerced to a bool/int.
-    config_overrides = (
-        [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()] if set_parameters else None
-    )
-    return _launch_app_job(
-        APP_SERVICE.prepare_pipeline(
-            ref=ref,
-            inputs=inputs,
-            gt=gt,
-            output=output,
-            mask=mask,
-            tta=tta,
-            ensemble=ensemble,
-            ensemble_models=ensemble_models,
-            patch_size=patch_size,
-            batch_size=batch_size,
-            config_overrides=config_overrides,
-            uncertainty=uncertainty,
-            gpu=gpu,
-            cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["fine_tune_app"]))
-def fine_tune_app(
-    ref: Annotated[
-        str, Field(description="App id 'repo_id:app_name', local app folder path, or remote 'host:port:name[|token]'.")
-    ],
-    dataset: Annotated[
-        str,
-        Field(description="KonfAI-style dataset directory to fine-tune on (must exist; uploaded for a remote app)."),
-    ],
-    output: Annotated[
-        str | None,
-        Field(
-            description="Destination for the produced app bundle (default: a unique dir under the session workspace AppBundles/)."
-        ),
-    ] = None,
-    name: Annotated[str, Field(description="Run name of the fine-tune training (default 'Finetune').")] = "Finetune",
-    epochs: Annotated[int, Field(description="Number of training epochs (must be > 0; default 10).")] = 10,
-    it_validation: Annotated[
-        int, Field(description="Iterations between validation/checkpoint steps (KonfAI it_validation; default 1000).")
-    ] = 1000,
-    models: Annotated[
-        list[str] | None,
-        Field(description="Which app checkpoints to fine-tune (default: the app's first advertised checkpoint)."),
-    ] = None,
-    lr: Annotated[
-        float | None, Field(description="Learning-rate override; omit to keep the app config's value.")
-    ] = None,
-    set_parameters: Annotated[
-        dict[str, Any] | None,
-        Field(
-            description="Model/config tuning NAME->VALUE overrides baked into the training config before fine-tuning "
-            "(e.g. {'iterations': 300}); local/HuggingFace apps only."
-        ),
-    ] = None,
-    gpu: Annotated[
-        list[int] | None,
-        Field(description="GPU indices to train on (default: every visible GPU); an empty list forces CPU."),
-    ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count; setting it without gpu forces a CPU run.")] = None,
-    config_file: Annotated[
-        str, Field(description="Which train config of the app to use (default 'Config.yml').")
-    ] = "Config.yml",
-    allow_untrusted_code: Annotated[
-        bool,
-        Field(
-            description="Must be True for a local/HuggingFace app: resolving imports its Python code and pip-installs its requirements."
-        ),
-    ] = False,
-    force_update: Annotated[
-        bool, Field(description="Re-download the app files instead of reusing the local cache.")
-    ] = False,
-) -> dict[str, Any]:
-    """Fine-tune a published KonfAI app on the user's dataset and produce a resolvable app bundle."""
-    # json.dumps keeps each value's type through the YAML re-parse in _apply_config_overrides: an int
-    # stays an int, but a string "true"/"1" stays a string instead of being coerced to a bool/int.
-    config_overrides = (
-        [f"{key}={json.dumps(value)}" for key, value in set_parameters.items()] if set_parameters else None
-    )
-    spec = APP_SERVICE.prepare_finetune(
-        ref=ref,
-        dataset=dataset,
-        output=output,
-        name=name,
-        epochs=epochs,
-        it_validation=it_validation,
-        models=models,
-        lr=lr,
-        config_overrides=config_overrides,
-        gpu=gpu,
-        cpu=cpu,
-        config_file=config_file,
-        allow_untrusted_code=allow_untrusted_code,
-        force_update=force_update,
-    )
-    return _launch_app_job(spec)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["package_app_from_session"]))
@@ -2378,6 +1993,42 @@ def delete_session(
     return {"deleted": WORKSPACE_LAYOUT.current_session, "path": str(workspace)}
 
 
+_RUN_OUTPUT_ROOTS: dict[str, tuple[str, ...]] = {
+    "train": ("Statistics", "Checkpoints"),
+    "prediction": ("Predictions",),
+    "evaluation": ("Evaluations",),
+    "uncertainty": ("Uncertainties",),
+    "all": ("Statistics", "Checkpoints", "Predictions", "Evaluations", "Uncertainties"),
+}
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["delete_run"]))
+def delete_run(
+    run_name: Annotated[str, Field(description="The run to delete (a train_name, e.g. 'MR2CT_01').")],
+    kind: Annotated[
+        Literal["train", "prediction", "evaluation", "uncertainty", "all"],
+        Field(
+            description="Which output to remove: train (Statistics + Checkpoints), prediction, evaluation, uncertainty, "
+            "or 'all' to remove every output of that run name."
+        ),
+    ],
+) -> dict[str, Any]:
+    """Delete one run's outputs from the current session, jailed to the session workspace."""
+    cleaned = run_name.strip()
+    if not cleaned or "/" in cleaned or "\\" in cleaned or cleaned in {".", ".."}:
+        raise ValueError(f"Invalid run_name '{run_name}': a run is a single folder name, not a path.")
+    base = WORKSPACE_LAYOUT.ensure_session_workspace_exists().resolve()
+    removed: list[str] = []
+    for root in _RUN_OUTPUT_ROOTS.get(kind, ()):
+        target = (base / root / cleaned).resolve()
+        if base != target.parent.parent:  # jail: exactly base/<root>/<run>, never outside the workspace
+            raise ValueError("Refused: the resolved path escapes the session workspace.")
+        if target.is_dir():
+            shutil.rmtree(target)
+            removed.append(str(target.relative_to(base)))
+    return {"run_name": cleaned, "kind": kind, "deleted": removed}
+
+
 @mcp.tool(description=(TOOL_DESCRIPTIONS["validate_config_semantics"]))
 def validate_config_semantics(
     workflow: Annotated[
@@ -2646,6 +2297,21 @@ def run_train(
     return payload
 
 
+def _strip_to_weights_only(checkpoint: Path) -> Path:
+    """Copy ``checkpoint`` keeping only the ``Model`` weights, to a jailed ``<stem>_init.pt`` in the
+    workspace. RESUME then starts at epoch/it 0 (a fresh fine-tune). The name carries no path separators."""
+    from konfai.utils.runtime import safe_torch_load
+
+    state_dict = safe_torch_load(checkpoint, "cpu")
+    if "Model" not in state_dict:
+        raise ValueError(f"Checkpoint '{checkpoint}' has no 'Model' weights to warm-start from.")
+    destination = SESSION.workspace_dir() / f"{checkpoint.stem}_init.pt"
+    import torch
+
+    torch.save({"Model": state_dict["Model"]}, destination)  # nosec B614
+    return destination
+
+
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_resume"]))
 def run_resume(
     model: Annotated[
@@ -2654,6 +2320,12 @@ def run_resume(
             description="Checkpoint to resume from: a path (workspace-relative or absolute) or an http(s) URL (default: the configured run's newest checkpoint)."
         ),
     ] = None,
+    weights_only: Annotated[
+        bool,
+        Field(
+            description="Warm-start a fine-tune: load only the checkpoint's model weights and restart epoch/iteration/optimizer from scratch (the fine-tune-from-app path). Requires a local checkpoint, not a URL."
+        ),
+    ] = False,
     lr: Annotated[
         float | None, Field(description="Learning-rate override; omit to continue the restored schedule.")
     ] = None,
@@ -2712,6 +2384,10 @@ def run_resume(
         raise ValueError("No checkpoint found to resume from. Provide model explicitly or run run_train first.")
     if isinstance(resolved_model, Path) and not resolved_model.exists():
         raise ValueError(f"Checkpoint not found: {resolved_model}")
+    if weights_only:
+        if not isinstance(resolved_model, Path):
+            raise ValueError("weights_only needs a local checkpoint (a URL cannot be stripped to weights).")
+        resolved_model = _strip_to_weights_only(resolved_model)
     blocked = SESSION.workflow_blocker("train", config_path=config_path)
     if blocked is not None:
         return blocked
@@ -2848,7 +2524,7 @@ def generate_folds(
     cases = sorted(path.name for path in case_directories(dataset_path) if path != dataset_path)
     if len(cases) < k:
         raise ValueError(f"Only {len(cases)} case directories found; cannot make k={k} folds.")
-    workspace = WORKSPACE_LAYOUT.ensure_session_workspace_exists()
+    workspace = WORKSPACE_LAYOUT.ensure_session_workspace()  # a setup step: create the session if needed
     shuffled = list(cases)
     random.Random(seed).shuffle(shuffled)
     folds_dir = workspace / "folds"
@@ -3075,6 +2751,103 @@ def cancel_job(
 ) -> dict[str, Any]:
     """Request job termination and wait briefly for a clean shutdown before killing it."""
     return _cancel_job_payload(job_id, wait_s=wait_s)
+
+
+@mcp.tool(
+    description=(
+        "Request an on-demand validation pass on a running training job. Sends SIGUSR1 to the job's process "
+        "group; the trainer runs validation at its next iteration boundary and logs the metrics (no "
+        "checkpoint or early-stopping side effect). POSIX only; a no-op when no training job is running."
+    )
+)
+def request_validation(
+    kind: Annotated[
+        WorkflowKind, Field(description="Job kind to target when job_id is omitted (default 'train').")
+    ] = "train",
+    job_id: Annotated[
+        str | None, Field(description="Exact job to validate (default: the latest job of the given kind).")
+    ] = None,
+) -> dict[str, Any]:
+    """Ask a running training job to run a validation pass now, via SIGUSR1."""
+    job = JOB_REGISTRY.get(job_id) if job_id is not None else SESSION.discover_latest_job(kind)
+    if job is None or job.status not in ACTIVE_JOB_STATES:
+        return {"ok": False, "detail": "No running training job to validate."}
+    delivered = JOB_REGISTRY.notify(job, signal.SIGUSR1)
+    return {
+        "ok": delivered,
+        "job_id": job.job_id,
+        "detail": (
+            "Validation requested; it runs at the next iteration boundary."
+            if delivered
+            else "Could not signal the job (already finished, or not signalable)."
+        ),
+    }
+
+
+@mcp.tool(
+    description=(
+        "Change tunables of a RUNNING training job in place, without restarting it. Writes a jailed "
+        "control.json into the run's Statistics/<run>/ dir; the trainer re-reads it at its next poll boundary "
+        "(~20 iterations) and records each change into the run's config snapshot. 'it_validation' takes effect "
+        "for all following iterations; 'lr' sets the optimizer learning rate now, rebased so a running "
+        "scheduler keeps it (the schedule restarts from the new value). POSIX/local; a no-op when no training "
+        "job is running."
+    )
+)
+def set_live_tunables(
+    lr: Annotated[
+        float | None,
+        Field(
+            gt=0,
+            description="New optimizer learning rate, applied at the next poll boundary. Omit to leave it unchanged.",
+        ),
+    ] = None,
+    it_validation: Annotated[
+        int | None,
+        Field(
+            gt=0,
+            description="New validation interval in iterations, effective for the following iterations. Omit to leave it unchanged.",
+        ),
+    ] = None,
+    job_id: Annotated[
+        str | None, Field(description="Exact training job to steer (default: the latest 'train' job of this session).")
+    ] = None,
+) -> dict[str, Any]:
+    """Steer a running training job's lr / it_validation by writing a jailed, revisioned control file."""
+    if lr is None and it_validation is None:
+        return {"ok": False, "detail": "Nothing to change: provide lr and/or it_validation."}
+    job = JOB_REGISTRY.get(job_id) if job_id is not None else SESSION.discover_latest_job("train")
+    if job is None or job.kind != "train" or job.status not in ACTIVE_JOB_STATES:
+        return {"ok": False, "detail": "No running training job to tune."}
+    runtime_log = SESSION.job_runtime_log_path(job)
+    if runtime_log is None:
+        return {"ok": False, "detail": "Job has no resolvable run directory yet."}
+    control_path = WORKSPACE_LAYOUT.resolve_workspace_relative_path(str(runtime_log.parent / "control.json"))
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    previous: dict[str, Any] = {}
+    if control_path.exists():
+        try:
+            loaded = json.loads(control_path.read_text(encoding="utf-8"))
+            previous = loaded if isinstance(loaded, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+    revision = int(previous.get("revision", 0)) + 1
+    payload: dict[str, Any] = {"revision": revision}
+    if lr is not None:
+        payload["lr"] = lr
+    if it_validation is not None:
+        payload["it_validation"] = it_validation
+    tmp = control_path.with_name(f".{control_path.name}.{uuid.uuid4().hex}.tmp")  # atomic write, like the job store
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp, control_path)
+    return {
+        "ok": True,
+        "job_id": job.job_id,
+        "revision": revision,
+        "applied": {key: payload[key] for key in ("lr", "it_validation") if key in payload},
+        "detail": "Applied at the trainer's next poll boundary (~20 iterations).",
+        "next_actions": ["read_live_metrics", "request_validation", "get_job_status"],
+    }
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["get_job_status"]))

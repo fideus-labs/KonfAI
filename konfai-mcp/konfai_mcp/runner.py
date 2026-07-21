@@ -246,173 +246,6 @@ def run_workflow_api(
         )
 
 
-def run_app_api(
-    *,
-    ref: str,
-    inputs: list[list[str]],
-    output: str,
-    mode: str,
-    gpu: list[int] | None = None,
-    cpu: int | None = None,
-    tta: int = 0,
-    ensemble: int = 0,
-    ensemble_models: list[str] | None = None,
-    patch_size: list[int] | None = None,
-    batch_size: int | None = None,
-    config_overrides: list[str] | None = None,
-    uncertainty: bool = False,
-    force_update: bool = False,
-    quiet: bool = False,
-    cwd: str | None = None,
-) -> None:
-    """Child entrypoint that runs a KonfAI app's inference.
-
-    ``mode='local'`` resolves and runs the app locally via ``KonfAIApp`` (imports the app's code and
-    pip-installs its requirements -- gated in the parent tool). ``mode='remote'`` runs it on the
-    user's server via ``KonfAIAppClient`` (uploads inputs, streams logs, downloads results).
-    """
-    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
-        _ensure_local_imports()
-        input_groups = [[Path(path) for path in group] for group in inputs]
-        common: dict[str, Any] = {
-            "inputs": input_groups,
-            "output": Path(output).resolve(),
-            "ensemble": ensemble,
-            "ensemble_models": ensemble_models or [],
-            "tta": tta,
-            "patch_size": patch_size,
-            "batch_size": batch_size,
-            "uncertainty": uncertainty,
-            "quiet": quiet,
-        }
-        if gpu is not None:
-            common["gpu"] = gpu
-        if cpu is not None:
-            common["cpu"] = cpu
-
-        if mode == "remote":
-            from konfai import RemoteServer
-            from konfai_apps.app import KonfAIAppClient
-
-            from .server_apps import parse_remote_ref
-
-            host, port, name, token = parse_remote_ref(ref)
-            client = KonfAIAppClient(name, RemoteServer(host, port, token))
-            client.infer(**common)
-        else:
-            from konfai_apps.app import KonfAIApp
-
-            app = KonfAIApp(ref, download=True, force_update=force_update)
-            app.infer(config_overrides=config_overrides, **common)
-
-
-def run_app_action_api(
-    *,
-    ref: str,
-    mode: str,
-    action: str,
-    output: str,
-    inputs: list[list[str]],
-    gt: list[list[str]] | None = None,
-    mask: list[list[str]] | None = None,
-    extra: dict[str, Any] | None = None,
-    force_update: bool = False,
-    cwd: str | None = None,
-) -> None:
-    """Child entrypoint for an app action beyond plain infer: evaluate / uncertainty / pipeline.
-
-    The parent (AppService.prepare_*) supplies the exact scalar kwargs for ``action`` in ``extra``
-    (already filtered for local vs remote); this converts the path groups and dispatches to the
-    matching KonfAIApp / KonfAIAppClient method. ``mode='local'`` imports the app's code and
-    pip-installs (gated in the parent); ``mode='remote'`` runs it on the user's server.
-    """
-
-    def _groups(value: list[list[str]]) -> list[list[Path]]:
-        return [[Path(path) for path in group] for group in value]
-
-    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
-        _ensure_local_imports()
-        call: dict[str, Any] = {"inputs": _groups(inputs), "output": Path(output).resolve(), **(extra or {})}
-        if action in ("evaluate", "pipeline"):
-            call["gt"] = _groups(gt) if gt else None
-            if mask is not None:
-                call["mask"] = _groups(mask)
-
-        if mode == "remote":
-            from konfai import RemoteServer
-            from konfai_apps.app import KonfAIAppClient
-
-            from .server_apps import parse_remote_ref
-
-            host, port, name, token = parse_remote_ref(ref)
-            getattr(KonfAIAppClient(name, RemoteServer(host, port, token)), action)(**call)
-        else:
-            from konfai_apps.app import KonfAIApp
-
-            getattr(KonfAIApp(ref, download=True, force_update=force_update), action)(**call)
-
-
-def run_finetune_api(
-    *,
-    ref: str,
-    dataset: str,
-    output: str,
-    mode: str,
-    name: str = "Finetune",
-    epochs: int = 10,
-    it_validation: int = 1000,
-    models: list[str] | None = None,
-    lr: float | None = None,
-    config_overrides: list[str] | None = None,
-    gpu: list[int] | None = None,
-    cpu: int | None = None,
-    config_file: str = "Config.yml",
-    force_update: bool = False,
-    quiet: bool = False,
-    cwd: str | None = None,
-) -> None:
-    """Child entrypoint that fine-tunes a KonfAI app on the user's dataset, producing a bundle.
-
-    ``mode='local'`` trains locally via ``KonfAIApp`` (imports the app's code, pip-installs its
-    requirements -- gated in the parent tool); ``mode='remote'`` trains on the user's server via
-    ``KonfAIAppClient`` (uploads the dataset, streams logs, downloads the resulting bundle).
-    """
-    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
-        _ensure_local_imports()
-        common: dict[str, Any] = {
-            "dataset": Path(dataset).resolve(),
-            "output": Path(output).resolve(),
-            "name": name,
-            "epochs": epochs,
-            "it_validation": it_validation,
-            "models": models or [],
-            "lr": lr,
-            "config_file": config_file,
-            "quiet": quiet,
-        }
-        if gpu is not None:
-            common["gpu"] = gpu
-        if cpu is not None:
-            common["cpu"] = cpu
-
-        if mode == "remote":
-            from konfai import RemoteServer
-            from konfai_apps.app import KonfAIAppClient
-
-            from .server_apps import parse_remote_ref
-
-            # The remote client has no config_overrides (the server does not accept --set); the parent
-            # already forbids remote + config_overrides, so it is None here and simply not forwarded.
-            host, port, remote_name, token = parse_remote_ref(ref)
-            client = KonfAIAppClient(remote_name, RemoteServer(host, port, token))
-            client.fine_tune(**common)
-        else:
-            from konfai_apps.app import KonfAIApp
-
-            app = KonfAIApp(ref, download=True, force_update=force_update)
-            app.fine_tune(**common, config_overrides=config_overrides)
-
-
 def app_parameters_api(*, ref: str, force_update: bool = False) -> dict[str, Any]:
     """Child entrypoint that reads an app's tunable parameters (``{values, constraints}``).
 
@@ -430,6 +263,36 @@ def app_parameters_api(*, ref: str, force_update: bool = False) -> dict[str, Any
         "values": parameters.get("values", {}),
         "constraints": parameters.get("constraints", {}),
     }
+
+
+def import_app_api(
+    *,
+    ref: str,
+    target: str,
+    config_overrides: list[str] | None = None,
+    display_name: str | None = None,
+    force_update: bool = False,
+) -> dict[str, Any]:
+    """Child entrypoint: resolve + download an app bundle into the session root as a normal experiment.
+
+    Copies the app's config(s), custom code, and .pt checkpoints into ``target`` and pip-installs its
+    requirements. The resolve + download + install runs here in the spawn subprocess, never in the server
+    process. Returns the copied filenames, the checkpoint names, and which config files landed.
+    """
+    from konfai_apps.app_repository import LocalAppRepository, get_app_repository_info
+
+    info = get_app_repository_info(ref, force_update)
+    if not isinstance(info, LocalAppRepository):
+        raise ValueError("Importing an app into the session is only supported for local or HuggingFace apps.")
+    destination = Path(target).resolve()
+    filenames = info.download_bundle(destination, display_name=display_name, config_overrides=config_overrides)
+    checkpoints = sorted(name for name in filenames if name.endswith(".pt"))
+    configs = {
+        key: name
+        for key, name in (("train", "Config.yml"), ("prediction", "Prediction.yml"), ("evaluation", "Evaluation.yml"))
+        if (destination / name).is_file()
+    }
+    return {"files": filenames, "checkpoints": checkpoints, "configs": configs}
 
 
 def _collect_model_outputs(workflow_object: Any, workflow: str) -> dict[str, list[dict[str, Any]]]:

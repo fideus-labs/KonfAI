@@ -223,23 +223,22 @@ The `solve_task` prompt frames the entry decision as a three-way fork:
 
 1. **Use an app as-is** — no training. Discover with `list_apps`, read each
    candidate's manifest with `describe_app` (judge fit from the app's own
-   description and its declared inputs/outputs), then run it:
-   - `run_app_infer` — inference on the user's data
-   - `run_app_evaluate` — score predictions with the app's own metrics
-   - `run_app_uncertainty` — uncertainty maps
-   - `run_app_pipeline` — infer → evaluate → uncertainty in one call
-   - `list_app_parameters` / `set_parameters` — read tunable parameters (with
-     their constraints) and override them per run
+   description and its declared inputs/outputs), inspect its tunables with
+   `list_app_parameters`, then `import_app` copies it into the session (config +
+   code + checkpoints) so it runs as a **normal experiment**: `run_prediction`
+   with the returned checkpoints — no app-specific execution wrapper.
 2. **Fine-tune an app** — start training from a published model rather than a
-   blank slate: `fine_tune_app` adapts it to the user's dataset and writes a
-   resolvable app bundle.
+   blank slate: `import_app` it, then `run_resume` with `weights_only=True`
+   warm-starts training from the app's weights on the user's dataset.
 3. **Train from scratch** — author a config (the loop above) and, when done,
    `package_app_from_session` turns the trained model into a bundle too.
 
 Both training paths therefore **end at the same reusable artifact — a bundle** —
-which `describe_app` / `run_app_infer` can then consume, and `export_app` can
+which `describe_app` / `import_app` can then consume, and `export_app` can
 snapshot (with tuned parameters baked in) as the reproducibility record a
-challenge submission wants.
+challenge submission wants. (A remote `host:port:name` app keeps its code on the
+user's own server; it is not runnable from the MCP server — drive it with
+`konfai-apps` directly.)
 
 **App catalogue.** `list_apps` reads a layered catalogue of app sources — a
 shipped default, an editable per-workspace file, and the `KONFAI_MCP_APP_CATALOG`

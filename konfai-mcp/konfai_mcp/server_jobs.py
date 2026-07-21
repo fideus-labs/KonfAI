@@ -27,13 +27,13 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from .server_support import WorkspaceLayout
-from .workflows import APP_JOB_KINDS, JOB_RETRY_TOOLS, JobKind
+from .workflows import JOB_RETRY_TOOLS, JobKind
 
 
 def _run_job(
@@ -72,6 +72,11 @@ def _run_job(
                 os.kill(os.getpid(), signum)
 
             signal.signal(signal.SIGTERM, _on_terminate)
+            # SIGUSR1 (KonfAI Studio's on-demand validation) is delivered group-wide but is meant only for
+            # the training workers — ignore it in this wrapper so it never terminates the job. A spawned
+            # worker starts fresh and the trainer installs its own SIGUSR1 handler; if training runs inline
+            # here, that same handler overrides this SIG_IGN.
+            signal.signal(signal.SIGUSR1, signal.SIG_IGN)
         try:
             module_name, function_name = target.split(":", 1)
             getattr(importlib.import_module(module_name), function_name)(**kwargs)
@@ -460,39 +465,17 @@ class JobRegistry:
 
     def payload(self, job: Job, isoformat: Callable[[float | None], str | None]) -> dict[str, Any]:
         self.refresh(job)
-        app_kind = job.kind in APP_JOB_KINDS
         retry_tool = JOB_RETRY_TOOLS.get(job.kind, f"run_{job.kind}")
         # next_actions holds callable tool names only; URIs live in next_resources / resources.
         next_actions = ["get_job_status"]
         next_resources = [f"job://{job.job_id}/log"]
         if job.status in self.active_states:
-            # App jobs have no parsed runtime metrics (runtime_log_path is None), so skip read_live_metrics.
-            next_actions.extend(
-                ["wait_for_job", "cancel_job"] if app_kind else ["wait_for_job", "read_live_metrics", "cancel_job"]
-            )
+            next_actions.extend(["wait_for_job", "read_live_metrics", "cancel_job"])
         elif job.status == "done":
-            # An app job writes its outputs to a directory recorded in the manifest, so point at it.
-            if app_kind:
-                next_resources.append(f"job://{job.job_id}/manifest")
-                # Refine loop: incite iterating ONLY on the axis the user can actually turn, and ONLY when
-                # they signalled intent. A plain one-shot infer (no set_parameters) is a plain result and
-                # gets no evaluate/refine push — the loop never starts spontaneously.
-                if job.kind in ("evaluate", "pipeline"):
-                    # There is a score: rank the trials, re-tune, keep the best.
-                    next_actions.extend(["leaderboard", "compare_runs", "run_app_pipeline", "export_app"])
-                elif job.kind == "infer" and job.set_parameters:
-                    # Already tuning inference parameters: help close the loop toward a score.
-                    next_actions.extend(["run_app_evaluate", "run_app_pipeline", "compare_runs"])
-                elif job.kind == "finetune":
-                    # A fine-tune produces a bundle but keeps its training metrics out of it, so there is
-                    # nothing to rank yet: use the bundle, then evaluate it -- that evaluation lands where
-                    # leaderboard/compare_runs can rank this fine-tune against other training trials.
-                    next_actions.extend(["run_app_infer", "run_app_evaluate"])
-            else:
-                next_actions.extend(["summarize_session", "leaderboard"])
+            next_actions.extend(["summarize_session", "leaderboard"])
         else:
             next_actions.append("read_job_log")
-            next_actions.extend([retry_tool] if app_kind else ["validate_config_semantics", retry_tool])
+            next_actions.extend(["validate_config_semantics", retry_tool])
         return {
             "job_id": job.job_id,
             "session": job.session,
@@ -712,6 +695,23 @@ class JobRegistry:
                 os.kill(pid, sig)
             except OSError:
                 self.refresh(job)
+
+    def notify(self, job: Job, sig: int) -> bool:
+        """Best-effort delivery of a **non-terminating** signal (e.g. SIGUSR1) to a job's process group.
+
+        Unlike ``signal()`` it never falls back to killing the process, and it verifies the job is genuinely
+        alive (its own proc handle, or a recovered orphan's identity) before signalling — so a reused pid
+        can never receive it (SIGUSR1's default action is Terminate). POSIX only; returns whether it landed.
+        """
+        proc = job.proc
+        proc_alive = proc is not None and hasattr(proc, "is_alive") and proc.is_alive()
+        orphan_alive = proc is None and _pid_is_recovered_job(job.pid, job.proc_create_time)
+        if os.name == "nt" or job.pid is None or not (proc_alive or orphan_alive):
+            return False
+        with suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(job.pid, sig)
+            return True
+        return False
 
     def cancel(
         self, job_id: str, isoformat: Callable[[float | None], str | None], wait_s: float = 5.0
