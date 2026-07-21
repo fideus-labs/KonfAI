@@ -416,7 +416,9 @@ class AppService:
                 "code remote and cannot be imported — drive a remote app with konfai-apps directly."
             )
         self._require_trust(self._infer_mode(ref), allow_untrusted_code, "Importing")
-        target = self.workspace_layout.ensure_session_workspace()  # session root (auto-created); in-jail by construction
+        target = (
+            self.workspace_layout.ensure_session_workspace()
+        )  # session root (auto-created); in-jail by construction
         from . import runner as mcp_runner
 
         payload = mcp_runner.run_api_in_subprocess(
