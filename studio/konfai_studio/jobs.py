@@ -264,10 +264,10 @@ def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]
             for log in directory.glob("*/log_0.txt"):
                 add(log, log.parent.name, kind, None)
     for job in jobs:  # app runs land outside the three roots, under each app job's own output_path
-        out = job.get("output_path")
-        if not out:
+        out_path = job.get("output_path")
+        if not out_path:
             continue
-        entry = app_status_by_output.get(str(Path(out)))
+        entry = app_status_by_output.get(str(Path(out_path)))
         for log, run_name, kind in _discover_run_logs(job):
             add(log, run_name, kind, entry[1] if entry else None)
     found.sort(key=lambda row: row[5], reverse=True)

@@ -41,7 +41,9 @@ def main() -> None:
             "--i-know-this-is-insecure to override."
         )
     if not loopback and not authed:
-        print(f"WARNING: {args.host} bound with no auth (--i-know-this-is-insecure) — anyone on the network has a shell.")
+        print(
+            f"WARNING: {args.host} bound with no auth (--i-know-this-is-insecure) — anyone on the network has a shell."
+        )
     print(f"KonfAI Studio -> http://{args.host}:{args.port}  (auth {'on' if authed else 'off'})")
     uvicorn.run(
         "konfai_studio.server:app",

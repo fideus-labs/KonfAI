@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """The Studio agent: an LLM driving the konfai-mcp tools, streamed as UI events.
 
-The LLM backend is pluggable (``KONFAI_STUDIO_LLM``): ``anthropic`` (Claude API) or
-``openai`` for any OpenAI-compatible local server (vLLM / Ollama / LM Studio). The MCP
-side never depends on which brain is used, and the imaging data never reaches the LLM:
-tools run locally on the compute node and return text.
+The LLM backend is pluggable (``KONFAI_STUDIO_LLM``): ``claude-code`` (default; the
+Claude Code subscription via the Claude Agent SDK, no API key), ``anthropic`` (the Claude
+API, ``ANTHROPIC_API_KEY``), or ``openai`` for any OpenAI-compatible server (vLLM / Ollama
+/ LM Studio, ``KONFAI_STUDIO_LLM_BASE_URL``). The MCP side never depends on which brain is
+used, and the imaging data never reaches the LLM: tools run locally on the compute node
+and return text.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ def _resolve_mcp_command(command: str) -> str:
         return command
     beside = Path(sys.executable).with_name(command)
     return str(beside) if beside.exists() else (shutil.which(command) or command)
+
 
 DEFAULT_MODEL = os.environ.get("KONFAI_STUDIO_MODEL", "claude-opus-4-8")
 MAX_TOKENS = int(os.environ.get("KONFAI_STUDIO_MAX_TOKENS", "16000"))
@@ -335,8 +338,8 @@ class StudioAgent:
     async def __aenter__(self) -> StudioAgent:
         await self._client.__aenter__()
         mcp_tools = await self._client.list_tools()
-        backend = (self._brain or os.environ.get("KONFAI_STUDIO_LLM", "anthropic")).lower()
-        model = self._model or os.environ.get("KONFAI_STUDIO_MODEL", DEFAULT_MODEL)
+        backend = (self._brain or os.environ.get("KONFAI_STUDIO_LLM") or "anthropic").lower()
+        model = self._model or os.environ.get("KONFAI_STUDIO_MODEL") or DEFAULT_MODEL
         if backend in {"openai", "local", "vllm", "ollama"}:
             self._backend = OpenAIBackend(mcp_tools, self._call_tool, model)
         else:
@@ -515,7 +518,7 @@ async def _one_shot_claude(prompt: str) -> str:
 async def suggest_title(text: str, brain: str | None = None) -> str:
     """A short experiment title for the user's first message, named by the LLM (one-shot, isolated
     from the task conversation) with a heuristic fallback so it never fails the turn."""
-    backend = (brain or os.environ.get("KONFAI_STUDIO_LLM", "claude-code")).lower()
+    backend = (brain or os.environ.get("KONFAI_STUDIO_LLM") or "claude-code").lower()
     if backend in {"claude-code", "claude", "subscription", "agent-sdk"}:
         if title := _clean_title(await _one_shot_claude(_TITLE_PROMPT.format(text=text[:800]))):
             return title
@@ -562,7 +565,7 @@ async def suggest_next_prompts(
 ) -> list[dict[str, str]]:
     """The 3 next prompts (short button label + full prompt) from a one-shot LLM call. ``actions`` are the
     turn's tool next_actions. Empty on any failure; the UI falls back to its own chips."""
-    backend = (brain or os.environ.get("KONFAI_STUDIO_LLM", "claude-code")).lower()
+    backend = (brain or os.environ.get("KONFAI_STUDIO_LLM") or "claude-code").lower()
     if backend not in {"claude-code", "claude", "subscription", "agent-sdk"}:
         return []  # API brains: skip the extra call; the UI falls back on its own
     prompt = _NEXT_PROMPTS_PROMPT.format(
@@ -603,7 +606,7 @@ def make_agent(
     the Claude Code brain resumes its SDK transcript (``resume``/``on_session_id``); the API brains
     reload their history (``history_file``).
     """
-    backend = (brain or os.environ.get("KONFAI_STUDIO_LLM", "claude-code")).lower()
+    backend = (brain or os.environ.get("KONFAI_STUDIO_LLM") or "claude-code").lower()
     if backend in {"claude-code", "claude", "subscription", "agent-sdk"}:
         return ClaudeCodeAgent(session, model=model, resume=resume, on_session_id=on_session_id)
     return StudioAgent(session, brain=backend, model=model, history_file=history_file)
