@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from .agent import make_agent
@@ -189,7 +190,7 @@ class _Registry:
                     brain=self._brain,
                     model=self._model or None,
                     resume=state.sdk_id,
-                    on_session_id=lambda sid, n=name: self._set_sdk_id(n, sid),
+                    on_session_id=partial(self._set_sdk_id, name),
                     history_file=_workspace_root() / "sessions" / name / ".konfai_studio" / "history.json",
                 ).__aenter__()
         return state.agent

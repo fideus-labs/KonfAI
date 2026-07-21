@@ -33,9 +33,9 @@ repos:
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
-        files: ^(konfai/|konfai-apps/konfai_apps/|tests/)
+        files: ^(konfai/|konfai-apps/konfai_apps/|studio/konfai_studio/|tests/)
       - id: ruff-format
-        files: ^(konfai/|konfai-apps/konfai_apps/|tests/)
+        files: ^(konfai/|konfai-apps/konfai_apps/|studio/konfai_studio/|tests/)
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.17.0
@@ -43,7 +43,7 @@ repos:
       - id: mypy
         additional_dependencies:
           - types-requests
-        files: ^konfai/
+        files: ^(konfai/|studio/konfai_studio/)
         args:
           - --ignore-missing-imports
           - --check-untyped-defs

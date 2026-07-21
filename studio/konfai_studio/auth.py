@@ -63,7 +63,7 @@ def _authorised(scope: dict[str, Any]) -> bool:
     expected = _session_cookie(token)
     raw = _scope_header(scope, b"cookie")
     if raw:
-        jar: SimpleCookie[str] = SimpleCookie()
+        jar: SimpleCookie = SimpleCookie()
         with suppress(Exception):
             jar.load(raw)
         morsel = jar.get(_COOKIE_NAME)

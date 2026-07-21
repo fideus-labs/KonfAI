@@ -168,10 +168,10 @@ scikit-image = "*"
 test = { cmd = "pytest -q tests/", description = "Run the test suite" }
 test-apps = { cmd = "pytest -q konfai-apps/tests", description = "Run the konfai-apps test suite" }
 test-cov = { cmd = "pytest --cov=konfai --cov-report=term-missing tests/", description = "Run tests with coverage" }
-lint = { cmd = "ruff check konfai konfai-apps/konfai_apps tests", description = "Lint source code" }
-format = { cmd = "ruff format konfai konfai-apps/konfai_apps tests", description = "Format source code" }
-format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps tests", description = "Check formatting without modifying files" }
-typecheck = { cmd = "python -m mypy konfai --ignore-missing-imports --no-site-packages", description = "Type-check the konfai package" }
+lint = { cmd = "ruff check konfai konfai-apps/konfai_apps studio/konfai_studio tests", description = "Lint source code" }
+format = { cmd = "ruff format konfai konfai-apps/konfai_apps studio/konfai_studio tests", description = "Format source code" }
+format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps studio/konfai_studio tests", description = "Check formatting without modifying files" }
+typecheck = { cmd = "python -m mypy konfai studio/konfai_studio --ignore-missing-imports --no-site-packages", description = "Type-check the konfai and studio packages" }
 build = { cmd = "python -m build", description = "Build sdist and wheel" }
 check = { depends-on = ["lint", "format-check", "test", "test-apps"], description = "Run all quality checks" }
 
