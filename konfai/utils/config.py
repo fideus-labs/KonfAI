@@ -454,7 +454,7 @@ def _convert_union_sequence_value(
 _SKIP = object()
 
 
-def _bind_literal(config: Config, param: inspect.Parameter, annotation) -> object:
+def _bind_literal(config: Config, param: inspect.Parameter, annotation, is_optional: bool = False) -> object:
     allowed_values = get_args(annotation)
     default_value = param.default if param.default != inspect._empty else allowed_values[0]
     value = config.get_value(param.name, f"default|{default_value}")
@@ -464,6 +464,8 @@ def _bind_literal(config: Config, param: inspect.Parameter, annotation) -> objec
     # membership check.
     if isinstance(value, str) and value.startswith("default|"):
         value = value.split("|", 1)[1]
+    if is_optional and value in (None, "None"):
+        return None
     if value not in allowed_values:
         matched = [allowed for allowed in allowed_values if str(allowed) == str(value)]
         if matched:
@@ -567,9 +569,11 @@ def _bind_parameter(function, config: Config, param: inspect.Parameter, section_
     annotation = _resolve_annotation(function, param.annotation)
     if hasattr(annotation, "__metadata__"):  # Annotated[T, meta]: bind on T, meta is a UI hint
         annotation = get_args(annotation)[0]
-    if get_origin(annotation) is Literal:
-        return _bind_literal(config, param, annotation)
     annotation, is_optional = _unwrap_optional(annotation)
+    # After unwrapping, so ``Literal[X] | None`` binds as a literal (or None) instead of falling through
+    # to _bind_config_object, which would try to instantiate the Literal as a class.
+    if get_origin(annotation) is Literal:
+        return _bind_literal(config, param, annotation, is_optional)
 
     if annotation == inspect._empty:
         return _SKIP if param.name == "self" else config.get_value(param.name, param.default)
