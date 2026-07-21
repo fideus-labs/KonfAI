@@ -1033,16 +1033,17 @@ class Dataset:
             elif os.path.exists(f"{self.filename}{name}.npy"):
                 data = np.load(f"{self.filename}{name}.npy")
             else:
-                # Prefer the declared format's own extension; otherwise deprioritize the sidecar halves of
-                # paired formats (.raw/.zraw are unreadable standalone; .img reads only via its paired .hdr,
-                # so prefer the header). glob order is unsorted, so without this a '.mhd'+'.raw' pair could
-                # hand the '.raw' to ReadImage.
+                # Prefer the declared format's own extension; otherwise skip a crashed writer's '.tmp' (a
+                # header plus zero-reserved pixels) and deprioritize the sidecar halves of paired formats
+                # (.raw/.zraw are unreadable standalone; .img reads only via its paired .hdr, so prefer the
+                # header). glob order is unsorted, so without this a '.mhd'+'.raw' pair could hand the '.raw'
+                # to ReadImage, or a leftover '.tmp' a zero-filled partial volume -- as in _resolve_data_path.
                 direct = f"{self.filename}{name}.{self.file_format}"
                 if os.path.exists(direct):
                     path = direct
                 else:
                     matches = sorted(
-                        glob.glob(f"{self.filename}{name}.*"),
+                        (c for c in glob.glob(f"{self.filename}{name}.*") if not c.endswith(".tmp")),
                         key=lambda candidate: candidate.lower().endswith((".raw", ".zraw", ".img")),
                     )
                     if not matches:
