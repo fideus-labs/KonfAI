@@ -499,7 +499,7 @@ def prediction_rules() -> dict[str, Any]:
         "authoring_checks": [
             "The Model section must match the trained config (classpath, channels, patch sizes).",
             "dataset_filenames may point at NEW unseen data; paths are checked before launch.",
-            "Uncertainty needs the apps path (run_app_infer uncertainty=True) or a custom reduction.",
+            "Uncertainty comes from TTA / MC-dropout configured in Prediction.yml, or a custom reduction.",
         ],
     }
 

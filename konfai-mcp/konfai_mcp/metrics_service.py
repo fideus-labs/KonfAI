@@ -22,14 +22,12 @@ this mixin."""
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Literal
 
+from .live_parse import parse_live_metric_line
 from .server_jobs import Job
 from .server_support import WorkspaceLayout, read_text_tail
-
-ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
 class MetricsServiceMixin:
@@ -77,96 +75,12 @@ class MetricsServiceMixin:
             )
         return layout
 
-    def _extract_parenthesized_value(self, text: str, prefix: str) -> str | None:
-        start = text.find(prefix)
-        if start < 0:
-            return None
-        index = start + len(prefix)
-        depth = 1
-        chunk: list[str] = []
-        while index < len(text):
-            char = text[index]
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    return "".join(chunk)
-            chunk.append(char)
-            index += 1
-        return None
-
-    def _parse_model_metrics(self, body: str | None) -> list[dict[str, Any]]:
-        if not body:
-            return []
-        token_pattern = re.compile(r"([A-Za-z0-9_.-]+)\(([-+0-9.eE]+)\)\s*:\s*")
-        value_pattern = re.compile(r"[-+0-9.eE]+|nan|inf|-inf", flags=re.IGNORECASE)
-        matches = list(token_pattern.finditer(body))
-        models: list[dict[str, Any]] = []
-        current_model: dict[str, Any] | None = None
-        for index, match in enumerate(matches):
-            segment_end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
-            trailing = body[match.end() : segment_end].strip()
-            if trailing == "" or not value_pattern.fullmatch(trailing):
-                current_model = {
-                    "name": match.group(1),
-                    "lr": float(match.group(2)),
-                    "metrics": {},
-                }
-                models.append(current_model)
-                continue
-            if current_model is None:
-                current_model = {
-                    "name": match.group(1),
-                    "lr": 0.0,
-                    "metrics": {},
-                }
-                models.append(current_model)
-            current_model["metrics"][match.group(1)] = {
-                "weight": float(match.group(2)),
-                "value": float(trailing),
-            }
-        return models
-
-    def _flatten_live_metrics(self, models: list[dict[str, Any]]) -> dict[str, float]:
-        return {
-            f"{model['name']}:{metric_name}": metric_payload["value"]
-            for model in models
-            for metric_name, metric_payload in model["metrics"].items()
-        }
-
     def _parse_live_metric_line(self, line: str) -> dict[str, Any] | None:
-        clean = ANSI_ESCAPE_RE.sub("", line).strip()
-        if not clean:
-            return None
-        stage_match = re.search(r"\b(Training|Validation|Prediction)\s*:", clean)
-        if stage_match is None:
-            return None
-        stage = stage_match.group(1)
-        metrics = self._parse_model_metrics(self._extract_parenthesized_value(clean, "Loss ("))
-        metrics_ema = self._parse_model_metrics(self._extract_parenthesized_value(clean, "Loss EMA ("))
-        if not metrics and not metrics_ema:
-            return None
-        memory_match = re.search(r"Memory \(([-+0-9.]+)G \(([-+0-9.]+) %\)\)", clean)
-        cpu_match = re.search(r"CPU \(([-+0-9.]+) %\)", clean)
-        result: dict[str, Any] = {
-            "stage": stage,
-            "models": metrics,
-            "ema_models": metrics_ema,
-            "flat_metrics": self._flatten_live_metrics(metrics),
-            "flat_metrics_ema": self._flatten_live_metrics(metrics_ema),
-            "raw": clean,
-        }
-        if memory_match is not None:
-            result["memory_gb"] = float(memory_match.group(1))
-            result["memory_percent"] = float(memory_match.group(2))
-        if cpu_match is not None:
-            result["cpu_percent"] = float(cpu_match.group(1))
-        return result
+        return parse_live_metric_line(line)  # module-level: the single source of truth (see top of file)
 
     def _parse_live_metrics_file(self, path: Path, max_lines: int | None = None) -> list[dict[str, Any]]:
         lines = read_text_tail(path, max_lines=max_lines or self.max_log_tail_lines).splitlines()
-        return [entry for line in lines if (entry := self._parse_live_metric_line(line)) is not None]
+        return [entry for line in lines if (entry := parse_live_metric_line(line)) is not None]
 
     def read_live_metrics_payload(self, job: Job, max_entries: int) -> dict[str, Any]:
         runtime_log = self.job_runtime_log_path(job)

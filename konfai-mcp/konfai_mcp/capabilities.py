@@ -72,8 +72,10 @@ def describe_konfai_capabilities() -> dict[str, Any]:
         "apps": {
             "principle": "When the user wants a RESULT, check published apps FIRST -- cheapest fit wins: "
             "use an app as-is, else fine-tune one, else train from scratch.",
-            "use_dont_train": "list_apps -> describe_app -> list_app_parameters -> run_app_infer / run_app_pipeline",
-            "fine_tune": "fine_tune_app (weights-only warm start on the user's dataset -> runnable bundle)",
+            "use_dont_train": "list_apps -> describe_app -> list_app_parameters -> import_app "
+            "(copies the app into the session) -> run_prediction with the returned checkpoints",
+            "fine_tune": "import_app -> run_resume(weights_only=True) (warm start from the app's weights on the "
+            "user's dataset, fresh optimizer/epoch)",
             "resume": "run_resume (true RESUME of an interrupted session training: optimizer/epoch restored)",
             "package": "package_app_from_session / export_app (turn a trained session or tuned app into a bundle)",
         },

@@ -76,21 +76,11 @@ WORKFLOW_SPECS: dict[str, WorkflowSpec] = {
     )
 }
 
-# konfai-apps job kinds (no session YAML of their own) -> the tool that relaunches them.
-APP_JOB_RETRY_TOOLS: dict[str, str] = {
-    "infer": "run_app_infer",
-    "finetune": "fine_tune_app",
-    "evaluate": "run_app_evaluate",
-    "uncertainty": "run_app_uncertainty",
-    "pipeline": "run_app_pipeline",
-}
-APP_JOB_KINDS: tuple[str, ...] = tuple(APP_JOB_RETRY_TOOLS)
-JOB_RETRY_TOOLS: dict[str, str] = {
-    **{kind: spec.retry_tool for kind, spec in WORKFLOW_SPECS.items()},
-    **APP_JOB_RETRY_TOOLS,
-}
-JOB_KINDS: tuple[str, ...] = tuple(WORKFLOW_SPECS) + APP_JOB_KINDS
+# Apps run as normal experiments (import_app copies them into the session), so every job is a workflow
+# job -- there are no app-only job kinds anymore.
+JOB_RETRY_TOOLS: dict[str, str] = {kind: spec.retry_tool for kind, spec in WORKFLOW_SPECS.items()}
+JOB_KINDS: tuple[str, ...] = tuple(WORKFLOW_SPECS)
 
 # Static mirrors of the table for tool signatures; pinned to it by the drift test.
 WorkflowKind = Literal["train", "prediction", "evaluation"]
-JobKind = Literal["train", "prediction", "evaluation", "infer", "finetune", "evaluate", "uncertainty", "pipeline"]
+JobKind = WorkflowKind
