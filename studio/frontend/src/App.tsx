@@ -12,6 +12,7 @@ import { useJobStream } from "./useJobStream";
 import { getJson, postJson } from "./api";
 import { useJson } from "./useJson";
 import { jobState } from "./status";
+import { type SessionUi, patchSession, replaceSessionField } from "./sessionState";
 
 type Gpu = { index: number; name: string; used_gb: number | null; total_gb: number | null };
 type Ram = { used_gb: number; total_gb: number };
@@ -159,15 +160,12 @@ export default function App() {
 function Studio({ remote }: { remote: boolean }) {
   const [status, setStatus] = useState("connecting…");
   const [sessions, setSessions] = useState<string[]>([]); // starts empty — no phantom "default" experiment
-  const [titles, setTitles] = useState<Record<string, string>>({});
   const [active, setActive] = useState(NEW);
-  const [volume, setVolume] = useState<Record<string, string | null>>({});
-  const [compareVol, setCompareVol] = useState<Record<string, string | null>>({}); // second volume for the viewer's compare pane
-  const [runNonce, setRunNonce] = useState<Record<string, number>>({});
-  const [datasets, setDatasets] = useState<Record<string, string>>({});
+  // One consolidated map of per-experiment UI state (title, dataset, device, status, volumes, run nonce,
+  // inject prompt, busy) — replaces the dozen parallel `Record<string, X>` maps keyed by session name.
+  const [ui, setUi] = useState<SessionUi>({});
   const [recent, setRecent] = useState<string[]>([]);
   const [fileRecent, setFileRecent] = useState<string[]>([]);
-  const [inject, setInject] = useState<Record<string, { text: string; nonce: number }>>({});
   const [gpus, setGpus] = useState<Gpu[]>([]);
   const [ram, setRam] = useState<Ram | null>(null);
   const [ramHist, setRamHist] = useState<number[]>([]); // RAM utilisation % over time
@@ -176,7 +174,6 @@ function Studio({ remote }: { remote: boolean }) {
   const [brain, setBrain] = useState("");
   const [model, setModel] = useState("");
   const [modelText, setModelText] = useState(""); // free-text model for the local backend
-  const [devices, setDevices] = useState<Record<string, string>>({}); // compute device per experiment
   const [defaultDevice, setDefaultDevice] = useState("auto"); // what a fresh experiment starts on
   const [menu, setMenu] = useState<{ session: string; x: number; y: number } | null>(null);
   // What the right-clicked experiment contains — greys out actions that would just fail (fails open to null).
@@ -184,8 +181,6 @@ function Studio({ remote }: { remote: boolean }) {
     menu ? `/api/experiment?session=${encodeURIComponent(menu.session)}` : "",
     [menu?.session],
   );
-  const [busy, setBusy] = useState<Record<string, boolean>>({}); // which tasks' agents are working
-  const [statuses, setStatuses] = useState<Record<string, string>>({}); // latest job status per task
   const [datasetBrowsing, setDatasetBrowsing] = useState(false);
   const [appPick, setAppPick] = useState<string | null>(null); // app ref awaiting its dataset before launch
   const [apps, setApps] = useState<StudioApp[]>([]);
@@ -265,8 +260,8 @@ function Studio({ remote }: { remote: boolean }) {
           setSessions(d.sessions);
           setActive(d.sessions[0]); // land on the most recent experiment (its Live), not an empty draft
         }
-        setTitles(d.titles ?? {});
-        setDatasets(d.datasets ?? {});
+        setUi((u) => replaceSessionField(u, "title", d.titles ?? {}));
+        setUi((u) => replaceSessionField(u, "dataset", d.datasets ?? {}));
       })
       .catch(() => {});
     getJson("/api/datasets")
@@ -286,7 +281,7 @@ function Studio({ remote }: { remote: boolean }) {
       .catch(() => {});
     getJson("/api/device")
       .then((d) => {
-        setDevices(d.devices ?? {});
+        setUi((u) => replaceSessionField(u, "device", d.devices ?? {}));
         setDefaultDevice(d.default ?? "auto");
       })
       .catch(() => {});
@@ -312,7 +307,7 @@ function Studio({ remote }: { remote: boolean }) {
         })
         .catch(() => {});
       getJson("/api/sessions/status")
-        .then((d) => setStatuses(d.statuses ?? {}))
+        .then((d) => setUi((u) => replaceSessionField(u, "status", d.statuses ?? {})))
         .catch(() => {});
     };
     pull();
@@ -344,10 +339,10 @@ function Studio({ remote }: { remote: boolean }) {
       .catch(() => {});
   }
 
-  const deviceOf = (session: string) => devices[session] ?? defaultDevice;
+  const deviceOf = (session: string) => ui[session]?.device ?? defaultDevice;
 
   function chooseDevice(session: string, val: string) {
-    setDevices((d) => ({ ...d, [session]: val }));
+    setUi((u) => patchSession(u, session, { device: val }));
     if (session === NEW) {
       setDefaultDevice(val); // a draft's choice becomes the default the new experiment inherits
       return;
@@ -377,7 +372,7 @@ function Studio({ remote }: { remote: boolean }) {
 
   // Remember a task's dataset server-side (persists, and the Experiment tree mounts it).
   function recordDataset(session: string, path: string) {
-    setDatasets((d) => ({ ...d, [session]: path }));
+    setUi((u) => patchSession(u, session, { dataset: path }));
     postJson("/api/sessions/dataset", { session, path }).catch(() => {});
   }
 
@@ -391,7 +386,7 @@ function Studio({ remote }: { remote: boolean }) {
       return;
     }
     recordDataset(active, path);
-    setInject((i) => ({ ...i, [active]: { text: prompt, nonce: (i[active]?.nonce ?? 0) + 1 } }));
+    setUi((u) => patchSession(u, active, { inject: { text: prompt, nonce: (u[active]?.inject?.nonce ?? 0) + 1 } }));
   }
 
   // The Chat composer sends the "read this file" turn itself; here we just record it in the
@@ -421,12 +416,12 @@ function Studio({ remote }: { remote: boolean }) {
         clearChat(id); // a reused id (a deleted experiment-1 frees it) must not inherit the old chat
         clearChat(NEW); // the draft's turn is replayed into the new experiment via inject, not localStorage
         setSessions(d.sessions);
-        setTitles(d.titles ?? {});
+        setUi((u) => replaceSessionField(u, "title", d.titles ?? {}));
         if (dataset) recordDataset(id, dataset);
         const draftDevice = deviceOf(NEW);
         if (draftDevice !== defaultDevice) chooseDevice(id, draftDevice); // carry the draft's device over
         setActive(id);
-        setInject((i) => ({ ...i, [id]: { text, nonce: (i[id]?.nonce ?? 0) + 1 } }));
+        setUi((u) => patchSession(u, id, { inject: { text, nonce: (u[id]?.inject?.nonce ?? 0) + 1 } }));
       })
       .catch(() => {})
       .finally(() => {
@@ -470,25 +465,25 @@ function Studio({ remote }: { remote: boolean }) {
 
   function renameExperiment(s: string) {
     setMenu(null);
-    const current = titles[s] ?? s;
+    const current = ui[s]?.title ?? s;
     const next = window.prompt("Rename experiment", current);
     const title = next?.trim();
     if (!title || title === current) return;
-    setTitles((t) => ({ ...t, [s]: title })); // optimistic
+    setUi((u) => patchSession(u, s, { title })); // optimistic
     postJson("/api/sessions/rename", { session: s, title })
-      .then((d) => d.titles && setTitles(d.titles))
+      .then((d) => d.titles && setUi((u) => replaceSessionField(u, "title", d.titles)))
       .catch(() => setToast("Rename failed."));
   }
 
   function deleteExperiment(s: string) {
     setMenu(null);
-    if (!window.confirm(`Delete “${titles[s] ?? s}” and its workspace (jobs, checkpoints)? This cannot be undone.`))
+    if (!window.confirm(`Delete “${ui[s]?.title ?? s}” and its workspace (jobs, checkpoints)? This cannot be undone.`))
       return;
     clearChat(s); // drop its stored chat so a reused id starts clean
     postJson("/api/sessions/delete", { name: s })
       .then((d) => {
         setSessions(d.sessions);
-        setTitles(d.titles ?? {});
+        setUi((u) => replaceSessionField(u, "title", d.titles ?? {}));
         if (!d.sessions.includes(active)) setActive(NEW);
       })
       .catch(() => setToast("Delete failed."));
@@ -497,7 +492,7 @@ function Studio({ remote }: { remote: boolean }) {
   // Bundle/export are deterministic MCP actions (no LLM) — they only need a destination folder.
   function runAction(session: string, action: "bundle" | "export", output: string) {
     setPick(null);
-    const label = titles[session] ?? session;
+    const label = ui[session]?.title ?? session;
     setToast(`${action === "bundle" ? "Packaging" : "Exporting"} “${label}”…`);
     postJson(`/api/sessions/${action}`, { session, output })
       .then((d) => setToast(d.result || (d.ok ? "Done." : "Failed.")))
@@ -510,10 +505,10 @@ function Studio({ remote }: { remote: boolean }) {
     return () => clearTimeout(id);
   }, [toast]);
 
-  const bumpRun = (s: string) => setRunNonce((r) => ({ ...r, [s]: (r[s] ?? 0) + 1 }));
+  const bumpRun = (s: string) => setUi((u) => patchSession(u, s, { runNonce: (u[s]?.runNonce ?? 0) + 1 }));
 
   // One live subscription for the active task, shared by the feed (right) and the console (bottom).
-  const stream = useJobStream(active, runNonce[active] ?? 0);
+  const stream = useJobStream(active, ui[active]?.runNonce ?? 0);
 
   function signOut() {
     purgeStudioChat(); // drop transcripts before the httpOnly cookie is cleared and the page reloads
@@ -582,12 +577,12 @@ function Studio({ remote }: { remote: boolean }) {
           </button>
           <div className="rail-list">
             {sessions
-              .filter((s) => !railSearch || (titles[s] ?? s).toLowerCase().includes(railSearch.toLowerCase()))
+              .filter((s) => !railSearch || (ui[s]?.title ?? s).toLowerCase().includes(railSearch.toLowerCase()))
               .map((s) => {
               // The active task's live stream is the freshest signal; others use the polled status.
-              const status = s === active && stream.status ? stream.status : statuses[s];
+              const status = s === active && stream.status ? stream.status : ui[s]?.status;
               const state = jobState(status);
-              const spinning = busy[s] || state === "run";
+              const spinning = ui[s]?.busy || state === "run";
               return (
                 <button
                   key={s}
@@ -604,7 +599,7 @@ function Studio({ remote }: { remote: boolean }) {
                   ) : (
                     <span className={`tdot st-${state}`} />
                   )}
-                  <span className="tname">{titles[s] ?? s}</span>
+                  <span className="tname">{ui[s]?.title ?? s}</span>
                 </button>
               );
             })}
@@ -622,13 +617,13 @@ function Studio({ remote }: { remote: boolean }) {
                     key={s}
                     session={s}
                     active={s === active}
-                    inject={inject[s]}
+                    inject={ui[s]?.inject}
                     recentFiles={fileRecent}
-                    onVolume={(p) => setVolume((v) => ({ ...v, [s]: p }))}
+                    onVolume={(p) => setUi((u) => patchSession(u, s, { volume: p }))}
                     onRun={() => bumpRun(s)}
-                    onTitle={(title) => setTitles((t) => ({ ...t, [s]: title }))}
+                    onTitle={(title) => setUi((u) => patchSession(u, s, { title }))}
                     onAttach={recordFile}
-                    onBusy={(b) => setBusy((prev) => ({ ...prev, [s]: b }))}
+                    onBusy={(b) => setUi((u) => patchSession(u, s, { busy: b }))}
                     onPickDataset={() => setDatasetBrowsing(true)}
                     datasetRecent={recent}
                     onChooseDataset={chooseDataset}
@@ -664,10 +659,10 @@ function Studio({ remote }: { remote: boolean }) {
             <div className="col-divider" onMouseDown={startColDrag} title="Drag to resize" />
             <RightPanel
               session={active}
-              volumePath={volume[active] ?? null}
-              onVolumePathChange={(p) => setVolume((v) => ({ ...v, [active]: p }))}
-              comparePath={compareVol[active] ?? null}
-              onComparePathChange={(p) => setCompareVol((v) => ({ ...v, [active]: p || null }))}
+              volumePath={ui[active]?.volume ?? null}
+              onVolumePathChange={(p) => setUi((u) => patchSession(u, active, { volume: p }))}
+              comparePath={ui[active]?.compareVol ?? null}
+              onComparePathChange={(p) => setUi((u) => patchSession(u, active, { compareVol: p || null }))}
               stream={stream}
               onReload={() => bumpRun(active)}
             />
@@ -765,7 +760,7 @@ function Studio({ remote }: { remote: boolean }) {
 
       {pick && (
         <FolderBrowser
-          start={datasets[pick.session] || ""}
+          start={ui[pick.session]?.dataset || ""}
           title={pick.action === "bundle" ? "Choose where to save the app bundle" : "Choose where to save the run record"}
           cta={pick.action === "bundle" ? "Bundle here" : "Export here"}
           onPick={(dest) => runAction(pick.session, pick.action, dest)}
