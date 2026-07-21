@@ -27,6 +27,22 @@ import pytest
 import torch
 from ruamel.yaml import YAML
 
+# The fine-tune loss guard refuses a config with no training loss, so the stub must carry one.
+_MIN_CONFIG = (
+    "Trainer:\n"
+    "  train_name: PLACEHOLDER\n"
+    "  Model:\n"
+    "    classpath: Net\n"
+    "    Net:\n"
+    "      outputs_criterions:\n"
+    "        Head:\n"
+    "          targets_criterions:\n"
+    "            CT:\n"
+    "              criterions_loader:\n"
+    "                MAE:\n"
+    "                  is_loss: true\n"
+)
+
 
 def _write_src_checkpoint(path: Path) -> None:
     torch.save({"epoch": 10, "it": 100, "loss": 0.0, "Model": {}}, path)
@@ -48,7 +64,7 @@ def _run_local_fine_tune(
 
     output_dir = tmp_path / "Output"
     output_dir.mkdir()
-    (output_dir / "Config.yml").write_text("Trainer:\n  train_name: PLACEHOLDER\n", encoding="utf-8")
+    (output_dir / "Config.yml").write_text(_MIN_CONFIG, encoding="utf-8")
 
     captured: list[float | None] = []
 
@@ -103,7 +119,7 @@ def test_local_fine_tune_forwards_config_overrides_to_install(monkeypatch: pytes
     dataset_dir.mkdir()
     output_dir = tmp_path / "Output"
     output_dir.mkdir()
-    (output_dir / "Config.yml").write_text("Trainer:\n  train_name: PLACEHOLDER\n", encoding="utf-8")
+    (output_dir / "Config.yml").write_text(_MIN_CONFIG, encoding="utf-8")
 
     captured: dict = {}
 
@@ -148,6 +164,55 @@ def test_local_fine_tune_defaults_lr_to_none(monkeypatch: pytest.MonkeyPatch, tm
     assert captured == [None]
 
 
+def test_fine_tune_writes_the_run_to_artifacts_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """With artifacts_root set, Statistics/Checkpoints land there (the session root), not in the bundle dir."""
+    src_ckpt = tmp_path / "CV_0_src.pt"
+    _write_src_checkpoint(src_ckpt)
+    session_root = tmp_path / "session"
+    bundle = session_root / "bundle-abc"
+    bundle.mkdir(parents=True)
+    (bundle / "Config.yml").write_text(_MIN_CONFIG, encoding="utf-8")
+    monkeypatch.chdir(bundle)  # keep_training_artifacts=True -> train_root = cwd = the bundle dir
+
+    captured: dict = {}
+
+    def fake_train(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["checkpoints"] = Path(args[8])
+        captured["statistics"] = Path(args[9])
+        with open(Path(args[7])) as file:
+            data = YAML().load(file)
+        produced = Path(args[8]) / data["Trainer"]["train_name"]
+        produced.mkdir(parents=True, exist_ok=True)
+        torch.save({"epoch": 0, "it": 5, "loss": 0.0, "Model": {}}, produced / "out.pt")
+
+    monkeypatch.setattr("konfai.trainer.train", fake_train)
+    monkeypatch.setattr(app_module.KonfAIApp, "symlink", staticmethod(lambda *a, **k: None))
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app.app_repository = types.SimpleNamespace(  # type: ignore[attr-defined]
+        install_fine_tune=lambda *a, **k: [("CV_0.pt", str(src_ckpt))]
+    )
+    app.fine_tune(
+        dataset=tmp_path / "Dataset",
+        name="Run",
+        output=bundle,
+        epochs=1,
+        it_validation=1,
+        models=["CV_0"],
+        gpu=[],
+        cpu=1,
+        quiet=True,
+        config_file="Config.yml",
+        tmp_dir=bundle,
+        keep_training_artifacts=True,
+        artifacts_root=session_root,
+    )
+
+    # The run lives at the session root, not inside the produced bundle.
+    assert captured["checkpoints"] == session_root / "Checkpoints"
+    assert captured["statistics"] == session_root / "Statistics"
+    assert (bundle / "CV_0.pt").is_file()  # the fine-tuned checkpoint still lands in the bundle
+
+
 def test_local_fine_tune_copies_subpackage_support_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """An app whose code/config lives in a subpackage must be replicated into work_dir at its own path."""
     src_ckpt = tmp_path / "CV_0_src.pt"
@@ -158,7 +223,7 @@ def test_local_fine_tune_copies_subpackage_support_files(monkeypatch: pytest.Mon
 
     output_dir = tmp_path / "Output"
     output_dir.mkdir()
-    (output_dir / "Config.yml").write_text("Trainer:\n  train_name: PLACEHOLDER\n", encoding="utf-8")
+    (output_dir / "Config.yml").write_text(_MIN_CONFIG, encoding="utf-8")
     # Support assets in subpackages (a relative-classpath sub-model + custom code) must survive the copy.
     (output_dir / "models").mkdir()
     (output_dir / "models" / "UNet.yml").write_text("Network:\n  type: UNet\n", encoding="utf-8")
