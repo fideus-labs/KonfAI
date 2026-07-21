@@ -1264,7 +1264,8 @@ def export_app(
 @mcp.tool(description=(TOOL_DESCRIPTIONS["import_app"]))
 def import_app(
     ref: Annotated[
-        str, Field(description="App id 'repo_id:app_name' or local app folder path (remote servers cannot be imported).")
+        str,
+        Field(description="App id 'repo_id:app_name' or local app folder path (remote servers cannot be imported)."),
     ],
     allow_untrusted_code: Annotated[
         bool,
