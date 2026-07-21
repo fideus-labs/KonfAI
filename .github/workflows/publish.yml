@@ -43,6 +43,14 @@ jobs:
         run: |
           python -m pytest -q konfai-mcp/tests
 
+      - name: Install standalone Studio package
+        run: |
+          pip install -e ./studio
+
+      - name: Run konfai-studio tests
+        run: |
+          python -m pytest -q studio/tests
+
   build:
     needs: test
     runs-on: ubuntu-latest
@@ -66,6 +74,12 @@ jobs:
             pkg: "apps/mrsegmentator"
           - name: totalsegmentator-konfai
             pkg: "apps/totalsegmentator"
+          # Studio ships a built React front (konfai_studio/web/*), so its front is built before packaging
+          # and the wheel is built directly (--wheel): web/ is git-ignored, so the sdist file-finder would
+          # drop it, but the wheel picks it up from package-data on disk.
+          - name: konfai-studio
+            pkg: "studio"
+            build_args: "--wheel"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -75,12 +89,25 @@ jobs:
         with:
           python-version: "3.10"
 
+      - name: Set up Node
+        if: matrix.name == 'konfai-studio'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build the Studio front
+        if: matrix.name == 'konfai-studio'
+        run: |
+          cd studio/frontend
+          npm ci
+          npm run build
+
       - name: Build package
         run: |
           python -m pip install -U pip
           python -m pip install build setuptools-scm
           cd "${{ matrix.pkg }}"
-          python -m build
+          python -m build ${{ matrix.build_args }}
 
       - name: Upload dist
         uses: actions/upload-artifact@v4

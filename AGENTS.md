@@ -20,6 +20,7 @@ Three pillars run through the codebase:
 | `konfai/` | Core package (config, data, network, metric, workflows, utils) |
 | `konfai-apps/` | **Independent** package `konfai_apps` (app management, HF repos, FastAPI server) — own `pyproject.toml`, deps, and CI |
 | `konfai-mcp/` | **Independent** package `konfai_mcp` (FastMCP server exposing KonfAI to LLM agents) — own `pyproject.toml`, tests, CI. On `main` since v1.6.0; published to PyPI by the release workflow. |
+| `studio/` | **Independent** package `konfai_studio` (FastAPI BFF + built React front — a chatbot web UI over `konfai-mcp`). Own `pyproject.toml`; the front (`konfai_studio/web/*`) is a CI `npm` build, not in git; wheel-only. |
 | `apps/` | Ready-to-use model app bundles (excluded from the `konfai` wheel) |
 | `examples/` | Runnable `Segmentation` / `Synthesis` / `Registration` workflows (assume CWD = the example dir) |
 | `docs/` · `tests/` | Sphinx site · core test suite (`tests/unit`, `tests/integration`) |
@@ -125,11 +126,14 @@ The Pixi `dev` env carries the imaging extras; a bare `pip install .[dev]` does 
 
 ## 6b. Releasing
 
-Versions are **tag-derived** (`setuptools_scm`, `^v(?P<version>.*)$`) for all three packages — never hand-edit
-a version. Pushing a `v*` tag runs `.github/workflows/publish.yml`: test (core + apps + mcp) → build the
-8-package matrix (konfai, konfai-apps, konfai-mcp, and the 5 `apps/*` bundles) → publish to PyPI via OIDC →
-build the Docker image once `konfai` is visible on PyPI. `apps/*` bundles pin `konfai==` and `konfai-apps==`
-the same version, so the whole matrix releases in lockstep.
+Versions are **tag-derived** (`setuptools_scm`, `^v(?P<version>.*)$`) for every package — never hand-edit
+a version. Pushing a `v*` tag runs `.github/workflows/publish.yml`: test (core + apps + mcp + studio) → build
+the 9-package matrix (konfai, konfai-apps, konfai-mcp, konfai-studio, and the 5 `apps/*` bundles) → publish to
+PyPI via OIDC → build the Docker image once `konfai` is visible on PyPI. `apps/*` bundles pin `konfai==` and
+`konfai-apps==`, and `konfai-studio` pins `konfai-mcp==` (via its `setup.py`), all the same version, so the
+whole matrix releases in lockstep. `konfai-studio` is the one exception to the pure-Python build: the build
+job runs `npm ci && npm run build` first (its React front is git-ignored) and then `python -m build --wheel`
+(wheel-only — the sdist file-finder would drop the built `web/`).
 
 Before tagging: `pixi run check` green; both sibling suites green; and — because the test job only exercises
 the **source tree** — confirm the built wheel still ships `konfai/models/python/**` and `konfai/models/yaml/*.yml`
