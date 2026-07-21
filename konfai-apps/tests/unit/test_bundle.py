@@ -208,6 +208,52 @@ def test_derive_reduction_reads_the_ensemble_reduction():
     assert _derive_reduction({"Predictor": {}}, "Predictor") is None
 
 
+def test_masked_tta_compiler_reads_the_config():
+    from konfai_apps.bundle import _assemble_masked_tta_program, _aux_mask_groups, _mask_specs, _tta_passes
+
+    config = {
+        "Predictor": {
+            "manual_seed": 32,
+            "Dataset": {
+                "groups_src": {
+                    "Volume_0": {
+                        "groups_dest": {
+                            "MASK": {
+                                "is_input": False,
+                                "transforms": {
+                                    "KonfAIInference": {"repo_id": "R/S", "model_name": "body"},
+                                    "ResampleToResolution": {"spacing": [1, 1, 3]},
+                                    "Dilate": {"dilate": 5},
+                                    "Save": {"dataset": "x"},
+                                },
+                            },
+                            "Volume": {"is_input": True, "transforms": {"Normalize": {}}},
+                        }
+                    }
+                },
+                "augmentations": {"DA0": {"nb": 2, "data_augmentations": {"Flip": {"f_prob": [0, 0.5, 0.5]}}}},
+            },
+            "outputs_dataset": {"H": {"OutputDataset": {"before_reduction_transforms": {"Mask": {"path": "MASK", "value_outside": -1024}}}}},
+        }
+    }
+    passes = _tta_passes(config, "Predictor")
+    assert passes[0] == [] and len(passes) == 3  # identity + nb draws; other augmentations would be skipped
+    aux = _aux_mask_groups(config, "Predictor")
+    assert set(aux) == {"MASK"} and [op for op, _ in aux["MASK"]["ops"]] == ["resample", "dilate"]
+    assert _mask_specs(config, "Predictor") == [{"group": "MASK", "value_outside": -1024.0}]
+
+    fold = {"preprocessing": [{"op": "resample", "inverse": True}], "postprocessing": [{"op": "cast", "dtype": "int16"}]}
+    program = _assemble_masked_tta_program(
+        [{"id": f"CV_{i}", "manifest": fold} for i in range(5)],
+        passes,
+        {"MASK": {"id": "MASK", "manifest": {}, "ops": aux["MASK"]["ops"]}},
+        _mask_specs(config, "Predictor"),
+    )
+    ops = [s["op"] for s in program["steps"] if "op" in s]
+    assert "mask" in ops and "resample_linear" in ops  # the mask and the hoisted inverse resample
+    assert program["steps"][-1] == {"op": "cast", "in": ["resampled"], "out": "output", "dtype": "int16"}
+
+
 def test_transform_manifest_refuses_an_unportable_transform():
     import pytest
     from konfai_apps.bundle import AppMetadataError, _transform_manifest

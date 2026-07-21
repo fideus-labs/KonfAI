@@ -42,5 +42,7 @@ def test_runtime_op_after_fold_is_refused():
 
 
 def test_non_foldable_transform_is_refused():
+    # A real transform that is neither a runtime op nor pointwise (Gradient is a HALO transform); a
+    # program-level transform such as KonfAIInference is instead compiled into a nested model step.
     with pytest.raises(AppMetadataError, match="not a foldable pointwise"):
-        _transform_manifest(_cfg({"KonfAIInference": {"repo_id": "x", "model_name": "y"}}), "Predictor")
+        _transform_manifest(_cfg({"Gradient": {"per_dim": False}}), "Predictor")

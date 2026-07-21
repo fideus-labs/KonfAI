@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import sys
 from collections.abc import Callable
@@ -224,6 +225,25 @@ _OP_MAP = {
 }
 
 
+# Transforms compiled into PROGRAM steps (cross-buffer, or a buffer produced by a nested model), never
+# per-buffer manifest pipeline ops: the multi-model program handles them, so `_pipeline` skips them.
+_PROGRAM_TRANSFORMS = {"Mask", "KonfAIInference", "Dilate", "Save", "InferenceStack"}
+
+
+def _input_group_transforms(config: dict[str, Any], root: str) -> dict[str, Any] | None:
+    """The transform chain of the ``is_input: true`` dest group -- the model's actual input pipeline.
+    A config may carry auxiliary groups (a mask, a conditioning image) whose transforms are NOT the
+    model preprocessing; falls back to the first ``transforms`` block for single-group configs."""
+    dataset = config.get(root, {}).get("Dataset", {})
+    for src in (dataset.get("groups_src") or {}).values():
+        if not isinstance(src, dict):
+            continue
+        for group in (src.get("groups_dest") or {}).values():
+            if isinstance(group, dict) and group.get("is_input") and isinstance(group.get("transforms"), dict):
+                return group["transforms"]
+    return _find_transforms(dataset, "transforms")
+
+
 def _find_transforms(node: Any, key: str) -> dict[str, Any] | None:
     """First ``key`` sub-dict of a mapping value (the input ``transforms`` / output ``final_transforms``)."""
     if isinstance(node, dict):
@@ -277,6 +297,8 @@ def _pipeline(
     folds: list[Callable[[Any], Any]] = []
     for name, params in (transforms or {}).items():
         base = name.split("/", 1)[0]
+        if base in _PROGRAM_TRANSFORMS:
+            continue  # compiled into a program step, not a per-buffer pipeline op
         if _clean(params) is None and base not in _OP_MAP:
             continue
         if base in _OP_MAP:
@@ -302,7 +324,7 @@ def _transform_manifest(config: dict[str, Any], root: str) -> tuple[dict[str, An
     """The pre/post op pipeline the portable runtime applies around the tiled forward, plus the
     ``fold_pre`` callables (POINTWISE preprocessing transforms baked into the ONNX graph)."""
     section = config.get(root, {})
-    pre, folds = _pipeline(_find_transforms(section.get("Dataset"), "transforms"), fold=True)
+    pre, folds = _pipeline(_input_group_transforms(config, root), fold=True)
     # Post is `before_reduction_transforms` (disjoint ensemble: argmax per fold before merge) or
     # `final_transforms` (same-class ensemble: runs once after the mean); read both.
     before, _ = _pipeline(_find_transforms(section.get("outputs_dataset"), "before_reduction_transforms"))
@@ -453,6 +475,168 @@ def _derive_reduction(config: dict[str, Any], root: str) -> str | None:
     return None
 
 
+def _tta_passes(config: dict[str, Any], root: str) -> list[list[int]]:
+    """Flip test-time-augmentation passes: identity plus each augmentation's ``nb`` random draws, matching
+    the config's pass count and per-axis Flip probabilities. Randomness is embraced -- the exact draw is
+    not KonfAI's (whose torch RNG is not reproducible here), so the result is CLOSE, not byte-identical --
+    but it is reproducible from the config's ``manual_seed``. A non-Flip TTA augmentation is refused rather
+    than silently dropped (the runtime has no portable op for it yet). ``f_prob`` index ``i`` maps to
+    channel-first tensor dim ``i + 1`` and hence to spatial axis ``i``; ``[[]]`` when there is no TTA."""
+    predictor = config.get(root, {})
+    augmentations = predictor.get("Dataset", {}).get("augmentations")
+    if not isinstance(augmentations, dict) or not augmentations:
+        return [[]]
+    rng = random.Random(int(predictor.get("manual_seed") or 0))  # nosec B311 - TTA sampling, not security
+    passes: list[list[int]] = [[]]  # the identity pass is always present
+    for aug in augmentations.values():
+        chain = aug.get("data_augmentations") if isinstance(aug, dict) else None
+        # Only Flip has a portable runtime op; other augmentations are skipped (the TTA is a bit lighter,
+        # never wrong) rather than blocking the export -- extend the runtime registry to add them.
+        f_prob = next(
+            (p.get("f_prob") for n, p in (chain or {}).items() if n.split("/", 1)[0] == "Flip" and isinstance(p, dict)),
+            None,
+        )
+        for _ in range(int(aug.get("nb", 0)) if f_prob else 0):
+            passes.append([i for i, p in enumerate(f_prob) if rng.random() < float(p)])
+    return passes
+
+
+def _aux_mask_groups(config: dict[str, Any], root: str) -> dict[str, dict[str, Any]]:
+    """Auxiliary dest groups (``is_input`` false) a ``Mask`` references: each is produced by a nested
+    model (``KonfAIInference``) then pipeline ops (resample onto the primary grid, dilate). Returns
+    ``{group_name: {"inference": <KonfAIInference params>, "ops": [("resample"|"dilate", param)]}}``."""
+    dataset = config.get(root, {}).get("Dataset", {})
+    groups: dict[str, dict[str, Any]] = {}
+    for src in (dataset.get("groups_src") or {}).values():
+        for name, group in (src.get("groups_dest") or {}).items() if isinstance(src, dict) else []:
+            if not isinstance(group, dict) or group.get("is_input") or not isinstance(group.get("transforms"), dict):
+                continue
+            inference, ops = None, []
+            for tname, params in group["transforms"].items():
+                base = tname.split("/", 1)[0]
+                if base == "KonfAIInference":
+                    inference = params
+                elif base == "ResampleToResolution":
+                    ops.append(("resample", params))
+                elif base == "Dilate":
+                    ops.append(("dilate", int((params or {}).get("dilate", 0))))
+            if inference is not None:
+                groups[name] = {"inference": inference, "ops": ops}
+    return groups
+
+
+def _mask_specs(config: dict[str, Any], root: str) -> list[dict[str, Any]]:
+    """``Mask`` ops in ``before_reduction`` (masking the primary output by an auxiliary group's buffer):
+    ``[{"group": <aux group name>, "value_outside": float}]``."""
+    before = _find_transforms(config.get(root, {}).get("outputs_dataset"), "before_reduction_transforms") or {}
+    return [
+        {"group": params.get("path"), "value_outside": float((params or {}).get("value_outside", 0))}
+        for name, params in before.items()
+        if name.split("/", 1)[0] == "Mask" and isinstance(params, dict)
+    ]
+
+
+def _assemble_masked_tta_program(
+    fold_models: list[dict[str, Any]],
+    tta_passes: list[list[int]],
+    aux: dict[str, dict[str, Any]],
+    mask_specs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The synthesis-with-mask program: nested mask model(s) -> primary folds x TTA flip passes ->
+    mean -> mask -> hoisted inverse resample -> final integer cast.
+
+    ``fold_models``/``aux`` values carry an ``id`` and a single-model ``manifest``. Each fold keeps its
+    per-fold post (unnormalize + truncating cast) and its inverse resample is hoisted to a single tail op
+    after the reduction. Each TTA pass flips the input, runs every fold, and unflips the output; the mask
+    model's buffer is resampled onto the primary grid and dilated, then applied to the mean.
+    """
+    rep = fold_models[0]["manifest"]
+    final_dtype = next((s.get("dtype") for s in reversed(rep.get("postprocessing", [])) if s["op"] == "cast"), None)
+    has_inverse = any(s.get("op") == "resample" and s.get("inverse") for s in rep.get("preprocessing", []))
+
+    def hoisted(manifest: dict[str, Any]) -> dict[str, Any]:
+        fold = json.loads(json.dumps(manifest))
+        for step in fold.get("preprocessing", []):
+            if step.get("op") == "resample":
+                step["inverse"] = False
+        return fold
+
+    steps: list[dict[str, Any]] = [
+        {"model": g["id"], "in": "input", "out": f"{name}__raw", "manifest": g["manifest"]} for name, g in aux.items()
+    ]
+    copies: list[str] = []
+    grid_ref: str | None = None
+    for p, axes in enumerate(tta_passes):
+        flipped = "input" if not axes else f"in{p}"
+        if axes:
+            steps.append({"op": "flip", "in": ["input"], "out": flipped, "axes": axes})
+        for model in fold_models:
+            raw = f"{model['id']}__p{p}"
+            steps.append({"model": model["id"], "in": flipped, "out": raw, "manifest": hoisted(model["manifest"])})
+            out = raw
+            if axes:
+                out = f"{model['id']}__u{p}"
+                steps.append({"op": "flip", "in": [raw], "out": out, "axes": axes})  # undo the flip
+            copies.append(out)
+            grid_ref = grid_ref or out  # any fold output sits on the primary (post-resample) grid
+    mask_buffers: dict[str, str] = {}
+    for name, g in aux.items():
+        cur = f"{name}__raw"
+        for kind, param in g["ops"]:
+            nxt = f"{name}__{kind[:1]}"
+            if kind == "resample":
+                steps.append({"op": "resample_nearest", "in": [cur, grid_ref], "out": nxt})
+            else:  # dilate
+                steps.append({"op": "dilate", "in": [cur], "out": nxt, "radius": param})
+            cur = nxt
+        mask_buffers[name] = cur
+
+    steps.append({"op": "mean", "in": copies, "out": "synth"})
+    cur = "synth"
+    for i, spec in enumerate(mask_specs):
+        nxt = f"masked{i}"
+        steps.append(
+            {
+                "op": "mask",
+                "in": [cur, mask_buffers[spec["group"]]],
+                "out": nxt,
+                **{"value_outside": spec["value_outside"]},
+            }
+        )
+        cur = nxt
+    if has_inverse:
+        steps.append({"op": "resample_linear", "in": [cur, "input"], "out": "resampled"})
+        cur = "resampled"
+    if final_dtype:
+        steps.append({"op": "cast", "in": [cur], "out": "output", "dtype": final_dtype})
+    else:
+        steps[-1]["out"] = "output"
+    return {"steps": steps, "output": "output"}
+
+
+def _export_nested_model(main_bundle: Path, group_name: str, inference: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the app a ``KonfAIInference`` references (``repo_id:model_name``), export its single-model
+    onnx + manifest, copy the onnx into the main bundle as ``<group>.onnx``, and return ``{id, manifest}``
+    for the program. The nested model's own transforms (resample / argmax / inverse) live in its manifest."""
+    import tempfile
+
+    from konfai_apps.app import KonfAIApp
+
+    app = KonfAIApp(f"{inference['repo_id']}:{inference['model_name']}", True, False)
+    with tempfile.TemporaryDirectory() as tmp:
+        # Materialise the bundle under its real filenames (the HF cache stores blobs under content hashes,
+        # but the config's bundle-relative classpaths need the real names).
+        nested_dir = Path(tmp)
+        for name, path in app.app_repository.download_app():
+            dest = nested_dir / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(path, dest)
+        export_portable_into_bundle(nested_dir, checkpoints=inference.get("checkpoints_name"))
+        shutil.copy(nested_dir / "model.onnx", main_bundle / f"{group_name}.onnx")
+        manifest = json.loads((nested_dir / "manifest.json").read_text())
+    return {"id": group_name, "manifest": manifest}
+
+
 def export_portable_into_bundle(
     bundle: str | Path,
     *,
@@ -557,6 +741,19 @@ def export_portable_into_bundle(
                 write_manifest=not ensemble,
             )
             models.append({"id": fold_id, "manifest": manifest})
+
+        # A config with an auxiliary mask group (a nested KonfAIInference model + a Mask on the output) is a
+        # masked / TTA synthesis, not a plain ensemble: nested model(s) + folds x TTA passes -> mean -> mask.
+        aux_groups = _aux_mask_groups(config, root)
+        if aux_groups:
+            aux = {
+                name: {**_export_nested_model(bundle, name, g["inference"]), "ops": g["ops"]}
+                for name, g in aux_groups.items()
+            }
+            program = _assemble_masked_tta_program(models, _tta_passes(config, root), aux, _mask_specs(config, root))
+            program_path = bundle / "program.json"
+            program_path.write_text(json.dumps(program, indent=2))
+            return program_path
 
         if not ensemble:
             return onnx_path
