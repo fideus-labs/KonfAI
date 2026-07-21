@@ -58,12 +58,6 @@ def _session_service(tmp_path: Path) -> SessionService:
     )
 
 
-def _touch(path: Path) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"")
-    return str(path)
-
-
 # -- Finding 3: describe_app surfaces the optional-input "default" -------------------------------
 
 
@@ -121,37 +115,6 @@ def test_normalize_bundled_prediction_config_preserves_windows_drive_path(tmp_pa
     data = YAML_SAFE.load((bundle / "Prediction.yml").read_text(encoding="utf-8"))
     # The staged root replaces the path; the ':a:mha' accessor/format token survives uncorrupted.
     assert data["Predictor"]["Dataset"]["dataset_filenames"] == ["./Dataset/:a:mha"]
-
-
-# -- Finding 4: paired input/gt/mask groups with unequal case counts are rejected ---------------
-
-
-def test_check_case_pairing_rejects_mismatched_file_counts(tmp_path: Path) -> None:
-    inputs = [[_touch(tmp_path / "in" / f"a{i}.mha") for i in range(3)]]
-    gt = [[_touch(tmp_path / "gt" / f"g{i}.mha") for i in range(2)]]
-    with pytest.raises(ValueError, match="mismatched case counts"):
-        AppService._check_case_pairing([("inputs", inputs), ("gt", gt)])
-
-    equal_gt = [[_touch(tmp_path / "gt2" / f"g{i}.mha") for i in range(3)]]
-    AppService._check_case_pairing([("inputs", inputs), ("gt", equal_gt)])  # no raise
-
-
-def test_check_case_pairing_skips_directory_groups(tmp_path: Path) -> None:
-    # A directory expands to an unknown case count downstream, so it is not counted here: a 1-dir
-    # group beside a 3-file group must NOT falsely trip the guard.
-    (tmp_path / "series").mkdir()
-    inputs = [[str(tmp_path / "series")]]
-    gt = [[_touch(tmp_path / "gt" / f"g{i}.mha") for i in range(3)]]
-    AppService._check_case_pairing([("inputs", inputs), ("gt", gt)])  # no raise
-
-
-def test_prepare_infer_rejects_unequal_channel_counts(tmp_path: Path) -> None:
-    a = _touch(tmp_path / "c" / "a.mha")
-    b = _touch(tmp_path / "c" / "b.mha")
-    c = _touch(tmp_path / "c" / "c.mha")
-    with pytest.raises(ValueError, match="mismatched case counts"):
-        # Remote ref keeps the trust gate out of the way; the pairing check runs first regardless.
-        _app_service(tmp_path).prepare_infer(ref="localhost:8000:MyApp", inputs=[[a, b], [c]])
 
 
 # -- Finding 5: design_config_strategy resolves the read extension per root ----------------------

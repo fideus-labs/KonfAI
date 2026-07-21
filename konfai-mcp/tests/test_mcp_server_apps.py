@@ -24,15 +24,8 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 if str(MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(MODULE_ROOT))
 
-from konfai_mcp.server_apps import AppService, parse_remote_ref  # noqa: E402
+from konfai_mcp.server_apps import AppService  # noqa: E402
 from konfai_mcp.server_support import WorkspaceLayout  # noqa: E402
-
-
-def _dummy_inputs(tmp_path: Path) -> list[list[str]]:
-    volume = tmp_path / "case0" / "Volume_0.mha"
-    volume.parent.mkdir(parents=True, exist_ok=True)
-    volume.write_bytes(b"")
-    return [[str(volume)]]
 
 
 def _write_local_app(root: Path, name: str = "TinyLocalApp") -> Path:
@@ -57,7 +50,7 @@ def _write_local_app(root: Path, name: str = "TinyLocalApp") -> Path:
         encoding="utf-8",
     )
     (app_dir / "tiny.pt").write_bytes(b"")
-    # A train config makes the app finetunable (fine_tune_app warm-starts from Config.yml).
+    # A train config makes the app finetunable (run_resume warm-starts from Config.yml).
     (app_dir / "Config.yml").write_text("Trainer: {}\n", encoding="utf-8")
     return app_dir
 
@@ -85,25 +78,48 @@ def test_describe_app_reads_local_manifest(tmp_path: Path) -> None:
     assert payload["checkpoints_available"] == ["tiny.pt"]
     assert payload["patch_size"] == [1, 64, 64]
     assert payload["task"] == "synthesis"
-    # The bundle ships a Config.yml, so it is finetunable and offers fine_tune_app.
+    # The bundle ships a Config.yml, so it is finetunable (run_resume can warm-start from it).
     assert payload["finetunable"] is True
-    # An inference-capable app routes forward to the run/tune tools instead of dead-ending.
-    assert payload["next_actions"][0] == "run_app_infer"
-    assert "fine_tune_app" in payload["next_actions"]
-    assert "run_app_evaluate" not in payload["next_actions"]
+    # A runnable app routes forward to import_app (the single entry) instead of dead-ending.
+    assert payload["next_actions"][0] == "import_app"
 
 
-def test_describe_app_inference_only_is_not_finetunable(tmp_path: Path) -> None:
-    """An app with no train Config.yml must not advertise fine_tune_app (it would dead-end)."""
+def test_describe_app_inference_only_still_routes_to_import(tmp_path: Path) -> None:
+    """An app with no train Config.yml is not finetunable but is still imported the same way."""
     app_dir = _write_local_app(tmp_path)
     (app_dir / "Config.yml").unlink()
 
     payload = _service(tmp_path).describe_app(str(app_dir))
 
     assert payload["finetunable"] is False
-    assert "fine_tune_app" not in payload["next_actions"]
-    # Inference routing is unaffected.
-    assert payload["next_actions"][0] == "run_app_infer"
+    assert payload["next_actions"][0] == "import_app"
+
+
+def test_describe_app_no_inference_routes_to_design(tmp_path: Path) -> None:
+    """A bundle KonfAI cannot run for inference must route to design_config_strategy, not import_app."""
+    app_dir = tmp_path / "no_inputs"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "No IO",
+                "description": "bundle without declared inputs",
+                "short_description": "no io",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": ["tiny.pt"],
+                "inputs": {},
+                "outputs": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_dir / "tiny.pt").write_bytes(b"")
+
+    payload = _service(tmp_path).describe_app(str(app_dir))
+    assert payload["capabilities"]["inference"] is False
+    assert "import_app" not in payload["next_actions"]
+    assert "design_config_strategy" in payload["next_actions"]
 
 
 def test_describe_app_marks_optional_input_not_required(tmp_path: Path) -> None:
@@ -220,116 +236,74 @@ def test_missing_catalog_file_is_empty(tmp_path: Path) -> None:
     assert AppService._read_catalog_file(tmp_path / "does_not_exist.json") == []
 
 
-def test_prepare_infer_gates_local_app(tmp_path: Path) -> None:
+def test_import_app_gates_local_and_rejects_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app_dir = _write_local_app(tmp_path)
     service = _service(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
 
+    # A local/HF app copies + runs its code and pip-installs -> gated behind allow_untrusted_code.
     with pytest.raises(ValueError, match="allow_untrusted_code=True"):
-        service.prepare_infer(ref=str(app_dir), inputs=inputs)
+        service.import_app(str(app_dir))
 
-    spec = service.prepare_infer(ref=str(app_dir), inputs=inputs, allow_untrusted_code=True, tta=2)
-    assert spec["mode"] == "local"
-    assert spec["target"] == "konfai_mcp.runner:run_app_api"
-    assert spec["kwargs"]["ref"] == str(app_dir)
-    assert spec["kwargs"]["tta"] == 2
-    assert spec["kwargs"]["inputs"] == [[str(Path(inputs[0][0]).resolve())]]
-    assert "app_TinyLocalApp" in spec["output"]
+    # A remote server keeps its code remote and cannot be imported into the session.
+    with pytest.raises(ValueError, match="cannot be imported"):
+        service.import_app("localhost:8000:MyApp", allow_untrusted_code=True)
 
+    # With the gate confirmed, it dispatches to the spawn-subprocess import API (never in-process).
+    calls: list[tuple[str, dict]] = []
+    from konfai_mcp import runner as mcp_runner
 
-def test_prepare_infer_remote_needs_no_code_gate(tmp_path: Path) -> None:
-    service = _service(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
+    def _fake_subprocess(target: str, kwargs: dict) -> dict:
+        calls.append((target, kwargs))
+        return {"files": ["app.json", "tiny.pt"], "checkpoints": ["tiny.pt"], "configs": {"prediction": "Prediction.yml"}}
 
-    spec = service.prepare_infer(ref="localhost:8000:MyApp", inputs=inputs)
-    assert spec["mode"] == "remote"
-    assert spec["kwargs"]["config_overrides"] is None
+    monkeypatch.setattr(mcp_runner, "run_api_in_subprocess", _fake_subprocess)
+    result = service.import_app(str(app_dir), allow_untrusted_code=True)
 
-    with pytest.raises(ValueError, match="only supported for local/HuggingFace"):
-        service.prepare_infer(ref="localhost:8000:MyApp", inputs=inputs, config_overrides=["iterations=1"])
-
-
-def test_prepare_infer_rejects_bare_repo_and_bad_inputs(tmp_path: Path) -> None:
-    service = _service(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
-
-    with pytest.raises(ValueError, match="not a single app"):
-        service.prepare_infer(ref="org/SomeRepo", inputs=inputs, allow_untrusted_code=True)
-
-    with pytest.raises(ValueError, match="inputs cannot be empty"):
-        service.prepare_infer(ref="localhost:8000:MyApp", inputs=[])
-
-    with pytest.raises(ValueError, match="path not found"):
-        service.prepare_infer(ref="localhost:8000:MyApp", inputs=[[str(tmp_path / "missing.mha")]])
+    assert calls and calls[0][0] == "konfai_mcp.runner:import_app_api"
+    assert calls[0][1]["ref"] == str(app_dir)
+    # The target is the session root (in-jail), never a per-app sub-folder.
+    assert Path(calls[0][1]["target"]) == service.workspace_layout.ensure_session_workspace()
+    assert result["checkpoints"] == ["tiny.pt"]
+    assert result["next_actions"] == ["run_resume", "run_prediction", "run_evaluation", "validate_config_semantics"]
 
 
-def test_parse_remote_ref() -> None:
-    assert parse_remote_ref("host:8000:MyApp") == ("host", 8000, "MyApp", None)
-    assert parse_remote_ref("host:8000:MyApp|secret") == ("host", 8000, "MyApp", "secret")
-
-
-def test_prepare_finetune_gates_local_app(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    dataset = tmp_path / "Dataset"
-    dataset.mkdir()
-    service = _service(tmp_path)
-
-    with pytest.raises(ValueError, match="allow_untrusted_code=True"):
-        service.prepare_finetune(ref=str(app_dir), dataset=str(dataset))
-
-    spec = service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), allow_untrusted_code=True, epochs=3)
-    assert spec["kind"] == "finetune"
-    assert spec["mode"] == "local"
-    assert spec["target"] == "konfai_mcp.runner:run_finetune_api"
-    assert spec["kwargs"]["dataset"] == str(dataset.resolve())
-    assert spec["kwargs"]["epochs"] == 3
-    assert "finetune_TinyLocalApp" in spec["output"]
-
-
-def test_prepare_finetune_remote_and_bad_dataset(tmp_path: Path) -> None:
-    service = _service(tmp_path)
-    dataset = tmp_path / "Dataset"
-    dataset.mkdir()
-
-    spec = service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset))
-    assert spec["mode"] == "remote"
-    assert spec["kind"] == "finetune"
-
-    with pytest.raises(ValueError, match="dataset must be an existing directory"):
-        service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(tmp_path / "missing"))
-
-    with pytest.raises(ValueError, match="epochs must be a positive integer"):
-        service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset), epochs=0)
-
-
-def test_prepare_finetune_bakes_set_parameters_local(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    dataset = tmp_path / "Dataset"
-    dataset.mkdir()
-    service = _service(tmp_path)
-
-    spec = service.prepare_finetune(
-        ref=str(app_dir),
-        dataset=str(dataset),
-        allow_untrusted_code=True,
-        config_overrides=["iterations=300"],
+def test_import_app_api_copies_weightless_registration_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A weightless registration app (engine-based, no .pt — e.g. ConvexAdam / FireANTs) imports cleanly:
+    the runner copies its config into the session and reports checkpoints=[] so run_prediction runs it
+    with the config's own engine (no models= needed)."""
+    monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")  # engine deps out of scope for the copy check
+    app_dir = tmp_path / "ConvexAdamLike"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "ConvexAdam-like",
+                "description": "Weightless registration engine app",
+                "short_description": "weightless reg",
+                "task": "registration",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": [],  # weightless: the engine comes from the config classpath, not a checkpoint
+                "inputs": {
+                    "Fixed": {"display_name": "Fixed", "volume_type": "VOLUME", "required": True},
+                    "Moving": {"display_name": "Moving", "volume_type": "VOLUME", "required": True},
+                },
+                "outputs": {"MovedImage": {"display_name": "Moved", "volume_type": "VOLUME", "required": True}},
+            }
+        ),
+        encoding="utf-8",
     )
-    # The overrides reach the runner (so they bake into the training config) ...
-    assert spec["kwargs"]["config_overrides"] == ["iterations=300"]
-    # ... and the default output dir is param-legible, so the leaderboard metrics_path names the trial.
-    assert "finetune_TinyLocalApp__iterations_300" in spec["output"]
+    (app_dir / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
 
+    from konfai_mcp.runner import import_app_api
 
-def test_prepare_finetune_remote_rejects_set_parameters(tmp_path: Path) -> None:
-    service = _service(tmp_path)
-    dataset = tmp_path / "Dataset"
-    dataset.mkdir()
+    target = tmp_path / "session"
+    payload = import_app_api(ref=str(app_dir), target=str(target))
 
-    spec = service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset))
-    assert spec["kwargs"]["config_overrides"] is None
-
-    with pytest.raises(ValueError, match="only supported for local/HuggingFace"):
-        service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset), config_overrides=["iterations=1"])
+    assert payload["checkpoints"] == []  # weightless -> run_prediction needs no models=
+    assert payload["configs"] == {"prediction": "Prediction.yml"}
+    assert (target / "Prediction.yml").is_file()
+    assert (target / "app.json").is_file()
 
 
 def test_list_parameters_gates_and_reads(tmp_path: Path) -> None:
@@ -362,51 +336,6 @@ def test_export_app_copies_bundle(tmp_path: Path) -> None:
         _service(tmp_path).export_app("localhost:8000:MyApp", str(tmp_path / "x"))
 
 
-def test_prepare_evaluate_requires_gt_and_gates(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
-    gt_file = tmp_path / "gt" / "Reference_0.mha"
-    gt_file.parent.mkdir(parents=True, exist_ok=True)
-    gt_file.write_bytes(b"")
-    gt = [[str(gt_file)]]
-    service = _service(tmp_path)
-
-    with pytest.raises(ValueError, match="allow_untrusted_code=True"):
-        service.prepare_evaluate(ref=str(app_dir), inputs=inputs, gt=gt)
-
-    with pytest.raises(ValueError, match="requires ground-truth"):
-        service.prepare_evaluate(ref=str(app_dir), inputs=inputs, gt=None, allow_untrusted_code=True)
-
-    spec = service.prepare_evaluate(ref=str(app_dir), inputs=inputs, gt=gt, allow_untrusted_code=True)
-    assert spec["kind"] == "evaluate"
-    assert spec["target"] == "konfai_mcp.runner:run_app_action_api"
-    assert spec["kwargs"]["action"] == "evaluate"
-    assert spec["kwargs"]["gt"] == [[str(gt_file.resolve())]]
-    assert spec["kwargs"]["extra"]["evaluation_file"] == "Evaluation.yml"
-
-
-def test_prepare_uncertainty_spec(tmp_path: Path) -> None:
-    spec = _service(tmp_path).prepare_uncertainty(ref="localhost:8000:MyApp", inputs=_dummy_inputs(tmp_path))
-    assert spec["kind"] == "uncertainty"
-    assert spec["mode"] == "remote"
-    assert spec["kwargs"]["action"] == "uncertainty"
-    assert spec["kwargs"]["gt"] is None
-
-
-def test_prepare_pipeline_spec_and_remote_override_guard(tmp_path: Path) -> None:
-    service = _service(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
-
-    spec = service.prepare_pipeline(ref="localhost:8000:MyApp", inputs=inputs, uncertainty=False)
-    assert spec["kind"] == "pipeline"
-    assert spec["kwargs"]["action"] == "pipeline"
-    assert spec["kwargs"]["extra"]["uncertainty"] is False
-    assert "config_overrides" not in spec["kwargs"]["extra"]
-
-    with pytest.raises(ValueError, match="only supported for local/HuggingFace"):
-        service.prepare_pipeline(ref="localhost:8000:MyApp", inputs=inputs, config_overrides=["iterations=1"])
-
-
 def test_package_from_session_builds_bundle(tmp_path: Path) -> None:
     layout = WorkspaceLayout(tmp_path / "workspaces")
     workspace = layout.workspace_dir()
@@ -424,6 +353,7 @@ def test_package_from_session_builds_bundle(tmp_path: Path) -> None:
     assert (bundle / "Prediction.yml").exists()
     assert (bundle / "model.pt").exists()
     assert result["checkpoints"] == ["model.pt"]
+    assert result["next_actions"] == ["describe_app", "import_app"]
     meta = json.loads((bundle / "app.json").read_text(encoding="utf-8"))
     assert meta["display_name"] == "My App"
     assert meta["short_description"] == "My App"
@@ -500,13 +430,9 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             "describe_app",
             "list_app_parameters",
             "export_app",
+            "import_app",
             "register_app_source",
             "unregister_app_source",
-            "run_app_infer",
-            "run_app_evaluate",
-            "run_app_uncertainty",
-            "run_app_pipeline",
-            "fine_tune_app",
             "package_app_from_session",
         )
         import asyncio
@@ -516,14 +442,14 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             assert callable(getattr(server, name))
             assert name in index["tools"]
 
-        import konfai_mcp.runner as runner
-
-        assert callable(runner.run_finetune_api)
+        # The app-execution wrappers are retired: an app runs as a normal experiment via import_app.
+        for gone in ("run_app_infer", "run_app_evaluate", "run_app_uncertainty", "run_app_pipeline", "fine_tune_app"):
+            assert gone not in index["tools"]
 
         assert "solve_task" in index["prompts"]
         solve = server.prompt_solve_task("segment the liver", "one CT group")
         content = solve[0]["content"]
-        for tool in ("run_app_infer", "fine_tune_app", "design_config_strategy"):
+        for tool in ("import_app", "run_prediction", "design_config_strategy"):
             assert tool in content
 
         app_dir = _write_local_app(tmp_path)
