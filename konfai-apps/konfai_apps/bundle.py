@@ -440,22 +440,36 @@ def assemble_bundle(
     return bundle
 
 
-def export_onnx_into_bundle(
+def _derive_reduction(config: dict[str, Any], root: str) -> str | None:
+    """The ensemble reduction a multi-model program applies, read from the output transforms:
+    ``MergeLabels`` (models with disjoint label spaces) -> ``merge_labels``; ``InferenceStack``
+    (same-class probability ensemble) -> ``mean``. ``None`` when the config declares no reduction."""
+    after = _find_transforms(config.get(root, {}).get("outputs_dataset"), "after_reduction_transforms") or {}
+    names = {name.split("/", 1)[0] for name in after}
+    if "MergeLabels" in names:
+        return "merge_labels"
+    if "InferenceStack" in names:
+        return "mean"
+    return None
+
+
+def export_portable_into_bundle(
     bundle: str | Path,
     *,
+    checkpoints: list[str] | None = None,
     patch_size: list[int] | None = None,
     in_channels: int | None = None,
     prediction_config: str = "Prediction.yml",
-    checkpoint: str | None = None,
     output_module: str | None = None,
     root: str = "Predictor",
 ) -> Path:
-    """Add ``model.onnx`` + ``manifest.json`` to an assembled bundle.
+    """Write the bundle's portable-runtime artifacts from its prediction config.
 
-    Loads the model from the bundle's prediction config (``Model.classpath``) with the given
-    checkpoint and exports it via :func:`konfai.export.export_to_onnx`; ``patch_size`` /
-    ``in_channels`` fall back to the config. The config file is restored afterwards because
-    reading it mutates it.
+    One checkpoint -> ``model.onnx`` + ``manifest.json``. Several checkpoints combined by the ensemble
+    reduction the config declares (``MergeLabels`` / ``InferenceStack``) -> one ``<fold>.onnx`` per
+    checkpoint plus ``program.json``, the multi-model dataflow the konfai-rs runtime executes. The patch
+    geometry, transforms, blend, and reduction are all read from the config -- nothing is per-app. The
+    config file is restored afterwards because reading it mutates it.
     """
     import torch
     import yaml
@@ -477,14 +491,20 @@ def export_onnx_into_bundle(
     derived_patch, derived_channels, extend_slice, pad_value = _derive_onnx_params(config, root)
     patch_size = patch_size or derived_patch
     in_channels = in_channels if in_channels is not None else derived_channels
-    if not patch_size or not in_channels:
-        raise AppMetadataError(
-            "could not derive patch_size/in_channels from the config; pass --patch-size and --in-channels",
-        )
+    if not patch_size:
+        raise AppMetadataError("could not derive patch_size from the config; pass --patch-size")
 
     inference_patch = _find_inference_patch(config)
     patch_overlap = _derive_overlap(inference_patch, patch_size) if inference_patch else None
     blend = _derive_blend(config, root)
+    reduction = _derive_reduction(config, root)
+    checkpoints = checkpoints or [None]
+    ensemble = len(checkpoints) > 1
+    if ensemble and reduction is None:
+        raise AppMetadataError(
+            "several checkpoints were given but the config declares no ensemble reduction "
+            "(MergeLabels / InferenceStack in outputs_dataset); cannot assemble a multi-model program.",
+        )
 
     config_snapshot = config_path.read_text()
     env_keys = ("KONFAI_config_file", "KONFAI_CONFIG_MODE", "KONFAI_ROOT", "KONFAI_STATE")
@@ -496,34 +516,59 @@ def export_onnx_into_bundle(
         os.environ["KONFAI_ROOT"] = root
         os.environ["KONFAI_STATE"] = "PREDICTION"
 
-        model = ModelLoader(classpath).get_model(train=False)
-        # Export the per-patch network; the runtime does the sliding-window tiling.
-        model.patch = None
-        model.eval()
-        if checkpoint is not None:
-            ckpt_path = Path(checkpoint)
-            if not ckpt_path.is_absolute():
-                ckpt_path = bundle / ckpt_path.name
-            state = safe_torch_load(ckpt_path, "cpu")
-            model.load(state, init=False)
-
-        example = torch.randn(1, in_channels, *patch_size)
-        # Default to the terminal float head; the graph's last output is often an integer Argmax.
-        head = output_module or select_inference_head(model, example)
         extra_manifest, fold_pre = _transform_manifest(config, root)
         if blend is not None:
             extra_manifest["blend"] = blend
-        return export_to_onnx(
-            model,
-            bundle,
-            example,
-            head,
-            patch_overlap=patch_overlap,
-            extend_slice=extend_slice,
-            pad_value=pad_value,
-            extra_manifest=extra_manifest,
-            fold_pre=fold_pre,
+
+        models: list[dict[str, Any]] = []
+        onnx_path = bundle / "model.onnx"
+        for checkpoint in checkpoints:
+            model = ModelLoader(classpath).get_model(train=False)
+            # Export the per-patch network; the runtime does the sliding-window tiling.
+            model.patch = None
+            model.eval()
+            if checkpoint is not None:
+                ckpt_path = Path(checkpoint)
+                if not ckpt_path.is_absolute():
+                    ckpt_path = bundle / ckpt_path.name
+                model.load(safe_torch_load(ckpt_path, "cpu"), init=False)
+
+            # The input channel count is intrinsic to the architecture; read it off the loaded model
+            # when the config does not declare it.
+            if not in_channels:
+                in_channels = getattr(model, "in_channels", None)
+            if not in_channels:
+                raise AppMetadataError("could not derive in_channels from the config or model; pass --in-channels")
+            example = torch.randn(1, in_channels, *patch_size)
+            # Default to the terminal float head; the graph's last output is often an integer Argmax.
+            head = output_module or select_inference_head(model, example)
+            fold_id = Path(checkpoint).stem if ensemble else "model"
+            onnx_path, manifest = export_to_onnx(
+                model,
+                bundle,
+                example,
+                head,
+                patch_overlap=patch_overlap,
+                extend_slice=extend_slice,
+                pad_value=pad_value,
+                extra_manifest=dict(extra_manifest),
+                fold_pre=fold_pre,
+                model_filename="model.onnx" if not ensemble else f"{fold_id}.onnx",
+                write_manifest=not ensemble,
+            )
+            models.append({"id": fold_id, "manifest": manifest})
+
+        if not ensemble:
+            return onnx_path
+
+        program = assemble_program(
+            models,
+            reduce=reduction,
+            classes=[int(m["manifest"]["output"]["channels"]) for m in models],
         )
+        program_path = bundle / "program.json"
+        program_path.write_text(json.dumps(program, indent=2))
+        return program_path
     finally:
         sys.path.remove(str(bundle))
         config_path.write_text(config_snapshot)
@@ -532,6 +577,29 @@ def export_onnx_into_bundle(
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def export_onnx_into_bundle(
+    bundle: str | Path,
+    *,
+    patch_size: list[int] | None = None,
+    in_channels: int | None = None,
+    prediction_config: str = "Prediction.yml",
+    checkpoint: str | None = None,
+    output_module: str | None = None,
+    root: str = "Predictor",
+) -> Path:
+    """Single-checkpoint portable export (``model.onnx`` + ``manifest.json``); a thin wrapper over
+    :func:`export_portable_into_bundle`, which also handles the ensemble (``program.json``) form."""
+    return export_portable_into_bundle(
+        bundle,
+        checkpoints=[checkpoint] if checkpoint is not None else None,
+        patch_size=patch_size,
+        in_channels=in_channels,
+        prediction_config=prediction_config,
+        output_module=output_module,
+        root=root,
+    )
 
 
 def run_bundle_cli(args: dict[str, Any]) -> None:
@@ -555,11 +623,11 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             print(f"Drafted requirements.txt (review!): {', '.join(drafted)}")
 
     if args.get("onnx"):
-        onnx_path = export_onnx_into_bundle(
+        artifact = export_portable_into_bundle(
             bundle,
+            checkpoints=[Path(c).name for c in args["checkpoint"]] if args.get("checkpoint") else None,
             patch_size=args.get("patch_size"),
             in_channels=args.get("in_channels"),
-            checkpoint=Path(args["checkpoint"][0]).name if args.get("checkpoint") else None,
             output_module=args.get("output_module"),
         )
-        print(f"Portable model exported: {onnx_path} (+ manifest.json)")
+        print(f"Portable model exported: {artifact}")

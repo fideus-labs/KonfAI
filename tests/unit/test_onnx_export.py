@@ -61,7 +61,7 @@ def test_catalog_model_exports_with_parity(yml, tmp_path):
     head = select_inference_head(model, example)
     assert "argmax" not in head.lower(), f"{yml.stem}: exported an integer label head {head!r}"
 
-    onnx_path = export_to_onnx(model, tmp_path, example)  # output_module auto-selected
+    onnx_path, _ = export_to_onnx(model, tmp_path, example)  # output_module auto-selected
     assert onnx_path.exists()
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["output_module"] == head
@@ -111,7 +111,7 @@ def test_fold_pre_bakes_a_custom_pointwise_op_into_the_graph(tmp_path):
         return torch.clamp(t, -0.5, 0.5) * 2.0 + 1.0
 
     head = select_inference_head(model, example)
-    onnx_path = export_to_onnx(model, tmp_path, example, head, fold_pre=[custom])
+    onnx_path, _ = export_to_onnx(model, tmp_path, example, head, fold_pre=[custom])
 
     with torch.no_grad():
         reference = _NamedHead(model, head, fold_pre=[custom])(example).numpy()  # custom -> model head

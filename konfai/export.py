@@ -131,7 +131,9 @@ def export_to_onnx(
     pad_value: float | None = None,
     fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
     extra_manifest: dict[str, Any] | None = None,
-) -> Path:
+    model_filename: str = "model.onnx",
+    write_manifest: bool = True,
+) -> tuple[Path, dict[str, Any]]:
     """Export ``model`` to ``output_dir/model.onnx`` (+ ``manifest.json``).
 
     Parameters
@@ -148,17 +150,23 @@ def export_to_onnx(
         When omitted, :func:`select_inference_head` picks the terminal floating-point head.
     opset:
         ONNX opset (>= 18 recommended; the dynamo exporter implements 18).
+    model_filename:
+        ONNX file name to write (a multi-model ensemble exports one file per fold).
+    write_manifest:
+        Write ``manifest.json`` beside the ONNX. Off for a multi-model bundle, whose
+        per-fold manifests are embedded in a single ``program.json`` instead.
 
     Returns
     -------
-    Path to the written ``model.onnx``.
+    ``(onnx_path, manifest)`` -- the written ONNX path and the manifest dict (also written
+    to ``manifest.json`` when ``write_manifest``).
     """
     onnx = _require("onnx")
     _require("onnxscript")  # required by the torch dynamo ONNX exporter
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    onnx_path = out_dir / "model.onnx"
+    onnx_path = out_dir / model_filename
 
     model.eval()
     if output_module is None:
@@ -213,5 +221,6 @@ def export_to_onnx(
     }
     if extra_manifest:
         manifest.update(extra_manifest)
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    return onnx_path
+    if write_manifest:
+        (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return onnx_path, manifest
