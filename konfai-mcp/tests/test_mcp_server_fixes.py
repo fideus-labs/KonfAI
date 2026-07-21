@@ -261,3 +261,49 @@ def test_run_resume_and_failed_job_payload(
             assert log_data["lines_returned"] >= 1
 
     asyncio.run(scenario())
+
+
+def test_run_resume_weights_only_strips_to_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """weights_only=True warm-starts a fine-tune: it loads ONLY the Model weights into a jailed
+    <stem>_init.pt, so RESUME leaves epoch/iteration at 0 (fresh schedule)."""
+    torch = pytest.importorskip("torch")
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "0.05")
+    mcp_server = load_mcp_server()
+    install_fake_konfai_runtime(tmp_path, monkeypatch, mcp_server)
+
+    config = yaml_dump({"Trainer": {"train_name": "FAKE_RUN"}})
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            await client.call_tool("write_workflow_config", {"workflow": "train", "content": config})
+
+            workspace = Path(mcp_server.WORKSPACE_LAYOUT.workspace_dir())
+            checkpoint = workspace / "Checkpoints" / "FAKE_RUN" / "epoch_0009.pt"
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            # A full training checkpoint: Model weights beside the counters/optimizer a plain RESUME restores.
+            torch.save({"Model": {"w": torch.zeros(2)}, "epoch": 9, "it": 900, "optimizer": {"state": {}}}, checkpoint)
+
+            # A URL cannot be stripped to weights -- weights_only demands a local checkpoint.
+            with pytest.raises(Exception, match="local checkpoint"):
+                await client.call_tool(
+                    "run_resume", {"weights_only": True, "model": "https://example.com/model.pt"}
+                )
+
+            resumed = await client.call_tool("run_resume", {"weights_only": True})
+            manifest = await client.read_resource(f"job://{resumed.structured_content['job_id']}/manifest")
+            resume_from = Path(json.loads(manifest[0].text)["manifest"]["resume_from"])
+
+            # The resume points at the stripped copy, jailed in the session root, not the raw checkpoint.
+            assert resume_from.name == "epoch_0009_init.pt"
+            assert resume_from.parent == workspace
+            from konfai.utils.runtime import safe_torch_load
+
+            assert set(safe_torch_load(resume_from, "cpu")) == {"Model"}
+
+    asyncio.run(scenario())

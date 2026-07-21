@@ -19,10 +19,8 @@ every derived registry must match it, so adding a kind cannot silently miss a ma
 
 from typing import get_args
 
-import pytest
 from konfai_mcp import capabilities, server, server_support
 from konfai_mcp.workflows import (
-    APP_JOB_KINDS,
     JOB_KINDS,
     JOB_RETRY_TOOLS,
     WORKFLOW_SPECS,
@@ -32,9 +30,10 @@ from konfai_mcp.workflows import (
 
 
 def test_literal_aliases_match_the_table() -> None:
+    # Apps run as normal experiments (import_app), so every job kind is a workflow kind: no app-only kinds.
     assert set(get_args(WorkflowKind)) == set(WORKFLOW_SPECS)
     assert set(get_args(JobKind)) == set(JOB_KINDS)
-    assert set(JOB_KINDS) == set(WORKFLOW_SPECS) | set(APP_JOB_KINDS)
+    assert set(JOB_KINDS) == set(WORKFLOW_SPECS)
 
 
 def test_derived_registries_come_from_the_table() -> None:
@@ -56,13 +55,3 @@ def test_table_values_pin_the_konfai_contract() -> None:
     assert WORKFLOW_SPECS["evaluation"].root_key == "Evaluator"
     assert capabilities._WORKFLOW_ALIASES["trainer"] == "train"
     assert capabilities._WORKFLOW_ALIASES["eval"] == "evaluation"
-
-
-def test_app_job_devices_register_the_real_default_reservation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """konfai-apps defaults an omitted gpu to every visible CUDA device; the job registry must
-    record that reservation, not 'cpu', or concurrent scheduling double-books the GPUs."""
-    monkeypatch.setattr(server, "konfai_pkg", server.konfai_pkg)
-    monkeypatch.setattr(server.konfai_pkg, "cuda_visible_devices", lambda: [0, 1], raising=False)
-    assert server._app_job_devices(None, None) == ["0", "1"]
-    assert server._app_job_devices([], None) == ["cpu"]  # explicit empty list forces CPU
-    assert server._app_job_devices([1], None) == ["1"]
