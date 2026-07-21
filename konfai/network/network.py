@@ -1169,23 +1169,11 @@ class Network(ModuleArgsDict, ABC):
             if isinstance(_nb_lr_update, int):
                 self._nb_lr_update = _nb_lr_update
 
-        if override_lr is not None and self.optimizer is not None:
-            for param_group in self.optimizer.param_groups:
-                param_group["lr"] = override_lr
-                param_group["initial_lr"] = override_lr
-
-        for scheduler in self.schedulers:
-            sched: Any = scheduler
-            if override_lr is not None:
-                if hasattr(sched, "base_lrs"):
-                    sched.base_lrs = [override_lr for _ in sched.base_lrs]
-                if hasattr(sched, "initial_lr"):
-                    sched.initial_lr = override_lr
-                sched.last_epoch = 0
-                if hasattr(sched, "_last_lr"):
-                    sched._last_lr = [override_lr for _ in sched._last_lr]
-            else:
-                sched.last_epoch = self._nb_lr_update
+        if override_lr is not None:
+            self._rebase_lr_local(override_lr)
+        else:
+            for scheduler in self.schedulers:
+                scheduler.last_epoch = self._nb_lr_update
         self.initialized()
 
     def _compute_channels_trace(
@@ -1552,6 +1540,30 @@ class Network(ModuleArgsDict, ABC):
                     _scheduler.step(sum(self.measure.get_last_values(0).values()))
             else:
                 _scheduler.step()
+
+    def _rebase_lr_local(self, new_lr: float) -> None:
+        """Set this one network's optimizer LR to ``new_lr`` and rebase its schedulers onto it (base_lrs /
+        initial_lr / _last_lr) with last_epoch reset, so the next scheduler step keeps the new value instead
+        of re-decaying from the old anchor. Plain (no fan-out): the callers own the recursion."""
+        if self.optimizer is not None:
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = new_lr
+                param_group["initial_lr"] = new_lr
+        for scheduler in self.schedulers:
+            sched: Any = scheduler
+            if hasattr(sched, "base_lrs"):
+                sched.base_lrs = [new_lr for _ in sched.base_lrs]
+            if hasattr(sched, "initial_lr"):
+                sched.initial_lr = new_lr
+            sched.last_epoch = 0
+            if hasattr(sched, "_last_lr"):
+                sched._last_lr = [new_lr for _ in sched._last_lr]
+
+    @_function_network()
+    def rebase_lr(self, new_lr: float) -> None:
+        """Rebase the learning rate of this network and every nested one onto ``new_lr`` — the same restart a
+        RESUME with ``--lr`` applies, reused for a live mid-run change so the value sticks past the scheduler."""
+        self._rebase_lr_local(new_lr)
 
     @_function_network()
     def get_networks(self) -> Self:

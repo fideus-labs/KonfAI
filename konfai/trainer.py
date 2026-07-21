@@ -20,13 +20,16 @@ import math
 import os
 import random
 import shutil
+import signal
+from contextlib import suppress
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import tqdm
+from ruamel.yaml import YAML
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.swa_utils import AveragedModel
 from torch.utils.data import DataLoader
@@ -48,6 +51,7 @@ from konfai.data.data_manager import BatchSample, DataTrain
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import apply_config, config
 from konfai.utils.errors import ConfigError, TrainerError
+from konfai.utils.live_control import LiveControl
 from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
@@ -199,6 +203,7 @@ class _Trainer:
         it: int,
         model: Model,
         model_ema: AveragedModel,
+        config_snapshot: Path,
         dataloader_training: DataLoader,
         dataloader_validation: DataLoader | None = None,
     ) -> None:
@@ -206,6 +211,7 @@ class _Trainer:
         self.global_rank = global_rank
         self.local_rank = local_rank
         self.size = size
+        self._validate_now = False  # set by SIGUSR1 to request an on-demand validation (see run())
         self.save_checkpoint_mode = save_checkpoint_mode
         self.train_name = train_name
         self.epochs = epochs
@@ -220,6 +226,11 @@ class _Trainer:
         self.it_validation = len(dataloader_training) if it_validation is None else it_validation
         self.it_lr_update = len(dataloader_training) if it_lr_update is None else it_lr_update
         self.it = it
+        # Live steering: an external steerer (MCP/Studio) drops control.json in the run dir; the loop applies
+        # each new revision at a DDP poll boundary and records the change into the run's config snapshot.
+        self._config_snapshot = config_snapshot
+        self._live_control = LiveControl(statistics_directory() / self.train_name / "control.json")
+        self._interventions: list[dict[str, Any]] = []
         if SummaryWriter is None:
             raise ImportError(
                 "TensorBoard is required for training logging. Install it with: pip install konfai[tensorboard]"
@@ -292,6 +303,10 @@ class _Trainer:
         Launches the training loop, performing one epoch at a time.
         Triggers early stopping and resets data augmentations between epochs.
         """
+        # SIGUSR1 requests an on-demand validation pass (KonfAI Studio's "Validate now"); the handler only
+        # flips a flag — the loop consumes it at a poll boundary, DDP-safe (see _requested_validation).
+        with suppress(ValueError, OSError):  # signals only install on the main thread
+            signal.signal(signal.SIGUSR1, lambda *_: setattr(self, "_validate_now", True))
         self.dataloader_training.dataset.load("Train")
         if self.dataloader_validation is not None:
             self.dataloader_validation.dataset.load("Validation")
@@ -341,8 +356,13 @@ class _Trainer:
                         self.model_ema.update_parameters(self.model)
                     self.it += 1
 
+                    self._apply_live_tunables()  # before update_lr, so a fresh LR anchors the next step
+
                     if (self.it) % self.it_lr_update == 0:
                         self.model.module.update_lr()
+
+                    if self.dataloader_validation is not None and self._requested_validation():
+                        self._validate()  # on-demand (SIGUSR1): metrics only, no checkpoint / early-stopping
 
                     if (self.it) % self.it_validation == 0:
                         loss = self._train_log(batch_sample)
@@ -416,6 +436,16 @@ class _Trainer:
             self.model_ema.module.set_state(NetState.TRAIN)
         return self._validation_log(batch_sample)
 
+    def _broadcast_from_master(self, value: Any) -> Any:
+        """Share rank 0's value with every rank, so the loop stays synchronized under DDP. Any picklable
+        object rides through (synchronize_data uses all_gather_object) — callers cast as they need."""
+        outputs = synchronize_data(
+            self.world_size,
+            self.local_rank * self.size + self.size - 1,
+            value,
+        )
+        return outputs[0]
+
     def _broadcast_stop(self, stop: bool) -> bool:
         """
         Share rank 0's stop decision with every rank so the training loop is left together.
@@ -423,12 +453,75 @@ class _Trainer:
         Only rank 0 owns the aggregated metrics and therefore the early-stopping decision.
         Broadcasting it prevents ranks from diverging (some breaking, some continuing).
         """
-        outputs = synchronize_data(
-            self.world_size,
-            self.local_rank * self.size + self.size - 1,
-            stop,
-        )
-        return bool(outputs[0])
+        return bool(self._broadcast_from_master(stop))
+
+    def _requested_validation(self) -> bool:
+        """Whether an on-demand validation (SIGUSR1) is pending. Polled at a modest cadence so the DDP
+        broadcast stays rare; rank 0's flag is authoritative, so every rank validates on the same
+        iteration. Single-process runs skip the collective entirely."""
+        if self.it % 20 != 0:  # bound the on-demand latency to ~20 iterations while keeping the poll cheap
+            return False
+        requested = self._validate_now if self.global_rank == 0 else False
+        if self.world_size > 1:
+            requested = bool(self._broadcast_from_master(requested))
+        if requested:
+            self._validate_now = False
+        return requested
+
+    def _apply_live_tunables(self) -> None:
+        """Poll the run's control file at the same coarse, rank-aligned cadence as the validation poll and
+        apply any new tunables. Rank 0 reads and broadcasts, so every rank applies the same change on the
+        same iteration; rank 0 also records it into the run's config snapshot. No control file → a no-op."""
+        if self.it % 20 != 0:
+            return
+        pending = self._live_control.take() if self.global_rank == 0 else None
+        if self.world_size > 1:
+            pending = self._broadcast_from_master(pending)
+        if not pending:
+            return
+        applied = self._apply_tunables(pending)
+        if self.global_rank == 0 and applied:
+            self._interventions.extend(applied)
+            self._record_interventions()
+
+    def _apply_tunables(self, pending: dict[str, Any]) -> list[dict[str, Any]]:
+        """Apply the pending tunables to this rank's live state; return one audit entry per change."""
+        applied: list[dict[str, Any]] = []
+        if "lr" in pending:
+            new_lr = float(pending["lr"])
+            applied.append({"it": self.it, "key": "lr", "from": self._current_lr(), "to": new_lr})
+            self.model.module.rebase_lr(new_lr)
+        if "it_validation" in pending:
+            old = self.it_validation
+            self.it_validation = max(1, int(pending["it_validation"]))
+            applied.append({"it": self.it, "key": "it_validation", "from": old, "to": self.it_validation})
+        return applied
+
+    def _current_lr(self) -> float | None:
+        """The learning rate of the first network that owns an optimizer, for the audit trail."""
+        for network in self.model.module.get_networks().values():
+            if network.optimizer is not None:
+                return float(network.optimizer.param_groups[0]["lr"])
+        return None
+
+    def _record_interventions(self) -> None:
+        """Append the intervention audit trail to the run's config snapshot and reflect the current
+        it_validation, so the on-disk config stays a truthful record of the run. Rank 0, atomic."""
+        target = self._config_snapshot
+        if not target.is_file():
+            return
+        yaml = YAML()
+        with open(target) as file:
+            data = yaml.load(file)
+        if not isinstance(data, dict):
+            return
+        data["Interventions"] = self._interventions
+        if isinstance(data.get("Trainer"), dict):
+            data["Trainer"]["it_validation"] = self.it_validation
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        with open(tmp, "w") as file:
+            yaml.dump(data, file)
+        os.replace(tmp, target)
 
     def checkpoint_save(self, loss: float | None) -> None:
         """
@@ -891,6 +984,7 @@ class Trainer(DistributedObject):
                     self.it,
                     model,
                     self.model_ema,
+                    self.config_namefile,
                     *dataloaders,
                 ) as t:
                     t.run()
