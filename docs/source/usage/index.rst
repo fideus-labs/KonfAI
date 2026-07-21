@@ -12,8 +12,9 @@ Start here
 Read :doc:`adopting-konfai` if you already use PyTorch, MONAI, nnU-Net, or
 Lightning. Read :doc:`large-images` when regional I/O and bounded host memory
 matter. :doc:`custom-models` covers extension contracts and :doc:`docker`
-covers a containerized runtime. Apps and agent automation are first-class
-sections in the main navigation: :doc:`apps` and :doc:`mcp`.
+covers a containerized runtime. :doc:`studio` drives the whole loop from a
+chat window. Apps and agent automation are first-class sections in the main
+navigation: :doc:`apps` and :doc:`mcp`.
 
 .. toctree::
    :maxdepth: 1
@@ -22,3 +23,4 @@ sections in the main navigation: :doc:`apps` and :doc:`mcp`.
    large-images
    custom-models
    docker
+   studio

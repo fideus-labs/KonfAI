@@ -16,6 +16,7 @@
     · <a href="https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html"><strong>Bring PyTorch or MONAI</strong></a>
     · <a href="https://konfai.readthedocs.io/en/latest/usage/apps.html"><strong>Ship an App</strong></a>
     · <a href="https://konfai.readthedocs.io/en/latest/usage/mcp.html"><strong>Automate with MCP</strong></a>
+    · <a href="https://konfai.readthedocs.io/en/latest/usage/studio.html"><strong>KonfAI Studio</strong></a>
   </p>
 </div>
 
@@ -263,6 +264,27 @@ for the current status.
 
 ---
 
+## 💬 KonfAI Studio
+
+**[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** is
+a single chatbot web UI over the MCP server. Point it at your own dataset and,
+from the conversation alone, inspect the data, author or reuse a model, train,
+predict, evaluate, compare runs, and view the volumes in a built-in NiiVue
+viewer — every step a `konfai-mcp` tool call, the compute staying on your
+machine. It is a product surface over `konfai-mcp`, not a new engine, and it
+ships **no API key**: you bring your own LLM — your Claude Code subscription by
+default, the Claude API with your key, or a fully local OpenAI-compatible server
+such as Ollama or vLLM.
+
+```bash
+pip install konfai-studio
+konfai-studio            # -> http://127.0.0.1:8730
+```
+
+→ **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)**
+
+---
+
 ## Ecosystem
 
 | Package | What it is |
@@ -273,6 +295,7 @@ for the current status.
 | **[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI)** | run segmentation, synthesis, evaluation, and uncertainty Apps from 3D Slicer |
 | **[SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg)** | run IMPACT-Reg presets and inspect registration results in 3D Slicer |
 | **KonfAI-MCP** | expose KonfAI to LLM agents — inspect data, author configs, launch and monitor runs |
+| **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** | a chat web UI over `konfai-mcp` — inspect data, train, predict, evaluate, and compare from one conversation |
 
 See the [ecosystem map](https://konfai.readthedocs.io/en/latest/ecosystem/index.html)
 for what is shipped vs. in-progress.
