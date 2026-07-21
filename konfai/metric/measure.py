@@ -1222,7 +1222,9 @@ class IMPACTReg(CriterionWithAttribute):
             )
             loss = loss + slice_loss
             true_nb += slice_nb
-        return loss / true_nb, np.nan if true_nb == 0 else loss.item() / true_nb
+        # true_nb == 0 (a mask with no foreground) would divide the differentiable loss by zero; the loss is
+        # still its zero seed then, so return it as-is and report NaN for the scalar.
+        return (loss / true_nb if true_nb else loss), np.nan if true_nb == 0 else loss.item() / true_nb
 
 
 class IMPACTSynth(CriterionWithAttribute):
@@ -1379,7 +1381,9 @@ class IMPACTSynth(CriterionWithAttribute):
                 )
                 loss = loss + stream_loss
                 true_nb += stream_nb
-        return loss / true_nb, np.nan if true_nb == 0 else loss.item() / true_nb
+        # true_nb == 0 (a mask with no foreground) would divide the differentiable loss by zero; the loss is
+        # still its zero seed then, so return it as-is and report NaN for the scalar.
+        return (loss / true_nb if true_nb else loss), np.nan if true_nb == 0 else loss.item() / true_nb
 
 
 class SAM_Perceptual(CriterionWithAttribute):
@@ -1468,7 +1472,9 @@ class SAM_Perceptual(CriterionWithAttribute):
             )
             loss = loss + slice_loss
             true_nb += slice_nb
-        return loss / true_nb, np.nan if true_nb == 0 else loss.item() / true_nb
+        # true_nb == 0 (a mask with no foreground) would divide the differentiable loss by zero; the loss is
+        # still its zero seed then, so return it as-is and report NaN for the scalar.
+        return (loss / true_nb if true_nb else loss), np.nan if true_nb == 0 else loss.item() / true_nb
 
 
 class Variance(Criterion):
