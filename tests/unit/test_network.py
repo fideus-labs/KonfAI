@@ -71,7 +71,7 @@ class _NestedGraph(ModuleArgsDict):
         self.add_module("Block", _Inner(), in_branch=[0], out_branch=[0])
 
 
-def test_forward_routes_two_inputs_through_branches():
+def test_forward_routes_two_inputs_through_branches() -> None:
     graph = _TwoInputGraph()
     a = torch.ones(1, 1, 2, 2)
     b = torch.full((1, 1, 2, 2), 2.0)
@@ -79,7 +79,7 @@ def test_forward_routes_two_inputs_through_branches():
     assert torch.allclose(out, torch.full_like(out, 23.0))
 
 
-def test_named_forward_exposes_every_intermediate():
+def test_named_forward_exposes_every_intermediate() -> None:
     graph = _TwoInputGraph()
     a = torch.ones(1, 1, 2, 2)
     b = torch.full((1, 1, 2, 2), 2.0)
@@ -87,7 +87,7 @@ def test_named_forward_exposes_every_intermediate():
     assert outputs == {"A": 3.0, "B": 20.0, "Sum": 23.0}
 
 
-def test_named_forward_uses_dotted_names_for_nested_graphs():
+def test_named_forward_uses_dotted_names_for_nested_graphs() -> None:
     graph = _NestedGraph()
     x = torch.ones(1, 1, 2, 2)
     names = [name for name, _ in graph.named_forward(x)]
@@ -97,7 +97,7 @@ def test_named_forward_uses_dotted_names_for_nested_graphs():
     assert torch.allclose(out, torch.full_like(out, 10.0))
 
 
-def test_out_branch_isolation_preserves_a_branch_for_later_use():
+def test_out_branch_isolation_preserves_a_branch_for_later_use() -> None:
     """A branch written by one module must remain available to a later consumer."""
 
     class _SkipGraph(ModuleArgsDict):
@@ -160,7 +160,7 @@ def test_init_func_centres_batchnorm_gamma_on_one() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_load_state_dict_warm_starts_resized_layer_and_keeps_siblings():
+def test_load_state_dict_warm_starts_resized_layer_and_keeps_siblings() -> None:
     """#2 A resized layer must warm-start, and sibling layers must still load.
 
     Checking ``isinstance(module, Linear)`` on the parent instead of the child,
@@ -277,7 +277,7 @@ def _make_accumulating_measure(scaler) -> tuple[Measure, torch.Tensor]:
     return measure, output
 
 
-def test_accumulation_backward_uses_scaler_scale():
+def test_accumulation_backward_uses_scaler_scale() -> None:
     """#AMP: accumulation losses must be scaled before backward when a GradScaler is set."""
     scaler = MagicMock()
     scaled = MagicMock()
@@ -294,7 +294,7 @@ def test_accumulation_backward_uses_scaler_scale():
     assert output.grad is None
 
 
-def test_accumulation_backward_without_scaler_is_plain_backward():
+def test_accumulation_backward_without_scaler_is_plain_backward() -> None:
     """Without a scaler the accumulation path must still back-propagate normally."""
     measure, output = _make_accumulating_measure(None)
     target = torch.ones(1, 1, 2, 2)
@@ -310,7 +310,7 @@ class _PlainLossAttr(_CriterionAttr):
         self.accumulation = False  # a normal, non-accumulation loss in the SAME numeric group
 
 
-def test_accumulation_backward_not_refired_by_plain_loss_in_same_group():
+def test_accumulation_backward_not_refired_by_plain_loss_in_same_group() -> None:
     """A plain (non-accumulation) loss sharing the numeric group must NOT re-fire the accumulation
     backward: the accumulated backward runs exactly once, for the accumulation loss itself."""
     scaler = MagicMock()
@@ -342,13 +342,13 @@ def test_accumulation_backward_not_refired_by_plain_loss_in_same_group():
 # --------------------------------------------------------------------------------------
 
 
-def test_update_scheduler_empty_raises_config_error():
+def test_update_scheduler_empty_raises_config_error() -> None:
     """update_scheduler on an empty schedule must raise a clear ConfigError."""
     with pytest.raises(ConfigError):
         Measure.update_scheduler(None, {}, 0)  # type: ignore[arg-type]
 
 
-def test_update_scheduler_past_last_window_clamps_to_last():
+def test_update_scheduler_past_last_window_clamps_to_last() -> None:
     """Past every configured window, the last scheduler is selected (no crash)."""
     s0, s1 = Constant(1.0), Constant(2.0)
     schedulers = {s0: 3, s1: 3}  # active windows [0,3) and [3,6)
@@ -543,19 +543,19 @@ class TestUnknownStringBranch:
         graph.add_module("Consumer", torch.nn.Identity(), in_branch=in_branch, out_branch=[-1])
         return graph
 
-    def test_typoed_string_label_raises(self):
+    def test_typoed_string_label_raises(self) -> None:
         from konfai.utils.errors import ConfigError
 
         graph = self._graph(["faet"])  # typo of "feat"
         with pytest.raises(ConfigError, match="no earlier module has produced"):
             list(graph.named_forward(torch.zeros(1, 1, 4)))
 
-    def test_declared_string_label_still_routes(self):
+    def test_declared_string_label_still_routes(self) -> None:
         graph = self._graph(["feat"])
         outputs = dict(graph.named_forward(torch.zeros(1, 1, 4)))
         assert set(outputs) == {"Producer", "Consumer"}
 
-    def test_numeric_fallback_is_preserved(self):
+    def test_numeric_fallback_is_preserved(self) -> None:
         graph = self._graph([1])  # no second input: falls back to inputs[0]
         outputs = dict(graph.named_forward(torch.zeros(1, 1, 4)))
         assert torch.equal(outputs["Consumer"], torch.zeros(1, 1, 4))
@@ -564,7 +564,7 @@ class TestUnknownStringBranch:
 # ---------------------------------------------------------------------------
 # Learning-rate schedulers in ``konfai.metric.schedulers`` (Network.load resync)
 # ---------------------------------------------------------------------------
-def test_polylr_resync_resumes_from_last_epoch():
+def test_polylr_resync_resumes_from_last_epoch() -> None:
     """#scheduler: PolyLR must honour a resync that sets last_epoch (RESUME fast-forward)."""
     param = torch.nn.Parameter(torch.zeros(1))
     opt = torch.optim.SGD([param], lr=0.1)
@@ -582,7 +582,7 @@ def test_polylr_resync_resumes_from_last_epoch():
     assert scheduler.last_epoch == 51
 
 
-def test_polylr_fresh_run_unchanged():
+def test_polylr_fresh_run_unchanged() -> None:
     """Fresh training (no resync) still steps from the internal counter 0, 1, 2 ..."""
     param = torch.nn.Parameter(torch.zeros(1))
     opt = torch.optim.SGD([param], lr=0.1)
@@ -599,7 +599,7 @@ def test_polylr_fresh_run_unchanged():
     assert scheduler.last_epoch == -1
 
 
-def test_composite_criteria_are_scheduled_on_the_owning_networks_counter():
+def test_composite_criteria_are_scheduled_on_the_owning_networks_counter() -> None:
     """A composite root never steps its own _it (only networks owning measure+optimizer do), so
     criteria scheduled on the root's counter freeze at 0: start/stop windows and loss-weight
     schedulers of a GAN never fire. Measure.update must receive the OWNING network's _it."""
