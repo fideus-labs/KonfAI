@@ -1,0 +1,301 @@
+<title>KonfAI Studio — interface (maquette hi-fi)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0a1417; --app:#0d1b1e; --panel:#102226; --panel-2:#0c1c1f; --inset:#0a181b;
+    --console:#081215; --ink:#e8f1f1; --ink-2:#b6c9cb; --muted:#7d9598; --faint:#5b7376;
+    --line:#1e3539; --line-2:#274449;
+    --cyan:#37d0c4; --cyan-ink:#7fe6dc; --cyan-t:rgba(55,208,196,.13);
+    --coral:#f0714e; --coral-ink:#ff9273; --coral-t:rgba(240,113,78,.14);
+    --good:#4fc08a; --warn:#d8b45c; --amber:#e0964f;
+    --fsans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --fmono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --shadow:0 18px 50px rgba(0,0,0,.42);
+  }
+  @media (prefers-color-scheme:light){
+    :root{
+      --bg:#e7edee; --app:#ffffff; --panel:#ffffff; --panel-2:#f4f8f8; --inset:#eef4f4;
+      --console:#0c1a1d; --ink:#0c1a1d; --ink-2:#28403f; --muted:#516568; --faint:#7d9295;
+      --line:#dbe6e6; --line-2:#cbdbdb;
+      --cyan:#0e9e96; --cyan-ink:#0a6e68; --cyan-t:rgba(14,158,150,.1);
+      --coral:#d25a38; --coral-ink:#a83f22; --coral-t:rgba(210,90,56,.1);
+      --good:#2e925c; --warn:#a5771a; --amber:#b06a1f;
+      --shadow:0 18px 46px rgba(20,40,45,.16);
+    }
+  }
+  :root[data-theme="dark"]{ --bg:#0a1417;--app:#0d1b1e;--panel:#102226;--panel-2:#0c1c1f;--inset:#0a181b;--console:#081215;--ink:#e8f1f1;--ink-2:#b6c9cb;--muted:#7d9598;--faint:#5b7376;--line:#1e3539;--line-2:#274449;--cyan:#37d0c4;--cyan-ink:#7fe6dc;--cyan-t:rgba(55,208,196,.13);--coral:#f0714e;--coral-ink:#ff9273;--coral-t:rgba(240,113,78,.14);--good:#4fc08a;--warn:#d8b45c;--amber:#e0964f;--shadow:0 18px 50px rgba(0,0,0,.42); }
+  :root[data-theme="light"]{ --bg:#e7edee;--app:#ffffff;--panel:#ffffff;--panel-2:#f4f8f8;--inset:#eef4f4;--console:#0c1a1d;--ink:#0c1a1d;--ink-2:#28403f;--muted:#516568;--faint:#7d9295;--line:#dbe6e6;--line-2:#cbdbdb;--cyan:#0e9e96;--cyan-ink:#0a6e68;--cyan-t:rgba(14,158,150,.1);--coral:#d25a38;--coral-ink:#a83f22;--coral-t:rgba(210,90,56,.1);--good:#2e925c;--warn:#a5771a;--amber:#b06a1f;--shadow:0 18px 46px rgba(20,40,45,.16); }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--fsans);font-size:15px;-webkit-font-smoothing:antialiased}
+  .mono{font-family:var(--fmono)}
+  .page{max-width:1240px;margin:0 auto;padding:30px 20px 48px}
+  .cap{margin-bottom:20px}
+  .cap .eyebrow{font-family:var(--fmono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--cyan-ink);font-weight:600}
+  .cap h1{margin:9px 0 6px;font-size:clamp(22px,3vw,30px);font-weight:740;letter-spacing:-.02em}
+  .cap p{margin:0;color:var(--muted);font-size:15px;max-width:74ch}
+
+  /* ---------- APP SHELL ---------- */
+  .app{background:var(--app);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--shadow)}
+  .topbar{display:flex;align-items:center;gap:14px;padding:11px 16px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,color-mix(in srgb,var(--panel) 70%,transparent),var(--app))}
+  .brand{display:flex;align-items:center;gap:10px}
+  .logo{width:26px;height:26px;border-radius:8px;border:1px solid var(--line-2);background:var(--panel-2);display:grid;place-items:center}
+  .brand b{font-weight:730;font-size:15px;letter-spacing:-.01em} .brand b span{color:var(--cyan-ink)}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-family:var(--fmono);font-size:11.5px;color:var(--ink-2);
+    background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:5px 10px}
+  .pill .k{color:var(--muted)}
+  .gpu{color:var(--good)} .gpu::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px color-mix(in srgb,var(--good) 22%,transparent);display:inline-block}
+  .live{color:var(--cyan-ink)} .live .dot{width:7px;height:7px;border-radius:50%;background:var(--cyan);animation:pulse 1.6s ease-in-out infinite}
+  .spacer{flex:1}
+  .ghost{font-family:var(--fmono);font-size:11.5px;color:var(--muted);border:1px solid var(--line);border-radius:8px;padding:5px 10px}
+  .avatar{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,var(--cyan),var(--coral));display:grid;place-items:center;color:#06181a;font-weight:800;font-size:12px}
+
+  .appmain{display:grid;grid-template-columns:1fr}
+  @media(min-width:900px){.appmain{grid-template-columns:212px 1fr}}
+  /* rail */
+  .rail{border-right:1px solid var(--line);padding:14px 12px;background:var(--panel-2);display:flex;flex-direction:column;gap:16px}
+  .nav{display:flex;flex-direction:column;gap:3px}
+  .nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;font-size:13.5px;color:var(--ink-2);text-decoration:none}
+  .nav a .ico{width:16px;height:16px;border-radius:4px;border:1.5px solid currentColor;opacity:.6}
+  .nav a.on{background:var(--cyan-t);color:var(--cyan-ink);font-weight:600} .nav a.on .ico{opacity:1;border-color:var(--cyan)}
+  .railh{font-family:var(--fmono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);font-weight:700;margin:2px 4px 8px}
+  .explist{display:flex;flex-direction:column;gap:6px}
+  .exp{display:flex;align-items:center;gap:9px;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:var(--panel);font-size:12.5px}
+  .exp.sel{border-color:var(--cyan);background:var(--cyan-t)}
+  .exp .sdot{width:7px;height:7px;border-radius:50%;flex:none}
+  .exp .sdot.run{background:var(--cyan);animation:pulse 1.6s ease-in-out infinite} .exp .sdot.ok{background:var(--good)} .exp .sdot.idle{background:var(--faint)}
+  .exp .en{font-family:var(--fmono);font-size:11.5px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .exp .em{font-family:var(--fmono);font-size:10.5px;color:var(--good);font-variant-numeric:tabular-nums}
+  .exp.sel .em{color:var(--cyan-ink)}
+
+  /* work area */
+  .work{display:grid;grid-template-columns:1fr;min-width:0}
+  @media(min-width:1040px){.work{grid-template-columns:minmax(0,.92fr) minmax(0,1.18fr)}}
+  .chat{display:flex;flex-direction:column;border-right:1px solid var(--line);min-width:0}
+  .chatscroll{padding:18px 16px;display:flex;flex-direction:column;gap:14px;flex:1}
+  .m-user{align-self:flex-end;max-width:88%;background:var(--cyan-t);border:1px solid var(--line-2);border-radius:13px 13px 4px 13px;padding:10px 13px;font-size:13.5px}
+  .m-ass{max-width:94%;font-size:13.5px;color:var(--ink-2);line-height:1.55}
+  .m-ass .who{font-family:var(--fmono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--cyan-ink);font-weight:700;margin-bottom:5px;display:flex;align-items:center;gap:7px}
+  .m-ass .who .s{width:16px;height:16px;border-radius:5px;background:linear-gradient(135deg,var(--cyan),var(--coral))}
+  .m-ass b{color:var(--ink)}
+  .chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+  .chip{font-family:var(--fmono);font-size:10px;color:var(--cyan-ink);background:var(--cyan-t);border:1px solid var(--line);padding:3px 7px;border-radius:6px}
+  /* generative run card in chat */
+  .runcard{margin-top:10px;border:1px solid var(--line-2);border-radius:12px;background:var(--panel);overflow:hidden}
+  .runcard .rh{display:flex;align-items:center;gap:9px;padding:11px 13px;border-bottom:1px solid var(--line)}
+  .runcard .rh .nm{font-family:var(--fmono);font-size:12px;font-weight:600}
+  .runcard .rh .st{margin-left:auto;font-family:var(--fmono);font-size:10.5px;font-weight:700;color:var(--cyan-ink);display:inline-flex;align-items:center;gap:6px}
+  .runcard .rh .st .d{width:7px;height:7px;border-radius:50%;background:var(--cyan);animation:pulse 1.6s ease-in-out infinite}
+  .runcard .rb{padding:12px 13px;display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center}
+  .spark{height:40px;width:100%}
+  .runmeta{text-align:right;font-family:var(--fmono);font-size:11px;color:var(--muted);white-space:nowrap}
+  .runmeta b{color:var(--cyan-ink);font-size:16px;display:block;font-variant-numeric:tabular-nums}
+  .prog{height:5px;border-radius:5px;background:var(--inset);margin:0 13px 13px;overflow:hidden}
+  .prog i{display:block;height:100%;width:75%;background:linear-gradient(90deg,var(--cyan),var(--cyan-ink));border-radius:5px}
+  .runlink{padding:0 13px 12px;font-family:var(--fmono);font-size:11px;color:var(--muted)}
+  .runlink a{color:var(--cyan-ink);text-decoration:none;border-bottom:1px dotted var(--line-2)}
+  .composer{border-top:1px solid var(--line);padding:12px 14px;display:flex;gap:9px;align-items:center;background:var(--panel-2)}
+  .composer .box{flex:1;background:var(--app);border:1px solid var(--line-2);border-radius:10px;padding:9px 12px;color:var(--muted);font-size:13px}
+  .composer .send{width:34px;height:34px;border-radius:9px;background:var(--cyan);color:#06181a;display:grid;place-items:center;font-weight:800;flex:none}
+
+  /* stage: viewer + live row */
+  .stage{padding:14px;display:flex;flex-direction:column;gap:13px;min-width:0}
+  .viewer{position:relative;aspect-ratio:16/9;border-radius:12px;overflow:hidden;border:1px solid var(--line-2);
+    background:radial-gradient(130% 130% at 50% 38%,#123236,#0a181b 72%)}
+  :root[data-theme="light"] .viewer{background:radial-gradient(130% 130% at 50% 38%,#d3e2e2,#c2d4d4 72%)}
+  .viewer .organ{position:absolute;top:33%;left:41%;width:20%;height:30%;border-radius:52% 48% 44% 56%;background:var(--coral);opacity:.6;filter:blur(.4px);mix-blend-mode:screen}
+  :root[data-theme="light"] .viewer .organ{mix-blend-mode:multiply;opacity:.42}
+  .viewer .cross::before,.viewer .cross::after{content:"";position:absolute;background:rgba(127,230,220,.16)}
+  .viewer .cross::before{left:51%;top:0;bottom:0;width:1px} .viewer .cross::after{top:49%;left:0;right:0;height:1px}
+  .vtop{position:absolute;top:10px;left:10px;right:10px;display:flex;align-items:center;gap:8px}
+  .vcase{font-family:var(--fmono);font-size:10.5px;color:var(--ink-2);background:rgba(6,20,22,.5);border:1px solid var(--line-2);border-radius:7px;padding:4px 9px}
+  :root[data-theme="light"] .vcase{background:rgba(255,255,255,.6)}
+  .vtabs{margin-left:auto;display:flex;gap:3px;background:rgba(6,20,22,.5);border:1px solid var(--line-2);border-radius:8px;padding:3px}
+  :root[data-theme="light"] .vtabs{background:rgba(255,255,255,.6)}
+  .vtabs span{font-family:var(--fmono);font-size:10px;color:var(--muted);padding:3px 8px;border-radius:6px}
+  .vtabs span.on{background:var(--cyan-t);color:var(--cyan-ink);font-weight:600}
+  .vbot{position:absolute;left:10px;right:10px;bottom:9px;display:flex;align-items:center;gap:10px}
+  .vbot .lbl{font-family:var(--fmono);font-size:9.5px;color:#9fb8bb}
+  .slider{flex:1;height:4px;border-radius:4px;background:rgba(127,230,220,.18);position:relative}
+  .slider i{position:absolute;left:0;top:0;bottom:0;width:64%;background:var(--cyan);border-radius:4px}
+  .slider .th{position:absolute;left:64%;top:50%;transform:translate(-50%,-50%);width:11px;height:11px;border-radius:50%;background:#eafffb;border:2px solid var(--cyan)}
+  .vpriv{position:absolute;right:10px;bottom:8px}
+  .badge-ov{font-family:var(--fmono);font-size:9.5px;color:var(--coral-ink);background:rgba(6,20,22,.5);border:1px solid var(--line-2);border-radius:6px;padding:3px 7px}
+  :root[data-theme="light"] .badge-ov{background:rgba(255,255,255,.6)}
+
+  .liverow{display:grid;grid-template-columns:1fr;gap:13px}
+  @media(min-width:640px){.liverow{grid-template-columns:1.15fr .85fr}}
+  .card{border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden;display:flex;flex-direction:column}
+  .cardh{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line)}
+  .cardh .t{font-family:var(--fmono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700}
+  .cardh .live2{margin-left:auto;font-family:var(--fmono);font-size:10px;color:var(--cyan-ink);display:inline-flex;align-items:center;gap:6px}
+  .cardh .live2 .d{width:6px;height:6px;border-radius:50%;background:var(--cyan);animation:pulse 1.6s ease-in-out infinite}
+
+  /* console */
+  .console{background:var(--console);flex:1}
+  .console .cardh{background:color-mix(in srgb,var(--console) 82%,#000);border-bottom-color:#12262a}
+  .console .cardh .t{color:#7fa0a3}
+  .conbody{padding:11px 13px;font-family:var(--fmono);font-size:11px;line-height:1.65;color:#c5d6d8;min-height:186px}
+  .ln{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ts{color:#5b7a7d} .tg{font-weight:700} .tg.info{color:#5fd6cc} .tg.tr{color:#8fa6a8} .tg.val{color:var(--coral-ink)} .tg.ck{color:#5fc08a} .tg.wn{color:var(--warn)}
+  .vn{color:#e6f2f2} .cur{display:inline-block;width:7px;height:13px;background:#5fd6cc;vertical-align:-2px;margin-left:3px;animation:blink 1.05s step-end infinite}
+
+  /* metrics */
+  .metrics{background:var(--panel)}
+  .mbig{padding:12px 13px 4px;display:flex;align-items:baseline;justify-content:space-between}
+  .mbig .lab{font-family:var(--fmono);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  .mbig .val{font-family:var(--fmono);font-size:24px;font-weight:700;color:var(--cyan-ink);font-variant-numeric:tabular-nums}
+  .mbig .val small{font-size:12px;color:var(--good)}
+  .mchart{padding:0 6px} .mchart svg{width:100%;height:66px;display:block}
+  .mstats{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border-top:1px solid var(--line)}
+  .mstat{background:var(--panel);padding:8px 12px}
+  .mstat .k{font-family:var(--fmono);font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .mstat .v{font-family:var(--fmono);font-size:13px;color:var(--ink);font-variant-numeric:tabular-nums;margin-top:2px}
+
+  /* notes under app */
+  .notes{margin-top:20px;display:grid;gap:11px;grid-template-columns:1fr}
+  @media(min-width:720px){.notes{grid-template-columns:repeat(4,1fr)}}
+  .note{border:1px solid var(--line);border-radius:11px;background:var(--app);padding:13px 14px}
+  .note .nt{font-family:var(--fmono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--coral-ink);font-weight:700}
+  .note h4{margin:7px 0 4px;font-size:14px;font-weight:680}
+  .note p{margin:0;font-size:12.5px;color:var(--muted)}
+
+  @keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 var(--cyan-t)}50%{opacity:.55;box-shadow:0 0 0 4px transparent}}
+  @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+  @media (prefers-reduced-motion:reduce){.live .dot,.exp .sdot.run,.runcard .rh .st .d,.cardh .live2 .d{animation:none}.cur{animation:none}}
+</style>
+
+<div class="page">
+  <div class="cap">
+    <div class="eyebrow">KonfAI Studio · UI · maquette hi-fi</div>
+    <h1>L'interface — un produit, pas un outil de dev.</h1>
+    <p>Un seul écran : le chat pilote, le viewer NiiVue montre la prédiction sur le scan, la courbe de validation grimpe en direct, et la <b>console de logs coule en temps réel</b>. Design system cyan/corail, thème clair &amp; sombre. Bascule le thème pour voir les deux.</p>
+  </div>
+
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="5" fill="none" stroke="var(--cyan)" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="var(--coral)"/></svg></span>
+        <b>KonfAI <span>Studio</span></b>
+      </div>
+      <span class="pill"><span class="k">session</span> liver-ct</span>
+      <span class="pill gpu">GPU 0 · 41 GB</span>
+      <span class="pill live"><span class="dot"></span> training</span>
+      <span class="spacer"></span>
+      <span class="ghost">🔒 local · offline</span>
+      <span class="ghost">Claude · MCP</span>
+      <span class="avatar">VB</span>
+    </header>
+
+    <div class="appmain">
+      <aside class="rail">
+        <nav class="nav">
+          <a href="#" class="on"><span class="ico"></span> Datasets</a>
+          <a href="#"><span class="ico"></span> Experiments</a>
+          <a href="#"><span class="ico"></span> Deploy</a>
+        </nav>
+        <div>
+          <div class="railh">Experiments</div>
+          <div class="explist">
+            <div class="exp sel"><span class="sdot run"></span><span class="en">unet_liver_v3</span><span class="em">0.94</span></div>
+            <div class="exp"><span class="sdot ok"></span><span class="en">nnunet_ft_v1</span><span class="em">0.93</span></div>
+            <div class="exp"><span class="sdot ok"></span><span class="en">unet_liver_v2</span><span class="em">0.91</span></div>
+            <div class="exp"><span class="sdot idle"></span><span class="en">baseline_v0</span><span class="em">0.86</span></div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="work">
+        <section class="chat">
+          <div class="chatscroll">
+            <div class="m-user">Segmente le foie sur ces 40 CT abdominaux.</div>
+            <div class="m-ass">
+              <div class="who"><span class="s"></span> KonfAI</div>
+              <b>40 cas inspectés</b> — 1 canal CT, spacing (0.8, 0.8, 3.0), 2 classes. Une app foie proche existe : je la <b>fine-tune</b> (~15 min) plutôt qu'un entraînement complet.
+              <div class="chips"><span class="chip">inspect_dataset</span><span class="chip">solve_task → fine_tune</span></div>
+            </div>
+            <div class="m-ass">
+              <div class="who"><span class="s"></span> KonfAI</div>
+              Config écrite et validée (un vrai forward+backward avant de lancer). Entraînement démarré.
+              <div class="runcard">
+                <div class="rh"><span class="nm">unet_liver_v3</span><span class="st"><span class="d"></span>running · 60/80</span></div>
+                <div class="rb">
+                  <svg class="spark" viewBox="0 0 260 40" preserveAspectRatio="none" aria-hidden="true">
+                    <polyline fill="var(--cyan-t)" stroke="none" points="0,34 26,30 52,24 78,20 104,16 130,13 156,11 182,9 208,8 234,7 260,6 260,40 0,40"/>
+                    <polyline fill="none" stroke="var(--cyan)" stroke-width="2" points="0,34 26,30 52,24 78,20 104,16 130,13 156,11 182,9 208,8 234,7 260,6"/>
+                    <circle cx="260" cy="6" r="3" fill="var(--cyan)"/>
+                  </svg>
+                  <div class="runmeta"><b>0.941</b>val Dice ▲</div>
+                </div>
+                <div class="prog"><i></i></div>
+                <div class="runlink">→ <a href="#">logs en direct</a> · <a href="#">annuler</a></div>
+              </div>
+            </div>
+            <div class="m-user">Montre la prédiction vs la vérité.</div>
+          </div>
+          <div class="composer">
+            <div class="box">Décris la suite… (ex. « évalue sur le fold 2 »)</div>
+            <div class="send" aria-hidden="true">↑</div>
+          </div>
+        </section>
+
+        <section class="stage">
+          <div class="viewer">
+            <div class="organ"></div><div class="cross"></div>
+            <div class="vtop">
+              <span class="vcase">case 003 · CT</span>
+              <span class="vtabs"><span class="on">Axial</span><span>Sag</span><span>Cor</span></span>
+            </div>
+            <div class="vbot">
+              <span class="lbl">overlay</span>
+              <span class="slider"><i></i><span class="th"></span></span>
+              <span class="badge-ov">prédiction · foie</span>
+            </div>
+          </div>
+
+          <div class="liverow">
+            <div class="card console">
+              <div class="cardh"><span class="t">console</span><span class="live2"><span class="d"></span>live</span></div>
+              <div class="conbody">
+                <div class="ln"><span class="ts">12:04:07</span> <span class="tg info">INFO</span> epoch 60/80 · lr 3.0e-4</div>
+                <div class="ln"><span class="ts">12:04:07</span> <span class="tg tr">train</span> loss <span class="vn">0.081</span> dice <span class="vn">0.962</span></div>
+                <div class="ln"><span class="ts">12:04:12</span> <span class="tg info">INFO</span> validation ▸ 40 cases</div>
+                <div class="ln"><span class="ts">12:04:19</span> <span class="tg val">val</span> dice <span class="vn">0.941</span> hd95 <span class="vn">4.2mm</span></div>
+                <div class="ln"><span class="ts">12:04:19</span> <span class="tg ck">ckpt</span> saved epoch_060.pt</div>
+                <div class="ln"><span class="ts">12:04:20</span> <span class="tg info">INFO</span> epoch 61/80 · eta 7m<span class="cur"></span></div>
+              </div>
+            </div>
+
+            <div class="card metrics">
+              <div class="cardh"><span class="t">val Dice</span><span class="live2"><span class="d"></span>live</span></div>
+              <div class="mbig"><span class="lab">epoch 60</span><span class="val">0.941 <small>▲</small></span></div>
+              <div class="mchart">
+                <svg viewBox="0 0 300 66" preserveAspectRatio="none" aria-hidden="true">
+                  <line x1="0" y1="16" x2="300" y2="16" stroke="var(--line)" stroke-width="1"/>
+                  <line x1="0" y1="40" x2="300" y2="40" stroke="var(--line)" stroke-width="1"/>
+                  <polyline fill="var(--cyan-t)" stroke="none" points="0,58 30,50 60,40 90,33 120,26 150,22 180,18 210,15 240,13 270,12 300,11 300,66 0,66"/>
+                  <polyline fill="none" stroke="var(--cyan)" stroke-width="2" points="0,58 30,50 60,40 90,33 120,26 150,22 180,18 210,15 240,13 270,12 300,11"/>
+                  <circle cx="300" cy="11" r="3.2" fill="var(--cyan)"/>
+                </svg>
+              </div>
+              <div class="mstats">
+                <div class="mstat"><div class="k">train loss</div><div class="v">0.081 ▼</div></div>
+                <div class="mstat"><div class="k">hd95</div><div class="v">4.2 mm</div></div>
+                <div class="mstat"><div class="k">lr</div><div class="v">3.0e-4</div></div>
+                <div class="mstat"><div class="k">eta</div><div class="v">7 min</div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="note"><div class="nt">Live · métriques</div><h4>Courbe qui grimpe</h4><p>tail du log → <span class="mono">read_live_metrics</span> → WebSocket → uPlot.</p></div>
+    <div class="note"><div class="nt">Live · console</div><h4>Logs en temps réel</h4><p>tail direct du log console du job → WebSocket → terminal virtualisé.</p></div>
+    <div class="note"><div class="nt">Live · images</div><h4>Voir le modèle apprendre</h4><p>image-summaries TensorBoard (déjà émises) → overlay qui s'affine.</p></div>
+    <div class="note"><div class="nt">Viewer</div><h4>NiiVue 3D</h4><p>volumes .mha/.nii natifs, overlay prédiction vs vérité, opacité réglable.</p></div>
+  </div>
+</div>
