@@ -42,18 +42,19 @@ with a dataset and a goal, the `solve_task` prompt frames a three-way decision a
 agent takes the cheapest path that genuinely fits:
 
 1. **Use a published app as-is** — no training. `list_apps` → `describe_app` (judge fit
-   from the app's own description and its declared inputs/outputs) → `run_app_infer`
-   (or `run_app_evaluate` / `run_app_uncertainty` / `run_app_pipeline`). Tune per run
-   by reading `list_app_parameters`, then passing `set_parameters` to the run tools.
+   from the app's own description and its declared inputs/outputs) → `import_app`, which
+   copies the app (config + code + checkpoints) into the session so it runs as a **normal
+   experiment**: `run_prediction` with the returned checkpoints. Tune per run by reading
+   `list_app_parameters`, then baking `set_parameters` into the imported config.
 2. **Fine-tune a published app** — start from an existing model instead of a blank
-   slate: `fine_tune_app` adapts it to the user's dataset.
+   slate: `import_app` it, then `run_resume` with `weights_only=True` warm-starts training
+   from the app's weights on the user's dataset.
 3. **Train from scratch** — author a config and run the train loop.
 
 Both training paths finish at the **same reusable artifact — a KonfAI app bundle**
-(`fine_tune_app` writes one directly; `package_app_from_session` packages a
-from-scratch model), which the agent can immediately run, share, or snapshot with
-`export_app`. No submission service is involved: the bundle is the KonfAI-native
-deliverable.
+(`package_app_from_session` packages a from-scratch model), which the agent can
+immediately re-`import_app`, share, or snapshot with `export_app`. No submission service
+is involved: the bundle is the KonfAI-native deliverable.
 
 Apps resolve from a **local path, a HuggingFace repo, or a remote server**, read from a
 layered catalogue (a shipped default, an editable per-workspace file, and the
@@ -102,8 +103,8 @@ KONFAI_MCP_APP_CATALOG = "/path/to/my_apps.json"   # optional: your own app sour
 | Author | `design_config_strategy`, `initialize_session`, `write_workflow_config`, `write_session_file` |
 | Validate | `review_config_semantics`, `validate_config_semantics` |
 | Run & monitor | `run_train`, `run_prediction`, `run_evaluation`, `wait_for_job`, `read_live_metrics`, `leaderboard` |
-| Use an app | `list_apps`, `describe_app`, `list_app_parameters`, `run_app_infer`, `run_app_evaluate`, `run_app_uncertainty`, `run_app_pipeline` |
-| Adapt & package | `fine_tune_app`, `package_app_from_session`, `export_app`, `register_app_source` |
+| Use an app | `list_apps`, `describe_app`, `list_app_parameters`, `import_app` (→ `run_prediction` with the returned checkpoints) |
+| Adapt & package | `import_app` → `run_resume` (`weights_only=True`), `package_app_from_session`, `export_app`, `register_app_source` |
 
 Most payloads include a `next_actions` list so the agent can chain calls without
 guessing the next valid step. The full per-tool contract is not duplicated here: it is

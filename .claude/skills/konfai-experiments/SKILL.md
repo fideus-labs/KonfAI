@@ -34,7 +34,7 @@ This is the tool order verified by the segmentation and synthesis end-to-end tes
 the discovery steps only when the dataset and task are already understood.
 
 **Route first (cheapest fit wins)**
-0. `list_apps` → `describe_app` — when the user wants a RESULT, check whether a published app already solves it (`run_app_infer`), or is a close starting point (`fine_tune_app`), BEFORE authoring and training from scratch. `run_resume` continues an interrupted session training.
+0. `list_apps` → `describe_app` → `import_app` — when the user wants a RESULT, check whether a published app already solves it BEFORE authoring and training from scratch. `import_app` copies the app into the session so it runs as a normal experiment: `run_prediction` with the returned checkpoints to use it as-is, or `run_resume` with `weights_only=True` to fine-tune from its weights. `run_resume` (without `weights_only`) continues an interrupted session training.
 
 **Discover (dataset-driven)**
 1. `browse_dataset` → `inspect_dataset` — choose the real dataset root, see groups + sampled stats (`include_stats=False` for a fast structural peek; `groups=[...]` when you need intensity ranges for normalization).
