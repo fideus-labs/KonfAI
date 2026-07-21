@@ -190,6 +190,44 @@ def run_distributed_app(
     return wrapper
 
 
+def _finetune_target_has_loss(model_subtree: Any) -> bool:
+    """Whether a resolved ``Trainer.Model`` subtree attaches at least one real training loss.
+
+    A RESUME whose model has ``outputs_criterions: None`` leaves ``network.measure is None``: the trainer
+    runs forward-only, updates no weights, yet still writes back a checkpoint identical to its input. Scan
+    every ``outputs_criterions`` in the subtree (a nested sub-network — a GAN — carries its own one level
+    deeper) and accept on the first real loss: a concrete criterion (not the ``default|a|b|c`` placeholder
+    key) whose ``is_loss`` is not ``false``. Optimizer presence is not required — nested GANs and inference
+    engines legitimately omit it, so it is no trainability signal.
+    """
+    found = False
+
+    def scan_criterions(node: Any, in_criterions_loader: bool) -> None:
+        nonlocal found
+        if found or not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            if found:
+                return
+            if in_criterions_loader and "|" not in str(key):
+                attrs = value if isinstance(value, dict) else {}
+                if attrs.get("is_loss", True) is not False:
+                    found = True
+                    return
+            scan_criterions(value, key == "criterions_loader")
+
+    def walk(node: Any) -> None:
+        if found or not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            if key == "outputs_criterions" and isinstance(value, dict):
+                scan_criterions(value, False)
+            walk(value)
+
+    walk(model_subtree)
+    return found
+
+
 class AbstractKonfAIApp:
     """Common base class for local and remote KonfAI App runners."""
 
@@ -1133,6 +1171,30 @@ class KonfAIApp(AbstractKonfAIApp):
                 for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(mask_path)):
                     KonfAIApp.symlink(source, Path(f"./Dataset/P{idx:03d}/Mask_{i}{suffix}"))
 
+    @staticmethod
+    def _stage_result_dir(output: Path, tmp_dir: Path | None, name: str) -> Path:
+        """Where a stage writes its results.
+
+        With a caller-owned workspace (``tmp_dir`` set -- e.g. konfai-mcp runs directly in the session
+        dir so the run is inspectable live), write straight into ``output`` -- no throwaway ``./<name>``
+        + copy. Otherwise write to ``./<name>`` in the isolated temp workspace, which the caller then
+        collects into ``output``.
+        """
+        return output.resolve() if tmp_dir is not None else Path(f"./{name}").resolve()
+
+    @staticmethod
+    def _clear_dataset() -> None:
+        """Drop the ``./Dataset`` staging.
+
+        The auto-created temp workspace is deleted wholesale, so this only matters when the caller owns
+        the workspace (``tmp_dir`` set): there ``output`` must keep the results alone, not the inputs.
+        """
+        link = Path("./Dataset")
+        if link.is_symlink() or link.is_file():
+            link.unlink()
+        elif link.is_dir():
+            shutil.rmtree(link, ignore_errors=True)
+
     @run_distributed_app
     def infer(
         self,
@@ -1196,6 +1258,7 @@ class KonfAIApp(AbstractKonfAIApp):
         # predictions_dir is passed explicitly: predict()'s default is resolved when konfai.predictor is
         # first imported, so a host that imports it before this chdir'd workspace (e.g. the konfai-mcp
         # job runner) would silently write predictions outside ./Predictions and break collection below.
+        result_dir = self._stage_result_dir(output, tmp_dir, "Predictions")
         predict(
             models_path,
             True,
@@ -1204,10 +1267,13 @@ class KonfAIApp(AbstractKonfAIApp):
             quiet,
             False,
             Path(prediction_file).resolve(),
-            predictions_dir=Path("./Predictions").resolve(),
+            predictions_dir=result_dir,
         )
-        if Path("./Predictions").absolute().exists():
-            shutil.copytree(Path("./Predictions").absolute(), output, dirs_exist_ok=True)
+        if tmp_dir is None:
+            if Path("./Predictions").absolute().exists():
+                shutil.copytree(Path("./Predictions").absolute(), output, dirs_exist_ok=True)
+        else:
+            self._clear_dataset()
 
     @run_distributed_app
     def evaluate(
@@ -1245,6 +1311,7 @@ class KonfAIApp(AbstractKonfAIApp):
         from konfai.evaluator import evaluate
 
         # evaluations_dir passed explicitly for the same import-time-default reason as predict() above.
+        result_dir = self._stage_result_dir(output, tmp_dir, "Evaluations")
         evaluate(
             True,
             gpu,
@@ -1252,10 +1319,13 @@ class KonfAIApp(AbstractKonfAIApp):
             quiet,
             False,
             Path(evaluation_file).resolve(),
-            evaluations_dir=Path("./Evaluations").resolve(),
+            evaluations_dir=result_dir,
         )
-        if Path("./Evaluations").exists():
-            shutil.copytree("./Evaluations", output, dirs_exist_ok=True)
+        if tmp_dir is None:
+            if Path("./Evaluations").exists():
+                shutil.copytree("./Evaluations", output, dirs_exist_ok=True)
+        else:
+            self._clear_dataset()
 
     @run_distributed_app
     def uncertainty(
@@ -1287,9 +1357,13 @@ class KonfAIApp(AbstractKonfAIApp):
         self.app_repository.install_uncertainty(uncertainty_file)
         from konfai.evaluator import evaluate
 
-        evaluate(True, gpu, cpu, quiet, False, Path(uncertainty_file).resolve(), Path("./Uncertainties/"))
-        if Path("./Uncertainties").exists():
-            shutil.copytree("./Uncertainties", output, dirs_exist_ok=True)
+        result_dir = self._stage_result_dir(output, tmp_dir, "Uncertainties")
+        evaluate(True, gpu, cpu, quiet, False, Path(uncertainty_file).resolve(), result_dir)
+        if tmp_dir is None:
+            if Path("./Uncertainties").exists():
+                shutil.copytree("./Uncertainties", output, dirs_exist_ok=True)
+        else:
+            self._clear_dataset()
 
     def pipeline(
         self,
@@ -1402,6 +1476,8 @@ class KonfAIApp(AbstractKonfAIApp):
         lr: float | None = None,
         config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
+        keep_training_artifacts: bool = False,
+        artifacts_root: Path | None = None,
     ) -> None:
         """
         Fine-tune one or several checkpoints of the app locally.
@@ -1414,8 +1490,10 @@ class KonfAIApp(AbstractKonfAIApp):
            distinct ``train_name``, run `konfai.trainer.train(...)` in resume mode, then copy the
            produced checkpoint back into the output app.
 
-        The output directory is left as a clean, resolvable app bundle (app.json + config + code +
-        fine-tuned checkpoint(s)); training artifacts (Checkpoints/Statistics) are kept out of it.
+        By default the output directory is left as a clean, resolvable app bundle (app.json + config +
+        code + fine-tuned checkpoint(s)) with training artifacts (Checkpoints/Statistics) kept out of it.
+        Pass ``keep_training_artifacts=True`` to instead write ``Checkpoints/``/``Statistics/`` into the
+        workspace, so a caller that runs in the workspace (konfai-mcp) keeps the full, inspectable run.
 
         Notes
         -----
@@ -1434,37 +1512,62 @@ class KonfAIApp(AbstractKonfAIApp):
 
         from konfai.trainer import train
 
-        # Keep training artifacts (Checkpoints/Statistics) outside the output so it stays a clean app.
-        work_dir = Path(tempfile.mkdtemp(prefix="konfai_finetune_")).resolve()
+        # Fine-tuning writes its scaffolding (per-model config copies, sanitised init checkpoints) and
+        # training artifacts (Checkpoints/Statistics) under ``train_root``. By default that is a scratch
+        # dir that is discarded, so the produced bundle stays a clean app -- konfai-apps' native isolation.
+        # When the caller keeps the full run (konfai-mcp runs in the workspace), ``train_root`` IS the
+        # workspace: no scratch dir, and no copy of the support files since they already sit there.
+        # ``train_root`` holds the scaffolding (per-model config copies, sanitised init checkpoints, the app
+        # support files). ``art_root`` holds the training run itself (Checkpoints/Statistics); it defaults to
+        # ``train_root`` but a caller (konfai-mcp) points it at the session root so the fine-tune shows up as
+        # a normal training run at the top of the workspace, not buried inside the produced bundle.
         config_path = Path(config_file)
-        # Relative classpaths (e.g. 'classpath: sub/UNet.yml') resolve against the config file's parent,
-        # so the app's support files -- including any that live in a subpackage -- must sit next to the
-        # per-model config copies written into work_dir, at the same relative path.
-        for support in Path(".").rglob("*"):
-            if not support.is_file() or "__pycache__" in support.parts:
-                continue
-            if support.suffix.lower() not in {".py", ".yml", ".yaml"}:
-                continue
-            if support.resolve() == config_path.resolve():
-                continue
-            dest = work_dir / support
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(support, dest)
+        work_dir: Path | None
+        if keep_training_artifacts:
+            work_dir = None
+            train_root = Path(".").resolve()
+        else:
+            work_dir = Path(tempfile.mkdtemp(prefix="konfai_finetune_")).resolve()
+            train_root = work_dir
+            # Relative classpaths ('classpath: sub/UNet.yml') resolve against the config's parent, so the
+            # app's support files must sit beside the per-model config copies in the scratch dir.
+            for support in Path(".").rglob("*"):
+                if not support.is_file() or "__pycache__" in support.parts:
+                    continue
+                if support.suffix.lower() not in {".py", ".yml", ".yaml"}:
+                    continue
+                if support.resolve() == config_path.resolve():
+                    continue
+                dest = train_root / support
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(support, dest)
+        art_root = artifacts_root.resolve() if artifacts_root is not None else train_root
         try:
             for checkpoint_name, checkpoint_src in selected_models:
                 stem = Path(checkpoint_name).stem
                 train_name = f"{name}_{stem}"
 
-                sanitized_ckpt = work_dir / f"{stem}_init.pt"
+                sanitized_ckpt = train_root / f"{stem}_init.pt"
                 torch.save(KonfAIApp._weights_only_checkpoint(checkpoint_src), sanitized_ckpt)  # nosec B614
 
-                model_config = work_dir / f"{config_path.stem}_{stem}{config_path.suffix}"
+                model_config = train_root / f"{config_path.stem}_{stem}{config_path.suffix}"
                 yaml = YAML()
                 with open(config_path) as file:
                     data = yaml.load(file)
                 data["Trainer"]["train_name"] = train_name
                 with open(model_config, "w") as file:
                     yaml.dump(data, file)
+
+                # A loss-less RESUME still writes a checkpoint, so the `if not produced` check below cannot
+                # catch it: refuse before the expensive run instead of returning an unchanged checkpoint.
+                if not _finetune_target_has_loss((data.get("Trainer") or {}).get("Model")):
+                    raise AppRepositoryError(
+                        f"Cannot fine-tune '{checkpoint_name}': its training config '{config_path.name}' "
+                        "attaches no loss (no 'outputs_criterions' carrying a real loss under "
+                        "'Trainer.Model'). A RESUME with no loss runs forward-only, updates no weights, and "
+                        "would write back a checkpoint identical to the input. Add an 'outputs_criterions' "
+                        "loss to the app's config, or run this inference-only app with 'infer'."
+                    )
 
                 train(
                     State.RESUME,
@@ -1475,12 +1578,12 @@ class KonfAIApp(AbstractKonfAIApp):
                     quiet,
                     False,
                     model_config,
-                    work_dir / "Checkpoints",
-                    work_dir / "Statistics",
+                    art_root / "Checkpoints",
+                    art_root / "Statistics",
                     lr=lr,
                 )
 
-                produced_dir = work_dir / "Checkpoints" / train_name
+                produced_dir = art_root / "Checkpoints" / train_name
                 produced = sorted(produced_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
                 if not produced:
                     raise AppRepositoryError(
@@ -1505,7 +1608,8 @@ class KonfAIApp(AbstractKonfAIApp):
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(artifact, dst)
         finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            if work_dir is not None:
+                shutil.rmtree(work_dir, ignore_errors=True)
             dataset_link = Path("./Dataset")
             if dataset_link.is_symlink() or dataset_link.is_file():
                 dataset_link.unlink()

@@ -770,8 +770,12 @@ class LocalAppRepository(AppRepositoryInfo):
         if not is_app_repo(filenames):
             raise AppRepositoryError(f"'{self._app_name}' is not a valid KonfAI app (no app.json); cannot export.")
         path.mkdir(parents=True, exist_ok=True)
+        root = path.resolve()
         for filename in filenames:
-            dest = path / filename
+            # A bundle filename is untrusted (HF tree / app.json); refuse one that escapes the export dir.
+            dest = (path / filename).resolve()
+            if dest != root and root not in dest.parents:
+                raise AppRepositoryError(f"App file '{filename}' escapes the export directory; refusing to copy.")
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self._download(filename), dest)
 
@@ -788,6 +792,25 @@ class LocalAppRepository(AppRepositoryInfo):
             if not config.is_file():
                 raise AppRepositoryError(f"Cannot apply tuned defaults: '{prediction_file}' not found in the export.")
             self._apply_config_overrides(str(config), config_overrides)
+
+    def download_bundle(
+        self,
+        path: Path,
+        display_name: str | None = None,
+        config_overrides: list[str] | None = None,
+        prediction_file: str = "Prediction.yml",
+    ) -> list[str]:
+        """Copy the whole app into ``path`` (via ``export_app``) and pip-install its requirements. The
+        install is the caller-gated trust boundary. Returns the copied filenames."""
+        self.export_app(
+            path,
+            display_name=display_name,
+            config_overrides=config_overrides,
+            prediction_file=prediction_file,
+        )
+        filenames = self._get_filenames()
+        self._install_requirements(filenames)
+        return filenames
 
     @abstractmethod
     def _get_filenames(self) -> list[str]:
