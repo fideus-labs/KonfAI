@@ -490,11 +490,20 @@ class MinimalLog:
             self._buffered_line = msg_clean.strip()
 
         if self.verbose and (self.rank == 0 or "KONFAI_CLUSTER" in os.environ):
-            self._stdout_bak.write(msg)
-            self._stdout_bak.flush()
+            # The console mirror is best-effort: if its reader is gone (an interactive launcher exited, a
+            # server restarted), the pipe is broken — keep running and keep writing to the log file rather
+            # than crashing the job.
+            try:
+                self._stdout_bak.write(msg)
+                self._stdout_bak.flush()
+            except (BrokenPipeError, ValueError):
+                pass
 
     def flush(self):
-        self._stdout_bak.flush()
+        try:
+            self._stdout_bak.flush()
+        except (BrokenPipeError, ValueError):
+            pass
 
     def fileno(self):
         if sys.__stdout__ is None:

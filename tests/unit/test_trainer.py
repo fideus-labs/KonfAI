@@ -92,6 +92,7 @@ def _build_trainer(tmp_path: Path, monkeypatch, date_values: list[str], early_st
         it=0,
         model=cast(Any, _DummyModel()),
         model_ema=None,
+        config_snapshot=tmp_path / "Config.yml",
         dataloader_training=[object()],
         dataloader_validation=None,
     )
@@ -407,6 +408,38 @@ def test_resume_with_override_restarts_lr_and_scheduler() -> None:
     # Decaying from the override reproduces a fresh schedule anchored at ``override``.
     scheduler.step()
     assert net.optimizer.param_groups[0]["lr"] == override * _GAMMA
+
+
+def test_rebase_lr_makes_a_live_change_stick_past_the_scheduler() -> None:
+    # The live-tuning LR knob must survive the next scheduler.step(), unlike a naive param_groups write that a
+    # base_lrs scheduler would clobber back to the old anchor.
+    new_lr = 0.03
+    net, scheduler, _ = _make_net(lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=_GAMMA))
+
+    net.rebase_lr(new_lr)
+
+    assert net.optimizer.param_groups[0]["lr"] == new_lr
+    assert scheduler.base_lrs == [new_lr]
+    scheduler.step()
+    assert net.optimizer.param_groups[0]["lr"] == new_lr * _GAMMA
+
+
+def test_apply_tunables_changes_it_validation_and_audits(tmp_path: Path, monkeypatch) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["run"])
+    trainer.it = 40
+
+    applied = trainer._apply_tunables({"it_validation": 5})
+
+    assert trainer.it_validation == 5
+    assert applied == [{"it": 40, "key": "it_validation", "from": 1, "to": 5}]
+
+
+def test_apply_tunables_clamps_it_validation_to_at_least_one(tmp_path: Path, monkeypatch) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["run"])
+
+    trainer._apply_tunables({"it_validation": 0})
+
+    assert trainer.it_validation == 1  # a 0 interval would ZeroDivisionError the loop's modulo check
 
 
 def test_resume_with_override_restarts_polylr_from_value() -> None:
