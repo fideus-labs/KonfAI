@@ -42,8 +42,11 @@ def _is_int(value: Any) -> bool:
 
 
 def _is_override(value: Any) -> bool:
-    # 'NAME=VALUE' only: a leading '-' would be parsed as a flag by the job subprocess's argparse.
-    return isinstance(value, str) and "=" in value and not value.startswith("-")
+    # 'NAME=VALUE' only: a leading '-' would be parsed as a flag by the job subprocess's argparse, and an
+    # empty NAME ('=value') is rejected here (422) instead of failing after the job is dispatched.
+    return (
+        isinstance(value, str) and "=" in value and not value.startswith("-") and value.split("=", 1)[0].strip() != ""
+    )
 
 
 # Field -> (validator, expected shape for the 422 detail, JSON value -> CLI args).
