@@ -21,7 +21,6 @@ cannot be honoured must fail loudly (HTTP 422 server-side, ``KonfAIAppClientErro
 never be silently dropped.
 """
 
-import importlib.util
 import inspect
 import json
 import shutil
@@ -31,18 +30,18 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+# Before importing anything that pulls in FastAPI (app_server, the TestClient): a module-level import runs
+# at collection, so pytestmark would skip too late and collection would error when FastAPI is absent.
+pytest.importorskip("fastapi")
+
 import konfai_apps.app as app_module
 import konfai_apps.app_server as app_server
 import konfai_apps.cli as apps_cli_module
-import pytest
 from fastapi.testclient import TestClient
 from konfai.utils.errors import KonfAIAppClientError
 from konfai_apps.remote_options import REMOTE_OPTION_FIELDS
-
-pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("fastapi") is None,
-    reason="fastapi is not installed",
-)
 
 TUNABLE_VALUES: dict[str, Any] = {
     "patch_size": [160, 160, 160],
