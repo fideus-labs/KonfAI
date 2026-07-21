@@ -59,6 +59,7 @@ from konfai import (
     predictions_directory,
     statistics_directory,
 )
+from konfai.utils.errors import ConfigError
 
 
 class ClusterKwargs(TypedDict):
@@ -372,12 +373,15 @@ def clear_directory_except_logs(path: Path) -> None:
     to delete a directory holding an open file. Clearing around the live logs preserves them.
     """
     for child in path.iterdir():
-        if child.name.startswith("log_") and child.suffix == ".txt":
+        # Preserve only a regular log file: a directory or symlink merely named log_*.txt is not a live log.
+        if child.is_file() and not child.is_symlink() and child.name.startswith("log_") and child.suffix == ".txt":
             continue
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
+        # is_dir() follows symlinks, so unlink a symlink (even one to a directory) instead of rmtree-ing
+        # through it into the target's contents.
+        if child.is_symlink() or not child.is_dir():
             child.unlink()
+        else:
+            shutil.rmtree(child)
 
 
 def _log_signal_format(array: np.ndarray) -> dict[str, np.ndarray]:
@@ -509,7 +513,14 @@ class Log(MinimalLog):
             path = evaluations_directory()
         else:
             path = statistics_directory()
+        # ``name`` is train_name from the config; an absolute path or '..' segments would place the logs
+        # outside the run's output directory. A nested run name stays inside and is fine.
         self.log_path = path / name
+        if not self.log_path.resolve().is_relative_to(path.resolve()):
+            raise ConfigError(
+                f"train_name '{name}' resolves outside the output directory.",
+                "Use a plain run name, without an absolute path or '..' segments.",
+            )
         self.log_path.mkdir(parents=True, exist_ok=True)
         # Append, never truncate: this file is opened BEFORE the overwrite prompt runs, so a "w" mode
         # destroyed the previous run's log even when the user declined the overwrite.
