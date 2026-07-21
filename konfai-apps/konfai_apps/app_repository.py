@@ -85,7 +85,9 @@ def _constraint_of_annotation(annotation: Any) -> dict[str, Any] | None:
 def _constraints_of_class(cls: type) -> dict[str, Any]:
     """Constraints of every configurable arg of ``cls.__init__`` (recursing into nested ``@config`` classes)."""
     out: dict[str, Any] = {}
-    for name, param in inspect.signature(cls.__init__).parameters.items():
+    # Reflect the declared __init__ signature (self is skipped below); the instance-access warning
+    # does not apply to a reflection lookup on the class object.
+    for name, param in inspect.signature(cls.__init__).parameters.items():  # type: ignore[misc]
         if name == "self":
             continue
         constraint = _constraint_of_annotation(param.annotation)
@@ -715,6 +717,8 @@ class LocalAppRepository(AppRepositoryInfo):
         sys.path.insert(0, str(path.parent))
         try:
             spec = importlib.util.spec_from_file_location(f"_konfai_app_model_{module_stem}", path)
+            if spec is None or spec.loader is None:
+                raise AppRepositoryError(f"Cannot load module '{module_stem}' from '{path}'.")
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return getattr(module, class_name)
@@ -940,7 +944,7 @@ class LocalAppRepository(AppRepositoryInfo):
         installed = {
             canonicalize_name(dist.metadata["Name"]): dist.version
             for dist in importlib.metadata.distributions()
-            if dist.metadata.get("Name")
+            if dist.metadata["Name"]
         }
         missing_or_outdated = []
         for line in required_lines:

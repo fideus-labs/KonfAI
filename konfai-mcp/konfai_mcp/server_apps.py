@@ -733,11 +733,11 @@ class AppService:
                     suffix = ":".join(part for part in (flag, file_format) if part)
                     rewritten.append("./Dataset/" + (f":{suffix}" if suffix else ""))
                 dataset["dataset_filenames"] = list(dict.fromkeys(rewritten))
-            outputs_dataset = predictor.get("outputs_dataset")
+            outputs_dataset = predictor.get("outputs_dataset") if isinstance(predictor, dict) else None
             for spec in outputs_dataset.values() if isinstance(outputs_dataset, dict) else []:
                 output = spec.get("OutputDataset") if isinstance(spec, dict) else None
                 same_as = output.get("same_as_group") if isinstance(output, dict) else None
-                if isinstance(same_as, str):
+                if isinstance(same_as, str) and isinstance(output, dict):
                     src, sep, dest = same_as.partition(":")
                     if src in renames:
                         output["same_as_group"] = renames[src] + sep + dest
