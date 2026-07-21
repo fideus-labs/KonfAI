@@ -59,7 +59,11 @@ class DatasetInspectionMixin:
                 break
             if depth >= max_depth:
                 continue
-            children = sorted([path for path in current.iterdir() if path.is_dir()], key=lambda path: path.name)
+            try:
+                children = sorted([path for path in current.iterdir() if path.is_dir()], key=lambda path: path.name)
+            except OSError:
+                # An unreadable subdirectory (permissions, a broken mount) must not abort the whole scan.
+                continue
             for child in children:
                 queue.append((child, depth + 1))
 

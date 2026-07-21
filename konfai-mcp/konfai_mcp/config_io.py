@@ -34,8 +34,10 @@ YAML_DUMP.width = 4096
 
 def validate_yaml_content(content: str, filename: str, expected_root: str | None = None) -> dict[str, Any]:
     """Parse YAML content and optionally enforce one top-level root key."""
+    # A fresh parser per call: a ruamel.yaml instance keeps mutable state, so a shared one is unsafe under
+    # concurrent (SSE/HTTP) requests.
     try:
-        data = YAML_SAFE.load(content)
+        data = YAML(typ="safe").load(content)
     except Exception as exc:  # pragma: no cover - parser exceptions vary
         raise ValueError(f"{filename} is not valid YAML: {exc}") from exc
     if not isinstance(data, dict):
@@ -47,8 +49,11 @@ def validate_yaml_content(content: str, filename: str, expected_root: str | None
 
 def yaml_dump_content(data: dict[str, Any]) -> str:
     """Serialize a mapping into normalized YAML content."""
+    emitter = YAML()  # fresh per call: the shared emitter's mutable state is unsafe under concurrency
+    emitter.default_flow_style = False
+    emitter.width = 4096
     stream = StringIO()
-    YAML_DUMP.dump(data, stream)
+    emitter.dump(data, stream)
     return stream.getvalue()
 
 
