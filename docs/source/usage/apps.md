@@ -114,6 +114,8 @@ The app CLI currently exposes these subcommands:
 - `uncertainty`
 - `pipeline`
 - `fine-tune`
+- `bundle`
+- `download`
 
 The main command pattern is:
 

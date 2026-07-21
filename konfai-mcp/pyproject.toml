@@ -23,9 +23,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/vboussot/KonfAI"
-Repository = "https://github.com/vboussot/KonfAI"
-Issues = "https://github.com/vboussot/KonfAI/issues"
+Homepage = "https://github.com/fideus-labs/KonfAI"
+Repository = "https://github.com/fideus-labs/KonfAI"
+Issues = "https://github.com/fideus-labs/KonfAI/issues"
 License = "https://www.apache.org/licenses/LICENSE-2.0"
 
 [project.scripts]

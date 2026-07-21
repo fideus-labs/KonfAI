@@ -108,10 +108,16 @@ move), re-plans the patch grid and re-runs the rank's cases — typically one
 restart. The chosen size also reserves room for the accumulation, so the blend
 stays on the GPU; when that reservation cannot fit (or cannot be measured), the
 forward is sized alone and the writer blends on the host instead. `overlap`
-accepts voxels, a fraction (`0.2`), a percent string
-(`"20%"`) or a per-axis list, resolved after the size; an axis a single patch
-spans gets none. A `patch_size` without a `0` is never resized: the OOM
-propagates.
+accepts a voxel count (`8`), a percent string (`"20%"`), or `null` (a 20%
+default), resolved after the size; an axis a single patch spans gets none. A
+`patch_size` without a `0` is never resized: the OOM propagates.
+
+```{note}
+The patch engine also understands a fractional overlap (`0.2`) and a per-axis
+list, but the config binder does not yet bind those forms — a YAML `overlap: 0.2`
+currently coerces to `0` (no overlap) and a list errors. Use the voxel-count or
+percent-string form.
+```
 
 ## `outputs_dataset`
 

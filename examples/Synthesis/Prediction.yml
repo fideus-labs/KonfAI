@@ -1,30 +1,12 @@
 Predictor:
   Model:
     classpath: Model:UNetpp5 # Shared predictor for both the baseline checkpoint and the generator extracted from a GAN checkpoint
-    outputs_criterions:    # Keep prediction lightweight; metrics are computed afterward in Evaluation.yml
-      default:
-        targets_criterions:
-          Labels:
-            criterions_loader:
-              torch:nn:CrossEntropyLoss:
-                schedulers:
-                  Constant:
-                    nb_step: 0
-                is_loss: true
-                group: 0
-                start: 0
-                stop: None
-                accumulation: false
-    Patch:
-      patch_size:
-      - 128
-      - 128
-      - 128
-      overlap: None
-      patch_combine: None
-      pad_value: 0
-      extend_slice: 0
-    dim: 2
+    UNetpp5:
+      # Keep prediction lightweight: no losses (metrics are computed afterward in Evaluation.yml),
+      # no internal model tiling (the 512x512 slice is predicted whole). Mirrors Config.yml's UNetpp5 block.
+      outputs_criterions: None
+      ModelPatch: None
+      dim: 2
   Dataset:
     groups_src:  # Mapping between dataset modalities and model inputs
       MR:

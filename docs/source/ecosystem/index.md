@@ -122,7 +122,7 @@ or experimental**, so you know what you can rely on today.
 | **`konfai-apps`** | ✅ Shipped (PyPI, own CI) | Packages a mature workflow as a reusable **app** — see {doc}`../usage/apps`. |
 | **`konfai-mcp`** | ✅ Shipped (PyPI, own CI) | Operates KonfAI workflows and Apps through structured tools for dataset inspection, config authoring and validation, job execution, monitoring, metrics, and comparison — see {doc}`../usage/mcp`. |
 | **App bundles** (`apps/`) | ✅ Shipped (thin wrappers) | Ready-to-use CLI shims: `impact-synth-konfai`, `impact-seg-konfai`, `mrsegmentator-konfai`, `totalsegmentator-konfai`. Config + weights live on Hugging Face and download on first run. |
-| **`impact-reg-konfai`** | 🟡 Shipped, heaviest | A full multi-preset registration orchestrator (Elastix + the IMPACT semantic metric), **not** a thin wrapper. The most moving parts of the five. |
+| **`impact-reg-konfai`** | 🟡 Shipped, heaviest | A full multi-preset registration orchestrator with Elastix, ConvexAdam, and FireANTs engines behind the IMPACT semantic metric, **not** a thin wrapper. The most moving parts of the five. |
 | **Demo data & models (HF)** | ✅ Published | `VBoussot/konfai-demo` (demo dataset), plus per-app model repos (`ImpactSynth`, `ImpactSeg`, `TotalSegmentator-KonfAI`, `MRSegmentator-KonfAI`, `ImpactReg`) and `impact-torchscript-models` (the SAM2.1 backbone behind `IMPACTSynth`). |
 | **Challenge repos** | ✅ External | Top-ranking MICCAI-challenge projects built on KonfAI (SynthRAD 2025 T1/T2, TrackRAD 2025, Panther, CURVAS, CURVAS-PDACVI). Referenced from the README; not in this tree. |
 

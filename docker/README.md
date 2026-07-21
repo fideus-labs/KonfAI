@@ -37,7 +37,7 @@ Build a specific KonfAI version from PyPI:
 
 ```bash
 docker build -f docker/Dockerfile \
-  --build-arg KONFAI_PYPI_VERSION=1.5.3 \
+  --build-arg KONFAI_PYPI_VERSION=1.6.0 \
   -t konfai .
 ```
 
@@ -45,7 +45,7 @@ Build with additional optional dependencies:
 
 ```bash
 docker build -f docker/Dockerfile \
-  --build-arg KONFAI_EXTRAS=server,cluster \
+  --build-arg KONFAI_EXTRAS=imaging,cluster \
   -t konfai .
 ```
 

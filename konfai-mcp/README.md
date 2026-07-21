@@ -73,7 +73,7 @@ Tests:
 For local development, install both the KonfAI core package and the MCP package:
 
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
+git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 
 python -m pip install -U pip

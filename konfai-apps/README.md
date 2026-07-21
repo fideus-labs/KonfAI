@@ -38,7 +38,7 @@ python -m pip install konfai-apps
 From a local checkout of this monorepo:
 
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
+git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 python -m pip install -e .
 python -m pip install -e ./konfai-apps

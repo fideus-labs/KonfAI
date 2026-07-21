@@ -26,7 +26,7 @@ These tools are provided by the `konfai-mcp` MCP server and appear namespaced as
 `mcp__konfai__<tool>` (e.g. `mcp__konfai__inspect_dataset`). If they are absent, the server
 is not wired into this client — run `scripts/check_setup.py` to distinguish "not installed"
 from "installed but not wired", then see [references/resources-and-clients.md](references/resources-and-clients.md).
-(The package lives only on the private `konfai-mcp` git branch.)
+(`konfai-mcp` is on `main` and published to PyPI; install with `pip install konfai-mcp` or `-e ./konfai-mcp`.)
 
 ## The canonical loop
 

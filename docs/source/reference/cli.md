@@ -104,6 +104,8 @@ This command is provided by the standalone `konfai-apps` package.
 | `uncertainty` | Run uncertainty estimation for an app. |
 | `pipeline` | Chain inference, evaluation, and optional uncertainty. |
 | `fine-tune` | Fine-tune an app on a dataset. |
+| `bundle` | Assemble an app bundle (HF layout), optionally with a portable ONNX model. |
+| `download` | Pre-fetch an app's files from Hugging Face into the local cache (offline use). |
 
 ### Shared options
 
@@ -151,6 +153,26 @@ This command is provided by the standalone `konfai-apps` package.
 - `--epochs`
 - `--it-validation`
 - `--config` (aliases: `--config-file`, `--config_file`)
+
+### Tuning a preset (`--set`, `--patch-size`, `--batch-size`)
+
+`infer` and `pipeline` accept parameter overrides so you can adapt a
+published App without editing its bundled config:
+
+| Option | Meaning |
+| --- | --- |
+| `--set NAME=VALUE` | Override any config value (repeatable). A bare `NAME` tunes a model parameter (`--set iterations=300`); a dotted `NAME` is a full path from the config root (`--set Predictor.Dataset.batch_size=2`). The value is parsed as YAML (int / float / bool / list / string). |
+| `--patch-size` | Override the inference `Patch.patch_size` (one value = an isotropic cube; else per-axis). Overrides the App's auto `vram_plan` choice. |
+| `--batch-size` | Override the inference batch size. |
+
+These are the same knobs SlicerKonfAI drives through its ⚙ **Advanced** dialog.
+
+```{warning}
+Parameter overrides currently apply to **local** execution only. In remote mode
+(`--host …`) `--set` / `--patch-size` / `--batch-size` are not yet forwarded to the
+server and take no effect — run the tuning locally, or against a bundle you resolve
+directly.
+```
 
 ## `konfai-apps-server`
 

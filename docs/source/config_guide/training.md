@@ -87,7 +87,7 @@ Common nested fields used by built-in and local models:
 | `optimizer` | mapping | Usually | Optimizer configuration passed through `OptimizerLoader`. |
 | `schedulers` | mapping | Optional | Learning-rate schedulers keyed by classpath. |
 | `outputs_criterions` | mapping | Usually | Declares losses and metrics attached to specific model outputs. |
-| `Patch` | mapping | Optional | Enables model-level patching via `ModelPatch`. |
+| `ModelPatch` | mapping or null | Optional | Enables a second, model-level patch inside the network (a config key named `ModelPatch`, distinct from `Dataset.Patch`). |
 | `dim` | int | Model-dependent | Declares whether the network operates in 2D or 3D. |
 
 ### `outputs_criterions`
@@ -129,7 +129,7 @@ Common fields:
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
 | `memory_budget` | number / string / null | `null` = `auto` | RAM budget the loading regime is derived from: the dataset caches when its per-rank share fits, streams otherwise. An absent key (`null`) means `auto`: 80% of the detected memory decides. |
-| `subset` | object | `TrainSubset()` | Restricts which cases are used. |
+| `subset` | string / list / null | `null` | Restricts which cases are used — a flat selector (a case-list file, a list of names, or a `start:end` slice), not a nested object. `shuffle` and `shuffle_window` are sibling `Dataset` keys. |
 | `batch_size` | int | `1` | Batch size. |
 | `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` on the cache regime, and to `max(1, min(cpu_count, 4))` on the stream/buffer regime. A `KonfAIInference` transform in any group forces `0` whatever the value. |
 | `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |

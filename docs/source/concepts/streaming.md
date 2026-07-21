@@ -46,7 +46,7 @@ Two keys under `Dataset:`:
 | Key | Default | Where | Effect |
 | --- | --- | --- | --- |
 | `memory_budget` | `null` = `auto` | all three workflows | Derives the regime from the dataset's size; an absent key means `auto`. |
-| `subset.shuffle_window` | `null` | `Trainer:` | Bounds how many cases stay resident on the buffer path. |
+| `shuffle_window` | `null` | `Trainer:` | Bounds how many cases stay resident on the buffer path. |
 
 Both are listed in {doc}`../config_guide/training`.
 

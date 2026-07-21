@@ -283,8 +283,8 @@ class AddNoise(DataAugmentation):
     ) -> list[list[int]]:
         return shapes
 
-    def _compute(self, name: str, index: int, tensors: list[torch.Tensor]) -> list[torch.Tensor]:
-        return [tensor + torch.randn_like(tensor.float()) * self.sigma for tensor in tensors]
+    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor + torch.randn_like(tensor.float()) * self.sigma
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         return tensor
@@ -304,7 +304,9 @@ augmentations:
 
 ### Augmentation contract details
 
-- Augmentations operate on a list of tensors, not on a single tensor.
+- `_compute(name, index, a, tensor)` receives **one tensor at a time** — `a`
+  identifies the augmented copy within the case; KonfAI applies it across the
+  group in `__call__`, so each call returns a single tensor.
 - `prob` lives in the same YAML branch as the augmentation-specific parameters.
 - `_state_init(...)` is the right place to sample random state that must stay
   consistent across groups.

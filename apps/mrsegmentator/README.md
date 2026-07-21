@@ -1,7 +1,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/mrsegmentator-konfai.svg?color=blue)](https://pypi.org/project/mrsegmentator-konfai/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml)
+[![CI](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://www.arxiv.org/abs/2508.09823)
 
 # MRSegmentator-KonfAI 
@@ -12,7 +12,7 @@
 
 ## 🧩 Overview
 
-**MRSegmentator-KonfAI** is a lightweight **command-line interface (CLI)** for running **[MRSegmentator](https://github.com/hhaentze/MRSegmentator)** models through the [KonfAI](https://github.com/vboussot/KonfAI) deep learning framework.
+**MRSegmentator-KonfAI** is a lightweight **command-line interface (CLI)** for running **[MRSegmentator](https://github.com/hhaentze/MRSegmentator)** models through the [KonfAI](https://github.com/fideus-labs/KonfAI) deep learning framework.
 
 It provides **fast and efficient inference** for whole-body MRI segmentation, including on low-resource hardware.  
 
@@ -59,7 +59,7 @@ Same input, same weights (5-fold ensemble), same PyTorch build (cu13.0), single
 
 ## 🧠 Features
 
-- ⚡ **Fast inference** powered by [KonfAI](https://github.com/vboussot/KonfAI)
+- ⚡ **Fast inference** powered by [KonfAI](https://github.com/fideus-labs/KonfAI)
 - 🤗 **Automatic model download** from Hugging Face
 - 🧩 **Multi-model ensembling**
 - 🧠 **Supports evaluation workflows with reference data, and uncertainty estimation without reference**
@@ -76,7 +76,7 @@ python -m pip install mrsegmentator-konfai
 
 From source:
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
+git clone https://github.com/fideus-labs/KonfAI.git
 python -m pip install -e apps/mrsegmentator
 ```
 

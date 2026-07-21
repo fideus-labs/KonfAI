@@ -173,9 +173,9 @@ KonfAI
          </a>
          <a class="kf-nextcard kf-h-coral" href="usage/apps.html">
            <span class="intent">Ship</span>
-           <h3>As an app</h3>
-           <p>Package a stable workflow behind <code>konfai-apps</code> &mdash; local, HuggingFace,
-              or an HTTP server.</p>
+           <h3>Run or ship an app</h3>
+           <p>Run a published app with one command, or package your own workflow behind
+              <code>konfai-apps</code> &mdash; local, HuggingFace, or an HTTP server.</p>
            <span class="go">Apps &amp; API &rarr;</span>
          </a>
          <a class="kf-nextcard kf-h-amber" href="usage/mcp.html">

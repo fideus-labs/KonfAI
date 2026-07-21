@@ -47,7 +47,7 @@ From source:
 
 .. code-block:: bash
 
-   git clone https://github.com/vboussot/KonfAI.git
+   git clone https://github.com/fideus-labs/KonfAI.git
    cd KonfAI
    python -m pip install -e ".[imaging]"
 

@@ -79,6 +79,27 @@ The `Model:UNetpp5` used in the `Synthesis` example is a **local** class in
 | --- | --- | --- | --- | --- |
 | `Representation` | `representation.representation.Representation` | Self-supervised / triplet-style representation learner: a frozen conv encoder + trainable linear projection head. | 3D | No |
 
+## Features — `konfai.models.python.features`
+
+| Model | Classpath | Purpose | Dims |
+| --- | --- | --- | --- |
+| `MIND` | `features.mind.MIND` | Modality-independent neighbourhood-descriptor feature extractor (used as a registration/synthesis feature space). | 2D/3D |
+
+## YAML-only catalog (`classpath: default|<Name>.yml`)
+
+Beyond the Python classes above, KonfAI ships a **declarative model catalog** —
+addressable directly as `classpath: default|<Name>.yml`, discoverable by name,
+and built by the safe-by-construction YAML model builder (see
+{doc}`../../concepts/yaml-model-builder`):
+
+`UNet`, `NestedUNet`, `UNetPlusPlus`, `AttentionUNet`, `ResidualEncoderUNet`,
+`PlainConvUNet`, `DynUNet`, `SegResNet`, `VNet`, `UNETR`, `ViT`, `ResNet`,
+`ResNet18`, `VGG16`.
+
+Several are weight-exact to their MONAI / nnU-Net / torchvision references (each
+file's header states the fidelity level); the pretrained bridge can load an
+external checkpoint into a weight-exact catalog graph.
+
 ## Building blocks (`konfai.network.blocks`)
 
 If you author your own model — as a Python `Network` or a YAML graph — these

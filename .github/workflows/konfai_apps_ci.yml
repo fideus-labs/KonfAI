@@ -66,6 +66,9 @@ jobs:
         run: |
           pip install -e ./konfai-apps
 
+      - name: Pin gloo to the loopback interface on macOS
+        if: runner.os == 'macOS'
+        run: echo "GLOO_SOCKET_IFNAME=lo0" >> "$GITHUB_ENV"
       - name: Run apps tests
         run: |
           python -m pytest -q konfai-apps/tests

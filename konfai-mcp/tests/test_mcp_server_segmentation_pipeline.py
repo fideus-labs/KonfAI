@@ -156,7 +156,9 @@ def test_mcp_server_segmentation_template_pipeline(
             prediction_cfg["Predictor"]["Dataset"]["Patch"]["patch_size"] = [1, 32, 32]
             prediction_cfg["Predictor"]["Dataset"]["batch_size"] = 64
             prediction_cfg["Predictor"]["Model"]["UNet"]["parameters"]["channels"] = [1, 4, 8, 16, 32]
-            prediction_cfg["Predictor"]["Model"]["UNet"]["ModelPatch"]["patch_size"] = [32, 32]
+            # The shipped example declares ModelPatch: None (no internal tiling); this smoke test
+            # patches at 32x32, so it must REPLACE the value, not mutate into the 'None' marker.
+            prediction_cfg["Predictor"]["Model"]["UNet"]["ModelPatch"] = {"patch_size": [32, 32]}
 
             evaluation_cfg = _yaml_load(session_dir / "Evaluation.yml")
             evaluation_cfg["Evaluator"]["train_name"] = "SEG_SMOKE"

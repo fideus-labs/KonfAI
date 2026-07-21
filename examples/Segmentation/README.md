@@ -2,7 +2,7 @@
 
 This example provides a **simple multiclass segmentation baseline** for KonfAI.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vboussot/KonfAI/blob/main/examples/Segmentation/Segmentation_demo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/Segmentation/Segmentation_demo.ipynb)
 
 It is intentionally conservative and is meant to be:
 
@@ -54,8 +54,8 @@ Model:
 Use the **YAML form** for a no-code, shareable model (safe by construction — it can only
 reference a curated set of block types). Reach for the **Python form** when a model needs a
 custom `forward` or logic a declarative graph cannot express (the Synthesis example is such a
-case). Because both expose the same named output `UNetBlock_0:Head`, `outputs_criterions` in
-`Config.yml` is unchanged when you swap between them.
+case). Because both expose the same named output (`Config.yml` keys the loss on
+`UNetBlock_0:Head:Conv`), `outputs_criterions` is unchanged when you swap between them.
 
 The notebook is designed to work from a **fresh environment**, including **Google Colab**. Its setup cells can:
 

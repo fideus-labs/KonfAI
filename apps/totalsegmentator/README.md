@@ -1,8 +1,8 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/totalsegmentator-konfai.svg?color=blue)](https://pypi.org/project/totalsegmentator-konfai/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml)
-[![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_apps_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_apps_ci.yml)
+[![CI](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml)
+[![CI](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_apps_ci.yml/badge.svg)](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_apps_ci.yml)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://www.arxiv.org/abs/2508.09823)
 
 # TotalSegmentator-KonfAI
@@ -13,7 +13,7 @@
 
 ## 🧩 Overview
 
-**TotalSegmentator-KonfAI** is a lightweight **command-line interface (CLI)** for running **[TotalSegmentator](https://github.com/wasserth/TotalSegmentator)** models for **multi-organ medical image segmentation**, through the [KonfAI](https://github.com/vboussot/KonfAI) deep learning framework.
+**TotalSegmentator-KonfAI** is a lightweight **command-line interface (CLI)** for running **[TotalSegmentator](https://github.com/wasserth/TotalSegmentator)** models for **multi-organ medical image segmentation**, through the [KonfAI](https://github.com/fideus-labs/KonfAI) deep learning framework.
 
 It provides **fast and efficient inference** for segmentation tasks, including on low-resource hardware. Pretrained models are automatically downloaded from [Hugging Face Hub](https://huggingface.co/VBoussot/TotalSegmentator-KonfAI).
 
@@ -62,7 +62,7 @@ resident set; peak VRAM = over baseline.
 
 ## 🧠 Features
 
-- ⚡ **Fast inference** powered by [KonfAI](https://github.com/vboussot/KonfAI)
+- ⚡ **Fast inference** powered by [KonfAI](https://github.com/fideus-labs/KonfAI)
 - 🤗 **Automatic model download** from Hugging Face
 - 🧠 **Supports evaluation workflows with reference data**
 - 🧾 **Multi-format compatibility:** supports all major medical image formats handled by ITK
@@ -76,7 +76,7 @@ python -m pip install totalsegmentator-konfai
 
 From source:
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
+git clone https://github.com/fideus-labs/KonfAI.git
 python -m pip install -e apps/totalsegmentator
 ```
 

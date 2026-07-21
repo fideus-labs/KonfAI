@@ -25,7 +25,7 @@ cloned KonfAI checkout.**
 ## Clone and install
 
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
+git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 pixi install       # resolves and installs all Pixi environments
 ```
@@ -47,12 +47,13 @@ Where each part of the codebase lives:
 | `konfai.network` | Model graph composition, optimizer/scheduler loaders, criterion routing |
 | `konfai.metric` | Metrics, losses, and schedulers |
 | `konfai.utils` | Config system, dataset helpers, distributed runtime utilities |
-| `konfai_apps` | Standalone package for local/remote app execution and app server |
+| `konfai_apps` | Standalone package (in `konfai-apps/`) for local/remote app execution and the app server |
+| `konfai_mcp` | Standalone package (in `konfai-mcp/`) exposing KonfAI workflows and Apps to LLM agents via a FastMCP server |
 
 ```{note}
-`konfai_apps` lives in `konfai-apps/` with its own `pyproject.toml`, dependencies,
-and tests — it is installed and tested separately from the core package (see
-below).
+`konfai_apps` and `konfai_mcp` each live in their own directory with their own
+`pyproject.toml`, dependencies, and tests — they are installed and tested
+separately from the core package (see below).
 ```
 
 ## Available tasks
@@ -68,7 +69,8 @@ Run tasks with `pixi run <task>`:
 | `format-check` | `ruff format --check ...` | Check formatting without modifying files |
 | `typecheck` | `mypy konfai --ignore-missing-imports` | Static type checking |
 | `build` | `python -m build` | Build sdist and wheel |
-| `check` | lint + format-check + test | Full pre-push gate — run before finishing any change |
+| `test-apps` | `pytest -q konfai-apps/tests` | Run the konfai-apps test suite |
+| `check` | lint + format-check + test + test-apps | Full pre-push gate — run before finishing any change (needs konfai-apps installed) |
 
 Always run `pixi run check` before pushing or opening a PR.
 
@@ -151,6 +153,19 @@ pip install -e ./konfai-apps
 pytest konfai-apps/tests
 ```
 
+### The konfai-mcp test suite
+
+`konfai-mcp` is a separate package too, with its own suite (and its own CI). It
+is likewise **not** part of `pixi run test`:
+
+```bash
+pip install -e ".[imaging]" -e ./konfai-mcp
+pytest konfai-mcp/tests
+```
+
+The segmentation end-to-end test needs the imaging extra (`konfai[imaging]`),
+installed above alongside the package.
+
 ### Validate an example manually
 
 Some changes are best validated end-to-end against a shipped example. The most
@@ -207,15 +222,16 @@ updating the docs:
 ## Packaging and release
 
 The repository contains a publish workflow in `.github/workflows/publish.yml`
-that builds:
+that builds an **8-package matrix**, all sharing a tag-derived version:
 
-- `konfai`
-- `impact-synth-konfai`
-- `mrsegmentator-konfai`
-- `totalsegmentator-konfai`
+- `konfai` (the core framework)
+- `konfai-apps` and `konfai-mcp` (the standalone Apps and MCP packages)
+- the five App bundles: `impact-synth-konfai`, `impact-seg-konfai`,
+  `mrsegmentator-konfai`, `totalsegmentator-konfai`, `impact-reg-konfai`
 
-This is a useful reminder that changes to the core package may affect both the
-framework and published KonfAI Apps.
+The bundles pin `konfai==` and `konfai-apps==` the same version, so the whole
+matrix releases in lockstep. A change to the core package can therefore affect
+the framework, the two sibling packages, and every published App.
 
 ## AI agent rules
 

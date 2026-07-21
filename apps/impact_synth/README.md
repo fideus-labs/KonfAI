@@ -1,7 +1,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/impact_synth_konfai.svg?color=blue)](https://pypi.org/project/impact_synth_konfai/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml)
+[![CI](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://arxiv.org/abs/2510.21358)
 
 <p align="center">
@@ -17,7 +17,7 @@
 ## 🧩 Overview
 
 **IMPACT-Synth-KonfAI** is the **command-line interface (CLI)** for performing **inference** and **uncertainty estimation** with the *IMPACT-Synth* models.  
-It provides a streamlined way to generate **synthetic CT (sCT) images** from MR or CBCT scans, leveraging the [KonfAI](https://github.com/vboussot/KonfAI) framework for efficient inference, test-time augmentation (TTA), model ensembling, and uncertainty quantification.  
+It provides a streamlined way to generate **synthetic CT (sCT) images** from MR or CBCT scans, leveraging the [KonfAI](https://github.com/fideus-labs/KonfAI) framework for efficient inference, test-time augmentation (TTA), model ensembling, and uncertainty quantification.  
 
 The underlying **IMPACT-Synth** models are a family of **supervised convolutional neural networks (CNNs)** dedicated to **sCT generation**.
 They build upon the research presented in **“Why Registration Quality Matters: Enhancing sCT Synthesis with IMPACT-Based Registration” (Boussot et al., 2025)**.  
@@ -36,7 +36,7 @@ python -m pip install impact-synth-konfai
 
 From source:
 ```bash
-git clone https://github.com/vboussot/KonfAI.git
+git clone https://github.com/fideus-labs/KonfAI.git
 python -m pip install -e apps/impact_synth
 ```
 ---
@@ -86,7 +86,7 @@ impact-synth-konfai pipeline CBCT -i patient01.nii.gz --gt ct.nii.gz -o patient0
 
 ## 🧠 Features
 
-- ⚡ **Fast inference** powered by [KonfAI](https://github.com/vboussot/KonfAI)
+- ⚡ **Fast inference** powered by [KonfAI](https://github.com/fideus-labs/KonfAI)
 - 🤗 **Automatic model download** from Hugging Face
 - 🧩 **Multi-model ensembling** and **test-time augmentation (TTA)**
 - 🧠 **Supports evaluation workflows with reference data, and uncertainty estimation without reference**
