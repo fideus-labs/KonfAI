@@ -16,23 +16,21 @@
 
 """Export a frozen KonfAI ``Network`` to a self-contained ONNX graph + manifest.
 
-This is the producer side of the ``konfai-rs`` portable-inference contract: a
-trained KonfAI model becomes ``model.onnx`` (graph + weights, single file) plus
-``manifest.json`` (patch geometry, input/output spec) that a no-Python runtime
-consumes. The non-obvious steps the ``torch -> ONNX -> burn-onnx`` chain requires
-are encoded here:
+A trained model becomes ``model.onnx`` (graph + weights, single file) plus ``manifest.json``
+(patch geometry, input/output spec) for a Python-free runtime. Three constraints shape the code:
 
-* KonfAI ``Network`` overrides ``state_dict()`` with a custom signature that breaks
-  the TorchScript exporter, so the **dynamo** exporter is used.
-* ``Network.forward`` returns per-output-group results (empty without ``init()``),
-  so the graph is reached via ``named_forward`` and a named head is selected.
-* The dynamo exporter writes weights as external data; they are inlined so the
-  ``.onnx`` is a single self-contained file (required by ``burn-onnx``).
+* KonfAI ``Network`` overrides ``state_dict()`` with a custom signature that breaks the
+  TorchScript exporter, so the **dynamo** exporter is used.
+* ``Network.forward`` returns per-output-group results (empty without ``init()``), so the
+  graph is reached via ``named_forward`` and a named head is selected.
+* The dynamo exporter writes weights as external data; they are inlined so the ``.onnx`` is
+  a single self-contained file.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from types import ModuleType
@@ -42,7 +40,7 @@ import torch
 
 from konfai.utils.errors import PredictorError
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 
 
 def _require(module: str) -> ModuleType:
@@ -58,17 +56,25 @@ def _require(module: str) -> ModuleType:
 class _NamedHead(torch.nn.Module):
     """Wrap a routed KonfAI graph to return a single named output tensor.
 
-    ``Network.forward`` yields per-output-group results (deep-supervision aware);
-    for export we want one specific head. ``named_forward`` exposes every module
-    output as ``(dotted_name, tensor)``; this returns the tensor of ``output_module``.
+    ``named_forward`` exposes every module output as ``(dotted_name, tensor)``; this returns the
+    tensor of ``output_module``. ``fold_pre`` are per-patch tensor->tensor callables applied to the
+    input *inside* the graph, so they trace into the ONNX; only pointwise ops are foldable.
     """
 
-    def __init__(self, net: torch.nn.Module, output_module: str) -> None:
+    def __init__(
+        self,
+        net: torch.nn.Module,
+        output_module: str,
+        fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
+    ) -> None:
         super().__init__()
         self.net = net
         self.output_module = output_module
+        self.fold_pre = list(fold_pre or [])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for pre in self.fold_pre:
+            x = pre(x)
         out = x
         for name, tensor in self.net.named_forward(x):
             if name == self.output_module:
@@ -77,11 +83,8 @@ class _NamedHead(torch.nn.Module):
 
 
 def list_output_modules(model: torch.nn.Module, example_input: torch.Tensor) -> list[tuple[str, tuple[int, ...]]]:
-    """Return ``(dotted_name, shape)`` for every output of the routed graph.
-
-    Use this to discover the inference head to export (e.g. ``UNetBlock_0.Head.Softmax``
-    or ``Head.Tanh``), skipping deep-supervision heads and integer ``Argmax`` outputs.
-    """
+    """Return ``(dotted_name, shape)`` for every output of the routed graph, to discover the
+    inference head to export."""
     if not hasattr(model, "named_forward"):
         raise PredictorError("export expects a KonfAI Network exposing `named_forward`.")
     model.eval()
@@ -92,11 +95,31 @@ def list_output_modules(model: torch.nn.Module, example_input: torch.Tensor) -> 
     return outputs
 
 
+def select_inference_head(model: torch.nn.Module, example_input: torch.Tensor) -> str:
+    """Pick the head to export: the last **floating-point** output in execution order.
+
+    Terminal outputs often end in an integer ``Argmax`` label map; a float runtime wants the final
+    probability/regression head, so integer outputs are skipped. Pass ``output_module`` to target a
+    specific head.
+    """
+    if not hasattr(model, "named_forward"):
+        raise PredictorError("export expects a KonfAI Network exposing `named_forward`.")
+    model.eval()
+    head: str | None = None
+    with torch.no_grad():
+        for name, tensor in model.named_forward(example_input):
+            if torch.is_floating_point(tensor):
+                head = name
+    if head is None:
+        raise PredictorError("no floating-point output to export; pass an explicit output_module.")
+    return head
+
+
 def export_to_onnx(
     model: torch.nn.Module,
     output_dir: str | Path,
     example_input: torch.Tensor,
-    output_module: str,
+    output_module: str | None = None,
     *,
     opset: int = 18,
     input_name: str = "input",
@@ -105,6 +128,8 @@ def export_to_onnx(
     output_group: str = "output",
     patch_overlap: list[int] | None = None,
     extend_slice: int = 0,
+    pad_value: float | None = None,
+    fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
     extra_manifest: dict[str, Any] | None = None,
 ) -> Path:
     """Export ``model`` to ``output_dir/model.onnx`` (+ ``manifest.json``).
@@ -117,9 +142,10 @@ def export_to_onnx(
         Directory to write ``model.onnx`` and ``manifest.json`` into.
     example_input:
         A fixed-shape example patch ``[N, C, (Z), Y, X]``; the ONNX is exported at
-        this exact shape (burn-onnx dislikes dynamic shapes).
+        this exact shape (no dynamic axes).
     output_module:
         Dotted name of the inference head to export (see :func:`list_output_modules`).
+        When omitted, :func:`select_inference_head` picks the terminal floating-point head.
     opset:
         ONNX opset (>= 18 recommended; the dynamo exporter implements 18).
 
@@ -135,6 +161,8 @@ def export_to_onnx(
     onnx_path = out_dir / "model.onnx"
 
     model.eval()
+    if output_module is None:
+        output_module = select_inference_head(model, example_input)
     available = list_output_modules(model, example_input)
     matches = [shape for name, shape in available if name == output_module]
     if not matches:
@@ -144,7 +172,7 @@ def export_to_onnx(
         )
     output_shape = matches[-1]
 
-    wrapper = _NamedHead(model, output_module).eval()
+    wrapper = _NamedHead(model, output_module, fold_pre=fold_pre).eval()
     with torch.no_grad():
         torch.onnx.export(
             wrapper,
@@ -156,9 +184,8 @@ def export_to_onnx(
             dynamo=True,
         )
 
-    # The dynamo exporter writes weights as external data; inline them so the
-    # .onnx is a single self-contained file (required by burn-onnx's ModelGen and
-    # simpler to serve to ONNX-Runtime-Web). Remove the now-orphan sidecar.
+    # The dynamo exporter writes weights as external data; inline them so the .onnx is a
+    # single self-contained file. Remove the now-orphan sidecar.
     onnx.save(onnx.load(str(onnx_path)), str(onnx_path), save_as_external_data=False)
     sidecar = onnx_path.with_name(onnx_path.name + ".data")
     if sidecar.exists():
@@ -179,8 +206,10 @@ def export_to_onnx(
             "overlap": patch_overlap if patch_overlap is not None else [0] * dim,
             "dim": dim,
             "extend_slice": extend_slice,
+            # The border-pad value for the last (ragged) patch of an axis; 0 unless the config pins one.
+            "pad_value": float(pad_value) if pad_value is not None else 0.0,
         },
-        "geometry": "preserve_from_input",
+        "geometry": {"mode": "preserve_from_input"},
     }
     if extra_manifest:
         manifest.update(extra_manifest)
