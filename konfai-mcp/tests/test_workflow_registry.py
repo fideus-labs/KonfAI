@@ -19,6 +19,7 @@ every derived registry must match it, so adding a kind cannot silently miss a ma
 
 from typing import get_args
 
+import pytest
 from konfai_mcp import capabilities, server, server_support
 from konfai_mcp.workflows import (
     APP_JOB_KINDS,
@@ -57,7 +58,7 @@ def test_table_values_pin_the_konfai_contract() -> None:
     assert capabilities._WORKFLOW_ALIASES["eval"] == "evaluation"
 
 
-def test_app_job_devices_register_the_real_default_reservation(monkeypatch) -> None:
+def test_app_job_devices_register_the_real_default_reservation(monkeypatch: pytest.MonkeyPatch) -> None:
     """konfai-apps defaults an omitted gpu to every visible CUDA device; the job registry must
     record that reservation, not 'cpu', or concurrent scheduling double-books the GPUs."""
     monkeypatch.setattr(server, "konfai_pkg", server.konfai_pkg)
