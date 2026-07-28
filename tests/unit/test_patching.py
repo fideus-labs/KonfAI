@@ -434,3 +434,51 @@ def test_streaming_accumulator_rejects_out_of_order_arrival():
     streaming.add_layer(3, torch.ones(1, 4, 8))  # start=6 flushes the window up to 6
     with pytest.raises(PatchError, match="non-decreasing"):
         streaming.add_layer(2, torch.ones(1, 4, 8))  # start=4 < flushed=6
+
+
+# --------------------------------------------------------------------------------------
+# Separable blend weight
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize("combine_cls", [Mean, Cosinus, Gaussian])
+def test_blend_weight_factorises_into_one_vector_per_axis(combine_cls):
+    """``sum_p prod_d w_d == prod_d sum_k w_d``, so the total weight is one vector per axis.
+
+    The patch grid is a full per-axis product and the window is separable, so summing the window over
+    the grid factorises exactly. That is what lets the accumulator normalise without ever holding a
+    spatial-sized weight buffer.
+    """
+    shape, patch, overlap = [10, 12, 14], [6, 6, 6], 2
+    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    combine = combine_cls()
+    combine.set_patch_config(patch, overlap)
+    accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
+
+    naive = torch.zeros(shape)
+    for patch_slice in accumulator.patch_slices:
+        dest = tuple(slice(s.start, min(s.stop, shape[d])) for d, s in enumerate(patch_slice))
+        naive[dest] += combine.data[tuple(slice(0, d.stop - d.start) for d in dest)]
+
+    _, totals = accumulator._weight_geometry()
+    assert [total.shape for total in totals] == [torch.Size([extent]) for extent in shape]
+    outer = totals[0][:, None, None] * totals[1][None, :, None] * totals[2][None, None, :]
+    torch.testing.assert_close(outer, naive, rtol=0, atol=1e-5)
+
+
+@pytest.mark.parametrize("combine_cls", [Cosinus, Gaussian])
+def test_blend_recovers_the_source_in_low_precision(combine_cls):
+    """A float16 blend returns the volume it was cut from, borders included.
+
+    Each patch carries its SHARE of the weight, ``w / sum_k w`` — a ratio of comparable quantities, so
+    it stays in [0, 1]. The raw product underflows float16 at a tapered border (a Gaussian corner is
+    ~1e-8 against a 6e-5 smallest normal), and flooring it there, as a weight accumulated in the blend
+    dtype forces, leaves those voxels off by ~0.5.
+    """
+    shape, patch, overlap = [10, 12, 14], [6, 6, 6], 2
+    full = torch.rand(2, *shape)
+    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    combine = combine_cls()
+    combine.set_patch_config(patch, overlap)
+    accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
+    for index, patch_slice in enumerate(slices):
+        accumulator.add_layer(index, full[(slice(None), *patch_slice)].to(torch.float16))
+    torch.testing.assert_close(accumulator.assemble().float(), full, rtol=0, atol=5e-3)

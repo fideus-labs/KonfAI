@@ -239,6 +239,7 @@ class PathCombine(ABC):
 
     def __init__(self) -> None:
         self.data: torch.Tensor
+        self.windows_1d: list[torch.Tensor]
         self.overlap: int
         self._data_per_device: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
@@ -246,17 +247,26 @@ class PathCombine(ABC):
         self._data_per_device.clear()
         overlaps = [overlap] * len(patch_size) if isinstance(overlap, int) else list(overlap)
         self.overlap = max(overlaps)
-        if all(o <= 0 for o in overlaps):
-            self.data = torch.ones(patch_size)
-            return
         # The per-patch weight is the outer product of one 1-D window per axis. It is separable by
         # construction, so a per-axis partition of unity stays a partition of unity in N-D and overlapping
         # patches blend without darkening — no distance map or explicit renormalisation loop is needed, and
-        # the trailing ``result / weight_sum`` in Accumulator.assemble stays exact at the volume borders.
+        # the trailing normalisation in Accumulator.assemble stays exact at the volume borders.
         # Each axis tapers over its own overlap, so anisotropic overlaps blend correctly per axis.
-        data = self._window_1d(patch_size[0], overlaps[0]) if overlaps[0] > 0 else torch.ones(patch_size[0])
-        for size, axis_overlap in zip(patch_size[1:], overlaps[1:], strict=True):
-            window = self._window_1d(size, axis_overlap) if axis_overlap > 0 else torch.ones(size)
+        #
+        # The factors are kept, not just their product: Accumulator normalises by a per-axis sum rather
+        # than a volume-sized buffer (see _weight_factors). Stored rather than re-derived, because the
+        # all-flat case below never calls _window_1d — re-deriving would turn its uniform count into a
+        # tapered weighting.
+        if all(o <= 0 for o in overlaps):
+            self.windows_1d = [torch.ones(size) for size in patch_size]
+            self.data = torch.ones(patch_size)
+            return
+        self.windows_1d = [
+            self._window_1d(size, axis_overlap) if axis_overlap > 0 else torch.ones(size)
+            for size, axis_overlap in zip(patch_size, overlaps, strict=True)
+        ]
+        data = self.windows_1d[0]
+        for window in self.windows_1d[1:]:
             data = data.unsqueeze(-1) * window
         self.data = data
 
@@ -365,13 +375,14 @@ class Accumulator:
         self._count = len(patch_slices)
         self._filled = 0
         self._done = [False] * self._count
-        # Patches are blended into these running buffers as they arrive (see add_layer), instead of
+        # Patches are blended into this running buffer as they arrive (see add_layer), instead of
         # being kept until assembly: holding every patch of a large multi-class case (e.g. ~70 patches
         # of a 122-channel whole-body segmentation ≈ tens of GB) was the dominant reassembly RAM cost.
         self._result: torch.Tensor | None = None
-        self._weight_sum: torch.Tensor | None = None
-        self._weight_patch: torch.Tensor | None = None
         self._weighted: torch.Tensor | None = None
+        # Blend-weight geometry: fixed for the accumulator's life, so it survives _reset.
+        self._geometry: tuple[list[torch.Tensor], list[torch.Tensor]] | None = None
+        self._shares: dict[tuple[int, int, int, torch.dtype, torch.device], torch.Tensor] = {}
 
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
         """Blend one patch in; returns the slabs this completes (none for the whole-volume base)."""
@@ -389,10 +400,6 @@ class Accumulator:
             # part at blend time instead, so nothing outside the volume is ever allocated.
             n = self._n
             self._result = torch.zeros(list(layer.shape[:n]) + list(self.shape), dtype=layer.dtype, device=layer.device)
-            if self.patch_combine is not None:
-                # Match the result dtype so the final ``result / weight_sum`` does not promote the whole
-                # (channels x volume) accumulator to float32.
-                self._weight_sum = torch.zeros(list(self.shape), dtype=layer.dtype, device=layer.device)
         self._blend(layer, self.patch_slices[index])
         self._done[index] = True
         self._filled += 1
@@ -406,36 +413,68 @@ class Accumulator:
         for dim, s in enumerate(patch_slice):
             if s.stop - s.start == 1:
                 data = data.unsqueeze(dim=dim + n)
-        # Clamp each spatial destination to the volume, and crop the patch (and its weight window) to the
-        # matching in-volume extent so the padded tail of border patches is discarded, not stored.
+        # Clamp each spatial destination to the volume and crop the patch to it, BEFORE weighting: the
+        # padded tail of a border patch lies outside the volume, so it has no share of the blend weight
+        # to compute and every index in _weighted_patch stays in range.
         dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
-        crop = tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])
+        data = data[tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])]
         dest[0] = slice(dest[0].start - row_offset, dest[0].stop - row_offset)
         slices_dest = tuple([slice(cast(torch.Tensor, self._result).shape[i]) for i in range(n)] + dest)
-        # Overlap blending weights each patch (edge bands < 1 so interior overlaps sum to unity).
-        # A voxel covered by fewer patches (a volume border without whole-image padding) would sum
-        # to < 1 and come out darkened (x0.5 edges, x0.25 corners), so divide by the accumulated weight.
         result = cast(torch.Tensor, self._result)
-        if self.patch_combine is not None and self._weight_sum is not None:
-            result[slices_dest] += self._weighted_patch(data)[crop]
-            if self._weight_patch is None:
-                # Spatial-only ones: the weight is per-voxel, and deriving it from a channel-sized
-                # ones_like would allocate (and weight) C copies just to index one back out.
-                self._weight_patch = self.patch_combine(
-                    torch.ones(data.shape[n:], dtype=data.dtype, device=data.device)
-                )
-            self._weight_sum[tuple(dest)] += self._weight_patch[crop[n:]]
+        if self.patch_combine is not None:
+            result[slices_dest] += self._weighted_patch(data, patch_slice)
         else:
-            result[slices_dest] = data[crop]
+            result[slices_dest] = data
 
-    def _weighted_patch(self, data: torch.Tensor) -> torch.Tensor:
-        """``patch_combine(data)`` into a staging buffer the patches share, one patch-sized allocation
-        per accumulator instead of per blend.
+    def _weight_geometry(self) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Per axis: the blend window, and its sum over the patch grid.
 
-        The multiply stays out of place: the caller's tensor is never
-        touched, so the OOM retry (which re-blends the same patch on the CPU) never re-weights it.
+        The outer product of those sums is the total weight covering each voxel. It factorises because
+        the patch grid is a full per-axis product and the window is itself separable
+        (``sum_p prod_d w_d == prod_d sum_k w_d``), so the total is one vector per axis and never exists
+        as a volume — on a 320-row window of a 1331x1775 volume, 13 KB instead of 2.8 GB.
+
+        The patch extent comes from the slices, not from the window: a free axis carries a single
+        broadcast entry (the ModelPatch blend-window contract) that must cover the whole extent.
         """
-        combine = cast(PathCombine, self.patch_combine)
+        if self._geometry is None:
+            windows, totals = [], []
+            for dim, extent in enumerate(self.shape):
+                window = cast(PathCombine, self.patch_combine).windows_1d[dim]
+                length = self.patch_slices[0][dim].stop - self.patch_slices[0][dim].start
+                window = window.expand(length) if window.numel() == 1 else window
+                total = torch.zeros(extent)
+                for start in sorted({patch[dim].start for patch in self.patch_slices}):
+                    stop = min(start + length, extent)
+                    total[start:stop] += window[: stop - start]
+                windows.append(window)
+                totals.append(total)
+            self._geometry = (windows, totals)
+        return self._geometry
+
+    def _share(self, dim: int, start: int, data: torch.Tensor) -> torch.Tensor:
+        """This patch's fraction of the blend weight along one axis, ``w / sum_k w``, cached per axis."""
+        extent = data.shape[self._n + dim]
+        key = (dim, start, extent, data.dtype, data.device)
+        if key not in self._shares:
+            windows, totals = self._weight_geometry()
+            share = windows[dim][:extent] / totals[dim][start : start + extent]
+            self._shares[key] = share.to(device=data.device, dtype=data.dtype)
+        return self._shares[key]
+
+    def _weighted_patch(self, data: torch.Tensor, patch_slice: tuple[slice, ...]) -> torch.Tensor:
+        """``data`` scaled by its SHARE of the blend weight at each voxel, one axis at a time.
+
+        Normalising per patch rather than dividing the assembled volume by an accumulated weight drops
+        both the spatial-sized weight buffer and the final division pass over every channel. The shares
+        sum to one per voxel by construction (the total is the sum over the same grid), so the blend
+        stays exact — and each factor is a ratio of comparable quantities, so it lives in [0, 1] where
+        the raw product underflows fp16 and needed a floor.
+
+        Into a staging buffer the patches share, one patch-sized allocation per accumulator instead of
+        per blend, and out of place: the caller's tensor is never touched, so the OOM retry (which
+        re-blends the same patch on the CPU) never re-weights it.
+        """
         if (
             self._weighted is None
             or self._weighted.shape != data.shape
@@ -443,7 +482,11 @@ class Accumulator:
             or self._weighted.device != data.device
         ):
             self._weighted = torch.empty_like(data)
-        torch.mul(data, combine.weight(data), out=self._weighted)
+        for dim, s in enumerate(patch_slice):
+            view = [1] * data.ndim
+            view[self._n + dim] = -1
+            share = self._share(dim, s.start, data).view(view)
+            torch.mul(data, share, out=self._weighted) if dim == 0 else self._weighted.mul_(share)
         return self._weighted
 
     def is_empty(self) -> bool:
@@ -469,23 +512,13 @@ class Accumulator:
                 "Add at least one patch (and check is_full()) before calling assemble().",
             )
         result = self._result
-        # With padding weight_sum is ~1 and the division is a near no-op; the clamp guards borders
-        # that no patch (fully) covered. In-place so we do not materialise a second
-        # (channels x volume) tensor; weight_sum already matches result.dtype (fp16), so the division
-        # stays in fp16 with no float32 promotion (same values as the out-of-place form).
-        # The floor must be representable in the accumulation dtype: 1e-8 rounds to zero in fp16
-        # (divide-by-zero -> NaN), so clamp at the dtype's smallest normal instead.
-        if self.patch_combine is not None and self._weight_sum is not None:
-            result.div_(self._weight_sum.clamp(min=torch.finfo(self._weight_sum.dtype).tiny))
-        # No final crop: patches are cropped to the volume at blend time, so result is already self.shape.
-
+        # Nothing to normalise: each patch was blended in with its share of the weight, so the shares
+        # already sum to one per voxel. No final crop either — patches are cropped at blend time.
         self._reset()
         return result
 
     def _reset(self) -> None:
         self._result = None
-        self._weight_sum = None
-        self._weight_patch = None
         self._weighted = None
         self._filled = 0
         self._done = [False] * self._count
@@ -545,8 +578,6 @@ class StreamingAccumulator(Accumulator):
                 dtype=layer.dtype,
                 device=layer.device,
             )
-            if self.patch_combine is not None:
-                self._weight_sum = torch.zeros(self._result.shape[n:], dtype=layer.dtype, device=layer.device)
         self._blend(layer, patch_slice, row_offset=self._flushed)
         self._done[index] = True
         self._filled += 1
@@ -586,19 +617,13 @@ class StreamingAccumulator(Accumulator):
                 "Patch starts may advance by at most one patch extent per step (checked at construction).",
             )
         lead = (slice(None),) * n
-        slab = self._result[(*lead, slice(0, length))]
-        if self.patch_combine is not None and self._weight_sum is not None:
-            # Same division and fp16 floor as Accumulator.assemble, applied to the finalized slab.
-            slab = slab / self._weight_sum[:length].clamp(min=torch.finfo(self._weight_sum.dtype).tiny)
-        else:
-            slab = slab.clone()
+        # Cloned: the window slides over these rows right after, so the slab handed out must not be a
+        # view of it. Nothing else to do — the blend weights already sum to one over these voxels.
+        slab = self._result[(*lead, slice(0, length))].clone()
         keep = self._window - length
         # .clone(): source and destination views overlap when length < window.
         self._result[(*lead, slice(0, keep))] = self._result[(*lead, slice(length, self._window))].clone()
         self._result[(*lead, slice(keep, self._window))] = 0
-        if self._weight_sum is not None:
-            self._weight_sum[:keep] = self._weight_sum[length : self._window].clone()
-            self._weight_sum[keep:] = 0
         region = slice(self._flushed, z)
         self._flushed = z
         return [(region, slab)]
