@@ -118,8 +118,8 @@ def _load_image(store_path: str, level: int) -> Any:
 
     A streamed run reads one patch per call, and re-parsing the NGFF metadata and rebuilding the
     lazy array graph per patch is pure per-read overhead: the image object is lazy (no voxel data),
-    so a handful of them is cheap to keep. Every write path calls ``_load_image.cache_clear()`` —
-    a store just written must be re-read, never served from the memo.
+    so a handful of them is cheap to keep. The key is the path alone, so anything that puts a
+    different store at a path already read must call ``clear_ome_zarr_cache()`` — see there.
 
     ``@N`` selects among the levels a store offers, so a single-level store has nothing to select: its
     one level is read whatever ``N`` says (as every other backend does -- ``SitkFile`` ignores
@@ -138,6 +138,17 @@ def _load_image(store_path: str, level: int) -> Any:
             f"Cannot open OME-Zarr store '{store_path}' (level {level}).",
             "Ensure the directory is a valid OME-NGFF store.",
         ) from exc
+
+
+def clear_ome_zarr_cache() -> None:
+    """Forget the memoised NGFF images, so a store replaced on disk is parsed afresh.
+
+    The write paths here call it for their own output. Anything that materialises a store by other
+    means -- copying one over another, say -- has to call it too: the memo is keyed on the path, and
+    a hit serves the previous store's axes and geometry against the new store's voxels. That reads as
+    a shape mismatch when the two differ, and as nothing at all when they do not.
+    """
+    _load_image.cache_clear()
 
 
 def is_displacement_field(store_path: str | Path) -> bool:
@@ -270,7 +281,7 @@ def write_ome_zarr(
     exist only from 0.6, so a caller passing both could only ever pass them consistently -- an
     invariant worth removing rather than documenting.
     """
-    _load_image.cache_clear()
+    clear_ome_zarr_cache()
     _require_ngff_zarr()
     array_data = np.asarray(data)
     spatial_axes, scale_values, translation_values = _spatial_geometry(
@@ -340,7 +351,7 @@ def create_ome_zarr_store(
     read back as zeros. Metadata (the 0.4 multiscales entry plus the KonfAI attribute sidecar) is
     complete from the start, so the store is readable at any point during the write.
     """
-    _load_image.cache_clear()
+    clear_ome_zarr_cache()
     _require_zarr()
     spatial_axes, scale_values, translation_values = _spatial_geometry(
         len(shape), f"shape {list(shape)}", spacing, origin
