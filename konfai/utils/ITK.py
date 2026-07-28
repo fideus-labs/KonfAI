@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import torch
 
@@ -34,6 +36,40 @@ def _require_simpleitk() -> None:
     """Raise a clear project error when an ITK-only path is used without SimpleITK."""
     if sitk is None:
         raise TransformError("SimpleITK is required for this operation. Install it with `pip install konfai[itk]`.")
+
+
+def read_displacement_field(path: str | Path) -> sitk.Image:
+    """A displacement field, from an ITK image file OR an NGFF RFC-5 OME-Zarr store.
+
+    A field written as a store cannot go through ``sitk.ReadImage``, and reading it as an ordinary
+    image is worse than failing: the component axis looks like any other, so indexing it yields one
+    third of the field and a registration that is wrong without being obviously wrong. This is the one
+    place that knows how to open either form, so no caller has to decide.
+
+    The result is ``sitkVectorFloat64`` -- what ``DisplacementFieldTransform`` requires.
+    """
+    _require_simpleitk()
+    path = Path(path)
+    if not path.is_dir():
+        return sitk.ReadImage(str(path), sitk.sitkVectorFloat64)
+
+    from konfai.utils.ome_zarr import get_ome_zarr_info, read_ome_zarr_data_slice
+
+    info = get_ome_zarr_info(path)
+    axes = info["axes"]
+    spatial = [axis for axis in ("z", "y", "x") if axis in axes]
+    shape = [int(dict(zip(axes, info["shape"], strict=True)).get("c", 1))]
+    shape += [int(dict(zip(axes, info["shape"], strict=True))[axis]) for axis in spatial]
+    data, metadata = read_ome_zarr_data_slice(path, tuple(slice(None) for _ in shape))
+
+    scale = dict(zip(metadata["axes"], metadata["scale"], strict=True))
+    translation = dict(zip(metadata["axes"], metadata["translation"], strict=True))
+    # KonfAI arrays are channel-first; a SimpleITK vector image wants the components last, and its
+    # geometry in (x, y, z) -- the reverse of the NGFF axis order.
+    field = sitk.GetImageFromArray(np.moveaxis(np.asarray(data), 0, -1), isVector=True)
+    field.SetSpacing([float(scale[axis]) for axis in reversed(spatial)])
+    field.SetOrigin([float(translation[axis]) for axis in reversed(spatial)])
+    return sitk.Cast(field, sitk.sitkVectorFloat64)
 
 
 def _invert_via_displacement_field(transform: sitk.Transform, image: sitk.Image) -> sitk.DisplacementFieldTransform:
