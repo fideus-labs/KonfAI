@@ -33,10 +33,19 @@ pytest.importorskip("zarr")
 pytest.importorskip("ngff_zarr")
 
 from konfai.utils.dataset import Dataset  # noqa: E402
-from konfai.utils.ome_zarr import is_displacement_field, write_ome_zarr  # noqa: E402
+from konfai.utils.ome_zarr import _zarr_v3_available, is_displacement_field, write_ome_zarr  # noqa: E402
+
+# RFC-5 fields are a zarr v3 store (NGFF >= 0.5), which zarr 2.x (Python 3.10) cannot write: the
+# feature does not exist there.
+pytestmark = pytest.mark.skipif(
+    not _zarr_v3_available(),
+    reason="NGFF RFC-5 displacement fields need a zarr v3 store (zarr>=3, Python>=3.11)",
+)
 
 SPACING = (1.5, 1.5, 2.0)
 ORIGIN = (7.0, -3.0, 10.0)
+# A 90 deg in-plane rotation: non-identity and anisotropic, so a dropped or transposed Direction shows.
+DIRECTION = (0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
 
 def _displacement_field_transform() -> "sitk.DisplacementFieldTransform":
@@ -45,6 +54,7 @@ def _displacement_field_transform() -> "sitk.DisplacementFieldTransform":
     field = sitk.GetImageFromArray(values, isVector=True)
     field.SetSpacing(SPACING)
     field.SetOrigin(ORIGIN)
+    field.SetDirection(DIRECTION)
     return sitk.DisplacementFieldTransform(sitk.Cast(field, sitk.sitkVectorFloat64))
 
 
@@ -76,6 +86,7 @@ def test_transform_round_trips_through_the_store(tmp_path: Path) -> None:
     assert after.GetSize() == before.GetSize()
     assert after.GetSpacing() == pytest.approx(SPACING)
     assert after.GetOrigin() == pytest.approx(ORIGIN)
+    assert after.GetDirection() == pytest.approx(DIRECTION)
     assert after.GetNumberOfComponentsPerPixel() == 3
     assert np.array_equal(sitk.GetArrayFromImage(after), sitk.GetArrayFromImage(before))
 
