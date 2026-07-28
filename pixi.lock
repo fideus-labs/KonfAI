@@ -316,8 +316,8 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/56/7a/123e033aaff487c77107195fa5a2b8686795ca537935a24efae476c41f05/nvidia_nvjitlink-13.0.88-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/57/b2/453099f5f3b698d7d0eab38916aac44c7f76229f451709e2eb9db6615dcd/cuda_toolkit-13.0.2-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/58/9d/40b6267367182187139a4000b82a3b287d84d745bccd808e75d916920e9d/bleach-6.4.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/5a/b9/b71828ecfa6097d2690489f5ff8adb4f6e74a021fc043e667f4e4884994b/ngff_zarr-0.37.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5b/67/314f6151bad77a93d751978a344033e1fc890822f05f0416079338e34231/nh3-0.3.6-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/5c/1f/1957d07725e6abdaef43b05c30a797fa2a2e7093ced9dbd750d796921a5d/ngff_zarr-0.40.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5d/85/9ebeae2f76e9e77b952f4b274c27238156eae7979c5421fba91a28f4970d/sphinxcontrib_applehelp-2.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5e/f5/0c41cb68dcae6b7de4fac4188a3a9589e21fb31df21ea3a2e888db95e6c9/soupsieve-2.8.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5f/53/fb7122b71361a0d121b669dcf3d31244ef75badbbb724af388948de543e2/imagesize-2.0.0-py2.py3-none-any.whl
@@ -525,8 +525,8 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/55/8c/aed55408879043d72bb9135f4d0d19a02b886dd569631e113e3d2706cb8d/mypy-2.1.0-cp313-cp313-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/58/9d/40b6267367182187139a4000b82a3b287d84d745bccd808e75d916920e9d/bleach-6.4.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/5a/b9/b71828ecfa6097d2690489f5ff8adb4f6e74a021fc043e667f4e4884994b/ngff_zarr-0.37.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5b/0b/a81b5daf5adea482ecb68d9615f6a348486ab4d8e980a915d4420e57ee4d/wasmtime-45.0.0-py3-none-macosx_11_0_arm64.whl
+      - pypi: https://files.pythonhosted.org/packages/5c/1f/1957d07725e6abdaef43b05c30a797fa2a2e7093ced9dbd750d796921a5d/ngff_zarr-0.40.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5d/85/9ebeae2f76e9e77b952f4b274c27238156eae7979c5421fba91a28f4970d/sphinxcontrib_applehelp-2.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5e/f5/0c41cb68dcae6b7de4fac4188a3a9589e21fb31df21ea3a2e888db95e6c9/soupsieve-2.8.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5f/53/fb7122b71361a0d121b669dcf3d31244ef75badbbb724af388948de543e2/imagesize-2.0.0-py2.py3-none-any.whl
@@ -723,8 +723,8 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/52/a7/d2782e4e3f77c8450f727ba74a8f12756d5ba823d81b941f1b04da9d033a/sphinxcontrib_serializinghtml-2.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/58/9d/40b6267367182187139a4000b82a3b287d84d745bccd808e75d916920e9d/bleach-6.4.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/5a/b9/b71828ecfa6097d2690489f5ff8adb4f6e74a021fc043e667f4e4884994b/ngff_zarr-0.37.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5c/10/3d18e3bbdf8fc50bbb4ac3cc45970aa5a9753c5cb51bf9ed9a3cd8b79fa3/ruff-0.15.2-py3-none-win_amd64.whl
+      - pypi: https://files.pythonhosted.org/packages/5c/1f/1957d07725e6abdaef43b05c30a797fa2a2e7093ced9dbd750d796921a5d/ngff_zarr-0.40.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5d/78/1b74c5bbb3f99b77a1715c91b3e0b5bdb6fe302d95ace4f5b1bec37b0167/charset_normalizer-3.4.7-cp313-cp313-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/5d/85/9ebeae2f76e9e77b952f4b274c27238156eae7979c5421fba91a28f4970d/sphinxcontrib_applehelp-2.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5e/f5/0c41cb68dcae6b7de4fac4188a3a9589e21fb31df21ea3a2e888db95e6c9/soupsieve-2.8.4-py3-none-any.whl
@@ -1987,7 +1987,7 @@ packages:
   - h5py ; extra == 'imaging'
   - pydicom ; extra == 'imaging'
   - zarr ; extra == 'imaging'
-  - ngff-zarr ; extra == 'imaging'
+  - ngff-zarr>=0.38 ; extra == 'imaging'
   - vtk ; extra == 'vtk'
   - lpips ; extra == 'lpips'
   - segmentation-models-pytorch ; extra == 'smp'
@@ -1997,7 +1997,7 @@ packages:
   - submitit ; extra == 'cluster'
   - pydicom ; extra == 'dicom'
   - zarr ; extra == 'omezarr'
-  - ngff-zarr ; extra == 'omezarr'
+  - ngff-zarr>=0.38 ; extra == 'omezarr'
   - onnx ; extra == 'export'
   - onnxruntime ; extra == 'export'
   - onnxscript ; extra == 'export'
@@ -2017,7 +2017,7 @@ packages:
   - h5py ; extra == 'dev'
   - pydicom ; extra == 'dev'
   - zarr ; extra == 'dev'
-  - ngff-zarr ; extra == 'dev'
+  - ngff-zarr>=0.38 ; extra == 'dev'
   - scikit-image ; extra == 'dev'
   - onnx ; extra == 'dev'
   - onnxruntime ; extra == 'dev'
@@ -3279,12 +3279,32 @@ packages:
   - webencodings
   - tinycss2>=1.1.0 ; extra == 'css'
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/5a/b9/b71828ecfa6097d2690489f5ff8adb4f6e74a021fc043e667f4e4884994b/ngff_zarr-0.37.0-py3-none-any.whl
-  name: ngff-zarr
-  version: 0.37.0
-  sha256: e09775ff04c78d89932e2ecc22ee49fb259efcb2065e52a52fee690f947f4c86
+- pypi: https://files.pythonhosted.org/packages/5b/0b/a81b5daf5adea482ecb68d9615f6a348486ab4d8e980a915d4420e57ee4d/wasmtime-45.0.0-py3-none-macosx_11_0_arm64.whl
+  name: wasmtime
+  version: 45.0.0
+  sha256: 31d10f25c330cebcfb364e9a357123deeec96c41725ff2bba91b705587f38a93
   requires_dist:
-  - dask[array]!=2025.12.0,!=2026.1.0,!=2026.1.1
+  - coverage ; extra == 'testing'
+  - pycparser ; extra == 'testing'
+  - pytest-mypy ; extra == 'testing'
+  - pytest ; extra == 'testing'
+  requires_python: '>=3.9'
+- pypi: https://files.pythonhosted.org/packages/5b/67/314f6151bad77a93d751978a344033e1fc890822f05f0416079338e34231/nh3-0.3.6-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+  name: nh3
+  version: 0.3.6
+  sha256: 905f877dc66dd7aea4a76e54bcb26acb5ff8216f720c0017ccf63e0e6035698e
+  requires_python: '>=3.8'
+- pypi: https://files.pythonhosted.org/packages/5c/10/3d18e3bbdf8fc50bbb4ac3cc45970aa5a9753c5cb51bf9ed9a3cd8b79fa3/ruff-0.15.2-py3-none-win_amd64.whl
+  name: ruff
+  version: 0.15.2
+  sha256: d20014e3dfa400f3ff84830dfb5755ece2de45ab62ecea4af6b7262d0fb4f7c5
+  requires_python: '>=3.7'
+- pypi: https://files.pythonhosted.org/packages/5c/1f/1957d07725e6abdaef43b05c30a797fa2a2e7093ced9dbd750d796921a5d/ngff_zarr-0.40.0-py3-none-any.whl
+  name: ngff-zarr
+  version: 0.40.0
+  sha256: d8b07b4bc27a198190cfa98b292b5f1a5b7fb88ff3a72e401308347abb852866
+  requires_dist:
+  - dask[array]>=2026.1.2
   - importlib-resources
   - itkwasm-downsample>=1.8.0
   - itkwasm>=1.0b183
@@ -3362,26 +3382,6 @@ packages:
   - pytest>=6 ; extra == 'test'
   - jsonschema ; extra == 'validate'
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/5b/0b/a81b5daf5adea482ecb68d9615f6a348486ab4d8e980a915d4420e57ee4d/wasmtime-45.0.0-py3-none-macosx_11_0_arm64.whl
-  name: wasmtime
-  version: 45.0.0
-  sha256: 31d10f25c330cebcfb364e9a357123deeec96c41725ff2bba91b705587f38a93
-  requires_dist:
-  - coverage ; extra == 'testing'
-  - pycparser ; extra == 'testing'
-  - pytest-mypy ; extra == 'testing'
-  - pytest ; extra == 'testing'
-  requires_python: '>=3.9'
-- pypi: https://files.pythonhosted.org/packages/5b/67/314f6151bad77a93d751978a344033e1fc890822f05f0416079338e34231/nh3-0.3.6-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-  name: nh3
-  version: 0.3.6
-  sha256: 905f877dc66dd7aea4a76e54bcb26acb5ff8216f720c0017ccf63e0e6035698e
-  requires_python: '>=3.8'
-- pypi: https://files.pythonhosted.org/packages/5c/10/3d18e3bbdf8fc50bbb4ac3cc45970aa5a9753c5cb51bf9ed9a3cd8b79fa3/ruff-0.15.2-py3-none-win_amd64.whl
-  name: ruff
-  version: 0.15.2
-  sha256: d20014e3dfa400f3ff84830dfb5755ece2de45ab62ecea4af6b7262d0fb4f7c5
-  requires_python: '>=3.7'
 - pypi: https://files.pythonhosted.org/packages/5d/78/1b74c5bbb3f99b77a1715c91b3e0b5bdb6fe302d95ace4f5b1bec37b0167/charset_normalizer-3.4.7-cp313-cp313-win_amd64.whl
   name: charset-normalizer
   version: 3.4.7
