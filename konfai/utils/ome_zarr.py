@@ -62,6 +62,13 @@ except ImportError:
 _KONFAI_ATTR_KEY = "konfai"
 _SPATIAL = ("z", "y", "x")
 
+# NGFF RFC-5 types the component axis of a vector field, so a displacement field says what it is on
+# disk. Those types only exist from NGFF 0.6 (zarr v3); 0.4 (zarr v2 layout) stays the default
+# everywhere else, being the version portable across the whole CI matrix.
+_DISPLACEMENT_AXIS_TYPE = "displacement"
+_RFC5_VERSION = "0.6"
+_DEFAULT_VERSION = "0.4"
+
 
 def _require_zarr() -> None:
     if not _ZARR_AVAILABLE:
@@ -115,6 +122,31 @@ def _load_image(store_path: str, level: int) -> Any:
             f"Cannot open OME-Zarr store '{store_path}' (level {level}).",
             "Ensure the directory is a valid OME-NGFF store.",
         ) from exc
+
+
+def is_displacement_field(store_path: str | Path) -> bool:
+    """Whether the store declares its component axis as an NGFF RFC-5 displacement field.
+
+    This is what lets a DVF be read back as a transform rather than as a 3-channel image, and it is
+    read from the store itself: the producer does not have to be trusted, and no sidecar convention
+    (a filename, an attribute) has to be agreed on separately.
+
+    A store that predates RFC-5, or an ngff-zarr too old to model it, simply answers False -- an
+    unreadable or absent store is not a displacement field either, so this never raises.
+    """
+    if not _NGFF_ZARR_AVAILABLE:
+        return False
+    try:
+        metadata = ngff_zarr.from_ngff_zarr(str(store_path)).metadata
+    except Exception:
+        # "Not a displacement field" is the only answer this owes: it is asked purely to decide HOW to
+        # read an entry, and an absent or unreadable store is not one either.
+        return False
+    return any(
+        axis.name == "c" and axis.type == _DISPLACEMENT_AXIS_TYPE
+        for system in getattr(metadata, "coordinateSystems", None) or []
+        for axis in system.axes
+    )
 
 
 def _canonical_shape(dims: Sequence[str], shape: Sequence[int]) -> list[int]:
@@ -207,8 +239,21 @@ def write_ome_zarr(
     origin: Sequence[float] | None = None,
     attributes: dict[str, Any] | None = None,
     chunks: Sequence[int] | None = None,
+    displacement_field: bool = False,
 ) -> None:
-    """Write one channel-first KonfAI array as a single-level OME-NGFF store."""
+    """Write one channel-first KonfAI array as a single-level OME-NGFF store.
+
+    ``displacement_field`` writes it as a vector FIELD rather than an image: the component axis is
+    typed ``displacement`` (NGFF RFC-5), which is what makes a registration DVF self-describing
+    instead of an anonymous 3-channel image. A reader then no longer has to be told out of band that
+    the channels are a displacement -- the mistake that path invites is silent, not loud: index the
+    component axis like any other and you get one third of the field back, and a plausible-looking
+    registration with it.
+
+    The NGFF version follows from that flag and is deliberately NOT a parameter. RFC-5 axis types
+    exist only from 0.6, so a caller passing both could only ever pass them consistently -- an
+    invariant worth removing rather than documenting.
+    """
     _load_image.cache_clear()
     _require_ngff_zarr()
     array_data = np.asarray(data)
@@ -223,13 +268,38 @@ def write_ome_zarr(
     multiscales = ngff_zarr.to_multiscales(
         image, scale_factors=[], chunks=tuple(chunks) if chunks is not None else None
     )
-    # version 0.4 (zarr v2 layout) stays compatible with zarr-python 2.x; v0.5 needs zarr>=3
-    # (unavailable on Python 3.10), so pin 0.4 for portability across the CI matrix.
-    ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version="0.4")
+    version = _DEFAULT_VERSION
+    if displacement_field:
+        _type_component_axis(multiscales, _DISPLACEMENT_AXIS_TYPE)
+        version = _RFC5_VERSION
+    ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=version)
 
     if attributes:
         group = zarr.open_group(str(store_path), mode="r+")
         group.attrs[_KONFAI_ATTR_KEY] = {"attributes": dict(attributes)}
+
+
+def _type_component_axis(multiscales: Any, axis_type: str) -> None:
+    """Type the ``c`` axis of every coordinate system, in place.
+
+    The axis type is set on the RFC-5 coordinate systems rather than on the ``NgffImage``, because
+    ``to_multiscales`` derives the axes itself and hardcodes ``type="channel"`` for a ``c`` dim --
+    tagging the image is a dead assignment on a non-frozen dataclass, and the store comes out an
+    ordinary 3-channel image with no error raised anywhere.
+
+    Coordinate systems are also the capability check: an ngff-zarr too old to model RFC-5 has no
+    ``coordinateSystems`` on its metadata, and would otherwise write a silently untyped store.
+    """
+    systems = getattr(multiscales.metadata, "coordinateSystems", None)
+    if not systems:
+        raise DatasetManagerError(
+            f"Writing a '{axis_type}' field needs NGFF RFC-5 coordinate systems, which this ngff-zarr cannot model.",
+            "Upgrade it with: pip install 'ngff-zarr>=0.38'",
+        )
+    for system in systems:
+        for axis in system.axes:
+            if axis.name == "c":
+                axis.type = axis_type
 
 
 def create_ome_zarr_store(

@@ -305,6 +305,27 @@ def data_to_image(data: np.ndarray, attributes: Attribute) -> sitk.Image:
     return image
 
 
+# Set on an entry read back from a store that types its component axis as an RFC-5 displacement
+# field, so ``Dataset.read_transform`` can rebuild the transform. The underscore matters: a key
+# without one is stack-renamed by ``Attribute.__setitem__`` (``Transform`` becomes ``Transform_0``).
+DISPLACEMENT_FIELD_ATTRIBUTE = "konfai_displacement_field"
+
+
+def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np.ndarray, Attribute]:
+    """A displacement-field transform as a channel-first array plus its geometry.
+
+    The counterpart of ``_encode_transform_leaves`` for the one transform kind that cannot go through
+    it: a displacement field's parameters ARE the field, so serialising it as a parameter vector
+    would drop the geometry that makes it meaningful. It travels as an image instead, and the store
+    records what it is (see ``write_ome_zarr(displacement_field=True)``).
+    """
+    if not isinstance(transform, sitk.DisplacementFieldTransform):
+        raise DatasetManagerError(
+            f"Expected a DisplacementFieldTransform for entry '{name}', got '{type(transform).__name__}'."
+        )
+    return image_to_data(transform.GetDisplacementField())
+
+
 def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     """Convert a SimpleITK image into a channel-first NumPy array and attributes."""
     attributes = Attribute()
@@ -1283,8 +1304,16 @@ class Dataset:
             return attributes
 
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
+            from konfai.utils.ome_zarr import is_displacement_field
+
             info_shape, _ = self.get_infos(group, name)
-            return self.file_to_data_slice(group, name, tuple(slice(None) for _ in info_shape))
+            data, attributes = self.file_to_data_slice(group, name, tuple(slice(None) for _ in info_shape))
+            # Marked here and not in file_to_data_slice: that one is the streamed path, called once per
+            # patch, and re-reading the store's metadata per patch is exactly the overhead _load_image
+            # is memoised to avoid. A transform is only ever rebuilt from a whole entry.
+            if is_displacement_field(self._path(name)):
+                attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+            return data, attributes
 
         def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
             from konfai.utils.ome_zarr import read_ome_zarr_data_slice
@@ -1329,9 +1358,17 @@ class Dataset:
             from konfai.utils.ome_zarr import write_ome_zarr
 
             attributes = attributes or Attribute()
+            displacement_field = False
             if sitk is not None and isinstance(data, sitk.Image):
                 data, image_attributes = image_to_data(data)
                 attributes.update(image_attributes)
+            elif sitk is not None and isinstance(data, sitk.Transform):
+                # The parametric transforms the other backends serialise (Euler, affine, B-spline) have
+                # no OME-NGFF form; a displacement field does, and it is array-backed, so this backend
+                # stores exactly the one kind it can store faithfully.
+                data, field_attributes = displacement_field_to_data(data, name)
+                attributes.update(field_attributes)
+                displacement_field = True
             if not isinstance(data, np.ndarray):
                 raise DatasetManagerError("OME-Zarr datasets can only store image arrays.")
             write_ome_zarr(
@@ -1340,6 +1377,7 @@ class Dataset:
                 spacing=attributes.get_np_array("Spacing") if "Spacing" in attributes else None,
                 origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
                 attributes=dict(attributes),
+                displacement_field=displacement_field,
             )
 
         def open_data_stream(
@@ -1770,6 +1808,11 @@ class Dataset:
         if not self._exists_on_disk():
             raise NameError(f"Dataset {self.filename} not found")
         transform_parameters, attribute = self.read_data(group, name)
+        if DISPLACEMENT_FIELD_ATTRIBUTE in attribute:
+            # A displacement field carries no parameter vector to decode: the entry IS the transform,
+            # and the store said so (NGFF RFC-5). float64 is what DisplacementFieldTransform requires.
+            field = sitk.Cast(data_to_image(transform_parameters, attribute), sitk.sitkVectorFloat64)
+            return sitk.DisplacementFieldTransform(field)
         transforms_type = [v for k, v in attribute.items() if k.endswith(":Transform_0")]
         transforms = []
         for i, transform_type in enumerate(transforms_type):
