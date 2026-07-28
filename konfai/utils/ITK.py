@@ -53,22 +53,15 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
     if not path.is_dir():
         return sitk.ReadImage(str(path), sitk.sitkVectorFloat64)
 
+    from konfai.utils.dataset import data_to_image, ome_zarr_attributes
     from konfai.utils.ome_zarr import get_ome_zarr_info, read_ome_zarr_data_slice
 
-    info = get_ome_zarr_info(path)
-    axes = info["axes"]
-    spatial = [axis for axis in ("z", "y", "x") if axis in axes]
-    shape = [int(dict(zip(axes, info["shape"], strict=True)).get("c", 1))]
-    shape += [int(dict(zip(axes, info["shape"], strict=True))[axis]) for axis in spatial]
-    data, metadata = read_ome_zarr_data_slice(path, tuple(slice(None) for _ in shape))
-
-    scale = dict(zip(metadata["axes"], metadata["scale"], strict=True))
-    translation = dict(zip(metadata["axes"], metadata["translation"], strict=True))
-    # KonfAI arrays are channel-first; a SimpleITK vector image wants the components last, and its
-    # geometry in (x, y, z) -- the reverse of the NGFF axis order.
-    field = sitk.GetImageFromArray(np.moveaxis(np.asarray(data), 0, -1), isVector=True)
-    field.SetSpacing([float(scale[axis]) for axis in reversed(spatial)])
-    field.SetOrigin([float(translation[axis]) for axis in reversed(spatial)])
+    axes = get_ome_zarr_info(path)["axes"]
+    n_axes = 1 + sum(axis in axes for axis in ("z", "y", "x"))  # channel-first C[Z]YX
+    data, metadata = read_ome_zarr_data_slice(path, tuple(slice(None) for _ in range(n_axes)))
+    # Origin, Spacing and Direction together: NGFF scale/translation alone cannot express the
+    # direction matrix, so the geometry comes from the konfai sidecar through data_to_image.
+    field = data_to_image(data, ome_zarr_attributes(metadata))
     return sitk.Cast(field, sitk.sitkVectorFloat64)
 
 

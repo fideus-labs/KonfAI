@@ -36,10 +36,20 @@ from impact_reg_konfai.impact_reg import (  # noqa: E402
     _find_output,
     _write_displacement_field,
 )
-from konfai.utils.ome_zarr import is_displacement_field  # noqa: E402
+from konfai.utils.ome_zarr import _zarr_v3_available, is_displacement_field  # noqa: E402
+
+# The OME-Zarr side of these tests writes an RFC-5 field, a zarr v3 store that zarr 2.x
+# (Python 3.10) cannot write.
+pytestmark = pytest.mark.skipif(
+    not _zarr_v3_available(),
+    reason="NGFF RFC-5 displacement fields need a zarr v3 store (zarr>=3, Python>=3.11)",
+)
 
 SPACING = (1.5, 1.5, 2.0)
 ORIGIN = (7.0, -3.0, 10.0)
+# A 90 deg in-plane rotation: non-identity, so a Direction dropped on the store round-trip changes
+# where the field is sampled and the mapped-point assertion below catches it.
+DIRECTION = (0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
 
 def _field(seed: int = 0) -> "sitk.Image":
@@ -47,6 +57,7 @@ def _field(seed: int = 0) -> "sitk.Image":
     field = sitk.GetImageFromArray(values, isVector=True)
     field.SetSpacing(SPACING)
     field.SetOrigin(ORIGIN)
+    field.SetDirection(DIRECTION)
     return sitk.Cast(field, sitk.sitkVectorFloat64)
 
 
