@@ -36,6 +36,7 @@ from impact_reg_konfai.impact_reg import (  # noqa: E402
     _find_output,
     _write_displacement_field,
 )
+from konfai.utils.errors import TransformError  # noqa: E402
 from konfai.utils.ITK import read_displacement_field  # noqa: E402
 from konfai.utils.ome_zarr import _zarr_v3_available, is_displacement_field, write_ome_zarr  # noqa: E402
 
@@ -147,6 +148,33 @@ def test_replacing_a_store_is_not_served_from_the_reader_cache(tmp_path: Path) -
     assert second.GetSpacing() == pytest.approx((0.5, 0.5, 0.5))
     assert second.GetOrigin() == pytest.approx((100.0, 200.0, 300.0))
     assert sitk.GetArrayFromImage(second).flat[0] == pytest.approx(9.0)
+
+
+def test_an_ordinary_image_store_is_refused_as_a_field(tmp_path: Path) -> None:
+    """The declaration the store carries is the point: a three-component volume is a normal image,
+    and reading one as a field yields a transform that registers to nowhere without ever failing."""
+    image = tmp_path / "Image.ome.zarr"
+    write_ome_zarr(image, np.ones((3, 4, 5, 6), dtype=np.float32), spacing=SPACING, origin=ORIGIN)
+
+    assert not is_displacement_field(image)
+    with pytest.raises(TransformError, match="not a displacement field"):
+        read_displacement_field(image)
+
+
+def test_rerunning_in_the_other_form_leaves_one_output(tmp_path: Path) -> None:
+    """Discovery is by stem, so a run that emits the other form must not leave the previous one
+    beside it -- ``_find_output`` returns the first match, and ``DVF.mha`` sorts before its store."""
+    source, destination = tmp_path / "src", tmp_path / "out"
+    source.mkdir()
+    destination.mkdir()
+    _write_displacement_field(_field(), source / "DVF.mha")
+    _write_displacement_field(_field(), source / "DVF.ome.zarr")
+
+    _copy_output(source / "DVF.mha", destination, "DVF")
+    _copy_output(source / "DVF.ome.zarr", destination, "DVF")
+
+    assert [p.name for p in destination.iterdir()] == ["DVF.ome.zarr"]
+    assert _find_output(destination, "DVF").name == "DVF.ome.zarr"
 
 
 def test_store_written_by_the_orchestrator_is_a_declared_field(tmp_path: Path) -> None:
