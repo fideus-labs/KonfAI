@@ -104,14 +104,18 @@ def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
 def _write_displacement_field(field: sitk.Image, dest: Path) -> None:
     """Write a field in the form ``dest`` names, so a derived field matches the ones it came from."""
     if "".join(dest.suffixes).endswith(".ome.zarr"):
+        from konfai.utils.dataset import image_to_data
         from konfai.utils.ome_zarr import write_ome_zarr
 
-        array = sitk.GetArrayFromImage(field)
+        # image_to_data yields the channel-first array and the Origin/Spacing/Direction the store must
+        # carry -- the same encoding the Dataset backend writes, so the field round-trips through either.
+        data, attributes = image_to_data(field)
         write_ome_zarr(
             dest,
-            np.moveaxis(array, -1, 0),
+            data,
             spacing=field.GetSpacing(),
             origin=field.GetOrigin(),
+            attributes=dict(attributes),
             displacement_field=True,
         )
     else:
@@ -274,10 +278,16 @@ class ImpactRegKonfAIApp:
                 shutil.rmtree(work, ignore_errors=True)
 
     def _average_displacement(self, dvf_paths: list[Path]) -> sitk.Image:
-        """Average several presets' displacement fields (all on the same fixed grid) into one field."""
+        """Average several presets' displacement fields (all on the same fixed grid) into one field.
+
+        A running sum keeps memory flat in the number of members: a few field-sized buffers are live
+        at any instant, whatever the size of the ensemble.
+        """
         reference = read_displacement_field(dvf_paths[0])
-        stack = np.stack([sitk.GetArrayFromImage(read_displacement_field(p)) for p in dvf_paths], axis=0)
-        avg = sitk.GetImageFromArray(stack.mean(axis=0), isVector=True)
+        total = sitk.GetArrayFromImage(reference)
+        for path in dvf_paths[1:]:
+            total += sitk.GetArrayFromImage(read_displacement_field(path))
+        avg = sitk.GetImageFromArray(total / len(dvf_paths), isVector=True)
         avg.CopyInformation(reference)
         return avg
 
@@ -395,10 +405,11 @@ class ImpactRegKonfAIApp:
             raise ValueError("Uncertainty needs at least two ensemble displacement fields.")
         work = Path(tempfile.mkdtemp(prefix="impact_reg_unc_"))
         try:
-            reference = sitk.ReadImage(str(dvfs[0]))
+            reference = read_displacement_field(dvfs[0])
             rank = reference.GetDimension()
             stack = sitk.GetImageFromArray(
-                np.stack([sitk.GetArrayFromImage(sitk.ReadImage(str(p))) for p in dvfs], axis=-1), isVector=True
+                np.stack([sitk.GetArrayFromImage(read_displacement_field(p)) for p in dvfs], axis=-1),
+                isVector=True,
             )
             # The extra leading image axis holds the vector components (dropped by ``Norm``); the real
             # fixed-grid geometry lives on the remaining axes so the uncertainty map stays aligned.

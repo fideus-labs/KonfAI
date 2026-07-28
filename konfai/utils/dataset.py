@@ -343,6 +343,29 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     return data, attributes
 
 
+def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
+    """A KonfAI ``Attribute`` (Origin / Spacing / Direction) from an OME-Zarr entry's metadata.
+
+    The store's konfai sidecar wins when present -- it carries the full Direction matrix, which NGFF
+    scale/translation cannot express -- otherwise geometry falls back to the NGFF transforms, Direction
+    defaulting to identity. Shared by the Dataset OME-Zarr reader and ``ITK.read_displacement_field``
+    so both recover geometry the one same way.
+    """
+    attributes = Attribute(metadata.get("attributes", {}))
+    axes = metadata["axes"]
+    scale = dict(zip(axes, metadata.get("scale", []), strict=False))
+    translation = dict(zip(axes, metadata.get("translation", []), strict=False))
+    spatial_axes = [axis for axis in ("x", "y", "z") if axis in axes]
+    if "Spacing" not in attributes:
+        attributes["Spacing"] = np.asarray([scale.get(axis, 1.0) for axis in spatial_axes])
+    if "Origin" not in attributes:
+        attributes["Origin"] = np.asarray([translation.get(axis, 0.0) for axis in spatial_axes])
+    if "Direction" not in attributes:
+        attributes["Direction"] = np.eye(len(spatial_axes), dtype=np.float64).flatten()
+    attributes["OMEAxes"] = np.asarray(axes)
+    return attributes
+
+
 def _flatten_transforms(transform: sitk.Transform) -> list[sitk.Transform]:
     """The leaf transforms of a (possibly nested) composite, in application order.
 
@@ -1289,19 +1312,7 @@ class Dataset:
 
         @staticmethod
         def _attributes(metadata: dict[str, Any]) -> Attribute:
-            attributes = Attribute(metadata.get("attributes", {}))
-            axes = metadata["axes"]
-            scale = dict(zip(axes, metadata.get("scale", []), strict=False))
-            translation = dict(zip(axes, metadata.get("translation", []), strict=False))
-            spatial_axes = [axis for axis in ("x", "y", "z") if axis in axes]
-            if "Spacing" not in attributes:
-                attributes["Spacing"] = np.asarray([scale.get(axis, 1.0) for axis in spatial_axes])
-            if "Origin" not in attributes:
-                attributes["Origin"] = np.asarray([translation.get(axis, 0.0) for axis in spatial_axes])
-            if "Direction" not in attributes:
-                attributes["Direction"] = np.eye(len(spatial_axes), dtype=np.float64).flatten()
-            attributes["OMEAxes"] = np.asarray(axes)
-            return attributes
+            return ome_zarr_attributes(metadata)
 
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             from konfai.utils.ome_zarr import is_displacement_field
