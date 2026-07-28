@@ -92,11 +92,21 @@ def _find_output(root: Path, stem: str) -> Path:
     return matches[0]
 
 
+def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
+    """The path ``<stem><suffixes>`` in ``dest_dir``, with every earlier output of that stem removed.
+
+    A re-run whose presets emit the other form would otherwise leave both ``DVF.mha`` and
+    ``DVF.ome.zarr`` behind, and discovery is by stem: ``_find_output`` takes the first match, which
+    sorts to the stale one. Only the current run's output is left standing.
+    """
+    for stale in [p for p in dest_dir.iterdir() if p.name.startswith(f"{stem}.")]:
+        shutil.rmtree(stale) if stale.is_dir() else stale.unlink()
+    return dest_dir / (stem + suffixes)
+
+
 def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
     """Copy an output beside the results, keeping the form the preset produced (file or store)."""
-    dest = dest_dir / (stem + "".join(src.suffixes))
-    if dest.exists():
-        shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+    dest = _output_path(dest_dir, stem, "".join(src.suffixes))
     (shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
     if dest.is_dir():
         # A store put at a path already read is invisible to the reader's path-keyed memo, which
@@ -268,7 +278,7 @@ class ImpactRegKonfAIApp:
                     # Ensemble: average the presets' displacement fields (all on the fixed grid) and warp the
                     # moving image once with that averaged field — the one output no single preset produced.
                     avg_dvf = self._average_displacement(dvf_paths)
-                    dvf_out = case_out / ("DVF" + "".join(dvf_paths[0].suffixes))
+                    dvf_out = _output_path(case_out, "DVF", "".join(dvf_paths[0].suffixes))
                     _write_displacement_field(avg_dvf, dvf_out)
                     transform = sitk.DisplacementFieldTransform(sitk.Cast(avg_dvf, sitk.sitkVectorFloat64))
                     moving = sitk.ReadImage(str(moving_image))

@@ -54,8 +54,16 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
         return sitk.ReadImage(str(path), sitk.sitkVectorFloat64)
 
     from konfai.utils.dataset import data_to_image, ome_zarr_attributes
-    from konfai.utils.ome_zarr import get_ome_zarr_info, read_ome_zarr_data_slice
+    from konfai.utils.ome_zarr import get_ome_zarr_info, is_displacement_field, read_ome_zarr_data_slice
 
+    if not is_displacement_field(path):
+        raise TransformError(
+            f"'{path}' is an OME-Zarr image, not a displacement field: its component axis is not "
+            "typed as an NGFF RFC-5 displacement.",
+            "A three-component volume is a perfectly ordinary image, so the store's own declaration "
+            "is the only thing that tells them apart -- write the field with "
+            "write_ome_zarr(displacement_field=True).",
+        )
     axes = get_ome_zarr_info(path)["axes"]
     n_axes = 1 + sum(axis in axes for axis in ("z", "y", "x"))  # channel-first C[Z]YX
     data, metadata = read_ome_zarr_data_slice(path, tuple(slice(None) for _ in range(n_axes)))
