@@ -44,7 +44,7 @@ pytestmark = pytest.mark.skipif(
 
 SPACING = (1.5, 1.5, 2.0)
 ORIGIN = (7.0, -3.0, 10.0)
-# A 90 deg in-plane rotation: non-identity and anisotropic, so a dropped or transposed Direction shows.
+# A 90 deg in-plane rotation: an identity matrix would let a dropped Direction pass unnoticed.
 DIRECTION = (0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
 
