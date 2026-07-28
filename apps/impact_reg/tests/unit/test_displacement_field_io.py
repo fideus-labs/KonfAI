@@ -34,6 +34,7 @@ from impact_reg_konfai.impact_reg import (  # noqa: E402
     _copy_output,
     _displacement_transform,
     _find_output,
+    _output_path,
     _write_displacement_field,
 )
 from konfai.utils.errors import TransformError  # noqa: E402
@@ -159,6 +160,21 @@ def test_an_ordinary_image_store_is_refused_as_a_field(tmp_path: Path) -> None:
     assert not is_displacement_field(image)
     with pytest.raises(TransformError, match="not a displacement field"):
         read_displacement_field(image)
+
+
+def test_output_path_clears_the_stem_whatever_the_previous_form(tmp_path: Path) -> None:
+    """The contract both writers share: one output per stem. The ensemble branch writes ``Moved.mha``
+    verbatim, so a preceding single-preset run that produced ``Moved.ome.zarr`` has to be cleared here
+    rather than at the copy. Neighbouring stems are left alone."""
+    (tmp_path / "Moved.ome.zarr").mkdir()
+    (tmp_path / "Moved.mha").touch()
+    (tmp_path / "MovedMask.mha").touch()  # shares a prefix, not the stem
+    (tmp_path / "DVF.mha").touch()
+
+    dest = _output_path(tmp_path, "Moved", ".mha")
+
+    assert dest == tmp_path / "Moved.mha"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["DVF.mha", "MovedMask.mha"]
 
 
 def test_rerunning_in_the_other_form_leaves_one_output(tmp_path: Path) -> None:
