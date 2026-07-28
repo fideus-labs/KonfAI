@@ -56,7 +56,7 @@ itk = ["SimpleITK"]
 hdf5 = ["h5py"]
 monitoring = ["nvidia-ml-py"]
 tensorboard = ["tensorboard"]
-imaging = ["SimpleITK", "h5py", "pydicom", "zarr", "ngff-zarr"]
+imaging = ["SimpleITK", "h5py", "pydicom", "zarr", "ngff-zarr>=0.38"]
 vtk = ["vtk"]
 lpips = ["lpips"]
 smp = ["segmentation-models-pytorch"]
@@ -64,7 +64,7 @@ ssim = ["scikit-image"]
 fid = ["scipy", "torchvision"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
-omezarr = ["zarr", "ngff-zarr"]
+omezarr = ["zarr", "ngff-zarr>=0.38"]
 export = ["onnx", "onnxruntime", "onnxscript"]
 all = [
   "konfai[itk]",
@@ -85,7 +85,7 @@ dev = [
   "h5py",
   "pydicom",
   "zarr",
-  "ngff-zarr",
+  "ngff-zarr>=0.38",
   "scikit-image",
   "onnx",
   "onnxruntime",
@@ -161,7 +161,7 @@ tensorboard = "*"
 nvidia-ml-py = "*"
 pydicom = "*"
 zarr = "*"
-ngff-zarr = "*"
+ngff-zarr = ">=0.38"
 scikit-image = "*"
 
 [tool.pixi.feature.dev.tasks]
