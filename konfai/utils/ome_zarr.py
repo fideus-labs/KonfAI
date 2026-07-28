@@ -70,6 +70,22 @@ _RFC5_VERSION = "0.6"
 _DEFAULT_VERSION = "0.4"
 
 
+def _zarr_v3_available() -> bool:
+    """Whether the installed zarr can write a v3 store, which NGFF >= 0.5 (RFC-5) requires.
+
+    RFC-5 axis types live only in NGFF 0.6, a zarr v3 layout, and zarr-python 3 needs Python >= 3.11 --
+    so on Python 3.10 (zarr 2.x) a displacement field cannot be written. This is the capability the
+    RFC-5 write actually depends on: ``coordinateSystems`` (checked in ``_type_component_axis``) tracks
+    the ngff-zarr version, not the zarr one, so it alone lets a 2.x store through to an opaque failure.
+    """
+    if not _ZARR_AVAILABLE:
+        return False
+    try:
+        return int(zarr.__version__.split(".")[0]) >= 3
+    except (AttributeError, ValueError):
+        return False
+
+
 def _require_zarr() -> None:
     if not _ZARR_AVAILABLE:
         raise DatasetManagerError(
@@ -270,6 +286,12 @@ def write_ome_zarr(
     )
     version = _DEFAULT_VERSION
     if displacement_field:
+        if not _zarr_v3_available():
+            raise DatasetManagerError(
+                "Writing an NGFF RFC-5 displacement field needs a zarr v3 store, i.e. "
+                "zarr-python >= 3 (Python >= 3.11); this environment has zarr 2.",
+                "Install it with: pip install 'zarr>=3' on Python >= 3.11.",
+            )
         _type_component_axis(multiscales, _DISPLACEMENT_AXIS_TYPE)
         version = _RFC5_VERSION
     ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=version)
