@@ -284,7 +284,7 @@ class ImpactRegKonfAIApp:
                     moving = sitk.ReadImage(str(moving_image))
                     sitk.WriteImage(
                         sitk.Resample(moving, avg_dvf, transform, sitk.sitkLinear, 0.0, moving.GetPixelID()),
-                        str(case_out / "Moved.mha"),
+                        str(_output_path(case_out, "Moved", ".mha")),
                     )
 
                 # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid displacement
