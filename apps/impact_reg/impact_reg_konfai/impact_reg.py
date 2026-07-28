@@ -98,6 +98,12 @@ def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
     if dest.exists():
         shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
     (shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
+    if dest.is_dir():
+        # A store put at a path already read is invisible to the reader's path-keyed memo, which
+        # would otherwise pair the copy's voxels with the replaced store's axes and geometry.
+        from konfai.utils.ome_zarr import clear_ome_zarr_cache
+
+        clear_ome_zarr_cache()
     return dest
 
 

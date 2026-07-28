@@ -36,7 +36,8 @@ from impact_reg_konfai.impact_reg import (  # noqa: E402
     _find_output,
     _write_displacement_field,
 )
-from konfai.utils.ome_zarr import _zarr_v3_available, is_displacement_field  # noqa: E402
+from konfai.utils.ITK import read_displacement_field  # noqa: E402
+from konfai.utils.ome_zarr import _zarr_v3_available, is_displacement_field, write_ome_zarr  # noqa: E402
 
 # The OME-Zarr side of these tests writes an RFC-5 field, a zarr v3 store that zarr 2.x
 # (Python 3.10) cannot write.
@@ -109,6 +110,43 @@ def test_copy_output_replaces_an_existing_store(tmp_path: Path) -> None:
 
     assert again.is_dir()
     assert is_displacement_field(again)
+
+
+def test_replacing_a_store_is_not_served_from_the_reader_cache(tmp_path: Path) -> None:
+    """The second of two registrations writing to one output directory must read its own field.
+
+    The reader memoises NGFF metadata per store path, so a store copied over one already read is a
+    hit: the new voxels arrive carrying the replaced store's geometry. Nothing raises when the two
+    have the same shape -- the field is simply sampled in the wrong place. Written without a konfai
+    sidecar (what a third-party RFC-5 producer emits), since the sidecar is read outside the memo
+    and would mask exactly the staleness under test.
+    """
+    source, destination = tmp_path / "src", tmp_path / "out"
+    (source / "first").mkdir(parents=True)
+    (source / "second").mkdir(parents=True)
+    destination.mkdir()
+    shape = (3, 4, 5, 6)
+    write_ome_zarr(
+        source / "first" / "DVF.ome.zarr",
+        np.ones(shape, dtype=np.float32),
+        spacing=SPACING,
+        origin=ORIGIN,
+        displacement_field=True,
+    )
+    write_ome_zarr(
+        source / "second" / "DVF.ome.zarr",
+        np.full(shape, 9.0, dtype=np.float32),
+        spacing=(0.5, 0.5, 0.5),
+        origin=(100.0, 200.0, 300.0),
+        displacement_field=True,
+    )
+
+    read_displacement_field(_copy_output(source / "first" / "DVF.ome.zarr", destination, "DVF"))
+    second = read_displacement_field(_copy_output(source / "second" / "DVF.ome.zarr", destination, "DVF"))
+
+    assert second.GetSpacing() == pytest.approx((0.5, 0.5, 0.5))
+    assert second.GetOrigin() == pytest.approx((100.0, 200.0, 300.0))
+    assert sitk.GetArrayFromImage(second).flat[0] == pytest.approx(9.0)
 
 
 def test_store_written_by_the_orchestrator_is_a_declared_field(tmp_path: Path) -> None:
