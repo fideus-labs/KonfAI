@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 from konfai.utils.dataset import read_landmarks, write_landmarks
-from konfai.utils.ITK import apply_to_data_transform
+from konfai.utils.ITK import apply_to_data_transform, read_displacement_field
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import get_available_apps_on_hf_repo
 
@@ -79,17 +79,48 @@ def get_available_presets(force_update: bool = False) -> list[str]:
     return list(get_available_apps_on_hf_repo(IMPACT_REG_KONFAI_REPO, force_update))
 
 
-def _find_output(root: Path, name: str) -> Path:
-    """Locate a single ``<name>`` produced by a preset inference under ``root``."""
-    matches = sorted(root.rglob(name))
+def _find_output(root: Path, stem: str) -> Path:
+    """Locate the single output named ``stem`` under ``root``, whatever form the preset wrote it in.
+
+    Matched on the name rather than on a fixed filename: a displacement field may come out as an ITK
+    image or as an OME-Zarr store, and a store is a DIRECTORY whose ``Path.stem`` is "DVF.ome" -- so a
+    fixed "DVF.mha" finds nothing and the run dies with the output sitting in the directory it listed.
+    """
+    matches = sorted(root.rglob(f"{stem}.*"))
     if not matches:
-        raise FileNotFoundError(f"Preset inference did not produce '{name}' under {root}.")
+        raise FileNotFoundError(f"Preset inference did not produce '{stem}' under {root}.")
     return matches[0]
 
 
+def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
+    """Copy an output beside the results, keeping the form the preset produced (file or store)."""
+    dest = dest_dir / (stem + "".join(src.suffixes))
+    if dest.exists():
+        shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+    (shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
+    return dest
+
+
+def _write_displacement_field(field: sitk.Image, dest: Path) -> None:
+    """Write a field in the form ``dest`` names, so a derived field matches the ones it came from."""
+    if "".join(dest.suffixes).endswith(".ome.zarr"):
+        from konfai.utils.ome_zarr import write_ome_zarr
+
+        array = sitk.GetArrayFromImage(field)
+        write_ome_zarr(
+            dest,
+            np.moveaxis(array, -1, 0),
+            spacing=field.GetSpacing(),
+            origin=field.GetOrigin(),
+            displacement_field=True,
+        )
+    else:
+        sitk.WriteImage(field, str(dest))
+
+
 def _displacement_transform(dvf_path: Path) -> sitk.Transform:
-    """Read a displacement-field image (3-component, fixed grid) as a SimpleITK transform."""
-    return sitk.DisplacementFieldTransform(sitk.ReadImage(str(dvf_path), sitk.sitkVectorFloat64))
+    """Read a displacement field (3-component, fixed grid) as a SimpleITK transform."""
+    return sitk.DisplacementFieldTransform(read_displacement_field(dvf_path))
 
 
 def _neutral_mask(out_path: Path) -> Path:
@@ -161,7 +192,7 @@ class ImpactRegKonfAIApp:
         subprocess.run(command, check=True)  # nosec B603
         # The model emits both the moved image and the displacement field on the fixed grid; reusing them
         # (rather than re-resampling here) keeps the single-preset path free of any extra image read/write.
-        return _find_output(out, "Moved.mha"), _find_output(out, "DVF.mha")
+        return _find_output(out, "Moved"), _find_output(out, "DVF")
 
     def register(
         self,
@@ -213,9 +244,7 @@ class ImpactRegKonfAIApp:
                         config_overrides,
                     )
                     if keep_dvf:
-                        member = case_out / _ENSEMBLE_DIR / f"{preset}.mha"
-                        shutil.copy2(dvf, member)
-                        dvf = member
+                        dvf = _copy_output(dvf, case_out / _ENSEMBLE_DIR, preset)
                     moved_paths.append(moved)
                     dvf_paths.append(dvf)
 
@@ -223,13 +252,14 @@ class ImpactRegKonfAIApp:
                     # One preset: the model already produced the moved image AND the displacement field on
                     # the fixed grid — reuse them verbatim. No input re-read, no re-resample, and the input
                     # format is whatever the model handled (OME-Zarr included).
-                    shutil.copy2(moved_paths[0], case_out / "Moved.mha")
-                    shutil.copy2(dvf_paths[0], case_out / "DVF.mha")
+                    _copy_output(moved_paths[0], case_out, "Moved")
+                    dvf_out = _copy_output(dvf_paths[0], case_out, "DVF")
                 else:
                     # Ensemble: average the presets' displacement fields (all on the fixed grid) and warp the
                     # moving image once with that averaged field — the one output no single preset produced.
                     avg_dvf = self._average_displacement(dvf_paths)
-                    sitk.WriteImage(avg_dvf, str(case_out / "DVF.mha"))
+                    dvf_out = case_out / ("DVF" + "".join(dvf_paths[0].suffixes))
+                    _write_displacement_field(avg_dvf, dvf_out)
                     transform = sitk.DisplacementFieldTransform(sitk.Cast(avg_dvf, sitk.sitkVectorFloat64))
                     moving = sitk.ReadImage(str(moving_image))
                     sitk.WriteImage(
@@ -239,14 +269,14 @@ class ImpactRegKonfAIApp:
 
                 # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid displacement
                 # field as a SimpleITK transform.
-                sitk.WriteTransform(_displacement_transform(case_out / "DVF.mha"), str(case_out / "Transform.h5"))
+                sitk.WriteTransform(_displacement_transform(dvf_out), str(case_out / "Transform.h5"))
             finally:
                 shutil.rmtree(work, ignore_errors=True)
 
     def _average_displacement(self, dvf_paths: list[Path]) -> sitk.Image:
         """Average several presets' displacement fields (all on the same fixed grid) into one field."""
-        reference = sitk.ReadImage(str(dvf_paths[0]))
-        stack = np.stack([sitk.GetArrayFromImage(sitk.ReadImage(str(p))) for p in dvf_paths], axis=0)
+        reference = read_displacement_field(dvf_paths[0])
+        stack = np.stack([sitk.GetArrayFromImage(read_displacement_field(p)) for p in dvf_paths], axis=0)
         avg = sitk.GetImageFromArray(stack.mean(axis=0), isVector=True)
         avg.CopyInformation(reference)
         return avg
