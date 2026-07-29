@@ -52,10 +52,14 @@ except ImportError:
     _ZARR_AVAILABLE = False
 
 try:
+    # dask sits under the same guard because it is ngff-zarr's own hard dependency: the two are
+    # present or absent together, and dask.array is used only to describe a store to ngff-zarr.
+    import dask.array
     import ngff_zarr  # type: ignore[import-untyped]
 
     _NGFF_ZARR_AVAILABLE = True
 except ImportError:
+    dask = None  # type: ignore[assignment]
     ngff_zarr = None  # type: ignore[assignment]
     _NGFF_ZARR_AVAILABLE = False
 
@@ -348,47 +352,67 @@ def create_ome_zarr_store(
     """Create an empty single-level OME-NGFF store for region-by-region writes.
 
     Returns the level-0 zarr array: chunks materialise as regions are assigned, and unwritten regions
-    read back as zeros. Metadata (the 0.4 multiscales entry plus the KonfAI attribute sidecar) is
-    complete from the start, so the store is readable at any point during the write.
+    read back as zeros. Metadata is complete from the start, so the store is readable at any point
+    during the write.
+
+    ngff-zarr writes that metadata, exactly as it does for the whole-array path, so both paths describe
+    a store the same way. The hand-built ``multiscales`` entry this replaces was frozen at version 0.4
+    with the component axis typed ``channel``: the streaming path could never describe a displacement
+    field, however well ``write_ome_zarr`` could.
+
+    It describes the store from a one-voxel stand-in rather than from an array of the target shape.
+    With a single resolution level the metadata does not depend on the extent at all -- axes and
+    coordinate transformations come from ``dims``, ``scale`` and ``translation`` -- and the two come
+    out byte-identical, verified for 0.4 and 0.6. Handing ngff-zarr the real shape instead costs a
+    pass over every chunk of an array that is entirely zeros (~44 ms per chunk, ~33 s for a 13.6 GiB
+    field) to write no bytes at all. The real array is then created underneath that metadata, which is
+    also what makes its chunking exactly the caller's: the region grid is the one thing ngff-zarr
+    cannot infer, and a store whose chunks straddle it turns every region write into a
+    read-modify-write.
     """
     clear_ome_zarr_cache()
-    _require_zarr()
+    _require_ngff_zarr()
     spatial_axes, scale_values, translation_values = _spatial_geometry(
         len(shape), f"shape {list(shape)}", spacing, origin
     )
-    scale = [1.0, *scale_values]
-    translation = [0.0, *translation_values]
+    dims = ["c", *spatial_axes]
+    scale = {"c": 1.0, **dict(zip(spatial_axes, scale_values, strict=True))}
+    translation = {"c": 0.0, **dict(zip(spatial_axes, translation_values, strict=True))}
 
     if chunks is None:
         spatial_chunks = [min(extent, 128) for extent in shape[1:]]
         # Keep one chunk around 32 MiB: full 128-wide spatial tiles, channels split to fit the budget.
         tile_bytes = int(np.prod(spatial_chunks, dtype=np.int64)) * np.dtype(dtype).itemsize
         chunks = [min(shape[0], max(1, (32 << 20) // max(1, tile_bytes))), *spatial_chunks]
+    chunks = tuple(chunks)
 
-    try:
-        group = zarr.open_group(str(store_path), mode="w", zarr_format=2)
-    except TypeError:  # zarr-python 2.x: the v2 layout is its only format
-        group = zarr.open_group(str(store_path), mode="w")
+    stand_in = dask.array.zeros((shape[0], *(1,) * len(spatial_axes)), dtype=np.dtype(dtype))
+    image = ngff_zarr.to_ngff_image(stand_in, dims=dims, scale=scale, translation=translation)
+    multiscales = ngff_zarr.to_multiscales(image, scale_factors=[])
+    # version is explicit because to_ngff_zarr defaults to 0.5, which zarr-python 2 cannot write.
+    ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=_DEFAULT_VERSION)
+
+    # The level-0 key comes from the metadata rather than a literal: ngff-zarr builds it from the
+    # image name, so "scale0/image" is its convention to change, not ours to hardcode.
+    group = zarr.open_group(str(store_path), mode="r+")
     create_array = getattr(group, "create_array", None) or group.create_dataset
-    array = create_array("0", shape=tuple(shape), chunks=tuple(chunks), dtype=np.dtype(dtype), fill_value=0)
-    group.attrs["multiscales"] = [
-        {
-            "version": "0.4",
-            "name": "image",
-            "axes": [{"name": "c", "type": "channel"}, *[{"name": axis, "type": "space"} for axis in spatial_axes]],
-            "datasets": [
-                {
-                    "path": "0",
-                    "coordinateTransformations": [
-                        {"type": "scale", "scale": scale},
-                        {"type": "translation", "translation": translation},
-                    ],
-                }
-            ],
-        }
-    ]
+    array = create_array(
+        multiscales.metadata.datasets[0].path,
+        shape=tuple(shape),
+        chunks=chunks,
+        dtype=np.dtype(dtype),
+        fill_value=0,
+        overwrite=True,
+    )
+    # Sidecar last: to_ngff_zarr(overwrite=True) reopens the root with mode="w" and drops every
+    # attribute it finds, so writing this first loses Direction -- and losing Direction is silent,
+    # the reader falls back to identity and returns a plausibly-oriented volume.
     if attributes:
         group.attrs[_KONFAI_ATTR_KEY] = {"attributes": dict(attributes)}
+    # ngff-zarr leaves a consolidated index behind, and readers trust it over the arrays themselves --
+    # so until it is rebuilt the store still advertises the one-voxel stand-in, whatever is on disk.
+    # Last, so that the sidecar written just above is part of what gets indexed.
+    zarr.consolidate_metadata(str(store_path))
     return array
 
 
