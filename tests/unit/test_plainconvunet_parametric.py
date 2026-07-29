@@ -34,6 +34,8 @@ from konfai.models.python.segmentation.plainconvunet import PlainConvUNet
 from konfai.network.network import Network
 from konfai.utils.pretrained import transfer_weights_by_execution_order
 
+pytestmark = pytest.mark.slow
+
 # Each config: (id, n_stages, features_per_stage, strides, kernel_sizes, n_conv_per_stage,
 #               n_conv_per_stage_decoder, num_classes).
 CONFIGS = [

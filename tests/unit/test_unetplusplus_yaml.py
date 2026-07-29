@@ -32,11 +32,14 @@ YAML inherits that equivalence. A structural build+forward test runs on any CI w
 
 from pathlib import Path
 
+import pytest
 import torch
 from konfai.models.python.segmentation.unetplusplus import UNetPlusPlus
 from konfai.network.network import Network
 from konfai.utils.model_builder import build_model_from_yaml
 from konfai.utils.pretrained import transfer_weights_by_execution_order
+
+pytestmark = pytest.mark.slow
 
 CATALOG = Path(__file__).resolve().parents[2] / "konfai" / "models" / "yaml"
 UNETPLUSPLUS_YML = CATALOG / "UNetPlusPlus.yml"

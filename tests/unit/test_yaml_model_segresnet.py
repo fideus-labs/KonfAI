@@ -44,6 +44,8 @@ import torch
 from konfai.network.network import Network
 from konfai.utils.model_builder import build_model_from_yaml
 
+pytestmark = pytest.mark.slow
+
 CATALOG = Path(__file__).resolve().parents[2] / "konfai" / "models" / "yaml"
 SEGRESNET_YML = CATALOG / "SegResNet.yml"
 

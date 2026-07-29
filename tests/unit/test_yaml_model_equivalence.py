@@ -40,6 +40,8 @@ from konfai.utils.pretrained import (
     transfer_weights_by_execution_order,
 )
 
+pytestmark = pytest.mark.slow
+
 CATALOG = Path(__file__).resolve().parents[2] / "konfai" / "models" / "yaml"
 
 UNET_YML = Path(__file__).resolve().parents[2] / "examples" / "Segmentation" / "UNet.yml"

@@ -29,6 +29,8 @@ from ruamel.yaml import YAML
 fastmcp = pytest.importorskip("fastmcp")
 pytest.importorskip("SimpleITK")
 
+pytestmark = pytest.mark.slow
+
 yaml = YAML()
 yaml.default_flow_style = False
 

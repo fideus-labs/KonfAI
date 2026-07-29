@@ -30,6 +30,8 @@ import pytest
 import torch
 from konfai import RemoteServer, check_server
 
+pytestmark = pytest.mark.slow
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KONFAI_APPS_ROOT = REPO_ROOT / "konfai-apps"
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
@@ -230,7 +232,7 @@ def test_main_apps_remote_infer_roundtrip_against_main_apps_server(
     )
 
     assert result.returncode == 0, (
-        "Remote CLI roundtrip failed.\n\n" f"STDOUT:\n{result.stdout}\n\n" f"STDERR:\n{result.stderr}"
+        f"Remote CLI roundtrip failed.\n\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
     )
     assert "Remote job" in result.stdout
     assert "Result written to" in result.stdout

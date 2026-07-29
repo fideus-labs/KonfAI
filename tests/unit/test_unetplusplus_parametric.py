@@ -31,6 +31,8 @@ from konfai.models.python.segmentation.unetplusplus import UNetPlusPlus
 from konfai.network.network import Network
 from konfai.utils.pretrained import transfer_weights_by_execution_order
 
+pytestmark = pytest.mark.slow
+
 # Each config: (id, encoder_name, in_channels, classes, expected_leaves).
 CONFIGS = [
     # The EXACT ImpactSynth "MR" backbone: smp.UnetPlusPlus(resnet34, in_channels=5, classes=1). The

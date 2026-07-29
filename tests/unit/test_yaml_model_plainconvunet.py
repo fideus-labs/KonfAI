@@ -50,6 +50,8 @@ from konfai.network.network import Network
 from konfai.utils.model_builder import build_model_from_yaml
 from konfai.utils.pretrained import transfer_weights_by_execution_order
 
+pytestmark = pytest.mark.slow
+
 CATALOG = Path(__file__).resolve().parents[2] / "konfai" / "models" / "yaml"
 PLAINCONVUNET_YML = CATALOG / "PlainConvUNet.yml"
 

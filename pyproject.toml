@@ -168,6 +168,7 @@ scikit-image = "*"
 
 [tool.pixi.feature.dev.tasks]
 test = { cmd = "pytest -q tests/", description = "Run the test suite" }
+test-fast = { cmd = 'pytest -q -m "not slow and not integration" tests/', description = "Run the test suite without slow oracle and integration tests" }
 test-apps = { cmd = "pytest -q konfai-apps/tests", description = "Run the konfai-apps test suite" }
 test-cov = { cmd = "pytest --cov=konfai --cov-report=term-missing tests/", description = "Run tests with coverage" }
 lint = { cmd = "ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Lint source code" }
