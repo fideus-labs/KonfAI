@@ -95,6 +95,7 @@ dev = [
   "tensorboard",
   "pytest",
   "pytest-cov",
+  "pytest-xdist",
   "pre-commit",
   "ruff==0.15.2",
   "mypy",
@@ -150,6 +151,7 @@ docs = { features = ["default", "docs"], solve-group = "default" }
 [tool.pixi.feature.dev.pypi-dependencies]
 pytest = "*"
 pytest-cov = "*"
+pytest-xdist = "*"
 ruff = "==0.15.2"
 build = "*"
 twine = "*"
@@ -167,10 +169,10 @@ dask = "*"
 scikit-image = "*"
 
 [tool.pixi.feature.dev.tasks]
-test = { cmd = "pytest -q tests/", description = "Run the test suite" }
+test = { cmd = "pytest -q -n auto --dist loadfile tests/", description = "Run the test suite" }
 test-fast = { cmd = 'pytest -q -m "not slow and not integration" tests/', description = "Run the test suite without slow oracle and integration tests" }
 test-apps = { cmd = "pytest -q konfai-apps/tests", description = "Run the konfai-apps test suite" }
-test-cov = { cmd = "pytest --cov=konfai --cov-report=term-missing tests/", description = "Run tests with coverage" }
+test-cov = { cmd = "pytest -n auto --dist loadfile --cov=konfai --cov-report=term-missing tests/", description = "Run tests with coverage" }
 lint = { cmd = "ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Lint source code" }
 format = { cmd = "ruff format konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Format source code" }
 format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Check formatting without modifying files" }
