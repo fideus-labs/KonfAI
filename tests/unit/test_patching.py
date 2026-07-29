@@ -629,3 +629,36 @@ def test_trim_keeps_the_patch_whole_when_there_is_nothing_to_trim():
     """
     for size, overlap in ((4, 4), (3, 4), (1, 2), (2, 3)):
         assert torch.equal(Trim()._window_1d(size, overlap), torch.ones(size)), (size, overlap)
+
+
+@pytest.mark.parametrize("sweep_axis", [0, 1, 2])
+def test_streaming_accumulator_sweeps_any_axis(sweep_axis):
+    """The window slides along the declared axis, and the volume comes back the same whichever it is.
+
+    The window costs ``patch[axis] x (the other extents)``, so the axis is worth choosing rather than
+    fixing: on an anisotropic volume the cheapest sweep can be several times smaller than axis 0. This
+    pins that the machinery is axis-agnostic; picking the axis is a separate decision.
+    """
+    shape, patch, overlap = [10, 10, 14], [6, 6, 6], 2
+    full = torch.rand(2, *shape)
+    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    # The grid is emitted with axis 0 outermost; a sweep along another axis needs that axis outermost.
+    rest = [axis for axis in range(3) if axis != sweep_axis]
+    ordered = sorted(slices, key=lambda sl: tuple(sl[axis].start for axis in (sweep_axis, *rest)))
+
+    combine = Cosinus()
+    combine.set_patch_config(patch, overlap)
+    accumulator = StreamingAccumulator(ordered, patch, patch_combine=combine, batch=False, sweep_axis=sweep_axis)
+    assert accumulator.footprint_shape[sweep_axis] == 6  # the window, not the extent
+    assert accumulator.footprint_shape == [6 if a == sweep_axis else shape[a] for a in range(3)]
+
+    out = torch.zeros(2, *shape)
+    finalized = []
+    for index, patch_slice in enumerate(ordered):
+        finalized += accumulator.add_layer(index, full[(slice(None), *patch_slice)])
+    finalized += accumulator.finalize()
+    for region, slab in finalized:
+        destination = [slice(None)] * 3
+        destination[sweep_axis] = region
+        out[(slice(None), *destination)] = slab
+    torch.testing.assert_close(out, full, rtol=0, atol=1e-5)

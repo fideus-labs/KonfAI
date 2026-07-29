@@ -421,7 +421,12 @@ class Accumulator:
         patch_size: list[int],
         patch_combine: PathCombine | None = None,
         batch: bool = True,
+        sweep_axis: int = 0,
     ) -> None:
+        # Which spatial axis the window slides along. The patch grid is emitted with this axis
+        # outermost, so a patch's arrival finalizes everything behind it on that axis and nothing
+        # else. 0 is what get_patch_slices_from_shape produces today.
+        self.sweep_axis = sweep_axis
         self.patch_slices: list[tuple[slice, ...]] = []
         self.shape = max([[v.stop for v in patch] for patch in patch_slices])
 
@@ -486,7 +491,8 @@ class Accumulator:
         # to compute and every index in _weighted_patch stays in range.
         dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
         data = data[tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])]
-        dest[0] = slice(dest[0].start - row_offset, dest[0].stop - row_offset)
+        sweep = self.sweep_axis
+        dest[sweep] = slice(dest[sweep].start - row_offset, dest[sweep].stop - row_offset)
         slices_dest = tuple([slice(cast(torch.Tensor, self._result).shape[i]) for i in range(n)] + dest)
         result = cast(torch.Tensor, self._result)
         lead = slices_dest[:n]
@@ -596,6 +602,15 @@ class Accumulator:
                 self._weighted.mul_(share)
         return self._weighted
 
+    def _along_sweep(self, span: slice, lead: int) -> tuple[slice, ...]:
+        """Index a result tensor over ``span`` on the sweep axis and whole on every other."""
+        spatial = [span if dim == self.sweep_axis else slice(None) for dim in range(len(self.shape))]
+        return tuple([slice(None)] * lead + spatial)
+
+    def _sweep_shape(self, extent: int) -> list[int]:
+        """The volume's spatial shape with the sweep axis cut down to ``extent``."""
+        return [extent if dim == self.sweep_axis else size for dim, size in enumerate(self.shape)]
+
     def is_empty(self) -> bool:
         """True until the first patch has been blended in (no volume-sized buffer allocated yet)."""
         return self._result is None
@@ -648,10 +663,14 @@ class StreamingAccumulator(Accumulator):
         patch_size: list[int],
         patch_combine: PathCombine | None = None,
         batch: bool = True,
+        sweep_axis: int = 0,
     ) -> None:
-        super().__init__(patch_slices, patch_size, patch_combine, batch)
-        self._window = min(max(patch[0].stop - patch[0].start for patch in self.patch_slices), self.shape[0])
-        starts = [patch[0].start for patch in self.patch_slices]
+        super().__init__(patch_slices, patch_size, patch_combine, batch, sweep_axis)
+        sweep = self.sweep_axis
+        self._window = min(
+            max(patch[sweep].stop - patch[sweep].start for patch in self.patch_slices), self.shape[sweep]
+        )
+        starts = [patch[sweep].start for patch in self.patch_slices]
         if (starts and starts[0] != 0) or any(
             0 > current - previous or current - previous > self._window for previous, current in pairwise(starts)
         ):
@@ -672,16 +691,16 @@ class StreamingAccumulator(Accumulator):
         # window offset (dest[0] below), which torch silently reads from the end -> misplaced data, no
         # error. Fail loud instead. The prediction loop preserves per-case order (shuffle=False), so
         # this only guards a future misuse (e.g. a shuffling sampler).
-        if patch_slice[0].start < self._flushed:
+        if patch_slice[self.sweep_axis].start < self._flushed:
             raise PatchError(
-                f"StreamingAccumulator received patch start {patch_slice[0].start} after flushing to "
+                f"StreamingAccumulator received patch start {patch_slice[self.sweep_axis].start} after flushing to "
                 f"{self._flushed}: patches must arrive in non-decreasing first-spatial-axis order.",
                 "Add patches in the order get_patch_slices_from_shape generates them (no shuffling).",
             )
-        slabs = self._advance_to(patch_slice[0].start)
+        slabs = self._advance_to(patch_slice[self.sweep_axis].start)
         if self._result is None:
             self._result = torch.zeros(
-                [*layer.shape[:n], self._window, *self.shape[1:]],
+                [*layer.shape[:n], *self._sweep_shape(self._window)],
                 dtype=layer.dtype,
                 device=layer.device,
             )
@@ -692,7 +711,7 @@ class StreamingAccumulator(Accumulator):
 
     def finalize(self) -> list[tuple[slice, torch.Tensor]]:
         """Flush the remaining window and reset for reuse; call once ``is_full()``."""
-        slabs = self._advance_to(self.shape[0])
+        slabs = self._advance_to(self.shape[self.sweep_axis])
         self._reset()
         self._flushed = 0
         return slabs
@@ -703,7 +722,7 @@ class StreamingAccumulator(Accumulator):
         # on the GPU within bounded VRAM. Blend and IEEE-correctly-rounded finalize ops (+, *, /, argmax,
         # cast) are bit-identical CPU/CUDA; only a transcendental-terminated float output (Softmax/Sigmoid)
         # can differ by ~1 ULP between a window on the GPU and a whole-volume reference on the CPU.
-        return [self._window, *self.shape[1:]]
+        return self._sweep_shape(self._window)
 
     def assemble(self) -> torch.Tensor:
         raise PatchError(
@@ -713,7 +732,7 @@ class StreamingAccumulator(Accumulator):
 
     def _advance_to(self, z: int) -> list[tuple[slice, torch.Tensor]]:
         """Finalize the window up to ``z`` (absolute) and shift the window origin there."""
-        z = min(z, self.shape[0])
+        z = min(z, self.shape[self.sweep_axis])
         if self._result is None or z <= self._flushed:
             return []
         n = self._n
@@ -723,14 +742,15 @@ class StreamingAccumulator(Accumulator):
                 f"StreamingAccumulator asked to finalize {length} rows at once with a {self._window}-row window.",
                 "Patch starts may advance by at most one patch extent per step (checked at construction).",
             )
-        lead = (slice(None),) * n
         # Cloned: the window slides over these rows right after, so the slab handed out must not be a
         # view of it. Nothing else to do — the blend weights already sum to one over these voxels.
-        slab = self._result[(*lead, slice(0, length))].clone()
+        slab = self._result[self._along_sweep(slice(0, length), n)].clone()
         keep = self._window - length
         # .clone(): source and destination views overlap when length < window.
-        self._result[(*lead, slice(0, keep))] = self._result[(*lead, slice(length, self._window))].clone()
-        self._result[(*lead, slice(keep, self._window))] = 0
+        self._result[self._along_sweep(slice(0, keep), n)] = self._result[
+            self._along_sweep(slice(length, self._window), n)
+        ].clone()
+        self._result[self._along_sweep(slice(keep, self._window), n)] = 0
         region = slice(self._flushed, z)
         self._flushed = z
         return [(region, slab)]
