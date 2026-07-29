@@ -349,11 +349,15 @@ class OutputDataset(Dataset, NeedDevice, ABC):
                     )
                     transform_type.append(transform)
 
-        if self._patch_combine is not None:
-            module, name = get_module(self._patch_combine, "konfai.data.patching")
-            self.patch_combine = apply_config(f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset")(
-                getattr(module, name)
-            )()
+        # A patch grid overlaps whether or not a combine is declared, and an undeclared one used to
+        # leave the overlap to whichever patch wrote last -- an arbitrary winner, possibly holding that
+        # voxel on its own border with no context behind it, which is what a seam is. Trim keeps each
+        # patch's central band instead: the bands tile the volume exactly, so the default is a seamless
+        # selection that still never averages (a label map survives it).
+        module, name = get_module(self._patch_combine or "Trim", "konfai.data.patching")
+        self.patch_combine = apply_config(f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset")(
+            getattr(module, name)
+        )()
 
         module, name = get_module(self.reduction_classpath, "konfai.predictor")
         # get_module returns the module OBJECT: compare its dotted name, not the module against the string
