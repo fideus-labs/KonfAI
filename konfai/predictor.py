@@ -216,6 +216,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         final_transforms: dict[str, TransformLoader],
         patch_combine: str | None,
         reduction: str,
+        attributes: list[str] | None = None,
     ) -> None:
         filename, _, file_format = split_path_spec(filename)
         super().__init__(filename, file_format)
@@ -229,6 +230,10 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self._after_reduction_transforms = after_reduction_transforms
         self._final_transforms = final_transforms
         self._patch_combine = patch_combine
+        # "key=value" strings rather than a mapping: the config layer accepts list[str] and not
+        # dict[str, str], so a mapping here would be unreachable from the YAML that is supposed to
+        # drive it. Same spelling as the --set overrides.
+        self._attributes = dict(entry.split("=", 1) for entry in attributes or [])
         self.reduction_classpath = reduction
         self.reduction: Reduction
 
@@ -571,6 +576,7 @@ class OutSameAsGroupDataset(OutputDataset):
         final_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
         patch_combine: str | None = None,
         reduction: str = "Mean",
+        attributes: list[str] | None = None,
     ) -> None:
         super().__init__(
             dataset_filename,
@@ -580,6 +586,7 @@ class OutSameAsGroupDataset(OutputDataset):
             final_transforms,
             patch_combine,
             reduction,
+            attributes,
         )
         self.group_src, self.group_dest = same_as_group.split(":")
         # Slab streaming has no config knob: it is applied automatically, per case, whenever it is
@@ -617,6 +624,15 @@ class OutSameAsGroupDataset(OutputDataset):
             source_attribute = (
                 Attribute(attribute) if attribute is not None else Attribute(input_dataset.cache_attributes[0])
             )
+            # What the output declares about itself, applied over what it inherited from its input.
+            # Inheritance carries the geometry, which is right, but it also carries whatever the source
+            # entry said it WAS -- and that describes the source, not this. Declared last, so the
+            # config always wins; declare a key empty to drop an inherited one.
+            for key, value in self._attributes.items():
+                if value == "":
+                    source_attribute.pop(key, None)
+                else:
+                    source_attribute[key] = value
             if index_dataset not in self.output_layer_accumulator:
                 self.output_layer_accumulator[index_dataset] = {}
                 self.attributes[index_dataset] = {}

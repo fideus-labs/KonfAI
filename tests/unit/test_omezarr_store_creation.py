@@ -35,9 +35,11 @@ pytest.importorskip("ngff_zarr")
 
 import zarr
 from konfai.utils.ome_zarr import (
+    _zarr_v3_available,
     clear_ome_zarr_cache,
     create_ome_zarr_store,
     get_ome_zarr_info,
+    is_displacement_field,
 )
 
 SPACING = (2.0, 1.5, 0.5)
@@ -155,3 +157,33 @@ def test_creating_a_store_writes_no_pixel_bytes(tmp_path: Path) -> None:
     written = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
     metadata_only = 64 << 10
     assert written < metadata_only, f"{written} bytes written for an untouched store"
+
+
+@pytest.mark.skipif(
+    not _zarr_v3_available(),
+    reason="NGFF RFC-5 displacement fields need a zarr v3 store (zarr>=3, Python>=3.11)",
+)
+def test_a_streamed_displacement_field_says_that_it_is_one(tmp_path: Path) -> None:
+    """A field written region by region must be as self-describing as one written whole.
+
+    This is the case that matters, not the whole-volume one: a field small enough to assemble in
+    memory never had to be streamed, so before this the store said what it was exactly when nobody
+    needed to be told. A reader handed an untyped store sees three channels and no reason to treat
+    them as anything but an image -- and taking the first of them is a plausible-looking registration
+    built on a third of the displacement.
+    """
+    path = tmp_path / "field.ome.zarr"
+    array = _create(path, displacement_field=True)
+    array[:] = 1
+
+    clear_ome_zarr_cache()
+    assert is_displacement_field(path)
+    assert get_ome_zarr_info(path)["shape"] == list(SHAPE)
+
+
+def test_a_store_is_not_a_field_unless_it_was_asked_to_be(tmp_path: Path) -> None:
+    array = _create(tmp_path / "image.ome.zarr")
+    array[:] = 1
+
+    clear_ome_zarr_cache()
+    assert not is_displacement_field(tmp_path / "image.ome.zarr")

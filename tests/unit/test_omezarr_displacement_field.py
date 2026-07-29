@@ -32,8 +32,13 @@ sitk = pytest.importorskip("SimpleITK")
 pytest.importorskip("zarr")
 pytest.importorskip("ngff_zarr")
 
-from konfai.utils.dataset import Dataset  # noqa: E402
-from konfai.utils.ome_zarr import _zarr_v3_available, is_displacement_field, write_ome_zarr  # noqa: E402
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset  # noqa: E402
+from konfai.utils.ome_zarr import (  # noqa: E402
+    _zarr_v3_available,
+    clear_ome_zarr_cache,
+    is_displacement_field,
+    write_ome_zarr,
+)
 
 # RFC-5 fields are a zarr v3 store (NGFF >= 0.5), which zarr 2.x (Python 3.10) cannot write: the
 # feature does not exist there.
@@ -131,3 +136,34 @@ def test_non_displacement_transform_is_rejected(tmp_path: Path) -> None:
     loudly beats writing their parameter vector as if it were a field."""
     with pytest.raises(DatasetManagerError, match="DisplacementFieldTransform"):
         _store(tmp_path).write("case", "Affine", sitk.AffineTransform(3))
+
+
+def test_a_field_streamed_region_by_region_is_still_a_field(tmp_path: Path) -> None:
+    """The marker on the attributes declares it, so no transform has to be built to say so.
+
+    A producer that emits blocks -- the predictor, and anything writing a field too large to hold --
+    has no transform to hand over, and wrapping one purely to be described correctly would mean
+    assembling in memory the very volume streaming exists to avoid. So the declaration travels with
+    the attributes instead, and the streamed store ends up saying exactly what the whole-volume one
+    says.
+    """
+    values = np.arange(3 * 4 * 5 * 6, dtype=np.float32).reshape(3, 4, 5, 6) / 100.0
+    attributes = Attribute()
+    attributes["Spacing"] = np.asarray(SPACING)
+    attributes["Origin"] = np.asarray(ORIGIN)
+    attributes["Direction"] = np.asarray(DIRECTION)
+    attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+
+    dataset = _store(tmp_path)
+    stream = dataset.open_data_stream("DVF", "case", list(values.shape), values.dtype, attributes)
+    assert stream is not None
+    with stream:
+        for z in range(0, values.shape[1], 2):
+            stream.write_slice(
+                (slice(0, 3), slice(z, z + 2), slice(0, values.shape[2]), slice(0, values.shape[3])),
+                values[:, z : z + 2],
+            )
+
+    clear_ome_zarr_cache()
+    assert is_displacement_field(tmp_path / "dataset" / "case" / "DVF.ome.zarr")
+    assert isinstance(dataset.read_transform("DVF", "case"), sitk.DisplacementFieldTransform)

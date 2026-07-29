@@ -107,6 +107,22 @@ def _require_ngff_zarr() -> None:
         )
 
 
+def _require_zarr_v3_for_rfc5() -> None:
+    """Both write paths type a component axis, so both need the same capability check.
+
+    Raised rather than silently downgraded to an untyped 0.4 store: a caller asking for a displacement
+    field is asking for the one property that makes it readable as a transform, and a store that
+    quietly is not one gets found out much later, by a reader that took its three channels for an
+    image.
+    """
+    if not _zarr_v3_available():
+        raise DatasetManagerError(
+            "Writing an NGFF RFC-5 displacement field needs a zarr v3 store, i.e. "
+            "zarr-python >= 3 (Python >= 3.11); this environment has zarr 2.",
+            "Install it with: pip install 'zarr>=3' on Python >= 3.11.",
+        )
+
+
 def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
     """Read KonfAI's proprietary ``Attribute`` sidecar from the store, if present."""
     try:
@@ -301,12 +317,7 @@ def write_ome_zarr(
     )
     version = _DEFAULT_VERSION
     if displacement_field:
-        if not _zarr_v3_available():
-            raise DatasetManagerError(
-                "Writing an NGFF RFC-5 displacement field needs a zarr v3 store, i.e. "
-                "zarr-python >= 3 (Python >= 3.11); this environment has zarr 2.",
-                "Install it with: pip install 'zarr>=3' on Python >= 3.11.",
-            )
+        _require_zarr_v3_for_rfc5()
         _type_component_axis(multiscales, _DISPLACEMENT_AXIS_TYPE)
         version = _RFC5_VERSION
     ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=version)
@@ -348,6 +359,7 @@ def create_ome_zarr_store(
     origin: Sequence[float] | None = None,
     attributes: dict[str, Any] | None = None,
     chunks: Sequence[int] | None = None,
+    displacement_field: bool = False,
 ) -> Any:
     """Create an empty single-level OME-NGFF store for region-by-region writes.
 
@@ -356,9 +368,10 @@ def create_ome_zarr_store(
     during the write.
 
     ngff-zarr writes that metadata, exactly as it does for the whole-array path, so both paths describe
-    a store the same way. The hand-built ``multiscales`` entry this replaces was frozen at version 0.4
-    with the component axis typed ``channel``: the streaming path could never describe a displacement
-    field, however well ``write_ome_zarr`` could.
+    a store the same way -- ``displacement_field`` included, which is the point of routing it through
+    ngff-zarr at all. A field too large to assemble in memory is written region by region, so this is
+    the ONLY path a real one takes, and until it could type its component axis a DVF came out
+    self-describing exactly when it was small enough not to need to be.
 
     It describes the store from a one-voxel stand-in rather than from an array of the target shape.
     With a single resolution level the metadata does not depend on the extent at all -- axes and
@@ -389,8 +402,13 @@ def create_ome_zarr_store(
     stand_in = dask.array.zeros((shape[0], *(1,) * len(spatial_axes)), dtype=np.dtype(dtype))
     image = ngff_zarr.to_ngff_image(stand_in, dims=dims, scale=scale, translation=translation)
     multiscales = ngff_zarr.to_multiscales(image, scale_factors=[])
+    version = _DEFAULT_VERSION
+    if displacement_field:
+        _require_zarr_v3_for_rfc5()
+        _type_component_axis(multiscales, _DISPLACEMENT_AXIS_TYPE)
+        version = _RFC5_VERSION
     # version is explicit because to_ngff_zarr defaults to 0.5, which zarr-python 2 cannot write.
-    ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=_DEFAULT_VERSION)
+    ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=version)
 
     # The level-0 key comes from the metadata rather than a literal: ngff-zarr builds it from the
     # image name, so "scale0/image" is its convention to change, not ours to hardcode.
