@@ -20,7 +20,7 @@ import itertools
 
 import pytest
 import torch
-from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean, StreamingAccumulator, blend_overlap
+from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean, StreamingAccumulator, Trim, blend_overlap
 from konfai.utils.errors import PatchError
 from konfai.utils.utils import get_patch_slices_from_shape, resolve_overlap
 
@@ -482,3 +482,98 @@ def test_blend_recovers_the_source_in_low_precision(combine_cls):
     for index, patch_slice in enumerate(slices):
         accumulator.add_layer(index, full[(slice(None), *patch_slice)].to(torch.float16))
     torch.testing.assert_close(accumulator.assemble().float(), full, rtol=0, atol=5e-3)
+
+
+# --------------------------------------------------------------------------------------
+# Reassembly contract: per-axis overlap, arrival order, unweighted semantics
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize("combine_cls", [Cosinus, Gaussian])
+def test_anisotropic_overlap_reassembles_exactly(combine_cls):
+    """A different overlap per axis still reconstructs the source.
+
+    The window tapers over each axis's own overlap, so an axis that does not tile (overlap 0) must
+    contribute a flat factor rather than the taper of its neighbours.
+    """
+    # 12=2x6, 14=6+8, 16=4+4+8: every patch is full patch_size (the model emits full-size patches)
+    shape, patch, overlap = [12, 14, 16], [6, 8, 8], [0, 2, 4]
+    full = torch.rand(2, *shape)
+    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    combine = combine_cls()
+    combine.set_patch_config(patch, overlap)
+    accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
+    for index, patch_slice in enumerate(slices):
+        accumulator.add_layer(index, full[(slice(None), *patch_slice)])
+    torch.testing.assert_close(accumulator.assemble(), full, rtol=0, atol=1e-5)
+
+
+@pytest.mark.parametrize("combine_cls", [Mean, Cosinus, Gaussian])
+def test_blend_does_not_depend_on_patch_arrival_order(combine_cls):
+    """A weighted blend is a sum, so the assembled volume does not depend on the order patches arrive.
+
+    Only the whole-volume accumulator: StreamingAccumulator requires non-decreasing starts by
+    construction and rejects anything else.
+    """
+    shape, patch, overlap = [10, 10, 14], [6, 6, 6], 2  # exact tiling at step 4
+    full = torch.rand(2, *shape)
+    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+
+    def assemble(order: list[int]) -> torch.Tensor:
+        combine = combine_cls()
+        combine.set_patch_config(patch, overlap)
+        accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
+        for index in order:
+            accumulator.add_layer(index, full[(slice(None), *slices[index])])
+        return accumulator.assemble()
+
+    forward = list(range(len(slices)))
+    torch.testing.assert_close(assemble(forward), assemble(forward[::-1]), rtol=0, atol=1e-6)
+
+
+def test_unweighted_overlap_is_last_write_wins():
+    """Without a combine, an overlapped voxel keeps the LAST patch that covered it.
+
+    Pinned because it is a choice, not a consequence: the winning patch may hold that voxel on its
+    own border, with no context behind it, which is what shows up as a seam.
+    """
+    shape, patch, overlap = [8], [4], 2
+    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    accumulator = Accumulator(slices, patch, patch_combine=None, batch=False)
+    for index, _ in enumerate(slices):
+        accumulator.add_layer(index, torch.full((1, 4), float(index)))
+    out = accumulator.assemble()[0]
+    # starts 0, 2, 4 -> the last patch covering each voxel wins, so the volume reads 0,0,1,1,2,2,2,2
+    assert out.tolist() == [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
+
+
+def test_trim_selects_the_most_central_patch():
+    """Trim keeps the patch that holds a voxel most centrally, not the last one that wrote it.
+
+    Volume 8, patch 4, overlap 2 -> starts 0, 2, 4. The kept bands are [0,3), [3,5), [5,8): they tile
+    the axis, the first and last open to the edge, and every interior voxel sits at least one row
+    inside the patch it came from. Compare test_unweighted_overlap_is_last_write_wins.
+    """
+    slices, _ = get_patch_slices_from_shape([4], [8], 2)
+    combine = Trim()
+    combine.set_patch_config([4], 2)
+    accumulator = Accumulator(slices, [4], patch_combine=combine, batch=False)
+    for index, _ in enumerate(slices):
+        accumulator.add_layer(index, torch.full((1, 4), float(index)))
+    assert accumulator.assemble()[0].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0]
+
+
+def test_trim_reassembles_exactly_and_keeps_values_discrete():
+    """The kept bands tile every axis, so the weights sum to one: the volume comes back untouched.
+
+    Values are never averaged, which is what lets a label map survive reassembly.
+    """
+    shape, patch, overlap = [10, 10, 14], [6, 6, 6], 2
+    labels = torch.randint(0, 5, (2, *shape)).float()
+    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    combine = Trim()
+    combine.set_patch_config(patch, overlap)
+    accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
+    for index, patch_slice in enumerate(slices):
+        accumulator.add_layer(index, labels[(slice(None), *patch_slice)])
+    out = accumulator.assemble()
+    assert torch.equal(out, labels)
+    assert torch.equal(out, out.round())

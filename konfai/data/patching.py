@@ -241,12 +241,14 @@ class PathCombine(ABC):
         self.data: torch.Tensor
         self.windows_1d: list[torch.Tensor]
         self.overlap: int
+        self.overlaps: list[int]
         self._data_per_device: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
 
     def set_patch_config(self, patch_size: list[int], overlap: int | list[int]) -> None:
         self._data_per_device.clear()
         overlaps = [overlap] * len(patch_size) if isinstance(overlap, int) else list(overlap)
         self.overlap = max(overlaps)
+        self.overlaps = overlaps
         # The per-patch weight is the outer product of one 1-D window per axis. It is separable by
         # construction, so a per-axis partition of unity stays a partition of unity in N-D and overlapping
         # patches blend without darkening — no distance map or explicit renormalisation loop is needed, and
@@ -269,6 +271,15 @@ class PathCombine(ABC):
         for window in self.windows_1d[1:]:
             data = data.unsqueeze(-1) * window
         self.data = data
+
+    def window(self, dim: int, position: int, count: int) -> torch.Tensor:
+        """The 1-D window along ``dim`` for the patch at grid ``position`` of ``count`` on that axis.
+
+        A weighting is the same wherever the patch sits; a selection opens its border patches so the
+        kept bands still reach the volume edge (see :class:`Trim`).
+        """
+        del position, count
+        return self.windows_1d[dim]
 
     def weight(self, tensor: torch.Tensor) -> torch.Tensor:
         """The raw per-voxel window on ``tensor``'s device and dtype (cached per pair).
@@ -332,6 +343,38 @@ class Cosinus(PathCombine):
         return window
 
 
+class Trim(PathCombine):
+    """Selection instead of weighting: each voxel comes from the patch that holds it most centrally.
+
+    An interior patch keeps its central ``patch - overlap`` band, so the kept bands tile the axis
+    exactly and the weights already sum to one; the first and last patch of an axis open to the volume
+    edge. Every kept voxel therefore carries at least half the overlap of context on each side, where
+    the unweighted default keeps whichever patch wrote last -- possibly one holding that voxel on its
+    own border with no context behind it, which is what a seam is.
+
+    The values are 0 or 1, so the patch is selected rather than averaged: a discrete output (a label
+    map, an argmax) survives reassembly, where any weighting would invent values between its classes.
+    """
+
+    def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
+        window = torch.zeros(size)
+        # Split an odd overlap so consecutive kept bands abut: k*stride + hi == (k+1)*stride + lo.
+        window[overlap // 2 : size - (overlap - overlap // 2)] = 1.0
+        return window
+
+    def window(self, dim: int, position: int, count: int) -> torch.Tensor:
+        overlap = self.overlaps[dim]
+        window = self.windows_1d[dim]
+        if overlap <= 0 or (position > 0 and position < count - 1):
+            return window
+        window = window.clone()
+        if position == 0:
+            window[: overlap // 2] = 1.0
+        if position == count - 1:
+            window[window.shape[0] - (overlap - overlap // 2) :] = 1.0
+        return window
+
+
 class Gaussian(PathCombine):
     """nnU-Net-style Gaussian importance weighting.
 
@@ -387,7 +430,7 @@ class Accumulator:
         self._result: torch.Tensor | None = None
         self._weighted: torch.Tensor | None = None
         # Blend-weight geometry: fixed for the accumulator's life, so it survives _reset.
-        self._geometry: tuple[list[torch.Tensor], list[torch.Tensor]] | None = None
+        self._geometry: tuple[list[list[torch.Tensor]], list[torch.Tensor]] | None = None
         self._shares: dict[tuple[int, int, int, torch.dtype, torch.device], torch.Tensor] = {}
 
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
@@ -432,7 +475,7 @@ class Accumulator:
         else:
             result[slices_dest] = data
 
-    def _weight_geometry(self) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    def _weight_geometry(self) -> tuple[list[list[torch.Tensor]], list[torch.Tensor]]:
         """Per axis: the blend window, and its sum over the patch grid.
 
         The outer product of those sums is the total weight covering each voxel. It factorises because
@@ -442,21 +485,31 @@ class Accumulator:
 
         The patch extent comes from the slices, not from the window: a free axis carries a single
         broadcast entry (the ModelPatch blend-window contract) that must cover the whole extent.
+
+        The window is asked for per grid position, because a selection opens its border patches to the
+        volume edge (see Trim); a weighting returns the same window everywhere.
         """
         if self._geometry is None:
+            combine = cast(PathCombine, self.patch_combine)
             windows, totals = [], []
             for dim, extent in enumerate(self.shape):
-                window = cast(PathCombine, self.patch_combine).windows_1d[dim]
+                starts = self._starts(dim)
                 length = self.patch_slices[0][dim].stop - self.patch_slices[0][dim].start
-                window = window.expand(length) if window.numel() == 1 else window
-                total = torch.zeros(extent)
-                for start in sorted({patch[dim].start for patch in self.patch_slices}):
+                per_position, total = [], torch.zeros(extent)
+                for position, start in enumerate(starts):
+                    window = combine.window(dim, position, len(starts))
+                    window = window.expand(length) if window.numel() == 1 else window
                     stop = min(start + length, extent)
                     total[start:stop] += window[: stop - start]
-                windows.append(window)
+                    per_position.append(window)
+                windows.append(per_position)
                 totals.append(total)
             self._geometry = (windows, totals)
         return self._geometry
+
+    def _starts(self, dim: int) -> list[int]:
+        """The patch grid's positions along one axis, in order."""
+        return sorted({patch[dim].start for patch in self.patch_slices})
 
     def _share(self, dim: int, start: int, data: torch.Tensor) -> torch.Tensor:
         """This patch's fraction of the blend weight along one axis, ``w / sum_k w``, cached per axis."""
@@ -464,7 +517,8 @@ class Accumulator:
         key = (dim, start, extent, data.dtype, data.device)
         if key not in self._shares:
             windows, totals = self._weight_geometry()
-            share = windows[dim][:extent] / totals[dim][start : start + extent]
+            window = windows[dim][self._starts(dim).index(start)]
+            share = window[:extent] / totals[dim][start : start + extent]
             self._shares[key] = share.to(device=data.device, dtype=data.dtype)
         return self._shares[key]
 
