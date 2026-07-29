@@ -52,18 +52,22 @@ def test_run_records_diffs_comparison_and_curves(
             )
             first = await client.call_tool("run_train", {})
             first_payload = first.structured_content
-            await client.call_tool(
+            done_first = await client.call_tool(
                 "wait_for_job", {"job_id": first_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
             )
+            # The snapshots and the manifest exist whatever the outcome, so without this a run that
+            # ended in error would still satisfy every assertion below.
+            assert done_first.structured_content["status"] == "done", done_first.structured_content
             await client.call_tool(
                 "write_workflow_config",
                 {"workflow": "train", "content": yaml_dump({"Trainer": {"train_name": "FAKE_RUN", "epochs": 2}})},
             )
             second = await client.call_tool("run_train", {"overwrite": True})
             second_payload = second.structured_content
-            await client.call_tool(
+            done_second = await client.call_tool(
                 "wait_for_job", {"job_id": second_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
             )
+            assert done_second.structured_content["status"] == "done", done_second.structured_content
 
             record = await client.call_tool("export_run_record", {"run_name": "FAKE_RUN"})
             record_data = record.structured_content
