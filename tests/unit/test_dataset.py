@@ -17,6 +17,7 @@
 """Tests for ``konfai.utils.dataset``: the ``Attribute`` sidecar, the SITK/HDF5 storage
 backends (modes, locking, transforms, path resolution), and ``get_infos`` shape order."""
 
+import multiprocessing
 import os
 import stat
 import threading
@@ -460,3 +461,135 @@ def test_get_infos_reads_only_the_header_for_a_mismatched_extension(tmp_path: Pa
     assert size == [1, 4, 5, 6]
     assert full_reads == [], "a readable image header must never trigger a full-volume decode"
     assert np.allclose(attributes.get_np_array("Spacing"), [1.5, 1.5, 2.0])
+
+
+def test_a_group_written_through_another_dataset_object_is_seen(tmp_path: Path) -> None:
+    """A group can be produced through one Dataset and read through another over the same folder: a
+    ``Save`` builds its own (data/patching.py:_save_destination) while the reader keeps the DataManager's.
+    Membership answered from the reader's memoised listing froze at its first lookup, so every case
+    written after it read as absent -- ImpactSynth masks its own output that way and raised
+    ``NameError: Mask : MASK/P002 not found`` from the third case of a batch on."""
+    root = tmp_path / "ds"
+    root.mkdir()
+    reader = Dataset(str(root) + "/", "mha")
+    writer = Dataset(str(root) + "/", "mha")
+
+    writer.write("MASK", "P000", np.ones((4, 4, 4), dtype=np.uint8), Attribute())
+    assert reader.get_names("MASK") == ["P000"]  # the reader memoises the listing here
+
+    writer.write("MASK", "P001", np.ones((4, 4, 4), dtype=np.uint8), Attribute())
+    writer.write("MASK", "P002", np.ones((4, 4, 4), dtype=np.uint8), Attribute())
+
+    assert reader.is_dataset_exist("MASK", "P001")
+    assert reader.is_dataset_exist("MASK", "P002")
+
+
+def test_membership_is_asked_of_disk_not_of_the_listing(tmp_path: Path) -> None:
+    """``get_names`` is a planning-time enumeration; asking it whether ONE case exists answers from a
+    snapshot. A hit may come from the memo -- an entry never disappears mid-run -- but a miss must be
+    checked, or the listing's age becomes the answer."""
+    root = tmp_path / "ds"
+    root.mkdir()
+    dataset = Dataset(str(root) + "/", "mha")
+    (root / "P000").mkdir()
+    sitk.WriteImage(sitk.GetImageFromArray(np.ones((4, 4, 4), dtype=np.uint8)), str(root / "P000" / "MASK.mha"))
+
+    assert dataset.get_names("MASK") == ["P000"]  # memoise the listing
+    (root / "P001").mkdir()
+    sitk.WriteImage(sitk.GetImageFromArray(np.ones((4, 4, 4), dtype=np.uint8)), str(root / "P001" / "MASK.mha"))
+
+    assert dataset.is_dataset_exist("MASK", "P001")
+    assert dataset.is_dataset_exist("MASK", "P000")  # the memoised hit still answers
+    assert not dataset.is_dataset_exist("MASK", "P999")
+
+
+def _write_mask_in_child(root: str, case: str) -> None:
+    from konfai.utils.dataset import Attribute as ChildAttribute
+    from konfai.utils.dataset import Dataset as ChildDataset
+
+    ChildDataset(root, "mha").write("MASK", case, np.ones((4, 4, 4), dtype=np.uint8), ChildAttribute())
+
+
+def test_membership_sees_an_entry_written_by_another_process(tmp_path: Path) -> None:
+    """The loader's ``Save`` runs in a DataLoader worker while the output transform reads in the parent,
+    so no in-process memo can be invalidated across that boundary. Membership has to ask the disk."""
+    root = str(tmp_path / "ds") + "/"
+    Path(root).mkdir()
+    reader = Dataset(root, "mha")
+    reader.write("MASK", "P000", np.ones((4, 4, 4), dtype=np.uint8), Attribute())
+    assert reader.get_names("MASK") == ["P000"]  # the parent memoises its listing here
+
+    child = multiprocessing.get_context("spawn").Process(target=_write_mask_in_child, args=(root, "P001"))
+    child.start()
+    child.join(120)
+    assert child.exitcode == 0, "the writer process failed; the assertion below would prove nothing"
+
+    assert reader.is_dataset_exist("MASK", "P001")
+
+
+def _write_mask_in_child_h5(root: str, case: str) -> None:
+    from konfai.utils.dataset import Attribute as ChildAttribute
+    from konfai.utils.dataset import Dataset as ChildDataset
+
+    ChildDataset(root, "h5").write("MASK", case, np.ones((4, 4, 4), dtype=np.uint8), ChildAttribute())
+
+
+def test_membership_sees_an_h5_entry_written_by_another_process(tmp_path: Path) -> None:
+    """A single store answers the same way a directory does. The pooled read handle used to keep serving
+    the view it opened on, and reopening alone would not have helped: HDF5 shares a file's metadata state
+    across the handles one process holds, so a second handle inherits the first's. The pool now closes a
+    handle whose store changed underneath it."""
+    pytest.importorskip("h5py")
+    root = str(tmp_path / "ds") + "/"
+    Path(root).mkdir()
+    reader = Dataset(root, "h5")
+    reader.write("MASK", "P000", np.ones((4, 4, 4), dtype=np.uint8), Attribute())
+    assert reader.get_names("MASK") == ["P000"]
+
+    child = multiprocessing.get_context("spawn").Process(target=_write_mask_in_child_h5, args=(root, "P001"))
+    child.start()
+    child.join(120)
+    assert child.exitcode == 0, "the writer process failed; the assertion below would prove nothing"
+
+    assert reader.is_dataset_exist("MASK", "P001")
+
+
+def test_an_evicted_h5_handle_goes_back_with_the_view_it_had(tmp_path: Path) -> None:
+    """A handle evicted while its file lock is busy returns to the pool instead of being closed. Re-stamping
+    it on the way back would hand it the store as it is now and launder a stale view into a fresh-looking
+    one, so the write that arrived meanwhile would stay invisible for the rest of the process."""
+    pytest.importorskip("h5py")
+    from konfai.utils.dataset import _h5_read_pool
+
+    root = str(tmp_path / "ds") + "/"
+    Path(root).mkdir()
+    dataset = Dataset(root, "h5")
+    dataset.write("MASK", "P000", np.ones((4, 4, 4), dtype=np.uint8), Attribute())
+    dataset.is_dataset_exist("MASK", "P000")  # pool a handle on the store
+    store = dataset.filename + ".h5"
+    pooled = _h5_read_pool._handles.pop(store)
+
+    child = multiprocessing.get_context("spawn").Process(target=_write_mask_in_child_h5, args=(root, "P001"))
+    child.start()
+    child.join(120)
+    assert child.exitcode == 0, "the writer process failed; the assertions below would prove nothing"
+
+    # The file lock is reentrant, so only another thread can make it look busy to the evicting one.
+    held, release = threading.Event(), threading.Event()
+
+    def hold_the_file_lock() -> None:
+        with _get_h5_file_lock(store):
+            held.set()
+            release.wait(120)
+
+    holder = threading.Thread(target=hold_the_file_lock)
+    holder.start()
+    try:
+        assert held.wait(120)
+        _h5_read_pool._close_idle(store, pooled)
+        assert _h5_read_pool._handles[store].opened_on == pooled.opened_on, "the view it had, not the store now"
+    finally:
+        release.set()
+        holder.join(120)
+
+    assert dataset.is_dataset_exist("MASK", "P001")

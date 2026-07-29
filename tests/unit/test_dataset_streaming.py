@@ -859,15 +859,21 @@ def test_dataset_get_names_cache_invalidated_on_write(tmp_path: Path) -> None:
     assert dataset.get_names("CT") == ["CASE_000", "CASE_001"]
 
 
-def test_dataset_is_dataset_exist_benefits_from_cache(tmp_path: Path) -> None:
+def test_dataset_is_dataset_exist_probes_the_entry_without_listing(tmp_path: Path) -> None:
+    """Membership is a point question: one probe, not a slice of the directory listing. It used to build
+    that listing, which both cost O(N) headers and froze an answer a run producing the group would
+    outgrow (a ``Save`` writing into the dataset being read, from a loader worker)."""
     dataset = Dataset(tmp_path / "Dataset", "mha")
     attrs = _image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
     volume = np.zeros((1, 4, 4, 4), dtype=np.float32)
     dataset.write("CT", "CASE_000", volume, attrs)
 
     assert dataset.is_dataset_exist("CT", "CASE_000")
-    assert "CT" in dataset._names_cache
     assert not dataset.is_dataset_exist("CT", "CASE_999")
+    assert "CT" not in dataset._names_cache, "membership must not enumerate the group"
+
+    assert dataset.get_names("CT") == ["CASE_000"]  # enumeration still memoises, on its own call
+    assert "CT" in dataset._names_cache
 
 
 def _build_streaming_manager(volume: np.ndarray, transforms: list[Transform], patch_size: list[int]) -> DatasetManager:

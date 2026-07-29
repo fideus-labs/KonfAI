@@ -29,10 +29,11 @@ import os
 import re
 import shutil
 import threading
+import time
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -65,6 +66,14 @@ def _get_h5_file_lock(filename: str) -> threading.RLock:
         return lock
 
 
+class _PooledRead(NamedTuple):
+    """An open read handle and the store it was opened on, as one thing: the two travel together through
+    eviction and re-insertion, so no site can pair a handle with a view it never had."""
+
+    file: Any
+    opened_on: tuple[int, int] | None
+
+
 class _H5ReadPool:
     """Pooled read handles, one per file per process, LRU-bounded.
 
@@ -74,51 +83,94 @@ class _H5ReadPool:
     handles inherited across ``fork`` are dropped unused (closing them would flush another process's
     state). Pooled handles open with ``locking=False``: a held HDF5 read lock would block every other
     process's write-open of the file for as long as the handle lives — the pool's whole lifetime.
-    Same-process access is serialized by the per-file thread lock; cross-process read-under-write
-    coherence is the store's own caveat, unchanged by the pool."""
+    Same-process access is serialized by the per-file thread lock.
+
+    A handle also stops answering for a store another PROCESS has written — a loader worker producing
+    the group its parent reads — so one is kept only while the file it was opened on is unchanged.
+    Reopening alone would not do: HDF5 shares a file's metadata state across the handles one process
+    holds, so a second handle inherits the first's view. The stale one is closed before the new open."""
 
     _MAX = 8
+    _OPEN_ATTEMPTS = 4
+    _OPEN_BACKOFF = 0.05
 
     def __init__(self) -> None:
-        self._handles: dict[str, Any] = {}
+        self._handles: dict[str, _PooledRead] = {}
         self._guard = threading.Lock()
         self._pid = os.getpid()
 
+    @staticmethod
+    def _stamp(filename: str) -> tuple[int, int] | None:
+        """What the store looked like when a handle was opened on it; ``None`` while it does not exist."""
+        try:
+            info = os.stat(filename)
+        except OSError:
+            return None
+        return info.st_mtime_ns, info.st_size
+
+    def _open(self, filename: str, **open_kwargs: Any) -> _PooledRead:
+        """A handle, with the store as it was when it was opened.
+
+        The reopen happens exactly when another process has just written, which is when that process is
+        most likely to still be mid-transaction: HDF5 without SWMR then refuses the open. It is transient,
+        so it is retried, and each attempt takes its own stamp — a handle is never paired with a view of
+        the store taken before the write that made the previous attempt fail."""
+        for remaining in reversed(range(self._OPEN_ATTEMPTS)):
+            stamp = self._stamp(filename)
+            try:
+                return _PooledRead(h5py.File(filename, "r", locking=False, **open_kwargs), stamp)
+            except OSError:
+                if not remaining:
+                    raise
+                time.sleep(self._OPEN_BACKOFF)
+        raise AssertionError("unreachable: the last attempt either returns or raises")
+
     def get(self, filename: str, **open_kwargs: Any) -> Any:
+        # Read before the open, never after: a write landing in between then leaves a stamp older than
+        # the handle, and the next call reopens. The reverse would record a view it never had.
+        stamp = self._stamp(filename)
         with self._guard:
             if os.getpid() != self._pid:
                 self._handles.clear()
                 self._pid = os.getpid()
-            handle = self._handles.pop(filename, None)
-            if handle is None or not handle.id.valid:
-                handle = h5py.File(filename, "r", locking=False, **open_kwargs)
-            self._handles[filename] = handle
+            pooled = self._handles.pop(filename, None)
+        # Outside the pool guard: opening touches the filesystem and may sleep between attempts. The
+        # caller holds this file's lock, so no other thread of ours is reading or reopening it here.
+        if pooled is not None and (not pooled.file.id.valid or pooled.opened_on != stamp):
+            pooled.file.close()
+            pooled = None
+        if pooled is None:
+            pooled = self._open(filename, **open_kwargs)
+        with self._guard:
+            self._handles[filename] = pooled
             evicted = []
             while len(self._handles) > self._MAX:
                 oldest = next(iter(self._handles))
                 evicted.append((oldest, self._handles.pop(oldest)))
         for stale_name, stale in evicted:
             self._close_idle(stale_name, stale)
-        return handle
+        return pooled.file
 
     def drop(self, filename: str) -> None:
         with self._guard:
-            handle = self._handles.pop(filename, None)
-        if handle is not None and handle.id.valid:
-            handle.close()
+            pooled = self._handles.pop(filename, None)
+        if pooled is not None and pooled.file.id.valid:
+            pooled.file.close()
 
-    def _close_idle(self, filename: str, handle: Any) -> None:
+    def _close_idle(self, filename: str, pooled: _PooledRead) -> None:
         # An evicted handle may be mid-read under its file's lock: close only when that lock is free,
         # otherwise put it back in the pool — an untracked open handle could never be dropped again.
+        # It goes back with the stamp it came with: re-stamping would hand it the store as it is now,
+        # and a write it never saw would stay invisible for the rest of the process.
         lock = _get_h5_file_lock(filename)
         if lock.acquire(blocking=False):
             try:
-                handle.close()
+                pooled.file.close()
             finally:
                 lock.release()
         else:
             with self._guard:
-                self._handles.setdefault(filename, handle)
+                self._handles.setdefault(filename, pooled)
 
 
 _h5_read_pool = _H5ReadPool()
@@ -1177,7 +1229,14 @@ class Dataset:
                 for k, v in attributes.items():
                     if v and len(v):
                         data.SetMetaData(k, v)
-                sitk.WriteImage(data, f"{self.filename}{name}.{self.file_format}")
+                # Publish by rename, as the streaming writer does: an existence probe answers from disk,
+                # so a reader must never meet the entry while it is being written. The staging name keeps
+                # the format extension (SimpleITK picks its writer from it) and is dotted so the readers'
+                # own `<group>.*` glob cannot reach it; the pid keeps two writers of one entry apart.
+                final = f"{self.filename}{name}.{self.file_format}"
+                staging = f"{self.filename}.{name}.{os.getpid()}.tmp.{self.file_format}"
+                sitk.WriteImage(data, staging)
+                os.replace(staging, final)
             elif isinstance(data, sitk.Transform):
                 sitk.WriteTransform(data, f"{self.filename}{name}.itk.txt")
             elif self.is_vtk_polydata(data):
@@ -1844,7 +1903,28 @@ class Dataset:
         return self.get_size(group) > 0
 
     def is_dataset_exist(self, group: str, name: str) -> bool:
-        return name in self.get_names(group)
+        """Whether ``(group, name)`` is on disk, asked of disk at the moment it is asked.
+
+        Deliberately NOT a slice of :meth:`get_names`: that listing is a planning-time snapshot, and a
+        group the run itself produces -- a ``Save`` writing into the dataset being read -- gains cases
+        while it is read, through a different ``Dataset`` object and, when the loader has workers, a
+        different PROCESS. No memo can be invalidated across that boundary, so membership asks the disk.
+        One entry, one probe: O(1) in the number of cases, where the listing is O(N) headers, and cheaper
+        than the listing it replaces.
+        """
+        if self.is_directory:
+            entry_group = group.split("/")[-1]
+            for sub_directory in self._get_sub_directories(group):
+                base = f"{self.filename}{sub_directory}{name}"
+                if not os.path.exists(f"{base}{'.h5' if self.file_format == 'h5' else ''}"):
+                    continue
+                with Dataset.File(base, True, self.file_format, self.level) as file:
+                    if file.is_exist(entry_group):
+                        return True
+            return False
+        with Dataset.File(self.filename, True, self.file_format, self.level) as file:
+            # A wildcard group is a path pattern; only the store's own listing expands it.
+            return name in file.get_names(group) if "*" in group else file.is_exist(group, name)
 
     def _get_sub_directories(self, groups: str, sub_directory: str = ""):
         group = groups.split("/")[0]
