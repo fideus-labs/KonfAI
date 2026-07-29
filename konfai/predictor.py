@@ -658,6 +658,7 @@ class OutSameAsGroupDataset(OutputDataset):
                 input_dataset.patch.patch_size,
                 self.patch_combine,
                 batch=False,
+                sweep_axis=input_dataset.patch.get_sweep_axis(index_augmentation),
             )
 
             for i in range(len(input_dataset.patch.get_patch_slices(index_augmentation))):
