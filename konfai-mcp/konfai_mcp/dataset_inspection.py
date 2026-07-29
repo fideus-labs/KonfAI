@@ -39,6 +39,7 @@ from .server_support import (
 # size: enough cases named to recognise the pattern, never the whole roll call.
 _MISSING_CASES_SHOWN = 5
 _CASE_LAYOUTS_SHOWN = 3
+_IGNORED_FILES_SHOWN = 5
 
 
 class DatasetInspectionMixin:
@@ -55,7 +56,7 @@ class DatasetInspectionMixin:
             )
             entry["cases"] += 1
             if summary["ignored_files"] and "ignored_files" not in entry:
-                entry["ignored_files"] = summary["ignored_files"]
+                entry["ignored_files"] = summary["ignored_files"][:_IGNORED_FILES_SHOWN]
         ranked = sorted(layouts.values(), key=lambda entry: -entry["cases"])
         return ranked[:_CASE_LAYOUTS_SHOWN]
 

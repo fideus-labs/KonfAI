@@ -14,9 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -713,3 +716,36 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         assert described["display_name"] == "Tiny Local"
     finally:
         sys.modules.pop("konfai_mcp.server", None)
+
+
+def test_app_execution_tool_schemas_reach_the_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """The five app-execution tools were exercised at function level only; a broken Annotated/Field on
+    any of them would surface as a client-side schema hole, invisible to those tests."""
+    import fastmcp
+
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> dict[str, dict]:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            return {tool.name: (tool.inputSchema or {}) for tool in await client.list_tools()}
+
+    schemas = asyncio.run(scenario())
+    expected = {
+        "run_app_infer": {"ref", "inputs", "output"},
+        "run_app_evaluate": {"ref", "inputs", "gt"},
+        "run_app_uncertainty": {"ref", "inputs"},
+        "run_app_pipeline": {"ref", "inputs", "gt"},
+        "fine_tune_app": {"ref", "dataset", "output"},
+    }
+    for name, required_params in expected.items():
+        assert name in schemas, f"{name} is not exposed to the client"
+        properties = schemas[name].get("properties", {})
+        missing = required_params - set(properties)
+        assert not missing, f"{name} lost parameters on the wire: {missing}"
+        undocumented = [p for p in required_params if not properties[p].get("description")]
+        assert not undocumented, f"{name} has undocumented parameters: {undocumented}"

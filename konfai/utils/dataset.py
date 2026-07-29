@@ -2000,6 +2000,8 @@ class Dataset:
             groups_set = set()
             for root_dir, _, files in os.walk(self.filename):
                 for file in files:
+                    if file.startswith("."):  # hidden: a staging write in flight, or its crashed leftover
+                        continue
                     path = Path(root_dir, file.split(".")[0]).relative_to(self.filename).as_posix()
                     parts = path.split("/")
                     if len(parts) >= 2:

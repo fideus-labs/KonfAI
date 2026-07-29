@@ -229,10 +229,16 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             # happened, and the next browser to open this experiment deserves to see it.
             record_turn(_session_dir(name), req.message, parts)
         # Re-read the workspace: the tools have written to it, so this is what the turn actually achieved
-        # — not what it said it did. Even a turn that broke ends with a state and a move.
-        state = _state(name)
-        yield _sse({"type": "state", **state})
-        yield _sse({"type": "next_prompts", "prompts": _turn_moves(name, written, state, tool_actions)})
+        # — not what it said it did. Even a turn that broke ends with a state and a move — including when
+        # deriving the state itself raises, or the bar would freeze on the previous turn.
+        try:
+            state = _state(name)
+            yield _sse({"type": "state", **state})
+            yield _sse({"type": "next_prompts", "prompts": _turn_moves(name, written, state, tool_actions)})
+        except Exception as exc:
+            yield _sse({"type": "error", "message": f"state unavailable: {exc}"})
+            yield _sse({"type": "next_prompts", "prompts": written})
+            return
         # Machine-injected onboarding prompts (dataset inspection) don't describe the experiment —
         # wait for the user's own first message so the title reflects the real task.
         if (

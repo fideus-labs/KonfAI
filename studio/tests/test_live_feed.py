@@ -51,16 +51,20 @@ def feed_events(session: Path, monkeypatch: pytest.MonkeyPatch, root: Path) -> l
         response = await live(session=session.name)
         events: list[dict[str, Any]] = []
         stream = response.body_iterator
+
+        async def drain() -> None:
+            async for chunk in stream:
+                text = chunk if isinstance(chunk, str) else chunk.decode()
+                for line in text.splitlines():
+                    if line.startswith("data: "):
+                        events.append(json.loads(line[6:]))
+                if len(events) > 6:
+                    break
+
         try:
-            async with asyncio.timeout(2):
-                async for chunk in stream:
-                    text = chunk if isinstance(chunk, str) else chunk.decode()
-                    for line in text.splitlines():
-                        if line.startswith("data: "):
-                            events.append(json.loads(line[6:]))
-                    if len(events) > 6:
-                        break
-        except (TimeoutError, asyncio.CancelledError):
+            # wait_for, not asyncio.timeout: the package supports 3.10 and the latter is 3.11+.
+            await asyncio.wait_for(drain(), timeout=2)
+        except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
             pass
         finally:
             await stream.aclose()

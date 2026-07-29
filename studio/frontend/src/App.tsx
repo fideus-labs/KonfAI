@@ -350,7 +350,8 @@ function Studio({ remote }: { remote: boolean }) {
           });
           setGpuVramHist((prev) => {
             const next: Record<number, number[]> = { ...prev };
-            for (const g of nextGpus) next[g.index] = [...(prev[g.index] ?? []), pct(g.used_gb, g.total_gb)].slice(-cap);
+            for (const g of nextGpus)
+              if (g.used_gb != null && g.total_gb) next[g.index] = [...(prev[g.index] ?? []), pct(g.used_gb, g.total_gb)].slice(-cap);
             return next;
           });
         })

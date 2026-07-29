@@ -115,3 +115,20 @@ def test_design_strategy_asks_instead_of_ping_ponging(
             assert "Ask the user" in payload["how_to_resolve_questions"]
 
     asyncio.run(scenario())
+
+
+def test_stage_actions_name_only_registered_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """STAGE_ACTIONS drives every [now] step and button; a renamed tool would leave a stage pointing at
+    nothing, and only job payloads had a drift guard until now."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+    tool_names, _ = _registered_names(mcp_server)
+    from konfai_mcp.experiment_state import STAGE_ACTIONS
+
+    for stage, actions in STAGE_ACTIONS.items():
+        missing = [action for action in actions if action not in tool_names]
+        assert not missing, f"stage '{stage}' names unregistered tools: {missing}"
