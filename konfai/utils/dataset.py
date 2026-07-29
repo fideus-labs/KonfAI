@@ -1376,7 +1376,11 @@ class Dataset:
             from konfai.utils.ome_zarr import write_ome_zarr
 
             attributes = attributes or Attribute()
-            displacement_field = False
+            # Two ways to say "this is a field": hand over a DisplacementFieldTransform, or mark the
+            # attributes. The second exists because a producer that never builds a transform -- the
+            # predictor emits arrays -- would otherwise have to wrap its output in one purely to be
+            # described correctly, and a field too large to hold in memory cannot be wrapped at all.
+            displacement_field = DISPLACEMENT_FIELD_ATTRIBUTE in attributes
             if sitk is not None and isinstance(data, sitk.Image):
                 data, image_attributes = image_to_data(data)
                 attributes.update(image_attributes)
@@ -1418,6 +1422,7 @@ class Dataset:
                 spacing=attributes.get_np_array("Spacing") if "Spacing" in attributes else None,
                 origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
                 attributes=dict(attributes),
+                displacement_field=DISPLACEMENT_FIELD_ATTRIBUTE in attributes,
             )
             return _OmeZarrDataStream(array, store_path, final_path)
 
