@@ -821,6 +821,29 @@ def test_data_train_enables_worker_prefetch_when_cache_is_disabled() -> None:
     assert dataset.dataLoader_args["persistent_workers"] is True
 
 
+def test_inline_augmentations_disable_persistent_workers() -> None:
+    # Persistent workers keep a fork-time copy of the dataset and never see the main process's
+    # per-epoch reset_augmentation redraw, so inline augmentations would freeze at their first draw.
+    # The guard is inline_augmentations AND a non-empty augmentations config, and it overrides an
+    # explicit persistent_workers=True.
+    augmentations = {"DataAugmentation_0": DataAugmentationsList(nb=1, data_augmentations={})}
+
+    inline = DataTrain(augmentations=augmentations, inline_augmentations=True, persistent_workers=True)
+    inline._configure_data_loading(use_cache=False)
+    assert cast(int, inline.dataLoader_args["num_workers"]) >= 1
+    assert inline.dataLoader_args["persistent_workers"] is False
+
+    # Preloaded (non-inline) augmentations are drawn in the main process: workers may persist.
+    preloaded = DataTrain(augmentations=augmentations, inline_augmentations=False)
+    preloaded._configure_data_loading(use_cache=False)
+    assert preloaded.dataLoader_args["persistent_workers"] is True
+
+    # The inline flag without any configured augmentation redraws nothing: workers may persist.
+    without_augmentations = DataTrain(augmentations=None, inline_augmentations=True)
+    without_augmentations._configure_data_loading(use_cache=False)
+    assert without_augmentations.dataLoader_args["persistent_workers"] is True
+
+
 def test_data_prediction_disables_persistent_workers_by_default() -> None:
     dataset = DataPrediction(augmentations=None)
 

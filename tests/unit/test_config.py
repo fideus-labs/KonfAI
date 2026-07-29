@@ -486,6 +486,53 @@ def test_apply_config_colon_and_plain_dict_keys_unaffected(write_config) -> None
     assert set(data["R"]["m"]) == {"X:Head:Conv", "plain"}
 
 
+def test_config_write_back_is_atomic_when_the_rename_fails(write_config, monkeypatch) -> None:
+    """A failed rename leaves the on-disk config byte-identical: content reaches it only via os.replace."""
+    config_path = write_config("Root:\n  count: 3\n")
+    original = config_path.read_bytes()
+
+    class Root:
+        def __init__(self, count: int = 0) -> None:
+            self.count = count
+
+    replace_calls: list[tuple[str, str]] = []
+
+    def failing_replace(src: object, dst: object) -> None:
+        replace_calls.append((str(src), str(dst)))
+        raise RuntimeError("crash at rename")
+
+    # A non-OSError: OSError is the Windows in-place fallback, pinned separately below.
+    monkeypatch.setattr("konfai.utils.config.os.replace", failing_replace)
+
+    with pytest.raises(RuntimeError, match="crash at rename"):
+        apply_config("Root")(Root)()
+
+    assert replace_calls, "the write-back must land through os.replace, never a bare open(target, 'w')"
+    assert config_path.read_bytes() == original  # a concurrent reader never sees a truncated config
+    assert list(config_path.parent.glob("*.tmp")) == []  # the temp file is removed on failure
+
+
+def test_config_write_back_denied_rename_falls_back_to_in_place_write(write_config, monkeypatch) -> None:
+    """An OSError from os.replace takes the in-place rewrite: the run continues and the file stays whole."""
+    config_path = write_config("Root:\n  count: 3\n")
+
+    class Root:
+        def __init__(self, count: int = 0) -> None:
+            self.count = count
+
+    def denied_replace(src: object, dst: object) -> None:
+        raise OSError("target busy")
+
+    monkeypatch.setattr("konfai.utils.config.os.replace", denied_replace)
+
+    root = apply_config("Root")(Root)()
+
+    assert root.count == 3
+    data = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    assert data == {"Root": {"count": 3}}
+    assert list(config_path.parent.glob("*.tmp")) == []
+
+
 # --------------------------------------------------------------------------------------
 # Config env-var bookkeeping
 # --------------------------------------------------------------------------------------

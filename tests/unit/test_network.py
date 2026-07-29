@@ -18,8 +18,9 @@
 Network.load_state_dict, Measure (loss records, backward, scheduler selection),
 and CriterionsLoader."""
 
+from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import konfai.network.network as network_module
@@ -486,6 +487,80 @@ def test_load_restores_nested_network_optimizer_and_counters() -> None:
             state_dict[f"{name}_nb_lr_update"] = net._nb_lr_update
     assert "Root.Sub_optimizer_state_dict" in state_dict  # the dotted key checkpoint_save actually writes
 
+    target = with_optimizers(Root())
+    target.load(state_dict, init=False)
+
+    loaded_sub = next(net for name, net in target.get_networks().items() if name.endswith(".Sub"))
+    assert loaded_sub._it == 123
+    assert loaded_sub._nb_lr_update == 7
+    assert loaded_sub.optimizer.state_dict()["state"] == saved_sub.optimizer.state_dict()["state"]
+
+
+def test_checkpoint_save_round_trip_restores_nested_network_state(tmp_path: Path, monkeypatch) -> None:
+    """The real writer against the real reader: the checkpoint comes from ``checkpoint_save`` itself, so a
+    key-convention drift on either side (save or ``Network.load``) breaks the pairing, not just the mirror."""
+    import konfai.trainer as trainer_module
+    from konfai.network.network import OptimizerLoader
+
+    class Sub(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, optimizer=OptimizerLoader(), dim=2)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, optimizer=None, dim=2)
+            self.add_module("Sub", Sub())
+
+    def with_optimizers(root: Network) -> Network:
+        for sub in root.get_networks().values():
+            if isinstance(sub, Sub):
+                sub.optimizer = torch.optim.AdamW(sub.parameters())
+        return root
+
+    source = with_optimizers(Root())
+    saved_sub = next(net for name, net in source.get_networks().items() if name.endswith(".Sub"))
+    sum(param.sum() for param in saved_sub.parameters()).backward()
+    saved_sub.optimizer.step()
+    saved_sub._it = 123
+    saved_sub._nb_lr_update = 7
+
+    class _NullSummaryWriter:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(trainer_module, "checkpoints_directory", lambda: tmp_path / "Checkpoints")
+    monkeypatch.setattr(trainer_module, "statistics_directory", lambda: tmp_path / "Statistics")
+    monkeypatch.setattr(trainer_module, "SummaryWriter", _NullSummaryWriter)
+    monkeypatch.setattr(trainer_module, "current_date", lambda: "ckpt")
+    trainer = trainer_module._Trainer(
+        world_size=1,
+        global_rank=0,
+        local_rank=0,
+        size=1,
+        train_name="RUN",
+        early_stopping=None,
+        data_log=None,
+        save_checkpoint_mode="ALL",
+        epochs=1,
+        epoch=0,
+        autocast=False,
+        it_validation=1,
+        it_lr_update=1,
+        it=0,
+        model=cast(Any, SimpleNamespace(module=source)),
+        model_ema=cast(Any, None),
+        config_snapshot=tmp_path / "Config.yml",
+        dataloader_training=cast(Any, [object()]),
+        dataloader_validation=None,
+    )
+
+    trainer.checkpoint_save(1.0)
+
+    state_dict = torch.load(tmp_path / "Checkpoints" / "RUN" / "ckpt.pt", map_location="cpu", weights_only=False)
     target = with_optimizers(Root())
     target.load(state_dict, init=False)
 
