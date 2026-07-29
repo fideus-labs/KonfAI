@@ -627,6 +627,8 @@ class _OmeZarrDataStream(DataStream):
         self._array[slices] = data
 
     def _close(self, success: bool) -> None:
+        from konfai.utils.ome_zarr import clear_ome_zarr_cache
+
         if not success:
             shutil.rmtree(self._store_path, ignore_errors=True)
             return
@@ -648,6 +650,11 @@ class _OmeZarrDataStream(DataStream):
             shutil.rmtree(self._store_path, ignore_errors=True)
         if replaced:
             shutil.rmtree(backup, ignore_errors=True)
+        # The reader memoises loaded stores by path, and this rename changes what that path holds.
+        # A store replaced by one written through a different code path can differ down to the key
+        # its level-0 array lives under, so a stale entry does not merely serve old pixels -- it
+        # points at a component that is no longer there.
+        clear_ome_zarr_cache()
 
 
 class Dataset:
