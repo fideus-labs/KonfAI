@@ -39,6 +39,7 @@ from konfai.utils.runtime import (
     clear_directory_except_logs,
     configure_workflow_environment,
     confirm_overwrite_or_raise,
+    get_device,
     run_distributed_app,
     synchronize_data,
 )
@@ -318,6 +319,11 @@ class Evaluator(DistributedObject):
         # mean every voxel is written exactly once -- the streamed map equals the whole-volume one.
         self._map_sinks: dict[tuple[str, str, int], DataStream] = {}
         self._iter_dataset: DatasetIter | None = None
+        # Where the metrics run. An evaluation has no model forward, so its tensors arrive from the
+        # DataLoader on CPU and reading the device off them pinned every metric to CPU -- including the
+        # ones that own a network (a perceptual metric moves its model to the tensor's device, and a
+        # segmentation metric runs a whole nested inference). `run_process` sets the run's real device.
+        self._device: torch.device | int = torch.device("cpu")
         self._validate_metric_groups()
 
     def _validate_metric_groups(self) -> None:
@@ -384,8 +390,8 @@ class Evaluator(DistributedObject):
             return self._update_streamed(batch_sample, statistics)
         result: dict[str, float] = {}
         for output_group in self.metrics:
-            output_tensor = batch_sample[output_group].tensor
-            metric_device = output_tensor.device
+            metric_device = self._device
+            output_tensor = self._on(batch_sample[output_group].tensor, metric_device)
             for target_group in self.metrics[output_group]:
                 targets = self._targets_on(batch_sample, target_group, metric_device)
                 target_attribute = [batch_sample[output_group].attribute] + [
@@ -435,16 +441,19 @@ class Evaluator(DistributedObject):
         return result
 
     @staticmethod
-    def _targets_on(batch_sample: BatchSample, target_group: str, metric_device: torch.device) -> list[torch.Tensor]:
+    def _on(tensor: torch.Tensor, metric_device: torch.device | int) -> torch.Tensor:
+        """A tensor on the metric's device, moved only when it is not already there."""
+        if tensor.device == torch.device(metric_device):
+            return tensor
+        return tensor.to(metric_device, non_blocking=tensor.device.type == "cpu")
+
+    @staticmethod
+    def _targets_on(
+        batch_sample: BatchSample, target_group: str, metric_device: torch.device | int
+    ) -> list[torch.Tensor]:
         """The target tensors of a ``;``-joined group spec, moved to the metric's device."""
         return [
-            (
-                batch_sample[group].tensor.to(
-                    metric_device, non_blocking=batch_sample[group].tensor.device.type == "cpu"
-                )
-                if batch_sample[group].tensor.device != metric_device
-                else batch_sample[group].tensor
-            )
+            Evaluator._on(batch_sample[group].tensor, metric_device)
             for group in target_group.split(";")
             if group in batch_sample
         ]
@@ -486,8 +495,8 @@ class Evaluator(DistributedObject):
             self._flush_pending(statistics)
         self._pending_name = name
         for output_group in self.metrics:
-            output_tensor = batch_sample[output_group].tensor
-            metric_device = output_tensor.device
+            metric_device = self._device
+            output_tensor = self._on(batch_sample[output_group].tensor, metric_device)
             for target_group in self.metrics[output_group]:
                 targets = self._targets_on(batch_sample, target_group, metric_device)
                 for index, metric in enumerate(self.metrics[output_group][target_group]):
@@ -595,6 +604,7 @@ class Evaluator(DistributedObject):
             - Only the main process (`global_rank == 0`) writes final results to disk.
         """
 
+        self._device = get_device(gpu) if len(cuda_visible_devices()) else torch.device("cpu")
         self._evaluate_split(dataloaders[0], self.statistics_train, "TRAIN", world_size, gpu, global_rank)
         if len(dataloaders) == 2:
             self._evaluate_split(dataloaders[1], self.statistics_validation, "VALIDATION", world_size, gpu, global_rank)
