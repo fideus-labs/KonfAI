@@ -435,10 +435,19 @@ class MetricsServiceMixin:
                 )
         declared_a = self._declared_directions(payload_a["metrics"])
         declared_b = self._declared_directions(payload_b["metrics"])
+        # Newest declaration first, the leaderboard's own rule: an old file that still says "min" for a
+        # metric re-evaluated as "max" must not make the winner depend on which run is passed first.
+        newest_first = (
+            (declared_a, declared_b)
+            if (payload_a.get("updated_at") or "") >= (payload_b.get("updated_at") or "")
+            else (declared_b, declared_a)
+        )
         comparison: dict[str, Any] = {}
         warnings: list[str] = []
         for name in common_metrics:
-            direction, direction_source = self._metric_direction(name, declared_a.get(name) or declared_b.get(name))
+            direction, direction_source = self._metric_direction(
+                name, newest_first[0].get(name) or newest_first[1].get(name)
+            )
             if direction_source == "default:min":
                 warnings.append(
                     f"No declared or recognised direction for '{name}'; assumed minimize. If it is a "

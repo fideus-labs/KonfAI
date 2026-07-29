@@ -50,9 +50,15 @@ def _detach_inherited_stdio(handle: TextIO) -> None:
     inherited request pipe -- a job that reads stdin would otherwise consume the client's bytes, or block
     forever on a pipe nobody feeds it; devnull gives it an immediate EOF instead.
     """
+    # Two independent blocks: fds 1/2 are what keep native writes off the protocol stream, and they
+    # must be redirected even when devnull or fd 0 is the part that fails.
     try:
         with open(os.devnull, "rb") as devnull:
             os.dup2(devnull.fileno(), 0)
+    except OSError as exc:  # pragma: no cover - needs an fd state a test cannot force
+        handle.write(f"[konfai-mcp] could not detach the job stdin from the server's: {exc}\n")
+        handle.flush()
+    try:
         os.dup2(handle.fileno(), 1)
         os.dup2(handle.fileno(), 2)
     except OSError as exc:  # pragma: no cover - needs an fd state a test cannot force

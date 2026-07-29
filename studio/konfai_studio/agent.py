@@ -637,6 +637,9 @@ class ClaudeCodeAgent:
         await self._client.disconnect()
 
     async def send(self, user_message: str) -> AsyncIterator[dict[str, Any]]:
+        # An interrupt that lands after the turn already ended leaves a stale flag; cleared here, it
+        # cannot swallow the next turn's genuine error.
+        self._interrupted = False
         async for event in with_volume_events(self._emit(user_message)):
             yield event
 

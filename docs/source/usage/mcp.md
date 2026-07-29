@@ -43,7 +43,9 @@ agent takes the cheapest path that genuinely fits:
 
 1. **Use a published app as-is** — no training. `list_apps` → `describe_app` (judge fit
    from the app's own description and its declared inputs/outputs) → `run_app_infer`
-   (or `run_app_pipeline` to also score it), which runs the app **as published** and
+   (or `run_app_pipeline` to also score it), which runs the app **as published** and takes a
+   local directory or a Hugging Face reference — a remote `host:port:name` server is driven
+   with `konfai-apps` directly, not through these tools — and
    tracks it as a job. Tune per run by reading `list_app_parameters`, then passing
    `set_parameters`. Use `import_app` instead only when the app must be **modified**
    first: it copies the app into the session to run as a normal experiment.

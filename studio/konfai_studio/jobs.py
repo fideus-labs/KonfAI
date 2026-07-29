@@ -281,7 +281,7 @@ def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]
     return [
         (
             log,
-            f"{run} · {Path(base).parent.name.rsplit('-', 1)[-1]}" if (run, kind) in duplicated and base else run,
+            f"{run} · {base.split('/')[0].rsplit('-', 1)[-1]}" if (run, kind) in duplicated and base else run,
             kind,
             status,
             base,

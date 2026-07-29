@@ -195,7 +195,7 @@ export default function Chat({
         const server = (d.messages ?? []) as ({ role: "user"; text?: string } | { role: "assistant"; parts?: Part[] })[];
         setMessages((local) => {
           const turns = (list: { role: string }[]) => list.filter((m) => m.role === "user").length;
-          if (turns(server) <= turns(local)) return local;
+          if (busyRef.current || turns(server) <= turns(local)) return local; // a turn in flight owns the list
           return server.map((m) =>
             m.role === "user"
               ? { id: nextId++, role: "user" as const, text: m.text ?? "" }
