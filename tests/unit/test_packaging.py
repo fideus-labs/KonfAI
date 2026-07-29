@@ -19,6 +19,7 @@ error-type message formatting, and wheel package discovery."""
 
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import konfai
@@ -197,3 +198,51 @@ def test_konfai_models_have_no_init_and_need_namespace_discovery() -> None:
     if not (_REPO_ROOT / "konfai" / "models").is_dir():
         pytest.skip("konfai/models not present")
     assert not (_REPO_ROOT / "konfai" / "models" / "__init__.py").exists()
+
+
+# --------------------------------------------------------------------------- #
+# The built wheel ships the PEP 420 model zoo, the YAML catalog, and nothing else.
+# --------------------------------------------------------------------------- #
+@pytest.mark.slow
+def test_wheel_ships_model_zoo_and_catalog(tmp_path: Path) -> None:
+    """Build a real wheel and inspect it: an editable install hides PEP 420 and
+    package-data breakage, so only the built artifact proves the packaging contract."""
+    pytest.importorskip("build")
+    # --no-isolation builds offline, so every declared build requirement must be importable.
+    pytest.importorskip("setuptools")
+    pytest.importorskip("wheel")
+    pytest.importorskip("setuptools_scm")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(tmp_path)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, f"wheel build failed:\n{result.stdout}\n{result.stderr}"
+    wheels = list(tmp_path.glob("*.whl"))
+    assert len(wheels) == 1, wheels
+
+    with zipfile.ZipFile(wheels[0]) as archive:
+        names = set(archive.namelist())
+
+    # Expected contents derive from the source tree, so a catalog addition never fails this test.
+    models = _REPO_ROOT / "konfai" / "models"
+    expected_python = {p.relative_to(_REPO_ROOT).as_posix() for p in (models / "python").rglob("*.py")}
+    expected_yaml = {p.relative_to(_REPO_ROOT).as_posix() for p in (models / "yaml").glob("*.yml")}
+    assert expected_python and expected_yaml
+
+    missing_python = sorted(expected_python - names)
+    assert not missing_python, f"models/python files missing from the wheel: {missing_python}"
+    missing_yaml = sorted(expected_yaml - names)
+    assert not missing_yaml, f"catalog .yml files missing from the wheel: {missing_yaml}"
+
+    forbidden_top_level = {"apps", "konfai-apps", "konfai_apps", "konfai-mcp", "konfai_mcp"}
+    leaked = sorted(n for n in names if n.split("/", 1)[0] in forbidden_top_level)
+    assert not leaked, f"sibling package leaked into the wheel: {leaked[:5]}"
+
+    # konfai/models and konfai/models/python are PEP 420 namespace packages; a generated
+    # __init__.py in the wheel would mean package discovery regressed.
+    assert "konfai/models/__init__.py" not in names
+    assert "konfai/models/python/__init__.py" not in names
