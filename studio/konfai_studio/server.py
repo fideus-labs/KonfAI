@@ -18,7 +18,7 @@ import os
 import re
 import shutil
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .agent import call_mcp_tool, suggest_next_prompts, suggest_title
+from .agent import call_mcp_tool, suggest_title
 from .auth import _AuthGate
 from .auth import router as auth_router
 from .jobs import _all_jobs, _job_created, _latest_job, _live_status, _sse
@@ -38,13 +38,15 @@ from .paths import (
     _history_load,
     _jail,
     _sane_session,
+    _session_dir,
     _session_path,
-    _workspace_root,
 )
 from .registry import _Registry
 from .tensorboard import reap_tb_servers
 from .tensorboard import router as tensorboard_router
 from .terminal import router as terminal_router
+from .transcript import load_transcript, note_event, record_turn
+from .workflow import MAX_MOVES, moves, pre_prompt, state_for, state_line
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -147,12 +149,46 @@ async def _mcp_detail(session: str, tool: str, args: dict[str, Any]) -> dict[str
 
 
 async def _mcp_json(session: str, tool: str, args: dict[str, Any]) -> tuple[bool, str, Any]:
-    """Proxy a konfai-mcp tool: (ok, raw text, JSON-decoded value) — the value is {} on non-JSON text."""
+    """Proxy a konfai-mcp tool: (ok, raw text, JSON-decoded value).
+
+    Unparseable text is a failure, not an empty answer: returning ``{}`` for it made a leaderboard the
+    caller could not decode render as "no evaluations yet" over runs that had been scored.
+    """
     ok, text = await call_mcp_tool(session, tool, args)
     try:
         return ok, text, json.loads(text)
     except (TypeError, ValueError):
-        return ok, text, {}
+        return False, text, {}
+
+
+def _state(session: str) -> dict[str, Any]:
+    """Where this experiment stands — derived by konfai-mcp from the workspace, not remembered here.
+    Studio shares the filesystem with the MCP server, so this is the same answer its tools report."""
+    jobs = sorted(_all_jobs(session), key=_job_created, reverse=True)
+    for job in jobs:  # a 'running' record whose process is gone really failed; say so, do not wait on it
+        job["status"] = _live_status(job)
+    return state_for(_session_dir(session), jobs, _reg.dataset(session))
+
+
+def _turn_moves(
+    session: str, written: list[dict[str, str]], state: dict[str, Any], tool_actions: list[str] | None
+) -> list[dict[str, str]]:
+    """This turn's action buttons.
+
+    The ones the assistant wrote at the end of its own reply, alone. They are its answer: when the reply
+    asked a question they ARE its options, and a generic tool-named button beside them is both a wrong
+    answer to that question and a step the reply just argued against — "Run train" under a config that
+    failed validation launches it anyway.
+
+    A turn cut short writes none, and the buttons from the last turn that did are a better answer than
+    the generic fill-in as long as they still describe where the experiment stands; the state line is what
+    decides that. Only when neither applies do the derived moves carry the bar, so it is never empty.
+    """
+    signature = state_line(state)
+    own = written or _reg.recall_moves(session, signature)
+    if written:
+        _reg.remember_moves(session, written, signature)
+    return (own or moves(state, tool_actions))[:MAX_MOVES]
 
 
 @app.post("/api/chat")
@@ -160,44 +196,74 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     """Stream one user turn as Server-Sent Events. Serialised: one turn at a time."""
 
     name = _sane_session(req.session)
-    directive = _device_directive(_reg.device(name))
-    message = f"({directive})\n\n{req.message}" if directive else req.message
+    message = pre_prompt(_state(name), _device_directive(_reg.device(name)), req.message)
 
     async def gen() -> AsyncIterator[str]:
-        async with _reg.lock(name):
-            reply: list[str] = []  # the assistant's text this turn
-            turn_actions: list[str] = []  # last tool next_actions of the turn
-            try:
-                agent = await _reg.agent(name)
-                async for event in agent.send(message):
-                    if event.get("type") == "text" and isinstance(event.get("text"), str):
-                        reply.append(event["text"])
-                    elif event.get("type") == "next_actions" and isinstance(event.get("actions"), list):
-                        turn_actions = event["actions"]
-                    yield _sse(event)
-            except Exception as exc:
-                _reg.invalidate(name)  # drop the broken SDK client so the next turn rebuilds and resumes
-                yield _sse({"type": "error", "message": str(exc)})
-                return
-            # Machine-injected onboarding prompts (dataset inspection) don't describe the experiment —
-            # wait for the user's own first message so the title reflects the real task.
-            if _reg.is_untitled(name) and req.message.strip() and not req.message.startswith("Inspect the dataset at "):
-                try:  # let the LLM name the experiment from its first prompt
-                    title = await suggest_title(req.message, _reg.brain())
-                    _reg.set_title(name, title)
-                    yield _sse({"type": "title", "session": name, "title": title})
-                except Exception:
-                    pass
-            # Suggest next prompts only on a turn that produced tool next_actions; skip conversational turns.
-            if turn_actions:
+        written: list[dict[str, str]] = []  # the moves the assistant wrote at the end of its reply
+        tool_actions: list[str] | None = None  # None = the turn ran no tool at all
+        broke = False
+        parts: list[dict[str, Any]] = []  # what this turn streamed, kept for browsers that missed it
+        try:
+            # The lock covers the agent only. Holding it over the title call would make the user's next
+            # message queue behind work they are not waiting for.
+            async with _reg.lock(name):
                 try:
-                    prompts = await suggest_next_prompts(req.message, "".join(reply), turn_actions, _reg.brain())
-                    if prompts:
-                        yield _sse({"type": "next_prompts", "prompts": prompts})
-                except Exception:
-                    pass
+                    agent = await _reg.agent(name)
+                    async for event in agent.send(message):
+                        if event.get("type") == "tool_call":
+                            tool_actions = tool_actions or []
+                        elif event.get("type") == "next_actions" and isinstance(event.get("actions"), list):
+                            tool_actions = event["actions"]  # the newest tool's own advice supersedes
+                        elif event.get("type") == "next_prompts" and isinstance(event.get("prompts"), list):
+                            written = event["prompts"]  # the assistant's own, parsed out of its reply
+                            continue  # held back until the state is known, so the bar fills once
+                        yield _sse(event)
+                        note_event(parts, event)
+                except Exception as exc:
+                    _reg.invalidate(name)  # drop the broken SDK client so the next turn rebuilds and resumes
+                    broke = True
+                    yield _sse({"type": "error", "message": str(exc)})
+                    note_event(parts, {"type": "error", "message": str(exc)})
+        finally:
+            # Recorded even when the browser walks away mid-stream (interrupt, closed tab): the turn
+            # happened, and the next browser to open this experiment deserves to see it.
+            record_turn(_session_dir(name), req.message, parts)
+        # Re-read the workspace: the tools have written to it, so this is what the turn actually achieved
+        # — not what it said it did. Even a turn that broke ends with a state and a move.
+        state = _state(name)
+        yield _sse({"type": "state", **state})
+        yield _sse({"type": "next_prompts", "prompts": _turn_moves(name, written, state, tool_actions)})
+        # Machine-injected onboarding prompts (dataset inspection) don't describe the experiment —
+        # wait for the user's own first message so the title reflects the real task.
+        if (
+            not broke
+            and _reg.is_untitled(name)
+            and req.message.strip()
+            and not req.message.startswith("Inspect the dataset at ")
+        ):
+            try:  # let the LLM name the experiment from its first prompt
+                title = await suggest_title(req.message, _reg.brain())
+                _reg.set_title(name, title)
+                yield _sse({"type": "title", "session": name, "title": title})
+            except Exception:
+                pass
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/api/chat/history")
+async def chat_history(session: str) -> dict[str, Any]:
+    """The server-side transcript. The browser keeps its own in localStorage, per device — one that did
+    not run these turns (another machine, a cleared profile) adopts this copy on open."""
+    return {"messages": load_transcript(_session_dir(_sane_session(session)))}
+
+
+@app.post("/api/chat/interrupt")
+async def interrupt_chat(req: CancelJob) -> dict[str, bool]:
+    """Cut the running turn short, so a correction typed mid-turn is acted on now rather than queued
+    behind everything the assistant was still going to do. A tool already in flight still finishes: a
+    launched job cannot be un-launched. ``ok`` is False when there is nothing to interrupt."""
+    return {"ok": await _reg.interrupt(_sane_session(req.session))}
 
 
 @app.get("/api/health")
@@ -214,10 +280,12 @@ async def list_sessions() -> dict[str, Any]:
 async def sessions_status() -> dict[str, Any]:
     """Latest job status per experiment, so the rail can colour each dot by its state."""
     statuses: dict[str, str] = {}
+    # Every session is listed, jobless ones with an empty status: the rail's poll is also how a browser
+    # discovers an experiment created elsewhere, and a discovery gated on "has run a job" would hide a
+    # freshly created one exactly while the other user is still configuring it.
     for name in _reg.names():
         job = _latest_job(name)
-        if job and job.get("status"):
-            statuses[name] = _live_status(job)
+        statuses[name] = _live_status(job) if job and job.get("status") else ""
     return {"statuses": statuses}
 
 
@@ -293,7 +361,7 @@ async def export_session(req: ExportRequest) -> dict[str, Any]:
     statistics and metrics — minus the input Dataset (the user's data, which lives outside) and the
     Studio/MCP internals. A folder you can archive or share."""
     name = _sane_session(req.session)
-    src = (_workspace_root() / "sessions" / name).resolve()
+    src = _session_dir(name).resolve()
     if not src.is_dir():
         return {"ok": False, "result": "This experiment has no workspace yet."}
     dest = Path(req.output).expanduser() / _sane_session(_reg.title(name) or name)
@@ -446,6 +514,41 @@ async def set_device(req: DeviceChoice) -> dict[str, Any]:
     return {"device": _reg.device(name), "devices": _reg.devices()}
 
 
+def _cpu_percent() -> float | None:
+    """Host CPU load since the previous snapshot, averaged over all cores.
+
+    Interval-free, so polling never blocks the thread: psutil reports the load since its own last call,
+    which is exactly the gap between two snapshots. Primed at import below, so the first snapshot a
+    browser asks for already measures against a real baseline instead of reading a flat 0%.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+    return round(psutil.cpu_percent(interval=None), 1)
+
+
+with suppress(ImportError):
+    __import__("psutil").cpu_percent(interval=None)  # start the counter; the first real poll measures from here
+
+
+def _gpu_utilisation() -> dict[int, int]:
+    """Compute load per GPU index, as NVML reports it — how busy the card is, which its VRAM does not
+    say: a job can hold 20 GB and compute nothing. Empty when NVML is absent or refuses."""
+    try:
+        import pynvml
+    except ImportError:
+        return {}
+    try:
+        pynvml.nvmlInit()
+        return {
+            i: int(pynvml.nvmlDeviceGetUtilizationRates(pynvml.nvmlDeviceGetHandleByIndex(i)).gpu)
+            for i in range(pynvml.nvmlDeviceGetCount())
+        }
+    except Exception:
+        return {}
+
+
 def _system_snapshot() -> dict[str, Any]:
     """Live RAM + per-GPU VRAM via KonfAI's own helpers, so the numbers match the MCP VRAM preflight.
 
@@ -467,6 +570,7 @@ def _system_snapshot() -> dict[str, Any]:
     except Exception:
         indices, names = [], []
     gpus: list[dict[str, Any]] = []
+    utilisation = _gpu_utilisation()
     for ordinal, index in enumerate(indices):
         vram = probe(lambda index=index: konfai.get_vram([index]))
         gpus.append(
@@ -475,11 +579,13 @@ def _system_snapshot() -> dict[str, Any]:
                 "name": names[ordinal] if ordinal < len(names) else f"GPU {index}",
                 "used_gb": vram[0] if vram else None,
                 "total_gb": vram[1] if vram else None,
+                "util_percent": utilisation.get(index),
             }
         )
     return {
         "gpus": gpus,
         "ram": {"used_gb": ram[0], "total_gb": ram[1]} if ram else None,
+        "cpu_percent": _cpu_percent(),
     }
 
 
@@ -498,7 +604,7 @@ def _read_eval_metrics(session: str) -> list[dict[str, Any]]:
     Mirrors konfai's evaluator JSON: ``{case, aggregates:{metric:{mean,std,…}}, directions}``. Keeps
     only top-level metrics (drops the per-component ``a:b:Metric:comp`` rows), like ``get_run_metrics``.
     """
-    root = _workspace_root() / "sessions" / session
+    root = _session_dir(session)
     if not root.is_dir():
         return []
     runs: list[dict[str, Any]] = []
@@ -565,7 +671,7 @@ def _run_config_snapshot(session: str, run: str) -> Path | None:
     root and in any isolated app-output subtree. Jailed: a run with a path separator is refused."""
     if not run or "/" in run or "\\" in run or ".." in run:
         return None
-    base = (_workspace_root() / "sessions" / session).resolve()
+    base = _session_dir(session).resolve()
     if not base.is_dir():
         return None
     snaps = [
@@ -680,7 +786,7 @@ async def experiment_file(session: str = Query("default"), path: str = Query(...
 
 def _experiment_info(session: str) -> dict[str, Any]:
     """What an experiment contains — drives the UI's overview and greys out impossible actions."""
-    root = _workspace_root() / "sessions" / session
+    root = _session_dir(session)
     if not root.is_dir():
         return {"checkpoints": [], "predictions": [], "jobs": [], "bundlable": False, "exportable": False}
     # "**/Checkpoints" / "**/Predictions" so isolated app outputs (<app_output>-<hash>/…) count too.
@@ -703,8 +809,11 @@ def _experiment_info(session: str) -> dict[str, Any]:
 
 @app.get("/api/experiment")
 async def experiment(session: str = Query("default")) -> dict[str, Any]:
+    """What the experiment holds, plus where it stands and the moves open from there — so a page reload
+    comes back with the same next actions instead of an empty bar."""
     name = _sane_session(session)
-    return {**_experiment_info(name), "dataset": _reg.dataset(name)}
+    state = _state(name)
+    return {**_experiment_info(name), "dataset": _reg.dataset(name), "workflow": state, "moves": moves(state)}
 
 
 class AppRef(BaseModel):
@@ -833,16 +942,26 @@ async def set_tunables(req: SetTunables) -> dict[str, Any]:
 
 @app.get("/assets/{file_path:path}")
 async def assets(file_path: str) -> FileResponse:
-    """Serve the built Vite assets (JS/CSS) from ``web/assets`` — jailed to that dir."""
+    """Serve the built Vite assets (JS/CSS) from ``web/assets`` — jailed to that dir.
+
+    Vite fingerprints every asset name, so a given URL's bytes never change: cache it for a year and a
+    warm reload fetches nothing. A new build produces new names, which ``index.html`` points at.
+    """
     target = _jail(WEB_DIR / "assets", file_path)
     if target is None or not target.is_file():
         raise HTTPException(404, "asset not found")
-    return FileResponse(str(target))
+    return FileResponse(str(target), headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+    """The one file that must never be cached: it is what names the fingerprinted bundle.
+
+    Served without cache headers the browser applies its own heuristic, keeps a stale index, and so
+    keeps loading the previous build's assets — an updated Studio silently serving the old front until
+    someone thinks to hard-reload.
+    """
+    return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 @app.get("/konfai-logo.png")

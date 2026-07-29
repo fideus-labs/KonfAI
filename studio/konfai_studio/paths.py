@@ -42,17 +42,31 @@ def _files_history_file() -> Path:
     return _workspace_root() / ".konfai_studio" / "files.json"
 
 
+def _sessions_root() -> Path:
+    return _workspace_root() / "sessions"
+
+
+def _session_dir(session: str) -> Path:
+    """A session's konfai-mcp workspace. Where a session lives is stated here and nowhere else."""
+    return _sessions_root() / _sane_session(session)
+
+
+def _session_jobs_dir(session: str) -> Path:
+    """Where konfai-mcp records that session's jobs."""
+    return _session_dir(session) / ".konfai_mcp" / "jobs"
+
+
 def _delete_workspace(name: str) -> None:
     """Delete a task's konfai-mcp workspace, jailed under ``sessions/`` (the name is already sanitized,
     so this never escapes the workspace root)."""
-    target = _jail(_workspace_root() / "sessions", name)
+    target = _jail(_sessions_root(), name)
     if target is not None and target.is_dir():
         shutil.rmtree(target, ignore_errors=True)
 
 
 def _session_path(session: str, rel: str) -> Path:
     """Resolve a path inside a session's workspace — jailed, never escapes the session root."""
-    target = _jail(_workspace_root() / "sessions" / _sane_session(session), rel)
+    target = _jail(_session_dir(session), rel)
     if target is None:
         raise HTTPException(400, "path escapes the session workspace")
     return target

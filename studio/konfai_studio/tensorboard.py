@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
-from .paths import _jail, _sane_session, _workspace_root
+from .paths import _jail, _sane_session, _session_dir
 
 router = APIRouter()
 
@@ -38,7 +38,7 @@ def _tb_image_dir(session: str, base: str = "") -> Path | None:
     run's log_0.txt). ``base`` is "Statistics/<run>" (session-root) or "<app_output>-<hash>/Statistics/<run>"
     (isolated app run), so an isolated run's images resolve under its own output subtree. Jailed: ``base``
     may contain '/', never '..'. Without a base, the most recently written tb dir anywhere under the session."""
-    root = (_workspace_root() / "sessions" / session).resolve()
+    root = _session_dir(session).resolve()
     if base:  # a provided base is authoritative — a traversal attempt is rejected, never fallen back on
         if ".." in Path(base).parts:
             return None
@@ -135,7 +135,7 @@ async def tensorboard_link(session: str = Query("default")) -> dict[str, Any]:
         return {"ok": True, "url": live["url"]}
     # The session root, not Statistics/: TensorBoard recurses, so it surfaces every "*/tb" at any depth —
     # session-root runs AND isolated app-output runs (<app_output>-<hash>/Statistics/<run>/tb) alike.
-    session_root = _workspace_root() / "sessions" / name
+    session_root = _session_dir(name)
     if not session_root.is_dir() or not any(session_root.glob("**/tb")):
         return {"ok": False, "detail": "no TensorBoard events yet — run a training first"}
     # Look next to the running interpreter first: the server is launched as a console script, so the env's

@@ -12,7 +12,7 @@ from functools import partial
 from typing import Any
 
 from .agent import make_agent
-from .paths import _delete_workspace, _sessions_file, _workspace_root
+from .paths import _delete_workspace, _session_dir, _sessions_file, _sessions_root
 
 
 def _valid_device(value: str) -> str:
@@ -38,6 +38,10 @@ class SessionState:
     agent: Any = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stale: bool = False
+    # The last buttons the assistant wrote itself, with the state they were written for. A turn that is
+    # interrupted writes none, and the generic fallback is a poorer answer than what still applies.
+    moves: list[dict[str, str]] = field(default_factory=list)
+    moves_state: str = ""
 
 
 class _Registry:
@@ -164,6 +168,23 @@ class _Registry:
             state.dataset = path
             self._save()
 
+    async def interrupt(self, name: str) -> bool:
+        """Cut a task's running turn short. False when it has no live agent, or a backend that cannot."""
+        state = self._sessions.get(name)
+        agent = state.agent if state is not None else None
+        stop = getattr(agent, "interrupt", None)
+        return bool(await stop()) if stop is not None else False
+
+    def remember_moves(self, name: str, moves: list[dict[str, str]], state: str) -> None:
+        """Keep the assistant's own buttons and the state they described, for a turn that writes none."""
+        session = self._sessions.setdefault(name, SessionState())
+        session.moves, session.moves_state = moves, state
+
+    def recall_moves(self, name: str, state: str) -> list[dict[str, str]]:
+        """Those buttons back, but only while they still describe where the experiment stands."""
+        session = self._sessions.get(name)
+        return list(session.moves) if session is not None and session.moves_state == state else []
+
     def invalidate(self, name: str) -> None:
         """Mark an agent for rebuild on its next use. A stream error can leave the SDK client unusable, so
         reusing it hangs the next turn; the rebuild resumes the transcript, so the conversation continues."""
@@ -191,7 +212,7 @@ class _Registry:
                     model=self._model or None,
                     resume=state.sdk_id,
                     on_session_id=partial(self._set_sdk_id, name),
-                    history_file=_workspace_root() / "sessions" / name / ".konfai_studio" / "history.json",
+                    history_file=_session_dir(name) / ".konfai_studio" / "history.json",
                 ).__aenter__()
         return state.agent
 
@@ -271,7 +292,7 @@ class _Registry:
         model = data.get("model")
         if isinstance(model, str):
             self._model = model
-        sessions_dir = _workspace_root() / "sessions"
+        sessions_dir = _sessions_root()
         if sessions_dir.is_dir():
             for child in sessions_dir.iterdir():
                 if child.is_dir() and not child.name.startswith("."):

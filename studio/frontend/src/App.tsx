@@ -14,7 +14,13 @@ import { useJson } from "./useJson";
 import { jobState } from "./status";
 import { type SessionUi, patchSession, replaceSessionField } from "./sessionState";
 
-type Gpu = { index: number; name: string; used_gb: number | null; total_gb: number | null };
+type Gpu = {
+  index: number;
+  name: string;
+  used_gb: number | null;
+  total_gb: number | null;
+  util_percent: number | null; // compute load: VRAM alone cannot say whether the card is working
+};
 type Ram = { used_gb: number; total_gb: number };
 type Brain = { id: string; label: string; detail: string; available: boolean; models?: { id: string; label: string }[] };
 
@@ -76,18 +82,25 @@ function Meter({
   used,
   total,
   title,
-  history,
+  traces,
+  text,
+  fill,
 }: {
   label: string;
   used: number | null;
   total: number | null;
   title?: string;
-  history?: number[];
+  // What the click reveals, one sparkline each — a GPU has two things worth watching over time (how
+  // busy it is, and how full), RAM and CPU only one.
+  traces?: { label: string; points: number[] }[];
+  // A meter reads "used/total GB" by default; CPU has no total to speak of, so it renders its own text.
+  text?: string;
+  fill?: number; // 0..1 for the dot, when there is no used/total to derive it from
 }) {
   const [open, setOpen] = useState(false);
-  const frac = used != null && total ? Math.min(used / total, 1) : 0;
-  const pts = history ?? [];
-  const clickable = pts.length > 1;
+  const frac = fill ?? (used != null && total ? Math.min(used / total, 1) : 0);
+  const shown = (traces ?? []).filter((t) => t.points.length > 1);
+  const clickable = shown.length > 0;
   return (
     <span
       className="chip meter"
@@ -97,16 +110,20 @@ function Meter({
     >
       <span className="gdot" style={{ opacity: 0.3 + frac * 0.7 }} />
       <span className="k">{label}</span>
-      {used != null && total != null ? ` ${used}/${total} GB` : ""}
+      {text ?? (used != null && total != null ? ` ${used}/${total} GB` : "")}
       {open && clickable && (
         <>
           <span className="pop-back" onClick={(e) => { e.stopPropagation(); setOpen(false); }} />
           <span className="meter-pop" onClick={(e) => e.stopPropagation()}>
-            <span className="meter-pop-head">
-              {label} · load
-              <span className="meter-pop-now">{Math.round(pts[pts.length - 1])}%</span>
-            </span>
-            <Sparkline points={pts} />
+            {shown.map((t) => (
+              <span key={t.label} className="meter-pop-trace">
+                <span className="meter-pop-head">
+                  {label} · {t.label}
+                  <span className="meter-pop-now">{Math.round(t.points[t.points.length - 1])}%</span>
+                </span>
+                <Sparkline points={t.points} />
+              </span>
+            ))}
           </span>
         </>
       )}
@@ -160,6 +177,24 @@ export default function App() {
 function Studio({ remote }: { remote: boolean }) {
   const [status, setStatus] = useState("connecting…");
   const [sessions, setSessions] = useState<string[]>([]); // starts empty — no phantom "default" experiment
+  // The status poll reads this to spot an experiment it does not know yet; a ref, because the poll's
+  // interval closure would otherwise forever see the mount-time empty list.
+  const sessionsRef = useRef<string[]>([]);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  function refreshSessions() {
+    // The rail's list, refetched without touching `active`: catching up on another browser's work must
+    // never yank this one off the experiment it is reading.
+    getJson("/api/sessions")
+      .then((d) => {
+        setSessions(d.sessions ?? []);
+        setUi((u) => replaceSessionField(u, "title", d.titles ?? {}));
+        setUi((u) => replaceSessionField(u, "dataset", d.datasets ?? {}));
+      })
+      .catch(() => {});
+  }
   const [active, setActive] = useState(NEW);
   // One consolidated map of per-experiment UI state (title, dataset, device, status, volumes, run nonce,
   // inject prompt, busy) — replaces the dozen parallel `Record<string, X>` maps keyed by session name.
@@ -169,7 +204,10 @@ function Studio({ remote }: { remote: boolean }) {
   const [gpus, setGpus] = useState<Gpu[]>([]);
   const [ram, setRam] = useState<Ram | null>(null);
   const [ramHist, setRamHist] = useState<number[]>([]); // RAM utilisation % over time
-  const [gpuHist, setGpuHist] = useState<Record<number, number[]>>({}); // per-GPU utilisation % over time
+  const [cpu, setCpu] = useState<number | null>(null); // host CPU load %, all cores
+  const [cpuHist, setCpuHist] = useState<number[]>([]);
+  const [gpuHist, setGpuHist] = useState<Record<number, number[]>>({}); // per-GPU compute load % over time
+  const [gpuVramHist, setGpuVramHist] = useState<Record<number, number[]>>({}); // per-GPU VRAM % over time
   const [brains, setBrains] = useState<Brain[]>([]);
   const [brain, setBrain] = useState("");
   const [model, setModel] = useState("");
@@ -294,12 +332,23 @@ function Studio({ remote }: { remote: boolean }) {
         .then((d) => {
           const nextGpus: Gpu[] = d.gpus ?? [];
           const nextRam: Ram | null = d.ram ?? null;
+          const nextCpu: number | null = typeof d.cpu_percent === "number" ? d.cpu_percent : null;
           setGpus(nextGpus);
           setRam(nextRam);
+          setCpu(nextCpu);
           const cap = 90; // ~4.5 min of history at a 3s poll
           const pct = (used: number | null, total: number | null) => (total ? Math.min(100, (used ?? 0) / total * 100) : 0);
           if (nextRam) setRamHist((h) => [...h, pct(nextRam.used_gb, nextRam.total_gb)].slice(-cap));
+          if (nextCpu != null) setCpuHist((h) => [...h, nextCpu].slice(-cap));
+          // Both are worth watching and they answer different questions: load says whether the card is
+          // working, VRAM how close the run is to running out.
           setGpuHist((prev) => {
+            const next: Record<number, number[]> = { ...prev };
+            for (const g of nextGpus)
+              if (g.util_percent != null) next[g.index] = [...(prev[g.index] ?? []), g.util_percent].slice(-cap);
+            return next;
+          });
+          setGpuVramHist((prev) => {
             const next: Record<number, number[]> = { ...prev };
             for (const g of nextGpus) next[g.index] = [...(prev[g.index] ?? []), pct(g.used_gb, g.total_gb)].slice(-cap);
             return next;
@@ -307,7 +356,13 @@ function Studio({ remote }: { remote: boolean }) {
         })
         .catch(() => {});
       getJson("/api/sessions/status")
-        .then((d) => setUi((u) => replaceSessionField(u, "status", d.statuses ?? {})))
+        .then((d) => {
+          const statuses: Record<string, string> = d.statuses ?? {};
+          setUi((u) => replaceSessionField(u, "status", statuses));
+          // The same poll that colours the dots is how this browser learns of an experiment created in
+          // another one: an unknown key means the rail's list is stale.
+          if (Object.keys(statuses).some((s) => !sessionsRef.current.includes(s))) refreshSessions();
+        })
         .catch(() => {});
     };
     pull();
@@ -377,7 +432,9 @@ function Studio({ remote }: { remote: boolean }) {
   }
 
   function chooseDataset(path: string) {
-    const prompt = `Inspect the dataset at ${path} and summarize it — cases, channels, classes, splits. Preview one case; don't train yet.`;
+    // KonfAI's own words: a dataset has cases and groups. The assistant echoes the vocabulary it is
+    // handed, so "channels" and "splits" must not appear here.
+    const prompt = `Inspect the dataset at ${path}: cases, groups, shape and spacing, label classes, and anything incomplete. Preview one case. Don't train yet.`;
     postJson("/api/datasets", { path })
       .then((d) => setRecent(d.datasets ?? []))
       .catch(() => {});
@@ -432,7 +489,7 @@ function Studio({ remote }: { remote: boolean }) {
   function useApp(ref: string, dataset?: string) {
     const base = `I want to use the app "${ref}". Inspect it with describe_app, then import_app it into the session so it runs as a normal experiment`;
     const text = dataset
-      ? `${base} on my dataset at ${dataset}. Check the dataset fits the app (inputs, channels, dataset group names), then run_prediction with the imported checkpoints; ask whether I want inference, evaluation, or fine-tuning (run_resume with weights_only).`
+      ? `${base} on my dataset at ${dataset}. Check the dataset fits the app (its expected input groups against my dataset's group names), then run_prediction with the imported checkpoints; ask whether I want inference, evaluation, or fine-tuning (run_resume with weights_only).`
       : `${base} on my dataset — ask me for the dataset path if you don't have it, then run_prediction with the imported checkpoints; ask whether I want inference, evaluation, or fine-tuning (run_resume with weights_only).`;
     if (dataset) {
       // Keep it in the recent list too; startExperiment records it per-session so it mounts in the tree.
@@ -525,9 +582,37 @@ function Studio({ remote }: { remote: boolean }) {
         </button>
         <span className="spacer" />
         {gpus.map((g) => (
-          <Meter key={g.index} label={`GPU ${g.index}`} used={g.used_gb} total={g.total_gb} title={g.name} history={gpuHist[g.index]} />
+          // Load first, then memory: a card can hold 20 GB and compute nothing, and it is the load that
+          // says whether the run is actually moving.
+          <Meter
+            key={g.index}
+            label={`GPU ${g.index}`}
+            used={g.used_gb}
+            total={g.total_gb}
+            text={
+              g.util_percent != null && g.used_gb != null && g.total_gb != null
+                ? ` ${g.util_percent}% · ${g.used_gb}/${g.total_gb} GB`
+                : undefined
+            }
+            title={`${g.name} — compute load and VRAM`}
+            traces={[
+              { label: "load", points: gpuHist[g.index] ?? [] },
+              { label: "VRAM", points: gpuVramHist[g.index] ?? [] },
+            ]}
+          />
         ))}
-        {ram && <Meter label="RAM" used={ram.used_gb} total={ram.total_gb} title="System RAM" history={ramHist} />}
+        {ram && <Meter label="RAM" used={ram.used_gb} total={ram.total_gb} title="System RAM" traces={[{ label: "load", points: ramHist }]} />}
+        {cpu != null && (
+          <Meter
+            label="CPU"
+            used={null}
+            total={null}
+            text={` ${Math.round(cpu)}%`}
+            fill={Math.min(cpu / 100, 1)}
+            title="Host CPU load, averaged over all cores"
+            traces={[{ label: "load", points: cpuHist }]}
+          />
+        )}
       </div>
 
       <div
@@ -619,8 +704,19 @@ function Studio({ remote }: { remote: boolean }) {
                     active={s === active}
                     inject={ui[s]?.inject}
                     recentFiles={fileRecent}
-                    onVolume={(p) => setUi((u) => patchSession(u, s, { volume: p }))}
-                    onRun={() => bumpRun(s)}
+                    onVolume={(p, c) =>
+                      // Two volumes surfaced together is a comparison ("the sCT next to the real CT"):
+                      // the second fills the compare pane, which opens itself. The nonce says the
+                      // assistant pointed at something — an event, not a state, so re-showing the same
+                      // volume still brings the viewer forward instead of leaving a run tab in front.
+                      setUi((u) =>
+                        patchSession(u, s, {
+                          volume: p,
+                          volumeNonce: (u[s]?.volumeNonce ?? 0) + 1,
+                          ...(c ? { compareVol: c } : {}),
+                        }),
+                      )
+                    }
                     onTitle={(title) => setUi((u) => patchSession(u, s, { title }))}
                     onAttach={recordFile}
                     onBusy={(b) => setUi((u) => patchSession(u, s, { busy: b }))}
@@ -660,6 +756,7 @@ function Studio({ remote }: { remote: boolean }) {
             <RightPanel
               session={active}
               volumePath={ui[active]?.volume ?? null}
+              volumeNonce={ui[active]?.volumeNonce ?? 0}
               onVolumePathChange={(p) => setUi((u) => patchSession(u, active, { volume: p }))}
               comparePath={ui[active]?.compareVol ?? null}
               onComparePathChange={(p) => setUi((u) => patchSession(u, active, { compareVol: p || null }))}

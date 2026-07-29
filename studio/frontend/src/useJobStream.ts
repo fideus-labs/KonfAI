@@ -89,6 +89,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
   const activeKeyRef = useRef(""); // key of the latest job's run — keeps the header status fresh when it ends
   const itCount = useRef<Record<string, number>>({}); // per run: monotonic training-iteration counter (the curve x-axis)
   const ramTick = useRef<Record<string, number>>({}); // per run: monotonic x for the caching RAM trace
+  const alive = useRef<Set<string>>(new Set()); // runs that have actually produced progress or metrics
 
   useEffect(() => {
     setLines([]);
@@ -100,10 +101,23 @@ export function useJobStream(session: string, runNonce: number): JobStream {
     sawMetric.current = false;
     itCount.current = {};
     ramTick.current = {};
-    const ctrl = new AbortController();
+    alive.current = new Set();
+    let ctrl = new AbortController();
     let stopped = false;
 
     const rkey = (r: string, k: string) => `${r} ${k}`; // unique run identity across kinds
+
+    // The tab opens on the latest job, which may be one that has not written a line yet — a job still
+    // warming up, or one that died before it could. Sitting there shows nothing while another run is
+    // streaming beside it, so the first run to actually produce output takes the tab from an empty one.
+    const cameAlive = (key: string) => {
+      if (alive.current.has(key)) return;
+      alive.current.add(key);
+      if (!alive.current.has(activeKeyRef.current)) {
+        activeKeyRef.current = key;
+        setActiveRun(key);
+      }
+    };
 
     // Find-or-create a run bucket by its (run, kind) key, apply `mutate` to a shallow copy. Runs persist —
     // buckets are only cleared when the subscription resets (a different experiment).
@@ -154,9 +168,10 @@ export function useJobStream(session: string, runNonce: number): JobStream {
       };
     };
 
-    async function pump() {
+    async function pump(seen: () => void) {
       const resp = await fetch(`/api/live?session=${encodeURIComponent(session)}`, { signal: ctrl.signal });
       for await (const ev of readSSE(resp)) {
+        seen();
         if (ev.type === "job") {
           // The latest job — sets the header + the default tab. It never clears runs: a new job (a
           // prediction after a training) adds a run, it doesn't wipe the ones already followed.
@@ -167,7 +182,8 @@ export function useJobStream(session: string, runNonce: number): JobStream {
           setStatus(ev.status || "running");
           setLines([]); // console is per-job
         } else if (ev.type === "run") {
-          // A run of the experiment was discovered — make sure its tab exists (even before any metric).
+          // A run of the experiment was announced or discovered — make sure its tab exists, even before
+          // it has produced a single metric.
           withRun(ev.run, ev.kind || "", (r) => ({ ...r, status: ev.status || r.status, base: ev.base || r.base }));
         } else if (ev.type === "idle") {
           setStatus("");
@@ -177,6 +193,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
           const label: string = ev.label || "Caching";
           const stage: string = ev.stage || "caching";
           const key = rkey(ev.run || "", ev.kind || "");
+          cameAlive(key);
           withRun(ev.run || "", ev.kind || "", (r) => {
             const live = liveFrom(r.live, label, stage, ev.progress, ev);
             if (stage === "caching" && typeof ev.memory_gb === "number") {
@@ -189,6 +206,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
           const label: string = ev.label || ev.stage;
           const stage: string = ev.stage;
           const key = rkey(ev.run || "", ev.kind || "");
+          cameAlive(key);
           const p: Progress | null = ev.progress ?? null;
           if (p) {
             // The x-axis depends on the stage. Training: a monotonic iteration counter (the tqdm step
@@ -228,20 +246,31 @@ export function useJobStream(session: string, runNonce: number): JobStream {
       }
     }
 
+    // The server pings every 10s. A stream that has gone quiet for far longer is not idle, it is dead —
+    // a connection the browser is still holding open against a server that restarted under it, which no
+    // amount of waiting recovers. Dropping it makes the loop below reconnect.
+    let lastEvent = Date.now();
+    const watchdog = setInterval(() => {
+      if (!stopped && Date.now() - lastEvent > 30_000) ctrl.abort();
+    }, 10_000);
+
     (async () => {
       while (!stopped) {
         try {
-          await pump();
+          await pump(() => (lastEvent = Date.now()));
         } catch {
           if (stopped) return; // aborted on unmount / superseded by a newer run
         }
         if (stopped) return;
+        ctrl = new AbortController(); // the old one is spent, aborted by the watchdog or by the drop
+        lastEvent = Date.now();
         await new Promise((r) => setTimeout(r, 1500)); // stream dropped (server restart?) — reconnect
       }
     })();
 
     return () => {
       stopped = true;
+      clearInterval(watchdog);
       ctrl.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

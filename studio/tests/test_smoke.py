@@ -54,3 +54,23 @@ def test_serves_the_built_frontend() -> None:
         response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers.get("content-type", "")
+
+
+def test_a_certfile_without_its_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Half a TLS pair cannot serve; uvicorn would fail after the sockets are already claimed — refuse
+    at the CLI, where the message can still name the missing flag."""
+    from konfai_studio.cli import main
+
+    monkeypatch.setattr("sys.argv", ["konfai-studio", "--ssl-certfile", "studio.crt"])
+    with pytest.raises(SystemExit):
+        main()
+
+
+def test_an_empty_tls_flag_is_refused_not_downgraded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unset shell variable in the documented one-liner passes ''; uvicorn treats '' as no-TLS, so
+    accepting it would bring the server up in plain HTTP with the token on the wire."""
+    from konfai_studio.cli import main
+
+    monkeypatch.setattr("sys.argv", ["konfai-studio", "--ssl-certfile", "", "--ssl-keyfile", ""])
+    with pytest.raises(SystemExit):
+        main()
