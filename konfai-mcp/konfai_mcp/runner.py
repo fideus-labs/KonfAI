@@ -54,8 +54,14 @@ def _subprocess_entry(queue: Any, target: str, kwargs: dict[str, Any], output_pa
     if output_path:
         try:
             with open(output_path, "ab") as sink:
-                with contextlib.suppress(OSError), open(os.devnull, "rb") as devnull:
-                    os.dup2(devnull.fileno(), 0)  # a jailed /dev/null must not cost fds 1/2 their detach
+                try:
+                    with open(os.devnull, "rb") as devnull:
+                        os.dup2(devnull.fileno(), 0)
+                except OSError:
+                    # A closed fd 0 makes a stray read fail instantly; left inherited, it could eat
+                    # the client's protocol bytes. And it must not cost fds 1/2 their detach.
+                    with contextlib.suppress(OSError):
+                        os.close(0)
                 os.dup2(sink.fileno(), 1)
                 os.dup2(sink.fileno(), 2)
         except OSError as exc:
