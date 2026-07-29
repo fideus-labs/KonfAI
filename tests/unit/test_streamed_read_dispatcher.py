@@ -20,10 +20,12 @@ A transform chain streams patches straight from disk when every stage declares i
 (``patch_locality``) and, for region stages, how a target patch pulls back through it
 (``stream_region_source``): the planner folds the region stages into one bounded read, runs the
 chain on that window, seeds GLOBAL_STAT stages from the stored statistics, and refuses the chains
-those declarations cannot honour. Streaming is an optimisation, so every streamed patch must equal
-the whole-volume pass sliced on the same grid. These tests prove that per region kind and in
-composition, for augmented copies and across epoch re-draws, and pin the planner's classification
-and refusals.
+those declarations cannot honour. The generic per-stage guarantee -- every built-in transform and
+augmentation, streamed patch == whole-volume pass on the same grid -- is enumerated and proven in
+``test_transform_locality_contract.py``; this file keeps the dispatcher-specific properties: how
+the fold composes region stages into one plan, the planner's classification and state (epoch
+re-draws, augmented copies, statistics seeded from disk instead of a full read), its refusals, and
+the streamed-resample region primitives the plan is built from.
 """
 
 from typing import cast
@@ -39,7 +41,6 @@ from konfai.data.transform import (
     Clip,
     Dilate,
     Flip,
-    Gradient,
     LocalityKind,
     Normalize,
     PatchLocality,
@@ -122,40 +123,6 @@ def test_stream_halo_dilate_seam_matches_whole_volume(assert_stream_matches_whol
     assert manager._resolve_patch_stream_source(0, True).region_index == 0
 
 
-def test_stream_halo_gradient_seam_matches_whole_volume(assert_stream_matches_whole_volume) -> None:
-    rng = np.random.default_rng(0)
-    volume = rng.standard_normal((1, 8, 8)).astype(np.float32)
-    assert_stream_matches_whole_volume(volume, [Gradient()], [4, 4], atol=1e-6)
-
-
-def test_stream_orientation_flip_remap_matches_whole_volume(assert_stream_matches_whole_volume) -> None:
-    volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
-    assert_stream_matches_whole_volume(volume, [Flip("0|1")], [4, 4])
-
-
-def test_stream_orientation_permute_remap_matches_whole_volume(assert_stream_matches_whole_volume) -> None:
-    volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
-    manager = assert_stream_matches_whole_volume(volume, [Permute("1|0")], [4, 4])
-    assert manager._resolve_patch_stream_source(0, True).region_index == 0
-
-
-def test_stream_orientation_permute_border_patch_uses_the_permuted_grid(assert_stream_matches_whole_volume) -> None:
-    # Permute swaps the spatial axes, so the patch grid is cut on the PERMUTED extents (7x8, not 8x7).
-    # The last patch of the 7-long target axis is one voxel short of patch_size: the streamed patch must
-    # be padded against that target grid, not against the source shape, which would leave it short.
-    volume = np.arange(1 * 8 * 7, dtype=np.float32).reshape(1, 8, 7)
-    assert_stream_matches_whole_volume(volume, [Permute("1|0")], [4, 4])
-
-
-def test_stream_pointwise_border_patch_pads_after_the_chain(assert_stream_matches_whole_volume) -> None:
-    # A 9-long axis leaves the last patch one voxel short of patch_size, so the read plan pads it up.
-    # The whole-volume path transforms the volume and only then pads (with the min of the TRANSFORMED
-    # patch), so the streamed path must apply the read plan after its chain too -- padding the raw patch
-    # first pads in the source domain and then runs the transform over the padding.
-    volume = np.arange(3 * 8 * 9, dtype=np.float32).reshape(3, 8, 9)
-    assert_stream_matches_whole_volume(volume, [Softmax(0)], [4, 4])
-
-
 def test_stream_global_stat_before_orientation_region_matches_whole_volume(build_streaming_manager) -> None:
     # GLOBAL_STAT (Normalize, seeded from disk stats) as a pre-pointwise stage in front of an
     # ORIENTATION region transform: both the stat and the remap must compose byte-identically.
@@ -175,13 +142,6 @@ def test_stream_global_stat_before_orientation_region_matches_whole_volume(build
     reference = [manager.patch.get_data(normalized, index, 0, True) for index in range(size)]
     for got, expected in zip(streamed, reference, strict=False):
         np.testing.assert_allclose(got.numpy(), expected.numpy(), atol=1e-6)
-
-
-def test_stream_pointwise_chain_matches_whole_volume(assert_stream_matches_whole_volume) -> None:
-    # A trailing chain of purely POINTWISE transforms streams the exact patch (region_index is None).
-    volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
-    manager = assert_stream_matches_whole_volume(volume, [TensorCast("float32"), Flip("0")], [4, 4])
-    assert manager._resolve_patch_stream_source(0, True).region_index == 1
 
 
 def test_stream_composed_orientation_and_halo_matches_whole_volume(assert_stream_matches_whole_volume) -> None:
@@ -233,19 +193,15 @@ def test_stream_composed_orientations_with_pointwise_between_match_whole_volume(
     assert tuple(plans[2].out_shape) == (6, 8)
 
 
-def test_softmax_channel_axis_is_pointwise_but_spatial_axis_falls_back(
-    assert_stream_matches_whole_volume, build_streaming_manager
-) -> None:
-    # A channel-axis softmax (dim 0) is spatially pointwise and streams the exact patch. A softmax over
-    # a SPATIAL axis normalises across the whole extent, so a per-patch softmax would diverge: the
-    # contract must declare it WHOLE_VOLUME and the dispatcher must refuse to stream it.
+def test_softmax_channel_axis_is_pointwise_but_spatial_axis_falls_back(build_streaming_manager) -> None:
+    # A channel-axis softmax (dim 0) is spatially pointwise (streamed equality: locality contract). A
+    # softmax over a SPATIAL axis normalises across the whole extent, so a per-patch softmax would
+    # diverge: the declaration must be WHOLE_VOLUME and the dispatcher must refuse to stream it.
     assert Softmax(0).patch_locality(Attribute()).kind is LocalityKind.POINTWISE
     assert Softmax(1).patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
     assert Softmax(-1).patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
 
     volume = np.arange(3 * 8 * 8, dtype=np.float32).reshape(3, 8, 8)
-    assert_stream_matches_whole_volume(volume, [Softmax(0)], [4, 4], atol=1e-6)
-
     spatial_manager = build_streaming_manager(volume, [Softmax(1)], [4, 4])
     assert spatial_manager.can_stream_patch(0) is False
 
@@ -321,47 +277,6 @@ def test_clip_percentile_and_mask_bounds_fall_back_to_whole_volume(build_streami
     volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
     manager = build_streaming_manager(volume, [Clip(min_value="percentile:1", max_value="percentile:99")], [4, 4])
     assert not manager.can_stream_patch(0)
-
-
-def test_stream_orientation_border_patch_is_padded_to_patch_size(assert_stream_matches_whole_volume) -> None:
-    # A tiling whose last patch is narrower than patch_size (30 with patch 8 -> border width 6): the
-    # whole-volume Patch.get_data pads that border up to patch_size, so the region streamed path must
-    # too, otherwise the border patch comes out one-or-more voxels short and cannot batch/reassemble.
-    volume = np.arange(1 * 30 * 30, dtype=np.float32).reshape(1, 30, 30)
-    manager = assert_stream_matches_whole_volume(volume, [Flip("0|1")], [8, 8])
-    assert manager._resolve_patch_stream_source(0, True).region_index == 0
-    # Every streamed patch is exactly patch_size, including the borders.
-    size = manager.patch.get_size(0)
-    for index in range(size):
-        assert tuple(manager._get_streamed_data(index, 0, True)[0].shape) == (1, 8, 8)
-
-
-def test_stream_resample_border_patch_matches_padded_whole_volume(build_streaming_manager) -> None:
-    # RESCALE upsample to a grid that tiles unevenly (30 with patch 8 -> border width 6). The whole-
-    # volume path resamples the whole volume then pads border patches to patch_size; the streamed
-    # resample path must reproduce that padding so border patches are shape- and value-consistent.
-    rng = np.random.default_rng(3)
-    volume = (rng.standard_normal((1, 20, 20, 20)).astype(np.float32)) * 100.0
-    shape = [30, 30, 30]
-    patch = [8, 8, 8]
-
-    stream_manager = build_streaming_manager(volume, [ResampleToShape(shape=shape)], patch)
-    assert stream_manager.can_stream_patch(0)
-    assert stream_manager._resolve_patch_stream_source(0, True).region_index == 0
-
-    reference_manager = build_streaming_manager(volume, [ResampleToShape(shape=shape)], patch)
-    reference_manager.load(reference_manager.transforms, [], load_augmentations=False)
-
-    size = stream_manager.patch.get_size(0)
-    streamed = [stream_manager._get_streamed_data(index, 0, True)[0] for index in range(size)]
-    reference = [reference_manager.patch.get_data(reference_manager.data[0], index, 0, True) for index in range(size)]
-
-    assert len(streamed) == len(reference) == size
-    for got, expected in zip(streamed, reference, strict=False):
-        assert tuple(got.shape) == tuple(expected.shape) == (1, 8, 8, 8)
-        # Interior values match F.interpolate to float32 interpolation-rounding; the border
-        # patch is padded to patch_size and byte-consistent in shape.
-        np.testing.assert_allclose(got.numpy(), expected.numpy(), atol=1e-3)
 
 
 def test_stream_resample_nearest_strong_downsampling_matches_whole_volume(build_streaming_manager) -> None:
