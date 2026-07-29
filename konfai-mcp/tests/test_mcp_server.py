@@ -345,11 +345,12 @@ def test_run_train_config_file_and_cluster(
             )
             assert done.structured_content["status"] == "done"
 
+            # Writing the bad file succeeds -- validation happens at launch, not at write.
+            await client.call_tool(
+                "write_session_file",
+                {"relative_path": "Bad.yml", "content": yaml_dump({"Predictor": {}})},
+            )
             with pytest.raises(Exception, match="must define the 'Trainer' root key"):
-                await client.call_tool(
-                    "write_session_file",
-                    {"relative_path": "Bad.yml", "content": yaml_dump({"Predictor": {}})},
-                )
                 await client.call_tool("run_train", {"config_file": "Bad.yml"})
 
             with pytest.raises(Exception, match="cluster expects exactly the keys"):

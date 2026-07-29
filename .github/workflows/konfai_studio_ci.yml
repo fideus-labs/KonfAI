@@ -28,6 +28,8 @@ jobs:
         with:
           # studio/setup.py pins konfai-mcp to the setuptools_scm version -- tags must be reachable.
           fetch-depth: 0
+          # PR CI runs untrusted build/test steps and never needs git auth.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6
