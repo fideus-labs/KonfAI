@@ -621,9 +621,17 @@ class OutSameAsGroupDataset(OutputDataset):
                 self.output_layer_accumulator[index_dataset] = {}
                 self.attributes[index_dataset] = {}
                 self.names[index_dataset] = input_dataset.name
+                # The streamed consumers (sink target, region pipe, buffer) index their slabs on the
+                # first spatial axis, and the aligner needs every augmentation on the same footing:
+                # a grid swept along another axis takes the whole-volume path until they carry the
+                # axis too.
+                # max(1, ...): the count is set by load(); before it, augmentation 0 always exists.
+                sweeps_first_axis = all(
+                    input_dataset.patch.get_sweep_axis(a) == 0 for a in range(max(1, self.nb_data_augmentation))
+                )
                 plan = (
                     self._plan_stream(dataset, index_dataset, source_attribute, layer, number_of_channels_per_model)
-                    if self._streaming_enabled
+                    if self._streaming_enabled and sweeps_first_axis
                     else None
                 )
                 self._stream_plans[index_dataset] = plan

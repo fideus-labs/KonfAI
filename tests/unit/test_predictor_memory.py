@@ -592,3 +592,62 @@ def test_offload_small_cuda_patch_takes_plain_path(monkeypatch: pytest.MonkeyPat
     out = ds._offload_to_cpu(x)
     assert torch.equal(out, x.detach().cpu())
     assert ds._pin_buffer is None  # small patches never allocate the pinned buffer
+
+
+def test_a_grid_swept_off_axis_zero_takes_the_whole_volume_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The streamed consumers index their slabs on the first spatial axis; a grid ordered along another
+    axis must not stream, or one axis's slab lands in another. Whole-volume is the safe path until the
+    consumers carry the axis."""
+
+    class DummyPatch:
+        patch_size: ClassVar[list[int]] = [2, 2]
+
+        @staticmethod
+        def get_patch_slices(index_augmentation: int):
+            del index_augmentation
+            return [(slice(0, 2), slice(0, 2))]
+
+        @staticmethod
+        def get_sweep_axis(index_augmentation: int) -> int:
+            del index_augmentation
+            return 1
+
+    class DummyManager:
+        name = "CASE_000"
+        patch = DummyPatch()
+        cache_attributes: ClassVar[list[Attribute]] = [Attribute({"Origin": [0.0, 0.0]})]
+
+    class DummyGroupTransform:
+        patch_transforms: ClassVar[list[object]] = []
+
+    class DummyDatasetIter:
+        groups_src: ClassVar[dict[str, dict[str, object]]] = {"src": {"dest": DummyGroupTransform()}}
+
+        @staticmethod
+        def get_dataset_from_index(group_dest: str, index: int):
+            return DummyManager()
+
+    output_dataset = OutSameAsGroupDataset(
+        same_as_group="src:dest",
+        dataset_filename="./Output:mha",
+        group="out",
+        patch_combine=None,
+        reduction="Mean",
+    )
+    output_dataset._streaming_enabled = True
+    # A plan would exist if streaming were allowed to consider this case at all.
+    monkeypatch.setattr(OutSameAsGroupDataset, "_plan_stream", lambda self, *a, **k: object(), raising=True)
+
+    output_dataset.add_layer(
+        index_dataset=0,
+        index_augmentation=0,
+        index_patch=0,
+        layer=torch.zeros(1, 2, 2),
+        dataset=cast(DatasetIter, DummyDatasetIter()),
+        attribute=Attribute({"Spacing": np.asarray([1.0, 1.0])}),
+    )
+
+    assert output_dataset._stream_plans[0] is None, "an off-axis sweep must fall back to whole-volume"
+    from konfai.data.patching import StreamingAccumulator
+
+    assert not isinstance(output_dataset.output_layer_accumulator[0][0], StreamingAccumulator)
