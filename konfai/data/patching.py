@@ -590,7 +590,10 @@ class Accumulator:
             view = [1] * data.ndim
             view[self._n + dim] = -1
             share = self._share(dim, s.start, data).view(view)
-            torch.mul(data, share, out=self._weighted) if dim == 0 else self._weighted.mul_(share)
+            if dim == 0:
+                torch.mul(data, share, out=self._weighted)
+            else:
+                self._weighted.mul_(share)
         return self._weighted
 
     def is_empty(self) -> bool:

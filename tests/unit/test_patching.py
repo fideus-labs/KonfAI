@@ -561,12 +561,20 @@ def test_trim_selects_the_most_central_patch():
     assert accumulator.assemble()[0].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0]
 
 
-def test_trim_reassembles_exactly_and_keeps_values_discrete():
+@pytest.mark.parametrize(
+    "shape, patch, overlap",
+    [
+        ([10, 10, 14], [6, 6, 6], 2),  # every patch reaches full patch_size
+        ([9, 11], [6, 6], 4),  # the last patch of each axis is truncated AND needs its tail opened
+    ],
+)
+def test_trim_reassembles_exactly_and_keeps_values_discrete(shape, patch, overlap):
     """The kept bands tile every axis, so the weights sum to one: the volume comes back untouched.
 
-    Values are never averaged, which is what lets a label map survive reassembly.
+    Values are never averaged, which is what lets a label map survive reassembly. A truncated last
+    patch is what Trim is most fragile to: a weighting always has a strictly positive total, so a
+    coverage gap only darkens a voxel, where a 0/1 selection leaves it unwritten.
     """
-    shape, patch, overlap = [10, 10, 14], [6, 6, 6], 2
     labels = torch.randint(0, 5, (2, *shape)).float()
     slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
     combine = Trim()
@@ -589,6 +597,7 @@ def test_trim_reassembles_exactly_and_keeps_values_discrete():
         ([16, 16], [8, 8], 0),  # no overlap at all
         ([10, 10], [10, 10], 2),  # a single patch covering everything
         ([9, 11], [4, 4], 3),  # odd overlap: the two halves must still abut
+        ([9, 11], [6, 6], 4),  # truncated last patch whose tail opening is what closes the volume
     ],
 )
 def test_trim_kept_boxes_partition_the_volume(shape, patch, overlap):
