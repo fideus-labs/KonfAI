@@ -387,7 +387,10 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         overlap: int | float | str | list[int | float | str] | None,
         nb_data_augmentation: int,
     ) -> None:
-        if patch_size is not None and overlap is not None:
+        # EMPTY, not just missing: the caller drops the axes of extent 1, so a case with nothing tiled
+        # arrives as []. That is a single patch covering the volume — no combine applies, and a blend
+        # window built on no axis leaves max() nothing to take.
+        if patch_size and overlap is not None:
             if self.patch_combine is not None:
                 self.patch_combine.set_patch_config(patch_size, blend_overlap(overlap, patch_size))
         else:
