@@ -23,7 +23,6 @@ per-copy head and reduction call as the whole-volume ``get_output`` — which is
 output must equal the assembled one bit for bit, for every reduction (Mean, Median, Concat), blend,
 and dtype. A draw that moves the slab axis (a z-flip) must refuse and fall back, transparently."""
 
-from types import SimpleNamespace
 from typing import ClassVar, cast
 
 import numpy as np
@@ -34,14 +33,12 @@ from konfai.data.data_manager import DatasetIter, _interleaved_case_entries
 from konfai.data.patching import DatasetPatch, Gaussian, SlabAligner
 from konfai.data.transform import Flip as FlipTransform
 from konfai.data.transform import InferenceStack, LocalityKind, Sum
-from konfai.predictor import Concat, Mean, Median, OutSameAsGroupDataset, Reduction
+from konfai.predictor import Concat, Mean, Median, OutSameAsGroupDataset
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.utils import get_patch_slices_from_shape
 
 SHAPE = [6, 4, 3]
 PATCH_SIZE = [2, 4, 3]
 OVERLAP = 1
-C = 2
 
 
 def _geometry_attribute() -> Attribute:
@@ -63,122 +60,6 @@ def _augmentations(
     return augmentations
 
 
-def _make_patches(volume: torch.Tensor, patch_slices) -> list[torch.Tensor]:
-    """Cut ``volume`` into model-sized patches, border patches zero-padded up to the patch extent."""
-    patches = []
-    for patch_slice in patch_slices:
-        patch = volume[(slice(None), *patch_slice)]
-        padding = []
-        for dim, s in reversed(list(enumerate(patch_slice))):
-            padding += [0, PATCH_SIZE[dim] - (s.stop - s.start)]
-        patches.append(torch.nn.functional.pad(patch, padding) if any(padding) else patch)
-    return patches
-
-
-def _drive_tta(
-    tmp_path,
-    monkeypatch,
-    *,
-    augmentation,
-    streamed: bool,
-    reduction: Reduction | None = None,
-    transforms=(),
-    after=(),
-    dtype: torch.dtype = torch.float32,
-    patch_combine=None,
-    case_index: int = 0,
-    file_format: str = "h5",
-    worth_gate: bool = False,
-):
-    """Push one TTA case (identity copy + one augmented copy) patch by patch through ``add_layer``
-    against an h5 sink, interleaved along the slab axis exactly as the prediction mapping orders it,
-    and read the written entry back.
-
-    The forward ``transforms`` run once on the volume (stacking the attribute as the input pipeline
-    would) and the result plays the model output; the augmented copy is the augmentation's own
-    ``compute`` of it. Returns the written tensor and whether the whole-volume path produced it."""
-    monkeypatch.setenv("KONFAI_STREAMED_WRITES", "1" if streamed else "0")
-    monkeypatch.setenv("KONFAI_config_file", "unused.yml")
-    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
-    # Toy volumes are far below the production worth-streaming threshold: zero it so these tests
-    # exercise the streamed machinery; ``worth_gate`` keeps the production threshold instead.
-    if worth_gate:
-        monkeypatch.delenv("KONFAI_STREAM_WORTH_THRESHOLD", raising=False)
-    else:
-        monkeypatch.setenv("KONFAI_STREAM_WORTH_THRESHOLD", "0")
-
-    attribute = _geometry_attribute()
-    volume = torch.from_numpy(np.random.default_rng(0).standard_normal((C, *SHAPE)).astype(np.float32)).to(dtype)
-    for transform in transforms:
-        volume = transform("CASE_000", volume, attribute)
-    augmentations = _augmentations(augmentation, shape=list(volume.shape[1:]), case_index=case_index)
-    copies = [volume, augmentation.compute("CASE_000", case_index, 0, volume)]
-    patch_slices, _ = get_patch_slices_from_shape(PATCH_SIZE, list(volume.shape[1:]), OVERLAP)
-    patches = [_make_patches(copy, patch_slices) for copy in copies]
-
-    class DummyPatch:
-        patch_size: ClassVar[list[int]] = list(PATCH_SIZE)
-
-        @staticmethod
-        def get_patch_slices(index_augmentation: int):
-            del index_augmentation
-            return patch_slices
-
-        @staticmethod
-        def get_sweep_axis(index_augmentation: int) -> int:
-            # These grids are cut along axis 0, which is what these doubles' slices assume.
-            del index_augmentation
-            return 0
-
-    class DummyManager:
-        index = case_index
-        name = "CASE_000"
-        patch = DummyPatch()
-        shapes: ClassVar[list[list[int]]] = [list(volume.shape[1:]), list(volume.shape[1:])]
-        cache_attributes: ClassVar[list[Attribute]] = [Attribute(), Attribute()]
-
-    class DummyDatasetIter:
-        data_augmentations_list: ClassVar[list[DataAugmentationsList]] = [augmentations]
-        groups_src: ClassVar[dict] = {
-            "src": {"dest": SimpleNamespace(transforms=list(transforms), patch_transforms=[])}
-        }
-
-        @staticmethod
-        def get_dataset_from_index(group_dest: str, index: int):
-            return DummyManager()
-
-    output_dataset = OutSameAsGroupDataset(
-        same_as_group="src:dest",
-        dataset_filename=f"{tmp_path}/output.h5:h5" if file_format == "h5" else f"{tmp_path}/output:{file_format}",
-        group="out",
-        patch_combine=None,
-        reduction="Mean",
-    )
-    output_dataset.reduction = reduction if reduction is not None else Mean()
-    output_dataset.nb_data_augmentation = 2
-    output_dataset.after_reduction_transforms = list(after)
-    for transform in output_dataset.after_reduction_transforms:
-        transform.set_datasets([output_dataset])
-    if patch_combine is not None:
-        patch_combine.set_patch_config(list(PATCH_SIZE), OVERLAP)
-        output_dataset.patch_combine = patch_combine
-
-    dataset_iter = cast(DatasetIter, DummyDatasetIter())
-    order = sorted((patch_slices[p][0].start, a, p) for a in range(2) for p in range(len(patch_slices)))
-    whole_volume = False
-    for _, a, p in order:
-        output_dataset.add_layer(0, a, p, patches[a][p].clone(), dataset_iter, Attribute(attribute), [C])
-        if output_dataset.is_done(0):
-            result = output_dataset.get_output(0, [C], dataset_iter)
-            output_dataset.write_prediction(0, "CASE_000", result)
-            whole_volume = True
-
-    output_dataset.finalize_writes()
-    store = f"{tmp_path}/output.h5" if file_format == "h5" else f"{tmp_path}/output"
-    data, _ = Dataset(store, file_format).read_data("out", "CASE_000")
-    return torch.from_numpy(data), whole_volume
-
-
 # --------------------------------------------------------------------------------------
 # Byte-identity: the slab-synchronized reduce equals the whole-volume path, per reduction.
 # --------------------------------------------------------------------------------------
@@ -193,15 +74,17 @@ def _drive_tta(
         (Median(), torch.float16, None),
     ],
 )
-def test_streamed_tta_flip_matches_whole_volume(tmp_path, monkeypatch, reduction, dtype, patch_combine) -> None:
+def test_streamed_tta_flip_matches_whole_volume(
+    tmp_path, monkeypatch, drive_tta, reduction, dtype, patch_combine
+) -> None:
     # An in-plane flip (y and x, never z): the copies' un-augment is slab-parallel, so the case must
     # stream (the whole-volume path never fires) and still match the assembled reference bit for bit.
     kwargs = {"reduction": reduction, "dtype": dtype, "patch_combine": patch_combine}
-    streamed, whole_volume = _drive_tta(
+    streamed, whole_volume = drive_tta(
         tmp_path / "streamed", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, **kwargs
     )
     assert not whole_volume, "the TTA case should have streamed"
-    reference, whole_volume = _drive_tta(
+    reference, whole_volume = drive_tta(
         tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False, **kwargs
     )
     assert whole_volume
@@ -209,56 +92,56 @@ def test_streamed_tta_flip_matches_whole_volume(tmp_path, monkeypatch, reduction
     assert torch.equal(streamed, reference)
 
 
-def test_streamed_tta_concat_layout_matches_whole_volume(tmp_path, monkeypatch) -> None:
+def test_streamed_tta_concat_layout_matches_whole_volume(tmp_path, monkeypatch, drive_tta) -> None:
     # reduce=Concat keeps the copies as leading blocks for after_reduction to merge (the documented
     # contract): the streamed prefix must hand Sum the same [T, C, ...] layout, slab by slab.
     kwargs = {"reduction": Concat(), "after": [Sum(dim=0)]}
-    streamed, whole_volume = _drive_tta(
+    streamed, whole_volume = drive_tta(
         tmp_path / "streamed", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, **kwargs
     )
     assert not whole_volume
-    reference, _ = _drive_tta(
+    reference, _ = drive_tta(
         tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False, **kwargs
     )
     assert torch.equal(streamed, reference)
 
 
-def test_streamed_tta_composes_with_a_region_pipe(tmp_path, monkeypatch) -> None:
+def test_streamed_tta_composes_with_a_region_pipe(tmp_path, monkeypatch, drive_tta) -> None:
     # TTA reduce feeding the write dispatcher's region pipe: the forward Flip on the slab axis leaves
     # a z-mirror inverse in the finalize chain, streamed AFTER the cross-copy reduction. Both layers
     # of the machinery compose without either knowing about the other.
     kwargs = {"transforms": [FlipTransform("0", inverse=True)]}
-    streamed, whole_volume = _drive_tta(
+    streamed, whole_volume = drive_tta(
         tmp_path / "streamed", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, **kwargs
     )
     assert not whole_volume
-    reference, _ = _drive_tta(
+    reference, _ = drive_tta(
         tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False, **kwargs
     )
     assert torch.equal(streamed, reference)
 
 
-def test_light_tta_case_takes_the_whole_volume_path_by_the_worth_gate(tmp_path, monkeypatch, capsys) -> None:
+def test_light_tta_case_takes_the_whole_volume_path_by_the_worth_gate(tmp_path, monkeypatch, drive_tta, capsys) -> None:
     # A TTA case whose assembled accumulators are a sliver of allocatable memory has nothing for the
     # slab-synchronized reduce to save: the worth gate routes it whole-volume, output unchanged, and
     # the fallback is said once (a silent one would hide that a large case pays it).
-    streamed, whole_volume = _drive_tta(
+    streamed, whole_volume = drive_tta(
         tmp_path / "gated", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, worth_gate=True
     )
     assert whole_volume, "a toy TTA case should not pay the streamed reduce"
-    reference, _ = _drive_tta(tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False)
+    reference, _ = drive_tta(tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False)
     assert torch.equal(streamed, reference)
     assert capsys.readouterr().out.count("takes the whole-volume path") == 1
 
 
-def test_streamed_tta_slab_axis_flip_falls_back_to_whole_volume(tmp_path, monkeypatch) -> None:
+def test_streamed_tta_slab_axis_flip_falls_back_to_whole_volume(tmp_path, monkeypatch, drive_tta) -> None:
     # A z-flip mirrors the slab order: finalizing output slab 0 would need the copy's LAST patch, so
     # the gate must refuse and the case must complete through the whole-volume path, transparently.
-    streamed, whole_volume = _drive_tta(
+    streamed, whole_volume = drive_tta(
         tmp_path / "streamed", monkeypatch, augmentation=Flip(f_prob=[1, 0, 0]), streamed=True
     )
     assert whole_volume, "a slab-axis flip must fall back to the whole-volume path"
-    reference, _ = _drive_tta(tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[1, 0, 0]), streamed=False)
+    reference, _ = drive_tta(tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[1, 0, 0]), streamed=False)
     assert torch.equal(streamed, reference)
 
 
@@ -347,13 +230,13 @@ def test_aligner_joint_intervals_carry_every_stream_and_stay_bounded() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, monkeypatch) -> None:
+def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, monkeypatch, drive_tta) -> None:
     # InferenceStack declares SLAB: per-voxel member reduction plus a per-region side write of the
     # stack. Fed through the streamed prefix it must produce the same main output AND the same stack
     # entry as the whole-volume call — here on a TTA Concat chain, where the stack holds both copies.
     def run(where: str, streamed: bool):
         stack = InferenceStack("", "stack", mode="Seg")
-        streamed_out, whole_volume = _drive_tta(
+        streamed_out, whole_volume = drive_tta(
             tmp_path / where,
             monkeypatch,
             augmentation=Flip(f_prob=[0, 1, 1]),
@@ -372,12 +255,12 @@ def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, mo
     assert torch.equal(got_stack, want_stack)
 
 
-def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path, monkeypatch) -> None:
+def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path, monkeypatch, drive_tta) -> None:
     # A destination that cannot serve region writes must not lose the stack: the SLAB stage buffers
     # and writes classically at the last slab — the whole-volume path's memory, never a missing file.
     stack = InferenceStack(f"{tmp_path}/stack_only.h5:h5", "stack", mode="Seg")
     stack.dataset.open_data_stream = lambda *args, **kwargs: None  # type: ignore[union-attr,method-assign]
-    _, whole_volume = _drive_tta(
+    written, whole_volume = drive_tta(
         tmp_path / "streamed",
         monkeypatch,
         augmentation=Flip(f_prob=[0, 1, 1]),
@@ -387,18 +270,19 @@ def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path
     )
     assert not whole_volume
     stack_data, _ = Dataset(f"{tmp_path}/stack_only.h5", "h5").read_data("InferenceStack", "CASE_000")
-    assert stack_data.shape == (2, *SHAPE)
+    # The full stack: both copies, over the case's whole spatial extent.
+    assert stack_data.shape == (2, *written.shape[1:])
 
 
-def test_streamed_tta_binds_the_draw_by_the_manager_case_index(tmp_path, monkeypatch) -> None:
+def test_streamed_tta_binds_the_draw_by_the_manager_case_index(tmp_path, monkeypatch, drive_tta) -> None:
     # A DDP shard remaps case indices to loader-local ones, but the draw was made under the manager's
     # own index — the only key ``who_index`` holds. Both paths must un-augment through it: with the
     # local index (0 here) the state lookup has no entry at all.
-    streamed, whole_volume = _drive_tta(
+    streamed, whole_volume = drive_tta(
         tmp_path / "streamed", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, case_index=7
     )
     assert not whole_volume
-    reference, _ = _drive_tta(
+    reference, _ = drive_tta(
         tmp_path / "reference", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=False, case_index=7
     )
     assert torch.equal(streamed, reference)
