@@ -312,8 +312,13 @@ def write_ome_zarr(
     translation = {"c": 0.0, **dict(zip(spatial_axes, translation_values, strict=True))}
 
     image = ngff_zarr.to_ngff_image(array_data, dims=dims, scale=scale, translation=translation)
+    # cache=False because the array is already resident: this function is handed one in memory, and
+    # spilling it to a disk cache "to limit memory consumption" cannot lower a peak that has already
+    # happened -- it only adds a full write and a full read. The estimate that would otherwise trigger
+    # it is inflated besides, by itemsize once per dimension, so a 13.6 GiB field reports 868 GiB and
+    # takes that path every time.
     multiscales = ngff_zarr.to_multiscales(
-        image, scale_factors=[], chunks=tuple(chunks) if chunks is not None else None
+        image, scale_factors=[], chunks=tuple(chunks) if chunks is not None else None, cache=False
     )
     version = _DEFAULT_VERSION
     if displacement_field:
