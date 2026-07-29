@@ -662,3 +662,22 @@ def test_streaming_accumulator_sweeps_any_axis(sweep_axis):
         destination[sweep_axis] = region
         out[(slice(None), *destination)] = slab
     torch.testing.assert_close(out, full, rtol=0, atol=1e-5)
+
+
+@pytest.mark.parametrize("sweep_axis", [0, 1, 2])
+def test_patch_grid_orders_by_the_sweep_axis(sweep_axis):
+    """The grid holds the same patches whatever the sweep axis; only the order changes.
+
+    The order is what the reassembly window relies on: it slides along that axis, so starts on it must
+    never decrease. Emitting a different SET of patches would silently change what is predicted, which
+    is why the set is asserted and not just the ordering.
+    """
+    shape, patch, overlap = [10, 12, 14], [6, 6, 6], 2
+    reference, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    ordered, _ = get_patch_slices_from_shape(patch, shape, overlap, sweep_axis=sweep_axis)
+
+    assert sorted(map(str, ordered)) == sorted(map(str, reference)), "the grid itself must not change"
+    starts = [patch_slice[sweep_axis].start for patch_slice in ordered]
+    assert starts == sorted(starts), f"starts on axis {sweep_axis} must not decrease: {starts}"
+    if sweep_axis == 0:
+        assert ordered == reference, "axis 0 must reproduce the historical order exactly"

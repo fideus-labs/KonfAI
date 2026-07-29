@@ -62,12 +62,25 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
     return module, name.split("/")[0]
 
 
+def _sweep_first(slices: list[list[slice]], sweep_axis: int) -> list[tuple[slice, ...]]:
+    """The patch grid, emitted with ``sweep_axis`` outermost and each tuple back in array order.
+
+    Which axis is outermost is what the reassembly window slides along: a patch's arrival finalizes
+    everything behind it on that axis and nothing else, so the window costs ``patch[axis] x (the other
+    extents)``. The order is the contract between the read and the write -- both must be given the same
+    axis, or reassembly hands out regions that are not final.
+    """
+    order = [sweep_axis, *(dim for dim in range(len(slices)) if dim != sweep_axis)]
+    back = [order.index(dim) for dim in range(len(slices))]
+    return [tuple(chunk[position] for position in back) for chunk in itertools.product(*(slices[d] for d in order))]
+
+
 def get_patch_slices_from_nb_patch_per_dim(
     patch_size_tmp: list[int],
     nb_patch_per_dim: list[tuple[int, bool]],
     overlap: int | None,
+    sweep_axis: int = 0,
 ) -> list[tuple[slice, ...]]:
-    patch_slices = []
     slices: list[list[slice]] = []
     if overlap is None:
         overlap = 0
@@ -86,9 +99,7 @@ def get_patch_slices_from_nb_patch_per_dim(
             start = (patch_size[dim] - overlap) * index
             end = start + patch_size[dim]
             slices[dim].append(slice(start, end))
-    for chunk in itertools.product(*slices):
-        patch_slices.append(tuple(chunk))
-    return patch_slices
+    return _sweep_first(slices, sweep_axis)
 
 
 #: Default overlap on tiled axes when a free-axis patch does not say otherwise: 20 % of the patch.
@@ -263,6 +274,7 @@ def get_patch_slices_from_shape(
     overlap_tmp: OverlapSpec,
     multiple: list[int] | None = None,
     declared_free_axis: bool | None = None,
+    sweep_axis: int = 0,
 ) -> tuple[list[tuple[slice, ...]], list[tuple[int, bool]]]:
 
     # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple`` so a
@@ -284,7 +296,6 @@ def get_patch_slices_from_shape(
             f"shape: {shape}",
             "Both must have the same number of dimensions (e.g., 3D patch for 3D volume).",
         )
-    patch_slices = []
     nb_patch_per_dim = []
     slices: list[list[slice]] = []
     if overlap_tmp is None:
@@ -329,10 +340,7 @@ def get_patch_slices_from_shape(
             index += 1
         nb_patch_per_dim.append((index + 1, patch_size[dim] == 1))
 
-    for chunk in itertools.product(*slices):
-        patch_slices.append(tuple(chunk))
-
-    return patch_slices, nb_patch_per_dim
+    return _sweep_first(slices, sweep_axis), nb_patch_per_dim
 
 
 SUPPORTED_EXTENSIONS = [
