@@ -291,9 +291,7 @@ def test_run_resume_weights_only_strips_to_model(
 
             # A URL cannot be stripped to weights -- weights_only demands a local checkpoint.
             with pytest.raises(Exception, match="local checkpoint"):
-                await client.call_tool(
-                    "run_resume", {"weights_only": True, "model": "https://example.com/model.pt"}
-                )
+                await client.call_tool("run_resume", {"weights_only": True, "model": "https://example.com/model.pt"})
 
             resumed = await client.call_tool("run_resume", {"weights_only": True})
             manifest = await client.read_resource(f"job://{resumed.structured_content['job_id']}/manifest")

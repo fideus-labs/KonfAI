@@ -76,11 +76,30 @@ WORKFLOW_SPECS: dict[str, WorkflowSpec] = {
     )
 }
 
-# Apps run as normal experiments (import_app copies them into the session), so every job is a workflow
-# job -- there are no app-only job kinds anymore.
-JOB_RETRY_TOOLS: dict[str, str] = {kind: spec.retry_tool for kind, spec in WORKFLOW_SPECS.items()}
-JOB_KINDS: tuple[str, ...] = tuple(WORKFLOW_SPECS)
+# konfai-apps job kinds (no session YAML of their own) -> the tool that relaunches them.
+APP_JOB_RETRY_TOOLS: dict[str, str] = {
+    "infer": "run_app_infer",
+    "finetune": "fine_tune_app",
+    "evaluate": "run_app_evaluate",
+    "uncertainty": "run_app_uncertainty",
+    "pipeline": "run_app_pipeline",
+}
+APP_JOB_KINDS: tuple[str, ...] = tuple(APP_JOB_RETRY_TOOLS)
+JOB_RETRY_TOOLS: dict[str, str] = {
+    **{kind: spec.retry_tool for kind, spec in WORKFLOW_SPECS.items()},
+    **APP_JOB_RETRY_TOOLS,
+}
+JOB_KINDS: tuple[str, ...] = tuple(WORKFLOW_SPECS) + APP_JOB_KINDS
+
+# What a *finished* workflow job leads to. A trained model is worth nothing until it has predicted, and a
+# prediction nothing until it is scored, so a done job names the step that follows it rather than ending
+# the loop. Consumed by the job payload builder; every entry must be a registered tool (drift test).
+WORKFLOW_DONE_NEXT: dict[str, list[str]] = {
+    "train": ["run_prediction", "read_training_curves", "summarize_session"],
+    "prediction": ["run_evaluation", "summarize_session"],
+    "evaluation": ["get_run_metrics", "leaderboard", "compare_runs"],
+}
 
 # Static mirrors of the table for tool signatures; pinned to it by the drift test.
 WorkflowKind = Literal["train", "prediction", "evaluation"]
-JobKind = WorkflowKind
+JobKind = Literal["train", "prediction", "evaluation", "infer", "finetune", "evaluate", "uncertainty", "pipeline"]

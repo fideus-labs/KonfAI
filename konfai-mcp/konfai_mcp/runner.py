@@ -16,10 +16,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import multiprocessing
 import os
+import shutil
 import sys
+import tempfile
 import time
 import traceback
 import warnings
@@ -35,7 +38,31 @@ from konfai.trainer import build_train
 from konfai.utils.runtime import State, execute_distributed_object
 
 
-def _subprocess_entry(queue: Any, target: str, kwargs: dict[str, Any]) -> None:
+def _subprocess_entry(queue: Any, target: str, kwargs: dict[str, Any], output_path: str = "") -> None:
+    """Run one runner API and post its result back, with the child's stdio off the server's.
+
+    The server speaks JSON-RPC over its own stdio, and this child inherits those descriptors. Anything it
+    or its descendants write to fd 1 -- KonfAI's own progress bars, a pip install during app resolution, a
+    library banner at import -- lands inside a protocol frame and desynchronises the stream: the response
+    to THIS call is delivered and then destroyed, and the caller waits forever for an answer that already
+    arrived. Redirecting at fd level covers the whole process tree; ``sys.stdout`` alone would not, since a
+    grandchild inherits descriptors rather than Python objects.
+
+    The output is not discarded: it is the child's only diagnostic, and ``run_api_in_subprocess`` attaches
+    its tail to a failure. fd 0 goes to devnull so a stray read gets EOF instead of eating a request.
+    """
+    if output_path:
+        try:
+            with open(os.devnull, "rb") as devnull, open(output_path, "ab") as sink:
+                os.dup2(devnull.fileno(), 0)
+                os.dup2(sink.fileno(), 1)
+                os.dup2(sink.fileno(), 2)
+        except OSError as exc:
+            # The call goes on -- refusing every validation over an exotic fd state would be worse --
+            # with fd 1 possibly still on the protocol. Said in the sink, by path: open() does not need
+            # the fds that just failed, and a wedged or failing call then carries its explanation.
+            with contextlib.suppress(OSError), open(output_path, "ab") as sink:
+                sink.write(f"[konfai-mcp] could not detach the child stdio from the server's: {exc}\n".encode())
     try:
         module_name, function_name = target.split(":", 1)
         result = getattr(importlib.import_module(module_name), function_name)(**kwargs)
@@ -71,7 +98,9 @@ def run_api_in_subprocess(target: str, kwargs: dict[str, Any], timeout_s: float 
     # Resolve the entry through the live module so spawn-pickling stays valid even if this module was
     # reloaded (pickle requires the exact object currently registered as konfai_mcp.runner._subprocess_entry).
     entry = importlib.import_module("konfai_mcp.runner")._subprocess_entry
-    process = context.Process(target=entry, args=(queue, target, kwargs), daemon=True)
+    # The child's stdio sink. Created here so the path survives a child that dies before saying anything.
+    output = Path(tempfile.mkdtemp(prefix="konfai-mcp-")) / "subprocess.log"
+    process = context.Process(target=entry, args=(queue, target, kwargs, str(output)), daemon=True)
     process.start()
     result: dict[str, Any] | None = None
     while result is None:
@@ -110,9 +139,26 @@ def run_api_in_subprocess(target: str, kwargs: dict[str, Any], timeout_s: float 
         if process.is_alive():
             process.kill()
             process.join(5)
+    printed = _drain(output)
     if not result.get("ok_transport"):
-        raise RuntimeError(str(result.get("error") or "Isolated subprocess failed."))
+        # The child's own output is where a native crash or an OOM leaves its only trace: the traceback
+        # says the process died, this says what it was saying when it did.
+        error = str(result.get("error") or "Isolated subprocess failed.")
+        raise RuntimeError(f"{error}\n\nSubprocess output (tail):\n{printed}" if printed else error)
     return result["payload"]
+
+
+_OUTPUT_TAIL = 4000  # enough for a traceback and the lines around it, short enough to hand to an agent
+
+
+def _drain(output: Path) -> str:
+    """The tail of the child's captured stdio, then remove it. '' when it printed nothing."""
+    try:
+        text = output.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        text = ""
+    shutil.rmtree(output.parent, ignore_errors=True)
+    return text[-_OUTPUT_TAIL:]
 
 
 def _ensure_local_imports() -> None:
@@ -244,6 +290,133 @@ def run_workflow_api(
             tensorboard=tensorboard,
             cluster_kwargs=cluster_kwargs,  # type: ignore[arg-type]
         )
+
+
+def run_app_api(
+    *,
+    ref: str,
+    inputs: list[list[str]],
+    output: str,
+    gpu: list[int] | None = None,
+    cpu: int | None = None,
+    tta: int = 0,
+    ensemble: int = 0,
+    ensemble_models: list[str] | None = None,
+    patch_size: list[int] | None = None,
+    batch_size: int | None = None,
+    config_overrides: list[str] | None = None,
+    uncertainty: bool = False,
+    force_update: bool = False,
+    quiet: bool = False,
+    cwd: str | None = None,
+) -> None:
+    """Child entrypoint that runs a KonfAI app's inference.
+
+    Resolving the app imports its Python code and pip-installs its requirements (the trust boundary,
+    gated in the parent tool), so it runs here in the spawn subprocess. Local and HuggingFace apps
+    only -- a remote app server is not driven from the MCP.
+    """
+    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
+        _ensure_local_imports()
+        from konfai_apps.app import KonfAIApp
+
+        app = KonfAIApp(ref, download=True, force_update=force_update)
+        common: dict[str, Any] = {
+            "inputs": [[Path(path) for path in group] for group in inputs],
+            "output": Path(output).resolve(),
+            "ensemble": ensemble,
+            "ensemble_models": ensemble_models or [],
+            "tta": tta,
+            "patch_size": patch_size,
+            "batch_size": batch_size,
+            "uncertainty": uncertainty,
+            "quiet": quiet,
+        }
+        if gpu is not None:
+            common["gpu"] = gpu
+        if cpu is not None:
+            common["cpu"] = cpu
+        app.infer(config_overrides=config_overrides, **common)
+
+
+def run_app_action_api(
+    *,
+    ref: str,
+    action: str,
+    output: str,
+    inputs: list[list[str]],
+    gt: list[list[str]] | None = None,
+    mask: list[list[str]] | None = None,
+    extra: dict[str, Any] | None = None,
+    force_update: bool = False,
+    cwd: str | None = None,
+) -> None:
+    """Child entrypoint for an app action beyond plain infer: evaluate / uncertainty / pipeline.
+
+    The parent (``AppService._prepare_action``) supplies the exact scalar kwargs for ``action`` in
+    ``extra``; this converts the path groups and dispatches to the matching ``KonfAIApp`` method.
+    Resolving the app imports its code and pip-installs (gated in the parent).
+    """
+
+    def _groups(value: list[list[str]]) -> list[list[Path]]:
+        return [[Path(path) for path in group] for group in value]
+
+    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
+        _ensure_local_imports()
+        from konfai_apps.app import KonfAIApp
+
+        call: dict[str, Any] = {"inputs": _groups(inputs), "output": Path(output).resolve(), **(extra or {})}
+        if action in ("evaluate", "pipeline"):
+            call["gt"] = _groups(gt) if gt else None
+            if mask is not None:
+                call["mask"] = _groups(mask)
+        getattr(KonfAIApp(ref, download=True, force_update=force_update), action)(**call)
+
+
+def run_finetune_api(
+    *,
+    ref: str,
+    dataset: str,
+    output: str,
+    name: str = "Finetune",
+    epochs: int = 10,
+    it_validation: int = 1000,
+    models: list[str] | None = None,
+    lr: float | None = None,
+    config_overrides: list[str] | None = None,
+    gpu: list[int] | None = None,
+    cpu: int | None = None,
+    config_file: str = "Config.yml",
+    force_update: bool = False,
+    quiet: bool = False,
+    cwd: str | None = None,
+) -> None:
+    """Child entrypoint that fine-tunes a KonfAI app on the user's dataset, producing a bundle.
+
+    Resolving the app imports its Python code and pip-installs its requirements (gated in the parent
+    tool). Local and HuggingFace apps only.
+    """
+    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
+        _ensure_local_imports()
+        from konfai_apps.app import KonfAIApp
+
+        app = KonfAIApp(ref, download=True, force_update=force_update)
+        common: dict[str, Any] = {
+            "dataset": Path(dataset).resolve(),
+            "output": Path(output).resolve(),
+            "name": name,
+            "epochs": epochs,
+            "it_validation": it_validation,
+            "models": models or [],
+            "lr": lr,
+            "config_file": config_file,
+            "quiet": quiet,
+        }
+        if gpu is not None:
+            common["gpu"] = gpu
+        if cpu is not None:
+            common["cpu"] = cpu
+        app.fine_tune(**common, config_overrides=config_overrides)
 
 
 def app_parameters_api(*, ref: str, force_update: bool = False) -> dict[str, Any]:

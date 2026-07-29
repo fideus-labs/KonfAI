@@ -300,10 +300,17 @@ class MetricsServiceMixin:
             selected_metric = next(iter(available_metrics))
 
         for metric_name, rows in by_metric.items():
-            row_direction = rows[0]["direction"]
+            # Which way is better is a property of the metric, not of one run. Runs written by different
+            # KonfAI versions can disagree (PSNR was declared minimize until it was fixed), and reading the
+            # direction off whichever file was globbed first ranked the board by luck and captioned it from
+            # a different row than the one it sorted by. The newest run states the current definition; every
+            # row is normalised to it, so what ranks and what is displayed can no longer diverge.
+            row_direction = max(rows, key=lambda row: row["updated_at"] or "")["direction"]
             # An explicit override applies to the selected metric (or to all when none is selected).
             if direction is not None and (selected_metric is None or metric_name == selected_metric):
                 row_direction = direction
+            for row in rows:
+                row["direction"] = row_direction
             rows.sort(key=lambda row: row["value"], reverse=row_direction == "max")
             by_metric[metric_name] = rows[: max(limit, 1)]
 

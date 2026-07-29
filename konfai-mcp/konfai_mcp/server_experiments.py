@@ -27,6 +27,7 @@ from ruamel.yaml import YAML
 
 from . import runner as mcp_runner
 from .dataset_inspection import DatasetInspectionMixin
+from .experiment_state import STAGE_ACTIONS, collect_facts, experiment_state
 from .metrics_service import MetricsServiceMixin
 from .server_jobs import Job, JobRegistry
 from .server_support import (
@@ -125,8 +126,10 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             },
         }
 
-    def _next_actions_for_readiness(self, readiness: dict[str, Any]) -> list[str]:
-        next_actions: list[str] = []
+    def _next_actions_for_readiness(self, readiness: dict[str, Any], stage: str = "") -> list[str]:
+        """What to do next: the stage's own tools first (derived from the workspace), then the ones this
+        session's readiness has unblocked. Ranked, deduped, and never empty."""
+        next_actions: list[str] = list(STAGE_ACTIONS.get(stage, []))
         configs_present = readiness["configs_present"]
         if configs_present.get("train"):
             next_actions.extend(["review_config_semantics", "validate_config_semantics"])
@@ -1019,10 +1022,15 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
     def job_runtime_log_path(self, job: Job) -> Path | None:
         if job.runtime_log_path is not None:
             return job.runtime_log_path
-        run_name = self.configured_run_name(job.kind, job.config_path)
+        kind = job.kind
+        # Spelled with != rather than `not in` so every mypy narrows `kind` to the three workflow literals
+        # that configured_run_name accepts (JobKind also carries the app kinds).
+        if kind != "train" and kind != "prediction" and kind != "evaluation":
+            return None  # an app job has no session YAML, so there is no configured run to locate
+        run_name = self.configured_run_name(kind, job.config_path)
         if run_name is None:
             return None
-        return self._workflow_runtime_root(job.kind) / run_name / "log_0.txt"
+        return self._workflow_runtime_root(kind) / run_name / "log_0.txt"
 
     def discover_latest_job(self, kind: str | None = None) -> Job | None:
         return self.job_registry.latest(kind=kind)
@@ -1078,9 +1086,20 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         active_jobs = [self.job_payload(job) for job in self.active_jobs()]
         latest_job = self.discover_latest_job()
         readiness = self._session_readiness()
+        # Where this experiment stands, read back from the workspace rather than remembered — so it is the
+        # same answer for every client, and it survives a restart or a session driven entirely by hand.
+        jobs = sorted(
+            (self.job_payload(job) for job in self.job_registry.jobs.values()),
+            key=lambda payload: str(payload.get("created_at") or ""),
+            reverse=True,
+        )
+        state = experiment_state(collect_facts(workspace, session=self.session_name(), jobs=jobs))
         return {
             "session": self.session_name(),
             "path": str(workspace),
+            "stage": state["stage"],
+            "focus": state["focus"],
+            "state": state,
             "readiness": readiness,
             "configs": {workflow: str(path) if path.exists() else None for workflow, path in config_paths.items()},
             "outputs": {
@@ -1096,7 +1115,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             },
             "latest_job": self.job_payload(latest_job) if latest_job is not None else None,
             "active_jobs": active_jobs,
-            "next_actions": self._next_actions_for_readiness(readiness),
+            "next_actions": self._next_actions_for_readiness(readiness, state["stage"]),
             "resources": {
                 "configs": {workflow: f"session://current/config/{workflow}" for workflow in config_paths},
                 "log": "session://current/log",

@@ -292,6 +292,18 @@ def _job_devices(gpu: list[int] | None, cpu: int | None, cluster: dict[str, Any]
     return ["cpu"]
 
 
+def _app_job_devices(gpu: list[int] | None, cpu: int | None) -> list[str]:
+    """Device reservation for an APP job: konfai-apps defaults an omitted gpu to every visible CUDA
+    device (``cuda_visible_devices()``), unlike core workflows which default to CPU -- register what
+    the job will actually hold so concurrent scheduling sees the real reservation."""
+    if gpu is None:
+        try:
+            gpu = konfai_pkg.cuda_visible_devices()
+        except Exception:
+            gpu = None
+    return _job_devices(gpu, cpu)
+
+
 def _cpu_fallback_warnings(gpu: list[int] | None, cluster: dict[str, Any] | None = None) -> list[str]:
     """Factual notice when a LOCAL run omits gpu while CUDA devices are visible.
 
@@ -417,7 +429,7 @@ def _runtime_job_spec(
 
 
 def _launch_job(
-    kind: JobKind,
+    kind: WorkflowKind,  # workflow jobs only: an app job has no session YAML and goes through _launch_app_job
     command: list[str],
     config_path: Path,
     extra_manifest: dict[str, Any] | None = None,
@@ -444,6 +456,62 @@ def _launch_job(
         kwargs={**(kwargs or {}), "cwd": str(workspace)},
     )
     payload = _job_payload(job)
+    preflight = _vram_preflight(job.devices)
+    if preflight is not None:
+        payload["vram_preflight"] = preflight
+    return payload
+
+
+def _config_overrides(set_parameters: dict[str, Any] | None) -> list[str] | None:
+    """Render NAME->VALUE tuning overrides as the ``NAME=VALUE`` strings konfai-apps' ``--set`` consumes.
+
+    json.dumps keeps each value's type through the YAML re-parse in _apply_config_overrides: an int
+    stays an int, but a string "true"/"1" stays a string instead of being coerced to a bool/int.
+    """
+    if not set_parameters:
+        return None
+    return [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()]
+
+
+def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
+    """Launch an app job (inference, evaluation, uncertainty, pipeline, fine-tune) from an AppService
+    spec via the shared job registry.
+
+    Unlike workflow jobs, an app job has no session YAML: it auto-creates the session workspace,
+    tracks the run under the spec's kind, and carries its own runner target and kwargs.
+    """
+    kind = cast(JobKind, spec.get("kind", "infer"))  # an app kind: infer / evaluate / uncertainty / pipeline / finetune
+    workspace = WORKSPACE_LAYOUT.ensure_session_workspace()
+    WORKSPACE_LAYOUT.jobs_dir().mkdir(parents=True, exist_ok=True)
+    kwargs = dict(spec["kwargs"])
+    # config_overrides live directly in kwargs (infer / finetune) or nested under extra (pipeline). Recording
+    # them links this trial's tuned parameters to the score it produces and gates the refine next_actions.
+    set_parameters = kwargs.get("config_overrides") or (kwargs.get("extra") or {}).get("config_overrides")
+    job = JOB_REGISTRY.launch(
+        session=WORKSPACE_LAYOUT.current_session or "default",
+        kind=kind,
+        command=spec["command"],
+        cwd=workspace,
+        log_path=WORKSPACE_LAYOUT.jobs_dir() / f"{kind}_{uuid.uuid4().hex[:12]}.log",
+        config_path=workspace / f"app_{kind}.ref",
+        run_name=spec["run_name"],
+        devices=_app_job_devices(
+            kwargs.get("gpu") if kwargs.get("gpu") is not None else (kwargs.get("extra") or {}).get("gpu"),
+            kwargs.get("cpu") if kwargs.get("cpu") is not None else (kwargs.get("extra") or {}).get("cpu"),
+        ),
+        runtime_log_path=None,
+        extra_manifest={
+            "app_ref": kwargs.get("ref"),
+            "output": spec["output"],
+            "set_parameters": set_parameters,
+            "environment": _environment_snapshot(),
+        },
+        target=spec["target"],
+        kwargs={**kwargs, "cwd": str(workspace)},
+        set_parameters=set_parameters,
+    )
+    payload = _job_payload(job)
+    payload["output"] = spec["output"]
     preflight = _vram_preflight(job.devices)
     if preflight is not None:
         payload["vram_preflight"] = preflight
@@ -964,13 +1032,19 @@ def inspect_dataset(
             missing_groups.append(group)
             missing_reasons[group] = _statistics_failure_reason(group, selected_extension, exc)
             continue
-        # dataset_path/extension are identical for every group and already live at the top level.
+        # dataset_path, extension, group and total_cases are already the group's entry in `groups`, which
+        # this joins; `sample_names` says which cases were drawn, which nothing downstream acts on.
         statistics[group] = {
-            key: value for key, value in group_statistics.items() if key not in {"dataset_path", "extension"}
+            key: value
+            for key, value in group_statistics.items()
+            if key not in {"dataset_path", "extension", "group", "total_cases", "sample_names", "sampled"}
         }
 
-    payload["statistics"] = statistics
-    payload["statistics_groups"] = sorted(statistics)
+    # One object per group: what it holds, what it is missing, and what its voxels look like. Splitting
+    # those across sibling maps made the reader join them by key, and made the payload say each group's
+    # name four times.
+    for group, group_statistics in statistics.items():
+        payload["groups"].setdefault(group, {}).update(group_statistics)
     payload["statistics_missing_groups"] = missing_groups
     if missing_reasons:
         payload["statistics_missing_reasons"] = missing_reasons
@@ -980,7 +1054,6 @@ def inspect_dataset(
         "only a hint. But h5/omezarr/dicom select a distinct backend BY this token: for those, the token must "
         "match the files (use a separate dataset_filenames entry per format/backend)."
     )
-    payload["statistics_sample_limit"] = max_cases_per_group
     if warnings:
         payload["warnings"] = [*(payload.get("warnings") or []), *warnings]
     payload["next_actions"] = [
@@ -1251,13 +1324,12 @@ def export_app(
     ] = False,
 ) -> dict[str, Any]:
     """Save a resolved app (optionally with tuned parameters) as a local, editable bundle."""
-    # json.dumps keeps each value's type through the YAML re-parse in _apply_config_overrides: an int
-    # stays an int, but a string "true"/"1" stays a string instead of being coerced to a bool/int.
-    config_overrides = (
-        [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()] if set_parameters else None
-    )
     return APP_SERVICE.export_app(
-        ref, path, display_name=display_name, config_overrides=config_overrides, force_update=force_update
+        ref,
+        path,
+        display_name=display_name,
+        config_overrides=_config_overrides(set_parameters),
+        force_update=force_update,
     )
 
 
@@ -1285,15 +1357,271 @@ def import_app(
     ] = False,
 ) -> dict[str, Any]:
     """Import a resolved app into the session as a normal KonfAI experiment (config + code + checkpoints)."""
-    config_overrides = (
-        [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()] if set_parameters else None
-    )
     return APP_SERVICE.import_app(
         ref,
         allow_untrusted_code=allow_untrusted_code,
         display_name=display_name,
-        config_overrides=config_overrides,
+        config_overrides=_config_overrides(set_parameters),
         force_update=force_update,
+    )
+
+
+# Parameter descriptions shared by the app-execution tools below (one wording, five tools).
+_APP_REF_DESC = "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only)."
+_APP_TRUST_DESC = "Must be True: resolving the app imports its Python code and pip-installs its requirements."
+_APP_GPU_DESC = "GPU indices to run on (default: every visible GPU); an empty list forces CPU."
+_APP_CPU_DESC = "CPU worker count; setting it without gpu forces a CPU run."
+_APP_FORCE_UPDATE_DESC = "Re-download the app files instead of reusing the local cache."
+_APP_TTA_DESC = "Number of test-time augmentations (0 disables; see the app's maximum_tta)."
+_APP_ENSEMBLE_DESC = "Number of checkpoints to ensemble; 0 with no ensemble_models uses every app checkpoint."
+_APP_ENSEMBLE_MODELS_DESC = "Explicit checkpoint names to ensemble (see describe_app checkpoints; overrides ensemble)."
+_APP_PATCH_SIZE_DESC = "Force the inference patch size (overrides the app's VRAM plan and config default)."
+_APP_BATCH_SIZE_DESC = "Force the inference batch size (overrides the app's VRAM plan and config default)."
+_APP_SET_PARAMETERS_DESC = "Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); see list_app_parameters."
+_APP_MASK_DESC = "Mask volumes as GROUPS restricting the evaluated region."
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_infer"]))
+def run_app_infer(
+    ref: Annotated[str, Field(description=_APP_REF_DESC)],
+    inputs: Annotated[
+        list[list[str]],
+        Field(
+            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory paths, paired by order across groups."
+        ),
+    ],
+    output: Annotated[
+        str | None,
+        Field(
+            description="Output directory for the reassembled predictions (default: a unique dir under the session workspace AppOutputs/)."
+        ),
+    ] = None,
+    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
+    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
+    tta: Annotated[int, Field(description=_APP_TTA_DESC)] = 0,
+    ensemble: Annotated[int, Field(description=_APP_ENSEMBLE_DESC)] = 0,
+    ensemble_models: Annotated[list[str] | None, Field(description=_APP_ENSEMBLE_MODELS_DESC)] = None,
+    patch_size: Annotated[list[int] | None, Field(description=_APP_PATCH_SIZE_DESC)] = None,
+    batch_size: Annotated[int | None, Field(description=_APP_BATCH_SIZE_DESC)] = None,
+    set_parameters: Annotated[dict[str, Any] | None, Field(description=_APP_SET_PARAMETERS_DESC)] = None,
+    uncertainty: Annotated[
+        bool,
+        Field(description="Keep the multi-channel inference stacks that run_app_uncertainty consumes (default False)."),
+    ] = False,
+    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
+    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
+) -> dict[str, Any]:
+    """Run a published KonfAI app on the user's data as a tracked inference job (local / HuggingFace)."""
+    return _launch_app_job(
+        APP_SERVICE.prepare_infer(
+            ref=ref,
+            inputs=inputs,
+            output=output,
+            gpu=gpu,
+            cpu=cpu,
+            tta=tta,
+            ensemble=ensemble,
+            ensemble_models=ensemble_models,
+            patch_size=patch_size,
+            batch_size=batch_size,
+            config_overrides=_config_overrides(set_parameters),
+            uncertainty=uncertainty,
+            allow_untrusted_code=allow_untrusted_code,
+            force_update=force_update,
+        )
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_evaluate"]))
+def run_app_evaluate(
+    ref: Annotated[str, Field(description=_APP_REF_DESC)],
+    inputs: Annotated[
+        list[list[str]],
+        Field(
+            description="Prediction volumes as GROUPS (one inner list per group, each a list of file/dir paths, paired by order)."
+        ),
+    ],
+    gt: Annotated[list[list[str]], Field(description="Ground-truth volumes as GROUPS, paired with inputs by order.")],
+    output: Annotated[
+        str | None,
+        Field(
+            description="Output directory for the metric JSON (default: a unique dir under the session workspace AppEvaluations/)."
+        ),
+    ] = None,
+    mask: Annotated[list[list[str]] | None, Field(description=_APP_MASK_DESC)] = None,
+    evaluation_file: Annotated[
+        str, Field(description="Which evaluation config of the app to run (default 'Evaluation.yml').")
+    ] = "Evaluation.yml",
+    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
+    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
+    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
+    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
+) -> dict[str, Any]:
+    """Score predictions vs ground truth with a published app's own evaluation config, as a tracked job."""
+    return _launch_app_job(
+        APP_SERVICE.prepare_evaluate(
+            ref=ref,
+            inputs=inputs,
+            gt=gt,
+            output=output,
+            mask=mask,
+            evaluation_file=evaluation_file,
+            gpu=gpu,
+            cpu=cpu,
+            allow_untrusted_code=allow_untrusted_code,
+            force_update=force_update,
+        )
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_uncertainty"]))
+def run_app_uncertainty(
+    ref: Annotated[str, Field(description=_APP_REF_DESC)],
+    inputs: Annotated[
+        list[list[str]],
+        Field(
+            description="Multi-channel inference stacks as GROUPS (typically produced by run_app_infer with uncertainty=True)."
+        ),
+    ],
+    output: Annotated[
+        str | None,
+        Field(
+            description="Output directory for the uncertainty maps (default: a unique dir under the session workspace AppUncertainties/)."
+        ),
+    ] = None,
+    uncertainty_file: Annotated[
+        str, Field(description="Which uncertainty config of the app to run (default 'Uncertainty.yml').")
+    ] = "Uncertainty.yml",
+    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
+    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
+    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
+    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
+) -> dict[str, Any]:
+    """Run a published app's uncertainty estimation on inference stacks, as a tracked job."""
+    return _launch_app_job(
+        APP_SERVICE.prepare_uncertainty(
+            ref=ref,
+            inputs=inputs,
+            output=output,
+            uncertainty_file=uncertainty_file,
+            gpu=gpu,
+            cpu=cpu,
+            allow_untrusted_code=allow_untrusted_code,
+            force_update=force_update,
+        )
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_pipeline"]))
+def run_app_pipeline(
+    ref: Annotated[str, Field(description=_APP_REF_DESC)],
+    inputs: Annotated[
+        list[list[str]],
+        Field(
+            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory paths, paired by order across groups."
+        ),
+    ],
+    gt: Annotated[
+        list[list[str]] | None,
+        Field(description="Ground-truth volumes as GROUPS; providing them enables the evaluation stage."),
+    ] = None,
+    output: Annotated[
+        str | None,
+        Field(
+            description="Output directory for the Predictions/Evaluations/Uncertainties subdirs (default: a unique dir under the session workspace AppPipelines/)."
+        ),
+    ] = None,
+    mask: Annotated[list[list[str]] | None, Field(description=_APP_MASK_DESC)] = None,
+    tta: Annotated[int, Field(description=_APP_TTA_DESC)] = 0,
+    ensemble: Annotated[int, Field(description=_APP_ENSEMBLE_DESC)] = 0,
+    ensemble_models: Annotated[list[str] | None, Field(description=_APP_ENSEMBLE_MODELS_DESC)] = None,
+    patch_size: Annotated[list[int] | None, Field(description=_APP_PATCH_SIZE_DESC)] = None,
+    batch_size: Annotated[int | None, Field(description=_APP_BATCH_SIZE_DESC)] = None,
+    set_parameters: Annotated[dict[str, Any] | None, Field(description=_APP_SET_PARAMETERS_DESC)] = None,
+    uncertainty: Annotated[bool, Field(description="Run the uncertainty stage (default True).")] = True,
+    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
+    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
+    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
+    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
+) -> dict[str, Any]:
+    """Run a published app's full infer -> evaluate -> uncertainty pipeline as a tracked job."""
+    return _launch_app_job(
+        APP_SERVICE.prepare_pipeline(
+            ref=ref,
+            inputs=inputs,
+            gt=gt,
+            output=output,
+            mask=mask,
+            tta=tta,
+            ensemble=ensemble,
+            ensemble_models=ensemble_models,
+            patch_size=patch_size,
+            batch_size=batch_size,
+            config_overrides=_config_overrides(set_parameters),
+            uncertainty=uncertainty,
+            gpu=gpu,
+            cpu=cpu,
+            allow_untrusted_code=allow_untrusted_code,
+            force_update=force_update,
+        )
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fine_tune_app"]))
+def fine_tune_app(
+    ref: Annotated[str, Field(description=_APP_REF_DESC)],
+    dataset: Annotated[str, Field(description="KonfAI-style dataset directory to fine-tune on (must exist).")],
+    output: Annotated[
+        str | None,
+        Field(
+            description="Destination for the produced app bundle (default: a unique dir under the session workspace AppBundles/)."
+        ),
+    ] = None,
+    name: Annotated[str, Field(description="Run name of the fine-tune training (default 'Finetune').")] = "Finetune",
+    epochs: Annotated[int, Field(description="Number of training epochs (must be > 0; default 10).")] = 10,
+    it_validation: Annotated[
+        int, Field(description="Iterations between validation/checkpoint steps (KonfAI it_validation; default 1000).")
+    ] = 1000,
+    models: Annotated[
+        list[str] | None,
+        Field(description="Which app checkpoints to fine-tune (default: the app's first advertised checkpoint)."),
+    ] = None,
+    lr: Annotated[
+        float | None, Field(description="Learning-rate override; omit to keep the app config's value.")
+    ] = None,
+    set_parameters: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description="Model/config tuning NAME->VALUE overrides baked into the training config before fine-tuning "
+            "(e.g. {'iterations': 300})."
+        ),
+    ] = None,
+    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
+    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
+    config_file: Annotated[
+        str, Field(description="Which train config of the app to use (default 'Config.yml').")
+    ] = "Config.yml",
+    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
+    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
+) -> dict[str, Any]:
+    """Fine-tune a published KonfAI app on the user's dataset and produce a resolvable app bundle."""
+    return _launch_app_job(
+        APP_SERVICE.prepare_finetune(
+            ref=ref,
+            dataset=dataset,
+            output=output,
+            name=name,
+            epochs=epochs,
+            it_validation=it_validation,
+            models=models,
+            lr=lr,
+            config_overrides=_config_overrides(set_parameters),
+            gpu=gpu,
+            cpu=cpu,
+            config_file=config_file,
+            allow_untrusted_code=allow_untrusted_code,
+            force_update=force_update,
+        )
     )
 
 
@@ -2232,26 +2560,18 @@ def leaderboard(
 def run_train(
     gpu: Annotated[
         int | list[int] | None,
-        Field(
-            description="GPU index or list of indices to train on; omit to run on CPU (mutually exclusive with cpu)."
-        ),
+        Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None, Field(description="Run on CPU with N worker processes (> 0); mutually exclusive with gpu.")
-    ] = None,
+    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
     overwrite: Annotated[
         bool,
-        Field(description="Overwrite existing run outputs (checkpoints, logs) without prompting (KonfAI --overwrite)."),
+        Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
     ] = False,
-    quiet: Annotated[
-        bool, Field(description="Suppress console output for a quieter execution (KonfAI --quiet).")
-    ] = False,
+    quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
     tensorboard: Annotated[
         bool, Field(description="Launch TensorBoard alongside the run (KonfAI --tensorboard).")
     ] = False,
-    single_process: Annotated[
-        bool, Field(description="Run the workflow inline in one process (no DDP spawn, no GPU setup).")
-    ] = False,
+    single_process: Annotated[bool, Field(description="Inline, one process (no DDP spawn, no GPU setup).")] = False,
     config_file: Annotated[
         str | None,
         Field(
@@ -2332,26 +2652,18 @@ def run_resume(
     ] = None,
     gpu: Annotated[
         int | list[int] | None,
-        Field(
-            description="GPU index or list of indices to train on; omit to run on CPU (mutually exclusive with cpu)."
-        ),
+        Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None, Field(description="Run on CPU with N worker processes (> 0); mutually exclusive with gpu.")
-    ] = None,
+    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
     overwrite: Annotated[
         bool,
-        Field(description="Overwrite existing run outputs (checkpoints, logs) without prompting (KonfAI --overwrite)."),
+        Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
     ] = False,
-    quiet: Annotated[
-        bool, Field(description="Suppress console output for a quieter execution (KonfAI --quiet).")
-    ] = False,
+    quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
     tensorboard: Annotated[
         bool, Field(description="Launch TensorBoard alongside the run (KonfAI --tensorboard).")
     ] = False,
-    single_process: Annotated[
-        bool, Field(description="Run the workflow inline in one process (no DDP spawn, no GPU setup).")
-    ] = False,
+    single_process: Annotated[bool, Field(description="Inline, one process (no DDP spawn, no GPU setup).")] = False,
     config_file: Annotated[
         str | None,
         Field(
@@ -2429,16 +2741,12 @@ def run_batch(
     ],
     gpu: Annotated[
         int | list[int] | None,
-        Field(
-            description="GPU index or list of indices to train on; omit to run on CPU (mutually exclusive with cpu)."
-        ),
+        Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None, Field(description="Run on CPU with N worker processes (> 0); mutually exclusive with gpu.")
-    ] = None,
+    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
     overwrite: Annotated[
         bool,
-        Field(description="Overwrite existing run outputs (checkpoints, logs) without prompting (KonfAI --overwrite)."),
+        Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
     ] = False,
     quiet: Annotated[
         bool, Field(description="Suppress console output for a quieter execution (KonfAI --quiet; default True).")
@@ -2638,20 +2946,14 @@ def run_prediction(
     ] = None,
     gpu: Annotated[
         int | list[int] | None,
-        Field(description="GPU index or list of indices to run on; omit to run on CPU (mutually exclusive with cpu)."),
+        Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None, Field(description="Run on CPU with N worker processes (> 0); mutually exclusive with gpu.")
-    ] = None,
+    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing prediction outputs without prompting (KonfAI --overwrite).")
     ] = False,
-    quiet: Annotated[
-        bool, Field(description="Suppress console output for a quieter execution (KonfAI --quiet).")
-    ] = False,
-    single_process: Annotated[
-        bool, Field(description="Run the workflow inline in one process (no DDP spawn, no GPU setup).")
-    ] = False,
+    quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
+    single_process: Annotated[bool, Field(description="Inline, one process (no DDP spawn, no GPU setup).")] = False,
 ) -> dict[str, Any]:
     """Launch a prediction job from the current session `Prediction.yml`."""
     normalized_models = _normalize_string_list(models, field_name="models")
@@ -2663,14 +2965,17 @@ def run_prediction(
     resolved_models = SESSION.resolve_prediction_models(
         normalized_models, run_name=SESSION.configured_run_name("prediction", config_path)
     )
-    if not resolved_models:
-        raise ValueError("No model checkpoint found. Provide models explicitly or train the current session first.")
     missing = [str(path) for path in resolved_models if not path.exists()]
     if missing:
         raise ValueError(f"Model checkpoint(s) not found: {missing}")
-    blocked = SESSION.workflow_blocker("prediction", [str(path) for path in resolved_models])
-    if blocked is not None:
-        return blocked
+    # No checkpoint at all is not a missing prerequisite this side can judge: KonfAI runs a model with zero
+    # parameters as constructed (a registration engine has no weights to load) and refuses a parameterised
+    # one itself, where the model is known. Blocking here made every weightless app unlaunchable through
+    # the MCP. The readiness summary still reports the absent checkpoint, so it stays visible as advice.
+    if resolved_models:
+        blocked = SESSION.workflow_blocker("prediction", [str(path) for path in resolved_models])
+        if blocked is not None:
+            return blocked
 
     job_spec = _runtime_job_spec(
         kind="prediction",
@@ -2700,20 +3005,14 @@ def run_prediction(
 def run_evaluation(
     gpu: Annotated[
         int | list[int] | None,
-        Field(description="GPU index or list of indices to run on; omit to run on CPU (mutually exclusive with cpu)."),
+        Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None, Field(description="Run on CPU with N worker processes (> 0); mutually exclusive with gpu.")
-    ] = None,
+    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing evaluation outputs without prompting (KonfAI --overwrite).")
     ] = False,
-    quiet: Annotated[
-        bool, Field(description="Suppress console output for a quieter execution (KonfAI --quiet).")
-    ] = False,
-    single_process: Annotated[
-        bool, Field(description="Run the workflow inline in one process (no DDP spawn, no GPU setup).")
-    ] = False,
+    quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
+    single_process: Annotated[bool, Field(description="Inline, one process (no DDP spawn, no GPU setup).")] = False,
 ) -> dict[str, Any]:
     """Launch an evaluation job from the current session `Evaluation.yml`."""
     normalized_gpu = _normalize_int_list(gpu, field_name="gpu")

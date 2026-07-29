@@ -21,6 +21,7 @@ from typing import get_args
 
 from konfai_mcp import capabilities, server, server_support
 from konfai_mcp.workflows import (
+    APP_JOB_KINDS,
     JOB_KINDS,
     JOB_RETRY_TOOLS,
     WORKFLOW_SPECS,
@@ -30,10 +31,10 @@ from konfai_mcp.workflows import (
 
 
 def test_literal_aliases_match_the_table() -> None:
-    # Apps run as normal experiments (import_app), so every job kind is a workflow kind: no app-only kinds.
+    # A job kind is either a workflow kind or a konfai-apps kind (run_app_* / fine_tune_app), never else.
     assert set(get_args(WorkflowKind)) == set(WORKFLOW_SPECS)
     assert set(get_args(JobKind)) == set(JOB_KINDS)
-    assert set(JOB_KINDS) == set(WORKFLOW_SPECS)
+    assert set(JOB_KINDS) == set(WORKFLOW_SPECS) | set(APP_JOB_KINDS)
 
 
 def test_derived_registries_come_from_the_table() -> None:

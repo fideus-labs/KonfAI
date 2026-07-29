@@ -315,6 +315,26 @@ def install_fake_konfai_runtime(
     monkeypatch.setattr(mcp_server, "_runtime_job_spec", fake_runtime_job_spec)
 
 
+def write_on_native_stdio(marker: str) -> None:
+    """Test job target: write to fds 1 and 2 natively, from this process AND from a grandchild.
+
+    Stands in for what a CUDA/PyTorch banner, a C extension or a DDP worker does -- writes that bypass
+    sys.stdout entirely. Everything here must land in the job log and nothing on the descriptors the job
+    inherited from the server, which for a stdio MCP server carry the JSON-RPC stream.
+    """
+    import os
+    import subprocess
+    import sys
+
+    os.write(1, f"{marker}-native-stdout\n".encode())
+    os.write(2, f"{marker}-native-stderr\n".encode())
+    print(f"{marker}-python-print", flush=True)
+    subprocess.run(
+        [sys.executable, "-c", f"import os; os.write(1, b'{marker}-grandchild\\n')"],
+        check=True,
+    )
+
+
 def spawn_grandchild_and_idle(pid_file: str) -> None:
     """Test job target: spawn a grandchild process (standing in for a DDP mp.spawn worker) and idle,
     recording both PIDs. Used to verify cancel_job reaps the whole process group, not just the middle
@@ -330,3 +350,43 @@ def spawn_grandchild_and_idle(pid_file: str) -> None:
     with open(pid_file, "w", encoding="utf-8") as handle:
         handle.write(f"{os.getpid()} {child.pid}\n")
     time.sleep(120)
+
+
+def noisy_runner_api(marker: str = "RUNNER") -> dict[str, str]:
+    """``run_api_in_subprocess`` target that writes natively, from this process and from a grandchild.
+
+    Mirrors what validation really does: KonfAI's own progress bars, a pip install during app resolution,
+    a library banner at import. None of it may reach the descriptors the child inherited from the server.
+    The first write has no trailing newline on purpose — that is the shape that swallows a JSON-RPC frame.
+    """
+    import os
+    import subprocess
+    import sys
+
+    os.write(1, f"{marker}-native-stdout ".encode())
+    os.write(2, f"{marker}-native-stderr\n".encode())
+    print(f"{marker}-python-print")
+    subprocess.run([sys.executable, "-c", f"print('{marker}-grandchild')"], check=False)
+    return {"marker": marker}
+
+
+def failing_runner_api(marker: str = "RUNNER") -> None:
+    """``run_api_in_subprocess`` target that says something, then dies — the diagnostic must survive."""
+    import os
+
+    os.write(1, f"{marker}-said-this-before-dying\n".encode())
+    raise ValueError("expected failure")
+
+
+def entry_with_broken_dup2(queue: Any, sink_path: str) -> None:
+    """``_subprocess_entry`` in a child whose ``dup2`` always refuses — only there: patching it in the
+    test process would break pytest's own capture, which restores streams with the same call."""
+    import os
+
+    from konfai_mcp import runner
+
+    def refuse(*_fds: int) -> None:
+        raise OSError(9, "Bad file descriptor")
+
+    os.dup2 = refuse  # type: ignore[assignment]
+    runner._subprocess_entry(queue, "json:dumps", {"obj": [1]}, sink_path)

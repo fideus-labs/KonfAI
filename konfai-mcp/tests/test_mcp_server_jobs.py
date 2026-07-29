@@ -15,11 +15,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import multiprocessing
 import os
 import signal
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from typing import Any, cast
 
 import pytest
@@ -31,6 +34,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))  # so the spawn child can import the mcp_test_helpers job target
 
+import mcp_test_helpers  # noqa: E402
 from konfai_mcp.server_jobs import Job, JobRegistry, _extract_error_excerpt  # noqa: E402
 from konfai_mcp.server_support import WorkspaceLayout  # noqa: E402
 
@@ -57,6 +61,74 @@ def _wait_pid_dead(pid: int, timeout: float) -> bool:
             return True
         time.sleep(0.05)
     return not _pid_alive(pid)
+
+
+def _wait_job_finished(registry: Any, job: Any, timeout: float = 90.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        registry.refresh(job)
+        if job.status not in ("queued", "running"):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"job {job.job_id} never finished (status={job.status})")
+
+
+def test_job_native_writes_never_reach_the_inherited_stdio(tmp_path: Path) -> None:
+    # konfai-mcp speaks JSON-RPC over stdio and a spawned job inherits fds 1/2, but redirect_stdout /
+    # redirect_stderr are Python-level only: they rebind sys.stdout/sys.stderr and leave the descriptors
+    # alone. Any native write by the job or a descendant (a CUDA/PyTorch banner, a C extension, a DDP
+    # worker) therefore landed in the middle of the protocol stream and froze the client on wait_for_job.
+    # Stand in for the server's stdio with two files, run a REAL job through _run_job, and require that
+    # everything it wrote natively is in the job log and that the inherited stdout stayed byte-clean.
+    # Resolve JobRegistry from the live module: another test's load_mcp_server reloads server_jobs, and
+    # spawn can only pickle the _run_job currently registered there.
+    job_registry_cls = importlib.import_module("konfai_mcp.server_jobs").JobRegistry
+    layout = WorkspaceLayout(tmp_path)
+    layout.ensure_session_workspace()
+    registry = job_registry_cls({"queued", "running"}, workspace_layout=layout)
+    marker = "PROTOCOL-CANARY"
+    log_path = tmp_path / "log.txt"
+    inherited_stdout = tmp_path / "inherited_stdout.bin"
+    inherited_stderr = tmp_path / "inherited_stderr.bin"
+
+    saved_stdout_fd = os.dup(1)
+    saved_stderr_fd = os.dup(2)
+    job = None
+    try:
+        with inherited_stdout.open("wb") as stdout_sink, inherited_stderr.open("wb") as stderr_sink:
+            os.dup2(stdout_sink.fileno(), 1)
+            os.dup2(stderr_sink.fileno(), 2)
+            try:
+                job = registry.launch(
+                    session=layout.current_session or "default",
+                    kind="train",
+                    command=["x"],
+                    cwd=tmp_path,
+                    log_path=log_path,
+                    config_path=tmp_path / "cfg.ref",
+                    target="mcp_test_helpers:write_on_native_stdio",
+                    kwargs={"marker": marker},
+                )
+                _wait_job_finished(registry, job)
+            finally:
+                os.dup2(saved_stdout_fd, 1)
+                os.dup2(saved_stderr_fd, 2)
+    finally:
+        os.close(saved_stdout_fd)
+        os.close(saved_stderr_fd)
+
+    log_text = log_path.read_text(encoding="utf-8")
+    assert job is not None and job.status == "done", f"job did not complete:\n{log_text}"
+    for expected in (
+        f"{marker}-native-stdout",
+        f"{marker}-native-stderr",
+        f"{marker}-python-print",
+        f"{marker}-grandchild",
+    ):
+        assert expected in log_text, f"'{expected}' missing from the job log:\n{log_text}"
+    # The JSON-RPC channel: not "no marker" but not a single byte -- anything at all desynchronises it.
+    assert inherited_stdout.read_bytes() == b""
+    assert marker not in inherited_stderr.read_text(encoding="utf-8", errors="replace")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="orphan pid signalling is POSIX-only")
@@ -507,3 +579,105 @@ def test_manifest_failure_marks_job_terminal_not_stuck_queued(tmp_path: Path) ->
     registry.ensure_no_active_job()  # does not raise: the device is free again
     statuses = {job.status for job in registry.jobs.values()}
     assert statuses == {"error"}
+
+
+def test_isolated_api_never_writes_on_the_inherited_stdio(tmp_path: Path) -> None:
+    """The validation/smoke-test child inherits the server's stdio, and the server speaks JSON-RPC on it.
+
+    A single stray byte desynchronises the stream: the response to this very call is delivered and then
+    destroyed, and the caller waits forever for an answer that already arrived. This covers the path
+    `validate_config_semantics`, `run_component_smoke_test` and `import_app` all take — `import_app` runs
+    `pip install`, whose `\\r` progress bars are exactly the shape that eats a frame.
+    """
+    from konfai_mcp.runner import run_api_in_subprocess
+
+    inherited = tmp_path / "inherited_stdout.bin"
+    with inherited.open("wb") as sink:
+        saved_out, saved_err = os.dup(1), os.dup(2)
+        try:
+            os.dup2(sink.fileno(), 1)
+            os.dup2(sink.fileno(), 2)
+            result = run_api_in_subprocess("mcp_test_helpers:noisy_runner_api", {"marker": "PROBE"})
+        finally:
+            os.dup2(saved_out, 1)
+            os.dup2(saved_err, 2)
+            os.close(saved_out)
+            os.close(saved_err)
+
+    assert result == {"marker": "PROBE"}
+    assert inherited.read_bytes() == b"", "not one byte may reach the JSON-RPC channel"
+
+
+def test_a_failing_isolated_api_keeps_what_the_child_printed(tmp_path: Path) -> None:
+    """Its output is the child's only diagnostic — a native crash leaves nothing else behind."""
+    from konfai_mcp.runner import run_api_in_subprocess
+
+    with pytest.raises(RuntimeError) as failure:
+        run_api_in_subprocess("mcp_test_helpers:failing_runner_api", {"marker": "PROBE"})
+
+    assert "ValueError: expected failure" in str(failure.value)
+    assert "PROBE-said-this-before-dying" in str(failure.value)
+
+
+def test_a_job_stopped_on_purpose_is_killed_not_broken() -> None:
+    """Cancel sends SIGTERM. When the process died before the request was recorded, the flag alone was
+    False and Stop reported "read the job log for the traceback" over a job that has none."""
+    import signal as _signal
+
+    from konfai_mcp.server_jobs import Job, JobRegistry
+
+    class _Exited:
+        def __init__(self, code: int) -> None:
+            self._code = code
+
+        def poll(self) -> int:
+            return self._code
+
+    registry = JobRegistry({"queued", "running"})
+    for code, expected in ((-_signal.SIGTERM, "killed"), (-_signal.SIGINT, "killed"), (-_signal.SIGSEGV, "error")):
+        job = Job(
+            job_id=f"j{code}",
+            session="s",
+            kind="train",
+            command=["x"],
+            cwd=Path("."),
+            log_path=Path("missing.log"),
+            config_path=None,
+            status="running",
+        )
+        job.proc = _Exited(code)
+        registry.jobs[job.job_id] = job
+        registry.refresh(job)
+        assert job.status == expected, f"returncode {code}"
+
+
+def test_a_weightless_model_is_not_blocked_for_want_of_a_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    """KonfAI runs a model with zero parameters as constructed -- a registration engine has no weights to
+    load -- and refuses a parameterised one itself. The MCP raised before ever reaching it, so no weightless
+    app could be launched through it. The readiness summary still reports the absent checkpoint as advice."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    server = load_mcp_server()
+    session = server.SESSION
+    session.workspace_dir().mkdir(parents=True, exist_ok=True)
+    (session.workspace_dir() / "Prediction.yml").write_text("Predictor:\n  Model:\n    classpath: x:Y\n")
+
+    assert session.resolve_prediction_models() == []  # nothing to block on
+    assert session._workflow_status("prediction")["missing_models"] == ["<checkpoint>"]  # still advised
+
+
+def test_a_failed_stdio_detach_is_said_in_the_sink(tmp_path: Path) -> None:
+    """dup2 can fail on an exotic fd state; the call goes on, but a child running with fd 1 still on the
+    protocol must say so where ``run_api_in_subprocess`` already looks — silence here replays the frozen
+    stream as an unexplainable mystery."""
+    sink = tmp_path / "subprocess.log"
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    child = context.Process(target=mcp_test_helpers.entry_with_broken_dup2, args=(queue, str(sink)))
+    child.start()
+    result = queue.get(timeout=120)
+    child.join(120)
+
+    assert result["ok_transport"] is True, "the call itself must still run and answer"
+    assert "could not detach the child stdio" in sink.read_text(encoding="utf-8")

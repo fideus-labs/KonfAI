@@ -88,13 +88,13 @@ def test_mcp_server_dataset_inspection_and_aliasing(
             inferred_data = inferred.structured_content
             assert {"IMG", "SEG"} == set(inferred_data["groups"])
 
-            # Role is knowledge, not a guess: is_input is left null for every group (the agent
-            # decides it from the user's task) and the payload explains what is_input means, instead
-            # of forcing a name-based guess that mis-wires segmentation (CT input) vs synthesis.
+            # Role is knowledge, not a guess: is_input is left null for every group and settled by
+            # design_config_strategy with the user, instead of a name-based guess that mis-wires
+            # segmentation (CT input) against synthesis (CT target). What it means is documented in
+            # that tool's description, paid once, not restated in every payload.
             suggested = inferred_data["suggested_groups_src"]
             assert suggested["IMG"]["groups_dest"]["IMG"]["is_input"] is None
             assert suggested["SEG"]["groups_dest"]["SEG"]["is_input"] is None
-            assert "is_input" in inferred_data["is_input_meaning"].lower()
 
             inspected = await client.call_tool(
                 "inspect_dataset",
@@ -106,8 +106,8 @@ def test_mcp_server_dataset_inspection_and_aliasing(
                 },
             )
             inspected_data = inspected.structured_content
-            assert inspected_data["statistics"]["IMG"]["total_cases"] == 2
-            assert inspected_data["statistics"]["IMG"]["sampled_cases"] == 1
+            assert inspected_data["groups"]["IMG"]["count"] == 2
+            assert inspected_data["groups"]["IMG"]["sampled_cases"] == 1
             assert "design_config_strategy" in inspected_data["next_actions"]
 
             aliased = await client.call_tool(
@@ -131,9 +131,9 @@ def test_mcp_server_dataset_inspection_and_aliasing(
                     "max_cases_per_group": 1,
                 },
             )
-            ct_stats_data = ct_stats.structured_content["statistics"]["CT"]
-            assert ct_stats_data["group"] == "CT"
+            ct_stats_data = ct_stats.structured_content["groups"]["CT"]
             assert ct_stats_data["sampled_cases"] == 1
+            assert ct_stats_data["statistics"]["mean"]["count"] == 1
 
             strategy = await client.call_tool(
                 "design_config_strategy",

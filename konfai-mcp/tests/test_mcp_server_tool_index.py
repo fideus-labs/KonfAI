@@ -56,7 +56,7 @@ def test_job_payload_next_actions_are_registered_tools(
     from konfai_mcp.server_jobs import Job, JobRegistry
 
     registry = JobRegistry({"queued", "running"})
-    for kind in ("train", "prediction", "evaluation"):
+    for kind in ("train", "prediction", "evaluation", "infer", "finetune", "evaluate", "uncertainty", "pipeline"):
         for status in ("running", "done", "error", "killed"):
             job = Job(
                 job_id=f"{kind}-{status}",
@@ -72,6 +72,21 @@ def test_job_payload_next_actions_are_registered_tools(
             unknown = [action for action in payload["next_actions"] if action not in tool_names]
             assert not unknown, f"{kind}/{status} suggests unregistered tools: {unknown}"
             assert all(str(uri).startswith("job://") for uri in payload["next_resources"])
+
+    # A tuned app run takes the refine branch, which suggests a different set of tools: cover it too.
+    tuned = Job(
+        job_id="infer-tuned",
+        session="default",
+        kind="infer",
+        command=["fake"],
+        cwd=tmp_path,
+        log_path=tmp_path / "job.log",
+        config_path=tmp_path / "Config.yml",
+        status="done",
+        set_parameters=["iterations=300"],
+    )
+    tuned_payload = registry.payload(tuned, lambda value: None)
+    assert not [action for action in tuned_payload["next_actions"] if action not in tool_names]
 
 
 def test_design_strategy_asks_instead_of_ping_ponging(
