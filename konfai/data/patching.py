@@ -370,6 +370,11 @@ class Trim(PathCombine):
         return True
 
     def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
+        if overlap >= size:
+            # Nothing central left to keep: trimming both sides would leave an empty band, and a patch
+            # that keeps nothing has no box to write. Keep the patch whole instead — the axis stops
+            # being a partition and falls back to last-write-wins on it, which is what it was before.
+            return torch.ones(size)
         window = torch.zeros(size)
         # Split an odd overlap so consecutive kept bands abut: k*stride + hi == (k+1)*stride + lo.
         window[overlap // 2 : size - (overlap - overlap // 2)] = 1.0
