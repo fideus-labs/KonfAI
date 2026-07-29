@@ -272,6 +272,15 @@ class PathCombine(ABC):
             data = data.unsqueeze(-1) * window
         self.data = data
 
+    @property
+    def selects(self) -> bool:
+        """Whether the window picks ONE patch per voxel (values 0 or 1) rather than weighting several.
+
+        A selection makes the kept regions a partition of the volume, so assembly writes each one
+        instead of accumulating a weighted sum -- see Accumulator._blend.
+        """
+        return False
+
     def window(self, dim: int, position: int, count: int) -> torch.Tensor:
         """The 1-D window along ``dim`` for the patch at grid ``position`` of ``count`` on that axis.
 
@@ -356,6 +365,10 @@ class Trim(PathCombine):
     map, an argmax) survives reassembly, where any weighting would invent values between its classes.
     """
 
+    @property
+    def selects(self) -> bool:
+        return True
+
     def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
         window = torch.zeros(size)
         # Split an odd overlap so consecutive kept bands abut: k*stride + hi == (k+1)*stride + lo.
@@ -432,6 +445,7 @@ class Accumulator:
         # Blend-weight geometry: fixed for the accumulator's life, so it survives _reset.
         self._geometry: tuple[list[list[torch.Tensor]], list[torch.Tensor]] | None = None
         self._shares: dict[tuple[int, int, int, torch.dtype, torch.device], torch.Tensor] = {}
+        self._boxes: dict[tuple[int, ...], tuple[slice, ...]] = {}
 
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
         """Blend one patch in; returns the slabs this completes (none for the whole-volume base)."""
@@ -470,10 +484,35 @@ class Accumulator:
         dest[0] = slice(dest[0].start - row_offset, dest[0].stop - row_offset)
         slices_dest = tuple([slice(cast(torch.Tensor, self._result).shape[i]) for i in range(n)] + dest)
         result = cast(torch.Tensor, self._result)
-        if self.patch_combine is not None:
-            result[slices_dest] += self._weighted_patch(data, patch_slice)
-        else:
+        lead = slices_dest[:n]
+        if self.patch_combine is None:
             result[slices_dest] = data
+        elif self.patch_combine.selects:
+            # The kept regions partition the volume: nothing to weight, nothing to sum. Writing the box
+            # this patch owns IS the operation -- and it is what carries a discrete output through,
+            # where a weighting would invent values between its classes.
+            box = self._kept_box(patch_slice)
+            kept = [slice(d.start + b.start, d.start + b.stop) for d, b in zip(dest, box, strict=True)]
+            result[(*lead, *kept)] = data[(*lead, *box)]
+        else:
+            result[slices_dest] += self._weighted_patch(data, patch_slice)
+
+    def _kept_box(self, patch_slice: tuple[slice, ...]) -> tuple[slice, ...]:
+        """The sub-box a selection keeps of this patch: the run of ones in its window, per axis.
+
+        Pure geometry, so it is read once from the host-side windows and cached per grid position.
+        Deriving it from the share instead would read a device tensor -- a host sync on every patch,
+        which costs more than the weighting it replaces.
+        """
+        key = tuple(s.start for s in patch_slice)
+        if key not in self._boxes:
+            windows, _ = self._weight_geometry()
+            box = []
+            for dim, s in enumerate(patch_slice):
+                kept = windows[dim][self._starts(dim).index(s.start)].nonzero().flatten()
+                box.append(slice(int(kept[0]), int(kept[-1]) + 1))
+            self._boxes[key] = tuple(box)
+        return self._boxes[key]
 
     def _weight_geometry(self) -> tuple[list[list[torch.Tensor]], list[torch.Tensor]]:
         """Per axis: the blend window, and its sum over the patch grid.
