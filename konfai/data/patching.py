@@ -36,6 +36,8 @@ from konfai.utils.errors import PatchError
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
     OverlapSpec,
+    best_sweep_axis,
+    concretize_patch_size,
     env_flag,
     free_axis_rounding,
     get_module,
@@ -988,6 +990,7 @@ class Patch(ABC):
             if self.overlap < 0:
                 self.overlap = None
         self._patch_slices: dict[int, list[tuple[slice, ...]]] = {}
+        self._sweep_axis: dict[int, int] = {}
         self._nb_patch_per_dim: dict[int, list[tuple[int, bool]]] = {}
         self.pad_value = pad_value
         self.extend_slice = extend_slice
@@ -1006,9 +1009,24 @@ class Patch(ABC):
         )
 
     def load(self, shape: list[int], a: int = 0) -> None:
-        self._patch_slices[a], self._nb_patch_per_dim[a] = get_patch_slices_from_shape(
-            self.patch_size, shape, self.overlap, self.free_axis_multiple, self._declared_free_axis
+        # The grid decides its own sweep axis and the reassembly reads it back (get_sweep_axis): one
+        # source of truth, because a grid emitted for one axis and reassembled along another hands out
+        # regions that are not final, with nothing to report it.
+        self._sweep_axis[a] = best_sweep_axis(
+            concretize_patch_size(self.patch_size, shape, self.free_axis_multiple), shape
         )
+        self._patch_slices[a], self._nb_patch_per_dim[a] = get_patch_slices_from_shape(
+            self.patch_size,
+            shape,
+            self.overlap,
+            self.free_axis_multiple,
+            self._declared_free_axis,
+            self._sweep_axis[a],
+        )
+
+    def get_sweep_axis(self, a: int = 0) -> int:
+        """The axis this grid is ordered by, and so the one reassembly must slide along."""
+        return self._sweep_axis[a]
 
     @abstractmethod
     def init(self, key: str):

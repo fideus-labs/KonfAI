@@ -527,6 +527,12 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
             del index_augmentation
             return patch_slices
 
+        @staticmethod
+        def get_sweep_axis(index_augmentation: int) -> int:
+            # These grids are cut along axis 0, as the dispatcher's slab contract expects.
+            del index_augmentation
+            return 0
+
     class DummyManager:
         name = "CASE_000"
         patch = DummyPatch()

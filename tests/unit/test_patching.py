@@ -17,12 +17,13 @@
 """Unit tests for patch reconstruction and overlap-blending (``konfai.data.patching``)."""
 
 import itertools
+import math
 
 import pytest
 import torch
 from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean, StreamingAccumulator, Trim, blend_overlap
 from konfai.utils.errors import PatchError
-from konfai.utils.utils import get_patch_slices_from_shape, resolve_overlap
+from konfai.utils.utils import best_sweep_axis, get_patch_slices_from_shape, resolve_overlap
 
 
 def _tile_2d(full: torch.Tensor, patch_size: list[int], overlap: int):
@@ -681,3 +682,27 @@ def test_patch_grid_orders_by_the_sweep_axis(sweep_axis):
     assert starts == sorted(starts), f"starts on axis {sweep_axis} must not decrease: {starts}"
     if sweep_axis == 0:
         assert ordered == reference, "axis 0 must reproduce the historical order exactly"
+
+
+@pytest.mark.parametrize(
+    "shape, patch, expected",
+    [
+        ([256, 512, 640], [128, 128, 128], 2),  # the patch divides the last axis most
+        ([295, 259, 219], [96, 128, 160], 0),  # axis 0 is already the cheapest here
+        ([64, 64, 64], [32, 32, 32], 0),  # a tie falls back to the first axis
+        ([100, 20, 20], [10, 20, 20], 0),  # an axis the patch spans whole is the worst sweep
+        ([100, 40, 20], [0, 20, 20], 1),  # a free axis spans the extent, so it never wins
+    ],
+)
+def test_best_sweep_axis_is_the_smallest_window(shape, patch, expected):
+    """The window costs ``min(patch, extent) x the other extents``; the axis is picked to minimise it.
+
+    Not a preference: on a 256x512x640 volume it is the difference between holding 0.47 GiB and 0.19,
+    for the same patches read in the same total time.
+    """
+    assert best_sweep_axis(patch, shape) == expected
+    windows = [
+        min(patch[axis] or shape[axis], shape[axis]) * math.prod(shape[d] for d in range(3) if d != axis)
+        for axis in range(3)
+    ]
+    assert windows[best_sweep_axis(patch, shape)] == min(windows)
