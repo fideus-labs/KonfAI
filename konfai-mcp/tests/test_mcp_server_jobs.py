@@ -14,7 +14,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import importlib
+import json
 import multiprocessing
 import os
 import signal
@@ -25,6 +27,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
 
+import fastmcp
 import pytest
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +40,7 @@ if str(TESTS_DIR) not in sys.path:
 import mcp_test_helpers  # noqa: E402
 from konfai_mcp.server_jobs import Job, JobRegistry, _extract_error_excerpt  # noqa: E402
 from konfai_mcp.server_support import WorkspaceLayout  # noqa: E402
+from mcp_test_helpers import install_fake_konfai_runtime, yaml_dump  # noqa: E402
 
 
 def _pid_alive(pid: int) -> bool:
@@ -61,74 +65,6 @@ def _wait_pid_dead(pid: int, timeout: float) -> bool:
             return True
         time.sleep(0.05)
     return not _pid_alive(pid)
-
-
-def _wait_job_finished(registry: Any, job: Any, timeout: float = 90.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        registry.refresh(job)
-        if job.status not in ("queued", "running"):
-            return
-        time.sleep(0.05)
-    raise AssertionError(f"job {job.job_id} never finished (status={job.status})")
-
-
-def test_job_native_writes_never_reach_the_inherited_stdio(tmp_path: Path) -> None:
-    # konfai-mcp speaks JSON-RPC over stdio and a spawned job inherits fds 1/2, but redirect_stdout /
-    # redirect_stderr are Python-level only: they rebind sys.stdout/sys.stderr and leave the descriptors
-    # alone. Any native write by the job or a descendant (a CUDA/PyTorch banner, a C extension, a DDP
-    # worker) therefore landed in the middle of the protocol stream and froze the client on wait_for_job.
-    # Stand in for the server's stdio with two files, run a REAL job through _run_job, and require that
-    # everything it wrote natively is in the job log and that the inherited stdout stayed byte-clean.
-    # Resolve JobRegistry from the live module: another test's load_mcp_server reloads server_jobs, and
-    # spawn can only pickle the _run_job currently registered there.
-    job_registry_cls = importlib.import_module("konfai_mcp.server_jobs").JobRegistry
-    layout = WorkspaceLayout(tmp_path)
-    layout.ensure_session_workspace()
-    registry = job_registry_cls({"queued", "running"}, workspace_layout=layout)
-    marker = "PROTOCOL-CANARY"
-    log_path = tmp_path / "log.txt"
-    inherited_stdout = tmp_path / "inherited_stdout.bin"
-    inherited_stderr = tmp_path / "inherited_stderr.bin"
-
-    saved_stdout_fd = os.dup(1)
-    saved_stderr_fd = os.dup(2)
-    job = None
-    try:
-        with inherited_stdout.open("wb") as stdout_sink, inherited_stderr.open("wb") as stderr_sink:
-            os.dup2(stdout_sink.fileno(), 1)
-            os.dup2(stderr_sink.fileno(), 2)
-            try:
-                job = registry.launch(
-                    session=layout.current_session or "default",
-                    kind="train",
-                    command=["x"],
-                    cwd=tmp_path,
-                    log_path=log_path,
-                    config_path=tmp_path / "cfg.ref",
-                    target="mcp_test_helpers:write_on_native_stdio",
-                    kwargs={"marker": marker},
-                )
-                _wait_job_finished(registry, job)
-            finally:
-                os.dup2(saved_stdout_fd, 1)
-                os.dup2(saved_stderr_fd, 2)
-    finally:
-        os.close(saved_stdout_fd)
-        os.close(saved_stderr_fd)
-
-    log_text = log_path.read_text(encoding="utf-8")
-    assert job is not None and job.status == "done", f"job did not complete:\n{log_text}"
-    for expected in (
-        f"{marker}-native-stdout",
-        f"{marker}-native-stderr",
-        f"{marker}-python-print",
-        f"{marker}-grandchild",
-    ):
-        assert expected in log_text, f"'{expected}' missing from the job log:\n{log_text}"
-    # The JSON-RPC channel: not "no marker" but not a single byte -- anything at all desynchronises it.
-    assert inherited_stdout.read_bytes() == b""
-    assert marker not in inherited_stderr.read_text(encoding="utf-8", errors="replace")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="orphan pid signalling is POSIX-only")
@@ -579,6 +515,186 @@ def test_manifest_failure_marks_job_terminal_not_stuck_queued(tmp_path: Path) ->
     registry.ensure_no_active_job()  # does not raise: the device is free again
     statuses = {job.status for job in registry.jobs.values()}
     assert statuses == {"error"}
+
+
+def test_run_resume_and_failed_job_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "0.05")
+    mcp_server = load_mcp_server()
+    install_fake_konfai_runtime(tmp_path, monkeypatch, mcp_server)
+
+    config = yaml_dump({"Trainer": {"train_name": "FAKE_RUN"}})
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            await client.call_tool("write_workflow_config", {"workflow": "train", "content": config})
+
+            with pytest.raises(Exception, match="No checkpoint found to resume from"):
+                await client.call_tool("run_resume", {})
+
+            workspace = Path(mcp_server.WORKSPACE_LAYOUT.workspace_dir())
+            checkpoint = workspace / "Checkpoints" / "FAKE_RUN" / "epoch_0000.pt"
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.write_text("checkpoint", encoding="utf-8")
+
+            resumed = await client.call_tool("run_resume", {"lr": 0.0005})
+            resumed_payload = resumed.structured_content
+            assert "RESUME" in resumed_payload["command"]
+            done = await client.call_tool(
+                "wait_for_job", {"job_id": resumed_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+            )
+            done_payload = done.structured_content
+            assert done_payload["status"] == "done"
+            assert "wait_for_job" not in done_payload["next_actions"]
+            assert done_payload["next_resources"] == [f"job://{done_payload['job_id']}/log"]
+
+            manifest = await client.read_resource(f"job://{resumed_payload['job_id']}/manifest")
+            manifest_data = json.loads(manifest[0].text)
+            assert manifest_data["manifest"]["resume_from"] == str(checkpoint)
+            assert manifest_data["manifest"]["lr_override"] == 0.0005
+
+            monkeypatch.setenv("KONFAI_MCP_FAKE_EXIT_CODE", "1")
+            failed = await client.call_tool("run_train", {"overwrite": True})
+            failed_payload = failed.structured_content
+            failed_done = await client.call_tool(
+                "wait_for_job", {"job_id": failed_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+            )
+            failed_data = failed_done.structured_content
+            assert failed_data["status"] == "error"
+            assert failed_data["error"], "a crashed job must state WHY in its payload"
+            assert "read_job_log" in failed_data["next_actions"]
+            assert "run_train" in failed_data["next_actions"]
+            assert not any(
+                str(action).startswith(("retry:", "read_resource:")) for action in failed_data["next_actions"]
+            )
+
+            # 'auto' must pick the console job log for a FAILED job (the traceback lives there).
+            log = await client.call_tool(
+                "read_job_log",
+                {"job_id": failed_payload["job_id"], "grep": "simulated failure"},
+            )
+            log_data = log.structured_content
+            assert "simulated failure" in log_data["content"]
+            assert log_data["lines_returned"] >= 1
+
+    asyncio.run(scenario())
+
+
+def test_run_resume_weights_only_strips_to_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """weights_only=True warm-starts a fine-tune: it loads ONLY the Model weights into a jailed
+    <stem>_init.pt, so RESUME leaves epoch/iteration at 0 (fresh schedule)."""
+    torch = pytest.importorskip("torch")
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "0.05")
+    mcp_server = load_mcp_server()
+    install_fake_konfai_runtime(tmp_path, monkeypatch, mcp_server)
+
+    config = yaml_dump({"Trainer": {"train_name": "FAKE_RUN"}})
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            await client.call_tool("write_workflow_config", {"workflow": "train", "content": config})
+
+            workspace = Path(mcp_server.WORKSPACE_LAYOUT.workspace_dir())
+            checkpoint = workspace / "Checkpoints" / "FAKE_RUN" / "epoch_0009.pt"
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            # A full training checkpoint: Model weights beside the counters/optimizer a plain RESUME restores.
+            torch.save({"Model": {"w": torch.zeros(2)}, "epoch": 9, "it": 900, "optimizer": {"state": {}}}, checkpoint)
+
+            # A URL cannot be stripped to weights -- weights_only demands a local checkpoint.
+            with pytest.raises(Exception, match="local checkpoint"):
+                await client.call_tool("run_resume", {"weights_only": True, "model": "https://example.com/model.pt"})
+
+            resumed = await client.call_tool("run_resume", {"weights_only": True})
+            manifest = await client.read_resource(f"job://{resumed.structured_content['job_id']}/manifest")
+            resume_from = Path(json.loads(manifest[0].text)["manifest"]["resume_from"])
+
+            # The resume points at the stripped copy, jailed in the session root, not the raw checkpoint.
+            assert resume_from.name == "epoch_0009_init.pt"
+            assert resume_from.parent == workspace
+            from konfai.utils.runtime import safe_torch_load
+
+            assert set(safe_torch_load(resume_from, "cpu")) == {"Model"}
+
+    asyncio.run(scenario())
+
+
+def _wait_job_finished(registry: Any, job: Any, timeout: float = 90.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        registry.refresh(job)
+        if job.status not in ("queued", "running"):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"job {job.job_id} never finished (status={job.status})")
+
+
+def test_job_native_writes_never_reach_the_inherited_stdio(tmp_path: Path) -> None:
+    # konfai-mcp speaks JSON-RPC over stdio and a spawned job inherits fds 1/2, but redirect_stdout /
+    # redirect_stderr are Python-level only: they rebind sys.stdout/sys.stderr and leave the descriptors
+    # alone. Any native write by the job or a descendant (a CUDA/PyTorch banner, a C extension, a DDP
+    # worker) therefore landed in the middle of the protocol stream and froze the client on wait_for_job.
+    # Stand in for the server's stdio with two files, run a REAL job through _run_job, and require that
+    # everything it wrote natively is in the job log and that the inherited stdout stayed byte-clean.
+    # Resolve JobRegistry from the live module: another test's load_mcp_server reloads server_jobs, and
+    # spawn can only pickle the _run_job currently registered there.
+    job_registry_cls = importlib.import_module("konfai_mcp.server_jobs").JobRegistry
+    layout = WorkspaceLayout(tmp_path)
+    layout.ensure_session_workspace()
+    registry = job_registry_cls({"queued", "running"}, workspace_layout=layout)
+    marker = "PROTOCOL-CANARY"
+    log_path = tmp_path / "log.txt"
+    inherited_stdout = tmp_path / "inherited_stdout.bin"
+    inherited_stderr = tmp_path / "inherited_stderr.bin"
+
+    saved_stdout_fd = os.dup(1)
+    saved_stderr_fd = os.dup(2)
+    job = None
+    try:
+        with inherited_stdout.open("wb") as stdout_sink, inherited_stderr.open("wb") as stderr_sink:
+            os.dup2(stdout_sink.fileno(), 1)
+            os.dup2(stderr_sink.fileno(), 2)
+            try:
+                job = registry.launch(
+                    session=layout.current_session or "default",
+                    kind="train",
+                    command=["x"],
+                    cwd=tmp_path,
+                    log_path=log_path,
+                    config_path=tmp_path / "cfg.ref",
+                    target="mcp_test_helpers:write_on_native_stdio",
+                    kwargs={"marker": marker},
+                )
+                _wait_job_finished(registry, job)
+            finally:
+                os.dup2(saved_stdout_fd, 1)
+                os.dup2(saved_stderr_fd, 2)
+    finally:
+        os.close(saved_stdout_fd)
+        os.close(saved_stderr_fd)
+
+    log_text = log_path.read_text(encoding="utf-8")
+    assert job is not None and job.status == "done", f"job did not complete:\n{log_text}"
+    for expected in (
+        f"{marker}-native-stdout",
+        f"{marker}-native-stderr",
+        f"{marker}-python-print",
+        f"{marker}-grandchild",
+    ):
+        assert expected in log_text, f"'{expected}' missing from the job log:\n{log_text}"
+    # The JSON-RPC channel: not "no marker" but not a single byte -- anything at all desynchronises it.
+    assert inherited_stdout.read_bytes() == b""
+    assert marker not in inherited_stderr.read_text(encoding="utf-8", errors="replace")
 
 
 def test_isolated_api_never_writes_on_the_inherited_stdio(tmp_path: Path) -> None:

@@ -163,15 +163,14 @@ def _evaluation_config(dataset_dir: Path, train_name: str) -> str:
     )
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_session_pipeline_with_local_support_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
     dataset_dir = tmp_path / "dataset"
     create_synthesis_dataset(dataset_dir)
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
 
     mcp_server = load_mcp_server()
     install_fake_konfai_runtime(tmp_path, monkeypatch, mcp_server)

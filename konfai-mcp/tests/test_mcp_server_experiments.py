@@ -14,12 +14,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from typing import ClassVar
 
+import fastmcp
 import numpy as np
 import pytest
 
@@ -31,6 +35,7 @@ from konfai_mcp import runner as mcp_runner  # noqa: E402
 from konfai_mcp.server_experiments import SessionService  # noqa: E402
 from konfai_mcp.server_jobs import JobRegistry  # noqa: E402
 from konfai_mcp.server_support import WorkspaceLayout  # noqa: E402
+from mcp_test_helpers import yaml_dump  # noqa: E402
 
 
 def _service(tmp_path: Path) -> SessionService:
@@ -107,6 +112,35 @@ def test_label_statistics_cover_many_class_segmentations_and_flag_intensity_grou
     hu_stats = service.compute_dataset_group_statistics(dataset_dir, "HU")
     assert "labels" not in hu_stats  # not treated as a label map
     assert "high_cardinality_integer_group" in hu_stats  # but not silently omitted either
+
+
+def test_label_statistics_for_integer_groups(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    pytest.importorskip("SimpleITK")
+    from mcp_test_helpers import create_segmentation_dataset
+
+    dataset_dir = tmp_path / "dataset"
+    create_segmentation_dataset(dataset_dir)
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            inspected = await client.call_tool(
+                "inspect_dataset",
+                {"dataset_dir": str(dataset_dir), "groups": ["SEG", "CT"], "extension": "mha"},
+            )
+            groups = inspected.structured_content["groups"]
+            assert groups["SEG"]["labels"]["unique"] == [0, 1]
+            assert groups["SEG"]["labels"]["presence_cases"]["1"] == 4
+            assert 0.0 < groups["SEG"]["labels"]["mean_voxel_fraction"]["1"] < 1.0
+            # Float groups carry no label block.
+            assert "labels" not in groups["CT"]
+
+    asyncio.run(scenario())
 
 
 def test_infer_dataset_structure_is_task_neutral(tmp_path: Path) -> None:
@@ -373,3 +407,68 @@ def test_worker_spawn_picklability_check_catches_unpicklable_datasets() -> None:
     # num_workers=0 -> the real run spawns nothing; the check must not fire.
     skipped = mcp_runner._check_worker_spawn_picklability(_PickleWorkflow(_DirtyDataset()), 0)
     assert skipped == {"requested_num_workers": 0, "checked": False}
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_import_experiment_links_artifacts(
+    tmp_path: Path,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    fastmcp = pytest.importorskip("fastmcp")
+    source = tmp_path / "old_experiment"
+    (source / "Checkpoints" / "OLD_RUN").mkdir(parents=True)
+    (source / "Checkpoints" / "OLD_RUN" / "best.pt").write_text("ckpt", encoding="utf-8")
+    (source / "Config.yml").write_text(yaml_dump({"Trainer": {"train_name": "OLD_RUN"}}), encoding="utf-8")
+    (source / "Model.py").write_text("class MyNet:\n    pass\n", encoding="utf-8")
+    (source / "notes.md").write_text("ignored", encoding="utf-8")
+
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            imported = await client.call_tool("import_experiment", {"source_dir": str(source)})
+            payload = imported.structured_content
+            assert sorted(payload["copied"]) == ["Config.yml", "Model.py"]
+            assert payload["linked"] == ["Checkpoints"]
+
+            workspace = Path(mcp_server.WORKSPACE_LAYOUT.workspace_dir())
+            assert (workspace / "Checkpoints").is_symlink()
+            assert (workspace / "Checkpoints" / "OLD_RUN" / "best.pt").read_text(encoding="utf-8") == "ckpt"
+
+            read_back = await client.call_tool("read_session_file", {"path": "Config.yml"})
+            assert "OLD_RUN" in read_back.structured_content["content"]
+
+            again = await client.call_tool("import_experiment", {"source_dir": str(source)})
+            assert "Config.yml" in again.structured_content["skipped"]
+
+    asyncio.run(scenario())
+
+
+def test_a_metric_ranks_one_way_for_every_run_that_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    """Which way is better belongs to the metric, not to one run. Files written by different KonfAI
+    versions disagree (PSNR was declared minimize until it was fixed), and reading the direction off
+    whichever file was globbed first ranked the board by luck and captioned it from another row."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    session = load_mcp_server().SESSION
+
+    def write(run: str, direction: str, value: float) -> Path:
+        out = session.workspace_layout.evaluations_dir() / run
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / "Metric_TRAIN.json"
+        path.write_text(
+            json.dumps({"aggregates": {"PSNR": {"mean": value}}, "directions": {"PSNR": direction}}), encoding="utf-8"
+        )
+        return path
+
+    old = write("old_run", "min", 20.0)
+    new = write("new_run", "max", 30.0)
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (2_000_000, 2_000_000))
+
+    board = session.leaderboard_payload(split="TRAIN")["leaderboard"]  # one metric: the selected board
+
+    assert {row["direction"] for row in board} == {"max"}, "the newest run states the current definition"
+    assert board[0]["run_name"] == "new_run", "and the ranking follows it"

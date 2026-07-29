@@ -25,12 +25,10 @@ import fastmcp
 import pytest
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_delete_run_removes_one_run_and_stays_jailed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
 
     async def scenario() -> Path:

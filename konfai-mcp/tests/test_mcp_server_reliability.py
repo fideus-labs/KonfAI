@@ -18,6 +18,7 @@ import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
+from typing import Any, cast
 
 import pytest
 from mcp_test_helpers import install_fake_konfai_runtime, resource_to_text, wait_for_live_metric
@@ -38,14 +39,11 @@ async def _create_fake_train_session(client: object) -> None:
     )
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_rejects_invalid_inputs(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
 
@@ -91,13 +89,9 @@ def test_mcp_server_rejects_invalid_inputs(
 
 
 def test_mcp_server_overwrite_recreates_clean_session_workspace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    workspace_root: Path,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
 
@@ -128,14 +122,12 @@ def test_mcp_server_overwrite_recreates_clean_session_workspace(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_serializes_concurrent_train_launches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     install_fake_konfai_runtime(tmp_path, monkeypatch, mcp_server)
     monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "0.8")
@@ -168,14 +160,56 @@ def test_mcp_server_serializes_concurrent_train_launches(
     asyncio.run(scenario())
 
 
+class _ProcAlive:
+    pid = 4242
+
+    def is_alive(self) -> bool:
+        return True
+
+
+def test_device_scoped_job_concurrency() -> None:
+    from konfai_mcp.server_jobs import Job, JobRegistry
+
+    registry = JobRegistry({"queued", "running"})
+    active = Job(
+        job_id="gpu0",
+        session="default",
+        kind="train",
+        command=["fake"],
+        cwd=Path("/tmp"),
+        log_path=Path("/tmp/job.log"),
+        config_path=Path("/tmp/Config.yml"),
+        status="running",
+        devices=["0"],
+    )
+    active.proc = cast(Any, _ProcAlive())
+    registry.jobs[active.job_id] = active
+
+    assert registry.find_device_conflicts(["0", "1"]) == [active]
+    assert registry.find_device_conflicts(["1"]) == []
+    assert registry.find_device_conflicts(["cpu"]) == []
+    # Unknown device sets conflict with everything (safe default).
+    assert registry.find_device_conflicts(None) == [active]
+
+    with pytest.raises(RuntimeError, match="conflicting device"):
+        registry.launch(
+            session="default",
+            kind="train",
+            command=["fake"],
+            cwd=Path("/tmp"),
+            log_path=Path("/tmp/job2.log"),
+            config_path=Path("/tmp/Config.yml"),
+            devices=["0"],
+            target="mcp_test_helpers:_fake_job_runtime",
+        )
+
+
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_timeout_cancel_and_live_metrics_are_stable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     install_fake_konfai_runtime(tmp_path, monkeypatch, mcp_server)
     monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "1.2")
@@ -217,16 +251,14 @@ def test_mcp_server_timeout_cancel_and_live_metrics_are_stable(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_validate_restores_config_when_subprocess_times_out(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
     # The child restores the authored config in its own finally, but a timeout SIGTERMs it before that
     # runs. Simulate a child that mutated the config (KonfAI rewrites it in place) and was then killed:
     # the parent must restore the authored bytes regardless.
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
 
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
@@ -256,14 +288,12 @@ def test_validate_restores_config_when_subprocess_times_out(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_handles_burst_polling_without_crashing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     install_fake_konfai_runtime(tmp_path, monkeypatch, mcp_server)
     monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "0.8")

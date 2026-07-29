@@ -61,14 +61,12 @@ def _seg_train_config(session_dir: Path, in_channels: int) -> str:
     return _yaml_dump(cfg)
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_train_step_validation_catches_runtime_only_config_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
     # A config with in_channels=2 but a 1-channel image builds and sets up fine, and only crashes at
     # the first forward. level="setup" must pass it; level="train_step" must catch it BEFORE any job.
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
 
     async def scenario() -> None:
@@ -113,14 +111,10 @@ def _contains_metric_name(payload: Any, metric_name: str) -> bool:
     return metric_name in str(payload)
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_segmentation_template_pipeline(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
 

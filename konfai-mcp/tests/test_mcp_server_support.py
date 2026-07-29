@@ -14,8 +14,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -216,3 +219,47 @@ def test_inspect_signature_summarizes_a_catalog_yaml_model() -> None:
 
     with pytest.raises(ValueError, match="Available catalog models"):
         server_support.summarize_classpath_signature("default|DoesNotExist.yml")
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_read_back_tools_and_workspace_jail(
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    fastmcp = pytest.importorskip("fastmcp")
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            await client.call_tool(
+                "write_session_file",
+                {"relative_path": "Loss.py", "content": "class MyLoss:\n    pass"},
+            )
+
+            read_back = await client.call_tool("read_session_file", {"path": "Loss.py"})
+            data = read_back.structured_content
+            assert "class MyLoss" in data["content"]
+            assert data["relative_path"] == "Loss.py"
+            assert data["truncated"] is False
+
+            paged = await client.call_tool("read_session_file", {"path": "Loss.py", "max_chars": 5, "offset": 6})
+            paged_data = paged.structured_content
+            assert paged_data["content"] == "MyLos"
+            assert paged_data["truncated"] is True
+
+            absolute_inside = await client.call_tool("read_session_file", {"path": data["path"]})
+            assert "class MyLoss" in absolute_inside.structured_content["content"]
+
+            with pytest.raises(Exception, match="escapes the session workspace"):
+                await client.call_tool("read_session_file", {"path": "../outside.txt"})
+
+            template = await client.call_tool("read_template_file", {"name": "Segmentation", "filename": "Config.yml"})
+            assert "Trainer" in template.structured_content["content"]
+
+            with pytest.raises(Exception, match="Invalid template"):
+                await client.call_tool("read_template_file", {"name": "../konfai-mcp", "filename": "README.md"})
+
+            with pytest.raises(Exception, match="Invalid template filename"):
+                await client.call_tool("read_template_file", {"name": "Segmentation", "filename": "../Config.yml"})
+
+    asyncio.run(scenario())
