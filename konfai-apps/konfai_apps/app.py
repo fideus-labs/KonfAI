@@ -760,7 +760,11 @@ class KonfAIApp(AbstractKonfAIApp):
         - LocalAppRepositoryFromDirectory
         """
         self.app_repository: LocalAppRepository
-        app_repository_info = get_app_repository_info(app, force_update or download)
+        # `download` means "make sure the bundle is here", `force_update` means "refresh it from the Hub".
+        # Folding the first into the second made every app job revalidate the cache file by file against
+        # the Hub before starting. A cache miss is already handled: the local-only read falls back to a
+        # real download on its own.
+        app_repository_info = get_app_repository_info(app, force_update)
         if not isinstance(app_repository_info, LocalAppRepository):
             raise TypeError(
                 f"KonfAI apps can only be executed from a local application repository. "
