@@ -357,3 +357,109 @@ def test_clear_directory_except_logs_keeps_the_live_log(tmp_path):
     assert not (run_dir / "events").exists()
     assert not (run_dir / "Config.yml").exists()
     assert (run_dir / "log_0.txt").read_text() == "parent line\nafter clear\n"
+
+
+class _FileLikeMirror:
+    """What the mirror target is inside an MCP job or a slurm run: a plain writable, not a TTY."""
+
+    def __init__(self):
+        self.written = ""
+
+    def write(self, msg):
+        self.written += msg
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+
+def test_the_mirror_folds_a_redrawing_bar_off_a_terminal(monkeypatch):
+    """A file appends what a terminal overwrites: mirrored raw, one bar's animation alone reached 1.6 MB
+    per short run. Off a terminal the mirror keeps at most one folded frame per throttle window, never
+    loses the bar's final state, and leaves normal messages untouched."""
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    log = rt.MinimalLog(rank=0)
+
+    for i in range(500):
+        log.write(f"\rProgress: {i}/500")
+    log.write("\n")
+    log.write("epoch 1 done\n")
+
+    mirrored = log._stdout_bak.written
+    frames = [line for line in mirrored.splitlines() if line.startswith("Progress:")]
+    # The throttle admits the first frame; every skipped one stays pending, so the final state is the
+    # second and last -- not 500 lines, and never a lost 499/500.
+    assert frames[0] == "Progress: 0/500"
+    assert frames[-1] == "Progress: 499/500"
+    assert len(frames) < 500 / 10, f"the animation was archived, not folded: {len(frames)} frames"
+    assert "\r" not in mirrored
+    assert mirrored.endswith("epoch 1 done\n")
+
+
+def test_the_mirror_stays_raw_on_a_terminal(monkeypatch):
+    """On a real console the animation IS the point: the fold must not degrade the interactive view."""
+
+    class _Terminal(_FileLikeMirror):
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(sys, "stdout", _Terminal())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    log = rt.MinimalLog(rank=0)
+
+    log.write("\rProgress: 1/2")
+    log.write("\rProgress: 2/2")
+
+    assert log._stdout_bak.written == "\rProgress: 1/2\rProgress: 2/2"
+
+
+def test_a_crlf_line_is_a_message_not_a_bar_frame(monkeypatch):
+    """'warning\\r\\n' folds to the text after its last \\r — nothing. Classified as a redraw it would
+    vanish from the mirror and the log file both; a CRLF terminator is not an animation."""
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    log = rt.MinimalLog(rank=0)
+
+    log.write("\rProgress: 1/100")
+    log.write("important warning\r\n")
+
+    assert "important warning" in log._stdout_bak.written
+    assert log._buffered_line == "important warning"
+
+
+def test_the_bar_state_held_by_the_throttle_lands_on_exit(monkeypatch):
+    """A run's last writes are often throttled frames; dropped at __exit__, the job sink would freeze on
+    a stale frame and misreport where the run actually stopped."""
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    mirror = sys.stdout
+
+    with rt.MinimalLog(rank=0) as log:
+        log.write("\rProgress: 0/100")
+        log.write("\rProgress: 100/100")  # inside the throttle window: withheld
+
+    assert mirror.written.splitlines()[-1] == "Progress: 100/100"
+
+
+def test_interleaved_bars_each_keep_their_final_state(monkeypatch):
+    """Train and validation redraw through the same stream; a single pending slot would let one bar
+    overwrite the other's withheld frame, ending the run without its final state ever mirrored."""
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    mirror = sys.stdout
+
+    with rt.MinimalLog(rank=0) as log:
+        for i in range(50):
+            log.write(f"\rTrain: {i}/50")
+            log.write(f"\rVal: {i}/50")
+
+    lines = mirror.written.splitlines()
+    assert "Train: 49/50" in lines and "Val: 49/50" in lines
