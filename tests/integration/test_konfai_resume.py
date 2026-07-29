@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-from test_konfai_core_workflows import _konfai_cli_command, _prepare_experiment_dir, _subprocess_env
+from harness import konfai_cli_command, prepare_experiment_dir, replace_once, subprocess_env
 
 pytestmark = pytest.mark.integration
 
@@ -73,20 +73,15 @@ def _flatten_model_weights(checkpoint: dict[str, Any]) -> dict[str, torch.Tensor
     return weights
 
 
-def _replace_once(content: str, old: str, new: str) -> str:
-    assert content.count(old) == 1, f"expected exactly one occurrence of {old!r} in the rendered config"
-    return content.replace(old, new)
-
-
 def test_konfai_cli_resume_continues_training(tmp_path: Path) -> None:
     experiment_dir = tmp_path / "experiment_resume"
     train_name = "RESUME_E2E"
-    paths = _prepare_experiment_dir(experiment_dir, train_name)
+    paths = prepare_experiment_dir(experiment_dir, train_name)
 
     # Keep every checkpoint (BEST mode prunes history, including on resume) so the
     # full epoch/iteration timeline stays observable on disk.
     config_path = experiment_dir / "Config.yml"
-    config_text = _replace_once(
+    config_text = replace_once(
         config_path.read_text(encoding="utf-8"),
         "save_checkpoint_mode: BEST",
         "save_checkpoint_mode: ALL",
@@ -95,15 +90,15 @@ def test_konfai_cli_resume_continues_training(tmp_path: Path) -> None:
     # RESUME continues to the epoch count of the config it is given: extend 2 -> 4.
     resume_config_path = experiment_dir / "ConfigResume.yml"
     resume_config_path.write_text(
-        _replace_once(config_text, f"epochs: {EPOCHS_INITIAL}", f"epochs: {EPOCHS_TOTAL}"),
+        replace_once(config_text, f"epochs: {EPOCHS_INITIAL}", f"epochs: {EPOCHS_TOTAL}"),
         encoding="utf-8",
     )
 
-    cli = _konfai_cli_command()
+    cli = konfai_cli_command()
     subprocess.run(
         [*cli, "TRAIN", "-y", "--cpu", "1", "-q", "-c", "Config.yml"],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
 
@@ -120,7 +115,7 @@ def test_konfai_cli_resume_continues_training(tmp_path: Path) -> None:
     subprocess.run(
         [*cli, "RESUME", "-y", "--cpu", "1", "-q", "-c", "ConfigResume.yml", "--model", str(last_checkpoint)],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
 
@@ -162,7 +157,7 @@ def test_konfai_cli_resume_continues_training(tmp_path: Path) -> None:
     subprocess.run(
         [*cli, "PREDICTION", "-y", "--cpu", "1", "-q", "-c", "Prediction.yml", "--models", str(final_checkpoint)],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
     expected_cases = sorted(path.name for path in paths["dataset_dir"].iterdir() if path.is_dir())

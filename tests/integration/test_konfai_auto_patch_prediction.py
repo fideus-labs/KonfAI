@@ -25,8 +25,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from test_konfai_core_workflows import _prepare_experiment_dir, _subprocess_env
-from test_konfai_ensemble_tta import _replace_once
+from harness import prepare_experiment_dir, replace_once, subprocess_env
 
 pytestmark = pytest.mark.integration
 
@@ -115,10 +114,10 @@ if __name__ == "__main__":
 def auto_patch_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     """Train once, predict whole-slice (reference), then with a forced-OOM auto-patch restart."""
     experiment_dir = tmp_path_factory.mktemp("auto_patch") / "experiment"
-    paths = _prepare_experiment_dir(experiment_dir, TRAIN_NAME)
+    paths = prepare_experiment_dir(experiment_dir, TRAIN_NAME)
     base = (experiment_dir / "Prediction.yml").read_text(encoding="utf-8")
-    auto = _replace_once(base, "patch_size: [1, 16, 16]", "patch_size: [1, 0, 0]")
-    auto = _replace_once(auto, "overlap: None", "overlap: 0")
+    auto = replace_once(base, "patch_size: [1, 16, 16]", "patch_size: [1, 0, 0]")
+    auto = replace_once(auto, "overlap: None", "overlap: 0")
     (experiment_dir / "PredictionAuto.yml").write_text(auto, encoding="utf-8")
 
     runner_path = experiment_dir / "run_auto_patch_prediction.py"
@@ -126,7 +125,7 @@ def auto_patch_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str,
     subprocess.run(
         [sys.executable, str(runner_path)],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
     return {

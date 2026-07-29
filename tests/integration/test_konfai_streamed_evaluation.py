@@ -30,10 +30,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from harness import subprocess_env, write_image
+
+pytestmark = pytest.mark.integration
 
 SimpleITK = pytest.importorskip("SimpleITK")
-
-from test_konfai_core_workflows import _subprocess_env  # noqa: E402
 
 TRAIN_NAME = "STREAMED_EVAL_01"
 
@@ -84,13 +85,6 @@ EVALUATION_TEMPLATE = """Evaluator:
 """
 
 
-def _write_image(path: Path, array: np.ndarray, pixel_id: int) -> None:
-    image = SimpleITK.GetImageFromArray(array)
-    image.SetSpacing((1.0, 1.0, 1.0))
-    image = SimpleITK.Cast(image, pixel_id)
-    SimpleITK.WriteImage(image, str(path))
-
-
 def _create_paired_dataset(dataset_dir: Path, predictions_dir: Path) -> None:
     """Ground-truth CT and a spatially-varying 'prediction' per case, so the metrics are non-trivial."""
     rng = np.random.default_rng(7)
@@ -99,8 +93,8 @@ def _create_paired_dataset(dataset_dir: Path, predictions_dir: Path) -> None:
         (predictions_dir / f"CASE_{idx:03d}").mkdir(parents=True)
         ct = rng.normal(size=(5, 16, 16)).astype(np.float32)
         sct = (0.85 * ct + 0.1 * rng.normal(size=ct.shape) + 0.02 * idx).astype(np.float32)
-        _write_image(dataset_dir / f"CASE_{idx:03d}" / "CT.mha", ct, SimpleITK.sitkFloat32)
-        _write_image(predictions_dir / f"CASE_{idx:03d}" / "sCT.mha", sct, SimpleITK.sitkFloat32)
+        write_image(dataset_dir / f"CASE_{idx:03d}" / "CT.mha", ct, SimpleITK.sitkFloat32)
+        write_image(predictions_dir / f"CASE_{idx:03d}" / "sCT.mha", sct, SimpleITK.sitkFloat32)
 
 
 def _run_evaluation(experiment_dir: Path, memory_budget: str) -> str:
@@ -143,7 +137,7 @@ def _run_evaluation(experiment_dir: Path, memory_budget: str) -> str:
     completed = subprocess.run(
         [sys.executable, str(runner)],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         capture_output=True,
         text=True,
     )

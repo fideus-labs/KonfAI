@@ -34,8 +34,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from test_konfai_core_workflows import _prepare_experiment_dir, _subprocess_env
-from test_konfai_ensemble_tta import TTA_AUGMENTATIONS_BLOCK, _replace_once
+from harness import TTA_AUGMENTATIONS_BLOCK, prepare_experiment_dir, replace_once, subprocess_env
 
 pytestmark = pytest.mark.integration
 
@@ -191,23 +190,23 @@ def _write_streamed_prediction_configs(experiment_dir: Path) -> None:
     base = (experiment_dir / "Prediction.yml").read_text(encoding="utf-8")
     # The in-plane flip (y and x, never z) is slab-parallel, so the case streams; flipping the slab
     # axis instead mirrors the slab order, which the gate must refuse.
-    tta = _replace_once(base, "    augmentations: None", TTA_AUGMENTATIONS_BLOCK)
+    tta = replace_once(base, "    augmentations: None", TTA_AUGMENTATIONS_BLOCK)
     (experiment_dir / "PredictionTTA.yml").write_text(tta, encoding="utf-8")
     z_flip_block = TTA_AUGMENTATIONS_BLOCK.replace(
         "- 0\n            - 1\n            - 1", "- 1\n            - 0\n            - 0"
     )
     assert z_flip_block != TTA_AUGMENTATIONS_BLOCK, "the TTA block does not match the expected f_prob layout"
     (experiment_dir / "PredictionTTAZ.yml").write_text(
-        _replace_once(base, "    augmentations: None", z_flip_block), encoding="utf-8"
+        replace_once(base, "    augmentations: None", z_flip_block), encoding="utf-8"
     )
-    tta_stack = _replace_once(tta, "        after_reduction_transforms: None", _STACK_AFTER_REDUCTION_BLOCK)
-    tta_stack = _replace_once(tta_stack, "        reduction: Mean", "        reduction: Concat")
-    tta_stack = _replace_once(tta_stack, "        Mean: {}", "        Concat: {}")
+    tta_stack = replace_once(tta, "        after_reduction_transforms: None", _STACK_AFTER_REDUCTION_BLOCK)
+    tta_stack = replace_once(tta_stack, "        reduction: Mean", "        reduction: Concat")
+    tta_stack = replace_once(tta_stack, "        Mean: {}", "        Concat: {}")
     (experiment_dir / "PredictionTTAStack.yml").write_text(tta_stack, encoding="utf-8")
     for variant, transforms_block in _VARIANT_TRANSFORMS.items():
-        config = _replace_once(base, "            transforms: None", transforms_block)
+        config = replace_once(base, "            transforms: None", transforms_block)
         if variant in _UINT8_VARIANTS:
-            config = _replace_once(config, "        before_reduction_transforms: None", _UINT8_BEFORE_REDUCTION)
+            config = replace_once(config, "        before_reduction_transforms: None", _UINT8_BEFORE_REDUCTION)
         (experiment_dir / f"Prediction{variant}.yml").write_text(config, encoding="utf-8")
 
 
@@ -216,7 +215,7 @@ def streamed_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, P
     """Train once, then predict every variant twice: the assembled reference (kill-switch) and the
     automatic streamed run."""
     experiment_dir = tmp_path_factory.mktemp("streamed") / "experiment"
-    paths = _prepare_experiment_dir(experiment_dir, TRAIN_NAME)
+    paths = prepare_experiment_dir(experiment_dir, TRAIN_NAME)
     _write_streamed_prediction_configs(experiment_dir)
 
     runner_path = experiment_dir / "run_streamed_prediction.py"
@@ -224,7 +223,7 @@ def streamed_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, P
     subprocess.run(
         [sys.executable, str(runner_path)],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
     return {

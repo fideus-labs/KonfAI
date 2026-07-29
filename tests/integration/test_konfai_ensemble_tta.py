@@ -34,27 +34,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from test_konfai_core_workflows import _prepare_experiment_dir, _subprocess_env
+from harness import TTA_AUGMENTATIONS_BLOCK, prepare_experiment_dir, replace_once, subprocess_env
 
 pytestmark = pytest.mark.integration
 
 SimpleITK = pytest.importorskip("SimpleITK")
 
 TRAIN_NAME = "ENSTTA"
-
-# Deterministic flip TTA: the pipeline probability is 1 and torch.rand() < 1 always holds,
-# so the single augmented replica is always flipped along Y and X ([C, Z, Y, X] dims 2, 3).
-TTA_AUGMENTATIONS_BLOCK = """\
-    augmentations:
-      DataAugmentation_0:
-        nb: 1
-        data_augmentations:
-          Flip:
-            f_prob:
-            - 0
-            - 1
-            - 1
-            prob: 1"""
 
 TTA_SUM_AFTER_REDUCTION_BLOCK = """\
         after_reduction_transforms:
@@ -131,21 +117,16 @@ if __name__ == "__main__":
 '''
 
 
-def _replace_once(content: str, old: str, new: str) -> str:
-    assert content.count(old) == 1, f"expected exactly one occurrence of {old!r} in the Prediction template"
-    return content.replace(old, new)
-
-
 def _write_tta_prediction_configs(experiment_dir: Path) -> None:
     base = (experiment_dir / "Prediction.yml").read_text(encoding="utf-8")
-    tta = _replace_once(base, "    augmentations: None", TTA_AUGMENTATIONS_BLOCK)
+    tta = replace_once(base, "    augmentations: None", TTA_AUGMENTATIONS_BLOCK)
     (experiment_dir / "PredictionTTA.yml").write_text(tta, encoding="utf-8")
 
     # Same ensemble + TTA, but the TTA branches are concatenated and summed instead of
     # averaged: the output doubles only if both TTA branches were actually produced.
-    tta_sum = _replace_once(tta, "        after_reduction_transforms: None", TTA_SUM_AFTER_REDUCTION_BLOCK)
-    tta_sum = _replace_once(tta_sum, "        reduction: Mean", "        reduction: Concat")
-    tta_sum = _replace_once(tta_sum, "        Mean: {}", "        Concat: {}")
+    tta_sum = replace_once(tta, "        after_reduction_transforms: None", TTA_SUM_AFTER_REDUCTION_BLOCK)
+    tta_sum = replace_once(tta_sum, "        reduction: Mean", "        reduction: Concat")
+    tta_sum = replace_once(tta_sum, "        Mean: {}", "        Concat: {}")
     (experiment_dir / "PredictionTTASum.yml").write_text(tta_sum, encoding="utf-8")
 
 
@@ -153,7 +134,7 @@ def _write_tta_prediction_configs(experiment_dir: Path) -> None:
 def ensemble_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     """Train once, then run the single-model, ensemble+TTA, and ensemble+TTA-sum predictions."""
     experiment_dir = tmp_path_factory.mktemp("ensemble_tta") / "experiment"
-    paths = _prepare_experiment_dir(experiment_dir, TRAIN_NAME)
+    paths = prepare_experiment_dir(experiment_dir, TRAIN_NAME)
     _write_tta_prediction_configs(experiment_dir)
 
     runner_path = experiment_dir / "run_ensemble_tta.py"
@@ -161,7 +142,7 @@ def ensemble_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, P
     subprocess.run(
         [sys.executable, str(runner_path)],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
     return {
