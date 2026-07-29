@@ -341,6 +341,7 @@ class MAESaveMap(MAE):
 
 class PSNR(MaskedLoss):
     reducible = True
+    maximize = True  # reported value is the peak signal-to-noise ratio in dB (higher-is-better)
 
     @staticmethod
     def _loss(dynamic_range: float, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -362,6 +363,8 @@ class PSNR(MaskedLoss):
 
 
 class SSIM(MaskedLoss):
+    maximize = True  # reported value is the structural similarity index (higher-is-better)
+
     @staticmethod
     def _loss(dynamic_range: float, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         structural_similarity = _require_optional(
