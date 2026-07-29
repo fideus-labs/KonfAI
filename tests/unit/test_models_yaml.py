@@ -16,21 +16,21 @@
 
 """Declarative catalog models are equivalent to their Python / oracle references.
 
-One section per model. Each section keeps its original validation level (documented in the
-section banner): weight-exact vs an external oracle (MONAI / torchvision / the parametric
-Python model), or structural-strict where the graphs differ by construction. Oracle paths are
-guarded by ``pytest.importorskip`` so CI without the optional dependency still validates the
-catalog entries structurally. PlainConvUNet and SegResNet keep their own files
-(test_yaml_model_plainconvunet.py, test_yaml_model_segresnet.py).
+One section per catalog entry, each at its strongest honest validation level (stated in the
+section banner): weight-exact vs an external oracle (dynamic_network_architectures / MONAI /
+torchvision / the parametric Python model), or structural-strict where the graphs differ by
+construction. Oracle paths are guarded by ``pytest.importorskip`` inside the test or builder so
+CI without the optional dependency still validates the catalog entries structurally.
 """
 
-from pathlib import Path
+import re
 
 import pytest
 import torch
 from konfai.models.python.classification.resnet import ResNet
 from konfai.models.python.segmentation.NestedUNet import NestedUNet
 from konfai.models.python.segmentation.residualencoderunet import ResidualEncoderUNet
+from konfai.models.python.segmentation.unetplusplus import UNetPlusPlus
 from konfai.network.blocks import BlockConfig, MultiHeadSelfAttention, PositionalEmbedding
 from konfai.network.network import Network
 from konfai.utils.errors import ConfigError
@@ -39,12 +39,348 @@ from konfai.utils.pretrained import (
     _parametric_leaves_in_execution_order,
     transfer_weights_by_execution_order,
 )
+from model_oracles import (
+    CATALOG,
+    REPO,
+    build_plainconv_oracle,
+    capture_output,
+    executed_leaf_param_count,
+    flat_state_dict,
+    forward_trace,
+    parametric_leaves_in_execution_order,
+    seeded_input,
+    terminal_output_paths,
+)
 
 pytestmark = pytest.mark.slow
 
-CATALOG = Path(__file__).resolve().parents[2] / "konfai" / "models" / "yaml"
 
-UNET_YML = Path(__file__).resolve().parents[2] / "examples" / "Segmentation" / "UNet.yml"
+# =========================================================================================== #
+# PlainConvUNet: the declarative PlainConvUNet.yml is weight-exact with nnU-Net's PlainConvUNet.
+#
+# ``PlainConvUNet.yml`` reproduces, module-for-module and in forward-execution order,
+# ``dynamic_network_architectures.architectures.unet.PlainConvUNet`` -- the "plain conv"
+# nnU-Net backbone used by nnU-Net, TotalSegmentator and MRSeg. Every conv block is
+# Conv -> InstanceNorm(affine=True) -> LeakyReLU(0.01) with conv_bias=True, downsampling is a
+# strided conv (first conv of each stage), upsampling is a transpose conv whose kernel and
+# stride both equal the encoder stride, and a single 1x1 head returns the highest-resolution
+# logits. Because the weighted leaves execute in the same order as the reference, a REAL
+# PlainConvUNet checkpoint transfers straight in through
+# ``transfer_weights_by_execution_order`` and the KonfAI logits are byte-identical to the
+# reference output, for both isotropic and per-axis anisotropic strides (the TotalSegmentator /
+# MRSeg case). The structural test builds and forwards without the oracle so CI still validates
+# the entry.
+#
+# Deep-supervision accounting (documented, not a defect): PlainConvUNet always *builds* a 1x1
+# seg head at every decoder resolution so a deep-supervision checkpoint stays loadable, but
+# with ``deep_supervision=False`` it *executes* only the highest-resolution head. For the
+# 4-stage [8, 16, 32, 64] config that is 100 parameters (Conv 32->2 = 66, Conv 16->2 = 34)
+# that are built but never run. The declarative graph carries exactly the executed head, so its
+# parameter count is the oracle's executed-path count (351270 total - 100 unused = 351170),
+# which the tests assert explicitly.
+# =========================================================================================== #
+PLAINCONVUNET_YML = CATALOG / "PlainConvUNet.yml"
+
+PLAINCONV_FEATURES_PER_STAGE = [8, 16, 32, 64]
+PLAINCONV_NUM_CLASSES = 2
+PLAINCONV_ORACLE_TOTAL_PARAMS = 351270
+# Two deep-supervision seg heads nnU-Net builds but does not execute when
+# deep_supervision=False: Conv(32->2)=66 and Conv(16->2)=34.
+PLAINCONV_UNUSED_DEEP_SUPERVISION_PARAMS = 100
+PLAINCONV_EXECUTED_PATH_PARAMS = PLAINCONV_ORACLE_TOTAL_PARAMS - PLAINCONV_UNUSED_DEEP_SUPERVISION_PARAMS
+PLAINCONV_EXPECTED_WEIGHTED_LEAVES = 32
+
+ISOTROPIC_STRIDES = [1, 2, 2, 2]
+# TotalSegmentator / MRSeg-style anisotropic strides (down-sample fewer axes).
+ANISOTROPIC_STRIDES = [1, [1, 2, 2], [2, 2, 2], [2, 2, 2]]
+
+
+def _build_plainconv(
+    strides: list,
+    *,
+    dim: int = 3,
+    features: list = PLAINCONV_FEATURES_PER_STAGE,
+    num_classes: int = PLAINCONV_NUM_CLASSES,
+) -> Network:
+    return build_model_from_yaml(
+        yaml_path=str(PLAINCONVUNET_YML),
+        parameters={
+            "dim": dim,
+            "in_channels": 1,
+            "features_per_stage": features,
+            "strides": strides,
+            "num_classes": num_classes,
+        },
+    )
+
+
+def _plainconv_oracle(strides: list) -> torch.nn.Module:
+    return build_plainconv_oracle(
+        n_stages=4,
+        features=PLAINCONV_FEATURES_PER_STAGE,
+        strides=strides,
+        num_classes=PLAINCONV_NUM_CLASSES,
+        deep_supervision=False,
+    )
+
+
+def _assert_plainconv_weight_exact(strides: list) -> float:
+    """Transfer a real PlainConvUNet into the YAML graph and return the logits maxdiff."""
+    yaml_net = _build_plainconv(strides)
+    oracle = _plainconv_oracle(strides)
+
+    x = seeded_input(1, 1, 32, 32, 32)
+
+    transferred = transfer_weights_by_execution_order(
+        yaml_net,
+        oracle,
+        target_forward=lambda: list(yaml_net.named_forward(x)),
+        source_forward=lambda: oracle(x),
+    )
+    assert transferred == PLAINCONV_EXPECTED_WEIGHTED_LEAVES
+
+    yaml_net.eval()
+    oracle.eval()
+    with torch.no_grad():
+        reference = oracle(x)
+        trace = dict(yaml_net.named_forward(x))
+
+    logits = trace["Head.Conv"]
+    assert logits.shape == reference.shape
+    assert torch.allclose(logits, reference, atol=1e-5)
+
+    # Parameter accounting: the KonfAI graph carries exactly the executed path.
+    konfai_total = sum(p.numel() for p in yaml_net.parameters())
+    oracle_total = sum(p.numel() for p in oracle.parameters())
+    oracle_executed = executed_leaf_param_count(oracle, lambda: oracle(x))
+    assert konfai_total == oracle_executed
+    assert oracle_total - konfai_total == PLAINCONV_UNUSED_DEEP_SUPERVISION_PARAMS
+
+    return (logits - reference).abs().max().item()
+
+
+def test_plainconvunet_yaml_is_weight_exact_isotropic() -> None:
+    # Pin the oracle's total parameter count, then assert exact equivalence.
+    oracle = _plainconv_oracle(ISOTROPIC_STRIDES)
+    assert sum(p.numel() for p in oracle.parameters()) == PLAINCONV_ORACLE_TOTAL_PARAMS
+    konfai = _build_plainconv(ISOTROPIC_STRIDES)
+    assert sum(p.numel() for p in konfai.parameters()) == PLAINCONV_EXECUTED_PATH_PARAMS
+
+    maxdiff = _assert_plainconv_weight_exact(ISOTROPIC_STRIDES)
+    assert maxdiff < 1e-4
+
+
+def test_plainconvunet_yaml_is_weight_exact_anisotropic() -> None:
+    # Proves TotalSegmentator / MRSeg-style anisotropic-stride checkpoints load.
+    maxdiff = _assert_plainconv_weight_exact(ANISOTROPIC_STRIDES)
+    assert maxdiff < 1e-4
+
+
+def test_plainconvunet_yaml_builds_and_forwards() -> None:
+    """Structural build + forward without the oracle (runs on any CI)."""
+    num_classes = 3
+    net = _build_plainconv(ISOTROPIC_STRIDES, features=[4, 8, 16, 32], num_classes=num_classes)
+    assert isinstance(net, Network)
+    assert net.get_name() == "PlainConvUNet"
+
+    trace = forward_trace(net, seeded_input(1, 1, 32, 32, 32))
+
+    # The head's Conv output is the raw logits; Softmax preserves them, ArgMax
+    # collapses the class axis to a single discrete channel.
+    assert trace["Head.Conv"].shape == (1, num_classes, 32, 32, 32)
+    assert trace["Head.Softmax"].shape == (1, num_classes, 32, 32, 32)
+    assert trace["Head.Argmax"].shape == (1, 1, 32, 32, 32)
+
+
+def test_plainconvunet_yaml_uses_affine_instance_norm_and_leaky_relu() -> None:
+    # The nnU-Net signature: Conv(bias) -> InstanceNorm(affine=True) -> LeakyReLU,
+    # with the first conv of each downsampling stage carrying the stride.
+    net = _build_plainconv(ISOTROPIC_STRIDES)
+    encoder0 = net["Encoder0"]
+    assert [type(module).__name__ for module in encoder0.values()] == [
+        "Conv3d",
+        "InstanceNorm3d",
+        "LeakyReLU",
+        "Conv3d",
+        "InstanceNorm3d",
+        "LeakyReLU",
+    ]
+    norm = encoder0["Norm_0"]
+    assert norm.affine is True
+    assert norm.track_running_stats is False
+    assert encoder0["Conv_0"].bias is not None
+    # nnU-Net downsamples with a strided convolution, not a pooling layer.
+    assert net["Encoder1"]["Conv_0"].stride == (2, 2, 2)
+    assert net["Encoder1"]["Conv_1"].stride == (1, 1, 1)
+
+
+# =========================================================================================== #
+# SegResNet: the shipped SegResNet.yml is weight-exact with MONAI 1.4.0 SegResNet.
+#
+# The declarative ``SegResNet.yml`` reproduces MONAI's plain SegResNet (no VAE branch) at its
+# default hyperparameters (init_filters 8, widths [8, 16, 32, 64], blocks_down (1, 2, 2, 4),
+# blocks_up (1, 1, 1)) exactly: the pre-activation ResBlock (norm-act-conv, norm-act-conv,
+# +identity), bias-free convolutions, GroupNorm(num_groups=8) and align_corners=False linear
+# upsampling all match, so transferring MONAI's ``state_dict`` by shape and running a fixed
+# seeded input in ``eval`` mode gives ``torch.allclose`` logits in both 2D and 3D.
+#
+# Divergence from MONAI is limited to KonfAI's segmentation convention: the YAML appends a
+# ``Softmax`` + ``ArgMax`` inference head after the logits convolution (``Head:Conv``).
+# Equivalence is therefore asserted at the logits conv, before that head; parameter
+# shapes/count are unaffected (Softmax and ArgMax are parameter-free).
+#
+# The structural asserts (build, forward, shapes, terminal head, parameter count) run without
+# MONAI so CI still validates the catalog entry; the oracle test ``importorskip``s MONAI and is
+# skipped cleanly where it is absent.
+# =========================================================================================== #
+SEGRESNET_YML = CATALOG / "SegResNet.yml"
+
+# MONAI SegResNet(init_filters=8, in=1, out=2, blocks_down=(1,2,2,4), blocks_up=(1,1,1)).
+SEGRESNET_NB_CLASS = 2
+SEGRESNET_PARAM_COUNT_2D = 394986
+SEGRESNET_PARAM_COUNT_3D = 1176186
+SEGRESNET_NUM_PARAM_TENSORS = 83
+
+SEGRESNET_INPUT_2D = (1, 1, 32, 32)
+SEGRESNET_INPUT_3D = (1, 1, 16, 16, 16)
+
+# MONAI groups a ResBlock's two norms then its two convs; the KonfAI graph
+# registers them in forward order (norm1, conv1, norm2, conv2), and MONAI lists
+# every ``up_layers`` block before every ``up_samples`` block. Names therefore
+# differ, so MONAI weights are transferred through this explicit shape-checked map.
+_SEGRESNET_STAGE = {
+    "down_layers.0.1": "Enc0_ResBlock0",
+    "down_layers.1.0": "Enc1_Down",
+    "down_layers.1.1": "Enc1_ResBlock0",
+    "down_layers.1.2": "Enc1_ResBlock1",
+    "down_layers.2.0": "Enc2_Down",
+    "down_layers.2.1": "Enc2_ResBlock0",
+    "down_layers.2.2": "Enc2_ResBlock1",
+    "down_layers.3.0": "Enc3_Down",
+    "down_layers.3.1": "Enc3_ResBlock0",
+    "down_layers.3.2": "Enc3_ResBlock1",
+    "down_layers.3.3": "Enc3_ResBlock2",
+    "down_layers.3.4": "Enc3_ResBlock3",
+    "up_layers.0.0": "Dec0_ResBlock0",
+    "up_layers.1.0": "Dec1_ResBlock0",
+    "up_layers.2.0": "Dec2_ResBlock0",
+}
+_SEGRESNET_RESBLOCK_LEAF = {
+    "norm1.weight": "Norm1.weight",
+    "norm1.bias": "Norm1.bias",
+    "norm2.weight": "Norm2.weight",
+    "norm2.bias": "Norm2.bias",
+    "conv1.conv.weight": "Conv1.weight",
+    "conv2.conv.weight": "Conv2.weight",
+}
+
+
+def _monai_to_konfai(key: str) -> str:
+    """Translate a MONAI SegResNet ``state_dict`` key to the KonfAI graph key."""
+    if key == "convInit.conv.weight":
+        return "ConvInit.weight"
+    up = re.fullmatch(r"up_samples\.(\d)\.0\.conv\.weight", key)
+    if up:
+        return f"Dec{up.group(1)}_UpConv.weight"
+    conv_final = {
+        "conv_final.0.weight": "Head.Norm.weight",
+        "conv_final.0.bias": "Head.Norm.bias",
+        "conv_final.2.conv.weight": "Head.Conv.weight",
+        "conv_final.2.conv.bias": "Head.Conv.bias",
+    }
+    if key in conv_final:
+        return conv_final[key]
+    for stage, name in _SEGRESNET_STAGE.items():
+        if key.startswith(stage + "."):
+            suffix = key[len(stage) + 1 :]
+            if suffix == "conv.weight":  # strided downsampling conv
+                return f"{name}.weight"
+            return f"{name}.{_SEGRESNET_RESBLOCK_LEAF[suffix]}"
+    raise KeyError(key)
+
+
+def _build_segresnet(dim: int, upsample_mode: str) -> Network:
+    return build_model_from_yaml(
+        yaml_path=str(SEGRESNET_YML),
+        parameters={"dim": dim, "upsample_mode": upsample_mode, "nb_class": SEGRESNET_NB_CLASS},
+    )
+
+
+SEGRESNET_DIM_CASES = pytest.mark.parametrize(
+    ("dim", "upsample_mode", "input_shape", "param_count"),
+    [
+        (2, "bilinear", SEGRESNET_INPUT_2D, SEGRESNET_PARAM_COUNT_2D),
+        (3, "trilinear", SEGRESNET_INPUT_3D, SEGRESNET_PARAM_COUNT_3D),
+    ],
+    ids=["2d", "3d"],
+)
+
+
+@SEGRESNET_DIM_CASES
+def test_segresnet_builds_with_expected_parameter_count(dim, upsample_mode, input_shape, param_count) -> None:
+    net = _build_segresnet(dim, upsample_mode)
+    assert isinstance(net, Network)
+    assert sum(p.numel() for p in net.parameters()) == param_count
+    assert len(list(net.parameters())) == SEGRESNET_NUM_PARAM_TENSORS
+
+
+def test_segresnet_terminal_head_is_the_only_output() -> None:
+    net = _build_segresnet(2, "bilinear")
+    assert terminal_output_paths(net) == ["Head"]
+    # The logits module a user references in ``outputs_criterions`` must exist.
+    assert any(name == "Head.Conv" for name, _, _ in net.named_module_args_dict())
+
+
+@SEGRESNET_DIM_CASES
+def test_segresnet_forward_preserves_spatial_and_channels(dim, upsample_mode, input_shape, param_count) -> None:
+    net = _build_segresnet(dim, upsample_mode)
+    inputs = seeded_input(*input_shape)
+
+    logits = capture_output(net, inputs, "Head.Conv")
+    # Logits: channels == nb_class, spatial preserved.
+    assert logits.shape == (input_shape[0], SEGRESNET_NB_CLASS, *input_shape[2:])
+
+    # Terminal ArgMax label map: single channel, spatial preserved.
+    label_map = net.forward_tensor(inputs)
+    assert label_map.shape == (input_shape[0], 1, *input_shape[2:])
+    assert label_map.dtype == torch.int64
+
+
+@SEGRESNET_DIM_CASES
+def test_weight_exact_vs_monai_segresnet(dim, upsample_mode, input_shape, param_count) -> None:
+    monai = pytest.importorskip("monai")
+    from monai.networks.nets import SegResNet
+
+    reference = SegResNet(
+        spatial_dims=dim,
+        init_filters=8,
+        in_channels=1,
+        out_channels=SEGRESNET_NB_CLASS,
+        blocks_down=(1, 2, 2, 4),
+        blocks_up=(1, 1, 1),
+    )
+    assert sum(p.numel() for p in reference.parameters()) == param_count, monai.__version__
+
+    net = _build_segresnet(dim, upsample_mode)
+    target = flat_state_dict(net)
+
+    remapped: dict[str, torch.Tensor] = {}
+    for monai_key, tensor in reference.state_dict().items():
+        konfai_key = _monai_to_konfai(monai_key)
+        assert konfai_key in target, konfai_key
+        assert target[konfai_key].shape == tensor.shape, (monai_key, konfai_key)
+        remapped[konfai_key] = tensor
+    assert set(remapped) == set(target), "the MONAI -> KonfAI key map is not a bijection"
+    net.load_state_dict(remapped)
+
+    reference.eval()
+    inputs = seeded_input(*input_shape)
+    with torch.no_grad():
+        expected = reference(inputs)
+    logits = capture_output(net, inputs, "Head.Conv")
+
+    assert logits.shape == expected.shape
+    assert torch.allclose(logits, expected, atol=1e-5)
 
 
 # =========================================================================================== #
@@ -55,7 +391,10 @@ UNET_YML = Path(__file__).resolve().parents[2] / "examples" / "Segmentation" / "
 # graph with the same parameter count and forward behaviour as the hand-written
 # ``konfai.models.python.segmentation.UNet`` configured identically.
 # =========================================================================================== #
-def _build_yaml_unet():
+UNET_YML = REPO / "examples" / "Segmentation" / "UNet.yml"
+
+
+def _build_yaml_unet() -> Network:
     params = {"dim": 2, "channels": [1, 32, 64, 128, 256], "nb_class": 41}
     return build_model_from_yaml(yaml_path=str(UNET_YML), parameters=params)
 
@@ -107,7 +446,7 @@ RESNET_YML = CATALOG / "ResNet.yml"
 NESTED_UNET_CHANNELS = [1, 2, 4, 8, 16, 32]
 RESNET_WIDTHS = [4, 4, 8, 16, 32]
 
-INPUT_SHAPE = (1, 1, 32, 32)
+PAIR_INPUT_SHAPE = (1, 1, 32, 32)
 
 
 def _build_nested_unet_pair() -> tuple[Network, Network]:
@@ -143,19 +482,11 @@ EXPECTED_TERMINAL_PATHS = {
 pair_case = pytest.mark.parametrize("model_name", sorted(MODEL_PAIRS), ids=sorted(MODEL_PAIRS))
 
 
-def _flat_state_dict(net: Network) -> dict[str, torch.Tensor]:
-    return net.state_dict()[net.get_name()]
-
-
 def _routing_table(net: Network) -> dict[str, tuple[list[str], list[str], list[str], bool]]:
     return {
         name: (list(args.in_branch), list(args.out_branch), list(args.alias), args.pretrained)
         for name, _, args in net.named_module_args_dict()
     }
-
-
-def _terminal_output_paths(net: Network) -> list[str]:
-    return [name for name, _, args in net.named_module_args_dict() if "-1" in args.out_branch]
 
 
 def _assert_tensors_equal(name: str, yaml_out: torch.Tensor, python_out: torch.Tensor) -> None:
@@ -176,8 +507,8 @@ def test_resnet_registry_primitives_are_registered() -> None:
 def test_state_dict_keys_and_shapes_match_one_to_one(model_name: str) -> None:
     yaml_net, python_net = MODEL_PAIRS[model_name]()
 
-    yaml_sd = _flat_state_dict(yaml_net)
-    python_sd = _flat_state_dict(python_net)
+    yaml_sd = flat_state_dict(yaml_net)
+    python_sd = flat_state_dict(python_net)
 
     assert list(yaml_sd) == list(python_sd)
     for key in python_sd:
@@ -188,8 +519,8 @@ def test_state_dict_keys_and_shapes_match_one_to_one(model_name: str) -> None:
 def test_terminal_output_paths_match(model_name: str) -> None:
     yaml_net, python_net = MODEL_PAIRS[model_name]()
 
-    assert _terminal_output_paths(python_net) == EXPECTED_TERMINAL_PATHS[model_name]
-    assert _terminal_output_paths(yaml_net) == EXPECTED_TERMINAL_PATHS[model_name]
+    assert terminal_output_paths(python_net) == EXPECTED_TERMINAL_PATHS[model_name]
+    assert terminal_output_paths(yaml_net) == EXPECTED_TERMINAL_PATHS[model_name]
 
 
 @pair_case
@@ -206,12 +537,11 @@ def test_module_paths_and_branch_routing_match(model_name: str) -> None:
 @pair_case
 def test_forward_traces_are_identical_with_shared_weights(model_name: str) -> None:
     yaml_net, python_net = MODEL_PAIRS[model_name]()
-    yaml_net.load_state_dict(_flat_state_dict(python_net))
+    yaml_net.load_state_dict(flat_state_dict(python_net))
     yaml_net.eval()
     python_net.eval()
 
-    torch.manual_seed(0)
-    inputs = torch.randn(*INPUT_SHAPE)
+    inputs = seeded_input(*PAIR_INPUT_SHAPE)
 
     with torch.no_grad():
         yaml_trace = list(yaml_net.named_forward(inputs))
@@ -279,16 +609,6 @@ def _attention_gate_paths(net: Network) -> list[str]:
     return [name for name, _, _ in net.named_module_args_dict() if name.split(".")[-1] == "AttentionGate"]
 
 
-def _terminal_paths(net: Network) -> list[str]:
-    return [name for name, _, args in net.named_module_args_dict() if "-1" in args.out_branch]
-
-
-def _forward_trace(net: Network, x: torch.Tensor) -> dict[str, torch.Tensor]:
-    net.eval()
-    with torch.no_grad():
-        return dict(net.named_forward(x))
-
-
 def _head_softmax(trace: dict[str, torch.Tensor]) -> torch.Tensor:
     softmaxes = [value for key, value in trace.items() if key.endswith("Head.Softmax")]
     assert softmaxes, "the segmentation head must expose a Softmax output"
@@ -301,20 +621,12 @@ def test_builds_as_network_with_three_attention_gates() -> None:
     gates = _attention_gate_paths(net)
     assert len(gates) == 3
     assert set(gates) == EXPECTED_GATE_PATHS
-    assert _terminal_paths(net) == ATTENTION_TERMINAL_PATHS
+    assert terminal_output_paths(net) == ATTENTION_TERMINAL_PATHS
 
 
-def test_default_catalog_entry_builds() -> None:
-    net = build_model_from_yaml(yaml_path=str(ATTENTION_UNET_YML))
-    assert isinstance(net, Network)
-    assert set(_attention_gate_paths(net)) == EXPECTED_GATE_PATHS
-
-
-def test_forward_2d_preserves_spatial_shape_and_class_channels() -> None:
+def test_attention_unet_forward_2d_preserves_spatial_shape_and_class_channels() -> None:
     net = _build_attention_unet(2, CHANNELS_2D)
-    torch.manual_seed(0)
-    x = torch.randn(1, CHANNELS_2D[0], 64, 64)
-    trace = _forward_trace(net, x)
+    trace = forward_trace(net, seeded_input(1, CHANNELS_2D[0], 64, 64))
     softmax = _head_softmax(trace)
     final = list(trace.values())[-1]
     assert softmax.shape == (1, ATTENTION_NB_CLASS, 64, 64)
@@ -323,11 +635,9 @@ def test_forward_2d_preserves_spatial_shape_and_class_channels() -> None:
     assert sum(p.numel() for p in net.parameters()) == EXPECTED_PARAMS_2D
 
 
-def test_forward_3d_preserves_spatial_shape_and_class_channels() -> None:
+def test_attention_unet_forward_3d_preserves_spatial_shape_and_class_channels() -> None:
     net = _build_attention_unet(3, CHANNELS_3D)
-    torch.manual_seed(0)
-    x = torch.randn(1, CHANNELS_3D[0], 32, 32, 32)
-    trace = _forward_trace(net, x)
+    trace = forward_trace(net, seeded_input(1, CHANNELS_3D[0], 32, 32, 32))
     softmax = _head_softmax(trace)
     final = list(trace.values())[-1]
     assert softmax.shape == (1, ATTENTION_NB_CLASS, 32, 32, 32)
@@ -341,9 +651,7 @@ def test_attention_gate_multiplies_the_skip_at_full_resolution() -> None:
     # by the upsampled attention coefficients, so its output keeps the skip's
     # f_l channels (channels[1]) and full spatial size for the finest gate.
     net = _build_attention_unet(2, CHANNELS_2D)
-    torch.manual_seed(0)
-    x = torch.randn(1, CHANNELS_2D[0], 64, 64)
-    trace = _forward_trace(net, x)
+    trace = forward_trace(net, seeded_input(1, CHANNELS_2D[0], 64, 64))
     gated = trace["UNetBlock_0.UNetBlock_1.AttentionGate.Multiply"]
     assert gated.shape == (1, CHANNELS_2D[1], 64, 64)
     assert torch.isfinite(gated).all()
@@ -368,19 +676,16 @@ def test_matches_monai_attention_unet_structurally() -> None:
         strides=(2, 2, 2),
     )
 
-    torch.manual_seed(0)
-    x = torch.randn(1, channels[0], 64, 64)
-    konfai_net.eval()
+    x = seeded_input(1, channels[0], 64, 64)
     monai_net.eval()
     with torch.no_grad():
         monai_out = monai_net(x)
-        konfai_softmax = _head_softmax(_forward_trace(konfai_net, x))
+    konfai_softmax = _head_softmax(forward_trace(konfai_net, x))
 
     # Both are Attention U-Nets: identical segmentation output shape.
     assert konfai_softmax.shape == monai_out.shape == (1, nb_class, 64, 64)
 
-    konfai_sd = konfai_net.state_dict()[konfai_net.get_name()]
-    konfai_shapes = [tuple(v.shape) for v in konfai_sd.values()]
+    konfai_shapes = [tuple(v.shape) for v in flat_state_dict(konfai_net).values()]
     monai_shapes = [tuple(v.shape) for v in monai_net.state_dict().values()]
     # Graphs differ by construction -> weight transfer is impossible (not weight-exact).
     assert konfai_shapes != monai_shapes
@@ -424,62 +729,50 @@ DYNUNET_YML = CATALOG / "DynUNet.yml"
 # topology: 4 encoder stages -> 3 decoder stages -> 2 deep-supervision heads
 # plus the full-resolution head. ``channels`` is [in, f0, f1, f2, f3].
 CHANNELS = [1, 8, 16, 32, 64]
-NB_CLASS = 3
+DYNUNET_NB_CLASS = 3
 
 # The full-resolution head plus the two deep-supervision heads, in the order in
 # which they are declared (matching MONAI's output_block, then heads[0..1]).
 EXPECTED_TERMINAL_HEADS = ["Head", "DeepSupervisionHead_1", "DeepSupervisionHead_2"]
 
 
-def _build_yaml(dim: int) -> Network:
+def _build_dynunet(dim: int) -> Network:
     return build_model_from_yaml(
         yaml_path=str(DYNUNET_YML),
-        parameters={"dim": dim, "channels": CHANNELS, "nb_class": NB_CLASS},
+        parameters={"dim": dim, "channels": CHANNELS, "nb_class": DYNUNET_NB_CLASS},
     )
-
-
-def _terminal_heads(net: Network) -> list[str]:
-    return [name for name, _, args in net.named_module_args_dict() if "-1" in args.out_branch]
 
 
 def _spatial(dim: int) -> tuple[int, ...]:
     return (32, 32) if dim == 2 else (16, 16, 16)
 
 
-# --------------------------------------------------------------------------- #
-# Structural-strict tests (run without MONAI).
-# --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("dim", [2, 3])
 def test_dynunet_builds_as_a_network(dim: int) -> None:
-    net = _build_yaml(dim)
+    net = _build_dynunet(dim)
     assert isinstance(net, Network)
     assert net.get_name() == "DynUNet"
 
 
 @pytest.mark.parametrize("dim", [2, 3])
 def test_dynunet_deep_supervision_heads_are_terminal(dim: int) -> None:
-    net = _build_yaml(dim)
-    assert _terminal_heads(net) == EXPECTED_TERMINAL_HEADS
+    net = _build_dynunet(dim)
+    assert terminal_output_paths(net) == EXPECTED_TERMINAL_HEADS
 
 
 @pytest.mark.parametrize("dim", [2, 3])
 def test_dynunet_forward_head_shapes(dim: int) -> None:
-    net = _build_yaml(dim)
-    net.eval()
+    net = _build_dynunet(dim)
     spatial = _spatial(dim)
-    torch.manual_seed(0)
-    x = torch.randn(1, CHANNELS[0], *spatial)
-
-    with torch.no_grad():
-        trace = dict(net.named_forward(x))
+    trace = forward_trace(net, seeded_input(1, CHANNELS[0], *spatial))
 
     half = tuple(s // 2 for s in spatial)
     quarter = tuple(s // 4 for s in spatial)
 
     # Softmax outputs carry the nb_class channel; spatial is preserved per level.
-    assert trace["Head.Softmax"].shape == (1, NB_CLASS, *spatial)
-    assert trace["DeepSupervisionHead_1.Softmax"].shape == (1, NB_CLASS, *half)
-    assert trace["DeepSupervisionHead_2.Softmax"].shape == (1, NB_CLASS, *quarter)
+    assert trace["Head.Softmax"].shape == (1, DYNUNET_NB_CLASS, *spatial)
+    assert trace["DeepSupervisionHead_1.Softmax"].shape == (1, DYNUNET_NB_CLASS, *half)
+    assert trace["DeepSupervisionHead_2.Softmax"].shape == (1, DYNUNET_NB_CLASS, *quarter)
 
     # The terminal ArgMax collapses the class axis to a single discrete channel.
     assert trace["Head.Argmax"].shape == (1, 1, *spatial)
@@ -490,7 +783,7 @@ def test_dynunet_forward_head_shapes(dim: int) -> None:
 @pytest.mark.parametrize("dim", [2, 3])
 def test_dynunet_uses_instance_norm_and_leaky_relu(dim: int) -> None:
     # The nnU-Net signature: Conv -> InstanceNorm(affine=False) -> LeakyReLU.
-    net = _build_yaml(dim)
+    net = _build_dynunet(dim)
     encoder0 = net["Encoder0"]
     module_types = [type(module).__name__ for module in encoder0.values()]
     assert module_types == [
@@ -509,17 +802,14 @@ def test_dynunet_uses_instance_norm_and_leaky_relu(dim: int) -> None:
     assert down_conv.stride == (2,) * dim
 
 
-# --------------------------------------------------------------------------- #
-# Oracle test: weight-exact vs MONAI DynUNet (skips cleanly without MONAI).
-# --------------------------------------------------------------------------- #
-def _build_monai(dim: int):
+def _build_monai_dynunet(dim: int):
     pytest.importorskip("monai")
     from monai.networks.nets import DynUNet
 
     return DynUNet(
         spatial_dims=dim,
         in_channels=CHANNELS[0],
-        out_channels=NB_CLASS,
+        out_channels=DYNUNET_NB_CLASS,
         kernel_size=[3, 3, 3, 3],
         strides=[1, 2, 2, 2],
         upsample_kernel_size=[2, 2, 2],
@@ -533,8 +823,8 @@ def _build_monai(dim: int):
 
 @pytest.mark.parametrize("dim", [2, 3])
 def test_dynunet_parameter_shapes_match_monai_position_by_position(dim: int) -> None:
-    yaml_net = _build_yaml(dim)
-    monai_net = _build_monai(dim)
+    yaml_net = _build_dynunet(dim)
+    monai_net = _build_monai_dynunet(dim)
 
     yaml_params = list(yaml_net.parameters())
     monai_params = list(monai_net.parameters())
@@ -546,8 +836,8 @@ def test_dynunet_parameter_shapes_match_monai_position_by_position(dim: int) -> 
 
 @pytest.mark.parametrize("dim", [2, 3])
 def test_dynunet_is_weight_exact_with_monai(dim: int) -> None:
-    yaml_net = _build_yaml(dim)
-    monai_net = _build_monai(dim)
+    yaml_net = _build_dynunet(dim)
+    monai_net = _build_monai_dynunet(dim)
 
     # Transfer MONAI's weights into the YAML graph by shape-ordered position.
     with torch.no_grad():
@@ -558,8 +848,7 @@ def test_dynunet_is_weight_exact_with_monai(dim: int) -> None:
     yaml_net.eval()
     monai_net.eval()
     spatial = _spatial(dim)
-    torch.manual_seed(0)
-    x = torch.randn(1, CHANNELS[0], *spatial)
+    x = seeded_input(1, CHANNELS[0], *spatial)
 
     # MONAI in eval mode returns only the full-resolution head logits.
     with torch.no_grad():
@@ -608,7 +897,7 @@ def test_defaults_reproduce_the_torchvision_resnet18_parameter_count() -> None:
     assert total == TORCHVISION_RESNET18_PARAMS, total
 
 
-def test_torchvision_pretrained_weights_drive_the_konfai_graph() -> None:
+def test_resnet18_pretrained_weights_drive_the_konfai_graph() -> None:
     torchvision = pytest.importorskip("torchvision")
 
     # weights=None keeps the ImageNet download out of CI; the point is graph-exactness, not the
@@ -619,8 +908,7 @@ def test_torchvision_pretrained_weights_drive_the_konfai_graph() -> None:
 
     net = _resnet18_yaml()
 
-    torch.manual_seed(1)
-    inputs = torch.randn(1, 3, 64, 64)
+    inputs = seeded_input(1, 3, 64, 64, seed=1)
 
     # No torchvision->KonfAI key map is supplied: the bridge pairs leaves by forward-execution order.
     transferred = transfer_weights_by_execution_order(
@@ -641,7 +929,7 @@ def test_torchvision_pretrained_weights_drive_the_konfai_graph() -> None:
     assert torch.allclose(logits, expected, atol=1e-4), max_diff
 
 
-def test_small_variant_forward_shape_without_torchvision() -> None:
+def test_resnet18_small_variant_forward_shape_without_torchvision() -> None:
     num_classes = 4
     net = _resnet18_yaml(
         {
@@ -652,8 +940,7 @@ def test_small_variant_forward_shape_without_torchvision() -> None:
         }
     )
     net.eval()
-    torch.manual_seed(0)
-    inputs = torch.randn(1, 3, 32, 32)
+    inputs = seeded_input(1, 3, 32, 32)
     with torch.no_grad():
         logits = net.forward_tensor(inputs)
     assert logits.shape == (1, num_classes)
@@ -721,8 +1008,7 @@ def test_unetr_has_twelve_transformer_layers_and_one_positional_embedding() -> N
 
 def test_unetr_terminal_output_conv_is_marked() -> None:
     net = _build_unetr()
-    terminal = [name for name, _, args in net.named_module_args_dict() if "-1" in args.out_branch]
-    assert terminal == ["Out"]
+    assert terminal_output_paths(net) == ["Out"]
 
 
 def test_unetr_forward_3d_returns_segmentation_map_at_input_resolution() -> None:
@@ -834,21 +1120,13 @@ def _vgg16_yaml(parameters: dict | None = None) -> Network:
     return build_model_from_yaml(yaml_path=str(VGG16), parameters=parameters)
 
 
-def _named_outputs(net: Network, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
-    outputs: dict[str, torch.Tensor] = {}
-    with torch.no_grad():
-        for name, out in net.named_forward(inputs):
-            outputs[name] = out
-    return outputs
-
-
 def test_defaults_reproduce_the_torchvision_vgg16_feature_parameter_count() -> None:
     net = _vgg16_yaml()
     total = sum(param.numel() for param in net.parameters())
     assert total == TORCHVISION_VGG16_FEATURES_PARAMS, total
 
 
-def test_torchvision_pretrained_weights_drive_the_five_konfai_feature_outputs() -> None:
+def test_vgg16_pretrained_weights_drive_the_five_feature_outputs() -> None:
     torchvision = pytest.importorskip("torchvision")
 
     # weights=None keeps the ImageNet download out of CI; the point is graph-exactness, not the actual
@@ -859,8 +1137,7 @@ def test_torchvision_pretrained_weights_drive_the_five_konfai_feature_outputs() 
 
     net = _vgg16_yaml()
 
-    torch.manual_seed(1)
-    inputs = torch.randn(1, 3, 64, 64)
+    inputs = seeded_input(1, 3, 64, 64, seed=1)
 
     # No torchvision->KonfAI key map is supplied: the bridge pairs leaves by forward-execution order.
     transferred = transfer_weights_by_execution_order(
@@ -882,8 +1159,7 @@ def test_torchvision_pretrained_weights_drive_the_five_konfai_feature_outputs() 
                 expected.append(activation.clone())
     assert len(expected) == len(BLOCK_OUTPUTS)
 
-    net.eval()
-    outputs = _named_outputs(net, inputs)
+    outputs = forward_trace(net, inputs)
 
     for path, reference_activation in zip(BLOCK_OUTPUTS, expected, strict=True):
         assert path in outputs, f"missing terminal output '{path}'"
@@ -893,25 +1169,19 @@ def test_torchvision_pretrained_weights_drive_the_five_konfai_feature_outputs() 
         assert torch.allclose(produced, reference_activation, atol=1e-4), (path, max_diff)
 
 
-def test_five_named_terminal_outputs_expose_the_feature_channel_schedule() -> None:
+def test_vgg16_five_terminal_outputs_expose_the_feature_channel_schedule() -> None:
     net = _vgg16_yaml()
-    net.eval()
-    torch.manual_seed(0)
-    inputs = torch.randn(1, 3, 32, 32)
-    outputs = _named_outputs(net, inputs)
+    outputs = forward_trace(net, seeded_input(1, 3, 32, 32))
 
     for path, channels in zip(BLOCK_OUTPUTS, BLOCK_CHANNELS, strict=True):
         assert path in outputs, f"missing terminal output '{path}'"
         assert outputs[path].shape[1] == channels, (path, outputs[path].shape)
 
 
-def test_small_variant_forward_shapes_without_torchvision() -> None:
+def test_vgg16_small_variant_forward_shapes_without_torchvision() -> None:
     widths = [4, 8, 16, 16, 16]
     net = _vgg16_yaml({"dim": 2, "in_channels": 3, "widths": widths})
-    net.eval()
-    torch.manual_seed(0)
-    inputs = torch.randn(1, 3, 32, 32)
-    outputs = _named_outputs(net, inputs)
+    outputs = forward_trace(net, seeded_input(1, 3, 32, 32))
 
     # Block 0 keeps the input resolution; each later block halves it (a leading max-pool).
     expected_sizes = [32, 16, 8, 4, 2]
@@ -959,16 +1229,6 @@ def _build_vit(dim: int, num_tokens: int) -> Network:
     return build_model_from_yaml(yaml_path=str(VIT_YML), parameters={"dim": dim, "num_tokens": num_tokens})
 
 
-def _encoder_features(net: Network, inputs: torch.Tensor) -> torch.Tensor:
-    features = None
-    with torch.no_grad():
-        for name, out in net.named_forward(inputs):
-            if name == "Encoder.Norm":
-                features = out
-    assert features is not None, "the ViT graph never produced an 'Encoder.Norm' token-feature output"
-    return features
-
-
 def test_vit_builds_as_network() -> None:
     net = _build_vit(dim=3, num_tokens=8)
     assert isinstance(net, Network)
@@ -994,15 +1254,14 @@ def test_vit_forward_shapes(dim: int, input_shape: tuple[int, ...], num_tokens: 
     # KonfAI classifier convention: [B, num_classes, 1].
     assert logits.shape == (input_shape[0], VIT_NUM_CLASSES, 1)
 
-    features = _encoder_features(net, inputs)
+    features = capture_output(net, inputs, "Encoder.Norm")
     # Normalised token sequence: [B, num_tokens, hidden_size].
     assert features.shape == (input_shape[0], num_tokens, HIDDEN)
 
 
 def test_vit_terminal_head_is_marked() -> None:
     net = _build_vit(dim=3, num_tokens=8)
-    terminal = [name for name, _, args in net.named_module_args_dict() if "-1" in args.out_branch]
-    assert terminal == ["Head"]
+    assert terminal_output_paths(net) == ["Head"]
 
 
 def test_vit_has_four_encoder_layers_each_with_self_attention() -> None:
@@ -1038,8 +1297,7 @@ def test_vit_encoder_is_numerically_equivalent_to_monai() -> None:
         spatial_dims=3,
     ).eval()
 
-    torch.manual_seed(0)
-    inputs = torch.randn(1, 1, IMG, IMG, IMG)
+    inputs = seeded_input(1, 1, IMG, IMG, IMG)
 
     def encoder_forward() -> None:
         for name, _ in net.named_forward(inputs):
@@ -1066,7 +1324,7 @@ def test_vit_encoder_is_numerically_equivalent_to_monai() -> None:
     with torch.no_grad():
         positional.positional_embedding.copy_(reference.patch_embedding.position_embeddings)
 
-    features = _encoder_features(net, inputs)
+    features = capture_output(net, inputs, "Encoder.Norm")
     reference_features, _ = reference(inputs)
     assert features.shape == reference_features.shape == (1, 8, HIDDEN)
     assert torch.allclose(features, reference_features, atol=1e-5), (features - reference_features).abs().max().item()
@@ -1123,7 +1381,7 @@ def test_shipped_bridge_refuses_the_raw_pair_because_of_the_positional_embedding
 #
 # MONAI's ``VNet`` registers each block's activation *before* its convolution and
 # defaults to ELU (not in the registry); we instantiate the oracle with
-# ``act='prelu'`` — matching V-Net's canonical channel-wise PReLU — and pair the
+# ``act='prelu'`` -- matching V-Net's canonical channel-wise PReLU -- and pair the
 # leaves in forward-execution order rather than by state_dict key order.
 # =========================================================================================== #
 VNET_YML = CATALOG / "VNet.yml"
@@ -1134,50 +1392,18 @@ CANONICAL_PARAM_COUNT = 45_601_516
 CANONICAL_LEAF_COUNT = 81
 
 
-def _build(**parameters: object) -> Network:
+def _build_vnet(**parameters: object) -> Network:
     return build_model_from_yaml(yaml_path=str(VNET_YML), parameters=parameters or None)
 
 
-def _parametric_leaves_in_exec_order(model: torch.nn.Module, run) -> list[torch.nn.Module]:
-    """Collect parametric leaf modules in forward-execution order via hooks."""
-    order: list[torch.nn.Module] = []
-
-    def hook(module: torch.nn.Module, _inputs: object, _output: object) -> None:
-        order.append(module)
-
-    handles = []
-    for _, module in model.named_modules():
-        is_leaf = len(list(module.children())) == 0
-        if is_leaf and len(list(module.parameters(recurse=False))) > 0:
-            handles.append(module.register_forward_hook(hook))
-    model.eval()
-    with torch.no_grad():
-        run()
-    for handle in handles:
-        handle.remove()
-    return order
-
-
-def _yaml_logits(net: Network, x: torch.Tensor) -> torch.Tensor:
-    """Pre-softmax output produced by the ``out_conv2`` node."""
-    logits: torch.Tensor | None = None
-    with torch.no_grad():
-        for name, out in net.named_forward(x):
-            if name == "out_conv2":
-                logits = out
-    assert logits is not None, "the VNet graph must expose an 'out_conv2' logits node"
-    return logits
-
-
 def test_vnet_builds_into_a_network() -> None:
-    assert isinstance(_build(), Network)
+    assert isinstance(_build_vnet(), Network)
 
 
 def test_vnet_3d_forward_has_correct_shape() -> None:
-    net = _build()
-    net.eval()
+    net = _build_vnet()
     x = torch.randn(1, 1, 16, 16, 16)
-    logits = _yaml_logits(net, x)
+    logits = capture_output(net, x, "out_conv2")
     # segmentation head: channels == out_channels (default 2), spatial preserved.
     assert tuple(logits.shape) == (1, 2, 16, 16, 16)
     with torch.no_grad():
@@ -1189,10 +1415,9 @@ def test_vnet_3d_forward_has_correct_shape() -> None:
 def test_vnet_2d_build_also_runs() -> None:
     # V-Net is inherently 3D, but the graph is dim-parametrized so a 2D build is a
     # fast smoke that exercises the same routing.
-    net = _build(dim=2, out_channels=3)
-    net.eval()
+    net = _build_vnet(dim=2, out_channels=3)
     x = torch.randn(1, 1, 16, 16)
-    logits = _yaml_logits(net, x)
+    logits = capture_output(net, x, "out_conv2")
     assert tuple(logits.shape) == (1, 3, 16, 16)
     with torch.no_grad():
         argmax = net.forward_tensor(x)
@@ -1200,7 +1425,7 @@ def test_vnet_2d_build_also_runs() -> None:
 
 
 def test_vnet_has_residual_adds_and_skip_concats() -> None:
-    net = _build()
+    net = _build_vnet()
     adds = [name for name, module, _ in net.named_module_args_dict() if type(module).__name__ == "Add"]
     concats = [name for name, module, _ in net.named_module_args_dict() if type(module).__name__ == "Concat"]
     # One residual Add per stage: input + four encoder + four decoder.
@@ -1210,13 +1435,12 @@ def test_vnet_has_residual_adds_and_skip_concats() -> None:
 
 
 def test_vnet_exposes_a_single_terminal_head() -> None:
-    net = _build()
-    terminal = [name for name, _, args in net.named_module_args_dict() if "-1" in args.out_branch]
-    assert terminal == ["Head"]
+    net = _build_vnet()
+    assert terminal_output_paths(net) == ["Head"]
 
 
 def test_vnet_default_param_count_is_canonical() -> None:
-    net = _build()
+    net = _build_vnet()
     total = sum(p.numel() for p in net.parameters())
     assert total == CANONICAL_PARAM_COUNT
 
@@ -1226,11 +1450,11 @@ def test_vnet_weight_exact_vs_monai() -> None:
     from monai.networks.nets import VNet
 
     x = torch.randn(1, 1, 16, 16, 16)
-    yaml_net = _build()
+    yaml_net = _build_vnet()
     monai_net = VNet(spatial_dims=3, in_channels=1, out_channels=2, act="prelu", bias=False)
 
-    yaml_leaves = _parametric_leaves_in_exec_order(yaml_net, lambda: list(yaml_net.named_forward(x)))
-    monai_leaves = _parametric_leaves_in_exec_order(monai_net, lambda: monai_net(x))
+    yaml_leaves = parametric_leaves_in_execution_order(yaml_net, lambda: list(yaml_net.named_forward(x)))
+    monai_leaves = parametric_leaves_in_execution_order(monai_net, lambda: monai_net(x))
 
     # Identical parametric spine: same number of leaves, same types, same shapes,
     # in the same forward-execution order.
@@ -1247,11 +1471,10 @@ def test_vnet_weight_exact_vs_monai() -> None:
         for yaml_leaf, monai_leaf in zip(yaml_leaves, monai_leaves, strict=True):
             yaml_leaf.load_state_dict(monai_leaf.state_dict())
 
-    yaml_net.eval()
     monai_net.eval()
     with torch.no_grad():
         monai_out = monai_net(x)
-    yaml_out = _yaml_logits(yaml_net, x)
+    yaml_out = capture_output(yaml_net, x, "out_conv2")
 
     assert yaml_out.shape == monai_out.shape
     assert torch.allclose(yaml_out, monai_out, atol=1e-5), (yaml_out - monai_out).abs().max().item()
@@ -1272,34 +1495,34 @@ def test_vnet_weight_exact_vs_monai() -> None:
 # parametric weights transfer straight into the YAML graph through
 # ``transfer_weights_by_execution_order`` and the YAML logits are ``torch.allclose`` with the
 # parametric output (maxdiff < 1e-4). The parametric model is itself weight-exact with a real
-# ResEnc nnU-Net checkpoint (see test_residualencoderunet_parametric.py), so the YAML inherits
-# that equivalence. A structural build+forward test runs on any CI without the reference.
+# ResEnc nnU-Net checkpoint (see test_models_parametric.py), so the YAML inherits that
+# equivalence. A structural build+forward test runs on any CI without the reference.
 # =========================================================================================== #
 RESIDUALENCODERUNET_YML = CATALOG / "ResidualEncoderUNet.yml"
 
 # The exact ImpactSeg "body" topology: 2D, 5-channel input, 6 stages, 12 classes.
-DIM = 2
-IN_CHANNELS = 5
-N_STAGES = 6
-FEATURES_PER_STAGE = [24, 48, 96, 192, 256, 256]
-STRIDES = [1, 2, 2, 2, 2, 2]
-N_BLOCKS_PER_STAGE = [1, 2, 2, 3, 3, 3]
-N_CONV_PER_STAGE_DECODER = [1, 1, 1, 1, 1]
-NUM_CLASSES = 12
+RESENC_DIM = 2
+RESENC_IN_CHANNELS = 5
+RESENC_N_STAGES = 6
+RESENC_FEATURES_PER_STAGE = [24, 48, 96, 192, 256, 256]
+RESENC_STRIDES = [1, 2, 2, 2, 2, 2]
+RESENC_N_BLOCKS_PER_STAGE = [1, 2, 2, 3, 3, 3]
+RESENC_N_CONV_PER_STAGE_DECODER = [1, 1, 1, 1, 1]
+RESENC_NUM_CLASSES = 12
 # Weighted leaves executed by both graphs (deep_supervision off -> a single seg head):
 # 66 encoder (stem 2 + residual stages 64) + 15 decoder (5 * (transpose + conv + norm)) + 1 head.
-EXPECTED_WEIGHTED_LEAVES = 82
+RESENC_EXPECTED_WEIGHTED_LEAVES = 82
 
 
 def _build_resenc(
     *,
-    dim: int = DIM,
-    in_channels: int = IN_CHANNELS,
-    features_per_stage: list = FEATURES_PER_STAGE,
-    strides: list = STRIDES,
-    n_blocks_per_stage: list = N_BLOCKS_PER_STAGE,
-    n_conv_per_stage_decoder: list = N_CONV_PER_STAGE_DECODER,
-    num_classes: int = NUM_CLASSES,
+    dim: int = RESENC_DIM,
+    in_channels: int = RESENC_IN_CHANNELS,
+    features_per_stage: list = RESENC_FEATURES_PER_STAGE,
+    strides: list = RESENC_STRIDES,
+    n_blocks_per_stage: list = RESENC_N_BLOCKS_PER_STAGE,
+    n_conv_per_stage_decoder: list = RESENC_N_CONV_PER_STAGE_DECODER,
+    num_classes: int = RESENC_NUM_CLASSES,
 ) -> Network:
     return build_model_from_yaml(
         yaml_path=str(RESIDUALENCODERUNET_YML),
@@ -1315,18 +1538,18 @@ def _build_resenc(
     )
 
 
-def _build_reference() -> ResidualEncoderUNet:
+def _build_resenc_reference() -> ResidualEncoderUNet:
     # deep_supervision=False: the parametric model builds and runs only the finest seg head, exactly
     # the single-head ImpactSeg checkpoint configuration the declarative YAML reproduces.
     return ResidualEncoderUNet(
-        dim=DIM,
-        in_channels=IN_CHANNELS,
-        n_stages=N_STAGES,
-        features_per_stage=FEATURES_PER_STAGE,
-        strides=STRIDES,
-        n_blocks_per_stage=N_BLOCKS_PER_STAGE,
-        n_conv_per_stage_decoder=N_CONV_PER_STAGE_DECODER,
-        num_classes=NUM_CLASSES,
+        dim=RESENC_DIM,
+        in_channels=RESENC_IN_CHANNELS,
+        n_stages=RESENC_N_STAGES,
+        features_per_stage=RESENC_FEATURES_PER_STAGE,
+        strides=RESENC_STRIDES,
+        n_blocks_per_stage=RESENC_N_BLOCKS_PER_STAGE,
+        n_conv_per_stage_decoder=RESENC_N_CONV_PER_STAGE_DECODER,
+        num_classes=RESENC_NUM_CLASSES,
         deep_supervision=False,
     )
 
@@ -1334,10 +1557,9 @@ def _build_reference() -> ResidualEncoderUNet:
 def test_residualencoderunet_yaml_is_forward_exact() -> None:
     """Transfer the parametric ResidualEncoderUNet into the YAML graph; the logits must match."""
     yaml_net = _build_resenc()
-    reference = _build_reference()
+    reference = _build_resenc_reference()
 
-    torch.manual_seed(0)
-    x = torch.randn(1, IN_CHANNELS, 128, 128)
+    x = seeded_input(1, RESENC_IN_CHANNELS, 128, 128)
 
     # The bridge pairs weighted leaves in forward-execution order and raises if the two graphs are not
     # weight-exact (different leaf count or a shape mismatch), so a green transfer already proves the
@@ -1348,7 +1570,7 @@ def test_residualencoderunet_yaml_is_forward_exact() -> None:
         target_forward=lambda: list(yaml_net.named_forward(x)),
         source_forward=lambda: list(reference.named_forward(x)),
     )
-    assert transferred == EXPECTED_WEIGHTED_LEAVES
+    assert transferred == RESENC_EXPECTED_WEIGHTED_LEAVES
 
     # Equal weighted-leaf count AND equal total parameter count (the parametric deep_supervision=False
     # model builds exactly the single head the YAML carries).
@@ -1362,8 +1584,8 @@ def test_residualencoderunet_yaml_is_forward_exact() -> None:
         reference_trace = dict(reference.named_forward(x))
 
     yaml_logits = yaml_trace["SegHead"]
-    reference_logits = reference_trace[f"SegHead_{N_STAGES - 2}"]
-    assert yaml_logits.shape == reference_logits.shape == (1, NUM_CLASSES, 128, 128)
+    reference_logits = reference_trace[f"SegHead_{RESENC_N_STAGES - 2}"]
+    assert yaml_logits.shape == reference_logits.shape == (1, RESENC_NUM_CLASSES, 128, 128)
     max_diff = (yaml_logits - reference_logits).abs().max().item()
     assert max_diff < 1e-4, f"YAML diverges from the parametric model: maxdiff={max_diff:.2e}"
 
@@ -1385,13 +1607,9 @@ def test_residualencoderunet_yaml_builds_and_forwards() -> None:
     assert isinstance(net, Network)
     assert net.get_name() == "ResidualEncoderUNet"
 
-    net.eval()
-    torch.manual_seed(0)
     # A 6-stage net downsamples 2^5 = 32x, so the input must be divisible by 32 and leave the
     # bottleneck with > 1 spatial element (InstanceNorm requires it); 64 is the smallest such size.
-    x = torch.randn(1, 1, 64, 64, 64)
-    with torch.no_grad():
-        trace = dict(net.named_forward(x))
+    trace = forward_trace(net, seeded_input(1, 1, 64, 64, 64))
 
     # Full-resolution raw-logits head at the requested class count.
     assert trace["SegHead"].shape == (1, num_classes, 64, 64, 64)
@@ -1422,12 +1640,12 @@ def test_residualencoderunet_yaml_decoder_stage_is_a_two_input_node() -> None:
     assert [type(module).__name__ for module in decoder0.values()] == ["ConvTranspose2d", "Concat", "ConvBlock"]
     transpose = decoder0["Up"]
     assert transpose.stride == (2, 2)
-    assert transpose.in_channels == FEATURES_PER_STAGE[5]
-    assert transpose.out_channels == FEATURES_PER_STAGE[4]
+    assert transpose.in_channels == RESENC_FEATURES_PER_STAGE[5]
+    assert transpose.out_channels == RESENC_FEATURES_PER_STAGE[4]
     conv_block = decoder0["Conv"]
     # First decoder conv maps 2*skip -> skip (the concatenated transpose + skip).
-    assert conv_block["Conv_0"].in_channels == 2 * FEATURES_PER_STAGE[4]
-    assert conv_block["Conv_0"].out_channels == FEATURES_PER_STAGE[4]
+    assert conv_block["Conv_0"].in_channels == 2 * RESENC_FEATURES_PER_STAGE[4]
+    assert conv_block["Conv_0"].out_channels == RESENC_FEATURES_PER_STAGE[4]
 
 
 def test_residualencoderunet_yaml_stem_tracks_kernel_size_and_negative_slope() -> None:
@@ -1440,11 +1658,173 @@ def test_residualencoderunet_yaml_stem_tracks_kernel_size_and_negative_slope() -
     )
     net.eval()
     with torch.no_grad():
-        out = net.forward_tensor(torch.randn(1, IN_CHANNELS, 128, 128))
-    assert out.shape == (1, NUM_CLASSES, 128, 128)
+        out = net.forward_tensor(torch.randn(1, RESENC_IN_CHANNELS, 128, 128))
+    assert out.shape == (1, RESENC_NUM_CLASSES, 128, 128)
     stem_slopes = {
         module.negative_slope
         for name, module in net.named_modules()
         if isinstance(module, torch.nn.LeakyReLU) and "Stem" in name
     }
     assert stem_slopes == {0.2}
+
+
+# =========================================================================================== #
+# UNetPlusPlus: the declarative UNetPlusPlus.yml is forward-exact with the parametric
+# UNetPlusPlus.
+#
+# ``UNetPlusPlus.yml`` reproduces, block-for-block and in forward-execution order, the
+# parametric ``konfai.models.python.segmentation.unetplusplus.UNetPlusPlus`` (the ImpactSynth
+# "MR" backbone: a torchvision ResNet-34 encoder + a UNet++ nested decoder). It is authored at
+# the BLOCK level from two generic composite blocks, ``ResNetStage`` (a stack of
+# ``ResNetBasicBlock``) and ``UNetPlusPlusNode`` (a multi-input upsample / dense-concat /
+# two-conv grid node), so the graph reads as the architecture -- encoder stages + the UNet++
+# decoder grid + head -- not a conv-by-conv unroll.
+#
+# Because the weighted leaves execute in the same order as the parametric model, the parametric
+# weights transfer straight into the YAML graph through ``transfer_weights_by_execution_order``
+# and the YAML logits are ``torch.allclose`` with the parametric output (maxdiff < 1e-4). The
+# parametric model is itself weight-exact with a real ``smp.UnetPlusPlus`` checkpoint (see
+# test_models_parametric.py), so the YAML inherits that equivalence. A structural
+# build+forward test runs on any CI without ``smp``.
+# =========================================================================================== #
+UNETPLUSPLUS_YML = CATALOG / "UNetPlusPlus.yml"
+
+# The exact ImpactSynth "MR" backbone: 2D, 5-channel input, resnet34 encoder, 1 class, raw logits.
+UNETPP_DIM = 2
+UNETPP_IN_CHANNELS = 5
+UNETPP_NUM_CLASSES = 1
+# smp's UnetPlusPlus(resnet34) runs 117 weighted leaves: 72 encoder (stem 2 + 16 BasicBlocks) + 44
+# decoder (11 grid nodes x 2 Conv2dReLU x [conv + norm]) + 1 seg head.
+UNETPP_EXPECTED_WEIGHTED_LEAVES = 117
+
+
+def _build_unetpp(
+    *,
+    dim: int = UNETPP_DIM,
+    in_channels: int = UNETPP_IN_CHANNELS,
+    num_classes: int = UNETPP_NUM_CLASSES,
+    n_blocks_per_stage: list | None = None,
+) -> Network:
+    parameters: dict = {"dim": dim, "in_channels": in_channels, "num_classes": num_classes}
+    if n_blocks_per_stage is not None:
+        parameters["n_blocks_per_stage"] = n_blocks_per_stage
+    return build_model_from_yaml(yaml_path=str(UNETPLUSPLUS_YML), parameters=parameters)
+
+
+def _build_unetpp_reference(encoder_name: str = "resnet34") -> UNetPlusPlus:
+    return UNetPlusPlus(
+        dim=UNETPP_DIM,
+        in_channels=UNETPP_IN_CHANNELS,
+        classes=UNETPP_NUM_CLASSES,
+        encoder_name=encoder_name,
+        activation=None,
+    )
+
+
+def test_unetplusplus_yaml_is_forward_exact() -> None:
+    """Transfer the parametric UNetPlusPlus into the YAML graph; the logits must match."""
+    yaml_net = _build_unetpp()
+    reference = _build_unetpp_reference()
+
+    x = seeded_input(1, UNETPP_IN_CHANNELS, 64, 64)
+
+    # The bridge pairs weighted leaves in forward-execution order and raises if the two graphs are not
+    # weight-exact (different leaf count or a shape mismatch), so a green transfer already proves the
+    # YAML blocks line up with the parametric model leaf-for-leaf.
+    transferred = transfer_weights_by_execution_order(
+        yaml_net,
+        reference,
+        target_forward=lambda: list(yaml_net.named_forward(x)),
+        source_forward=lambda: list(reference.named_forward(x)),
+    )
+    assert transferred == UNETPP_EXPECTED_WEIGHTED_LEAVES
+
+    # Equal weighted-leaf count AND equal total parameter count (no built-but-unused module gap).
+    assert sum(1 for _ in yaml_net.parameters()) == sum(1 for _ in reference.parameters())
+    assert sum(p.numel() for p in yaml_net.parameters()) == sum(p.numel() for p in reference.parameters())
+
+    yaml_net.eval()
+    reference.eval()
+    with torch.no_grad():
+        yaml_trace = dict(yaml_net.named_forward(x))
+        reference_trace = dict(reference.named_forward(x))
+
+    yaml_logits = yaml_trace["SegmentationHead"]
+    reference_logits = reference_trace["SegmentationHead"]
+    assert yaml_logits.shape == reference_logits.shape == (1, UNETPP_NUM_CLASSES, 64, 64)
+    max_diff = (yaml_logits - reference_logits).abs().max().item()
+    assert max_diff < 1e-4, f"YAML diverges from the parametric model: maxdiff={max_diff:.2e}"
+
+
+def test_unetplusplus_yaml_is_forward_exact_resnet18() -> None:
+    """The block-count parameter scales the encoder down to resnet18 (BasicBlock layers [2, 2, 2, 2])."""
+    yaml_net = _build_unetpp(n_blocks_per_stage=[2, 2, 2, 2])
+    reference = _build_unetpp_reference(encoder_name="resnet18")
+
+    x = seeded_input(1, UNETPP_IN_CHANNELS, 64, 64, seed=1)
+
+    # resnet18 = 40 encoder + 44 decoder + 1 head = 85 weighted leaves.
+    transferred = transfer_weights_by_execution_order(
+        yaml_net,
+        reference,
+        target_forward=lambda: list(yaml_net.named_forward(x)),
+        source_forward=lambda: list(reference.named_forward(x)),
+    )
+    assert transferred == 85
+
+    yaml_net.eval()
+    reference.eval()
+    with torch.no_grad():
+        yaml_logits = dict(yaml_net.named_forward(x))["SegmentationHead"]
+        reference_logits = dict(reference.named_forward(x))["SegmentationHead"]
+    assert (yaml_logits - reference_logits).abs().max().item() < 1e-4
+
+
+def test_unetplusplus_yaml_builds_and_forwards() -> None:
+    """Structural build + forward without the reference (runs on any CI)."""
+    num_classes = 3
+    net = _build_unetpp(in_channels=2, num_classes=num_classes)
+    assert isinstance(net, Network)
+    assert net.get_name() == "UNetPlusPlus"
+
+    trace = forward_trace(net, seeded_input(1, 2, 64, 64))
+
+    # Full-resolution raw-logits head at the requested class count.
+    assert trace["SegmentationHead"].shape == (1, num_classes, 64, 64)
+    # The dense decoder grid built all 11 nodes (10 in the triangular grid + the final x_0_4 head): the
+    # last leaf yielded under each node's nested name is its output.
+    dense_nodes = {key.split(".")[0] for key in trace if key.startswith("x_")}
+    assert dense_nodes == {f"x_{d}_{ll}" for ll in range(4) for d in range(ll + 1)} | {"x_0_4"}
+
+
+def test_unetplusplus_yaml_node_is_a_multi_input_upsample_concat_conv() -> None:
+    # A mid-grid node (x_0_1) upsamples its predecessor, concatenates 2 dense skips + the encoder skip,
+    # then two Conv-BatchNorm-ReLU blocks mapping 256 + 128 + 128 = 512 -> 128.
+    net = _build_unetpp()
+    node = net["x_0_1"]
+    assert [type(module).__name__ for module in node.values()] == ["Upsample", "Concat", "ConvBlock"]
+    conv_block = node["Conv"]
+    assert conv_block["Conv_0"].in_channels == 512
+    assert conv_block["Conv_0"].out_channels == 128
+    assert conv_block["Conv_1"].in_channels == 128
+
+    # The final full-resolution node has no skip: it drops the concat and convolves the upsample alone.
+    final = net["x_0_4"]
+    assert [type(module).__name__ for module in final.values()] == ["Upsample", "ConvBlock"]
+    assert final["Conv"]["Conv_0"].in_channels == 32
+
+
+def test_unetplusplus_yaml_encoder_widths_propagate_into_the_decoder() -> None:
+    # stem_channels/stage_channels feed the decoder grid through references, so halving the encoder
+    # widths builds and forwards (the decoder is not pinned to the hardcoded 512/256/128/64 table).
+    net = build_model_from_yaml(
+        yaml_path=str(UNETPLUSPLUS_YML),
+        parameters={"stem_channels": 32, "stage_channels": [32, 64, 128, 256], "num_classes": 2},
+    )
+    # x_0_0 now takes up=stage[3]=256 + skip=stage[2]=128 -> 384 into its first conv (was 768).
+    assert net["x_0_0"]["Conv"]["Conv_0"].in_channels == 384
+    net.eval()
+    x = seeded_input(1, UNETPP_IN_CHANNELS, 64, 64)
+    with torch.no_grad():
+        out = dict(net.named_forward(x))["SegmentationHead"]
+    assert out.shape == (1, 2, 64, 64)
