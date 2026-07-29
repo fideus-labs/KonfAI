@@ -30,11 +30,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from harness import subprocess_env, write_image
-
-pytestmark = pytest.mark.integration
 
 SimpleITK = pytest.importorskip("SimpleITK")
+
+from harness import subprocess_env, write_image  # noqa: E402  (the harness imports SimpleITK itself)
+
+pytestmark = pytest.mark.integration
 
 TRAIN_NAME = "STREAMED_EVAL_01"
 

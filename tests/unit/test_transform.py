@@ -395,6 +395,14 @@ def test_inference_stack_super_init_enables_dataset_fallback():
     assert torch.allclose(out, torch.full((1, 2, 2), 4.0))
 
 
+@pytest.fixture(autouse=True)
+def _ambient_ports_survive(monkeypatch: pytest.MonkeyPatch):
+    """infer_entry pops both port vars from the real environment; registering them with monkeypatch
+    makes teardown put an ambient value back instead of leaking the deletion into the session."""
+    monkeypatch.delenv("KONFAI_MASTER_PORT", raising=False)
+    monkeypatch.delenv("KONFAI_TENSORBOARD_PORT", raising=False)
+
+
 def test_konfai_inference_reassembles_channels_in_sorted_order(tmp_path, monkeypatch):
     """Per-channel outputs must be stacked in deterministic (sorted) case order."""
     sitk = pytest.importorskip("SimpleITK")
