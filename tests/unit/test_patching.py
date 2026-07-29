@@ -127,7 +127,7 @@ def test_accumulator_gpu_blend_matches_cpu(combine_cls):
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("combine_cls", [None, Gaussian])
+@pytest.mark.parametrize("combine_cls", [None, Gaussian, Trim])
 @pytest.mark.parametrize("free_axis", [0, 1, 2])
 def test_free_axis_reassembles_like_its_concrete_extent(free_axis, combine_cls):
     """A free (``0``) axis spans the full extent and must reassemble identically to the concrete-extent
@@ -577,3 +577,46 @@ def test_trim_reassembles_exactly_and_keeps_values_discrete():
     out = accumulator.assemble()
     assert torch.equal(out, labels)
     assert torch.equal(out, out.round())
+
+
+@pytest.mark.parametrize(
+    "shape, patch, overlap",
+    [
+        ([8], [4], 2),  # 1-D, exact tiling
+        ([10, 12, 14], [6, 6, 6], 2),  # 3-D, no axis divisible by the stride
+        ([12, 14, 16], [6, 8, 8], [0, 2, 4]),  # a different overlap per axis, including none
+        ([5, 14, 14], [8, 8, 8], 4),  # patch larger than the volume on axis 0
+        ([16, 16], [8, 8], 0),  # no overlap at all
+        ([10, 10], [10, 10], 2),  # a single patch covering everything
+        ([9, 11], [4, 4], 3),  # odd overlap: the two halves must still abut
+    ],
+)
+def test_trim_kept_boxes_partition_the_volume(shape, patch, overlap):
+    """Every voxel is written exactly once — no gap, no overlap.
+
+    This is the property the selection path rests on: if the kept boxes tiled imperfectly, assembly
+    would leave holes (never written) or race (written twice), and neither shows up as an error.
+    """
+    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    combine = Trim()
+    combine.set_patch_config(patch, overlap)
+    accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
+
+    hits = torch.zeros(shape, dtype=torch.int32)
+    for patch_slice in accumulator.patch_slices:
+        dest = [slice(s.start, min(s.stop, shape[d])) for d, s in enumerate(patch_slice)]
+        box = accumulator._kept_box(patch_slice)
+        hits[tuple(slice(d.start + b.start, d.start + b.stop) for d, b in zip(dest, box, strict=True))] += 1
+
+    assert int(hits.min()) == 1, f"{int((hits == 0).sum())} voxel(s) written by no patch"
+    assert int(hits.max()) == 1, f"{int((hits > 1).sum())} voxel(s) written by more than one patch"
+
+
+def test_trim_keeps_the_patch_whole_when_there_is_nothing_to_trim():
+    """An overlap at least as wide as the patch leaves no central band; keep the patch instead.
+
+    Trimming both sides would give an empty window, and a patch that keeps nothing has no box to
+    write — the box derivation would fail on an empty ``nonzero()``.
+    """
+    for size, overlap in ((4, 4), (3, 4), (1, 2), (2, 3)):
+        assert torch.equal(Trim()._window_1d(size, overlap), torch.ones(size)), (size, overlap)
