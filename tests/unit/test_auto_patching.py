@@ -289,6 +289,10 @@ class TestMetricReductionContract:
 
         out, tgt = torch.rand(1, 1, 8, 8, 8), torch.rand(1, 1, 8, 8, 8)
         mask = torch.zeros(1, 1, 8, 8, 8)
+        # An all-zero mask leaves no voxel to score: the metric value is NaN, never 0.0.
+        _, value = MAE()(out, tgt, mask)
+        assert np.isnan(value)
+        # And the streamed partial/combine path reproduces that NaN from disjoint patches.
         self._identity(MAE(), [out, tgt, mask], [self._patches((8, 8, 8), [4, 4, 4])])
 
     @pytest.mark.parametrize("explicit_labels", [None, [1, 2, 5]])

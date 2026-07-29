@@ -23,12 +23,10 @@ def _registered_names(mcp_server: ModuleType) -> tuple[set[str], set[str]]:
     return asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_tool_index_is_generated_from_registry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
     tool_names, prompt_names = _registered_names(mcp_server)
 
@@ -44,12 +42,11 @@ def test_tool_index_is_generated_from_registry(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_job_payload_next_actions_are_registered_tools(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
     tool_names, _ = _registered_names(mcp_server)
 
@@ -89,16 +86,15 @@ def test_job_payload_next_actions_are_registered_tools(
     assert not [action for action in tuned_payload["next_actions"] if action not in tool_names]
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_design_strategy_asks_instead_of_ping_ponging(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
     dataset_dir = tmp_path / "dataset"
     case_dir = dataset_dir / "CASE_000"
     case_dir.mkdir(parents=True)
     (case_dir / "CT.mha").write_bytes(b"\x00")
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
 
     async def scenario() -> None:

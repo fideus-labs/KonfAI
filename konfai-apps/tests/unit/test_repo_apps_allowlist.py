@@ -16,14 +16,14 @@
 
 """/repo_apps endpoints must not resolve app ids outside the allowlist."""
 
-import importlib.util
-
 import pytest
 
-pytestmark = pytest.mark.skipif(importlib.util.find_spec("fastapi") is None, reason="fastapi not installed")
+# Before importing anything that pulls in FastAPI (app_server, fastapi itself): a module-level import runs
+# at collection, so pytestmark would skip too late and collection would error when FastAPI is absent.
+pytest.importorskip("fastapi")
 
-import konfai_apps.app_server as app_server  # noqa: E402
-from fastapi import HTTPException  # noqa: E402
+import konfai_apps.app_server as app_server
+from fastapi import HTTPException
 
 
 def test_require_configured_app_rejects_unlisted(monkeypatch: pytest.MonkeyPatch) -> None:

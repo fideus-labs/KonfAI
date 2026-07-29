@@ -14,7 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""The background writer: disk writes overlap the prediction loop, byte-identically.
+"""Tests for ``konfai.predictor``: the background writer overlaps disk writes with the prediction
+loop, byte-identically.
 
 Writes are submitted to one worker per output dataset — in order, bounded queue, failures kept and
 re-raised — but only when the destination serves disjoint files per entry
@@ -28,7 +29,6 @@ from konfai.data.augmentation import Flip
 from konfai.predictor import _AsyncWriter
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import PredictorError
-from test_streamed_tta import _drive_tta
 
 
 def test_async_writer_runs_in_order_and_surfaces_failures() -> None:
@@ -51,7 +51,7 @@ def test_concurrent_write_safety_is_declared_per_backend(tmp_path) -> None:
     assert not Dataset(f"{tmp_path}/a", "omezarr").concurrent_write_safe()
 
 
-def test_async_streamed_writes_match_the_inline_reference(tmp_path, monkeypatch) -> None:
+def test_async_streamed_writes_match_the_inline_reference(tmp_path, monkeypatch, drive_tta) -> None:
     # A per-file destination goes through the background writer (forced here — the automatic gate
     # also requires a GPU-placed output); the kill-switch runs the same store inline. Same
     # operations, same order — the files must match bit for bit.
@@ -59,27 +59,27 @@ def test_async_streamed_writes_match_the_inline_reference(tmp_path, monkeypatch)
     submit = _AsyncWriter.submit
     monkeypatch.setattr(_AsyncWriter, "submit", lambda self, op: (used.append(1), submit(self, op))[1])
     monkeypatch.setenv("KONFAI_ASYNC_WRITES", "1")
-    asynchronous, whole_volume = _drive_tta(
+    asynchronous, whole_volume = drive_tta(
         tmp_path / "async", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="mha"
     )
     assert not whole_volume and used, "the mha destination should have taken the background writer"
     monkeypatch.setenv("KONFAI_ASYNC_WRITES", "0")
-    inline, _ = _drive_tta(
+    inline, _ = drive_tta(
         tmp_path / "inline", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="mha"
     )
     assert torch.equal(asynchronous, inline)
 
 
-def test_async_gate_stays_inline_for_single_stores_and_cpu_outputs(tmp_path, monkeypatch) -> None:
+def test_async_gate_stays_inline_for_single_stores_and_cpu_outputs(tmp_path, monkeypatch, drive_tta) -> None:
     used: list[int] = []
     submit = _AsyncWriter.submit
     monkeypatch.setattr(_AsyncWriter, "submit", lambda self, op: (used.append(1), submit(self, op))[1])
     # Even forced, a single-store destination never crosses threads.
     monkeypatch.setenv("KONFAI_ASYNC_WRITES", "1")
-    _drive_tta(tmp_path / "h5", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="h5")
+    drive_tta(tmp_path / "h5", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="h5")
     assert not used, "an h5 store must never be written from the background thread"
     # Automatic mode on a CPU-placed output stays inline: the blend already saturates the memory
     # bandwidth the writer would consume.
     monkeypatch.delenv("KONFAI_ASYNC_WRITES", raising=False)
-    _drive_tta(tmp_path / "cpu", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="mha")
+    drive_tta(tmp_path / "cpu", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="mha")
     assert not used, "a CPU-only output must stay inline in automatic mode"

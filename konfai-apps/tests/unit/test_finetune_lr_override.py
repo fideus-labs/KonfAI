@@ -17,13 +17,17 @@
 """``--lr`` learning-rate override plumbing for fine-tuning (local, remote client, server)."""
 
 import asyncio
-import importlib.util
 import types
 from pathlib import Path
 
+import pytest
+
+# Before importing anything that pulls in FastAPI (app_server): a module-level import runs at collection,
+# so pytestmark would skip too late and collection would error when FastAPI is absent.
+pytest.importorskip("fastapi")
+
 import konfai_apps.app as app_module
 import konfai_apps.app_server as app_server
-import pytest
 import torch
 from ruamel.yaml import YAML
 
@@ -313,20 +317,12 @@ def test_remote_client_fine_tune_sends_lr_in_data(monkeypatch: pytest.MonkeyPatc
     assert captured["data"]["lr"] == 0.03
 
 
-pytestmark_server = pytest.mark.skipif(
-    importlib.util.find_spec("fastapi") is None,
-    reason="fastapi is not installed",
-)
-
-
-@pytestmark_server
 def test_server_fine_tune_cmd_adds_lr_when_provided() -> None:
     cmd = asyncio.run(app_server.fine_tune.__wrapped__(app_name="demo", dataset=None, lr=0.03))
     assert "--lr" in cmd
     assert cmd[cmd.index("--lr") + 1] == "0.03"
 
 
-@pytestmark_server
 def test_server_fine_tune_cmd_omits_lr_by_default() -> None:
     cmd = asyncio.run(app_server.fine_tune.__wrapped__(app_name="demo", dataset=None))
     assert "--lr" not in cmd

@@ -16,7 +16,6 @@
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import textwrap
@@ -25,47 +24,14 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from harness import konfai_cli_command, prepare_experiment_dir, subprocess_env, write_image
 from konfai.evaluator import build_evaluate
 from konfai.predictor import build_predict
 from konfai.trainer import build_train
 
 pytestmark = pytest.mark.integration
 
-ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets" / "Workflows"
-REPO_ROOT = Path(__file__).resolve().parents[2]
 SimpleITK = pytest.importorskip("SimpleITK")
-
-
-def _write_image(path: Path, array: np.ndarray, pixel_id: int) -> None:
-    image = SimpleITK.GetImageFromArray(array)
-    image.SetSpacing((1.0, 1.0, 1.0))
-    image = SimpleITK.Cast(image, pixel_id)
-    SimpleITK.WriteImage(image, str(path))
-
-
-def _create_synthesis_dataset(dataset_dir: Path) -> None:
-    dataset_dir.mkdir(parents=True, exist_ok=True)
-    for idx in range(4):
-        case_dir = dataset_dir / f"CASE_{idx:03d}"
-        case_dir.mkdir()
-        zz, yy, xx = np.meshgrid(
-            np.linspace(-0.2, 0.2, 3, dtype=np.float32),
-            np.linspace(-1.0, 1.0, 16, dtype=np.float32),
-            np.linspace(-1.0, 1.0, 16, dtype=np.float32),
-            indexing="ij",
-        )
-        mr = np.clip(
-            0.45 * yy + 0.35 * xx + zz + (idx - 1.5) * 0.05,
-            -0.9,
-            0.9,
-        ).astype(np.float32)
-        ct = np.tanh(1.25 * mr - 0.15).astype(np.float32)
-        mask = np.ones_like(mr, dtype=np.uint8)
-        mask[:, 0, :] = 0
-        mask[:, -1, :] = 0
-        _write_image(case_dir / "MR.mha", mr, SimpleITK.sitkFloat32)
-        _write_image(case_dir / "CT.mha", ct, SimpleITK.sitkFloat32)
-        _write_image(case_dir / "MASK.mha", mask, SimpleITK.sitkUInt8)
 
 
 def _create_prediction_dataset_stub(predictions_dataset_dir: Path) -> None:
@@ -74,76 +40,7 @@ def _create_prediction_dataset_stub(predictions_dataset_dir: Path) -> None:
         case_dir = predictions_dataset_dir / f"CASE_{idx:03d}"
         case_dir.mkdir(parents=True, exist_ok=True)
         sct = np.zeros((3, 16, 16), dtype=np.float32)
-        _write_image(case_dir / "sCT.mha", sct, SimpleITK.sitkFloat32)
-
-
-def _render_asset_template(template_name: str, replacements: dict[str, str]) -> str:
-    content = (ASSETS_DIR / template_name).read_text(encoding="utf-8")
-    for placeholder, value in replacements.items():
-        content = content.replace(placeholder, value)
-    return content
-
-
-def _prepare_experiment_dir(experiment_dir: Path, train_name: str) -> dict[str, Path]:
-    dataset_dir = experiment_dir / "Dataset"
-    checkpoints_dir = experiment_dir / "Checkpoints"
-    predictions_dir = experiment_dir / "Predictions"
-    evaluations_dir = experiment_dir / "Evaluations"
-
-    experiment_dir.mkdir(parents=True, exist_ok=True)
-    _create_synthesis_dataset(dataset_dir)
-    shutil.copy2(ASSETS_DIR / "TinySynth.py", experiment_dir / "TinySynth.py")
-    (experiment_dir / "Config.yml").write_text(
-        _render_asset_template(
-            "Config.yml",
-            {
-                "__DATASET_DIR__": str(dataset_dir),
-                "__TRAIN_NAME__": train_name,
-            },
-        ),
-        encoding="utf-8",
-    )
-    (experiment_dir / "Prediction.yml").write_text(
-        _render_asset_template(
-            "Prediction.yml",
-            {
-                "__DATASET_DIR__": str(dataset_dir),
-                "__TRAIN_NAME__": train_name,
-            },
-        ),
-        encoding="utf-8",
-    )
-    (experiment_dir / "Evaluation.yml").write_text(
-        _render_asset_template(
-            "Evaluation.yml",
-            {
-                "__DATASET_DIR__": str(dataset_dir),
-                "__PREDICTIONS_DATASET_DIR__": str(predictions_dir / train_name / "Dataset"),
-                "__TRAIN_NAME__": train_name,
-            },
-        ),
-        encoding="utf-8",
-    )
-    return {
-        "dataset_dir": dataset_dir,
-        "checkpoints_dir": checkpoints_dir,
-        "predictions_dir": predictions_dir,
-        "evaluations_dir": evaluations_dir,
-    }
-
-
-def _subprocess_env() -> dict[str, str]:
-    env = os.environ.copy()
-    pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(REPO_ROOT) if not pythonpath else f"{REPO_ROOT}{os.pathsep}{pythonpath}"
-    return env
-
-
-def _konfai_cli_command() -> list[str]:
-    cli = shutil.which("konfai")
-    if cli is not None:
-        return [cli]
-    return [sys.executable, "-c", "from konfai.main import main; main()"]
+        write_image(case_dir / "sCT.mha", sct, SimpleITK.sitkFloat32)
 
 
 @contextmanager
@@ -187,7 +84,7 @@ def _assert_experiment_outputs(
 def test_konfai_api_user_path(tmp_path: Path) -> None:
     experiment_dir = tmp_path / "experiment_api"
     train_name = "API"
-    paths = _prepare_experiment_dir(experiment_dir, train_name)
+    paths = prepare_experiment_dir(experiment_dir, train_name)
 
     runner_path = experiment_dir / "run_api_workflow.py"
     runner_path.write_text(
@@ -244,7 +141,7 @@ def test_konfai_api_user_path(tmp_path: Path) -> None:
     subprocess.run(
         [sys.executable, str(runner_path)],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
     _assert_experiment_outputs(
@@ -259,8 +156,8 @@ def test_konfai_api_user_path(tmp_path: Path) -> None:
 def test_konfai_cli_user_path(tmp_path: Path) -> None:
     experiment_dir = tmp_path / "experiment_cli"
     train_name = "CLI"
-    paths = _prepare_experiment_dir(experiment_dir, train_name)
-    cli = _konfai_cli_command()
+    paths = prepare_experiment_dir(experiment_dir, train_name)
+    cli = konfai_cli_command()
 
     subprocess.run(
         [
@@ -278,7 +175,7 @@ def test_konfai_cli_user_path(tmp_path: Path) -> None:
             "Statistics",
         ],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
     checkpoints = sorted((paths["checkpoints_dir"] / train_name).glob("*.pt"))
@@ -300,7 +197,7 @@ def test_konfai_cli_user_path(tmp_path: Path) -> None:
             "Predictions",
         ],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
     subprocess.run(
@@ -317,7 +214,7 @@ def test_konfai_cli_user_path(tmp_path: Path) -> None:
             "Evaluations",
         ],
         cwd=experiment_dir,
-        env=_subprocess_env(),
+        env=subprocess_env(),
         check=True,
     )
     _assert_experiment_outputs(
@@ -334,7 +231,7 @@ def test_konfai_build_steps_construct_workflows_without_execution(
 ) -> None:
     experiment_dir = tmp_path / "experiment_build"
     train_name = "BUILD"
-    paths = _prepare_experiment_dir(experiment_dir, train_name)
+    paths = prepare_experiment_dir(experiment_dir, train_name)
     _create_prediction_dataset_stub(paths["predictions_dir"] / train_name / "Dataset")
 
     sys.path.insert(0, str(experiment_dir))

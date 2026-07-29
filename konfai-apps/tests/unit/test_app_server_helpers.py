@@ -15,22 +15,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import importlib.util
 import io
 import shutil
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
-import konfai_apps.app_server as app_server
 import pytest
+
+# Before importing anything that pulls in FastAPI (app_server, fastapi itself): a module-level import runs
+# at collection, so pytestmark would skip too late and collection would error when FastAPI is absent.
+pytest.importorskip("fastapi")
+
+import konfai_apps.app_server as app_server
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-
-pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("fastapi") is None,
-    reason="fastapi is not installed",
-)
 
 
 def _make_job(job_id: str, status: str = "queued") -> app_server.Job:

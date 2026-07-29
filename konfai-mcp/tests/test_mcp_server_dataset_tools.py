@@ -26,6 +26,26 @@ import pytest
 fastmcp = pytest.importorskip("fastmcp")
 sitk = pytest.importorskip("SimpleITK")
 
+from konfai_mcp.server_experiments import SessionService  # noqa: E402
+from konfai_mcp.server_jobs import JobRegistry  # noqa: E402
+from konfai_mcp.server_support import WorkspaceLayout  # noqa: E402
+
+
+def _session_service(tmp_path: Path) -> SessionService:
+    repo_root = Path(__file__).resolve().parents[2]
+    layout = WorkspaceLayout(tmp_path)
+    layout.ensure_session_workspace()
+    return SessionService(
+        repo_root=repo_root,
+        examples_root=repo_root / "examples",
+        workspace_layout=layout,
+        job_registry=JobRegistry({"queued", "running"}, workspace_layout=layout),
+        max_log_tail_lines=20,
+        active_job_states={"queued", "running"},
+        validation_levels={"instantiate", "setup"},
+        workflows={"train", "prediction", "evaluation"},
+    )
+
 
 def _write_image(path: Path, array: np.ndarray, pixel_id: int) -> None:
     image = sitk.GetImageFromArray(array)
@@ -67,15 +87,82 @@ def _metric_json(value: float, metric_name: str) -> str:
     )
 
 
-def test_mcp_server_dataset_inspection_and_aliasing(
+def _write_run_metrics(workspace: Path, run_name: str, metric_name: str, value: float, split: str = "TRAIN") -> None:
+    metrics = workspace / "Evaluations" / run_name / f"Metric_{split}.json"
+    metrics.parent.mkdir(parents=True, exist_ok=True)
+    metrics.write_text(_metric_json(value, metric_name), encoding="utf-8")
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_directory_backed_dataset_entries_are_discovered(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
+    dataset_dir = tmp_path / "dataset"
+    for idx in range(2):
+        case_dir = dataset_dir / f"CASE_{idx:03d}"
+        zarr_store = case_dir / "CT.ome.zarr"
+        zarr_store.mkdir(parents=True)
+        (zarr_store / ".zattrs").write_text("{}", encoding="utf-8")
+        dicom_series = case_dir / "MR"
+        dicom_series.mkdir()
+        (dicom_series / "slice0001.dcm").write_bytes(b"\x00")
+        (case_dir / "SEG.mha").write_bytes(b"\x00")
+        (case_dir / "notes").mkdir()
+        (case_dir / "notes" / "readme.txt").write_text("x", encoding="utf-8")
+
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            inferred = await client.call_tool(
+                "inspect_dataset", {"dataset_dir": str(dataset_dir), "include_stats": False}
+            )
+            data = inferred.structured_content
+            assert set(data["groups"]) == {"CT", "MR", "SEG"}
+            assert data["groups"]["CT"]["extensions"] == ["zarr"]
+            assert data["groups"]["MR"]["extensions"] == ["dicom"]
+            assert data["groups"]["CT"]["count"] == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_h5_internal_groups_are_discovered(
+    tmp_path: Path,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    h5py = pytest.importorskip("h5py")
+
+    dataset_dir = tmp_path / "dataset"
+    for idx in range(2):
+        case_dir = dataset_dir / f"CASE_{idx:03d}"
+        case_dir.mkdir(parents=True)
+        with h5py.File(case_dir / "data.h5", "w") as handle:
+            handle.create_dataset("CT", data=np.zeros((2, 4, 4), dtype=np.float32))
+            handle.create_dataset("SEG", data=np.zeros((2, 4, 4), dtype=np.uint8))
+
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            inferred = await client.call_tool(
+                "inspect_dataset", {"dataset_dir": str(dataset_dir), "include_stats": False}
+            )
+            data = inferred.structured_content
+            assert set(data["groups"]) == {"CT", "SEG"}
+            assert data["groups"]["CT"]["extensions"] == ["h5"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_mcp_server_dataset_inspection_and_aliasing(
+    tmp_path: Path,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
     dataset_dir = tmp_path / "dataset"
     _create_alias_dataset(dataset_dir)
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
 
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
@@ -176,19 +263,17 @@ def test_mcp_server_dataset_inspection_and_aliasing(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_prepare_dataset_aliases_rejects_path_traversal(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
     # A rename_map target that climbs out of the case directory is an arbitrary-write primitive; the
     # tool must refuse it (writes never widen beyond the dataset) while a legit rename still works.
-    workspace_root = tmp_path / "workspaces"
     dataset_dir = tmp_path / "dataset"
     _create_alias_dataset(dataset_dir)
     outside = tmp_path / "outside"
     outside.mkdir()
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
 
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
@@ -215,14 +300,10 @@ def test_mcp_server_prepare_dataset_aliases_rejects_path_traversal(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_review_config_semantics_surfaces_reasoning_warnings(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
     model_source = (Path(__file__).resolve().parents[2] / "examples" / "Synthesis" / "Model.py").read_text(
@@ -298,14 +379,10 @@ Trainer:
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_inspect_object_signature_supports_local_custom_components(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
     loss_source = """
@@ -345,8 +422,8 @@ class DiceFocalLoss:
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_inspect_object_signature_isolates_library_import(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
@@ -355,7 +432,6 @@ def test_mcp_server_inspect_object_signature_isolates_library_import(
     AGENTS.md invariant: code that imports/executes runs isolated. A local File:Class is parsed
     statically and must stay in-process (no multi-second spawn on the common path).
     """
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
 
     subprocess_calls: list[tuple[str, dict[str, object]]] = []
@@ -401,14 +477,10 @@ def test_mcp_server_inspect_object_signature_isolates_library_import(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_leaderboard_ranks_runs_by_metric(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
 
@@ -444,17 +516,56 @@ def test_mcp_server_leaderboard_ranks_runs_by_metric(
     asyncio.run(scenario())
 
 
-def test_mcp_server_design_config_strategy_accepts_multiple_datasets(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.usefixtures("workspace_root")
+def test_metric_direction_and_leaderboard_controls(
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
+    mcp_server = load_mcp_server()
+
+    # A criterion named DiceLoss must rank as minimize despite the 'dice' token.
+    direction, source = mcp_server.SESSION._metric_direction("PRED:SEG:DiceLoss")
+    assert direction == "min"
+    assert source == "heuristic:min"
+    assert mcp_server.SESSION._metric_direction("PRED:SEG:Dice")[0] == "max"
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            workspace = Path(mcp_server.WORKSPACE_LAYOUT.workspace_dir())
+            _write_run_metrics(workspace, "RUN_A", "PRED:SEG:DiceLoss", 0.2)
+            _write_run_metrics(workspace, "RUN_B", "PRED:SEG:DiceLoss", 0.5)
+
+            board = await client.call_tool("leaderboard", {"metric": "DiceLoss"})
+            board_data = board.structured_content
+            assert board_data["best"]["run_name"] == "RUN_A"
+            assert board_data["available_splits"] == ["TRAIN"]
+
+            flipped = await client.call_tool("leaderboard", {"metric": "DiceLoss", "direction": "max"})
+            assert flipped.structured_content["best"]["run_name"] == "RUN_B"
+
+            run_metrics = await client.call_tool("get_run_metrics", {"run_name": "RUN_B"})
+            run_data = run_metrics.structured_content
+            assert run_data["metrics"]["case"]["PRED:SEG:DiceLoss"]["CASE_000"] == 0.5
+            assert run_data["split"] == "TRAIN"
+
+            with pytest.raises(Exception, match=r"Available runs: .*RUN_A"):
+                await client.call_tool("get_run_metrics", {"run_name": "MISSING"})
+
+            with pytest.raises(Exception, match="Available splits"):
+                await client.call_tool("leaderboard", {"split": "TEST"})
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_mcp_server_design_config_strategy_accepts_multiple_datasets(
+    tmp_path: Path,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
     dataset_a = tmp_path / "dataset_a"
     dataset_b = tmp_path / "dataset_b"
     _create_alias_dataset(dataset_a)
     _create_alias_dataset(dataset_b)
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
 
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
@@ -481,12 +592,11 @@ def test_mcp_server_design_config_strategy_accepts_multiple_datasets(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_browse_dataset_surfaces_nested_candidate_root(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
     dataset_root = tmp_path / "dataset"
     nested_root = dataset_root / "AB"
     nested_root.mkdir(parents=True, exist_ok=True)
@@ -498,7 +608,6 @@ def test_mcp_server_browse_dataset_surfaces_nested_candidate_root(
         _write_image(case_dir / "MR.nii.gz", image, sitk.sitkFloat32)
         _write_image(case_dir / "CT.nii.gz", image, sitk.sitkFloat32)
         _write_image(case_dir / "MASK.nii.gz", mask, sitk.sitkUInt8)
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
 
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
@@ -532,9 +641,9 @@ def test_mcp_server_browse_dataset_surfaces_nested_candidate_root(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_inspect_dataset_recognizes_a_bare_zarr_store_root(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
     """A single OME-Zarr store handed in as the root is one image, not a case tree.
@@ -543,12 +652,10 @@ def test_mcp_server_inspect_dataset_recognizes_a_bare_zarr_store_root(
     store; the payload must say layout=single_store and carry a warning explaining the expected
     '<root>/<case>/<group>.zarr' layout instead of a bogus dataset_entry.
     """
-    workspace_root = tmp_path / "workspaces"
     store = tmp_path / "brain.ome.zarr"
     for level in range(3):
         (store / f"scale{level}").mkdir(parents=True)
     (store / "zarr.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
 
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
@@ -567,14 +674,12 @@ def test_mcp_server_inspect_dataset_recognizes_a_bare_zarr_store_root(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_read_dataset_file_previews_text_and_refuses_binary(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
     """Bounded sidecar reader: structured CSV preview, truncation flag, binary refusal."""
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
     labels = tmp_path / "labels.csv"
     labels.write_text("case,grade\nCASE_000,2\nCASE_001,3\n", encoding="utf-8")
     long_txt = tmp_path / "cases.txt"
@@ -608,3 +713,39 @@ def test_mcp_server_read_dataset_file_previews_text_and_refuses_binary(
                 await client.call_tool("read_dataset_file", {"path": str(binary)})
 
     asyncio.run(scenario())
+
+
+def test_design_config_strategy_uses_per_root_extension(tmp_path: Path) -> None:
+    mha_case = tmp_path / "MhaDataset" / "case_001"
+    nii_case = tmp_path / "NiiDataset" / "case_001"
+    mha_case.mkdir(parents=True)
+    nii_case.mkdir(parents=True)
+    (mha_case / "MR.mha").write_text("", encoding="utf-8")
+    (nii_case / "MR.nii.gz").write_text("", encoding="utf-8")
+
+    payload = _session_service(tmp_path).design_config_strategy_payload(
+        dataset_dir=None,
+        dataset_dirs=[mha_case.parent, nii_case.parent],
+        task="synthesis",
+    )
+    entries = payload["config_plan"]["dataset_entries"]
+    by_path = {entry["path"]: entry["entry"] for entry in entries}
+    assert by_path[str(mha_case.parent)].endswith(":a:mha")
+    assert by_path[str(nii_case.parent)].endswith(":a:nii.gz")
+
+
+def test_browse_dataset_depth_is_inclusive_and_bounded(tmp_path: Path) -> None:
+    dataset = tmp_path / "root"
+    (dataset / "A" / "B" / "C").mkdir(parents=True)
+    service = _session_service(tmp_path)
+
+    depth1 = service.browse_dataset_payload(dataset, depth=1)
+    assert depth1["entries"], "depth=1 must still list the immediate children"
+    assert max(entry["depth"] for entry in depth1["entries"]) == 1
+    assert {entry["path"] for entry in depth1["entries"]} == {"A"}
+
+    depth2 = service.browse_dataset_payload(dataset, depth=2)
+    paths = {entry["path"] for entry in depth2["entries"]}
+    assert max(entry["depth"] for entry in depth2["entries"]) == 2
+    assert "A/B" in paths
+    assert "A/B/C" not in paths

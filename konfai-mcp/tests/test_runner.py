@@ -14,8 +14,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""konfai_mcp.runner contracts: bounded final join, config-restore visibility, and
-propagation of a non-differentiable loss into the smoke-test ok flag."""
+"""konfai_mcp/runner.py contracts: bounded final join on a wedged spawn child, config-restore
+failures surfaced in the payload, and a non-differentiable loss propagating into the smoke-test
+ok flag."""
 
 import sys
 import time

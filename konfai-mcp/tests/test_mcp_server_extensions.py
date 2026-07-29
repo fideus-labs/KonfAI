@@ -14,8 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import importlib.metadata as _metadata
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -23,7 +27,12 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 if str(MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(MODULE_ROOT))
 
-from konfai_mcp.extensions import EXTENSION_POINTS, check_external_dependency, describe_extension_points  # noqa: E402
+from konfai_mcp.extensions import (  # noqa: E402
+    EXTENSION_POINTS,
+    _select_distribution,
+    check_external_dependency,
+    describe_extension_points,
+)
 from konfai_mcp.server_support import summarize_classpath_signature  # noqa: E402
 
 
@@ -64,6 +73,21 @@ def test_check_external_dependency_reports_installed_and_missing() -> None:
     assert missing["is_konfai_dependency"] is False
 
 
+def test_select_distribution_prefers_name_match_and_handles_single() -> None:
+    assert _select_distribution("Foo_Bar", ["baz", "foo-bar"]) == "foo-bar"
+    assert _select_distribution("solo", ["only-dist"]) == "only-dist"
+    assert _select_distribution("missing", []) == "missing"
+
+
+def test_check_external_dependency_resolves_namespace_by_owning_wheel() -> None:
+    candidates = _metadata.packages_distributions().get("itk", [])
+    if len(candidates) <= 1 or "itk-core" not in candidates:
+        pytest.skip("environment does not split the 'itk' namespace across multiple wheels")
+    payload = check_external_dependency("itk")
+    # The base 'itk' import is shipped by itk-core, NOT by whichever sibling wheel sorts first.
+    assert payload["distribution"] == "itk-core"
+
+
 def test_inspect_distinguishes_konfai_component_from_foreign_class() -> None:
     dice = summarize_classpath_signature("konfai.metric.measure:Dice", workspace_dir=MODULE_ROOT)
     assert dice["ok"] is True
@@ -76,3 +100,58 @@ def test_inspect_distinguishes_konfai_component_from_foreign_class() -> None:
     assert l1["konfai_base"] is None
     assert l1["forward"] and "input" in l1["forward"]
     assert l1["integration_hint"]
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_component_smoke_tests(
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    fastmcp = pytest.importorskip("fastmcp")
+    mcp_server = load_mcp_server()
+
+    good = (
+        "from konfai.data.transform import Transform\n"
+        "\n"
+        "\n"
+        "class Doubler(Transform):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__()\n"
+        "\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        return list(shape)\n"
+        "\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor * 2\n"
+    )
+    bad = good.replace("class Doubler", "class Liar").replace("return list(shape)", "return [s + 1 for s in shape]")
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            await client.call_tool("write_session_file", {"relative_path": "MyTransform.py", "content": good})
+            await client.call_tool("write_session_file", {"relative_path": "BadTransform.py", "content": bad})
+
+            ok = await client.call_tool(
+                "run_component_smoke_test", {"classpath": "MyTransform:Doubler", "kind": "transform"}
+            )
+            ok_data = ok.structured_content
+            assert ok_data["ok"] is True
+            assert ok_data["predicted_shape"] == ok_data["actual_shape"]
+
+            broken = await client.call_tool(
+                "run_component_smoke_test", {"classpath": "BadTransform:Liar", "kind": "transform"}
+            )
+            broken_data = broken.structured_content
+            assert broken_data["ok"] is False
+            assert broken_data["predicted_shape"] != broken_data["actual_shape"]
+            assert "write_session_file" in broken_data["next_actions"]
+
+            loss = await client.call_tool(
+                "run_component_smoke_test", {"classpath": "torch.nn:MSELoss", "kind": "criterion"}
+            )
+            loss_data = loss.structured_content
+            assert loss_data["ok"] is True
+            assert loss_data["behaves_as"] == "loss"
+            assert loss_data["backward_ok"] is True
+
+    asyncio.run(scenario())

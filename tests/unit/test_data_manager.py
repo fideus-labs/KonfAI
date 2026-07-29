@@ -14,12 +14,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ``konfai.data.data_manager``: DDP sharding, train/validation split,
-cache workers, and DatasetIter (streaming transforms, inline augmentations)."""
+"""Tests for ``konfai.data.data_manager``: DDP sharding, train/validation split, prediction
+subsets, DataLoader arguments, cache workers, and DatasetIter (streaming transforms, inline
+augmentations)."""
 
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -28,6 +30,7 @@ import torch
 from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
 from konfai.data.data_manager import (
     Data,
+    DataPrediction,
     DatasetIter,
     DataTrain,
     Group,
@@ -38,7 +41,7 @@ from konfai.data.data_manager import (
     _cache_worker_count,
 )
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import TensorCast, Transform
+from konfai.data.transform import TensorCast, Transform, TransformLoader
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.runtime import State
 from konfai.utils.utils import split_path_spec
@@ -122,16 +125,37 @@ def test_prediction_split_more_ranks_than_cases_leaves_spare_ranks_empty(monkeyp
         assert len({entry[0] for entry in shard}) == 1  # one whole case per busy rank
 
 
+def test_data_split_prediction_keeps_case_patches_together_and_allows_empty_shards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+
+    shards = Data._split(
+        [(0, 0, 0), (0, 0, 1), (1, 0, 0), (2, 0, 0), (2, 0, 1)],
+        4,
+    )
+
+    assert shards == [
+        [(0, 0, 0), (0, 0, 1)],
+        [(1, 0, 0)],
+        [(2, 0, 0), (2, 0, 1)],
+        [],
+    ]
+
+
+def test_data_remap_dataset_indices_compacts_sparse_mapping_indices() -> None:
+    indices, remapped = Data._remap_dataset_indices([(3, 0, 0), (3, 0, 1), (8, 1, 0), (3, 1, 2)])
+
+    assert indices == [3, 8]
+    assert remapped == [(0, 0, 0), (0, 0, 1), (1, 1, 0), (0, 1, 2)]
+
+
 # --------------------------------------------------------------------------------------
 # DataTrain train/validation split — reproducible and seeded from sorted names
 # --------------------------------------------------------------------------------------
 
 _SPLIT_PROBE = """
-import os
 import random
-
-os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
-os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
 
 from konfai.data.data_manager import DataTrain
 
@@ -190,6 +214,77 @@ def test_train_split_shuffle_draws_from_sorted_names(monkeypatch):
     assert data._prepared_train_names == ["CASE_003", "CASE_002", "CASE_001"]
 
 
+def test_data_train_validation_accepts_mixed_case_names_and_case_files(tmp_path: Path) -> None:
+    validation_file = tmp_path / "validation.txt"
+    validation_file.write_text("CASE_001\nCASE_003\n", encoding="utf-8")
+    dataset = DataTrain(
+        augmentations=None,
+        validation=[str(validation_file), "CASE_002"],
+    )
+
+    train_names, validation_names = dataset._split_train_validation_names(
+        ["CASE_000", "CASE_001", "CASE_002", "CASE_003"],
+        {},
+    )
+
+    assert train_names == ["CASE_000"]
+    assert validation_names == ["CASE_001", "CASE_002", "CASE_003"]
+
+
+def test_data_train_validation_none_keeps_full_dataset_for_training() -> None:
+    dataset = DataTrain(
+        augmentations=None,
+        validation=None,
+    )
+
+    train_names, validation_names = dataset._split_train_validation_names(
+        ["CASE_000", "CASE_001", "CASE_002"],
+        {},
+    )
+
+    assert train_names == ["CASE_000", "CASE_001", "CASE_002"]
+    assert validation_names == []
+
+
+def test_data_train_validation_augmentations_can_be_disabled() -> None:
+    augmentations = DataAugmentationsList(nb=2, data_augmentations={})
+    dataset = DataTrain(
+        augmentations={"DataAugmentation_0": augmentations},
+        validation_augmentations=False,
+    )
+    dataset._prepared_validation_mapping = [(0, 0, 0), (0, 1, 0), (1, 0, 0), (1, 2, 0)]
+
+    validation_mapping = dataset._get_validation_mapping()
+
+    assert validation_mapping == [(0, 0, 0), (1, 0, 0)]
+
+
+def test_data_train_prepare_skips_validation_augmentation_layout_when_disabled(tmp_path: Path) -> None:
+    pytest.importorskip("SimpleITK")
+    dataset_path = tmp_path / "Dataset"
+    dataset_storage = Dataset(dataset_path, "mha")
+    volume = np.arange(1 * 4 * 4, dtype=np.float32).reshape(1, 4, 4)
+    dataset_storage.write("CT", "CASE_000", volume, _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    dataset_storage.write("CT", "CASE_001", volume, _image_attributes([0.0, 0.0], [1.0, 1.0]))
+
+    augmentations = DataAugmentationsList(nb=1, data_augmentations={})
+    dataset = DataTrain(
+        dataset_filenames=[f"{dataset_path}:mha"],
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        augmentations={"DataAugmentation_0": augmentations},
+        patch=None,
+        validation=["CASE_001"],
+        validation_augmentations=False,
+    )
+
+    dataset.prepare()
+
+    assert dataset._prepared_data is not None
+    assert dataset._prepared_validation_data is not None
+    assert dataset._prepared_data["CT"][0].total_augmentations == 1
+    assert dataset._prepared_validation_data["CT"][0].total_augmentations == 0
+
+
 # --------------------------------------------------------------------------------------
 # B18 - caching worker count must never fall below one
 # --------------------------------------------------------------------------------------
@@ -217,32 +312,9 @@ def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
     return attributes
 
 
-class _StreamingDatasetStub:
-    def __init__(self, volume: np.ndarray) -> None:
-        self.volume = volume
-
-    def get_infos(self, group_src: str, name: str) -> tuple[list[int], Attribute]:
-        return list(self.volume.shape), _image_attributes([0.0, 0.0], [1.0, 1.0])
-
-    def read_data(self, group_src: str, name: str) -> tuple[np.ndarray, Attribute]:
-        return self.volume.copy(), _image_attributes([0.0, 0.0], [1.0, 1.0])
-
-    def read_data_slice(self, group_src: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
-        return self.volume[slices].copy(), _image_attributes([0.0, 0.0], [1.0, 1.0])
-
-    def read_data_statistics(self, group_src: str, name: str, channels: list[int] | None = None) -> dict[str, float]:
-        data = self.volume if channels is None else self.volume[channels]
-        return {
-            "min": float(data.min()),
-            "max": float(data.max()),
-            "mean": float(data.mean()),
-            "std": float(data.std(ddof=1)),
-        }
-
-
-def test_streaming_tensorcast_persists_source_dtype_for_inverse() -> None:
+def test_streaming_tensorcast_persists_source_dtype_for_inverse(streaming_dataset_stub) -> None:
     volume = np.arange(1 * 4 * 4, dtype=np.int16).reshape(1, 4, 4)
-    dataset_stub = _StreamingDatasetStub(volume)
+    dataset_stub = streaming_dataset_stub(volume)
     manager = DatasetManager(
         index=0,
         group_src="CT",
@@ -732,6 +804,205 @@ def test_every_rank_gets_a_shard_of_the_same_length(entries: int, world_size: in
     shards = Data._split(mapping, world_size)
     assert len({len(shard) for shard in shards}) == 1
     assert all(shard for shard in shards)
+
+
+# --------------------------------------------------------------------------------------
+# DataLoader arguments — worker prefetch and persistent workers per workflow
+# --------------------------------------------------------------------------------------
+
+
+def test_data_train_enables_worker_prefetch_when_cache_is_disabled() -> None:
+    # The budget resolver flips the regime through this same re-entry point.
+    dataset = DataTrain(augmentations=None)
+    dataset._configure_data_loading(use_cache=False)
+
+    assert cast(int, dataset.dataLoader_args["num_workers"]) >= 1
+    assert dataset.dataLoader_args["prefetch_factor"] == 2
+    assert dataset.dataLoader_args["persistent_workers"] is True
+
+
+def test_inline_augmentations_disable_persistent_workers() -> None:
+    # Persistent workers keep a fork-time copy of the dataset and never see the main process's
+    # per-epoch reset_augmentation redraw, so inline augmentations would freeze at their first draw.
+    # The guard is inline_augmentations AND a non-empty augmentations config, and it overrides an
+    # explicit persistent_workers=True.
+    augmentations = {"DataAugmentation_0": DataAugmentationsList(nb=1, data_augmentations={})}
+
+    inline = DataTrain(augmentations=augmentations, inline_augmentations=True, persistent_workers=True)
+    inline._configure_data_loading(use_cache=False)
+    assert cast(int, inline.dataLoader_args["num_workers"]) >= 1
+    assert inline.dataLoader_args["persistent_workers"] is False
+
+    # Preloaded (non-inline) augmentations are drawn in the main process: workers may persist.
+    preloaded = DataTrain(augmentations=augmentations, inline_augmentations=False)
+    preloaded._configure_data_loading(use_cache=False)
+    assert preloaded.dataLoader_args["persistent_workers"] is True
+
+    # The inline flag without any configured augmentation redraws nothing: workers may persist.
+    without_augmentations = DataTrain(augmentations=None, inline_augmentations=True)
+    without_augmentations._configure_data_loading(use_cache=False)
+    assert without_augmentations.dataLoader_args["persistent_workers"] is True
+
+
+def test_data_prediction_disables_persistent_workers_by_default() -> None:
+    dataset = DataPrediction(augmentations=None)
+
+    assert cast(int, dataset.dataLoader_args["num_workers"]) >= 1
+    assert dataset.dataLoader_args["prefetch_factor"] == 2
+    assert dataset.dataLoader_args["persistent_workers"] is False
+
+
+def test_data_prediction_disables_workers_for_konfai_inference_transforms() -> None:
+    dataset = DataPrediction(
+        augmentations=None,
+        groups_src={
+            "Volume_0": Group(
+                groups_dest={
+                    "MASK": GroupTransform(
+                        transforms={"KonfAIInference": TransformLoader()},
+                        patch_transforms=None,
+                    )
+                }
+            )
+        },
+    )
+
+    assert dataset.requires_single_process_loading is True
+    assert dataset.dataLoader_args["num_workers"] == 0
+    assert "prefetch_factor" not in dataset.dataLoader_args
+    assert "persistent_workers" not in dataset.dataLoader_args
+
+
+# --------------------------------------------------------------------------------------
+# PredictionSubset — case selection and common-name resolution
+# --------------------------------------------------------------------------------------
+
+
+def test_prediction_subset_none_selects_full_dataset() -> None:
+    subset = PredictionSubset(None)
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002"], {})
+
+    assert selected == {"CASE_000", "CASE_001", "CASE_002"}
+
+
+def test_prediction_subset_accepts_explicit_index_lists() -> None:
+    subset = PredictionSubset([0, 2])
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002"], {})
+
+    assert selected == {"CASE_000", "CASE_002"}
+
+
+def test_prediction_subset_accepts_lists_of_case_files(tmp_path: Path) -> None:
+    file_a = tmp_path / "subset_a.txt"
+    file_b = tmp_path / "subset_b.txt"
+    file_a.write_text("CASE_000\nCASE_002\n", encoding="utf-8")
+    file_b.write_text("CASE_001\n", encoding="utf-8")
+    subset = PredictionSubset([str(file_a), str(file_b)])
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002", "CASE_003"], {})
+
+    assert selected == {"CASE_000", "CASE_001", "CASE_002"}
+
+
+def test_prediction_subset_keeps_tilde_file_exclusion_with_file_lists(tmp_path: Path) -> None:
+    include_file = tmp_path / "subset_include.txt"
+    exclude_file = tmp_path / "subset_exclude.txt"
+    include_file.write_text("CASE_000\nCASE_001\nCASE_002\n", encoding="utf-8")
+    exclude_file.write_text("CASE_001\n", encoding="utf-8")
+    subset = PredictionSubset([str(include_file), f"~{exclude_file}"])
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002", "CASE_003"], {})
+
+    assert selected == {"CASE_000", "CASE_002"}
+
+
+def test_prediction_subset_accepts_windows_style_case_list_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    windows_file = r"C:\tmp\subset_a.txt"
+    subset = PredictionSubset([windows_file])
+
+    monkeypatch.setattr(
+        "konfai.data.data_manager.os.path.exists",
+        lambda path: path == windows_file,
+    )
+    monkeypatch.setattr(
+        PredictionSubset,
+        "_read_names_from_file",
+        staticmethod(lambda filename: ["CASE_000", "CASE_002"] if filename == windows_file else []),
+    )
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002", "CASE_003"], {})
+
+    assert selected == {"CASE_000", "CASE_002"}
+
+
+def test_builtin_subset_does_not_read_infos_during_common_name_resolution() -> None:
+    class InfoCountingDataset:
+        def __init__(self) -> None:
+            self.info_calls = 0
+
+        @staticmethod
+        def get_names(group: str) -> list[str]:
+            assert group == "CT"
+            return ["CASE_000", "CASE_001"]
+
+        def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
+            assert group == "CT"
+            self.info_calls += 1
+            return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
+
+    dataset = DataPrediction(
+        augmentations=None,
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+    )
+    dataset.datasets = {"fake": cast(Dataset, InfoCountingDataset())}
+
+    dataset_name, subset_names = dataset._resolve_common_names({"CT": [("fake", True)]})
+
+    assert dataset_name["CT"]["fake"] == ["CASE_000", "CASE_001"]
+    assert subset_names == {"CASE_000", "CASE_001"}
+    assert cast(InfoCountingDataset, dataset.datasets["fake"]).info_calls == 0
+
+
+def test_custom_subset_can_still_request_infos_during_common_name_resolution() -> None:
+    class InfoCountingDataset:
+        def __init__(self) -> None:
+            self.info_calls = 0
+
+        @staticmethod
+        def get_names(group: str) -> list[str]:
+            assert group == "CT"
+            return ["CASE_000", "CASE_001"]
+
+        def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
+            assert group == "CT"
+            self.info_calls += 1
+            return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
+
+    class InfoAwareSubset(PredictionSubset):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self.last_infos: dict[str, tuple[list[int], Attribute]] | None = None
+
+        def __call__(self, names: list[str], infos: dict[str, tuple[list[int], Attribute]]) -> set[str]:
+            self.last_infos = infos
+            return set(names)
+
+    subset = InfoAwareSubset()
+    dataset = DataPrediction(
+        augmentations=None,
+        subset=subset,
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+    )
+    dataset.datasets = {"fake": cast(Dataset, InfoCountingDataset())}
+
+    _dataset_name, subset_names = dataset._resolve_common_names({"CT": [("fake", True)]})
+
+    assert subset_names == {"CASE_000", "CASE_001"}
+    assert subset.last_infos is not None
+    assert set(subset.last_infos) == {"CASE_000", "CASE_001"}
+    assert cast(InfoCountingDataset, dataset.datasets["fake"]).info_calls == 2
 
 
 # --------------------------------------------------------------------------------------

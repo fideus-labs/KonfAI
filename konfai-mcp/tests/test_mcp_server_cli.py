@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 if str(MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(MODULE_ROOT))
@@ -95,3 +97,15 @@ def test_cli_sets_environment_and_forwards_transport(monkeypatch) -> None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def test_main_rejects_invalid_transport_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KONFAI_MCP_TRANSPORT", "not-a-transport")
+    with pytest.raises(SystemExit):
+        konfai_mcp.main([])
+
+
+def test_parser_default_accepts_valid_transport_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KONFAI_MCP_TRANSPORT", "streamable-http")
+    args = konfai_mcp._build_parser().parse_args([])
+    assert args.transport == "streamable-http"

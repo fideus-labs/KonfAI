@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Lot 6: sequential batch runs, cross-validation folds, and volume previews."""
+"""Two topics: batch execution (generate_folds + run_batch over per-fold configs) and
+volume previews (preview_volume PNG rendering and its streamed single-plane read)."""
 
 import asyncio
 from collections.abc import Callable
@@ -13,6 +14,7 @@ fastmcp = pytest.importorskip("fastmcp")
 from mcp_test_helpers import install_fake_konfai_runtime, yaml_dump  # noqa: E402
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_generate_folds_and_run_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -24,7 +26,6 @@ def test_generate_folds_and_run_batch(
         case_dir.mkdir(parents=True)
         (case_dir / "CT.mha").write_bytes(b"\x00")
 
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "0.05")
     mcp_server = load_mcp_server()
     install_fake_konfai_runtime(tmp_path, monkeypatch, mcp_server)
@@ -71,9 +72,9 @@ def test_generate_folds_and_run_batch(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_preview_volume_returns_png(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
     pytest.importorskip("SimpleITK")
@@ -81,7 +82,6 @@ def test_preview_volume_returns_png(
 
     dataset_dir = tmp_path / "dataset"
     create_segmentation_dataset(dataset_dir)
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
 
     async def scenario() -> None:
@@ -99,6 +99,7 @@ def test_preview_volume_returns_png(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_preview_volume_streams_a_single_plane_without_full_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -135,7 +136,6 @@ def test_preview_volume_streams_a_single_plane_without_full_read(
     full = sitk.GetArrayFromImage(real_read_image(str(volume)))  # reference read, before patching
     expected = {axis: window(np.take(full, 1, axis=axis)) for axis in (0, 1, 2)}
 
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
 
     full_reads: list[str] = []
@@ -164,45 +164,3 @@ def test_preview_volume_streams_a_single_plane_without_full_read(
 
     # The streaming path uses ImageFileReader.Execute(), never sitk.ReadImage on the whole volume.
     assert full_reads == [], f"preview_volume full-read the volume instead of streaming: {full_reads}"
-
-
-def test_set_parameters_preserve_value_types(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    load_mcp_server: Callable[[], ModuleType],
-) -> None:
-    """export_app must encode --set values so their type survives the YAML re-parse in konfai_apps.
-
-    A string "true"/"1" would otherwise come back as a bool/int; json.dumps keeps it a string while
-    leaving genuine ints/bools/floats/lists untouched.
-    """
-    yaml_safe = pytest.importorskip("ruamel.yaml")
-
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
-    mcp_server = load_mcp_server()
-
-    captured: dict[str, list[str] | None] = {}
-
-    def fake_export_app(ref, path, *, display_name=None, config_overrides=None, force_update=False):
-        captured["config_overrides"] = config_overrides
-        return {"ref": ref, "exported_to": str(path)}
-
-    monkeypatch.setattr(mcp_server.APP_SERVICE, "export_app", fake_export_app)
-
-    set_parameters = {"mode": "true", "code": "1", "iterations": 300, "flag": True, "lr": 2.0}
-
-    async def scenario() -> None:
-        async with fastmcp.Client(mcp_server.mcp) as client:
-            await client.call_tool(
-                "export_app",
-                {"ref": "org/App", "path": str(tmp_path / "out"), "set_parameters": set_parameters},
-            )
-
-    asyncio.run(scenario())
-
-    overrides = captured["config_overrides"]
-    assert overrides is not None
-    parser = yaml_safe.YAML(typ="safe")
-    round_tripped = {name: parser.load(value) for name, _, value in (item.partition("=") for item in overrides)}
-    assert round_tripped == set_parameters
-    assert isinstance(round_tripped["mode"], str) and isinstance(round_tripped["code"], str)

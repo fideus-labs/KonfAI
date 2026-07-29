@@ -21,6 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
+import fastmcp
 import pytest
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -29,13 +30,6 @@ if str(MODULE_ROOT) not in sys.path:
 
 from konfai_mcp.server_apps import AppService  # noqa: E402
 from konfai_mcp.server_support import WorkspaceLayout  # noqa: E402
-
-
-def _dummy_inputs(tmp_path: Path) -> list[list[str]]:
-    volume = tmp_path / "case0" / "Volume_0.mha"
-    volume.parent.mkdir(parents=True, exist_ok=True)
-    volume.write_bytes(b"")
-    return [[str(volume)]]
 
 
 def _write_local_app(root: Path, name: str = "TinyLocalApp") -> Path:
@@ -95,19 +89,6 @@ def test_describe_app_reads_local_manifest(tmp_path: Path) -> None:
     assert "fine_tune_app" in payload["next_actions"]
     assert "import_app" in payload["next_actions"]  # the modify-then-run path stays offered
     assert "run_app_evaluate" not in payload["next_actions"]
-
-
-def test_describe_app_inference_only_is_not_finetunable(tmp_path: Path) -> None:
-    """An app with no train Config.yml must not advertise fine_tune_app (it would dead-end)."""
-    app_dir = _write_local_app(tmp_path)
-    (app_dir / "Config.yml").unlink()
-
-    payload = _service(tmp_path).describe_app(str(app_dir))
-
-    assert payload["finetunable"] is False
-    assert "fine_tune_app" not in payload["next_actions"]
-    # Inference routing is unaffected.
-    assert payload["next_actions"][0] == "run_app_infer"
 
 
 def test_describe_app_no_inference_routes_to_design(tmp_path: Path) -> None:
@@ -250,175 +231,6 @@ def test_read_catalog_file_rejects_malformed(tmp_path: Path) -> None:
 
 def test_missing_catalog_file_is_empty(tmp_path: Path) -> None:
     assert AppService._read_catalog_file(tmp_path / "does_not_exist.json") == []
-
-
-def test_prepare_infer_gates_local_app(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    service = _service(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
-
-    with pytest.raises(ValueError, match="allow_untrusted_code=True"):
-        service.prepare_infer(ref=str(app_dir), inputs=inputs)
-
-    spec = service.prepare_infer(ref=str(app_dir), inputs=inputs, allow_untrusted_code=True, tta=2)
-    assert spec["kind"] == "infer"
-    assert spec["target"] == "konfai_mcp.runner:run_app_api"
-    assert spec["kwargs"]["ref"] == str(app_dir)
-    assert spec["kwargs"]["tta"] == 2
-    assert spec["kwargs"]["inputs"] == [[str(Path(inputs[0][0]).resolve())]]
-    assert "app_TinyLocalApp" in spec["output"]
-
-
-def test_prepare_infer_rejects_a_remote_server_ref(tmp_path: Path) -> None:
-    """Remote app servers are not driven from the MCP: the reference is refused, never run as local."""
-    service = _service(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
-
-    for ref in ("localhost:8000:MyApp", "localhost:8000"):
-        with pytest.raises(ValueError, match="remote app server"):
-            service.prepare_infer(ref=ref, inputs=inputs, allow_untrusted_code=True)
-
-
-def test_prepare_infer_rejects_bare_repo_and_bad_inputs(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    service = _service(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
-
-    with pytest.raises(ValueError, match="not a single app"):
-        service.prepare_infer(ref="org/SomeRepo", inputs=inputs, allow_untrusted_code=True)
-
-    with pytest.raises(ValueError, match="inputs cannot be empty"):
-        service.prepare_infer(ref=str(app_dir), inputs=[], allow_untrusted_code=True)
-
-    with pytest.raises(ValueError, match="path not found"):
-        service.prepare_infer(ref=str(app_dir), inputs=[[str(tmp_path / "missing.mha")]], allow_untrusted_code=True)
-
-
-def test_prepare_infer_labels_the_tuned_trial(tmp_path: Path) -> None:
-    """A tuned run's default output dir names its parameters, so the leaderboard metrics_path says which
-    trial produced the score."""
-    app_dir = _write_local_app(tmp_path)
-    spec = _service(tmp_path).prepare_infer(
-        ref=str(app_dir),
-        inputs=_dummy_inputs(tmp_path),
-        allow_untrusted_code=True,
-        config_overrides=["iterations=300"],
-    )
-    assert spec["kwargs"]["config_overrides"] == ["iterations=300"]
-    assert "app_TinyLocalApp__iterations_300" in spec["output"]
-
-
-def test_prepare_infer_cpu_without_gpu_forces_cpu(tmp_path: Path) -> None:
-    """Selecting CPU must not leave the app on its default (every visible GPU): gpu becomes an empty list."""
-    app_dir = _write_local_app(tmp_path)
-    spec = _service(tmp_path).prepare_infer(
-        ref=str(app_dir), inputs=_dummy_inputs(tmp_path), allow_untrusted_code=True, cpu=4
-    )
-    assert spec["kwargs"]["gpu"] == []
-    assert spec["kwargs"]["cpu"] == 4
-
-
-def test_prepare_evaluate_requires_gt_and_gates(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
-    gt_file = tmp_path / "gt" / "Reference_0.mha"
-    gt_file.parent.mkdir(parents=True, exist_ok=True)
-    gt_file.write_bytes(b"")
-    gt = [[str(gt_file)]]
-    service = _service(tmp_path)
-
-    with pytest.raises(ValueError, match="allow_untrusted_code=True"):
-        service.prepare_evaluate(ref=str(app_dir), inputs=inputs, gt=gt)
-
-    with pytest.raises(ValueError, match="requires ground-truth"):
-        service.prepare_evaluate(ref=str(app_dir), inputs=inputs, gt=None, allow_untrusted_code=True)
-
-    spec = service.prepare_evaluate(ref=str(app_dir), inputs=inputs, gt=gt, allow_untrusted_code=True)
-    assert spec["kind"] == "evaluate"
-    assert spec["target"] == "konfai_mcp.runner:run_app_action_api"
-    assert spec["kwargs"]["action"] == "evaluate"
-    assert spec["kwargs"]["gt"] == [[str(gt_file.resolve())]]
-    assert spec["kwargs"]["extra"]["evaluation_file"] == "Evaluation.yml"
-
-
-def test_prepare_uncertainty_spec(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    spec = _service(tmp_path).prepare_uncertainty(
-        ref=str(app_dir), inputs=_dummy_inputs(tmp_path), allow_untrusted_code=True
-    )
-    assert spec["kind"] == "uncertainty"
-    assert spec["kwargs"]["action"] == "uncertainty"
-    assert spec["kwargs"]["gt"] is None
-    assert spec["kwargs"]["extra"]["uncertainty_file"] == "Uncertainty.yml"
-
-
-def test_prepare_pipeline_spec_and_overrides(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    service = _service(tmp_path)
-    inputs = _dummy_inputs(tmp_path)
-
-    spec = service.prepare_pipeline(ref=str(app_dir), inputs=inputs, uncertainty=False, allow_untrusted_code=True)
-    assert spec["kind"] == "pipeline"
-    assert spec["kwargs"]["action"] == "pipeline"
-    assert spec["kwargs"]["extra"]["uncertainty"] is False
-    assert "config_overrides" not in spec["kwargs"]["extra"]
-
-    tuned = service.prepare_pipeline(
-        ref=str(app_dir), inputs=inputs, allow_untrusted_code=True, config_overrides=["iterations=300"]
-    )
-    # Overrides nested under extra still label the trial's output dir (the leaderboard reads that path).
-    assert tuned["kwargs"]["extra"]["config_overrides"] == ["iterations=300"]
-    assert "pipeline_TinyLocalApp__iterations_300" in tuned["output"]
-
-
-def test_prepare_finetune_gates_local_app(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    dataset = tmp_path / "Dataset"
-    dataset.mkdir()
-    service = _service(tmp_path)
-
-    with pytest.raises(ValueError, match="allow_untrusted_code=True"):
-        service.prepare_finetune(ref=str(app_dir), dataset=str(dataset))
-
-    spec = service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), allow_untrusted_code=True, epochs=3)
-    assert spec["kind"] == "finetune"
-    assert spec["target"] == "konfai_mcp.runner:run_finetune_api"
-    assert spec["kwargs"]["dataset"] == str(dataset.resolve())
-    assert spec["kwargs"]["epochs"] == 3
-    assert "finetune_TinyLocalApp" in spec["output"]
-
-
-def test_prepare_finetune_rejects_remote_and_bad_dataset(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    service = _service(tmp_path)
-    dataset = tmp_path / "Dataset"
-    dataset.mkdir()
-
-    with pytest.raises(ValueError, match="remote app server"):
-        service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset), allow_untrusted_code=True)
-
-    with pytest.raises(ValueError, match="dataset must be an existing directory"):
-        service.prepare_finetune(ref=str(app_dir), dataset=str(tmp_path / "missing"), allow_untrusted_code=True)
-
-    with pytest.raises(ValueError, match="epochs must be a positive integer"):
-        service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), epochs=0, allow_untrusted_code=True)
-
-
-def test_prepare_finetune_bakes_set_parameters(tmp_path: Path) -> None:
-    app_dir = _write_local_app(tmp_path)
-    dataset = tmp_path / "Dataset"
-    dataset.mkdir()
-
-    spec = _service(tmp_path).prepare_finetune(
-        ref=str(app_dir),
-        dataset=str(dataset),
-        allow_untrusted_code=True,
-        config_overrides=["iterations=300"],
-    )
-    # The overrides reach the runner (so they bake into the training config) ...
-    assert spec["kwargs"]["config_overrides"] == ["iterations=300"]
-    # ... and the default output dir is param-legible, so the leaderboard metrics_path names the trial.
-    assert "finetune_TinyLocalApp__iterations_300" in spec["output"]
 
 
 def test_import_app_gates_local_and_rejects_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -593,6 +405,22 @@ def test_package_from_session_normalizes_prediction_config_and_refreshes_support
     assert (bundle / "UNet.yml").read_text(encoding="utf-8") == "modules: [edited]\n"
 
 
+def test_normalize_bundled_prediction_config_preserves_windows_drive_path(tmp_path: Path) -> None:
+    from konfai_mcp.server_support import YAML_SAFE, yaml_dump_content
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    # A naive split(":", 1) would read the drive letter 'C' as the path and '\\...:a:mha' as the token.
+    config = {"Predictor": {"Dataset": {"dataset_filenames": ["C:\\data\\Dataset:a:mha"]}}}
+    (bundle / "Prediction.yml").write_text(yaml_dump_content(config), encoding="utf-8")
+
+    _app_service(tmp_path)._normalize_bundled_prediction_configs(bundle, ["Prediction.yml"])
+
+    data = YAML_SAFE.load((bundle / "Prediction.yml").read_text(encoding="utf-8"))
+    # The staged root replaces the path; the ':a:mha' accessor/format token survives uncorrupted.
+    assert data["Predictor"]["Dataset"]["dataset_filenames"] == ["./Dataset/:a:mha"]
+
+
 def test_package_from_session_requires_checkpoints_and_config(tmp_path: Path) -> None:
     layout = WorkspaceLayout(tmp_path / "workspaces")
     workspace = layout.workspace_dir()
@@ -606,6 +434,320 @@ def test_package_from_session_requires_checkpoints_and_config(tmp_path: Path) ->
     checkpoint.write_bytes(b"")
     with pytest.raises(ValueError, match="No config to package"):
         service.package_from_session(name="B", display_name="d", description="d", checkpoints=[str(checkpoint)])
+
+
+def test_package_from_session_runs_onnx_export_in_subprocess(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = WorkspaceLayout(tmp_path / "workspaces")
+    workspace = layout.workspace_dir()
+    (workspace / "Checkpoints" / "run").mkdir(parents=True)
+    (workspace / "Checkpoints" / "run" / "model.pt").write_bytes(b"")
+    (workspace / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
+
+    import konfai_apps.bundle as bundle_module
+
+    def _fail_in_process(*args: object, **kwargs: object) -> object:
+        raise AssertionError("export_onnx_into_bundle must not run in the server process")
+
+    monkeypatch.setattr(bundle_module, "export_onnx_into_bundle", _fail_in_process)
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def _fake_subprocess(target: str, kwargs: dict[str, object], *rest: object) -> str:
+        calls.append((target, kwargs))
+        return kwargs["bundle"] + "/model.onnx"  # type: ignore[operator]
+
+    # Patch by dotted path so it lands on the live konfai_mcp.runner module (some suites reload it),
+    # which is the exact object package_from_session's `from . import runner` resolves at call time.
+    monkeypatch.setattr("konfai_mcp.runner.run_api_in_subprocess", _fake_subprocess)
+
+    result = AppService(workspace_layout=layout).package_from_session(
+        name="OnnxBundle", display_name="Onnx App", description="exports onnx", onnx=True
+    )
+
+    assert len(calls) == 1
+    target, kwargs = calls[0]
+    assert target == "konfai_apps.bundle:export_onnx_into_bundle"
+    assert kwargs["bundle"] == str(Path(result["bundle_path"]))
+    assert kwargs["checkpoint"].endswith("model.pt")  # type: ignore[union-attr]
+    assert result["onnx"].endswith("model.onnx")
+
+
+def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "ws"))
+    import importlib
+
+    server = importlib.reload(importlib.import_module("konfai_mcp.server"))
+    try:
+        tool_names = (
+            "list_apps",
+            "describe_app",
+            "list_app_parameters",
+            "export_app",
+            "import_app",
+            "register_app_source",
+            "unregister_app_source",
+            "run_app_infer",
+            "run_app_evaluate",
+            "run_app_uncertainty",
+            "run_app_pipeline",
+            "fine_tune_app",
+            "package_app_from_session",
+        )
+        import asyncio
+
+        index = asyncio.run(server.read_tool_index())
+        for name in tool_names:
+            assert callable(getattr(server, name))
+            assert name in index["tools"]
+
+        import konfai_mcp.runner as runner
+
+        assert callable(runner.run_app_api)
+        assert callable(runner.run_app_action_api)
+        assert callable(runner.run_finetune_api)
+
+        assert "solve_task" in index["prompts"]
+        solve = server.prompt_solve_task("segment the liver", "one CT group")
+        content = solve[0]["content"]
+        for tool in ("run_app_infer", "fine_tune_app", "import_app", "design_config_strategy"):
+            assert tool in content
+
+        app_dir = _write_local_app(tmp_path)
+        described = server.describe_app(str(app_dir))
+        assert described["display_name"] == "Tiny Local"
+    finally:
+        sys.modules.pop("konfai_mcp.server", None)
+
+
+def test_set_parameters_preserve_value_types(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """export_app must encode --set values so their type survives the YAML re-parse in konfai_apps.
+
+    A string "true"/"1" would otherwise come back as a bool/int; json.dumps keeps it a string while
+    leaving genuine ints/bools/floats/lists untouched.
+    """
+    yaml_safe = pytest.importorskip("ruamel.yaml")
+
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+
+    captured: dict[str, list[str] | None] = {}
+
+    def fake_export_app(ref, path, *, display_name=None, config_overrides=None, force_update=False):
+        captured["config_overrides"] = config_overrides
+        return {"ref": ref, "exported_to": str(path)}
+
+    monkeypatch.setattr(mcp_server.APP_SERVICE, "export_app", fake_export_app)
+
+    set_parameters = {"mode": "true", "code": "1", "iterations": 300, "flag": True, "lr": 2.0}
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool(
+                "export_app",
+                {"ref": "org/App", "path": str(tmp_path / "out"), "set_parameters": set_parameters},
+            )
+
+    asyncio.run(scenario())
+
+    overrides = captured["config_overrides"]
+    assert overrides is not None
+    parser = yaml_safe.YAML(typ="safe")
+    round_tripped = {name: parser.load(value) for name, _, value in (item.partition("=") for item in overrides)}
+    assert round_tripped == set_parameters
+    assert isinstance(round_tripped["mode"], str) and isinstance(round_tripped["code"], str)
+
+
+def _dummy_inputs(tmp_path: Path) -> list[list[str]]:
+    volume = tmp_path / "case0" / "Volume_0.mha"
+    volume.parent.mkdir(parents=True, exist_ok=True)
+    volume.write_bytes(b"")
+    return [[str(volume)]]
+
+
+def test_describe_app_inference_only_is_not_finetunable(tmp_path: Path) -> None:
+    """An app with no train Config.yml must not advertise fine_tune_app (it would dead-end)."""
+    app_dir = _write_local_app(tmp_path)
+    (app_dir / "Config.yml").unlink()
+
+    payload = _service(tmp_path).describe_app(str(app_dir))
+
+    assert payload["finetunable"] is False
+    assert "fine_tune_app" not in payload["next_actions"]
+    # Inference routing is unaffected.
+    assert payload["next_actions"][0] == "run_app_infer"
+
+
+def test_prepare_infer_gates_local_app(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    service = _service(tmp_path)
+    inputs = _dummy_inputs(tmp_path)
+
+    with pytest.raises(ValueError, match="allow_untrusted_code=True"):
+        service.prepare_infer(ref=str(app_dir), inputs=inputs)
+
+    spec = service.prepare_infer(ref=str(app_dir), inputs=inputs, allow_untrusted_code=True, tta=2)
+    assert spec["kind"] == "infer"
+    assert spec["target"] == "konfai_mcp.runner:run_app_api"
+    assert spec["kwargs"]["ref"] == str(app_dir)
+    assert spec["kwargs"]["tta"] == 2
+    assert spec["kwargs"]["inputs"] == [[str(Path(inputs[0][0]).resolve())]]
+    assert "app_TinyLocalApp" in spec["output"]
+
+
+def test_prepare_infer_rejects_a_remote_server_ref(tmp_path: Path) -> None:
+    """Remote app servers are not driven from the MCP: the reference is refused, never run as local."""
+    service = _service(tmp_path)
+    inputs = _dummy_inputs(tmp_path)
+
+    for ref in ("localhost:8000:MyApp", "localhost:8000"):
+        with pytest.raises(ValueError, match="remote app server"):
+            service.prepare_infer(ref=ref, inputs=inputs, allow_untrusted_code=True)
+
+
+def test_prepare_infer_rejects_bare_repo_and_bad_inputs(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    service = _service(tmp_path)
+    inputs = _dummy_inputs(tmp_path)
+
+    with pytest.raises(ValueError, match="not a single app"):
+        service.prepare_infer(ref="org/SomeRepo", inputs=inputs, allow_untrusted_code=True)
+
+    with pytest.raises(ValueError, match="inputs cannot be empty"):
+        service.prepare_infer(ref=str(app_dir), inputs=[], allow_untrusted_code=True)
+
+    with pytest.raises(ValueError, match="path not found"):
+        service.prepare_infer(ref=str(app_dir), inputs=[[str(tmp_path / "missing.mha")]], allow_untrusted_code=True)
+
+
+def test_prepare_infer_labels_the_tuned_trial(tmp_path: Path) -> None:
+    """A tuned run's default output dir names its parameters, so the leaderboard metrics_path says which
+    trial produced the score."""
+    app_dir = _write_local_app(tmp_path)
+    spec = _service(tmp_path).prepare_infer(
+        ref=str(app_dir),
+        inputs=_dummy_inputs(tmp_path),
+        allow_untrusted_code=True,
+        config_overrides=["iterations=300"],
+    )
+    assert spec["kwargs"]["config_overrides"] == ["iterations=300"]
+    assert "app_TinyLocalApp__iterations_300" in spec["output"]
+
+
+def test_prepare_infer_cpu_without_gpu_forces_cpu(tmp_path: Path) -> None:
+    """Selecting CPU must not leave the app on its default (every visible GPU): gpu becomes an empty list."""
+    app_dir = _write_local_app(tmp_path)
+    spec = _service(tmp_path).prepare_infer(
+        ref=str(app_dir), inputs=_dummy_inputs(tmp_path), allow_untrusted_code=True, cpu=4
+    )
+    assert spec["kwargs"]["gpu"] == []
+    assert spec["kwargs"]["cpu"] == 4
+
+
+def test_prepare_evaluate_requires_gt_and_gates(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    inputs = _dummy_inputs(tmp_path)
+    gt_file = tmp_path / "gt" / "Reference_0.mha"
+    gt_file.parent.mkdir(parents=True, exist_ok=True)
+    gt_file.write_bytes(b"")
+    gt = [[str(gt_file)]]
+    service = _service(tmp_path)
+
+    with pytest.raises(ValueError, match="allow_untrusted_code=True"):
+        service.prepare_evaluate(ref=str(app_dir), inputs=inputs, gt=gt)
+
+    with pytest.raises(ValueError, match="requires ground-truth"):
+        service.prepare_evaluate(ref=str(app_dir), inputs=inputs, gt=None, allow_untrusted_code=True)
+
+    spec = service.prepare_evaluate(ref=str(app_dir), inputs=inputs, gt=gt, allow_untrusted_code=True)
+    assert spec["kind"] == "evaluate"
+    assert spec["target"] == "konfai_mcp.runner:run_app_action_api"
+    assert spec["kwargs"]["action"] == "evaluate"
+    assert spec["kwargs"]["gt"] == [[str(gt_file.resolve())]]
+    assert spec["kwargs"]["extra"]["evaluation_file"] == "Evaluation.yml"
+
+
+def test_prepare_uncertainty_spec(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    spec = _service(tmp_path).prepare_uncertainty(
+        ref=str(app_dir), inputs=_dummy_inputs(tmp_path), allow_untrusted_code=True
+    )
+    assert spec["kind"] == "uncertainty"
+    assert spec["kwargs"]["action"] == "uncertainty"
+    assert spec["kwargs"]["gt"] is None
+    assert spec["kwargs"]["extra"]["uncertainty_file"] == "Uncertainty.yml"
+
+
+def test_prepare_pipeline_spec_and_overrides(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    service = _service(tmp_path)
+    inputs = _dummy_inputs(tmp_path)
+
+    spec = service.prepare_pipeline(ref=str(app_dir), inputs=inputs, uncertainty=False, allow_untrusted_code=True)
+    assert spec["kind"] == "pipeline"
+    assert spec["kwargs"]["action"] == "pipeline"
+    assert spec["kwargs"]["extra"]["uncertainty"] is False
+    assert "config_overrides" not in spec["kwargs"]["extra"]
+
+    tuned = service.prepare_pipeline(
+        ref=str(app_dir), inputs=inputs, allow_untrusted_code=True, config_overrides=["iterations=300"]
+    )
+    # Overrides nested under extra still label the trial's output dir (the leaderboard reads that path).
+    assert tuned["kwargs"]["extra"]["config_overrides"] == ["iterations=300"]
+    assert "pipeline_TinyLocalApp__iterations_300" in tuned["output"]
+
+
+def test_prepare_finetune_gates_local_app(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+    service = _service(tmp_path)
+
+    with pytest.raises(ValueError, match="allow_untrusted_code=True"):
+        service.prepare_finetune(ref=str(app_dir), dataset=str(dataset))
+
+    spec = service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), allow_untrusted_code=True, epochs=3)
+    assert spec["kind"] == "finetune"
+    assert spec["target"] == "konfai_mcp.runner:run_finetune_api"
+    assert spec["kwargs"]["dataset"] == str(dataset.resolve())
+    assert spec["kwargs"]["epochs"] == 3
+    assert "finetune_TinyLocalApp" in spec["output"]
+
+
+def test_prepare_finetune_rejects_remote_and_bad_dataset(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    service = _service(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+
+    with pytest.raises(ValueError, match="remote app server"):
+        service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset), allow_untrusted_code=True)
+
+    with pytest.raises(ValueError, match="dataset must be an existing directory"):
+        service.prepare_finetune(ref=str(app_dir), dataset=str(tmp_path / "missing"), allow_untrusted_code=True)
+
+    with pytest.raises(ValueError, match="epochs must be a positive integer"):
+        service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), epochs=0, allow_untrusted_code=True)
+
+
+def test_prepare_finetune_bakes_set_parameters(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+
+    spec = _service(tmp_path).prepare_finetune(
+        ref=str(app_dir),
+        dataset=str(dataset),
+        allow_untrusted_code=True,
+        config_overrides=["iterations=300"],
+    )
+    # The overrides reach the runner (so they bake into the training config) ...
+    assert spec["kwargs"]["config_overrides"] == ["iterations=300"]
+    # ... and the default output dir is param-legible, so the leaderboard metrics_path names the trial.
+    assert "finetune_TinyLocalApp__iterations_300" in spec["output"]
 
 
 def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -671,53 +813,6 @@ def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.M
         sys.modules.pop("konfai_mcp.server", None)
 
 
-def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "ws"))
-    import importlib
-
-    server = importlib.reload(importlib.import_module("konfai_mcp.server"))
-    try:
-        tool_names = (
-            "list_apps",
-            "describe_app",
-            "list_app_parameters",
-            "export_app",
-            "import_app",
-            "register_app_source",
-            "unregister_app_source",
-            "run_app_infer",
-            "run_app_evaluate",
-            "run_app_uncertainty",
-            "run_app_pipeline",
-            "fine_tune_app",
-            "package_app_from_session",
-        )
-        import asyncio
-
-        index = asyncio.run(server.read_tool_index())
-        for name in tool_names:
-            assert callable(getattr(server, name))
-            assert name in index["tools"]
-
-        import konfai_mcp.runner as runner
-
-        assert callable(runner.run_app_api)
-        assert callable(runner.run_app_action_api)
-        assert callable(runner.run_finetune_api)
-
-        assert "solve_task" in index["prompts"]
-        solve = server.prompt_solve_task("segment the liver", "one CT group")
-        content = solve[0]["content"]
-        for tool in ("run_app_infer", "fine_tune_app", "import_app", "design_config_strategy"):
-            assert tool in content
-
-        app_dir = _write_local_app(tmp_path)
-        described = server.describe_app(str(app_dir))
-        assert described["display_name"] == "Tiny Local"
-    finally:
-        sys.modules.pop("konfai_mcp.server", None)
-
-
 def test_app_execution_tool_schemas_reach_the_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -751,3 +846,64 @@ def test_app_execution_tool_schemas_reach_the_client(
         # documented means present anywhere in the property's subtree.
         undocumented = [p for p in required_params if '"description"' not in json.dumps(properties[p])]
         assert not undocumented, f"{name} has undocumented parameters: {undocumented}"
+
+
+def _app_service(tmp_path: Path) -> AppService:
+    return AppService(workspace_layout=WorkspaceLayout(tmp_path / "workspaces"))
+
+
+def _touch(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"")
+    return str(path)
+
+
+def _local_app(tmp_path: Path) -> str:
+    """A minimal resolvable local app bundle -- enough for the prepare_* path validation."""
+    app_dir = tmp_path / "PairedApp"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Paired",
+                "description": "app used for pairing checks",
+                "short_description": "paired",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": ["tiny.pt"],
+                "inputs": {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
+                "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_dir / "tiny.pt").write_bytes(b"")
+    return str(app_dir)
+
+
+def test_check_case_pairing_rejects_mismatched_file_counts(tmp_path: Path) -> None:
+    inputs = [[_touch(tmp_path / "in" / f"a{i}.mha") for i in range(3)]]
+    gt = [[_touch(tmp_path / "gt" / f"g{i}.mha") for i in range(2)]]
+    with pytest.raises(ValueError, match="mismatched case counts"):
+        AppService._check_case_pairing([("inputs", inputs), ("gt", gt)])
+
+    equal_gt = [[_touch(tmp_path / "gt2" / f"g{i}.mha") for i in range(3)]]
+    AppService._check_case_pairing([("inputs", inputs), ("gt", equal_gt)])  # no raise
+
+
+def test_check_case_pairing_skips_directory_groups(tmp_path: Path) -> None:
+    # A directory expands to an unknown case count downstream, so it is not counted here: a 1-dir
+    # group beside a 3-file group must NOT falsely trip the guard.
+    (tmp_path / "series").mkdir()
+    inputs = [[str(tmp_path / "series")]]
+    gt = [[_touch(tmp_path / "gt" / f"g{i}.mha") for i in range(3)]]
+    AppService._check_case_pairing([("inputs", inputs), ("gt", gt)])  # no raise
+
+
+def test_prepare_infer_rejects_unequal_channel_counts(tmp_path: Path) -> None:
+    a = _touch(tmp_path / "c" / "a.mha")
+    b = _touch(tmp_path / "c" / "b.mha")
+    c = _touch(tmp_path / "c" / "c.mha")
+    with pytest.raises(ValueError, match="mismatched case counts"):
+        # The pairing check runs before the trust gate, so an un-gated call still reports it.
+        _app_service(tmp_path).prepare_infer(ref=_local_app(tmp_path), inputs=[[a, b], [c]])

@@ -35,12 +35,10 @@ class _Running:
         return None
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_set_live_tunables_writes_a_revisioned_control_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
     job_cls = importlib.import_module("konfai_mcp.server_jobs").Job
 
@@ -91,12 +89,10 @@ def test_set_live_tunables_writes_a_revisioned_control_file(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 def test_set_live_tunables_needs_at_least_one_field(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     mcp_server = load_mcp_server()
 
     async def scenario() -> None:

@@ -47,6 +47,20 @@ jobs:
         run: |
           pip install -e ./studio
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build the Studio front
+        # test_serves_the_built_frontend skips when web/index.html is absent -- build the front here
+        # so the smoke test actually executes. The build job rebuilds it independently for the wheel.
+        run: |
+          cd studio/frontend
+          npm ci
+          npm run build
+          test -f ../konfai_studio/web/index.html
+
       - name: Run konfai-studio tests
         run: |
           python -m pytest -q studio/tests

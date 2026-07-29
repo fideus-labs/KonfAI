@@ -16,15 +16,16 @@
 
 """Uploads sharing a basename must not silently overwrite each other."""
 
-import importlib.util
 import io
 from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(importlib.util.find_spec("fastapi") is None, reason="fastapi not installed")
+# Before importing anything that pulls in FastAPI (app_server): a module-level import runs at collection,
+# so pytestmark would skip too late and collection would error when FastAPI is absent.
+pytest.importorskip("fastapi")
 
-import konfai_apps.app_server as app_server  # noqa: E402
+import konfai_apps.app_server as app_server
 
 
 class _Upload:

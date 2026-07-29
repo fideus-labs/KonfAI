@@ -14,14 +14,29 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for patch reconstruction and overlap-blending (``konfai.data.patching``)."""
+"""Unit tests for ``konfai.data.patching``: patch reconstruction, overlap-blending, and the
+DatasetManager patch grids."""
 
 import itertools
 import math
+from typing import cast
 
+import numpy as np
 import pytest
 import torch
-from konfai.data.patching import Accumulator, Cosinus, Gaussian, Mean, StreamingAccumulator, Trim, blend_overlap
+from konfai.data.augmentation import DataAugmentationsList, Rotate
+from konfai.data.patching import (
+    Accumulator,
+    Cosinus,
+    DatasetManager,
+    DatasetPatch,
+    Gaussian,
+    Mean,
+    StreamingAccumulator,
+    Trim,
+    blend_overlap,
+)
+from konfai.utils.dataset import Dataset
 from konfai.utils.errors import PatchError
 from konfai.utils.utils import best_sweep_axis, get_patch_slices_from_shape, resolve_overlap
 
@@ -706,3 +721,36 @@ def test_best_sweep_axis_is_the_smallest_window(shape, patch, expected):
         for axis in range(3)
     ]
     assert windows[best_sweep_axis(patch, shape)] == min(windows)
+
+
+# DatasetManager construction — one augmentation draw per case, shared by every group
+# --------------------------------------------------------------------------------------
+
+
+def test_two_groups_share_one_construction_draw(streaming_dataset_stub) -> None:
+    """Building the label group's manager must reuse the image group's draw, not redraw over it.
+
+    A quarter Rotate transposes per-copy extents, so a per-group redraw leaves the two groups with
+    different copy grids -- crashing the streamed read of the stale grid's last patch.
+    """
+    volume = np.zeros((1, 6, 8, 10), dtype=np.float32)
+    for seed in range(10):
+        torch.manual_seed(seed)
+        augmentations = DataAugmentationsList(nb=2, data_augmentations={})
+        rotate = Rotate(is_quarter=True)
+        rotate.load(1.0)
+        augmentations.data_augmentations = [rotate]
+        image_manager, label_manager = (
+            DatasetManager(
+                index=0,
+                group_src=group,
+                group_dest=group,
+                name="CASE_000",
+                dataset=cast(Dataset, streaming_dataset_stub(volume)),
+                patch=DatasetPatch([4, 4, 4]),
+                transforms=[],
+                data_augmentations_list=[augmentations],
+            )
+            for group in ("CT", "SEG")
+        )
+        assert image_manager.shapes == label_manager.shapes, f"seed {seed}"

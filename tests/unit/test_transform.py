@@ -17,6 +17,7 @@
 """Tests for ``konfai.data.transform``: Clip, Dilate, Norm, Crop, Standardize, Padding,
 ResampleToResolution/ResampleToShape, InferenceStack, and KonfAIInference."""
 
+import os
 import sys
 import types
 from pathlib import Path
@@ -394,6 +395,14 @@ def test_inference_stack_super_init_enables_dataset_fallback():
     assert torch.allclose(out, torch.full((1, 2, 2), 4.0))
 
 
+@pytest.fixture(autouse=True)
+def _ambient_ports_survive(monkeypatch: pytest.MonkeyPatch):
+    """infer_entry pops both port vars from the real environment; registering them with monkeypatch
+    makes teardown put an ambient value back instead of leaking the deletion into the session."""
+    monkeypatch.delenv("KONFAI_MASTER_PORT", raising=False)
+    monkeypatch.delenv("KONFAI_TENSORBOARD_PORT", raising=False)
+
+
 def test_konfai_inference_reassembles_channels_in_sorted_order(tmp_path, monkeypatch):
     """Per-channel outputs must be stacked in deterministic (sorted) case order."""
     sitk = pytest.importorskip("SimpleITK")
@@ -453,6 +462,64 @@ def test_konfai_inference_forwards_configured_repo_and_model(monkeypatch):
     transform.infer_entry(Path("dataset"), Path("output"), [])
 
     assert captured["spec"] == "acme/Custom-KonfAI:CustomModel"
+
+
+def test_konfai_inference_raises_clear_error_inside_daemon_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    transform = KonfAIInference()
+
+    class DaemonProcess:
+        daemon = True
+
+    monkeypatch.setattr("konfai.data.transform.current_process", lambda: DaemonProcess())
+
+    with pytest.raises(RuntimeError, match=r"Dataset\.num_workers: 0"):
+        transform("CASE_000", torch.zeros(1, 4, 4), Attribute())
+
+
+def test_konfai_inference_forwards_config_overrides_to_the_nested_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The nested run is tunable from the calling code via the generic --set mechanism (not for shrinking a
+    # trained patch_size -- that hurts the result -- but for any legitimate config knob).
+    konfai_apps = pytest.importorskip("konfai_apps")
+    recorded: dict[str, object] = {}
+
+    class FakeKonfAIApp:
+        def __init__(self, ref: str, download: bool, force_update: bool) -> None:
+            recorded["ref"] = ref
+
+        def infer(self, *args: object, **kwargs: object) -> None:
+            recorded["config_overrides"] = kwargs.get("config_overrides")
+
+    monkeypatch.setattr(konfai_apps, "KonfAIApp", FakeKonfAIApp)
+    overrides = ["iterations=300"]
+    transform = KonfAIInference(repo_id="Org/Repo", model_name="tiny", config_overrides=overrides)
+    transform.infer_entry(Path("/tmp/in"), Path("/tmp/out"), [0])
+
+    assert recorded["ref"] == "Org/Repo:tiny"
+    assert recorded["config_overrides"] == overrides
+
+
+def test_konfai_inference_defragments_the_nested_allocator(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A heavy nested model (e.g. a 3D segmentation a metric relies on) can OOM on a large volume purely from
+    # allocator fragmentation; the nested run enables expandable segments so it fits without config changes.
+    konfai_apps = pytest.importorskip("konfai_apps")
+
+    class FakeKonfAIApp:
+        def __init__(self, ref: str, download: bool, force_update: bool) -> None:
+            pass
+
+        def infer(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    monkeypatch.setattr(konfai_apps, "KonfAIApp", FakeKonfAIApp)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+
+    KonfAIInference(repo_id="Org/Repo", model_name="tiny").infer_entry(Path("/tmp/in"), Path("/tmp/out"), [0])
+    assert "expandable_segments:True" in os.environ["PYTORCH_CUDA_ALLOC_CONF"]
+
+    # An explicit caller setting must win (setdefault, not overwrite).
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
+    KonfAIInference(repo_id="Org/Repo", model_name="tiny").infer_entry(Path("/tmp/in"), Path("/tmp/out"), [0])
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "max_split_size_mb:128"
 
 
 # --------------------------------------------------------------------------------------

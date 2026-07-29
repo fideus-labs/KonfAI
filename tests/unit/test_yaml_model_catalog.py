@@ -16,15 +16,11 @@
 
 """The shipped YAML model catalog: 'default|<Name>.yml' resolution and catalog health."""
 
-from pathlib import Path
-
 import pytest
 from konfai.network.network import ModelLoader, Network
 from konfai.utils.errors import ConfigError
 from konfai.utils.model_builder import build_model_from_yaml
-
-REPO = Path(__file__).resolve().parents[2]
-CATALOG = REPO / "konfai" / "models" / "yaml"
+from model_oracles import CATALOG, REPO
 
 
 def test_default_classpath_resolves_into_the_shipped_catalog() -> None:

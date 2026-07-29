@@ -26,6 +26,8 @@ import pytest
 fastmcp = pytest.importorskip("fastmcp")
 TestClient = pytest.importorskip("starlette.testclient").TestClient
 
+from mcp_test_helpers import install_fake_konfai_runtime, yaml_dump  # noqa: E402
+
 MINIMAL_TRAIN = """
 Trainer:
   train_name: MCP_TRAIN
@@ -73,14 +75,21 @@ Evaluator:
 """.strip()
 
 
+def _metric_json(metric_name: str, value: float) -> str:
+    return json.dumps(
+        {
+            "case": {metric_name: {"CASE_000": value}},
+            "aggregates": {metric_name: {"mean": value, "min": value, "max": value, "std": 0.0, "count": 1.0}},
+        }
+    )
+
+
 def test_mcp_server_session_loop(
     tmp_path: Path,
+    workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     monkeypatch.setattr(mcp_server, "KONFAI_VERSION", "test-version")
     monkeypatch.setattr(mcp_server, "konfai_get_available_devices", lambda: ([0], ["Fake GPU"]))
@@ -215,14 +224,53 @@ def test_mcp_server_session_loop(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
+def test_sessions_create_switch_and_cross_session_metrics(
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+
+            created = await client.call_tool("create_session", {"name": "exp-b"})
+            payload = created.structured_content
+            assert payload["session"] == "exp-b"
+            assert payload["created"] is True
+            assert mcp_server.WORKSPACE_LAYOUT.current_session == "exp-b"
+
+            # Metrics written in exp-b are rankable from ANY session via session=...
+            workspace = Path(mcp_server.WORKSPACE_LAYOUT.workspace_dir())
+            metrics = workspace / "Evaluations" / "RUN_B" / "Metric_TRAIN.json"
+            metrics.parent.mkdir(parents=True, exist_ok=True)
+            metrics.write_text(_metric_json("PRED:SEG:Dice", 0.9), encoding="utf-8")
+
+            switched = await client.call_tool("switch_session", {"name": "default"})
+            assert switched.structured_content["session"] == "default"
+            assert mcp_server.WORKSPACE_LAYOUT.current_session == "default"
+
+            board = await client.call_tool("leaderboard", {"metric": "Dice", "session": "exp-b"})
+            board_data = board.structured_content
+            assert board_data["session"] == "exp-b"
+            assert board_data["best"]["run_name"] == "RUN_B"
+
+            run = await client.call_tool("get_run_metrics", {"run_name": "RUN_B", "session": "exp-b"})
+            assert run.structured_content["metrics"]["case"]["PRED:SEG:Dice"]["CASE_000"] == 0.9
+
+            with pytest.raises(Exception, match="Unknown session"):
+                await client.call_tool("switch_session", {"name": "nope"})
+            with pytest.raises(Exception, match="Unknown session"):
+                await client.call_tool("leaderboard", {"session": "nope"})
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("workspace_root")
 def test_run_train_accepts_single_gpu_int(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
-
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
     captured: dict[str, Any] = {}
@@ -267,13 +315,66 @@ def test_run_train_accepts_single_gpu_int(
     asyncio.run(scenario())
 
 
-def test_http_bearer_token_protects_http_transports(
+@pytest.mark.usefixtures("workspace_root")
+def test_run_train_config_file_and_cluster(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    workspace_root = tmp_path / "workspaces"
-    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(workspace_root))
+    monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "0.05")
+    mcp_server = load_mcp_server()
+    install_fake_konfai_runtime(tmp_path, monkeypatch, mcp_server)
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            await client.call_tool(
+                "write_workflow_config",
+                {"workflow": "train", "content": yaml_dump({"Trainer": {"train_name": "BASE"}})},
+            )
+            await client.call_tool(
+                "write_session_file",
+                {"relative_path": "Config_GAN.yml", "content": yaml_dump({"Trainer": {"train_name": "GAN_RUN"}})},
+            )
+
+            job = await client.call_tool("run_train", {"config_file": "Config_GAN.yml"})
+            payload = job.structured_content
+            assert payload["run_name"] == "GAN_RUN"
+            done = await client.call_tool(
+                "wait_for_job", {"job_id": payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+            )
+            assert done.structured_content["status"] == "done"
+
+            # Writing the bad file succeeds -- validation happens at launch, not at write.
+            await client.call_tool(
+                "write_session_file",
+                {"relative_path": "Bad.yml", "content": yaml_dump({"Predictor": {}})},
+            )
+            with pytest.raises(Exception, match="must define the 'Trainer' root key"):
+                await client.call_tool("run_train", {"config_file": "Bad.yml"})
+
+            with pytest.raises(Exception, match="cluster expects exactly the keys"):
+                await client.call_tool("run_train", {"cluster": {"name": "gpu-queue"}})
+
+            cluster = {"name": "gpu-queue", "memory": 64, "num_nodes": 1, "time_limit": 120}
+            slurm_job = await client.call_tool("run_train", {"cluster": cluster, "overwrite": True})
+            slurm_payload = slurm_job.structured_content
+            assert slurm_payload["devices"] == ["slurm:gpu-queue"]
+            await client.call_tool(
+                "wait_for_job", {"job_id": slurm_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+            )
+            manifest = await client.read_resource(f"job://{slurm_payload['job_id']}/manifest")
+            manifest_data = json.loads(manifest[0].text)
+            assert manifest_data["manifest"]["cluster"] == cluster
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_http_bearer_token_protects_http_transports(
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
     monkeypatch.setenv("KONFAI_MCP_TRANSPORT", "streamable-http")
     monkeypatch.setenv("KONFAI_MCP_BEARER_TOKEN", "dev-token")
 

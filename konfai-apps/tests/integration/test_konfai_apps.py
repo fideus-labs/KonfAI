@@ -26,6 +26,8 @@ import numpy as np
 import pytest
 import torch
 
+pytestmark = pytest.mark.slow
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KONFAI_APPS_ROOT = REPO_ROOT / "konfai-apps"
 WORKFLOW_ASSETS_DIR = REPO_ROOT / "tests" / "assets" / "Workflows"

@@ -14,8 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import io
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -75,3 +79,70 @@ def test_describe_config_schema_covers_all_workflows_and_rejects_unknown() -> No
     assert describe_config_schema("training")["workflow"] == "train"  # alias
     with pytest.raises(ValueError, match="Unknown workflow"):
         describe_config_schema("inference")
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_config_schema_yaml_keys_and_drill(
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """The describe_config_schema TOOL surfaces literal YAML keys (yaml_key) and drills by YAML path."""
+    fastmcp = pytest.importorskip("fastmcp")
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            root = await client.call_tool("describe_config_schema", {"workflow": "train"})
+            root_data = root.structured_content
+            keys = {field["yaml_key"] for field in root_data["fields"]}
+            assert "Model" in keys and "train_name" in keys
+
+            drilled = await client.call_tool("describe_config_schema", {"workflow": "train", "path": "Model"})
+            drilled_data = drilled.structured_content
+            assert drilled_data["yaml_path"] == ["Trainer", "Model"]
+            assert any(field["name"] == "classpath" for field in drilled_data["fields"])
+
+            with pytest.raises(Exception, match="Drillable nested config keys"):
+                await client.call_tool("describe_config_schema", {"workflow": "train", "path": "Nope"})
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_describe_model_outputs_enumerates_module_paths(
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    fastmcp = pytest.importorskip("fastmcp")
+    pytest.importorskip("SimpleITK")
+    from mcp_test_helpers import create_segmentation_dataset
+    from ruamel.yaml import YAML
+
+    yaml = YAML()
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            created = await client.call_tool(
+                "initialize_session",
+                {"from_example": "Segmentation", "overwrite": True, "workflows": ["train"]},
+            )
+            session_dir = Path(created.structured_content["path"])
+            create_segmentation_dataset(session_dir / "Dataset")
+            config = yaml.load((session_dir / "Config.yml").read_text(encoding="utf-8"))
+            config["Trainer"]["Dataset"]["Patch"]["patch_size"] = [1, 32, 32]
+            config["Trainer"]["Model"]["UNet"]["parameters"]["channels"] = [1, 4, 8, 16, 32]
+            stream = io.StringIO()
+            yaml.dump(config, stream)
+            await client.call_tool(
+                "write_workflow_config", {"workflow": "train", "content": stream.getvalue(), "overwrite": True}
+            )
+
+            outputs = await client.call_tool("describe_model_outputs", {"workflow": "train"})
+            payload = outputs.structured_content
+            assert payload["ok"] is True
+            networks = payload["networks"]
+            assert networks, "at least one Network must be discovered"
+            paths = [entry["path"] for entries in networks.values() for entry in entries]
+            assert paths and any("." in path for path in paths)
+            assert any(entry["terminal"] for entries in networks.values() for entry in entries)
+
+    asyncio.run(scenario())

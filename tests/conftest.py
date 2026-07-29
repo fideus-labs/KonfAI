@@ -24,13 +24,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _konfai_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _konfai_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Harmless per-test defaults for the mandatory KONFAI environment variables.
 
     ``Config()`` requires ``KONFAI_config_file`` and ``KONFAI_CONFIG_MODE`` (AGENTS.md §7).
     Tests that exercise the config engine override these with ``monkeypatch.setenv``.
+    The sentinel path is per-test so parallel workers never share a config file.
     """
-    monkeypatch.setenv("KONFAI_config_file", "/tmp/konfai-none.yml")
+    monkeypatch.setenv("KONFAI_config_file", str(tmp_path / "konfai-none.yml"))
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
 
 
