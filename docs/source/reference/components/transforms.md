@@ -139,7 +139,7 @@ Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 | Name | Purpose | Stream |
 | --- | --- | --- |
 | `Statistics` | Records ImageMin/Max/Mean/Std to the attribute cache and returns the tensor unchanged (feeds the perceptual criteria `SAM_Perceptual`, `IMPACTSynth`, `IMPACTReg`). Order in the transform list matters. | no‡ |
-| `Save` | Writes the preprocessed volume to a cache dataset and passes the tensor through. Once that cache exists it is read instead, and the transforms before it are skipped. | no — it needs the whole volume to write |
+| `Save` | Writes the preprocessed volume to a cache dataset and passes the tensor through. Once that cache exists it is read instead, and the transforms before it are skipped. A group written this way is also readable, within the same run, by anything that names it (`Mask: {path: <group>}`), including when the write comes from a loader worker — every backend. On `h5` the reader and the writer share one store, which HDF5 does not define for concurrent access without SWMR: the entry is seen, but a read racing a write can raise. One file per case (`mha`/`nii`/…) has no such window. | no — it needs the whole volume to write |
 | `KonfAIInference` | Run a nested KonfAI app inference in a spawned subprocess. Needs `konfai-apps` and `num_workers: 0`; defaults to a specific HF repo. | no‡ |
 
 `†` changes the **channel** dimension, not spatial — no `transform_shape`
