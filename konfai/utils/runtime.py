@@ -25,6 +25,7 @@ import shutil
 import socket
 import subprocess  # nosec B404
 import sys
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import closing
@@ -457,11 +458,19 @@ class DataLog(Enum):
             raise ValueError(f"Unsupported DataLog type: {self}")
 
 
+def _bar_key(line: str) -> str:
+    """What identifies a progress bar across its redraws: its text up to the first digit."""
+    return re.split(r"\d", line, maxsplit=1)[0]
+
+
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
 class MinimalLog:
     """Capture stdout/stderr while keeping a one-line rolling status buffer."""
+
+    # Off a terminal, at most one redrawn progress-bar frame is mirrored per this many seconds.
+    _MIRROR_REDRAW_EVERY = 2.0
 
     def __init__(self, rank: int = 0) -> None:
         self._stdout_bak = sys.stdout
@@ -469,6 +478,15 @@ class MinimalLog:
         self._buffered_line = ""
         self.verbose = os.environ.get("KONFAI_VERBOSE", "True") == "True"
         self.rank = rank
+        try:
+            self._mirror_is_tty = bool(self._stdout_bak.isatty())
+        except (AttributeError, ValueError, OSError):
+            self._mirror_is_tty = False
+        self._mirror_last_redraw = 0.0
+        # Folded frames withheld by the throttle, one slot per bar (keyed by the text before the first
+        # digit): interleaved bars (train + validation) would overwrite a single slot, and one of the
+        # two would end the run without its final state ever mirrored.
+        self._mirror_pending: dict[str, str] = {}
 
     def __enter__(self):
         sys.stdout = cast(TextIO, self)
@@ -476,6 +494,10 @@ class MinimalLog:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # A run's last writes are often throttled frames: emitted here, so the sink ends on the bar's
+        # final state. flush() cannot carry this — the bars flush after every frame, which would empty
+        # the throttle each time.
+        self._mirror_emit_pending()
         sys.stdout = self._stdout_bak
         sys.stderr = self._stderr_bak
 
@@ -483,27 +505,64 @@ class MinimalLog:
         if not msg:
             return
         msg_clean = ANSI_ESCAPE_RE.sub("", msg)
-        if "\r" in msg_clean or "[A" in msg:
-            msg_clean = msg_clean.split("\r")[-1].strip()
-            self._buffered_line = msg_clean
+        # A CRLF line ending is not a redraw: "warning\r\n" folds to the text after its last \r — nothing
+        # — and the message would vanish from the mirror and the log file both.
+        redraw = "\r" in msg_clean.replace("\r\n", "\n") or "[A" in msg
+        if redraw:
+            self._buffered_line = msg_clean.split("\r")[-1].strip()
         else:
             self._buffered_line = msg_clean.strip()
 
         if self.verbose and (self.rank == 0 or "KONFAI_CLUSTER" in os.environ):
-            # The console mirror is best-effort: if its reader is gone (an interactive launcher exited, a
-            # server restarted), the pipe is broken — keep running and keep writing to the log file rather
-            # than crashing the job.
-            try:
-                self._stdout_bak.write(msg)
-                self._stdout_bak.flush()
-            except (BrokenPipeError, ValueError):
-                pass
+            self._mirror(msg, redraw)
+
+    def _mirror(self, msg: str, redraw: bool) -> None:
+        # A terminal overwrites a redrawn bar; a file appends every frame, so a mirrored animation is
+        # megabytes per run in an MCP job log or a slurm-*.out. Off a terminal the mirror sends the
+        # folded line instead, throttled — a log tail still shows live progress — and a skipped frame
+        # is kept pending so a bar's final state lands before whatever message follows it.
+        if not self._mirror_is_tty:
+            if redraw:
+                now = time.monotonic()
+                if now - self._mirror_last_redraw < self._MIRROR_REDRAW_EVERY:
+                    self._mirror_pending[_bar_key(self._buffered_line)] = self._buffered_line
+                    return
+                self._mirror_last_redraw = now
+                held = self._mirror_take_pending(exclude=_bar_key(self._buffered_line))
+                msg = f"{held}{self._buffered_line}\n"
+            else:
+                msg = f"{self._mirror_take_pending()}{msg}"
+        # Best-effort: if the mirror's reader is gone (an interactive launcher exited, a server
+        # restarted), the pipe is broken — keep running and keep writing to the log file rather than
+        # crashing the job.
+        try:
+            self._stdout_bak.write(msg)
+            self._stdout_bak.flush()
+        except (BrokenPipeError, ValueError):
+            pass
 
     def flush(self):
         try:
             self._stdout_bak.flush()
         except (BrokenPipeError, ValueError):
             pass
+
+    def _mirror_take_pending(self, exclude: str | None = None) -> str:
+        """The withheld frames as mirror-ready lines, cleared; ``exclude`` skips the bar being emitted."""
+        if not self._mirror_pending:
+            return ""
+        lines = [line for key, line in self._mirror_pending.items() if key != exclude]
+        self._mirror_pending.clear()
+        return "".join(f"{line}\n" for line in lines)
+
+    def _mirror_emit_pending(self) -> None:
+        held = self._mirror_take_pending()
+        if held:
+            try:
+                self._stdout_bak.write(held)
+                self._stdout_bak.flush()
+            except (BrokenPipeError, ValueError):
+                pass
 
     def fileno(self):
         if sys.__stdout__ is None:
