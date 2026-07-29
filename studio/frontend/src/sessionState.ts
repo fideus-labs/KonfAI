@@ -11,6 +11,7 @@ export interface SessionUiState {
   status?: string; // latest polled job status
   volume?: string | null; // primary volume shown in the viewer
   compareVol?: string | null; // second volume for the viewer's compare pane
+  volumeNonce?: number; // bumped each time the assistant points at a volume, same path or not
   runNonce?: number; // bumped to re-subscribe the job stream
   inject?: { text: string; nonce: number }; // a prompt to replay into the chat
   busy?: boolean; // the experiment's agent is working

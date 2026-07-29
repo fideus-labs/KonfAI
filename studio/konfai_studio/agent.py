@@ -11,6 +11,7 @@ and return text.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -21,6 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import Client
+
+from .workflow import MAX_MOVES
 
 
 def _resolve_mcp_command(command: str) -> str:
@@ -37,57 +40,108 @@ def _resolve_mcp_command(command: str) -> str:
     return str(beside) if beside.exists() else (shutil.which(command) or command)
 
 
+def _require_claude_code() -> None:
+    """The Claude Code brain needs its SDK *and* the ``claude`` CLI (not a pip package). Missing either is a
+    setup problem, so report the fix instead of letting an ImportError or a spawn failure reach the chat."""
+    switch = (
+        "or switch brain: KONFAI_STUDIO_LLM=anthropic (with ANTHROPIC_API_KEY), or =openai with "
+        "KONFAI_STUDIO_LLM_BASE_URL pointing at a local vLLM/Ollama/LM Studio server"
+    )
+    try:
+        import claude_agent_sdk  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            f"The Claude Code brain needs claude-agent-sdk (pip install konfai-studio), {switch}."
+        ) from exc
+    if shutil.which("claude") is None:
+        raise RuntimeError(f"The Claude Code brain needs the 'claude' CLI on PATH — install Claude Code, {switch}.")
+
+
 DEFAULT_MODEL = os.environ.get("KONFAI_STUDIO_MODEL", "claude-opus-4-8")
 MAX_TOKENS = int(os.environ.get("KONFAI_STUDIO_MAX_TOKENS", "16000"))
 MAX_TURNS = int(os.environ.get("KONFAI_STUDIO_MAX_TURNS", "30"))
 
+# Standing rules only: who you are, and what holds on every turn. What the experiment owes RIGHT NOW is
+# sent per turn as [state]/[now], derived from the workspace by konfai_mcp.experiment_state -- so no
+# stage's instruction can arrive at the wrong stage, and none of it is paid for twice.
 SYSTEM_PROMPT = (
-    "You are KonfAI Studio, an assistant that drives KonfAI (a config-driven deep-learning "
-    "framework for medical imaging) through its MCP tools. The user is a clinician-researcher: "
-    "they point you at a dataset and describe a task; you inspect data, author configs, launch "
-    "and monitor train/predict/eval jobs, and report results plainly. Prefer the safe, read-only "
-    "tools (inspect_dataset, list_apps, describe_*, summarize_session) before anything that runs a "
-    "job. Never fabricate a tool result. When you have enough information to act, act; state what "
-    "you did and what you found.\n\n"
-    "Be economical: keep answers short -- a sentence or a compact list, never long prose. Give what you "
-    "did, what you found, and the next step; skip preamble, capability lists, and restating the request.\n\n"
-    "At the start, don't ask permission to look or list what you can do: inspect the dataset "
-    "(inspect_dataset, browse_dataset) and report the essentials tersely -- modality, shape and spacing "
-    "(x,y,z), case count, label classes, any split, anything anomalous. Then pick the cheapest fitting "
-    "route -- (1) a published app as-is (list_apps -> describe_app -> import_app -> run_prediction), "
-    "(2) fine-tune a close app (import_app -> run_resume with weights_only), (3) author a config and train "
-    "from scratch -- and propose it with one concrete next step. At most one question, and only when the "
-    "choice is genuinely ambiguous.\n\n"
-    "Studio shows a 3D image viewer (NiiVue) beside this chat. To display a case, call a tool that "
-    "surfaces its absolute volume path (e.g. preview_volume, or read/inspect the file): any "
-    ".nii/.nii.gz/.mha/.mhd/.nrrd path in a tool call or result is auto-loaded into that viewer. "
-    "The viewer is part of the UI and always available — never say it is offline or unavailable. "
-    "Volumes are decoded in the browser, so you never need code execution, a screenshot, or a PNG "
-    "conversion to show one, and you must never fabricate an image.\n\n"
-    "When the user attaches a paper (a local PDF path or an arXiv/URL), read it, extract the task, "
-    "architecture, losses, augmentations and training setup, then reproduce it as a KonfAI experiment: "
-    "author the config with the tools and explain your design choices. Validate it, but do not launch "
-    "training until the user confirms.\n\n"
-    "If a train/predict job fails because its outputs already exist (a 'model already exists' / "
-    "'pass --overwrite' error), do not dump the traceback. Say plainly that this run's outputs are "
-    "already there, and offer two clear choices: (1) re-run overwriting the existing outputs, or "
-    "(2) use a new run name — then do whichever the user picks."
+    "You drive KonfAI -- config-driven deep learning for medical imaging -- through its MCP tools, for a "
+    "clinician-researcher who knows their data, not the framework.\n\n"
+    "Act, do not offer. When the next step only reads, take it and report what you found. Ask only for "
+    "what you cannot derive, one question at a time. Never state a tool result you did not get.\n\n"
+    "A turn may open with three lines:\n"
+    "  [state] where the experiment stands, read from its workspace. Authoritative: never ask for what is "
+    "already there, never redo a step it shows as done.\n"
+    "  [now] the step the experiment is waiting on. Do it -- unless the user's message asks for something "
+    "else, which always wins.\n"
+    "  [constraint] a compute restriction to respect exactly.\n\n"
+    "NEVER start training, fine-tuning, prediction or evaluation without asking first. Say in one line "
+    "what it will cost -- how many cases, on which device, roughly how long -- and wait for a yes. The "
+    "only exception is relaunching a run you just corrected after a failure.\n\n"
+    "A run is a result only when its job says so. After any run_* or fine_tune_app, wait for the job to "
+    "reach a terminal state, then open what it produced and report THAT. A launch that returned cleanly is "
+    "not a success and must never be presented as one.\n\n"
+    "When a run fails: the cause in one line, never a traceback, then the correction. A correction may be "
+    "relaunched straight away; anything else that costs GPU time is asked first. Two failed attempts is the "
+    "limit -- past it, lay out the options and ask. Never settle a scientific choice yourself (loss, "
+    "architecture, split, label mapping, which data is the right one): those are the user's.\n\n"
+    "A job whose status is 'killed' was stopped ON PURPOSE -- usually the user pressing Stop in the panel "
+    "beside you ('cancel_requested': true marks it). It is not a failure, not an external anomaly, and "
+    "nothing to investigate or apologise for: say in one line where the run stood (epoch/iteration, last "
+    "loss), then offer to resume or relaunch. A deliberate stop never counts toward the two-attempt limit, "
+    "and you never invent a watchdog, supervisor or OOM to explain it.\n\n"
+    "Reply in the user's own language -- French to French, English to English -- and keep tool names, "
+    "config keys and paths verbatim whatever the language.\n\n"
+    "Reply in a few sentences: what you did, what it showed, what is next. No preamble, no lists of what "
+    "you could do, no restating [state], no thinking out loud, no log dumps -- the failing lines only.\n\n"
+    "WHENEVER you describe a dataset, use exactly this shape so two datasets can be compared without "
+    "re-reading either:\n"
+    "one line -- <N> cases | <layout> | <ext> | spacing <x>x<y>x<z> mm | shape <X>x<Y>x<Z>\n"
+    "then a markdown table, one row per group, these columns and no others:\n"
+    "| Group | Cases | Range / classes | Role |\n"
+    "Role is one short clause: what it is, and whether it can serve as input or as target.\n"
+    "then, each on its own line and only when it applies:\n"
+    "**Incomplete** — <GROUP> missing in <n>/<N> cases (<a few case ids>)\n"
+    "**dataset_entry** — `<value>`\n"
+    "Every number comes from the tool, never from memory; group names verbatim. When groups differ in "
+    "geometry, say so in their Role rather than averaging them into the header line.\n\n"
+    "END EVERY REPLY with the next moves, after a line containing only <<NEXT>>:\n"
+    "<<NEXT>>\n"
+    "Short Label :: the whole message the user would send to take that step\n"
+    "Short Label :: ...\n"
+    "As many as genuinely apply, one to ten -- not a fixed number, and never one invented to reach a "
+    "count. If your reply asks a question or offers a choice, the moves ARE its answers: one per option "
+    "you raised, all of them, in the user's voice ('Do MR to CT synthesis'), and nothing else -- "
+    "answering is the only thing they owe you. Otherwise they are the next steps, best first.\n"
+    "The label is 2-4 words. The prompt is written as the USER, names its subject (the dataset path, the "
+    "app, the run) and says what to do; when it starts a run it also says to wait for the job and open "
+    "what it produced. Never a vague 'Continue' or 'Run it'. This block is stripped before the user sees "
+    "it: it becomes the buttons under your reply.\n\n"
+    "A NiiVue viewer sits beside the chat: any .nii/.nii.gz/.mha/.mhd/.nrrd path you surface loads there by "
+    "itself. To compare two volumes -- a synthetic CT against the real one, a prediction against its label "
+    "-- surface BOTH paths in the same step: exactly two opens them side by side, crosshairs linked. It is "
+    "never unavailable, and you must never invent an image.\n\n"
+    "Given a paper, extract task, architecture, losses and augmentations, reproduce it as a config, "
+    "validate it -- and stop there until the user confirms training."
 )
 
 # A tool executor: given (name, arguments) run the MCP tool, return (ok, text_preview).
 ToolFn = Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]]
 
-# Absolute NIfTI / MHA volume paths surfaced in a tool result -> auto-load in NiiVue.
+# Absolute NIfTI / MHA volume paths NAMED by the assistant -> auto-load in NiiVue.
 _VOLUME_RE = re.compile(r"(/[^\s\"'`|,)\]]+\.(?:nii\.gz|nii|mha|mhd|nrrd))")
 
 
-def _detect_volume(text: str) -> str | None:
-    """First existing volume path in a chunk of text, so the chat can drive the viewer."""
+def _detect_volumes(text: str) -> list[str]:
+    """The existing volume paths in a chunk of text, in order and deduped, so the chat can drive the viewer."""
+    found: list[str] = []
     for match in _VOLUME_RE.finditer(text or ""):
         path = match.group(1)
-        if os.path.isfile(path):
-            return path
-    return None
+        if path not in found and os.path.isfile(path):
+            found.append(path)
+            if len(found) > 3:  # past a comparison it is a listing; the exact count no longer matters
+                break
+    return found
 
 
 def _next_actions(text: str) -> list[str]:
@@ -114,24 +168,117 @@ def _next_actions(text: str) -> list[str]:
 # The UI only needs a short preview of a tool result; the full text is parsed here first.
 _PREVIEW_LIMIT = 600
 
+# The assistant ends its reply with its own next moves behind this marker. Asking a second model to write
+# them cost 40s per turn and knew less than the one that had just done the work.
+_NEXT_MARKER = "<<NEXT>>"
+
+
+class _NextMoves:
+    """Splits the reply stream at the marker: the prose goes to the user, the block behind it becomes
+    the buttons.
+
+    Text arrives in chunks that can cut the marker in half, so the last few characters are held back
+    until they cannot start one — the user never sees the marker appear and vanish.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._block = ""
+        self._split = False
+
+    @staticmethod
+    def _partial_marker(text: str) -> int:
+        """How many trailing characters could still grow into the marker — 0 when none can. Holding back
+        a fixed count instead would cut the visible text mid-word every time a tool call interrupts it."""
+        for size in range(min(len(text), len(_NEXT_MARKER) - 1), 0, -1):
+            if _NEXT_MARKER.startswith(text[-size:]):
+                return size
+        return 0
+
+    def feed(self, chunk: str) -> str:
+        """Take a chunk of the reply; return the part that is safe to show."""
+        if self._split:
+            self._block += chunk
+            return ""
+        self._pending += chunk
+        cut = self._pending.find(_NEXT_MARKER)
+        if cut >= 0:
+            visible, self._block = self._pending[:cut], self._pending[cut + len(_NEXT_MARKER) :]
+            self._pending, self._split = "", True
+            return visible
+        keep = self._partial_marker(self._pending)
+        visible, self._pending = self._pending[: len(self._pending) - keep], self._pending[len(self._pending) - keep :]
+        return visible
+
+    def flush(self) -> str:
+        """Whatever was held back, once the reply is over and no marker came."""
+        visible, self._pending = self._pending, ""
+        return visible
+
+    def moves(self) -> list[dict[str, str]]:
+        """The parsed moves — ``Label :: prompt`` per line. A malformed line is dropped, not guessed at."""
+        out: list[dict[str, str]] = []
+        for line in self._block.splitlines():
+            label, _, prompt = line.partition("::")
+            label, prompt = label.strip().lstrip("-*• ").strip(), prompt.strip()
+            if label and prompt and len(label) <= 40:
+                out.append({"label": label[:40], "prompt": prompt[:400]})
+        return out[:MAX_MOVES]
+
 
 async def with_volume_events(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
-    """Pass an agent's event stream through, deriving the UI's out-of-band signals from a tool's
-    full result in ONE place: a ``volume`` event (what to show in the viewer) and a ``next_actions``
-    event (what to suggest next). Backends stay free of any UI concern; the preview is trimmed here."""
+    """Pass an agent's event stream through, deriving the UI's out-of-band signals in ONE place: a
+    ``volume`` event (what to show in the viewer), a ``next_actions`` event (the tool's own advice), and
+    the reply's trailing next-moves block, which is stripped from the text and emitted as
+    ``next_prompts``. Backends stay free of any UI concern; the preview is trimmed here.
+
+    The viewer follows the volumes the assistant NAMES — in a tool's arguments, or in its own prose, which
+    is what the system prompt promises the user. A tool *result* is not a choice: an inventory names one
+    file per group to prove the group exists, and reading the viewer off those opened whichever group
+    sorted first instead of the images the assistant had just previewed."""
+    next_moves = _NextMoves()
+    named: list[str] = []  # what the assistant pointed at, in order — the last two are the comparison
+    shown: tuple[str, str | None] | None = None  # the pair on screen, so the same one is not re-sent
     async for event in events:
-        volume: str | None = None
+        volumes: list[str] = []
         actions: list[str] = []
-        if event["type"] == "tool_call":
-            volume = _detect_volume(json.dumps(event.get("input"), default=str))
+        if event["type"] == "text":
+            visible = next_moves.feed(event.get("text") or "")
+            if not visible:
+                continue  # held back: a partial marker, or the moves block itself
+            event["text"] = visible
+            volumes = _detect_volumes(visible)
+        elif event["type"] == "tool_call":
+            volumes = _detect_volumes(json.dumps(event.get("input"), default=str))
         elif event["type"] == "tool_result":
             full = event.get("preview", "")
-            volume = _detect_volume(full)
             actions = _next_actions(full)
             event["preview"] = full[:_PREVIEW_LIMIT]  # trim for the UI, after parsing the full text
+        elif event["type"] in {"done", "error"}:
+            if tail := next_moves.flush():
+                yield {"type": "text", "text": tail}
+            if moves := next_moves.moves():
+                yield {"type": "next_prompts", "prompts": moves}
         yield event
-        if volume:
-            yield {"type": "volume", "path": volume}
+        # The pane follows what the assistant last pointed at: the last two volumes it named are the
+        # comparison, whether they arrive together or one step apart -- a reply naming the moved image
+        # beside the reference is streamed in chunks, so "the same step" is not something this side can
+        # recognise. Naming is not deduplicated over the turn: a run names its inputs in its own arguments
+        # and then cites one of them again as half of a comparison, and dropping the repeat left the pane
+        # pairing the wrong two. A step listing more than two is an inventory, not a choice.
+        if volumes:
+            if len(volumes) > 2:
+                if shown is None:
+                    shown = (volumes[0], None)
+                    yield {"type": "volume", "path": shown[0], "compare": None}
+            else:
+                for path in volumes:
+                    if not named or named[-1] != path:
+                        named.append(path)
+                pair = (named[-2], named[-1]) if len(named) > 1 else (named[-1], None)
+                if pair != shown:
+                    shown = pair
+                    yield {"type": "volume", "path": pair[0], "compare": pair[1]}
         if actions:
             yield {"type": "next_actions", "actions": actions}
 
@@ -161,10 +308,20 @@ def _mcp_tools_to_openai(mcp_tools: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _tool_result_text(result: Any) -> str:
+# A tool result headed for a model is capped: one oversized payload would crowd out the conversation.
+# A result Studio parses itself is NOT — a JSON document cut at any length stops being JSON, and the
+# caller cannot tell a truncated payload from an empty one. The leaderboard reached 64 328 characters
+# with 65 metrics and came back as "no evaluations yet" over two runs that had been scored.
+_MODEL_RESULT_LIMIT = 60000
+
+
+def _tool_result_text(result: Any, limit: int | None = _MODEL_RESULT_LIMIT) -> str:
+    def capped(text: str) -> str:
+        return text if limit is None else text[:limit]
+
     if getattr(result, "data", None) is not None:
         try:
-            return json.dumps(result.data, default=str)[:60000]
+            return capped(json.dumps(result.data, default=str))
         except (TypeError, ValueError):
             pass
     parts: list[str] = []
@@ -172,7 +329,7 @@ def _tool_result_text(result: Any) -> str:
         text = getattr(block, "text", None)
         if text is not None:
             parts.append(text)
-    return ("\n".join(parts) or "(empty result)")[:60000]
+    return capped("\n".join(parts) or "(empty result)")
 
 
 class AnthropicBackend:
@@ -374,17 +531,24 @@ def _short_tool_name(name: str) -> str:
 
 
 def _stringify_content(content: Any) -> str:
-    """Flatten a Claude Code content value (str or list of blocks) into text."""
+    """Flatten a Claude Code content value (str or list of blocks) into text.
+
+    A block that is not text is named rather than dropped: ``preview_volume`` answers with an image, and
+    silently skipping it made a working call read as "(empty result)" in the chat.
+    """
     if isinstance(content, str):
         return content
     parts: list[str] = []
     for block in content or []:
         text = getattr(block, "text", None)
+        if text is None and isinstance(block, dict):
+            text = block.get("text")
         if text is not None:
-            parts.append(text)
-        elif isinstance(block, dict) and "text" in block:
-            parts.append(str(block["text"]))
-    return "\n".join(parts) or "(empty result)"
+            parts.append(str(text))
+            continue
+        kind = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+        parts.append(f"({kind or type(block).__name__.replace('Content', '').lower()} returned)")
+    return "\n".join(parts) or "(no content)"
 
 
 def _workspace_cwd() -> str:
@@ -419,7 +583,15 @@ class ClaudeCodeAgent:
             mcp_servers={"konfai": {"type": "stdio", "command": command, "args": mcp_args or [], "env": env}},
             strict_mcp_config=True,
             permission_mode="bypassPermissions",
-            disallowed_tools=["Bash", "Write", "Edit", "NotebookEdit"],
+            # Studio's safety posture is that the assistant drives KonfAI through its MCP tools and does
+            # not run shell or write files. Denying Bash alone does not achieve that: told no, it spawns
+            # a subagent that has a shell and delegates the command (observed, twice in one turn). Agent
+            # and Task have to go with it, or the restriction is decorative.
+            #
+            # ToolSearch pages in tools held back from the prompt; konfai-mcp's are all present, so every
+            # search returns nothing — enabled, the model spends its turns searching instead of calling
+            # the tools it already has.
+            disallowed_tools=["Bash", "Write", "Edit", "NotebookEdit", "ToolSearch", "Agent", "Task"],
             system_prompt=SYSTEM_PROMPT,
             setting_sources=[],
             model=model or os.environ.get("KONFAI_STUDIO_MODEL") or None,
@@ -429,10 +601,37 @@ class ClaudeCodeAgent:
         self._client = ClaudeSDKClient(options=options)
         self._on_session_id = on_session_id
         self._names: dict[str, str] = {}
+        self._interrupted = False  # this turn was cut short on purpose, so its error is not one
+
+    # The stdio MCP server takes about two seconds to hand over its tool list, and `connect()` returns
+    # before that. A turn started in the window sees no konfai tools at all: the first call comes back
+    # "no such tool", whatever name it used, and the assistant retries — one wasted call, in the open,
+    # on the very first thing the user asks.
+    _MCP_READY_TIMEOUT = 15.0
+    _MCP_POLL = 0.25
 
     async def __aenter__(self) -> ClaudeCodeAgent:
         await self._client.connect()
+        await self._await_mcp_tools()
         return self
+
+    async def _await_mcp_tools(self) -> None:
+        """Block until the MCP servers stop reporting `pending`, or the timeout runs out.
+
+        A timeout is not fatal: the tools may still arrive, and refusing to start the session over a slow
+        handshake would be worse than the retry it is meant to save.
+        """
+
+        deadline = asyncio.get_running_loop().time() + self._MCP_READY_TIMEOUT
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                status = await self._client.get_mcp_status()
+            except Exception:
+                return  # no status channel on this SDK build; the retry path still covers it
+            servers = (status or {}).get("mcpServers") or []
+            if servers and all(s.get("status") != "pending" for s in servers):
+                return
+            await asyncio.sleep(self._MCP_POLL)
 
     async def __aexit__(self, *exc: Any) -> None:
         await self._client.disconnect()
@@ -440,6 +639,22 @@ class ClaudeCodeAgent:
     async def send(self, user_message: str) -> AsyncIterator[dict[str, Any]]:
         async for event in with_volume_events(self._emit(user_message)):
             yield event
+
+    async def interrupt(self) -> bool:
+        """Cut the turn short so the user's correction is acted on now, not after it finishes.
+
+        Verified against the SDK from both states — mid-text and with a tool in flight: the turn ends
+        flagged as an error, and the *next* turn on the same session works. So the flag below only stops
+        that expected error from reading as a failure. A job the tool already launched keeps running;
+        interrupting the agent is not cancelling the work it started.
+        """
+        try:
+            self._interrupted = True
+            await self._client.interrupt()
+        except Exception:
+            self._interrupted = False
+            return False
+        return True
 
     async def _emit(self, user_message: str) -> AsyncIterator[dict[str, Any]]:
         from claude_agent_sdk import (
@@ -473,7 +688,12 @@ class ClaudeCodeAgent:
             elif isinstance(message, ResultMessage):
                 if self._on_session_id and getattr(message, "session_id", None):
                     self._on_session_id(message.session_id)  # persist so a restart can resume it
-                if message.is_error:
+                # A turn the user cut short comes back flagged as an error, with an SDK diagnostic for a
+                # message. It is not a failure and must not read as one: the next turn works (verified
+                # against the SDK, interrupted both mid-text and mid-tool), and the correction they typed
+                # is already on its way.
+                interrupted, self._interrupted = self._interrupted, False
+                if message.is_error and not interrupted:
                     detail = message.result or message.errors or message.api_error_status or "error"
                     yield {"type": "error", "message": str(detail)}
                 yield {"type": "done"}
@@ -498,6 +718,11 @@ def _heuristic_title(text: str) -> str:
     return _clean_title(" ".join(words[:6])) or "New experiment"
 
 
+# Naming an experiment is a small formatting job the user waits on with the answer already on screen:
+# it runs on the fast model, not the one driving the tools.
+SIDE_MODEL = os.environ.get("KONFAI_STUDIO_SIDE_MODEL", "claude-haiku-4-5")
+
+
 async def _one_shot_claude(prompt: str) -> str:
     """One isolated Claude Code query (no MCP tools, no task history) — its joined text, '' on failure."""
     try:
@@ -506,7 +731,9 @@ async def _one_shot_claude(prompt: str) -> str:
         parts: list[str] = []
         async for message in query(
             prompt=prompt,
-            options=ClaudeAgentOptions(setting_sources=[], permission_mode="bypassPermissions"),
+            options=ClaudeAgentOptions(
+                setting_sources=[], permission_mode="bypassPermissions", model=SIDE_MODEL or None
+            ),
         ):
             if isinstance(message, AssistantMessage):
                 parts += [b.text for b in message.content if isinstance(b, TextBlock) and b.text]
@@ -525,55 +752,6 @@ async def suggest_title(text: str, brain: str | None = None) -> str:
     return _heuristic_title(text)
 
 
-_NEXT_PROMPTS_PROMPT = (
-    "Suggest the user's next move in KonfAI, a medical-imaging deep-learning assistant driven from a chat "
-    "box. Workflow: inspect dataset -> author/adapt a config or pick a published app -> validate -> train "
-    "(or import_app + run_prediction to use an app as-is / run_resume weights_only to fine-tune) -> predict "
-    "-> evaluate -> compare / leaderboard.\n\n"
-    "User said:\n{user}\n\nAssistant replied:\n{response}\n\n"
-    "Tools available to call next: {actions}\n\n"
-    "Propose the 3 most likely next things THIS user would want -- each a real forward step from the current "
-    "state. Never suggest a step whose prerequisite is missing (no evaluate before a prediction exists), "
-    "never repeat what was just done, and prefer steps grounded in the tools above when they fit. For each: "
-    "a short button label (2-4 words, Title Case, no period) and the full prompt the user would send.\n\n"
-    'Reply with ONLY a JSON array of exactly 3 objects {{"label": "<2-4 words>", "prompt": "<full prompt>"}}. '
-    "No prose, no code fence."
-)
-
-
-def _parse_next_prompts(raw: str) -> list[dict[str, str]]:
-    """The ``[{label, prompt}]`` array from the LLM reply, tolerating a stray code fence or surrounding prose."""
-    text = (raw or "").strip()
-    start, end = text.find("["), text.rfind("]")
-    if start < 0 or end <= start:
-        return []
-    try:
-        items = json.loads(text[start : end + 1])
-    except (TypeError, ValueError):
-        return []
-    out: list[dict[str, str]] = []
-    for item in items if isinstance(items, list) else []:
-        label = item.get("label") if isinstance(item, dict) else None
-        prompt = item.get("prompt") if isinstance(item, dict) else None
-        if isinstance(label, str) and isinstance(prompt, str) and label.strip() and prompt.strip():
-            out.append({"label": label.strip()[:40], "prompt": prompt.strip()[:400]})
-    return out[:3]
-
-
-async def suggest_next_prompts(
-    user_msg: str, response: str, actions: list[str] | None = None, brain: str | None = None
-) -> list[dict[str, str]]:
-    """The 3 next prompts (short button label + full prompt) from a one-shot LLM call. ``actions`` are the
-    turn's tool next_actions. Empty on any failure; the UI falls back to its own chips."""
-    backend = (brain or os.environ.get("KONFAI_STUDIO_LLM") or "claude-code").lower()
-    if backend not in {"claude-code", "claude", "subscription", "agent-sdk"}:
-        return []  # API brains: skip the extra call; the UI falls back on its own
-    prompt = _NEXT_PROMPTS_PROMPT.format(
-        user=user_msg[:600], response=(response or "")[:1500], actions=", ".join(actions or []) or "(none)"
-    )
-    return _parse_next_prompts(await _one_shot_claude(prompt))
-
-
 async def call_mcp_tool(session: str, tool: str, args: dict[str, Any] | None = None) -> tuple[bool, str]:
     """One-shot konfai-mcp tool call for a session — deterministic, no LLM in the loop.
 
@@ -587,7 +765,7 @@ async def call_mcp_tool(session: str, tool: str, args: dict[str, Any] | None = N
     try:
         async with client:
             result = await client.call_tool(tool, args or {})
-        return (not getattr(result, "is_error", False)), _tool_result_text(result)
+        return (not getattr(result, "is_error", False)), _tool_result_text(result, limit=None)
     except Exception as exc:  # a tool error (e.g. nothing to package) is a result, not a crash
         return False, str(exc)
 
@@ -608,5 +786,6 @@ def make_agent(
     """
     backend = (brain or os.environ.get("KONFAI_STUDIO_LLM") or "claude-code").lower()
     if backend in {"claude-code", "claude", "subscription", "agent-sdk"}:
+        _require_claude_code()
         return ClaudeCodeAgent(session, model=model, resume=resume, on_session_id=on_session_id)
     return StudioAgent(session, brain=backend, model=model, history_file=history_file)

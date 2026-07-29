@@ -1457,11 +1457,26 @@ body {
   background: var(--chrome);
   border-bottom: 1px solid var(--line);
   flex: none;
+  /* One tab per run and none are dropped, so the bar outgrows the panel: it scrolls, because a tab
+     past a clipped edge is unreachable along with its run's curves and output. */
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.rtab-close {
+  opacity: 0.45;
+  padding: 0 3px;
+  border-radius: 3px;
+  line-height: 1;
+}
+.rtab-close:hover {
+  opacity: 1;
+  background: var(--line);
 }
 .rtab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex: none;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
@@ -2967,13 +2982,19 @@ body {
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
+/* a job that has produced no run yet: what it is doing, beside its console */
+.feed-note {
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: auto;
+}
 .feed-sub {
   color: var(--muted);
   font-family: var(--fmono);
   font-size: 12px;
 }
 
-/* Job header: label on the left, a red Stop on the right while it runs */
+/* Job header: the run's kinds on the left, its actions on the right (Stop lives in the panel header) */
 .feed-job-head {
   display: flex;
   align-items: center;
@@ -3012,7 +3033,8 @@ body {
   gap: 8px;
   flex: none;
 }
-.rtabs .tb-link {
+.rtabs .tb-link,
+.rtabs .stop-job {
   margin-left: auto; /* push it to the far right of the tab bar */
 }
 .tb-link {
@@ -3454,6 +3476,16 @@ body {
   flex-direction: column;
   gap: 8px;
   cursor: default;
+}
+/* one block per trace: a GPU stacks its compute load above its VRAM */
+.meter-pop-trace {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.meter-pop-trace + .meter-pop-trace {
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
 }
 .meter-pop-head {
   display: flex;

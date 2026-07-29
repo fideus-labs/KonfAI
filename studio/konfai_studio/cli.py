@@ -28,7 +28,22 @@ def main() -> None:
         action="store_true",
         help="allow binding a non-loopback address with no KONFAI_STUDIO_TOKEN (opens an unauthenticated shell)",
     )
+    parser.add_argument(
+        "--ssl-certfile",
+        default=None,
+        help="TLS certificate (PEM). With --ssl-keyfile, Studio serves https directly — which is also what "
+        "lets the browser grant the microphone off localhost.",
+    )
+    parser.add_argument("--ssl-keyfile", default=None, help="TLS private key (PEM), required with --ssl-certfile")
     args = parser.parse_args()
+
+    for flag, value in (("--ssl-certfile", args.ssl_certfile), ("--ssl-keyfile", args.ssl_keyfile)):
+        if value == "":
+            # An unset shell variable in the documented one-liner lands here; uvicorn treats "" as
+            # no-TLS and comes up in plain http with the token on the wire.
+            parser.error(f"{flag} is empty — an unset shell variable? Studio will not silently fall back to http.")
+    if (args.ssl_certfile is None) != (args.ssl_keyfile is None):
+        parser.error("--ssl-certfile and --ssl-keyfile go together — a certificate cannot serve without its key.")
 
     loopback = args.host in {"127.0.0.1", "::1", "localhost"}
     authed = bool(os.environ.get("KONFAI_STUDIO_TOKEN", "").strip())
@@ -44,7 +59,8 @@ def main() -> None:
         print(
             f"WARNING: {args.host} bound with no auth (--i-know-this-is-insecure) — anyone on the network has a shell."
         )
-    print(f"KonfAI Studio -> http://{args.host}:{args.port}  (auth {'on' if authed else 'off'})")
+    scheme = "https" if args.ssl_certfile else "http"
+    print(f"KonfAI Studio -> {scheme}://{args.host}:{args.port}  (auth {'on' if authed else 'off'})")
     uvicorn.run(
         "konfai_studio.server:app",
         host=args.host,
@@ -52,6 +68,8 @@ def main() -> None:
         log_level="info",
         proxy_headers=args.proxy_headers,
         forwarded_allow_ips=args.forwarded_allow_ips,
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
     )
 
 

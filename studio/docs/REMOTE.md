@@ -48,6 +48,20 @@ has a full read/write host shell. Keep `KONFAI_STUDIO_TERMINAL=0` unless you nee
 
 Bind Studio to loopback and let the proxy terminate TLS and forward HTTP **and** WebSocket upgrades.
 
+> **No proxy at hand? Studio can serve TLS itself.** For a LAN deployment a self-signed certificate is
+> enough — and it is also what unlocks the microphone off `localhost`, since browsers only grant it on
+> secure origins:
+>
+> ```bash
+> openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+>   -keyout studio.key -out studio.crt -subj "/CN=$(hostname)"
+> KONFAI_STUDIO_TOKEN="…" konfai-studio --host 0.0.0.0 --port 8730 \
+>   --ssl-certfile studio.crt --ssl-keyfile studio.key
+> ```
+>
+> The browser warns once about the unknown issuer; accept it for this host. A reverse proxy stays the
+> better setup for anything beyond a trusted LAN.
+
 ```bash
 KONFAI_STUDIO_TOKEN="…"  KONFAI_STUDIO_TERMINAL=0 \
 konfai-studio --host 127.0.0.1 --port 8730 --proxy-headers

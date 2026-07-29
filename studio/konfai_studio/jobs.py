@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import time
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import datetime
@@ -19,7 +20,7 @@ from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 from konfai_mcp.live_parse import parse_host_stats, parse_live_metric_line, parse_live_progress, progress_label
 
-from .paths import _sane_session, _workspace_root
+from .paths import _sane_session, _session_dir, _session_jobs_dir
 
 router = APIRouter()
 
@@ -27,6 +28,7 @@ _TERMINAL_STATUS = {"done", "error", "killed", "cancelled"}
 _LOG_BACKFILL = 32_000  # bytes: on connect, replay only the recent tail of a large log, not its full history
 _HOST_KEYS = ("memory_gb", "memory_percent", "memory_gpu_gb", "memory_gpu_percent", "cpu_percent")
 _MTIME_LIVE_WINDOW = 8.0  # a run log written this recently reads as live when no job record claims it
+_PING_EVERY = 10.0  # seconds between keep-alives, so a client can tell a quiet stream from a dead one
 _RUN_ROOT_KIND = {
     "Statistics": "train",
     "Predictions": "prediction",
@@ -40,7 +42,7 @@ def _sse(event: dict[str, Any]) -> str:
 
 
 def _all_jobs(session: str) -> list[dict[str, Any]]:
-    jobs_dir = _workspace_root() / "sessions" / session / ".konfai_mcp" / "jobs"
+    jobs_dir = _session_jobs_dir(session)
     out: list[dict[str, Any]] = []
     if jobs_dir.is_dir():
         for record in jobs_dir.glob("*/job.json"):
@@ -223,7 +225,7 @@ def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]
     previews / TensorBoard / Browse helpers resolve the real on-disk location. Status comes from the newest
     job that names the log (workflow) or owns the output_path (app), else from how recently the log was
     written. Newest first."""
-    base_root = _workspace_root() / "sessions" / session
+    base_root = _session_dir(session)
     # A run dir is often written by several jobs (re-runs share one log_0.txt); its status must come from the
     # NEWEST job that names it (workflow) or owns its output subtree (app), so a fresh run wins over an old one.
     jobs = _all_jobs(session)
@@ -271,7 +273,21 @@ def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]
         for log, run_name, kind in _discover_run_logs(job):
             add(log, run_name, kind, entry[1] if entry else None)
     found.sort(key=lambda row: row[5], reverse=True)
-    return [(log, run_name, kind, status, base) for log, run_name, kind, status, base, _ in found]
+    # Two runs of the same app share a name: its log directory is named after the app, so every re-run
+    # produces another `ImpactSynth`. They are different runs — different output directories — and left
+    # sharing a name they collapse into one feed whose status is whichever was read last, which is how a
+    # finished run comes to stand in for the one that is still going. Disambiguate by what differs.
+    duplicated = {key for key, n in Counter((run, kind) for _, run, kind, _, _, _ in found).items() if n > 1}
+    return [
+        (
+            log,
+            f"{run} · {Path(base).parent.name.rsplit('-', 1)[-1]}" if (run, kind) in duplicated and base else run,
+            kind,
+            status,
+            base,
+        )
+        for log, run, kind, status, base, _ in found
+    ]
 
 
 @router.get("/api/live")
@@ -292,15 +308,36 @@ async def live(session: str = Query("default")) -> StreamingResponse:
     name = _sane_session(session)
 
     async def gen() -> AsyncIterator[str]:
+        last_ping = time.monotonic()
         console_key: str | None = None  # which job's console log is being followed
         cpath: Path | None = None
         cpos = 0
         cbuf = ""
         feeds: dict[str, dict[str, Any]] = {}  # log-path -> {run, kind, path, pos, buf, step}: one per run, kept
-        announced: dict[str, str] = {}  # run key -> terminal status already emitted (so it fires once)
+        announced: dict[str, str] = {}  # run key -> the status last emitted for it (so each fires once)
         idle_sent = False
 
+        def state_of(run: str, kind: str, status: str, base: str = "") -> list[str]:
+            """One run, one place that says where it stands. A run's tab is created by the ``run`` event
+            and released by the ``status`` event; emitting them from two blocks let the first mark the
+            transition as seen and the second skip it, leaving Stop on screen over a finished run."""
+            key = f"{kind}:{run}"
+            if announced.get(key) == status:
+                return []
+            announced[key] = status
+            out = [_sse({"type": "run", "run": run, "kind": kind, "status": status, "base": base})]
+            if status in _TERMINAL_STATUS:
+                out.append(_sse({"type": "status", "run": run, "kind": kind, "status": status}))
+            return out
+
         while True:
+            # A quiet experiment sends nothing for minutes, so silence cannot be told from a stream that
+            # died — and one that dies is invisible: the page keeps showing the last thing it saw. A ping
+            # gives the client something to miss, so it can reconnect on its own.
+            if time.monotonic() - last_ping > _PING_EVERY:
+                last_ping = time.monotonic()
+                yield _sse({"type": "ping"})
+
             latest = _latest_job(name)
             runs = _discover_session_runs(name)
             if not runs and latest is None:
@@ -342,6 +379,18 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                         continue
                     yield _sse({"type": "log", "line": line})
 
+            # A workflow job names its own runtime log, so its run is known before a single line is
+            # written: announce it and its tab exists from launch, through the warm-up and even if it dies
+            # before its first iteration. Discovering that same log later lands on the same (run, kind),
+            # so it updates that tab rather than adding one.
+            #
+            # An app job is NOT announced. It carries two names — its own (`app_MR`) and the one its log
+            # directory takes (`ImpactSynth`) — so anything announced for it would be a second tab under
+            # the wrong name, and every metric would arrive in the other. Its run appears when it writes.
+            if latest is not None and latest.get("runtime_log_path") and latest.get("run_name"):
+                for frame in state_of(latest["run_name"], latest.get("kind") or "", _live_status(latest)):
+                    yield frame
+
             # Every run of the experiment is followed as its own feed and kept — launching a prediction
             # adds a run, it never clears the training runs. A newly-seen log replays from 0 so its curves
             # rebuild on connect.
@@ -349,17 +398,17 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                 feed_key = str(log)
                 if feed_key not in feeds:
                     feeds[feed_key] = {"run": run_name, "kind": run_kind, "path": log, "pos": 0, "buf": "", "step": 0}
-                    yield _sse({"type": "run", "run": run_name, "kind": run_kind, "status": status, "base": base})
                 feed = feeds[feed_key]
+                # The log path is the run's identity; the name discovered beside it can change under us
+                # (a second run of the same app renames the first). Everything this feed emits carries the
+                # name it was created with, so its metrics and its outcome land on the same tab.
+                for frame in state_of(feed["run"], feed["kind"], status, base):
+                    yield frame
                 lines, feed["pos"], feed["buf"] = _tail_lines(feed["path"], feed["pos"], feed["buf"])
                 for line in lines:
                     events, feed["step"] = _runtime_events(line, feed["run"], feed["kind"], feed["step"])
                     for event in events:
                         yield _sse(event)
-                run_key = f"{run_kind}:{run_name}"
-                if status in _TERMINAL_STATUS and announced.get(run_key) != status:
-                    announced[run_key] = status
-                    yield _sse({"type": "status", "run": run_name, "kind": run_kind, "status": status})
             await asyncio.sleep(0.6)
 
     return StreamingResponse(gen(), media_type="text/event-stream")

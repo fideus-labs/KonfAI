@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import FolderBrowser from "./FolderBrowser";
-import { getJson } from "./api";
+import { getJson, postJson } from "./api";
 import { readSSE } from "./sse";
 
 type Part =
@@ -42,40 +42,28 @@ function loadMessages(session: string): Msg[] {
   }
 }
 
-// Predictive next prompts. First choice = the MCP tool's own `next_actions`; else these per-phase starters.
-type Phase = "start" | "explored" | "running";
-const SUGGESTIONS: Record<Phase, string[]> = {
-  start: ["List the available apps", "Inspect a dataset", "What can you do with my data?"],
-  explored: ["Train a model from scratch", "Fine-tune an app on this data", "Preview one case in the viewer"],
-  running: ["Show the training progress", "Run prediction on the validation set", "Evaluate the predictions"],
-};
+// The next moves come from the server's workflow state machine (label + the full prompt the click sends).
+// These starters only cover the very first turn, before any experiment state exists.
+type Move = { label: string; prompt: string };
+const STARTERS: Move[] = [
+  { label: "Inspect a dataset", prompt: "Inspect my dataset and tell me what it contains and what I can do with it." },
+  { label: "Browse the apps", prompt: "List the published KonfAI apps and what each one does." },
+];
 
-// An MCP `next_actions` entry is a tool name; phrase it as an instruction the user would actually type.
-const ACTION_PROMPT: Record<string, string> = {
-  inspect_dataset: "Inspect the dataset",
-  browse_dataset: "Browse the dataset",
-  list_apps: "List the available apps",
-  run_train: "Start training",
-  run_resume: "Resume training",
-  run_prediction: "Run prediction",
-  run_evaluation: "Evaluate the predictions",
-  import_app: "Use this app in the session",
-  describe_app: "Inspect the app",
-  list_app_parameters: "Show the app's tunable parameters",
-  get_run_metrics: "Show the evaluation scores",
-  read_training_curves: "Show the training curves",
-  read_live_metrics: "Show the live metrics",
-  compare_runs: "Compare the runs",
-  leaderboard: "Show the leaderboard",
-  package_app_from_session: "Package this run as an app",
-  export_run_record: "Export the run record",
-  wait_for_job: "Wait for the job to finish",
-  get_job_status: "Check the job status",
+// The workflow stage, shown beside the next moves so the user can see where the experiment stands.
+const STAGE_LABEL: Record<string, string> = {
+  dataset_inspection: "Dataset",
+  action_selection: "Choose a route",
+  app_selection: "App",
+  configuration: "Config",
+  running: "Running",
+  failed: "Failed",
+  completed: "Done",
+  checkpoint_selection: "Checkpoint",
+  prediction: "Predictions",
+  evaluation: "Evaluation",
+  result_review: "Results",
 };
-
-function actionPrompt(name: string): string {
-  return ACTION_PROMPT[name] ?? name.replace(/_/g, " ");
-}
 
 function deviceLabel(device: string): string {
   if (device === "cpu") return "CPU";
@@ -136,7 +124,6 @@ export default function Chat({
   inject,
   recentFiles = [],
   onVolume,
-  onRun,
   onTitle,
   onAttach,
   onSubmit,
@@ -154,8 +141,7 @@ export default function Chat({
   active: boolean;
   inject?: { text: string; nonce: number };
   recentFiles?: string[];
-  onVolume?: (path: string) => void;
-  onRun?: () => void;
+  onVolume?: (path: string, compare?: string | null) => void;
   onTitle?: (title: string) => void;
   onAttach?: (ref: string) => void;
   onSubmit?: (text: string) => boolean; // intercept the send (a draft materialises into a task)
@@ -180,9 +166,8 @@ export default function Chat({
   const [messages, setMessages] = useState<Msg[]>(() => loadMessages(session));
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [phase, setPhase] = useState<Phase>("start");
-  const [nextActions, setNextActions] = useState<string[]>([]);
-  const [nextPrompts, setNextPrompts] = useState<{ label: string; prompt: string }[]>([]); // LLM: button + full prompt
+  const [stage, setStage] = useState("");
+  const [nextPrompts, setNextPrompts] = useState<Move[]>([]); // the workflow's next moves: button + full prompt
   const [attaching, setAttaching] = useState(false);
   const [attachText, setAttachText] = useState("");
   const [browsing, setBrowsing] = useState(false);
@@ -192,10 +177,37 @@ export default function Chat({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recRef = useRef<any>(null);
   const ctrlRef = useRef<AbortController | null>(null);
+  const busyRef = useRef(false); // the truth `send` reads: its own closure's `busy` is a render behind
+  const queued = useRef<string[]>([]); // typed while the agent worked; sent in order once it is free
 
   // Abort an in-flight turn if this task is unmounted (e.g. the experiment is deleted mid-response),
   // so the read loop stops and stops writing back into the parent's state for a dead session.
   useEffect(() => () => ctrlRef.current?.abort(), []);
+
+  // The transcript in localStorage is per device: an experiment driven in another browser shows empty
+  // here. The server records every turn it streams — more turns than this browser has seen means its
+  // copy wins; otherwise the local one is at least as complete and richer.
+  useEffect(() => {
+    let stale = false;
+    getJson(`/api/chat/history?session=${encodeURIComponent(session)}`)
+      .then((d) => {
+        if (stale) return;
+        const server = (d.messages ?? []) as ({ role: "user"; text?: string } | { role: "assistant"; parts?: Part[] })[];
+        setMessages((local) => {
+          const turns = (list: { role: string }[]) => list.filter((m) => m.role === "user").length;
+          if (turns(server) <= turns(local)) return local;
+          return server.map((m) =>
+            m.role === "user"
+              ? { id: nextId++, role: "user" as const, text: m.text ?? "" }
+              : { id: nextId++, role: "assistant" as const, parts: m.parts ?? [] },
+          );
+        });
+      })
+      .catch(() => {}); // offline or old server: the local copy stands
+    return () => {
+      stale = true;
+    };
+  }, [session]);
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
@@ -214,6 +226,24 @@ export default function Chat({
     }
   }, [session, messages]);
 
+  // On (re)load the workflow state lives server-side, so the next moves come back with it instead of the
+  // bar resetting to the generic starters.
+  useEffect(() => {
+    let cancelled = false;
+    getJson<{ workflow?: { stage?: string }; moves?: Move[] }>(`/api/experiment?session=${encodeURIComponent(session)}`)
+      .then((d) => {
+        if (cancelled) return;
+        setStage(d.workflow?.stage ?? "");
+        if (d.moves?.length) setNextPrompts(d.moves);
+      })
+      .catch(() => {
+        /* a task with no workspace yet — the starters cover it */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
   // A dataset chosen for this task injects an "inspect it" message into the conversation.
   useEffect(() => {
     if (inject && inject.nonce > 0) send(inject.text);
@@ -226,18 +256,32 @@ export default function Chat({
     );
   }
 
-  async function send(override?: string) {
+  // `shown` marks a message already in the transcript: one queued while the agent was working, and sent
+  // for real once it finished.
+  async function send(override?: string, shown = false) {
     const text = (override ?? input).trim();
-    if (!text || busy) return;
+    if (!text) return;
+    if (busyRef.current) {
+      // Typing while it works is a correction — "not that checkpoint", "stop after this one" — so the
+      // turn is cut short and the correction goes in as the next one. A tool already in flight still
+      // finishes; if the backend cannot interrupt, this simply waits for the turn to end.
+      queued.current.push(text);
+      if (override === undefined) setInput("");
+      setMessages((prev) => [...prev, { id: nextId++, role: "user", text }]);
+      postJson("/api/chat/interrupt", { session }).catch(() => {
+        /* nothing to interrupt, or a backend without the channel — the queue covers it */
+      });
+      return;
+    }
     if (onSubmit?.(text)) {
       if (override === undefined) setInput("");
       return; // a draft: the parent creates the task and re-sends there
     }
     if (override === undefined) setInput("");
+    busyRef.current = true;
     setBusy(true);
-    setNextActions([]); // superseded by this turn's own next_actions
-    setNextPrompts([]);
-    setMessages((prev) => [...prev, { id: nextId++, role: "user", text }]);
+    setNextPrompts([]); // superseded by this turn's own moves
+    if (!shown) setMessages((prev) => [...prev, { id: nextId++, role: "user", text }]);
     const aid = nextId++;
     setMessages((prev) => [...prev, { id: aid, role: "assistant", parts: [] }]);
 
@@ -255,7 +299,10 @@ export default function Chat({
       if (!(e instanceof DOMException && e.name === "AbortError"))
         patchAssistant(aid, (p) => [...p, { kind: "error", text: String(e) }]);
     } finally {
+      busyRef.current = false;
       setBusy(false);
+      const next = queued.current.shift();
+      if (next !== undefined) void send(next, true); // whatever was typed while this turn ran
     }
   }
 
@@ -272,10 +319,6 @@ export default function Chat({
     } else if (type === "tool_call") {
       const name = ev.name as string;
       patchAssistant(aid, (parts) => [...parts, { kind: "tool", name, input: ev.input, status: "running", preview: "" }]);
-      if (name.startsWith("run_") || name.startsWith("fine_tune")) {
-        onRun?.();
-        setPhase("running");
-      }
     } else if (type === "tool_result") {
       patchAssistant(aid, (parts) => {
         const copy = [...parts];
@@ -288,14 +331,19 @@ export default function Chat({
         }
         return copy;
       });
-      setPhase((p) => (p === "running" ? p : "explored"));
     } else if (type === "volume") {
-      onVolume?.(ev.path as string);
-      setPhase((p) => (p === "running" ? p : "explored"));
-    } else if (type === "next_actions") {
-      setNextActions((ev.actions as string[]) ?? []);
+      onVolume?.(ev.path as string, (ev.compare as string | null) ?? null);
+    } else if (type === "done") {
+      // The agent has finished; what still comes down this stream (the title) is a side call nobody is
+      // waiting on. Both flags clear together — releasing only the visible one left the composer open
+      // while `send` still believed a turn was running, so a message typed here was queued behind the
+      // side call AND fired an interrupt at an agent that had already stopped.
+      busyRef.current = false;
+      setBusy(false);
+    } else if (type === "state") {
+      setStage((ev.stage as string) ?? "");
     } else if (type === "next_prompts") {
-      setNextPrompts((ev.prompts as { label: string; prompt: string }[]) ?? []);
+      setNextPrompts((ev.prompts as Move[]) ?? []);
     } else if (type === "title") {
       onTitle?.(ev.title as string);
     } else if (type === "error") {
@@ -348,6 +396,9 @@ export default function Chat({
   // beyond the browser's own speech service. Absent on unsupported browsers, so the mic is hidden.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const SpeechRecognition = (typeof window !== "undefined" && ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)) || null;
+  // Browsers grant the microphone only on secure origins (https or localhost). Over plain http on a
+  // LAN IP the API is present and the permission auto-denied — a clickable mic that silently fails.
+  const micUsable = Boolean(SpeechRecognition) && typeof window !== "undefined" && window.isSecureContext;
 
   function toggleDictation() {
     if (listening) {
@@ -456,23 +507,18 @@ export default function Chat({
       </div>
       {!busy &&
         (() => {
-          // The LLM's proposed next prompts win — a short label on the button, the full prompt sent on click.
-          // Otherwise the MCP tool's next_actions, otherwise the static per-phase starters.
-          const chips: { key: string; label: string; prompt: string }[] = nextPrompts.length
-            ? nextPrompts.map((p) => ({ key: p.label, label: p.label, prompt: p.prompt }))
-            : (nextActions.length ? nextActions.map(actionPrompt) : SUGGESTIONS[phase]).map((s) => ({
-                key: s,
-                label: s,
-                prompt: s,
-              }));
-          const seen = new Set<string>();
-          const shown = chips.filter((c) => !seen.has(c.key) && seen.add(c.key));
-          const led = nextPrompts.length > 0 || nextActions.length > 0;
+          // The assistant writes these at the end of its own reply, so they arrive with it. The starters
+          // only stand in before an experiment has any state. The button shows the label, the click sends
+          // the prompt (hover shows it).
+          // `done` releases the composer before the server has finished the turn and sent the moves, so
+          // for that moment there are none. On an experiment that has already answered, the starters are
+          // not what comes next — an empty bar for an instant beats two wrong buttons.
+          const shown = nextPrompts.length ? nextPrompts : messages.length ? [] : STARTERS;
           return (
             <div className="suggest">
-              {led && <span className="suggest-lead">Next</span>}
+              {stage && <span className="suggest-lead">{STAGE_LABEL[stage] ?? stage}</span>}
               {shown.map((c) => (
-                <button key={c.key} className="chip-prompt" title={c.prompt} onClick={() => send(c.prompt)}>
+                <button key={c.label} className="chip-prompt" title={c.prompt} onClick={() => send(c.prompt)}>
                   {c.label}
                 </button>
               ))}
@@ -551,14 +597,16 @@ export default function Chat({
           {
             <button
               className={listening ? "cbtn mic on" : "cbtn mic"}
-              disabled={!SpeechRecognition}
+              disabled={!micUsable}
               onClick={toggleDictation}
               title={
-                SpeechRecognition
+                micUsable
                   ? listening
                     ? "Stop dictation"
                     : "Dictate"
-                  : "Dictation needs the Web Speech API — use Chrome, Chromium or Edge"
+                  : SpeechRecognition
+                    ? "The browser only allows the microphone on https or localhost — open Studio as localhost (an SSH tunnel does) to dictate"
+                    : "Dictation needs the Web Speech API — use Chrome, Chromium or Edge"
               }
               aria-label="Dictate"
             >

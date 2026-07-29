@@ -523,6 +523,15 @@ function ExperimentView({
   const [treeKey, setTreeKey] = useState(0);
   const [showVolume, setShowVolume] = useState(false);
   const [compareMode, setCompareMode] = useState(false); // when on, a tree volume fills the second pane
+
+  // The chat can ask for a comparison ("show me the sCT next to the real CT"): a second volume arriving
+  // opens the compare pane by itself, rather than being loaded into a view nobody switched on.
+  useEffect(() => {
+    if (comparePath) {
+      setCompareMode(true);
+      setShowVolume(true);
+    }
+  }, [comparePath]);
   const [root, setRoot] = useState(""); // absolute workspace root, learned from the tree
 
   const dataset = info?.dataset || "";
@@ -1222,6 +1231,7 @@ function TuneControls({ session }: { session: string }) {
 export default function RightPanel({
   session,
   volumePath,
+  volumeNonce,
   onVolumePathChange,
   comparePath,
   onComparePathChange,
@@ -1230,6 +1240,7 @@ export default function RightPanel({
 }: {
   session: string;
   volumePath: string | null;
+  volumeNonce?: number;
   onVolumePathChange: (p: string) => void;
   comparePath: string | null;
   onComparePathChange: (p: string) => void;
@@ -1237,6 +1248,9 @@ export default function RightPanel({
   onReload?: () => void; // reconnect the live stream (e.g. after deleting a run) so state rebuilds from disk
 }) {
   const [tab, setTab] = useState<string>("config"); // "config" (Workspace) or a run name
+  // Run tabs closed by their ✕ — a view choice, nothing on disk: they come back via the "+n closed"
+  // chip, on reload, or by themselves when their run starts working again.
+  const [hiddenTabs, setHiddenTabs] = useState<string[]>([]);
   const [subKey, setSubKey] = useState(""); // the selected kind (a run key) within the open run name
   const [browsePath, setBrowsePath] = useState(""); // a workspace dir to reveal in the tree (from a run tab)
   const [browseOpen, setBrowseOpen] = useState(""); // what to auto-open there: "config" | "volume" | "first"
@@ -1252,6 +1266,9 @@ export default function RightPanel({
     setStopping(false);
     setValidating(false);
     setTab("config");
+    // Closed tabs are a view choice on THIS experiment's runs: carried across, a same-named run in the
+    // next experiment would arrive silently hidden, under a phantom "+n closed" chip.
+    setHiddenTabs([]);
   }, [session]);
 
   // Two levels: the top tab is a run NAME (MR2CT_01…), and inside it a sub-tab per KIND (train / prediction
@@ -1268,16 +1285,17 @@ export default function RightPanel({
   const sel = kindsForName.find((r) => r.key === subKey) ?? kindsForName[0];
   const isActiveSel = !!sel && sel.key === stream.activeRun;
   const running = isRunning(active?.status ?? stream.status);
+  // The session's job itself — true while it starts up and while an isolated app run has not been
+  // discovered yet, so Stop never depends on a run being found (or selected).
+  const jobRunning = isRunning(stream.status);
   const stage = active?.live?.stage ?? "";
 
-  // Once the job leaves the running state, drop the transient "Stopping…"/"Validating…" labels: the Stop
-  // control gives way to Delete, and a one-way flag must never outlive the run it described.
+  // Once nothing is live any more, drop the transient "Stopping…"/"Validating…" labels: the Stop control
+  // gives way to Delete, and a one-way flag must never outlive the run it described.
   useEffect(() => {
-    if (!running) {
-      setStopping(false);
-      setValidating(false);
-    }
-  }, [running]);
+    if (!jobRunning) setStopping(false);
+    if (!running) setValidating(false);
+  }, [running, jobRunning]);
 
   async function stopJob() {
     setStopping(true);
@@ -1371,11 +1389,26 @@ export default function RightPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stream.activeRun, stream.metricNonce]);
 
-  // A volume becoming focused (tree click or an LLM tool loading one) brings the Workspace pane forward.
+  // The assistant pointing at a volume brings the Workspace pane forward. Keyed on the nonce, not the
+  // path: re-showing the same volume with a different companion ("the CT beside its segmentation") left
+  // the pane on the run tab, so the reply said the two were open side by side over a progress bar.
   useEffect(() => {
     if (volumePath && auto) setTab("config");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [volumePath]);
+  }, [volumePath, volumeNonce]);
+
+  // A job that started but owns no run tab yet (an app job, whose run is named only once it writes):
+  // open the feed regardless, so its console is watchable while it warms up.
+  useEffect(() => {
+    if (jobRunning && stream.run && !runNames.includes(stream.run)) setTab(stream.run);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobRunning, stream.run]);
+
+  // A closed tab whose run starts working again reopens itself: hiding is about clutter, and a
+  // running job must stay reachable from the bar.
+  useEffect(() => {
+    if (jobRunning && stream.run) setHiddenTabs((h) => (h.includes(stream.run) ? h.filter((n) => n !== stream.run) : h));
+  }, [jobRunning, stream.run]);
 
   return (
     <section className="rpanel">
@@ -1388,20 +1421,66 @@ export default function RightPanel({
             Leaderboard
           </button>
         )}
-        {runNames.map((name) => (
+        {/* A job with no run of its own yet — an app fetching its bundle, or one that died during warm-up.
+            It gets a tab of its own so it is reachable at all; the run's tab appears beside it when it
+            starts writing, and this one goes as soon as the job settles. */}
+        {jobRunning && stream.run && !runNames.includes(stream.run) && (
           <button
-            key={name}
-            className={tab === name ? "rtab on" : "rtab"}
-            onClick={() => show(name)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              deleteRun(name, "all", "the whole run (all outputs)");
-            }}
-            title={`${name} — right-click to delete the whole run`}
+            className={tab === stream.run ? "rtab on" : "rtab"}
+            onClick={() => show(stream.run)}
+            title={`${stream.kind || "job"} · starting`}
           >
-            {name}
+            {stream.run}
           </button>
-        ))}
+        )}
+        {runNames
+          .filter((name) => !hiddenTabs.includes(name))
+          .map((name) => {
+            const newest = stream.runs.find((r) => r.run === name); // runs are newest first
+            return (
+              <button
+                key={name}
+                className={tab === name ? "rtab on" : "rtab"}
+                onClick={() => show(name)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  deleteRun(name, "all", "the whole run (all outputs)");
+                }}
+                title={`${name} — ✕ closes the tab only; right-click deletes the whole run`}
+              >
+                {newest && <StatusMark status={newest.status} />}
+                {name}
+                <span
+                  className="rtab-close"
+                  title="Close this tab (nothing is deleted)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setHiddenTabs((h) => [...h, name]);
+                    if (tab === name) show("config");
+                  }}
+                >
+                  ×
+                </span>
+              </button>
+            );
+          })}
+        {hiddenTabs.length > 0 && (
+          <button className="rtab" onClick={() => setHiddenTabs([])} title="Reopen the closed run tabs">
+            +{hiddenTabs.length} closed
+          </button>
+        )}
+        {/* The job-level Stop: bound to the session's job, not to a discovered run — so it is there while a
+            job is still starting, and on every tab, run selected or not. */}
+        {jobRunning && (
+          <button
+            className="stop-job"
+            onClick={stopJob}
+            disabled={stopping}
+            title={`Stop the running job${stream.run ? ` (${stream.kind || "job"} · ${stream.run})` : ""}`}
+          >
+            {stopping ? "Stopping…" : "Stop job"}
+          </button>
+        )}
       </div>
 
       {/* Both panes stay mounted (hidden when inactive) so NiiVue keeps its volume and the workspace tree
@@ -1454,11 +1533,7 @@ export default function RightPanel({
                     <TuneControls session={session} />
                   </>
                 )}
-                {running && (
-                  <button className="stop-job" onClick={stopJob} disabled={stopping} title={`Stop the running job (${stream.run})`}>
-                    {stopping ? "Stopping…" : "Stop"}
-                  </button>
-                )}
+                {/* Stopping is session-scoped (it cancels the job), so it lives once in the panel header. */}
                 {!running && (
                   <button
                     className="delete-run"
@@ -1510,6 +1585,26 @@ export default function RightPanel({
                 </section>
               )}
             </FeedBoundary>
+          </>
+        ) : jobRunning || stream.lines.length > 0 ? (
+          // A job with no run of its own yet — fetching its bundle, warming up, or dead before its first
+          // iteration. Its console is the only thing it has produced, so that is what is shown, rather
+          // than an invitation to launch the job that is already running.
+          <>
+            <div className="feed-job-head">
+              <span className="feed-label">
+                {stream.kind || "job"}
+                {stream.run ? ` · ${stream.run}` : ""}
+              </span>
+              <span className="feed-note">{jobRunning ? "starting — no output yet" : "finished"}</span>
+            </div>
+            <div className="feed-log">
+              {stream.lines.slice(-60).map((line, i) => (
+                <div key={i} className="ln">
+                  {line}
+                </div>
+              ))}
+            </div>
           </>
         ) : (
           <div className="feed-hint">Launch a job — its live curves, sample images and evaluation scores stream here.</div>
