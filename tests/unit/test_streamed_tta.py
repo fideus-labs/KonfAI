@@ -124,6 +124,12 @@ def _drive_tta(
             del index_augmentation
             return patch_slices
 
+        @staticmethod
+        def get_sweep_axis(index_augmentation: int) -> int:
+            # These grids are cut along axis 0, which is what these doubles' slices assume.
+            del index_augmentation
+            return 0
+
     class DummyManager:
         index = case_index
         name = "CASE_000"

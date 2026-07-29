@@ -129,6 +129,12 @@ def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> No
             del index_augmentation
             return [(slice(0, 2), slice(0, 2))]
 
+        @staticmethod
+        def get_sweep_axis(index_augmentation: int) -> int:
+            # These grids are cut along axis 0, which is what these doubles' slices assume.
+            del index_augmentation
+            return 0
+
     class DummyManager:
         name = "CASE_000"
         patch = DummyPatch()
@@ -180,6 +186,12 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
         def get_patch_slices(index_augmentation: int):
             del index_augmentation
             return [(slice(0, 2), slice(0, 2))]
+
+        @staticmethod
+        def get_sweep_axis(index_augmentation: int) -> int:
+            # These grids are cut along axis 0, which is what these doubles' slices assume.
+            del index_augmentation
+            return 0
 
     class DummyManager:
         name = "CASE_000"
