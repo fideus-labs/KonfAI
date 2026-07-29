@@ -42,6 +42,35 @@ def _app_service(tmp_path: Path) -> AppService:
     return AppService(workspace_layout=WorkspaceLayout(tmp_path / "workspaces"))
 
 
+def _touch(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"")
+    return str(path)
+
+
+def _local_app(tmp_path: Path) -> str:
+    """A minimal resolvable local app bundle -- enough for the prepare_* path validation."""
+    app_dir = tmp_path / "PairedApp"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Paired",
+                "description": "app used for pairing checks",
+                "short_description": "paired",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": ["tiny.pt"],
+                "inputs": {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
+                "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_dir / "tiny.pt").write_bytes(b"")
+    return str(app_dir)
+
+
 def _session_service(tmp_path: Path) -> SessionService:
     repo_root = Path(__file__).resolve().parents[2]
     layout = WorkspaceLayout(tmp_path)
@@ -115,6 +144,37 @@ def test_normalize_bundled_prediction_config_preserves_windows_drive_path(tmp_pa
     data = YAML_SAFE.load((bundle / "Prediction.yml").read_text(encoding="utf-8"))
     # The staged root replaces the path; the ':a:mha' accessor/format token survives uncorrupted.
     assert data["Predictor"]["Dataset"]["dataset_filenames"] == ["./Dataset/:a:mha"]
+
+
+# -- Finding 4: paired input/gt/mask groups with unequal case counts are rejected ---------------
+
+
+def test_check_case_pairing_rejects_mismatched_file_counts(tmp_path: Path) -> None:
+    inputs = [[_touch(tmp_path / "in" / f"a{i}.mha") for i in range(3)]]
+    gt = [[_touch(tmp_path / "gt" / f"g{i}.mha") for i in range(2)]]
+    with pytest.raises(ValueError, match="mismatched case counts"):
+        AppService._check_case_pairing([("inputs", inputs), ("gt", gt)])
+
+    equal_gt = [[_touch(tmp_path / "gt2" / f"g{i}.mha") for i in range(3)]]
+    AppService._check_case_pairing([("inputs", inputs), ("gt", equal_gt)])  # no raise
+
+
+def test_check_case_pairing_skips_directory_groups(tmp_path: Path) -> None:
+    # A directory expands to an unknown case count downstream, so it is not counted here: a 1-dir
+    # group beside a 3-file group must NOT falsely trip the guard.
+    (tmp_path / "series").mkdir()
+    inputs = [[str(tmp_path / "series")]]
+    gt = [[_touch(tmp_path / "gt" / f"g{i}.mha") for i in range(3)]]
+    AppService._check_case_pairing([("inputs", inputs), ("gt", gt)])  # no raise
+
+
+def test_prepare_infer_rejects_unequal_channel_counts(tmp_path: Path) -> None:
+    a = _touch(tmp_path / "c" / "a.mha")
+    b = _touch(tmp_path / "c" / "b.mha")
+    c = _touch(tmp_path / "c" / "c.mha")
+    with pytest.raises(ValueError, match="mismatched case counts"):
+        # The pairing check runs before the trust gate, so an un-gated call still reports it.
+        _app_service(tmp_path).prepare_infer(ref=_local_app(tmp_path), inputs=[[a, b], [c]])
 
 
 # -- Finding 5: design_config_strategy resolves the read extension per root ----------------------

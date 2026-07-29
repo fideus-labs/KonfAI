@@ -5,6 +5,7 @@ model-output enumeration, run records/diffs/curves/comparison."""
 import asyncio
 import io
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -83,12 +84,12 @@ def test_label_statistics_for_integer_groups(
                 "inspect_dataset",
                 {"dataset_dir": str(dataset_dir), "groups": ["SEG", "CT"], "extension": "mha"},
             )
-            stats = inspected.structured_content["statistics"]
-            assert stats["SEG"]["labels"]["unique"] == [0, 1]
-            assert stats["SEG"]["labels"]["presence_cases"]["1"] == 4
-            assert 0.0 < stats["SEG"]["labels"]["mean_voxel_fraction"]["1"] < 1.0
+            groups = inspected.structured_content["groups"]
+            assert groups["SEG"]["labels"]["unique"] == [0, 1]
+            assert groups["SEG"]["labels"]["presence_cases"]["1"] == 4
+            assert 0.0 < groups["SEG"]["labels"]["mean_voxel_fraction"]["1"] < 1.0
             # Float groups carry no label block.
-            assert "labels" not in stats["CT"]
+            assert "labels" not in groups["CT"]
 
     asyncio.run(scenario())
 
@@ -286,3 +287,32 @@ def test_read_training_curves_from_tfevents(
                 await client.call_tool("read_training_curves", {"run_name": "MISSING"})
 
     asyncio.run(scenario())
+
+
+def test_a_metric_ranks_one_way_for_every_run_that_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    """Which way is better belongs to the metric, not to one run. Files written by different KonfAI
+    versions disagree (PSNR was declared minimize until it was fixed), and reading the direction off
+    whichever file was globbed first ranked the board by luck and captioned it from another row."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    session = load_mcp_server().SESSION
+
+    def write(run: str, direction: str, value: float) -> Path:
+        out = session.workspace_layout.evaluations_dir() / run
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / "Metric_TRAIN.json"
+        path.write_text(
+            json.dumps({"aggregates": {"PSNR": {"mean": value}}, "directions": {"PSNR": direction}}), encoding="utf-8"
+        )
+        return path
+
+    old = write("old_run", "min", 20.0)
+    new = write("new_run", "max", 30.0)
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (2_000_000, 2_000_000))
+
+    board = session.leaderboard_payload(split="TRAIN")["leaderboard"]  # one metric: the selected board
+
+    assert {row["direction"] for row in board} == {"max"}, "the newest run states the current definition"
+    assert board[0]["run_name"] == "new_run", "and the ranking follows it"

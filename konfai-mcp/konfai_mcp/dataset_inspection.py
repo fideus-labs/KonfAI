@@ -35,9 +35,29 @@ from .server_support import (
     full_suffix,
 )
 
+# A payload is read by a model that pays for every character of it. These caps keep each fact worth its
+# size: enough cases named to recognise the pattern, never the whole roll call.
+_MISSING_CASES_SHOWN = 5
+_CASE_LAYOUTS_SHOWN = 3
+
 
 class DatasetInspectionMixin:
     """Dataset structure/statistics methods mixed into ``SessionService``."""
+
+    @staticmethod
+    def _case_layouts(case_summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The distinct sets of file names across cases, commonest first, each with one case to open."""
+        layouts: dict[tuple[str, ...], dict[str, Any]] = {}
+        for summary in case_summaries:
+            entry = layouts.setdefault(
+                tuple(summary["files"]),
+                {"files": summary["files"], "cases": 0, "example": summary["case"]},
+            )
+            entry["cases"] += 1
+            if summary["ignored_files"] and "ignored_files" not in entry:
+                entry["ignored_files"] = summary["ignored_files"]
+        ranked = sorted(layouts.values(), key=lambda entry: -entry["cases"])
+        return ranked[:_CASE_LAYOUTS_SHOWN]
 
     def _supported_extensions(self) -> set[str]:
         from konfai.utils.utils import SUPPORTED_EXTENSIONS
@@ -230,8 +250,14 @@ class DatasetInspectionMixin:
             if missing:
                 missing_by_case[case_name] = missing
 
-        for entry in groups.values():
+        for group, entry in groups.items():
             entry["extensions"] = sorted(entry["extensions"])
+            # An incomplete group is a fact about the group, not about each of the cases that lack it:
+            # one entry per case says "BODY_MASK" 45 times to convey a single sentence.
+            absent = sorted(case for case, missing in missing_by_case.items() if group in missing)
+            if absent:
+                entry["missing_in_cases"] = len(absent)
+                entry["missing_in"] = absent[:_MISSING_CASES_SHOWN]
 
         detected_extensions = sorted({ext for info in groups.values() for ext in info["extensions"]})
         default_extension = detected_extensions[0] if detected_extensions else None
@@ -276,7 +302,9 @@ class DatasetInspectionMixin:
             **({"warnings": structure_warnings} if structure_warnings else {}),
             "total_cases": len(case_dirs),
             "groups": groups,
-            "case_samples": case_summaries[: min(10, len(case_summaries))],
+            # Ten consecutive cases carry the same file names ten times over. What a reader needs is how
+            # many distinct layouts exist and one case per layout to look at.
+            "case_layouts": self._case_layouts(case_summaries),
             "missing_by_case": missing_by_case,
             "ignored_files": ignored_files[:100],
             "detected_extensions": detected_extensions,
@@ -285,15 +313,6 @@ class DatasetInspectionMixin:
             "default_extension": default_extension,
             "dataset_entry": dataset_entry,
             "suggested_groups_src": suggested_groups_src,
-            "is_input_meaning": (
-                "is_input is each group's ROLE in the model graph: true = an input fed to the network "
-                "(the data it sees); false = a target/supervision held out of the input (a segmentation "
-                "label, or the volume a synthesis model must produce). It is left null in "
-                "suggested_groups_src because it cannot be inferred from the group name — decide it from "
-                "the user's task. Examples: CT->segmentation => CT is_input:true, SEG is_input:false; "
-                "MR->CT synthesis => MR is_input:true, CT is_input:false. "
-                "design_config_strategy(group_roles=...) resolves this with the user."
-            ),
         }
 
     def browse_dataset_payload(
@@ -372,7 +391,11 @@ class DatasetInspectionMixin:
             "common_filenames": summary_scan["common_filenames"],
             "extensions": summary_scan["detected_extensions"],
             "ignored_files": summary_scan["ignored_files"],
-            "missing_by_case": summary_scan["missing_by_case"],
+            "incomplete_groups": {
+                group: {key: entry[key] for key in ("missing_in_cases", "missing_in")}
+                for group, entry in summary_scan["groups"].items()
+                if "missing_in" in entry
+            },
             **({"warnings": summary_scan["warnings"]} if summary_scan.get("warnings") else {}),
             "candidate_dataset_roots": candidate_roots,
             "next_actions": ["inspect_dataset", "design_config_strategy"],
@@ -431,13 +454,11 @@ class DatasetInspectionMixin:
             "layout": scan["layout"],
             "total_cases": scan["total_cases"],
             "groups": scan["groups"],
-            "case_samples": scan["case_samples"],
-            "missing_by_case": scan["missing_by_case"],
+            "case_layouts": scan["case_layouts"],
             "ignored_files": scan["ignored_files"],
             "detected_extensions": scan["detected_extensions"],
             "dataset_entry": scan["dataset_entry"],
             "suggested_groups_src": scan["suggested_groups_src"],
-            "is_input_meaning": scan["is_input_meaning"],
             **({"warnings": scan["warnings"]} if scan.get("warnings") else {}),
         }
         if discover_candidates:
@@ -449,12 +470,14 @@ class DatasetInspectionMixin:
                     "No supported groups were found directly under the requested path. "
                     "Inspect candidate_dataset_roots or call browse_dataset to locate the actual dataset root.",
                 ]
-            payload["next_actions"] = [
-                "browse_dataset",
-                "inspect_dataset",
-                "design_config_strategy",
-                "initialize_session",
-            ]
+            # Once groups are found the real question is what to DO with the dataset -- use a published app
+            # as is, fine-tune a close one, or train from scratch. Only when nothing was found does the next
+            # step remain "locate the dataset".
+            payload["next_actions"] = (
+                ["list_apps", "run_app_infer", "fine_tune_app", "run_train", "design_config_strategy"]
+                if payload["groups"]
+                else ["browse_dataset", "inspect_dataset", "design_config_strategy", "initialize_session"]
+            )
         return payload
 
     def infer_dataset_structure_payload(self, dataset_dir: Path) -> dict[str, Any]:
@@ -550,7 +573,9 @@ class DatasetInspectionMixin:
             "readable_cases": len(sampled_items),
             "sample_names": sampled_names[: min(20, len(sampled_names))],
             "sampled": len(sampled_names) != len(names),
-            "statistics": statistics,
+            # The aggregates answer every question the per-case half does — and the per-case half is one
+            # number per metric per sampled case, which was 43% of the whole inspect_dataset payload.
+            "statistics": statistics.get("aggregates", {}),
         }
         if per_case_labels:
             all_labels = sorted({label for labels in per_case_labels.values() for label in labels}, key=int)
@@ -566,7 +591,6 @@ class DatasetInspectionMixin:
                     )
                     for label in all_labels
                 },
-                "per_case": per_case_labels,
             }
         if high_cardinality_labels:
             # Never silently omit the label section: state that the integer group exceeds the label cap

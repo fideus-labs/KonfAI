@@ -39,6 +39,7 @@ import os
 import re
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -281,18 +282,30 @@ class AppService:
         inference, evaluation, uncertainty = info.has_capabilities()
         finetunable = info.is_finetunable()
 
-        # Route by what the app can actually do instead of dead-ending on describe/design. A runnable app
-        # is imported into the session (import_app), then predicted / evaluated / fine-tuned through the
-        # ordinary run_prediction / run_evaluation / run_resume tools -- so import_app is the single entry.
+        # Route by what the app can actually do instead of dead-ending on describe/design. The run_app_*
+        # tools run the app AS PUBLISHED; import_app is offered beside them for the case where the app has
+        # to be modified first. fine_tune_app is only offered when the app ships a train config to
+        # warm-start from, so an inference-only bundle never routes the agent to a tool it cannot use.
+        source = _source_of(info)
         next_actions: list[str] = []
-        if inference:
-            next_actions.extend(["import_app", "list_app_parameters", "export_app"])
-        else:
+        if not inference:
             next_actions.extend(["describe_app", "design_config_strategy"])
+        elif source == "remote":
+            # A remote app server keeps its code and data on the user's own machine: the MCP does not run
+            # it, so route to discovery rather than to tools that would refuse the reference.
+            next_actions.append("list_apps")
+        else:
+            next_actions.extend(["run_app_infer", "list_app_parameters", "run_app_pipeline", "import_app"])
+            if evaluation:
+                next_actions.append("run_app_evaluate")
+            if uncertainty:
+                next_actions.append("run_app_uncertainty")
+            if finetunable:
+                next_actions.append("fine_tune_app")
 
         payload: dict[str, Any] = {
             "ref": ref,
-            "source": _source_of(info),
+            "source": source,
             "name": info.get_name(),
             "display_name": info.get_display_name(),
             "short_description": info.get_short_description(),
@@ -351,7 +364,7 @@ class AppService:
         never in the server process. Returns the same ``{values, constraints}`` shape the
         ``--set`` / ``set_parameters`` overrides write into. Local/HuggingFace apps only.
         """
-        if self._classify(ref) in ("remote", "remote_server"):
+        if self._is_remote(ref):
             raise ValueError("Reading tunable parameters is only supported for local or HuggingFace apps.")
         if not allow_untrusted_code:
             raise ValueError(
@@ -368,7 +381,7 @@ class AppService:
             "source": payload.get("source", "local"),
             "values": payload.get("values", {}),
             "constraints": payload.get("constraints", {}),
-            "next_actions": ["import_app", "export_app"],
+            "next_actions": ["run_app_infer", "run_app_pipeline", "import_app", "export_app"],
         }
 
     def export_app(
@@ -385,7 +398,7 @@ class AppService:
         with my tuned parameters, as a local app'. It copies files and rewrites the config; it does not
         import the app's model code. Local/HuggingFace apps only.
         """
-        if self._classify(ref) in ("remote", "remote_server"):
+        if self._is_remote(ref):
             raise ValueError("Exporting is only supported for local or HuggingFace apps (a remote server cannot).")
         app_repository = _import_app_repository()
         info = app_repository.get_app_repository_info(ref, force_update)
@@ -396,7 +409,7 @@ class AppService:
         return {
             "ref": ref,
             "exported_to": str(target),
-            "next_actions": ["describe_app", "import_app", "register_app_source"],
+            "next_actions": ["describe_app", "run_app_infer", "import_app", "register_app_source"],
         }
 
     def import_app(
@@ -410,7 +423,7 @@ class AppService:
         """Copy an app (config, code, checkpoints) into the session root and install its requirements, then
         run it via run_prediction / run_resume / run_evaluation. Local/HuggingFace apps only. Gated by
         ``allow_untrusted_code`` and run in a spawn subprocess."""
-        if self._classify(ref) in ("remote", "remote_server"):
+        if self._is_remote(ref):
             raise ValueError(
                 "Importing into the session is only for local or HuggingFace apps; a remote server keeps its "
                 "code remote and cannot be imported — drive a remote app with konfai-apps directly."
@@ -440,7 +453,7 @@ class AppService:
             "next_actions": ["run_resume", "run_prediction", "run_evaluation", "validate_config_semantics"],
         }
 
-    # -- app resolution helpers (mode + trust gate, shared by import_app) ------------------------
+    # -- app resolution helpers (mode + trust gate) ----------------------------------------------
 
     def _infer_mode(self, ref: str) -> str:
         """Resolve which execution path an app reference takes: ``local`` (local/HF) or ``remote``."""
@@ -456,15 +469,397 @@ class AppService:
             )
         raise ValueError(f"Unrecognized app reference: {ref!r}")
 
+    @classmethod
+    def _is_remote(cls, ref: str) -> bool:
+        """Whether the reference names an app server rather than a local/HuggingFace bundle."""
+        return cls._classify(ref) in ("remote", "remote_server")
+
+    def _require_local_app(self, ref: str, verb: str, allow_untrusted_code: bool) -> None:
+        """Accept only a local/HuggingFace app reference, then enforce the code-execution trust gate.
+
+        A remote app server keeps its code and its data on the user's own machine: the MCP does not
+        drive it, so a remote reference is refused here instead of being silently treated as local.
+        """
+        if self._is_remote(ref):
+            raise ValueError(
+                f"{verb} is only supported for local or HuggingFace apps: {ref!r} is a remote app server, "
+                "which the MCP does not drive -- run it with konfai-apps directly."
+            )
+        self._require_trust(self._infer_mode(ref), allow_untrusted_code, verb)
+
+    def _app_label(self, ref: str) -> str:
+        """Short, filesystem-safe name of the app behind a reference, used to label its runs."""
+        if ":" in ref and not Path(ref).expanduser().exists():
+            return ref.split(":")[-1]
+        return Path(ref).expanduser().name
+
+    @staticmethod
+    def _normalize_input_groups(groups: list[list[str]], label: str = "inputs") -> list[list[str]]:
+        """Validate path groups and resolve every entry to an absolute path.
+
+        Resolving to absolute matters because the parent validates against the server CWD while the
+        child job runs chdir'd into the session workspace.
+        """
+        if not groups:
+            raise ValueError(f"{label} cannot be empty: provide at least one group (a list of file/dir paths).")
+        normalized: list[list[str]] = []
+        for group in groups:
+            if not group:
+                raise ValueError(f"Each {label} group must contain at least one path.")
+            resolved = [str(Path(path).expanduser().resolve()) for path in group]
+            for path in resolved:
+                if not Path(path).exists():
+                    raise ValueError(f"{label} path not found: {path}")
+            normalized.append(resolved)
+        return normalized
+
+    @staticmethod
+    def _check_case_pairing(labeled_groups: list[tuple[str, list[list[str]]]]) -> None:
+        """Reject paired input/gt/mask groups whose case counts disagree -> silent mis-pairing.
+
+        Staging lays every group down positionally (Volume_i/Reference_i/Mask_i for case ``P{idx}``), so
+        all groups must expand to the same number of cases. A directory expands to an unknown case count
+        downstream, so only groups whose entries are all files are counted here; a mismatch among those
+        is an unambiguous authoring error worth failing early and naming.
+        """
+        counted: list[tuple[str, int]] = []
+        for label, groups in labeled_groups:
+            for index, group in enumerate(groups):
+                if group and all(Path(path).is_file() for path in group):
+                    counted.append((f"{label}[{index}]", len(group)))
+        if len({count for _, count in counted}) > 1:
+            detail = ", ".join(f"{name}={count}" for name, count in counted)
+            raise ValueError(
+                f"Paired groups have mismatched case counts ({detail}). Each input/gt/mask group is "
+                "paired by position, so they must list the same number of cases."
+            )
+
+    def _default_output(self, subdir: str, label: str) -> str:
+        # Unique suffix so re-running the same app does not silently overwrite a previous run.
+        return str(self.workspace_layout.workspace_dir() / subdir / f"{label}-{uuid.uuid4().hex[:8]}")
+
+    @staticmethod
+    def _param_label_suffix(config_overrides: list[str] | None) -> str:
+        """A short signature of the applied ``--set`` overrides, appended to a tuned trial's output label so
+        its leaderboard ``metrics_path`` says which parameters produced its score (``sanitize_name`` turns
+        the ``=`` into ``_``). Bounded so a many-override trial cannot blow up the directory name."""
+        if not config_overrides:
+            return ""
+        return "__" + "_".join(config_overrides)[:40]
+
     @staticmethod
     def _require_trust(mode: str, allow_untrusted_code: bool, verb: str) -> None:
-        """Enforce the code-execution gate for local/HuggingFace apps (remote runs on the user's server)."""
+        """Enforce the code-execution gate for local/HuggingFace apps."""
         if mode == "local" and not allow_untrusted_code:
             raise ValueError(
                 f"{verb} a local/HuggingFace app imports its Python code and pip-installs its requirements "
                 "(the konfai-apps trust model). Set allow_untrusted_code=True to confirm you trust this app source. "
                 "Set the env KONFAI_APPS_INSTALL_REQUIREMENTS=0 to skip requirement installs."
             )
+
+    # -- run planning (the job specs the app tools launch) ---------------------------------------
+
+    def prepare_infer(
+        self,
+        ref: str,
+        inputs: list[list[str]],
+        output: str | None = None,
+        gpu: list[int] | None = None,
+        cpu: int | None = None,
+        tta: int = 0,
+        ensemble: int = 0,
+        ensemble_models: list[str] | None = None,
+        patch_size: list[int] | None = None,
+        batch_size: int | None = None,
+        config_overrides: list[str] | None = None,
+        uncertainty: bool = False,
+        allow_untrusted_code: bool = False,
+        force_update: bool = False,
+    ) -> dict[str, Any]:
+        """Validate an inference request and build the job spec for ``runner.run_app_api``.
+
+        This is where the trust gate lives: resolving an app imports its Python code and pip-installs
+        its requirements, so it requires ``allow_untrusted_code=True``. Raising here (in the tool body,
+        before launch) keeps the confirmation synchronous.
+        """
+        normalized = self._normalize_input_groups(inputs)
+        self._check_case_pairing([("inputs", normalized)])
+        self._require_local_app(ref, "Running", allow_untrusted_code)
+
+        # Make the device choice explicit: selecting CPU must not leave the app on its default
+        # (all visible GPUs). An empty gpu list forces CPU downstream.
+        if cpu is not None and gpu is None:
+            gpu = []
+
+        label = self.workspace_layout.sanitize_name(
+            f"app_{self._app_label(ref)}{self._param_label_suffix(config_overrides)}"
+        )
+        resolved_output = (
+            str(Path(output).expanduser().resolve()) if output else self._default_output("AppOutputs", label)
+        )
+
+        kwargs: dict[str, Any] = {
+            "ref": ref,
+            "inputs": normalized,
+            "output": resolved_output,
+            "gpu": gpu,
+            "cpu": cpu,
+            "tta": tta,
+            "ensemble": ensemble,
+            "ensemble_models": ensemble_models or [],
+            "patch_size": patch_size,
+            "batch_size": batch_size,
+            "config_overrides": config_overrides,
+            "uncertainty": uncertainty,
+            "force_update": force_update,
+        }
+        return {
+            "kind": "infer",
+            "run_name": label,
+            "target": "konfai_mcp.runner:run_app_api",
+            "command": ["konfai_mcp.runner:run_app_api", ref, "->", resolved_output],
+            "kwargs": kwargs,
+            "output": resolved_output,
+        }
+
+    def _prepare_action(
+        self,
+        *,
+        action: str,
+        kind: str,
+        label_prefix: str,
+        output_subdir: str,
+        ref: str,
+        inputs: list[list[str]],
+        output: str | None,
+        allow_untrusted_code: bool,
+        force_update: bool,
+        gt: list[list[str]] | None = None,
+        mask: list[list[str]] | None = None,
+        needs_gt: bool = False,
+        gpu: list[int] | None = None,
+        cpu: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Shared spec builder for app actions run through ``runner.run_app_action_api``."""
+        normalized_inputs = self._normalize_input_groups(inputs)
+        self._require_local_app(ref, "Running", allow_untrusted_code)
+
+        normalized_gt = self._normalize_input_groups(gt, "gt") if gt is not None else None
+        if needs_gt and not normalized_gt:
+            raise ValueError(f"{action} requires ground-truth volumes: pass gt as a list of groups.")
+        normalized_mask = self._normalize_input_groups(mask, "mask") if mask is not None else None
+
+        pairing: list[tuple[str, list[list[str]]]] = [("inputs", normalized_inputs)]
+        if normalized_gt is not None:
+            pairing.append(("gt", normalized_gt))
+        if normalized_mask is not None:
+            pairing.append(("mask", normalized_mask))
+        self._check_case_pairing(pairing)
+
+        if cpu is not None and gpu is None:
+            gpu = []
+        merged_extra: dict[str, Any] = dict(extra or {})
+        if gpu is not None:
+            merged_extra["gpu"] = gpu
+        if cpu is not None:
+            merged_extra["cpu"] = cpu
+
+        label = self.workspace_layout.sanitize_name(
+            f"{label_prefix}_{self._app_label(ref)}{self._param_label_suffix(merged_extra.get('config_overrides'))}"
+        )
+        resolved_output = (
+            str(Path(output).expanduser().resolve()) if output else self._default_output(output_subdir, label)
+        )
+        kwargs: dict[str, Any] = {
+            "ref": ref,
+            "action": action,
+            "output": resolved_output,
+            "inputs": normalized_inputs,
+            "gt": normalized_gt,
+            "mask": normalized_mask,
+            "extra": merged_extra,
+            "force_update": force_update,
+        }
+        return {
+            "kind": kind,
+            "run_name": label,
+            "target": "konfai_mcp.runner:run_app_action_api",
+            "command": ["konfai_mcp.runner:run_app_action_api", action, ref, "->", resolved_output],
+            "kwargs": kwargs,
+            "output": resolved_output,
+        }
+
+    def prepare_evaluate(
+        self,
+        ref: str,
+        inputs: list[list[str]],
+        gt: list[list[str]],
+        output: str | None = None,
+        mask: list[list[str]] | None = None,
+        evaluation_file: str = "Evaluation.yml",
+        gpu: list[int] | None = None,
+        cpu: int | None = None,
+        allow_untrusted_code: bool = False,
+        force_update: bool = False,
+    ) -> dict[str, Any]:
+        """Build the job spec for an app's declared Evaluation.yml (predictions vs ground truth -> metrics)."""
+        return self._prepare_action(
+            action="evaluate",
+            kind="evaluate",
+            label_prefix="eval",
+            output_subdir="AppEvaluations",
+            ref=ref,
+            inputs=inputs,
+            output=output,
+            allow_untrusted_code=allow_untrusted_code,
+            force_update=force_update,
+            gt=gt,
+            mask=mask,
+            needs_gt=True,
+            gpu=gpu,
+            cpu=cpu,
+            extra={"evaluation_file": evaluation_file},
+        )
+
+    def prepare_uncertainty(
+        self,
+        ref: str,
+        inputs: list[list[str]],
+        output: str | None = None,
+        uncertainty_file: str = "Uncertainty.yml",
+        gpu: list[int] | None = None,
+        cpu: int | None = None,
+        allow_untrusted_code: bool = False,
+        force_update: bool = False,
+    ) -> dict[str, Any]:
+        """Build the job spec for standalone uncertainty estimation from multi-channel inference stacks."""
+        return self._prepare_action(
+            action="uncertainty",
+            kind="uncertainty",
+            label_prefix="uncertainty",
+            output_subdir="AppUncertainties",
+            ref=ref,
+            inputs=inputs,
+            output=output,
+            allow_untrusted_code=allow_untrusted_code,
+            force_update=force_update,
+            gpu=gpu,
+            cpu=cpu,
+            extra={"uncertainty_file": uncertainty_file},
+        )
+
+    def prepare_pipeline(
+        self,
+        ref: str,
+        inputs: list[list[str]],
+        gt: list[list[str]] | None = None,
+        output: str | None = None,
+        mask: list[list[str]] | None = None,
+        tta: int = 0,
+        ensemble: int = 0,
+        ensemble_models: list[str] | None = None,
+        patch_size: list[int] | None = None,
+        batch_size: int | None = None,
+        config_overrides: list[str] | None = None,
+        uncertainty: bool = True,
+        gpu: list[int] | None = None,
+        cpu: int | None = None,
+        allow_untrusted_code: bool = False,
+        force_update: bool = False,
+    ) -> dict[str, Any]:
+        """Build the job spec for a one-shot infer -> evaluate (if gt) -> uncertainty pipeline."""
+        extra: dict[str, Any] = {
+            "tta": tta,
+            "ensemble": ensemble,
+            "ensemble_models": ensemble_models or [],
+            "patch_size": patch_size,
+            "batch_size": batch_size,
+            "uncertainty": uncertainty,
+        }
+        if config_overrides:
+            extra["config_overrides"] = config_overrides
+        return self._prepare_action(
+            action="pipeline",
+            kind="pipeline",
+            label_prefix="pipeline",
+            output_subdir="AppPipelines",
+            ref=ref,
+            inputs=inputs,
+            output=output,
+            allow_untrusted_code=allow_untrusted_code,
+            force_update=force_update,
+            gt=gt,
+            mask=mask,
+            needs_gt=False,
+            gpu=gpu,
+            cpu=cpu,
+            extra=extra,
+        )
+
+    def prepare_finetune(
+        self,
+        ref: str,
+        dataset: str,
+        output: str | None = None,
+        name: str = "Finetune",
+        epochs: int = 10,
+        it_validation: int = 1000,
+        models: list[str] | None = None,
+        lr: float | None = None,
+        config_overrides: list[str] | None = None,
+        gpu: list[int] | None = None,
+        cpu: int | None = None,
+        config_file: str = "Config.yml",
+        allow_untrusted_code: bool = False,
+        force_update: bool = False,
+    ) -> dict[str, Any]:
+        """Validate a fine-tune request and build the job spec for ``runner.run_finetune_api``.
+
+        Fine-tuning starts training from an existing app's checkpoint(s) on the user's dataset and
+        produces a resolvable app bundle in ``output``. Same trust gate as inference: resolving the app
+        imports its code and pip-installs its requirements.
+        """
+        dataset_path = Path(dataset).expanduser().resolve()
+        if not dataset_path.is_dir():
+            raise ValueError(f"dataset must be an existing directory: {dataset}")
+        if epochs <= 0:
+            raise ValueError("epochs must be a positive integer.")
+        self._require_local_app(ref, "Fine-tuning", allow_untrusted_code)
+
+        if cpu is not None and gpu is None:
+            gpu = []
+
+        label = self.workspace_layout.sanitize_name(
+            f"finetune_{self._app_label(ref)}{self._param_label_suffix(config_overrides)}"
+        )
+        resolved_output = (
+            str(Path(output).expanduser().resolve()) if output else self._default_output("AppBundles", label)
+        )
+
+        kwargs: dict[str, Any] = {
+            "ref": ref,
+            "dataset": str(dataset_path),
+            "output": resolved_output,
+            "name": name,
+            "epochs": epochs,
+            "it_validation": it_validation,
+            "models": models or [],
+            "lr": lr,
+            "config_overrides": config_overrides,
+            "gpu": gpu,
+            "cpu": cpu,
+            "config_file": config_file,
+            "force_update": force_update,
+        }
+        return {
+            "kind": "finetune",
+            "run_name": label,
+            "target": "konfai_mcp.runner:run_finetune_api",
+            "command": ["konfai_mcp.runner:run_finetune_api", ref, "->", resolved_output],
+            "kwargs": kwargs,
+            "output": resolved_output,
+        }
 
     # -- packaging ------------------------------------------------------------------------------
 
@@ -489,7 +884,7 @@ class AppService:
 
         Gathers checkpoints and a config from the current session workspace (or explicit paths),
         synthesizes an ``app.json`` from the given metadata, and writes a bundle (app.json + config +
-        checkpoint + optional Model.py/requirements) that ``describe_app`` / ``import_app`` can then
+        checkpoint + optional Model.py/requirements) that ``describe_app`` / ``run_app_infer`` can then
         consume. This closes the train-from-scratch branch onto the same bundle endpoint as fine-tuning.
         """
         from konfai_apps import bundle
@@ -512,7 +907,7 @@ class AppService:
         }
         # Derive inputs/outputs from the config so the bundle is actually runnable: describe_app reports
         # capabilities.inference from len(get_inputs()) > 0, so without these the packaged app reads as
-        # non-runnable and routes the agent back to design_config_strategy instead of import_app.
+        # non-runnable and routes the agent back to design_config_strategy instead of run_app_infer.
         inputs, outputs = self._derive_app_io(resolved_configs)
         if inputs:
             metadata["inputs"] = inputs
@@ -550,12 +945,12 @@ class AppService:
             "support_files": copied_support,
             "inputs": sorted(inputs) if inputs else [],
             "outputs": sorted(outputs) if outputs else [],
-            "next_actions": ["describe_app", "import_app"],
+            "next_actions": ["describe_app", "run_app_infer", "import_app"],
         }
         if any(Path(path).name == "Config.yml" for path in resolved_configs):
             result["warnings"] = [
                 "Config.yml is copied from the session as-is: make sure it describes the SAME architecture "
-                "as the packaged checkpoints (run_resume with weights_only=True warm-starts from it)."
+                "as the packaged checkpoints (fine_tune_app will train with it)."
             ]
         if onnx:
             # The ONNX export instantiates and traces the packaged model: it imports the bundle's
@@ -606,8 +1001,8 @@ class AppService:
 
     def _resolve_package_configs(self, configs: list[str] | None) -> list[str]:
         if configs is None:
-            # Bundle BOTH the prediction config (to run) and the train config (so a later run_resume can
-            # warm-start from the bundle) when present -- a Prediction.yml-only bundle cannot be fine-tuned.
+            # Bundle BOTH the prediction config (to run) and the train config (so fine_tune_app can warm-start
+            # from the bundle) when present -- a Prediction.yml-only bundle cannot be fine-tuned.
             prediction = self.workspace_layout.config_path("prediction")
             train = self.workspace_layout.config_path("train")
             configs = [str(path) for path in (prediction, train) if path.exists()]
