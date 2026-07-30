@@ -471,8 +471,10 @@ def test_interleaved_bars_each_keep_their_final_state(monkeypatch):
 # ---------------------------------------------------------------------------
 # A single rank runs in this process; more than one still spawns
 # ---------------------------------------------------------------------------
-def _execute_counting(monkeypatch, *, cpu: int, inline: str):
-    """Run execute_distributed_object and report who executed: the rank ran here, or spawn was called."""
+def _execute_counting(monkeypatch, *, cpu: int, inline: str | None):
+    """Run execute_distributed_object and report who executed: the rank ran here, or spawn was called.
+
+    ``inline`` is the KONFAI_INLINE_SINGLE_RANK value, or None to leave it unset and exercise the default."""
     ran_here: list[int | None] = []
     spawned: list[int] = []
 
@@ -492,7 +494,10 @@ def _execute_counting(monkeypatch, *, cpu: int, inline: str):
     monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(rt.mp, "spawn", lambda obj, nprocs=1, **k: spawned.append(nprocs))
-    monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", inline)
+    if inline is None:
+        monkeypatch.delenv("KONFAI_INLINE_SINGLE_RANK", raising=False)
+    else:
+        monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", inline)
     rt.execute_distributed_object(FakeObject(), gpu=None, cpu=cpu)
     return ran_here, spawned
 
@@ -521,3 +526,11 @@ def test_the_inline_path_can_be_turned_off(monkeypatch) -> None:
 
     assert spawned == [1]
     assert ran_here == []
+
+
+def test_the_inline_path_is_the_default(monkeypatch) -> None:
+    """Unset is the shape every CLI run takes; a default flipped to False would otherwise go unnoticed."""
+    ran_here, spawned = _execute_counting(monkeypatch, cpu=1, inline=None)
+
+    assert ran_here == [0]
+    assert spawned == []
