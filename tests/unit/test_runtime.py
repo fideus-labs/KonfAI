@@ -278,6 +278,9 @@ def _run_execute(monkeypatch, obj):
     monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(rt.mp, "spawn", lambda *a, **k: None)
+    # These cover what the PARENT does before execution, and stub spawn to skip the run itself.
+    # The single-rank inline path would run it here instead, so it is turned off.
+    monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", "0")
     rt.execute_distributed_object(obj, gpu=None, cpu=1)
 
 
@@ -463,3 +466,58 @@ def test_interleaved_bars_each_keep_their_final_state(monkeypatch):
 
     lines = mirror.written.splitlines()
     assert "Train: 49/50" in lines and "Val: 49/50" in lines
+
+
+# ---------------------------------------------------------------------------
+# A single rank runs in this process; more than one still spawns
+# ---------------------------------------------------------------------------
+def _execute_counting(monkeypatch, *, cpu: int, inline: str):
+    """Run execute_distributed_object and report who executed: the rank ran here, or spawn was called."""
+    ran_here: list[int | None] = []
+    spawned: list[int] = []
+
+    class FakeObject(rt.DistributedObject):
+        def __init__(self) -> None:
+            super().__init__("fake-inline")
+
+        def setup(self, world_size: int) -> None:
+            pass
+
+        def __call__(self, rank: int | None = None) -> None:
+            ran_here.append(rank)
+
+        def run_process(self, *args, **kwargs) -> None:  # pragma: no cover - never spawned here
+            pass
+
+    monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt.mp, "spawn", lambda obj, nprocs=1, **k: spawned.append(nprocs))
+    monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", inline)
+    rt.execute_distributed_object(FakeObject(), gpu=None, cpu=cpu)
+    return ran_here, spawned
+
+
+def test_a_single_rank_runs_in_this_process(monkeypatch) -> None:
+    """A spawned child is a fresh interpreter: re-imported torch, re-initialised CUDA, the whole payload
+    unpickled. With one rank there is nothing to parallelise, so that start-up buys only isolation."""
+    ran_here, spawned = _execute_counting(monkeypatch, cpu=1, inline="1")
+
+    assert ran_here == [0], "the single rank must run here, as rank 0"
+    assert spawned == [], "no child may be spawned for one rank"
+
+
+def test_more_than_one_rank_still_spawns(monkeypatch) -> None:
+    """Ranks that must run side by side still need their own processes."""
+    ran_here, spawned = _execute_counting(monkeypatch, cpu=3, inline="1")
+
+    assert spawned == [3]
+    assert ran_here == []
+
+
+def test_the_inline_path_can_be_turned_off(monkeypatch) -> None:
+    """An embedded caller (Slicer, the apps server) outlives the run and would inherit this process's
+    CUDA context; KONFAI_INLINE_SINGLE_RANK=0 gives it the child back."""
+    ran_here, spawned = _execute_counting(monkeypatch, cpu=1, inline="0")
+
+    assert spawned == [1]
+    assert ran_here == []
