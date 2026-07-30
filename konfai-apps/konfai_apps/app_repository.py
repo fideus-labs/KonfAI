@@ -259,6 +259,7 @@ class AppRepositoryInfo(ABC):
         vram_plan: dict[int, VRAMPlanEntry] | None = None,
         patch_size: list[int] | None = None,
         task: str | None = None,
+        icon_path: Path | None = None,
     ) -> None:
         super().__init__()
         self._app_name = app_name
@@ -276,6 +277,7 @@ class AppRepositoryInfo(ABC):
         self._vram_plan = vram_plan
         self._patch_size = patch_size
         self._task = task
+        self._icon_path = icon_path
 
     def __str__(self) -> str:
         return (
@@ -321,6 +323,11 @@ class AppRepositoryInfo(ABC):
         """The app's declared task family (e.g. ``segmentation``/``registration``/``synthesis``), a free-form
         hint straight from ``app.json``; None when the manifest omits it. Not validated against an enum."""
         return self._task
+
+    def get_icon_path(self) -> Path | None:
+        """Local path of the app's own icon (the bundle's ``icon.png``, or the ``icon`` file that
+        ``app.json`` names); None when the bundle ships none. UIs fall back to a task glyph."""
+        return self._icon_path
 
     def is_finetunable(self) -> bool:
         """Whether the app can be fine-tuned from its bundled train config. Conservative default for
@@ -466,6 +473,11 @@ class LocalAppRepository(AppRepositoryInfo):
         checkpoints_name: list[str] = app_repository_metadata.get("models", [])
         checkpoints_name_available = self._get_available_checkpoint_names(checkpoints_name, filenames)
 
+        # The bundle's own icon: the file app.json names, or 'icon.png' by convention. Non-.pt files
+        # are all downloaded above, so resolving it here costs nothing.
+        icon_name = app_repository_metadata.get("icon", "icon.png" if "icon.png" in filenames else None)
+        icon_path = self._download(icon_name) if icon_name in filenames else None
+
         super().__init__(
             app_name=app_name,
             display_name=str(app_repository_metadata["display_name"]),
@@ -482,6 +494,7 @@ class LocalAppRepository(AppRepositoryInfo):
             vram_plan=vram_plan,
             patch_size=patch_size,
             task=app_repository_metadata.get("task"),
+            icon_path=icon_path,
         )
 
     def _get_available_checkpoint_names(self, checkpoints_name: list[str], filenames: list[str]) -> list[str]:
