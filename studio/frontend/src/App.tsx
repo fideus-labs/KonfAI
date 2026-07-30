@@ -52,6 +52,15 @@ function SearchIcon() {
   );
 }
 
+function PowerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+      <path d="M12 3v8" />
+      <path d="M6.2 6.4a8 8 0 1 0 11.6 0" />
+    </svg>
+  );
+}
+
 function AppsIcon() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
@@ -176,6 +185,7 @@ export default function App() {
 
 function Studio({ remote }: { remote: boolean }) {
   const [status, setStatus] = useState("connecting…");
+  const [stopped, setStopped] = useState(false); // the user shut the local server down from the titlebar
   const [sessions, setSessions] = useState<string[]>([]); // starts empty — no phantom "default" experiment
   // The status poll reads this to spot an experiment it does not know yet; a ref, because the poll's
   // interval closure would otherwise forever see the mount-time empty list.
@@ -568,10 +578,33 @@ function Studio({ remote }: { remote: boolean }) {
   // One live subscription for the active task, shared by the feed (right) and the console (bottom).
   const stream = useJobStream(active, ui[active]?.runNonce ?? 0);
 
+  // Stopping the server is a LOCAL privilege: never offered on a remote (token-gated) session,
+  // and the endpoint refuses non-loopback clients anyway.
+  const stoppable = !remote && ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  function quitStudio() {
+    if (!window.confirm("Stop the KonfAI Studio server?\n\nThe page will go offline; running jobs may be interrupted."))
+      return;
+    postJson("/api/quit", {})
+      .catch(() => {})
+      .finally(() => setStopped(true));
+  }
+
   function signOut() {
     purgeStudioChat(); // drop transcripts before the httpOnly cookie is cleared and the page reloads
     fetch("/api/logout", { method: "POST" }).finally(() => location.reload());
   }
+
+  if (stopped)
+    return (
+      <div className="stopped-wrap">
+        <div>
+          <h2>Studio server stopped</h2>
+          <p>
+            You can close this tab. Launch it again from Slicer or run <code>konfai-studio</code>.
+          </p>
+        </div>
+      </div>
+    );
 
   return (
     <div className="app">
@@ -613,6 +646,11 @@ function Studio({ remote }: { remote: boolean }) {
             title="Host CPU load, averaged over all cores"
             traces={[{ label: "load", points: cpuHist }]}
           />
+        )}
+        {stoppable && (
+          <button className="power-btn" onClick={quitStudio} title="Stop the Studio server (local session only)">
+            <PowerIcon />
+          </button>
         )}
       </div>
 

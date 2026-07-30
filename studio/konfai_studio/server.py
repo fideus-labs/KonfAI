@@ -21,8 +21,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -835,9 +836,57 @@ def _parse_apps(data: Any) -> list[dict[str, Any]]:
 
 @app.get("/api/apps")
 async def apps(session: str = Query("apps")) -> dict[str, Any]:
-    """The konfai-mcp app catalogue (shipped + registered sources) — a direct MCP call, no LLM."""
+    """The konfai-mcp app catalogue (shipped + registered sources) — a direct MCP call, no LLM.
+
+    Bundle metadata maps onto what the App Zoo renders: an app with its own ``icon.png`` gets a
+    ``logo`` URL (served below), and its declared ``task`` becomes the grouping ``theme``.
+    """
     ok, _text, data = await _mcp_json(_sane_session(session), "list_apps", {"include_summary": True})
-    return {"ok": ok, "apps": _parse_apps(data)}
+    listed = _parse_apps(data)
+    for entry in listed:
+        if entry.get("has_icon") and entry.get("ref"):
+            entry["logo"] = f"/api/apps/icon?ref={quote(str(entry['ref']), safe='')}"
+        if entry.get("task") and not entry.get("theme"):
+            entry["theme"] = str(entry["task"]).capitalize()
+    return {"ok": ok, "apps": listed}
+
+
+@app.post("/api/quit")
+async def quit_server(request: Request) -> dict[str, bool]:
+    """Stop the Studio server (graceful: the lifespan teardown closes agents and reaps TensorBoards).
+
+    Only accepted from the machine the server runs on: a remote client must never be able to take
+    the shared server down, token or not. Slicer's Studio button and the titlebar power button rely
+    on this — the server runs detached, with no terminal to Ctrl+C.
+    """
+    import signal
+
+    client = request.client.host if request.client else ""
+    if client not in ("127.0.0.1", "::1"):
+        raise HTTPException(403, "the Studio server can only be stopped from its own machine")
+
+    async def _after_reply() -> None:
+        await asyncio.sleep(0.3)  # let this response leave before the shutdown begins
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.get_running_loop().create_task(_after_reply())
+    return {"ok": True}
+
+
+@app.get("/api/apps/icon")
+async def app_icon(ref: str = Query(...)) -> FileResponse:
+    """The app's own bundle icon (its ``icon.png`` / ``app.json``-declared icon file)."""
+    try:
+        from konfai_apps.app_repository import AppRepositoryError, get_app_repository_info
+    except ImportError as exc:  # pragma: no cover - konfai-apps not installed
+        raise HTTPException(503, "konfai-apps is not installed") from exc
+    try:
+        icon_path = get_app_repository_info(ref, force_update=False).get_icon_path()
+    except (AppRepositoryError, FileNotFoundError, OSError, ValueError) as exc:
+        raise HTTPException(404, f"app '{ref}' has no icon") from exc
+    if icon_path is None or not Path(icon_path).is_file():
+        raise HTTPException(404, f"app '{ref}' has no icon")
+    return FileResponse(icon_path, media_type="image/png")
 
 
 def _app_bundle_file(ref: str, filename: str) -> Path:
