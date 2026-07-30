@@ -584,9 +584,11 @@ function Studio({ remote }: { remote: boolean }) {
   function quitStudio() {
     if (!window.confirm("Stop the KonfAI Studio server?\n\nThe page will go offline; running jobs may be interrupted."))
       return;
-    postJson("/api/quit", {})
-      .catch(() => {})
-      .finally(() => setStopped(true));
+    // The header is what the server checks against a drive-by POST; only show the stopped screen
+    // once the request actually succeeded, or the UI would lie about a server that is still up.
+    postJson("/api/quit", {}, { "X-KonfAI-Studio": "quit" })
+      .then(() => setStopped(true))
+      .catch((e) => window.alert(`Could not stop the server: ${e?.message ?? e}`));
   }
 
   function signOut() {

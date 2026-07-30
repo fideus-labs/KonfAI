@@ -855,15 +855,22 @@ async def apps(session: str = Query("apps")) -> dict[str, Any]:
 async def quit_server(request: Request) -> dict[str, bool]:
     """Stop the Studio server (graceful: the lifespan teardown closes agents and reaps TensorBoards).
 
-    Only accepted from the machine the server runs on: a remote client must never be able to take
-    the shared server down, token or not. Slicer's Studio button and the titlebar power button rely
-    on this — the server runs detached, with no terminal to Ctrl+C.
+    Two guards, because neither alone is enough. The client must be on this machine, so a remote
+    user cannot take a shared server down, token or not. And it must send the header below: the
+    loopback check only proves the TCP peer is local, which any page open in the user's browser
+    also is, so without it a drive-by form POST to localhost would shut Studio down. A custom
+    header is unforgeable from a form and, cross-origin, needs a preflight this server never grants.
+
+    Slicer's Studio button and the titlebar power button rely on this — the server runs detached,
+    with no terminal to Ctrl+C.
     """
     import signal
 
     client = request.client.host if request.client else ""
     if client not in ("127.0.0.1", "::1"):
         raise HTTPException(403, "the Studio server can only be stopped from its own machine")
+    if request.headers.get("x-konfai-studio") != "quit":
+        raise HTTPException(403, "missing the X-KonfAI-Studio header — stop Studio from its own UI")
 
     async def _after_reply() -> None:
         await asyncio.sleep(0.3)  # let this response leave before the shutdown begins
@@ -886,7 +893,8 @@ async def app_icon(ref: str = Query(...)) -> FileResponse:
         raise HTTPException(404, f"app '{ref}' has no icon") from exc
     if icon_path is None or not Path(icon_path).is_file():
         raise HTTPException(404, f"app '{ref}' has no icon")
-    return FileResponse(icon_path, media_type="image/png")
+    # No media_type: app.json may name a .svg or .webp, so let the response infer it from the path.
+    return FileResponse(icon_path)
 
 
 def _app_bundle_file(ref: str, filename: str) -> Path:
