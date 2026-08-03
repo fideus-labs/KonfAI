@@ -261,6 +261,10 @@ class AppService:
                 app["short_description"] = summary["short_description"]
                 app["inputs"] = list(summary["inputs"].keys())
                 app["outputs"] = list(summary["outputs"].keys())
+                if "task" in summary:
+                    app["task"] = summary["task"]
+                if summary.get("has_icon"):
+                    app["has_icon"] = True
 
         return {
             "apps": apps,
@@ -328,6 +332,9 @@ class AppService:
         task = info.get_task()
         if task:
             payload["task"] = task
+
+        if info.get_icon_path():
+            payload["has_icon"] = True  # the bundle ships its own icon.png (UIs fetch it themselves)
 
         terminology = info.get_terminology()
         if terminology:
