@@ -61,6 +61,7 @@ from konfai import (
     statistics_directory,
 )
 from konfai.utils.errors import ConfigError
+from konfai.utils.utils import env_flag
 
 
 class ClusterKwargs(TypedDict):
@@ -802,6 +803,22 @@ def run_distributed_app(
     return wrapper
 
 
+def _runs_inline(world_size: int) -> bool:
+    """Whether the single rank runs here instead of in a spawned child.
+
+    A spawned child is a fresh interpreter: it re-imports torch, re-initialises CUDA and unpickles the
+    whole payload before doing any work — measured at ~3 s, which a short prediction pays in full. With
+    one rank there is nothing to parallelise, so that cost buys only isolation.
+
+    Isolation is worth keeping where the caller outlives the run: an embedded interpreter (Slicer, the
+    apps server) would inherit this process's CUDA context and its memory. ``KONFAI_INLINE_SINGLE_RANK``
+    is the switch — default on for a CLI run, set it to 0 to force the child back.
+    """
+    if world_size != 1:
+        return False
+    return env_flag("KONFAI_INLINE_SINGLE_RANK", True)
+
+
 def execute_distributed_object(
     distributed_object: DistributedObject,
     *,
@@ -901,7 +918,10 @@ def execute_distributed_object(
                 # open-file limit ("Too many open files"), e.g. under Slicer's embedded Python.
                 mp.set_sharing_strategy("file_system")
                 with TensorBoard(configured_object.name):
-                    mp.spawn(configured_object, nprocs=world_size)
+                    if _runs_inline(world_size):
+                        configured_object(0)
+                    else:
+                        mp.spawn(configured_object, nprocs=world_size)
     finally:
         for key, value in previous_env.items():
             if value is None:
