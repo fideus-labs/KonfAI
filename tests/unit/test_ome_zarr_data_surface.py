@@ -34,6 +34,7 @@ from konfai.data import (
     read_ome_zarr_data_slice,
     write_ome_zarr,
 )
+from konfai.utils.dataset import _store_chunks
 from konfai.utils.errors import DatasetManagerError
 
 
@@ -158,3 +159,28 @@ def test_append_levels_without_factors_is_a_no_op(tmp_path: Path) -> None:
     write_ome_zarr(store, _volume(), spacing=[1.0] * 3)
     append_ome_zarr_levels(store, [])
     assert get_ome_zarr_info(store)["n_levels"] == 1
+
+
+def test_a_chunk_stays_openable_whatever_plane_the_writer_declares() -> None:
+    """A slab sweep declares the whole trailing plane, and that is not a chunk shape.
+
+    At 2048x2048 float32 the declared region is a gigabyte, and at 4096x4096 it is past what zarr
+    holds in one buffer. Every axis the region covers end to end can be tiled without splitting a
+    region write, so the axis the writer advances along keeps its declared height and the rest are
+    cut down until a chunk is a size a reader can decompress to reach one voxel.
+    """
+    rows = 64
+    for spatial in ([400, 512, 512], [400, 1024, 1024], [400, 2048, 2048], [400, 4096, 4096]):
+        for channels in (1, 3):
+            shape = [channels, *spatial]
+            chunk = _store_chunks(shape, [channels, rows, *spatial[1:]], np.float32)
+            assert chunk is not None
+            megabytes = int(np.prod(chunk, dtype=np.int64)) * 4 / (1 << 20)
+            assert megabytes <= 32.0, f"{shape} -> {chunk} is {megabytes:.0f} MiB"
+            # The sweep axis is the one the writer advances along: shrinking it below the declared
+            # slab is the read-modify-write this sizing exists to avoid.
+            assert chunk[1] == rows
+
+
+def test_a_writer_that_declares_nothing_leaves_the_store_its_own_default() -> None:
+    assert _store_chunks([1, 8, 8, 8], None, np.float32) is None

@@ -71,11 +71,15 @@ _SWEEP_SLAB_ROWS = 64
 _SWEEP_RESIDENT_SLABS = 2
 _SWEEP_ELEMENT_BYTES = 4
 
-# What a whole-volume fallback holds while a case is in flight -- the assembled tensor plus one
-# transform output -- and the bytes each element travels as. The transform plan and the run-time
-# budget check (_enforce_fallback_budget) must agree on this figure.
-_FALLBACK_INFLIGHT_FACTOR = 2
-_CASE_ELEMENT_BYTES = 4
+#: What a whole-volume fallback holds while a case is in flight -- the assembled tensor plus one
+#: transform output -- and the bytes each element travels as.
+#:
+#: Public because two callers must agree on the figure and neither owns it: the run-time budget check
+#: (``_enforce_fallback_budget``) refuses a case against it, and the TRANSFORM plan prints and
+#: enforces the same number before a byte is written. A plan estimating differently from the run it
+#: describes is worse than no plan.
+FALLBACK_INFLIGHT_FACTOR = 2
+CASE_ELEMENT_BYTES = 4
 
 
 def _halo_radii(halo: tuple[int, ...], n_axes: int) -> list[int]:
@@ -143,11 +147,15 @@ def _drawn_from(*key: object) -> Iterator[None]:
     draw the same copies on every run and on every rank of one run.
 
     The state is restored because it is global: reseeding everything downstream would make every
-    other random decision a function of how many copies were declared.
+    other random decision a function of how many copies were declared. CUDA's generators are part of
+    that state -- ``torch.manual_seed`` seeds every device, so restoring the CPU generator alone
+    would leave every later GPU draw reseeded from here.
     """
     digest = hashlib.blake2b("|".join(str(part) for part in key).encode(), digest_size=4).digest()
     seed = int.from_bytes(digest, "big")
-    states = (random.getstate(), np.random.get_state(), torch.random.get_rng_state())
+    cpu_state = torch.random.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    states = (random.getstate(), np.random.get_state())
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -156,7 +164,9 @@ def _drawn_from(*key: object) -> Iterator[None]:
     finally:
         random.setstate(states[0])
         np.random.set_state(states[1])
-        torch.random.set_rng_state(states[2])
+        torch.random.set_rng_state(cpu_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
 
 
 def _stage_name(stage: Stage) -> str:
@@ -277,8 +287,12 @@ class _ReadStagePlan:
     pull: Callable[[tuple[slice, ...]], list[slice]] | None
 
 
-def _save_destination(save: Save, default_dataset: Dataset, default_group: str) -> tuple[Dataset, str]:
-    """The dataset and group a :class:`Save` caches into, the manager's own when it names none."""
+def save_destination(save: Save, default_dataset: Dataset, default_group: str) -> tuple[Dataset, str]:
+    """The dataset and group a :class:`Save` caches into, the manager's own when it names none.
+
+    Public because a planner has to resolve a destination exactly as the engine will: one that probes
+    a store the run does not open has verified nothing.
+    """
     if save.dataset:
         filename, _, file_format = split_path_spec(
             save.dataset,
@@ -1510,7 +1524,7 @@ class DatasetManager:
         data = None
         for transform_function in reversed(pre_transform):
             if isinstance(transform_function, Save):
-                dataset, group_dest = _save_destination(transform_function, self.dataset, self.group_dest)
+                dataset, group_dest = save_destination(transform_function, self.dataset, self.group_dest)
                 if not self._rewrite_saves and dataset.is_dataset_exist(group_dest, self.name):
                     data, attrib = dataset.read_data(group_dest, self.name)
                     self.cache_attributes[0].update(attrib)
@@ -1542,7 +1556,7 @@ class DatasetManager:
         for transform_function in transforms:
             tensor = transform_function(self.name, tensor, attribute)
             if isinstance(transform_function, Save):
-                dataset, group_dest = _save_destination(transform_function, self.dataset, self.group_dest)
+                dataset, group_dest = save_destination(transform_function, self.dataset, self.group_dest)
                 dataset.write(group_dest, entry, tensor.numpy(), attribute)
         return tensor
 
@@ -1740,6 +1754,12 @@ class DatasetManager:
         shape = [int(extent) for extent in source_spatial_shape]
         localities: list[PatchLocality] = []
         plans: list[_ReadStagePlan] = []
+
+        def refuse(reason: str) -> tuple[bool, tuple[_ReadStagePlan, ...], Attribute, str]:
+            """A refusal carries the state folded so far, so the caller can still read the geometry
+            the chain reached before the stage that stopped it."""
+            return False, (), evolved, reason
+
         for stage_index, stage in enumerate(stages):
             loc = stage.patch_locality(Attribute(evolved))
             localities.append(loc)
@@ -1749,71 +1769,49 @@ class DatasetManager:
                 # OUTPUT, which a patch read has no notion of. A stage that is whole-volume only
                 # because something was left undeclared says so itself (PatchLocality.reason), so
                 # the reader is told what to change instead of what happened.
-                return (
-                    False,
-                    (),
-                    evolved,
-                    f"{label} declares {loc.kind.name}: {loc.reason or 'it needs the whole volume'}.",
-                )
+                return refuse(f"{label} declares {loc.kind.name}: {loc.reason or 'it needs the whole volume'}.")
             if loc.kind is LocalityKind.GLOBAL_STAT:
                 # The seed is the STORED volume's statistic, which is this transform's input only when
                 # every earlier stage preserves it; otherwise ([Clip(-200, 400), Standardize()]) every
                 # patch would be standardized by the pre-Clip statistic -- fall back to the whole volume.
                 if not all(previous.statistics_preserving for previous in localities[:-1]):
-                    return (
-                        False,
-                        (),
-                        evolved,
+                    return refuse(
                         f"{label} needs whole-volume statistics, but an earlier stage changes the values"
-                        " -- the stored volume's statistic is not this stage's input.",
+                        " -- the stored volume's statistic is not this stage's input."
                     )
                 if seed_statistics and not self._ensure_stream_stats(
                     source_dataset, source_group, source_entry, cache_attribute, set(loc.stat_keys), loc.stat_channels
                 ):
-                    return (
-                        False,
-                        (),
-                        evolved,
-                        f"{label} needs statistics {sorted(loc.stat_keys)} that the source cannot provide.",
-                    )
+                    return refuse(f"{label} needs statistics {sorted(loc.stat_keys)} that the source cannot provide.")
                 # The evolving case state carries the seed too: a Save sweep writes it as the cache
                 # header, exactly as the whole-volume pass leaves the statistic in the attribute.
                 for stat_key in loc.stat_keys:
                     if stat_key in cache_attribute and stat_key not in evolved:
                         evolved[stat_key] = cache_attribute[stat_key]
             if loc.kind is LocalityKind.HALO and not self._affords_halo(a, loc.halo):
-                return (
-                    False,
-                    (),
-                    evolved,
+                return refuse(
                     f"{label} declares a halo of {loc.halo} that is too wide for this grid to be worth"
-                    " reading (over half the patch extent per axis).",
+                    " reading (over half the patch extent per axis)."
                 )
             if loc.kind is LocalityKind.RESCALE and (not isinstance(stage, Resample) or "Spacing" not in evolved):
                 # A resample is patch-native only when the source geometry is known: the scale is read
                 # from the evolving 'Spacing' (a free geometry stat, no read_data_statistics).
-                return (
-                    False,
-                    (),
-                    evolved,
+                return refuse(
                     f"{label} declares RESCALE but "
                     + (
                         "does not inherit from Resample."
                         if not isinstance(stage, Resample)
                         else "the source carries no 'Spacing' to scale from."
-                    ),
+                    )
                 )
             plan = self._plan_read_stage(stage, loc, shape, evolved)
             plans.append(plan)
             shape = list(plan.out_shape)
         expected = landing_shape if landing_shape is not None else self.shapes[a]
         if shape != [int(extent) for extent in expected]:
-            return (
-                False,
-                (),
-                evolved,
+            return refuse(
                 f"the chain's shapes fold to {shape} but the target grid is"
-                f" {[int(extent) for extent in expected]} -- a stage's shape map is missing or wrong.",
+                f" {[int(extent) for extent in expected]} -- a stage's shape map is missing or wrong."
             )
         return True, tuple(plans), evolved, None
 
@@ -1916,7 +1914,7 @@ class DatasetManager:
                 entry = self.copy_entry(a)
                 continue
             if isinstance(transform, Save):
-                dataset, group = _save_destination(transform, self.dataset, self.group_dest)
+                dataset, group = save_destination(transform, self.dataset, self.group_dest)
                 if not self._rewrite_saves and dataset.is_dataset_exist(group, entry):
                     source_dataset, source_group, source_entry = dataset, group, entry
                     source_shape, boundary_attributes = dataset.get_infos(group, entry)
@@ -1998,8 +1996,12 @@ class DatasetManager:
                 source_dataset, source_group, source_entry, source_shape, stages, stage_plans
             )
         # The state the whole plan lands on, kept for consumers that need the LANDED geometry (a
-        # reduction seeding its output header) without re-walking the chain.
-        self._stream_evolved[key] = Attribute(evolved)
+        # reduction seeding its output header) without re-walking the chain. Recorded only when the
+        # plan HOLDS: a refused plan folded as far as the stage that refused and no further, and half
+        # a fold is not a geometry -- it is a Spacing from before the resample meant to change it.
+        # An unset key is what lets ``landed_attributes`` answer with the stored state instead.
+        if streamable:
+            self._stream_evolved[key] = Attribute(evolved)
         return self._patch_stream_sources[key]
 
     def _plan_save_sweep(
@@ -2234,14 +2236,14 @@ class DatasetManager:
             spatial = [int(extent) for extent in stage.transform_shape(self.group_src, self.name, source, attributes)]
             stage.write_stream_cache_attribute(attributes, source)
             peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
-        return peak * _CASE_ELEMENT_BYTES
+        return peak * CASE_ELEMENT_BYTES
 
     def _enforce_fallback_budget(self, fallback_budget_bytes: float | None) -> None:
         if fallback_budget_bytes is None:
             return
         # The plan's promise holds at run time too: a case whose sweep failed here (a refusal the
         # probe could not see) must not assemble a volume the budget cannot hold.
-        case_bytes = self.peak_case_bytes() * _FALLBACK_INFLIGHT_FACTOR
+        case_bytes = self.peak_case_bytes() * FALLBACK_INFLIGHT_FACTOR
         if case_bytes > fallback_budget_bytes:
             raise PatchError(
                 f"Case '{self.name}' fell back to the whole-volume path at run time and its"
@@ -2300,9 +2302,11 @@ class DatasetManager:
         if first is not None:
             shared_pending = [sweep for sweep in first.pending_sweeps if sweep.entry == self.name]
             if shared_pending:
-                # Each failure records its own reason; _sweep_failed reads them back.
                 for sweep in shared_pending:
-                    self._materialize_save(sweep)
+                    # Chained here as on the per-case path: past a failure the next sweep reads a
+                    # cache nobody wrote and overwrites the recorded reason with its own symptom.
+                    if not self._materialize_save(sweep):
+                        break
                 self._invalidate_stream_plans()
 
         shared: list[tuple[int, _PendingSweep]] = []
@@ -2538,7 +2542,12 @@ class DatasetManager:
         if not source.pending_sweeps:
             return True
         for sweep in source.pending_sweeps:
-            self._materialize_save(sweep)
+            # Stop at the first failure. The sweeps are CHAINED -- each one's source is the previous
+            # one's destination -- so past a failure the next reads a cache nobody wrote, fails too,
+            # and overwrites the recorded reason with its own. _sweep_failure has to keep the cause,
+            # not the last symptom.
+            if not self._materialize_save(sweep):
+                break
         # Every copy replans: the pending plans pointed at caches that did not exist yet (or, after a
         # failure, never will -- _sweep_failed reroutes them to the whole-volume path).
         self._invalidate_stream_plans()
@@ -2620,7 +2629,7 @@ class DatasetManager:
                     # not something a slab can carry an opinion about: refuse, and let the caller's
                     # handler fall back to the whole volume, which reduces correctly.
                     raise PatchError(
-                        f"A stage of the chain writing '{sweep.group}/{self.name}' returned a rank-{block.ndim}"
+                        f"A stage of the chain writing '{sweep.group}/{sweep.entry}' returned a rank-{block.ndim}"
                         f" slab where the channel-first layout needs rank {len(spatial) + 1}"
                         f" (C, {', '.join(str(e) for e in spatial)}).",
                         "A transform that reduces the leading axis must keep it (`keepdim=True`), so a"
@@ -2678,6 +2687,12 @@ class DatasetManager:
         landed block (plus the write buffer), so half the budget over that working set is the honest
         height. Below one row nothing fits; the row is the floor, and the fallback budget check is
         what refuses a case whose single row cannot fit.
+
+        ``channels`` is the SOURCE's, and ``_SWEEP_ELEMENT_BYTES`` assumes four: the landed block's
+        channel count and dtype are not known until the first slab has been read, and the height has
+        to be fixed before that so every slab writes whole chunks. A chain that multiplies channels
+        (a one-hot, a field synthesis) is therefore under-counted here; the per-case fallback budget
+        check runs on real shapes and is the authority that refuses.
         """
         cap = max(1, int(_SWEEP_SLAB_ROWS))
         budget = self._sweep_budget_bytes

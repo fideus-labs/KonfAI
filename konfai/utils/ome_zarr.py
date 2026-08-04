@@ -95,6 +95,13 @@ DISPLACEMENT_BOUND_ATTRIBUTE = "MaxDisplacement"
 _RFC5_VERSION = "0.6"
 _DEFAULT_VERSION = "0.4"
 
+#: How a chunk is sized, whether the store is created from a shape alone or from the region shape a
+#: streamed writer declares (:func:`konfai.utils.dataset._store_chunks`). One rule, two callers: a
+#: chunk is the unit a reader decompresses to reach one voxel, so an oversized one is paid by every
+#: partial read forever, and by any consumer that is not KonfAI.
+CHUNK_SPATIAL_TILE = 128
+CHUNK_TARGET_BYTES = 32 << 20
+
 
 def _zarr_v3_available() -> bool:
     """Whether the installed zarr can write a v3 store, which NGFF >= 0.5 (RFC-5) requires.
@@ -419,8 +426,9 @@ def displacement_bound(data: np.ndarray) -> list[float]:
     field = np.asarray(data)
     if field.ndim < 2:
         return []
-    flat = field.reshape(field.shape[0], -1)
-    return [float(np.abs(flat[component]).max(initial=np.float32(0.0))) for component in range(flat.shape[0])]
+    # Cast before the max, not after: ``initial=np.float32(0.0)`` does not downcast a float64 input.
+    flat = np.abs(field.reshape(field.shape[0], -1)).astype(np.float32, copy=False)
+    return [float(flat[component].max(initial=np.float32(0.0))) for component in range(flat.shape[0])]
 
 
 def update_konfai_attributes(store_path: str | Path, extra: dict[str, Any]) -> None:
@@ -435,6 +443,10 @@ def update_konfai_attributes(store_path: str | Path, extra: dict[str, Any]) -> N
     group = zarr.open_group(str(store_path), mode="r+")
     sidecar = dict(dict(group.attrs).get(_KONFAI_ATTR_KEY, {}).get("attributes", {}))
     sidecar.update(extra)
+    # Writing through an `r+` group updates the consolidated copy with it, so a sidecar landing here
+    # is readable by a consolidated reader without a second consolidation pass. Measured, because the
+    # opposite is the plausible assumption: a foreign `zarr.open_group(mode="r")` reads back a bound
+    # written this way on both sides of this line.
     group.attrs[_KONFAI_ATTR_KEY] = {"attributes": sidecar}
     clear_ome_zarr_cache()
 
@@ -505,10 +517,10 @@ def create_ome_zarr_store(
     translation = {"c": 0.0, **dict(zip(spatial_axes, translation_values, strict=True))}
 
     if chunks is None:
-        spatial_chunks = [min(extent, 128) for extent in shape[1:]]
-        # Keep one chunk around 32 MiB: full 128-wide spatial tiles, channels split to fit the budget.
+        spatial_chunks = [min(extent, CHUNK_SPATIAL_TILE) for extent in shape[1:]]
+        # Keep one chunk near the target: full spatial tiles, channels split to fit the budget.
         tile_bytes = int(np.prod(spatial_chunks, dtype=np.int64)) * np.dtype(dtype).itemsize
-        chunks = [min(shape[0], max(1, (32 << 20) // max(1, tile_bytes))), *spatial_chunks]
+        chunks = [min(shape[0], max(1, CHUNK_TARGET_BYTES // max(1, tile_bytes))), *spatial_chunks]
     chunks = tuple(chunks)
 
     stand_in = dask.array.zeros((shape[0], *(1,) * len(spatial_axes)), dtype=np.dtype(dtype))
@@ -589,6 +601,9 @@ def append_ome_zarr_levels(
             base,
             scale_factors=[int(f) for f in scale_factors],
             method=_downsample_method(downsample_method),
+            # Level 0 is rewritten here, so the base store's own chunking has to be carried across:
+            # ngff-zarr otherwise re-chunks it on its default.
+            chunks=tuple(int(size) for size in base.data.chunksize),
             cache=False,
         )
         version = _DEFAULT_VERSION

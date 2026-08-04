@@ -19,7 +19,8 @@
 This is the surface for driving KonfAI's data machinery from plain Python — no YAML, no environment
 variables, no workflow. A chain of transforms applied to a dataset, out-of-core, is::
 
-    from konfai.data import Dataset, DatasetManager, Clip, Write
+    from konfai.data import Dataset, DatasetManager, Write
+    from konfai.data.transform import Clip   # the concrete stages stay in the module that defines them
 
     manager = DatasetManager(
         index=0, group_src="CT", group_dest="CT", name="CASE_000",
@@ -41,6 +42,7 @@ buried in the module that happens to define them.
 
 from konfai.data.data_manager import DataMetric, DataPrediction, DatasetIter, DataTrain, DataTransform
 from konfai.data.patching import DatasetManager, DatasetPatch
+from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
 from konfai.data.transform import (
     Expand,
     LocalityKind,
@@ -63,6 +65,7 @@ from konfai.utils.ome_zarr import (
 
 __all__ = [
     "Attribute",
+    "Concat",
     "DataMetric",
     "DataPrediction",
     "DataTrain",
@@ -73,11 +76,15 @@ __all__ = [
     "DatasetPatch",
     "Expand",
     "LocalityKind",
+    "Mean",
+    "Median",
     "PatchLocality",
     "Reduce",
+    "Reduction",
     "Save",
     "Transform",
     "TransformInverse",
+    "Vote",
     "Write",
     "append_ome_zarr_levels",
     "create_ome_zarr_store",

@@ -496,7 +496,7 @@ def test_get_infos_reads_only_the_header_for_a_mismatched_extension(tmp_path: Pa
 
 def test_a_group_written_through_another_dataset_object_is_seen(tmp_path: Path) -> None:
     """A group can be produced through one Dataset and read through another over the same folder: a
-    ``Save`` builds its own (data/patching.py:_save_destination) while the reader keeps the DataManager's.
+    ``Save`` builds its own (data/patching.py:save_destination) while the reader keeps the DataManager's.
     Membership answered from the reader's memoised listing froze at its first lookup, so every case
     written after it read as absent -- ImpactSynth masks its own output that way and raised
     ``NameError: Mask : MASK/P002 not found`` from the third case of a batch on."""

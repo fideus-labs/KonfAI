@@ -20,14 +20,15 @@ What matters here is not that the median is right -- it is that it is right whil
 never assembled, that a cases which does not agree on its grid is refused before anything is read,
 and that a chain continues after the reduction."""
 
+import itertools
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
-from konfai.data.case_reduction import CaseReduction, resolve_operator, split_chain
+from konfai.data.case_reduction import CaseReduction, ReductionPlan, resolve_operator, split_chain
 from konfai.data.patching import DatasetManager
-from konfai.data.reduction import Mean, Median, Reduction
+from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
 from konfai.data.transform import Clip, Dilate, Normalize, Reduce, TensorCast, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ReductionError, TransformError
@@ -134,11 +135,25 @@ def test_averaging_keeps_a_floating_dtype_and_widens_an_integer_one(operator: Re
 
 
 def test_a_non_incremental_operator_holds_the_whole_cohort_per_region(tmp_path: Path) -> None:
+    """One region per case, plus the output's, plus what the operator allocates over its buffer.
+
+    ``Median`` stacks the buffer into a new tensor and sorts a copy of that, so the buffer alone
+    under-states its peak threefold — and it is the operator a bare ``Reduce`` gets.
+    """
     engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Median", output="t"), [])
     plan = engine.plan()
     assert plan.incremental is False
-    assert plan.resident_regions == CASES + 1
+    assert plan.resident_regions == CASES + 1 + Median.working_multiple * CASES
     assert "resident region" in plan.describe() and "CASE_000" in plan.describe()
+
+
+def test_an_operator_that_folds_in_place_is_budgeted_for_what_it_holds(tmp_path: Path) -> None:
+    """The multiplier is the operator's to declare: ``Mean`` accumulates into one running region."""
+    engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Mean", output="t"), [])
+    plan = engine.plan()
+    assert plan.incremental is True
+    assert Mean.working_multiple == 0.0
+    assert plan.resident_regions == 2
 
 
 def test_per_member_stages_run_on_each_member_separately(tmp_path: Path) -> None:
@@ -376,3 +391,92 @@ def test_an_operator_shadowing_a_reduce_key_is_refused() -> None:
     rather than silently handing the stage's value to the operator."""
     with pytest.raises(ReductionError, match="reads for itself"):
         resolve_operator(Reduce(operator=f"{__name__}:_Shadowing", output="t"))
+
+
+def test_vote_picks_a_label_where_median_would_invent_one() -> None:
+    """The reason Vote exists. Two label maps have no middle value that is a label.
+
+    Median averages the middle pair, so folding structures 1 and 5 answers 3 -- a third structure,
+    in a volume that is still a valid label map, which is why nothing downstream reports it.
+    """
+    labels = [torch.full((1, 1, 2, 2), value, dtype=torch.uint8) for value in (1, 5)]
+
+    assert float(Median()(labels).flatten()[0]) == 3.0
+    assert Median()(labels).dtype is torch.float32
+
+    voted = Vote()(labels)
+    assert float(voted.flatten()[0]) == 1.0, "a tie goes to the smallest label"
+    assert voted.dtype is torch.uint8, "a vote picks, so the label dtype survives"
+
+
+def test_vote_takes_the_label_the_majority_agrees_on() -> None:
+    labels = [torch.full((1, 1, 2, 2), value, dtype=torch.uint8) for value in (4, 7, 7, 2, 7)]
+    assert set(np.unique(Vote()(labels).numpy()).tolist()) == {7}
+
+
+def test_vote_answers_per_voxel_not_per_volume() -> None:
+    """Each voxel is its own ballot -- a majority somewhere else must not carry it."""
+    cases = [
+        torch.tensor([[[[1, 2]]]], dtype=torch.uint8),
+        torch.tensor([[[[1, 3]]]], dtype=torch.uint8),
+        torch.tensor([[[[9, 3]]]], dtype=torch.uint8),
+    ]
+    np.testing.assert_array_equal(Vote()(cases).numpy(), np.array([[[[1, 3]]]], dtype=np.uint8))
+
+
+def test_a_single_case_is_its_own_vote() -> None:
+    only = torch.full((1, 1, 2, 2), 6, dtype=torch.uint8)
+    assert Vote()([only]).dtype is torch.uint8
+    np.testing.assert_array_equal(Vote()([only]).numpy(), only.numpy())
+
+
+@pytest.mark.parametrize(
+    "operator,output_channels,member_regions,why",
+    [
+        (Mean(), 1, 2, "one running accumulator and the region coming into it"),
+        (Median(), 1, 3 * CASES + 1, "the cohort, the stack it is copied into, the sort, the output"),
+        (Vote(), 1, 3 * CASES + 1, "same shape of work: a mode sorts a copy of the stack too"),
+        (Concat(), CASES, 2 * CASES, "the cohort, and the concatenation that IS the output"),
+    ],
+    ids=["mean", "median", "vote", "concat"],
+)
+def test_the_peak_is_charged_at_each_side_s_own_width(
+    operator: Reduction, output_channels: int, member_regions: int, why: str
+) -> None:
+    """Members are measured at THEIR channel count, the output at its own.
+
+    Only ``Concat`` tells the two apart -- it writes ``N x C`` where each member holds ``C`` -- and
+    charging the cohort at the output's width over-states its peak by the cohort's size, which either
+    shrinks the slab for nothing or refuses a reduction that fits.
+    """
+    spatial, rows, source_channels = [8, 100, 100], 4, 1
+    plan = ReductionPlan(
+        output="t",
+        cases=[f"CASE_{i:03d}" for i in range(CASES)],
+        spatial=spatial,
+        channels=output_channels,
+        source_channels=source_channels,
+        slab_rows=rows,
+        incremental=operator.incremental,
+        stat_pass=False,
+        working_multiple=operator.working_multiple,
+    )
+    member = rows * spatial[1] * spatial[2] * source_channels * 4
+    assert plan.peak_bytes == member_regions * member, why
+
+
+def test_a_vote_tie_goes_to_the_smallest_label_whatever_the_cohort_order() -> None:
+    """The reproducibility half of Vote's contract, which its docstring promises out loud.
+
+    A cohort is folded by whichever rank owns it and in whatever order the manager list came out, so
+    a tie broken by position would write a different template on a rerun and nothing about the volume
+    would look wrong. ``torch.mode`` documents that the smallest of the most frequent values wins;
+    this pins that the whole way through, because the promise is ours and not torch's to keep.
+    """
+    for order in itertools.permutations((7, 2, 9)):
+        cohort = [torch.full((1, 1, 2, 2), value, dtype=torch.uint8) for value in order]
+        assert int(Vote()(cohort).flatten()[0]) == 2, f"order {order} broke the tie somewhere else"
+
+    # A majority still beats the smallest label: the tie rule is a tie-breaker, not a preference.
+    counted = [torch.full((1, 1, 2, 2), value, dtype=torch.uint8) for value in (9, 2, 9)]
+    assert int(Vote()(counted).flatten()[0]) == 9

@@ -37,7 +37,7 @@ import torch
 
 from konfai.data.patching import DatasetManager
 from konfai.data.reduction import Reduction
-from konfai.data.transform import LocalityKind, Reduce, Transform
+from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Transform
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import (
     Attribute,
@@ -77,6 +77,11 @@ class ReductionPlan:
     slab_rows: int
     incremental: bool
     stat_pass: bool
+    #: Channels a MEMBER's region carries. Separate from ``channels``, the output's, because an
+    #: operator may change the count: ``Concat`` writes ``N x C`` where each member holds ``C``, so
+    #: charging the members at the output's width over-states the peak by the cohort's size.
+    source_channels: int = 0
+    working_multiple: float = 0.0
     refusal: str | None = None
 
     @property
@@ -84,20 +89,36 @@ class ReductionPlan:
         return self.refusal is None
 
     @property
-    def resident_regions(self) -> int:
-        """Regions held at the peak: two for a running accumulator, else one per case plus the
-        output's own. This is what the budget multiplies, and why ``slab_rows`` is derived."""
-        return 2 if self.incremental else len(self.cases) + 1
+    def buffered_regions(self) -> int:
+        """Member regions resident at once: one for a running accumulator, else the whole cohort."""
+        return 1 if self.incremental else len(self.cases)
+
+    @property
+    def resident_regions(self) -> float:
+        """Regions held at the peak, counted in MEMBER regions plus the output's own.
+
+        ``Median`` stacks the buffer into a new tensor and sorts a copy of that, so counting the
+        buffer alone under-states its peak threefold -- and it is what a bare ``Reduce`` gets.
+        """
+        return self.buffered_regions * (1 + self.working_multiple) + 1
+
+    def _region_bytes(self, channels: int) -> int:
+        return int(self.slab_rows * np.prod(self.spatial[1:], dtype=np.int64) * channels * _ASSUMED_ITEMSIZE)
 
     @property
     def region_bytes(self) -> int:
-        return int(self.slab_rows * np.prod(self.spatial[1:], dtype=np.int64) * self.channels * _ASSUMED_ITEMSIZE)
+        """One OUTPUT region, the unit the written slab is measured in."""
+        return self._region_bytes(self.channels)
 
     @property
     def peak_bytes(self) -> int:
+        # Members at their own width, the output at its, and whatever the operator builds over the
+        # buffer it is handed -- which is member-sized, since that is what it was handed.
+        #
         # A statistics pass is a second traversal, not a second working set: it holds exactly what
         # one region holds, so the peak is the same whether there are one or two passes.
-        return self.resident_regions * self.region_bytes
+        members = self.buffered_regions * self._region_bytes(self.source_channels or self.channels)
+        return int(members * (1 + self.working_multiple) + self.region_bytes)
 
     def describe(self) -> str:
         verdict = "STREAM" if self.streams else "REFUSED"
@@ -107,7 +128,7 @@ class ReductionPlan:
             return "\n".join(lines)
         regime = "incremental accumulator" if self.incremental else "every case resident per region"
         lines.append(
-            f"    {self.resident_regions} resident region(s) of {self.slab_rows} row(s)"
+            f"    {self.resident_regions:g} resident region(s) of {self.slab_rows} row(s)"
             f" = {self.peak_bytes / (1 << 30):.2f} GiB  ({regime})"
         )
         if self.stat_pass:
@@ -204,21 +225,34 @@ def check_post_stages(post: list[Transform], output: str) -> None:
     -- a halo, a resample, a reorientation -- would take that region for the whole volume and seam
     at every boundary: a plausible result, and a wrong one. Those are deferred, not forbidden:
     end the chain, and read the written volume back in a second chain where the ordinary planner can
-    pull regions through it. That is the boundary that already lets a statistic follow a
-    value-changing stage.
+    pull regions through it.
+
+    A statistic may follow the reduction, but only over stages that leave the values alone: the stat
+    pass measures the FOLD, so an earlier stage that changes the values makes the seed describe a
+    volume nobody wrote. This mirrors the same refusal in the per-case planner.
     """
+    localities: list[PatchLocality] = []
     for index, stage in enumerate(post):
-        kind = stage.patch_locality(Attribute()).kind
-        if kind in _POST_KINDS:
-            continue
+        locality = stage.patch_locality(Attribute())
+        kind = locality.kind
         name = type(stage).__name__
-        raise ReductionError(
-            f"stage {index} '{name}' follows the Reduce into '{output}' and declares {kind.name},"
-            " which reads across space -- applied one region at a time it would seam at every"
-            " region boundary.",
-            f"Only voxel-local stages can follow a reduction. End this chain, and put '{name}' in a"
-            f" second chain that reads '{output}' back.",
-        )
+        if kind not in _POST_KINDS:
+            raise ReductionError(
+                f"stage {index} '{name}' follows the Reduce into '{output}' and declares {kind.name},"
+                " which reads across space -- applied one region at a time it would seam at every"
+                " region boundary.",
+                f"Only voxel-local stages can follow a reduction. End this chain, and put '{name}' in a"
+                f" second chain that reads '{output}' back.",
+            )
+        if kind is LocalityKind.GLOBAL_STAT and not all(previous.statistics_preserving for previous in localities):
+            raise ReductionError(
+                f"stage {index} '{name}' follows the Reduce into '{output}' and needs whole-volume"
+                " statistics, but an earlier stage after the Reduce changes the values -- the"
+                " statistic is measured on the fold, so it would not be this stage's input.",
+                f"End this chain after the value-changing stage, and put '{name}' in a second chain"
+                f" that reads '{output}' back, where its statistic is measured on what it receives.",
+            )
+        localities.append(locality)
 
 
 @dataclass
@@ -315,8 +349,18 @@ class CaseReduction:
         for manager in others:
             attribute = manager.landed_attributes()
             for key in _GEOMETRY_KEYS:
-                if key not in expected or key not in attribute:
-                    continue
+                # ``strict`` is a promise that the geometries WERE compared, and a key nobody
+                # recorded cannot be. Skipping it is quietest exactly where it costs most: a
+                # Direction missing from one header is a flip that shows in neither extent nor
+                # spacing. Fold on extent alone with 'grid: shape_only' if that is what is meant.
+                absent = [
+                    name for name, side in ((reference.name, expected), (manager.name, attribute)) if key not in side
+                ]
+                if absent:
+                    return (
+                        f"{' and '.join(repr(name) for name in absent)} lands on no {key},"
+                        f" which 'grid: strict' compares (use 'grid: shape_only' to fold on extent alone)"
+                    )
                 left = np.asarray(expected.get_np_array(key), dtype=np.float64).ravel()
                 right = np.asarray(attribute.get_np_array(key), dtype=np.float64).ravel()
                 if left.shape != right.shape or not np.allclose(left, right, atol=self.reduce.grid_tolerance):
@@ -356,8 +400,10 @@ class CaseReduction:
             # Concat over N cases writes N times the channels, and the plan must probe and size the
             # shape the run will actually open.
             channels=self.operator.output_channels(int(reference.base_shape[0]), len(self.managers)),
+            source_channels=int(reference.base_shape[0]),
             slab_rows=self.slab_rows,
             incremental=self.operator.incremental,
+            working_multiple=float(self.operator.working_multiple),
             stat_pass=self._needs_stat_pass(),
             refusal=self._first_refusal(),
         )

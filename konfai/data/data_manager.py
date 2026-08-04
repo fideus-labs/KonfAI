@@ -1976,7 +1976,7 @@ class DataTransform(Data):
 
     def _output_destinations(self) -> dict[tuple[str, str], list[tuple[str, str]]]:
         """Resolved ``(root, group)`` of every Save/Write, keyed by chain — the parse-time view of
-        what the run would write, resolved exactly as ``_save_destination`` will resolve it."""
+        what the run would write, resolved exactly as ``save_destination`` will resolve it."""
         destinations: dict[tuple[str, str], list[tuple[str, str]]] = {}
         for group_src in self.groups_src:
             for group_dest, group_transform in self.groups_src[group_src].items():
@@ -2058,13 +2058,24 @@ class DataTransform(Data):
             chain = f"groups_src.{group_src}.groups_dest.{group_dest}"
             transforms = group_transform.transforms
             expands = [t for t in transforms if isinstance(t, Expand)]
+            reduces = [t for t in transforms if isinstance(t, Reduce)]
             if len(expands) > 1:
                 raise TransformerError(
                     f"'{chain}' declares {len(expands)} Expand markers; a chain changes its cardinality at most once.",
                     "Keep one Expand per chain. Successive expansions compose across two"
                     " invocations, the second reading the first one's output back.",
                 )
-            if expands and any(isinstance(t, Reduce) for t in transforms):
+            if len(reduces) > 1:
+                # Counted here, where a cardinality marker is refused under its own name. The chain
+                # splits at the FIRST Reduce, so a second one lands among the post stages and comes
+                # back as an ordinary stage that reads across space: a true sentence about the wrong
+                # problem, naming a remedy that does not apply.
+                raise TransformerError(
+                    f"'{chain}' declares {len(reduces)} Reduce markers; a chain changes its cardinality at most once.",
+                    "Keep one Reduce per chain. Successive reductions compose across two"
+                    " invocations, the second reading the first one's output back.",
+                )
+            if expands and reduces:
                 raise TransformerError(
                     f"'{chain}' declares both an Expand and a Reduce.",
                     "One chain changes its cardinality once (1-to-N or N-to-1). Compose the two"
