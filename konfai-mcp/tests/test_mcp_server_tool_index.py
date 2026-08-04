@@ -138,3 +138,28 @@ def test_stage_actions_name_only_registered_tools(
     for stage, actions in STAGE_ACTIONS.items():
         missing = [action for action in actions if action not in tool_names]
         assert not missing, f"stage '{stage}' names unregistered tools: {missing}"
+
+
+@pytest.mark.parametrize("workflow", ["transform", "Transform", "TRANSFORM", "train", "Train"])
+def test_validated_config_names_only_registered_tools(
+    workflow: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """The parameter is documented case-insensitive, so the launcher cannot be the raw string.
+
+    The job-payload guard above never saw this builder, and an agent handed 'run_Transform' calls a
+    tool that does not exist. A transform's plan also has to come first, as it does everywhere else.
+    """
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+    tool_names, _ = _registered_names(mcp_server)
+    monkeypatch.setattr(mcp_server.SESSION, "validate_semantics", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(mcp_server.SESSION, "session_summary", lambda *a, **k: {"next_actions": []})
+
+    actions = mcp_server.validate_config_semantics(workflow=workflow)["next_actions"]
+
+    assert not [action for action in actions if action not in tool_names], actions
+    if workflow.lower() == "transform":
+        assert actions.index("plan_transform") < actions.index("run_transform")

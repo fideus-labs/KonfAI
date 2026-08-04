@@ -2420,7 +2420,12 @@ def validate_config_semantics(
         action for action in SESSION.session_summary()["next_actions"] if action != "validate_config_semantics"
     ]
     if result.get("ok", False):
-        result["next_actions"] = list(dict.fromkeys([f"run_{workflow}", "summarize_session", *summary_actions]))
+        # Named from the normalized value: the parameter is case-insensitive and 'run_Transform' is not
+        # a tool. And a transform writes a dataset, so its plan comes first -- the order every other
+        # next_actions builder in this session already keeps.
+        normalized = workflow.strip().lower()
+        launchers = ["plan_transform", "run_transform"] if normalized == "transform" else [f"run_{normalized}"]
+        result["next_actions"] = list(dict.fromkeys([*launchers, "summarize_session", *summary_actions]))
     else:
         result["next_actions"] = list(dict.fromkeys([*(result.get("next_actions", [])), "summarize_session"]))
     return result
