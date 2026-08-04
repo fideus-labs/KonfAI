@@ -44,6 +44,24 @@ def _default_preset() -> str:
     return presets[0]
 
 
+def _add_tmp_dir(parser: argparse.ArgumentParser) -> None:
+    """Add ``--tmp-dir``, the option every other KonfAI app CLI exposes through ``build_app_cli``.
+
+    Left unset the command stages under the system temporary directory, as before. It is worth naming
+    when that directory is the wrong medium: what is staged is volume-sized (the moved image and the
+    displacement field, written before being collected into ``--output``), so a tmpfs TMPDIR charges it
+    to RAM. Pointing this beside ``--output`` also puts the intermediates on the results' own filesystem.
+    """
+    parser.add_argument(
+        "--tmp-dir",
+        "--tmp_dir",
+        dest="tmp_dir",
+        type=_paths,
+        default=None,
+        help="Directory for intermediates (default: the system temporary directory).",
+    )
+
+
 def _add_device(parser: argparse.ArgumentParser, download: bool = True) -> None:
     """Add the shared device / verbosity / download options to a sub-parser."""
     device = parser.add_mutually_exclusive_group()
@@ -109,6 +127,7 @@ def main() -> None:
         "e.g. --set iterations=300 (repeatable).",
     )
     _add_device(reg)
+    _add_tmp_dir(reg)
 
     # eval -------------------------------------------------------------------
     ev = subparsers.add_parser(
@@ -145,6 +164,7 @@ def main() -> None:
     )
     ev.add_argument("-o", "--output", type=_paths, default=Path("./Output").resolve(), help="Output directory.")
     _add_device(ev)
+    _add_tmp_dir(ev)
 
     # uncertainty ------------------------------------------------------------
     unc = subparsers.add_parser(
@@ -166,6 +186,7 @@ def main() -> None:
     )
     unc.add_argument("-o", "--output", type=_paths, default=Path("./Output").resolve(), help="Output directory.")
     _add_device(unc)
+    _add_tmp_dir(unc)
 
     args = parser.parse_args()
     app = ImpactRegKonfAIApp(
@@ -187,6 +208,7 @@ def main() -> None:
             tta=args.tta,
             keep_dvf=args.uncertainty,
             config_overrides=args.config_overrides,
+            tmp_dir=args.tmp_dir,
         )
 
     elif args.command == "eval":
@@ -214,6 +236,7 @@ def main() -> None:
             gpu=gpu,
             cpu=args.cpu,
             quiet=args.quiet,
+            tmp_dir=args.tmp_dir,
         )
 
     elif args.command == "uncertainty":
@@ -225,6 +248,7 @@ def main() -> None:
             gpu=gpu,
             cpu=args.cpu,
             quiet=args.quiet,
+            tmp_dir=args.tmp_dir,
         )
 
 
