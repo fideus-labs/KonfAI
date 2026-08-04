@@ -33,7 +33,7 @@ module is specialised by ``stages``). ``deformable_method`` picks the deformable
 
     "syn"    symmetric diffeomorphic SyN (CC)   — invertible, higher quality, averages cleanly for ensembling
     "greedy" greedy diffeomorphic (CC)          — one-directional, faster / lower VRAM
-    "none"   linear only                        — Rigid+Affine, no deformable (the FireANTs_Affine preset)
+    "none"   no deformable                      — the linear stage IS the transform (FireANTs_Affine)
 
 and ``linear_method`` picks the linear one:
 
@@ -41,8 +41,10 @@ and ``linear_method`` picks the linear one:
     "rigid"         Rigid only                   — no free scale or shear
     "none"          deformable from identity     — for a pair already globally aligned
 
-The two cannot both be "none": that leaves nothing to optimise, and the engine says so rather than
-returning an identity transform.
+They compose, so ``deformable_method="none"`` runs whichever linear stage was asked for rather than
+always Rigid+Affine: with ``linear_method="rigid"`` it is a rigid-only registration. The one
+combination refused is both set to ``"none"`` -- that leaves nothing to optimise, and the engine
+raises ``ValueError`` at build time rather than returning an identity transform.
 
 Masks: the optional Fixed/Moving masks restrict the metric to a region. FireANTs implements this by
 carrying the mask as the last image channel and prefixing the metric with ``masked_``; a mask is only
@@ -79,6 +81,10 @@ from konfai.utils.dataset import Attribute, data_to_image, image_to_data
 from .elastix import _is_local_ref
 
 DIM = 3
+
+#: Linear stages a preset may ask for. The engine checks against this rather than trusting the
+#: ``Literal`` annotation, which only binds a config-driven call and not a direct Python one.
+_LINEAR_METHODS = ("rigid_affine", "rigid", "none")
 
 # Feature-model registry (models.json): the available IMPACT feature models, fetched from HF (NOT bundled).
 # Only consulted by the "impact" deformable metric; ``KONFAI_IMPACT_MODELS_REGISTRY`` (a local path) wins
@@ -466,10 +472,19 @@ class FireANTsEngine:
         self._moments_init = moments_init
         self._linear_method = linear_method
         self._deformable_method = deformable_method
+        # Both checks are at BUILD time, as the missing-feature-model one above is: the stages they
+        # guard run for minutes, and a run that reaches them has already paid for the read.
+        if linear_method not in _LINEAR_METHODS:
+            # Named, not silently ignored. Every unrecognised value would otherwise fall through to
+            # the rigid-then-affine branch, so a typo -- "affine", say -- would register with a stage
+            # the caller did not ask for and produce a perfectly plausible result.
+            raise ValueError(
+                f"Unknown linear_method '{linear_method}' (expected {', '.join(map(repr, _LINEAR_METHODS))})."
+            )
         if linear_method == "none" and deformable_method == "none":
-            # Refused at BUILD time, as the missing-feature-model check above is. Left to run, this
-            # optimises nothing and returns the identity: a Moved equal to the moving image and a
-            # zero field, which no downstream check tells apart from a pair that needed no moving.
+            # Left to run this optimises nothing and returns the identity: a Moved equal to the moving
+            # image and a zero field, which no downstream check tells apart from a pair that needed no
+            # moving.
             raise ValueError(
                 "linear_method='none' with deformable_method='none' leaves nothing to optimise."
             )
@@ -832,7 +847,9 @@ class RegistrationNet(network.Network):
         ] = "rigid_affine",
         deformable_method: Annotated[
             Literal["none", "syn", "greedy"],
-            "Deformable algorithm: 'syn' (symmetric diffeomorphic), 'greedy', or 'none' to stop after the affine stage.",
+            "Deformable algorithm: 'syn' (symmetric diffeomorphic), 'greedy', or 'none' to stop after the linear "
+            "stage, whichever 'linear_method' selected -- with linear_method='rigid' that is a rigid-only "
+            "registration. Both set to 'none' is refused: it would optimise nothing.",
         ] = "syn",
         deformable_metric: Annotated[
             Literal["cc", "mi", "mse", "impact"],
