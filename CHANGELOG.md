@@ -148,6 +148,10 @@ written replaces it.
 - **data**: Vote, the reduction operator that folds segmentations without inventing a label
 - **data**: declare an OME-Zarr pyramid from a Write, and let a field carry its own bound
 - **impact-reg**: seed the rigid from the centre of mass, not only the frame
+- **impact-reg**: `--tmp-dir` on register/eval/uncertainty, the option the other app CLIs already carry —
+  a caller whose system temp directory is a tmpfs can now stage volume-sized intermediates on real disk
+  instead of overriding `TMPDIR` from outside; the same change also writes the moved image and the
+  displacement field once per run instead of twice
 - **studio**: bundle icons through the app interface, and a way to stop Studio (#75)
 - **examples**: a Transform example -- a template folded out of a cohort, and drawn copies of a case
 
