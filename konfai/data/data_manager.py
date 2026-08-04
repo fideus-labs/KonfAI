@@ -95,6 +95,22 @@ class MemoryBudget:
         return self.total_bytes / max(1, world_size) if self.shared_across_ranks else self.total_bytes
 
 
+def _node_local_ranks(world_size: int | None = None) -> int:
+    """How many ranks of this run share ONE node's RAM -- the divisor a node-scoped budget needs.
+
+    The launcher publishes the count in ``KONFAI_LOCAL_RANKS``, because a budget is often sized before
+    the spawn where a world size exists at all. Without it -- direct API use, a garbled value -- the
+    world size stands in: exact on a single node, conservative everywhere else.
+    """
+    try:
+        local = int(os.environ.get("KONFAI_LOCAL_RANKS", "0"))
+    except ValueError:
+        local = 0
+    if local <= 0:
+        return max(1, world_size or 1)
+    return min(local, world_size) if world_size else local
+
+
 def _parse_memory_budget_bytes(value: str | float) -> int:
     """Parse an explicit memory budget to bytes: a bare number is GiB, a string carries its own unit.
 
@@ -1027,9 +1043,9 @@ class Data(ABC):
         The cache is chosen iff the per-rank dataset (``dataset / world_size`` -- ``Data._split``
         shards cases across ranks) fits the per-rank budget: an explicit budget is taken as declared
         per rank; ``"auto"`` -- also what an absent key means -- divides the detected node memory
-        (cgroup-capped) by the ranks sharing it, so its ``world_size`` cancels and it reduces to
-        "does the whole dataset fit the node". The decision is logged once here -- ``get_data`` runs
-        on the launcher alone, before any worker is spawned.
+        (cgroup-capped) by the ranks sharing THAT node, so on a single node the two divisions cancel
+        and the test reduces to "does the whole dataset fit the node". The decision is logged once
+        here -- ``get_data`` runs on the launcher alone, before any worker is spawned.
         """
         if not self._budget_caches_when_fit:
             # One-pass workflows (prediction, evaluation) read each case exactly once: a cache is
@@ -1041,7 +1057,7 @@ class Data(ABC):
         per_rank_bytes = dataset_bytes / world_size
 
         budget = self.resolved_budget()
-        per_rank_budget = budget.per_rank_bytes(world_size)
+        per_rank_budget = budget.per_rank_bytes(_node_local_ranks(world_size))
         budget_desc = f"{budget.description}, per-rank"
 
         use_cache = per_rank_bytes <= per_rank_budget
@@ -1760,14 +1776,7 @@ class DataMetric(Data):
             spatial_by_name,
             key=lambda name: channels_by_name[name] * int(np.prod(spatial_by_name[name], dtype=np.int64)),
         )
-        # Sizing runs at build time -- before the spawn where world_size exists -- so the launcher
-        # leaves the per-node rank count in the environment (a caller without the launcher, or with
-        # a garbled variable, keeps the undivided default).
-        try:
-            local_ranks = max(1, int(os.environ.get("KONFAI_LOCAL_RANKS", "1")))
-        except ValueError:
-            local_ranks = 1
-        budget = self.resolved_budget().per_rank_bytes(local_ranks)
+        budget = self.resolved_budget().per_rank_bytes(_node_local_ranks())
         sized = resolve_patch(
             [0] * len(spatial_by_name[worst]),
             spatial_by_name[worst],
