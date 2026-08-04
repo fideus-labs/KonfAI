@@ -1,0 +1,34 @@
+# Build one template from a cohort that does not share a grid: N cases in, 1 volume out.
+#
+#   python make_dataset.py
+#   konfai TRANSFORM --config Transform.yml --plan   # read this first
+#   konfai TRANSFORM --config Transform.yml
+#
+# Writes ./Template/template/CT_template.mha -- one entry, whatever the cohort's size.
+Transformer:
+  name: TEMPLATE
+  # A chain that cannot stream is a chain that would hold a whole volume. `error` refuses instead,
+  # which is what you want while the config is still being written; `warn` is the default.
+  on_fallback: error
+  Dataset:
+    dataset_filenames:
+      - ./Raw:mha
+    memory_budget: 2G
+    groups_src:
+      CT:
+        groups_dest:
+          CT_template:
+            transforms:
+              # Per case, in order, before anything is folded.
+              Clip: {min_value: 0.0, max_value: 400.0}
+              # The cohort as acquired fails `strict`: extents, spacings and origins all differ.
+              # This puts every member on CASE_000's grid, which makes the agreement true rather
+              # than waived. Any member would do -- what matters is that one is named.
+              ResampleToReference: {entry: CASE_000, group: CT, fill: 0.0}
+              # The cardinality changes here. Everything above ran once per case; everything below
+              # runs once, on the folded result.
+              Reduce:
+                operator: Median
+                output: template
+                grid: strict
+              Write: {dataset: ./Template:mha}
