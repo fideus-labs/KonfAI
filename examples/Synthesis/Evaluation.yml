@@ -38,7 +38,6 @@ Evaluator:
             is_input: true
     subset: None # Use the full dataset
     validation: None # Optional validation selector: case-list file, list of files, or case names; produces a separate metrics JSON
-    filter: None # Optional dataset filtering rule
     dataset_filenames: # Dataset sources (ground truth CT + predicted sCT)
     - ./Dataset:a:mha
     - ./Predictions/TRAIN_01/Dataset:i:mha # Update TRAIN_01 to the experiment you want to evaluate when reusing this file with another checkpoint

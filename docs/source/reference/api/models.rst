@@ -79,8 +79,11 @@ Building blocks
 .. autofunction:: get_norm
    :no-index:
 
-Metric schedulers
------------------
+Loss-weight schedulers
+----------------------
+
+These derive from ``Scheduler`` and expose ``get_value()``; a criterion's
+``schedulers`` block resolves against this module only.
 
 .. currentmodule:: konfai.metric.schedulers
 
@@ -99,7 +102,19 @@ Metric schedulers
    :show-inheritance:
    :no-index:
 
+Learning-rate schedulers
+------------------------
+
+These take the optimizer as their first argument and are resolved against
+``torch.optim.lr_scheduler`` first, then this module. They are not interchangeable
+with the loss-weight schedulers above.
+
 .. autoclass:: Warmup
+   :members:
+   :show-inheritance:
+   :no-index:
+
+.. autoclass:: PolyLRScheduler
    :members:
    :show-inheritance:
    :no-index:

@@ -71,9 +71,10 @@ after a run your YAML will contain the resolved defaults. See
 
 - `--model` — checkpoint path to resume from (**required**)
 - `--lr` — override the learning rate on resume (omit to keep the checkpoint LR)
-- `-checkpoints-dir` / `-statistics-dir` — note the **single leading dash** here
-  (an inconsistency with TRAIN's `--` forms; both parse, but invoke them exactly
-  as written)
+- `-checkpoints-dir` / `-statistics-dir` — note the **single leading dash** here, an
+  inconsistency with TRAIN's `--` forms. Only the single-dash spelling parses on
+  RESUME (`--checkpoints-dir` gives *unrecognized arguments*), so invoke them exactly
+  as written; the underscore variants (`-checkpoints_dir`) also work.
 
 `PREDICTION`
 
@@ -123,10 +124,18 @@ This command is provided by the standalone `konfai-apps` package.
 | `infer` | Run inference for an app. |
 | `eval` | Run evaluation for an app. |
 | `uncertainty` | Run uncertainty estimation for an app. |
-| `pipeline` | Chain inference, evaluation, and optional uncertainty. |
+| `pipeline` | Chain inference, evaluation, and optional uncertainty. **`--gt` is required** — it always evaluates. |
 | `fine-tune` | Fine-tune an app on a dataset. |
 | `bundle` | Assemble an app bundle (HF layout), optionally with a portable ONNX model. |
 | `download` | Pre-fetch an app's files from Hugging Face into the local cache (offline use). |
+
+```{note}
+`bundle` and `download` take neither `app` nor the shared options below — they have
+their own signatures. `bundle NAME` **requires** `--out`, `--app-json`, `--config`
+and `--checkpoint` (and its `--patch-size` sizes the *ONNX export*, not inference).
+`download APP [FILES…]` takes `--no-force-update`. Run `--help` on either for the
+full list.
+```
 
 ### Shared options
 
@@ -136,7 +145,8 @@ This command is provided by the standalone `konfai-apps` package.
 | `--host`, `--port`, `--token` | Switch from local app execution to remote server mode. |
 | `-i`, `--inputs` | Input paths, grouped by repeated flag occurrences. |
 | `-o`, `--output` | Output directory. |
-| `--gpu` / `--cpu` | Device selection. |
+| `--gpu` / `--cpu` | Device selection — **mutually exclusive**, as on the `konfai` CLI. |
+| `--tmp-dir` (alias: `--tmp_dir`) | Where intermediate artifacts are written. On `infer`, `eval`, `uncertainty` and `pipeline` only. |
 | `-q`, `--quiet` | Reduce console output. |
 | `--download` | Pre-download the full app locally. |
 | `--force_update` | Force an updated app download. |
@@ -145,8 +155,7 @@ This command is provided by the standalone `konfai-apps` package.
 
 `infer`
 
-- `--ensemble`
-- `--ensemble-models`
+- `--ensemble` / `--ensemble-models` — **mutually exclusive**
 - `--tta`
 - `--mc`
 - `-uncertainty`
@@ -165,6 +174,7 @@ This command is provided by the standalone `konfai-apps` package.
 `pipeline`
 
 - combines the options from `infer`, `eval`, and `uncertainty`
+- `--gt` is **required** here (unlike the per-app `pipeline` shims, where it is optional)
 
 `fine-tune`
 
@@ -173,12 +183,15 @@ This command is provided by the standalone `konfai-apps` package.
 - `--models` — checkpoint name(s) to fine-tune, e.g. `CV_0 CV_1` (default: first available)
 - `--epochs`
 - `--it-validation`
+- `--lr` — override the learning rate; omitted, the checkpoint's is resumed
+- `--set` — the same config overrides as `infer` (see below)
 - `--config` (aliases: `--config-file`, `--config_file`)
 
 ### Tuning a preset (`--set`, `--patch-size`, `--batch-size`)
 
-`infer` and `pipeline` accept parameter overrides so you can adapt a
-published App without editing its bundled config:
+`infer` and `pipeline` accept all three overrides below; `fine-tune` accepts
+`--set` (plus its own `--lr`, `--epochs` and `--it-validation`). They let you adapt
+a published App without editing its bundled config:
 
 | Option | Meaning |
 | --- | --- |
@@ -188,11 +201,13 @@ published App without editing its bundled config:
 
 These are the same knobs SlicerKonfAI drives through its ⚙ **Advanced** dialog.
 
-```{warning}
-Parameter overrides currently apply to **local** execution only. In remote mode
-(`--host …`) `--set` / `--patch-size` / `--batch-size` are not yet forwarded to the
-server and take no effect — run the tuning locally, or against a bundle you resolve
-directly.
+```{note}
+These overrides are honoured in **remote** mode too (`--host …`). Each operation
+declares which tunables the server must carry — `infer` and `pipeline` forward
+`patch_size`, `batch_size` and `config_overrides`; `fine-tune` forwards
+`config_overrides` — and the client **refuses the submission** if the server does
+not echo them back in `accepted_options`. A server too old to honour a tunable
+fails loudly rather than ignoring it silently.
 ```
 
 ## `konfai-apps-server`

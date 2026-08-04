@@ -74,8 +74,10 @@ interrupt. `RemoteServer(host, port, token)` builds the base URL
 ```{warning}
 `RemoteServer` uses **plain HTTP** — the token and the medical volumes travel
 unencrypted. Put the server behind a TLS-terminating reverse proxy for anything
-beyond localhost. Also note **remote `patch_size`/`batch_size` are dropped** (the
-HTTP endpoints don't accept them); those overrides only apply to local runs.
+beyond localhost. Remote `patch_size` / `batch_size` **are** carried: each job endpoint takes an
+`options` form field, and the client refuses the submission if the server does not
+echo the tunables back in `accepted_options` — a server too old to honour them fails
+loudly instead of ignoring them.
 ```
 
 ## Bundle & ONNX export
@@ -101,7 +103,10 @@ export_onnx_into_bundle(b, checkpoint="CV_0.pt")   # writes model.onnx + manifes
 | `derive_requirements(py_files)` | Best-effort AST import scan → PyPI names (a draft to review, not authoritative). |
 
 ```{note}
-ONNX export is **Python-API-only** (there is no `konfai` CLI subcommand for it).
+There is no `konfai` subcommand for ONNX export, but there **is** a
+`konfai-apps` one: `konfai-apps bundle <name> --onnx …` exports `model.onnx` plus a
+manifest into a bundle (and `--patch-size`, `--in-channels`, `--output-module` size
+it).
 It exports a **single, static-shape** head of a feed-forward model; custom-`forward`
 models (diffusion/StyleGAN/…) do not round-trip. See `konfai/export.py`.
 ```

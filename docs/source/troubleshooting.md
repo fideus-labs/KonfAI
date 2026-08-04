@@ -18,18 +18,18 @@ Reinstall with the exact interpreter you plan to use:
 python -m pip install -e .
 ```
 
-### `konfai-apps-server` or `konfai-cluster` is missing
+### `konfai-apps` or `konfai-apps-server` is missing
 
-`konfai-cluster` comes from the optional `cluster` extra on the core package.
-`konfai-apps` and `konfai-apps-server` come from the standalone `konfai-apps`
-package.
-
-Install the relevant package or extra:
+Both come from the standalone `konfai-apps` package:
 
 ```bash
 python -m pip install konfai-apps
-python -m pip install "konfai[cluster]"
 ```
+
+`konfai-cluster` is **not** in this category: it ships with the core package
+unconditionally, so it can never be missing. The `cluster` extra adds `submitit`,
+which is imported lazily at submission time — install `konfai[cluster]` if
+`konfai-cluster` fails when it submits, not because the command is absent.
 
 ### GPU works in Python but not in KonfAI
 
@@ -98,10 +98,15 @@ If the split looks wrong, check which form your config is actually using.
 ### The streaming regime still uses memory proportional to a case
 
 The stream/buffer regime bounds retention across cases; direct regional reads depend
-on the transforms. Any chain of pointwise transforms (`TensorCast`, unmasked
-`Normalize`/`Standardize`/`Clip`) and region transforms (`Flip`, `Permute`,
-`Canonical`, `Padding`, `ResampleToShape`/`ResampleToResolution`, `Dilate`,
-`Gradient`) streams — each declares its locality (see the transform reference).
+on the transforms. What streams is narrower than it looks, because a transform's kind
+depends on its arguments: pointwise covers `TensorCast`, `Clip` with **fixed** bounds
+and `Standardize` given **both** `mean` and `std`; `Normalize` and an automatic
+`Standardize` are global-statistic (still streamable, one statistics pass first); and
+the region kinds are `Flip`, `Permute`, **axis-aligned** `Canonical`,
+`ResampleToShape`/`ResampleToResolution`, `Dilate` and `Gradient`. A `Clip` with a
+percentile bound needs the whole histogram, and `Padding` streams on the **write**
+side only — on the read side it loads the case whole. See the transform reference for
+the per-transform answer.
 A transform that reads a second volume (`Mask`, masked `Clip`/`Standardize`), a
 global histogram (`HistogramMatching`), or an undeclared custom transform uses
 the bounded full-volume path.

@@ -77,7 +77,7 @@ Trainer:
             transforms: None
             patch_transforms: None
             is_input: true
-    augmentations: None  # Keep the example deterministic; the task is a pure translation
+    augmentations: None  # Keep the example deterministic; the deformation to recover is already known
     Patch:  # Patch extraction parameters used during training
       patch_size:  # [slice, height, width]; one patch covers a whole 256x256 slice
       - 1
@@ -89,7 +89,6 @@ Trainer:
       extend_slice: 0
     subset: None
     shuffle: true
-    filter: None
     dataset_filenames:  # Dataset source (format: folder_path:mode:image_format)
     - ./Dataset:a:mha
     inline_augmentations: false
@@ -111,6 +110,6 @@ Trainer:
   gpu_checkpoints: None
   ema_decay: 0
   data_log: None
-  save_checkpoint_mode: BEST  # Keep the best checkpoint (plus the last one)
+  save_checkpoint_mode: BEST  # Keep only the best checkpoint (ALL keeps every save)
   EarlyStopping: None
   it_lr_update: None

@@ -130,7 +130,7 @@ or experimental**, so you know what you can rely on today.
 
 | App CLI | Task | Modality | Models |
 | --- | --- | --- | --- |
-| `impact-synth-konfai synthesize` | Synthetic CT (sCT) | MR → CT, CBCT → CT | `MR`, `CBCT` |
+| `impact-synth-konfai synthesize` | Synthetic CT (sCT) | MR → CT, CBCT → CT | `MR`, `CBCT`, `MR_CBCT` |
 | `impact-seg-konfai segment` | Multimodal body segmentation (11 labels) | CBCT / MR / CT | `body` |
 | `mrsegmentator-konfai segment` | Whole-body MRI segmentation | MRI | folds 1–5 |
 | `totalsegmentator-konfai segment` | Whole-body CT/MRI segmentation | CT / MRI | `total`, `total_mr`, 3 mm variants |

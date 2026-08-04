@@ -5,12 +5,14 @@ published model on [`VBoussot/TotalSegmentator-KonfAI`](https://huggingface.co/V
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/TotalSegmentator/TotalSegmentator_demo.ipynb)
 
-`TotalSegmentator_demo.ipynb` downloads one public demo case (CT), inspects it, and shows the exact
-command. Inference is toggle-gated (`RUN_INFER = False`) because the model is fetched from the Hub and a GPU
-is recommended.
+**Run all the cells of `TotalSegmentator_demo.ipynb`.** It downloads one public demo case (CT), runs the
+model, and plots a whole-body label map over the input. The model is fetched from the Hub on first use
+(a few hundred MB) and a GPU is strongly recommended.
+
+The same thing from a terminal:
 
 ```bash
-pip install ./apps/totalsegmentator
+pip install . ./konfai-apps ./apps/totalsegmentator   # all three from this checkout: the app pins konfai== and konfai-apps==
 totalsegmentator-konfai segment total -i input.mha -o ./Output/ --gpu 0
 ```
 

@@ -2021,6 +2021,7 @@ packages:
   - konfai[dicom] ; extra == 'all'
   - konfai[omezarr] ; extra == 'all'
   - konfai[export] ; extra == 'all'
+  - konfai[smp] ; extra == 'all'
   - simpleitk ; extra == 'dev'
   - h5py ; extra == 'dev'
   - pydicom ; extra == 'dev'

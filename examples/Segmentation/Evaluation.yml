@@ -26,7 +26,6 @@ Evaluator:
             is_input: true
     subset: None
     validation: None
-    filter: None
     dataset_filenames:
     - ./Dataset:a:mha
     - ./Predictions/SEG_BASELINE/Dataset:i:mha

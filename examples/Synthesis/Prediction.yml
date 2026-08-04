@@ -68,7 +68,6 @@ Predictor:
       pad_value: -1
       extend_slice: 4 # 2 slices above + 2 below for 2.5D context
     subset: None # Use the full dataset
-    filter: None # Optional dataset filtering
     dataset_filenames: # Dataset sources (format: folder_path:mode:image_format)
     - ./Dataset:a:mha
     batch_size: 8 # Number of patches per inference batch; 32 needs about 17 GB of VRAM, 8 fits a 16 GB card

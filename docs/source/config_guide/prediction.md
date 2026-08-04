@@ -113,10 +113,11 @@ default), resolved after the size; an axis a single patch spans gets none. A
 `patch_size` without a `0` is never resized: the OOM propagates.
 
 ```{note}
-The patch engine also understands a fractional overlap (`0.2`) and a per-axis
-list, but the config binder does not yet bind those forms — a YAML `overlap: 0.2`
-currently coerces to `0` (no overlap) and a list errors. Use the voxel-count or
-percent-string form.
+`overlap` accepts four forms and the binder keeps each one's type: a voxel count
+(`16`), a fraction (`0.2`), a percent string (`"20%"`), and a per-axis list
+(`[10, 20, 0]`). Declaration-order coercion once turned `overlap: 0.25` into
+`int(0.25) == 0` — silent no-overlap; that is fixed and pinned by
+`tests/unit/test_config.py::test_apply_config_union_keeps_the_value_type_over_lossy_coercion`.
 ```
 
 ## `outputs_dataset`

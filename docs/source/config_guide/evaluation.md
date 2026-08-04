@@ -82,7 +82,10 @@ fits the budget is evaluated whole, and a case that does not is cut into the lar
 DISJOINT patches that fit. Metrics accumulate running partial sums per patch and
 combine them into the exact whole-case value (never a mean of per-patch values).
 MAE, MSE, ME, PSNR and Dice — masked or not — support this, and the SaveMap
-error maps stream region by region into their `dataset` (mha, h5 or omezarr).
+error maps stream region by region into their `dataset` (mha, h5 or omezarr). One
+caveat on the first two: `MAE` and `MSE` are reducible only for `reduction: mean` or
+`sum`, so a `reduction: none` on either forces the whole-volume path for the whole
+run, by the same rule as a non-reducible metric below.
 One metric that cannot recombine (SSIM, LPIPS, or any custom metric that does
 not declare `reducible`) keeps the whole-volume path for the entire run: correct
 beats bounded. Evaluation streams its data whatever the budget says — one pass,
@@ -101,6 +104,8 @@ The JSON structure contains:
 - per-case values under `case`
 - aggregated statistics under `aggregates`, such as mean, std, percentiles,
   min, max, and count
+- `directions` — per metric, `"max"` or `"min"`, emitted whenever a metric declares
+  one so a consumer can rank runs without guessing which way is better
 
 This behavior comes from `konfai.evaluator.Statistics.write()`.
 

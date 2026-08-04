@@ -27,19 +27,23 @@ docker run --rm vboussot/konfai
 
 ## Local Build
 
-Build the default image from this repository:
+Build the default image from this repository. It installs the KonfAI release the
+`KONFAI_PYPI_VERSION` argument names — currently `1.8.0`:
 
 ```bash
 docker build -f docker/Dockerfile -t konfai .
 ```
 
-Build a specific KonfAI version from PyPI:
+Build a different KonfAI version from PyPI:
 
 ```bash
 docker build -f docker/Dockerfile \
-  --build-arg KONFAI_PYPI_VERSION=1.6.0 \
+  --build-arg KONFAI_PYPI_VERSION=1.7.0 \
   -t konfai .
 ```
+
+The published images never rely on that default: the release workflow passes the tag's
+version as `--build-arg`, so the image for `vX.Y.Z` always installs `X.Y.Z`.
 
 Build with additional optional dependencies:
 

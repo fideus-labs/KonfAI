@@ -77,9 +77,9 @@ python -m pip install totalsegmentator-konfai
 From source:
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
-# konfai-apps must come from the same checkout: this app pins konfai-apps== its own
+# konfai and konfai-apps must come from the same checkout: this app pins both to its own
 # setuptools_scm version, which only exists on PyPI at a release tag.
-python -m pip install -e konfai-apps -e apps/totalsegmentator
+python -m pip install -e . -e konfai-apps -e apps/totalsegmentator
 ```
 
 ---
@@ -111,7 +111,7 @@ totalsegmentator-konfai pipeline total -i image.nii.gz --gt reference.nii.gz --g
 
 | Flag | Description | Default |
 |------|--------------|----------|
-| `TASK` | Model on Hugging Face (`total`, `total_mr`, `total_3mm`, `total_mr_3mm`) — determines what is predicted | *required* |
+| `TASK` | Model on Hugging Face (`total`, `total_mr`, `total-3mm`, `total_mr-3mm`) — determines what is predicted | *required* |
 | `-i`, `--inputs` | Input medical image(s) or a dataset directory | *required* |
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--models` | Explicit model identifiers/paths to ensemble (`segment` / `pipeline`) | *unset* |

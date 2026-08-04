@@ -5,7 +5,7 @@ description: >-
   registration) from the command line: author or adapt a YAML config, then train, resume,
   predict, and evaluate with the `konfai` CLI, or run a packaged model with the `konfai-apps`
   CLI. Use when the user wants to train / fine-tune / run inference / evaluate a KonfAI model
-  from the terminal, adapt an example (Segmentation / Synthesis) config, understand the
+  from the terminal, adapt an example (Segmentation / Synthesis / Registration) config, understand the
   workspace outputs (Checkpoints / Predictions / Evaluations), reference a custom model or
   loss by classpath, or run and serve a published app (impact-synth, impact-seg, konfai-apps,
   konfai-apps-server). Triggers: "train a KonfAI model", "konfai TRAIN / PREDICTION /
@@ -38,8 +38,8 @@ Three workflows map to three files, each with one mandatory root key:
 | `PREDICTION` | `Prediction.yml` | `Predictor:` |
 | `EVALUATION` | `Evaluation.yml` | `Evaluator:` |
 
-**Don't write configs from scratch — copy a runnable template from `examples/`** (Segmentation
-or Synthesis) and adapt it. Then:
+**Don't write configs from scratch — copy a runnable template from `examples/`** (Segmentation,
+Synthesis or Registration) and adapt it. Then:
 
 ```bash
 cd examples/Segmentation                 # always run from the dir holding the configs + Dataset/
@@ -53,7 +53,7 @@ Outputs are namespaced by the `train_name` in the config: `Checkpoints/<train_na
 `Statistics/<train_name>/`, `Predictions/<train_name>/`, `Evaluations/<train_name>/`. To
 iterate: edit the YAML (or bump `train_name`), re-run. See
 [references/examples-and-recipes.md](references/examples-and-recipes.md) for the verified
-Segmentation and Synthesis recipes, and
+Segmentation, Synthesis and Registration recipes, and
 [references/cli-reference.md](references/cli-reference.md) for every flag.
 
 ## Rules that keep runs correct
@@ -100,7 +100,7 @@ are thin task-named wrappers.
 
 - [references/cli-reference.md](references/cli-reference.md) — the `konfai` / `konfai-cluster` commands and every flag.
 - [references/config-authoring.md](references/config-authoring.md) — writing KonfAI YAML: files, root keys, classpaths, conventions, the mutation invariant.
-- [references/examples-and-recipes.md](references/examples-and-recipes.md) — verified Segmentation + Synthesis train→predict→evaluate recipes.
+- [references/examples-and-recipes.md](references/examples-and-recipes.md) — verified Segmentation + Synthesis + Registration train→predict→evaluate recipes.
 - [references/workspace-and-runtime.md](references/workspace-and-runtime.md) — outputs keyed by `train_name`, env vars, DDP, SLURM, config modes.
 - [references/apps-layer.md](references/apps-layer.md) — `konfai-apps` / `konfai-apps-server`, app resolution, trust model, published bundles.
 

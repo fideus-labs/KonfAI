@@ -37,9 +37,9 @@ python -m pip install impact-synth-konfai
 From source:
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
-# konfai-apps must come from the same checkout: this app pins konfai-apps== its own
+# konfai and konfai-apps must come from the same checkout: this app pins both to its own
 # setuptools_scm version, which only exists on PyPI at a release tag.
-python -m pip install -e konfai-apps -e apps/impact_synth
+python -m pip install -e . -e konfai-apps -e apps/impact_synth
 ```
 ---
 
@@ -71,7 +71,7 @@ impact-synth-konfai pipeline CBCT -i patient01.nii.gz --gt ct.nii.gz -o patient0
 
 | Flag | Description | Default |
 |------|--------------|----------|
-| `MODEL` | Model name on Hugging Face (`MR` or `CBCT`) — determines what is predicted | *required* |
+| `MODEL` | Model name on Hugging Face (`MR`, `CBCT` or `MR_CBCT`) — determines what is predicted | *required* |
 | `-i`, `--inputs` | Input file(s) or a dataset directory | *required* |
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--ensemble` | Number of models to ensemble (`synthesize` / `pipeline`) | `0` |

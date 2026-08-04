@@ -3,8 +3,10 @@
 This page covers every supported way to install KonfAI — PyPI, Pixi, and from
 source — plus the optional extras and how to verify the result. Read it before
 your first run, or come back when a format reader or CLI entrypoint is missing.
-KonfAI targets **Python 3.10+** and depends on PyTorch, SimpleITK, TensorBoard,
-and a set of medical-imaging utilities.
+KonfAI targets **Python 3.10+**. The core package pulls in PyTorch, NumPy,
+`ruamel.yaml`, `huggingface_hub` and a few small utilities — but **no image
+reader**: SimpleITK, h5py, pydicom and zarr arrive through the extras below, so
+`pip install konfai` on its own cannot open a `.mha`.
 
 ## Install from PyPI
 
@@ -49,7 +51,7 @@ covers all four).
 | `smp` | `segmentation-models-pytorch` | the `SMP` model bridge — **required by `examples/Synthesis`** |
 | `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export (experimental; see {doc}`../reference/python-api`) |
 | `cluster` | `submitit` | `konfai-cluster` job submission |
-| `all` | every extra above **except `smp`** | install the optional extras at once; add `konfai[smp]` separately if you need the smp bridge |
+| `all` | all of the above | install every optional extra at once |
 | `dev` | pytest, ruff, mypy, sphinx, … | local development, tests, docs, and linting |
 
 ```{tip}
@@ -68,15 +70,16 @@ python -m pip install konfai-apps
 :::{important}
 Installing one of the bundled apps (`apps/impact_seg`, `apps/impact_synth`,
 `apps/impact_reg`, `apps/mrsegmentator`, `apps/totalsegmentator`) **from a checkout**
-needs `konfai-apps` from that same checkout:
+needs both `konfai` and `konfai-apps` from that same checkout:
 
 ```bash
-python -m pip install -e konfai-apps -e apps/impact_seg
+python -m pip install -e . -e konfai-apps -e apps/impact_seg
 ```
 
-Each bundle pins `konfai-apps==` its own `setuptools_scm` version, and between release
-tags that version exists nowhere on PyPI — so installing the app alone fails to resolve
-with *"Could not find a version that satisfies the requirement konfai-apps==..."*.
+Each bundle pins **`konfai==` and `konfai-apps==`** its own `setuptools_scm` version, and
+between release tags that version exists nowhere on PyPI — so installing the app alone
+fails to resolve with *"Could not find a version that satisfies the requirement
+konfai==1.7.1.devNN"*.
 Installing from PyPI (`pip install impact-seg-konfai`) is unaffected, because a released
 bundle pins a released `konfai-apps`.
 :::

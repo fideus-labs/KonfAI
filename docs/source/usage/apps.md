@@ -143,7 +143,7 @@ metadata consumed by CLI, server, and Slicer clients.
 | `TotalSegmentator-KonfAI` | CT → 117 labels (`total`: 5 models; `total-3mm`: 1), MRI → 50 labels (`total_mr`: 2; `total_mr-3mm`: 1) | CT `total`: ≈42 s, ≈20 GB VRAM and ≈19 GB RAM; original TotalSegmentator ≈76 s on the same case |
 | `MRSegmentator-KonfAI:MRSegmentator` | MRI → 40 labels, five-fold ensemble | ≈27 s, ≈22 GB VRAM and ≈2 GB RAM; original MRSegmentator ≈35 s and ≈11 GB RAM on the same case |
 | `ImpactSeg:body` | one CT/MR/CBCT model → 11 structures | ≈7 s, ≈10 GB VRAM and ≈1.6 GB RAM |
-| `ImpactSynth` | four MR/CBCT→sCT variants, five models each | ≈24 s and ≈16 GB VRAM for the benchmark inference; ≈82 s for all five; ≈2 GB RAM |
+| `ImpactSynth` | three MR/CBCT→sCT variants, five models each | ≈24 s and ≈16 GB VRAM for the benchmark inference; ≈82 s for all five; ≈2 GB RAM |
 | `ImpactReg:ConvexAdam_Composite` | fixed + moving → `MovedImage` and `DisplacementField` on the fixed grid | ≈5.1 s and ≈2.1 GB VRAM on a real abdominal MR→CT pair |
 
 These are the conditions reported by each bundle README on an NVIDIA RTX PRO
@@ -152,7 +152,7 @@ they are not an apples-to-apples model leaderboard. Patch size, ensemble size,
 case dimensions and GPU placement are part of every result.
 
 Together these READMEs describe four TotalSegmentator tasks, a five-fold
-MRSegmentator, one modality-agnostic ImpactSeg model, four ImpactSynth variants,
+MRSegmentator, one modality-agnostic ImpactSeg model, three ImpactSynth variants,
 and thirteen IMPACT-Reg presets. These are deployable medical workflows, not a
 catalogue of untrained architecture names.
 
@@ -325,18 +325,17 @@ isolated temporary workspaces, and cleaned up after a grace period.
 
 ### Start the server
 
-The server requires a JSON file listing the available apps:
-
-```bash
-konfai-apps-server --host 0.0.0.0 --port 8000 --apps konfai-apps/tests/assets/apps.json
-```
-
-Bearer-token authentication is enabled by default:
+The server requires a JSON file listing the available apps, and bearer-token
+authentication is on by default — without a token it exits before binding rather than
+serving unauthenticated:
 
 ```bash
 export KONFAI_API_TOKEN="my-secret-token"
-konfai-apps-server --apps konfai-apps/tests/assets/apps.json
+konfai-apps-server --host 0.0.0.0 --port 8000 --apps konfai-apps/tests/assets/apps.json
 ```
+
+Pass `--auth off` to drop authentication deliberately, or `--token` to supply the
+token inline (development only).
 
 See {doc}`../reference/cli` for the full `konfai-apps-server` flag reference.
 

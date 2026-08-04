@@ -41,7 +41,7 @@ notebook plots a per-label chart rather than a single number.
 ```bash
 # Both from this checkout: the app pins konfai-apps== its own setuptools_scm version, which only
 # exists on PyPI at a release tag.
-pip install ./konfai-apps ./apps/impact_reg
+pip install . ./konfai-apps ./apps/impact_reg
 
 impact-reg-konfai register FireANTs_SyN \
   -f fixed.mha -m moving.mha \

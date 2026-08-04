@@ -71,9 +71,9 @@ From source:
 
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
-# konfai-apps must come from the same checkout: this app pins konfai-apps== its own
+# konfai and konfai-apps must come from the same checkout: this app pins both to its own
 # setuptools_scm version, which only exists on PyPI at a release tag.
-python -m pip install -e konfai-apps -e apps/impact_seg
+python -m pip install -e . -e konfai-apps -e apps/impact_seg
 ```
 
 ---

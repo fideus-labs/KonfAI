@@ -222,10 +222,12 @@ updating the docs:
 ## Packaging and release
 
 The repository contains a publish workflow in `.github/workflows/publish.yml`
-that builds an **8-package matrix**, all sharing a tag-derived version:
+that builds a **9-package matrix**, all sharing a tag-derived version:
 
 - `konfai` (the core framework)
-- `konfai-apps` and `konfai-mcp` (the standalone Apps and MCP packages)
+- `konfai-apps`, `konfai-mcp` and `konfai-studio` (the standalone Apps, MCP and
+  Studio packages — Studio is wheel-only, and its build job runs `npm ci &&
+  npm run build` first because the React front is not in git)
 - the five App bundles: `impact-synth-konfai`, `impact-seg-konfai`,
   `mrsegmentator-konfai`, `totalsegmentator-konfai`, `impact-reg-konfai`
 
@@ -235,11 +237,19 @@ the framework, the two sibling packages, and every published App.
 
 ### Cutting a release
 
-Versions are **tag-derived** — `setuptools_scm` reads the tag, and no version
-string is committed anywhere that could drift from it. `CHANGELOG.md` is
-generated from the commit history, and the publish workflow renders the section
-for the tag it is running on as the GitHub Release body, so the file and the
-release page cannot describe a version differently.
+Versions are **tag-derived** — `setuptools_scm` reads the tag, so no *package*
+version is committed anywhere that could drift from it. `CHANGELOG.md` is generated
+from the commit history, and the publish workflow renders the section for the tag it
+is running on as the GitHub Release body, so the file and the release page cannot
+describe a version differently.
+
+```{important}
+One version string **is** committed and does not follow the tag:
+`ARG KONFAI_PYPI_VERSION` in `docker/Dockerfile`. The published image is unaffected —
+the workflow passes the tag's version as `--build-arg` — but it is what a local
+`docker build` without that flag installs, so bump it when you cut a release. It sat
+at `1.6.0` through 1.7.
+```
 
 That order matters: **the changelog is written before the tag**, because the
 workflow renders what the history already says.

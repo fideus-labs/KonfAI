@@ -39,7 +39,6 @@ Predictor:
       pad_value: 0
       extend_slice: 0
     subset: None
-    filter: None
     dataset_filenames:
     - ./Dataset:a:mha
     batch_size: 8

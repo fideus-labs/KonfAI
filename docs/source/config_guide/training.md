@@ -56,6 +56,7 @@ konfai TRAIN -y --config Config.yml \
 | `manual_seed` | int or null | `None` | No | Sets the random seed when provided. |
 | `epochs` | int | `100` | No | Number of training epochs. |
 | `it_validation` | int or null | `None` | No | Validation and checkpoint interval in iterations. |
+| `it_lr_update` | int or null | `None` | No | Scheduler-step interval in iterations. `None` steps once per epoch (it resolves to the training dataloader's length). Every resolved config on disk carries this key. |
 | `autocast` | bool | `false` | No | Enables AMP during training. |
 | `gradient_checkpoints` | list or null | `None` | No | Activates gradient checkpointing on selected modules. |
 | `gpu_checkpoints` | list or null | `None` | No | Pins selected modules to dedicated GPUs. |
@@ -128,7 +129,7 @@ Common fields:
 | Field | Type | Default in code | Effect |
 | --- | --- | --- | --- |
 | `dataset_filenames` | list[str] | `["default\|./Dataset:mha"]` | Dataset sources and selection mode. |
-| `groups_src` | mapping | required in practice | Maps on-disk groups to loaded tensors. |
+| `groups_src` | mapping | `{Labels: Group()}` | Maps on-disk groups to loaded tensors. The default binds a single group named `Labels`, which is almost never what you want — treat it as required. |
 | `augmentations` | mapping or null | one default augmentation list | Data augmentations sampled during training. |
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
@@ -138,11 +139,11 @@ Common fields:
 | `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` on the cache regime, and to `max(1, min(cpu_count, 4))` on the stream/buffer regime. A `KonfAIInference` transform in any group forces `0` whatever the value. |
 | `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |
 | `prefetch_factor` | int or null | `None` | Prefetched batches per worker. Applies only when workers are enabled, where `None` resolves to `2`. |
-| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. |
+| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. **Forced to `false`** — an explicit `true` included — when `inline_augmentations` is on with any augmentation declared, because persistent workers freeze the per-epoch redraw. |
 | `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. |
 | `validation_augmentations` | bool | `true` | Whether validation also iterates over augmented variants. Set `false` to validate only on base (non-augmented) samples. |
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
-| `shuffle_window` | int or null | `null` through subset | Locality-aware training order: shuffles cases, then keeps this many cases in play at a time with their patches shuffled together. Single-process training only. |
+| `shuffle_window` | int or null | `null` through subset | Locality-aware training order: shuffles cases, then keeps this many cases in play at a time with their patches shuffled together. Safe under DDP. |
 
 ### Cache, stream, and buffer
 
@@ -196,8 +197,10 @@ Case is folded and the space before the unit is optional: `"32 gib"` and
 
 An explicit budget is **per rank**: the comparison is
 `dataset_size / world_size <= budget`, because cases are sharded across ranks.
-`"auto"` divides the detected memory by `world_size` too, so the ranks cancel and
-it reduces to "does the whole dataset fit 80% of the detected memory". `"auto"`
+`"auto"` divides the detected memory by the ranks sharing **one node**
+(`KONFAI_LOCAL_RANKS`), not by `world_size`. On a single node the two coincide, the
+ranks cancel, and it reduces to "does the whole dataset fit 80% of the detected
+memory"; across nodes the numerator still uses `world_size`, so they do not cancel. `"auto"`
 takes whichever is tighter of the **cgroup limit** — set under a container or
 SLURM — and the host's available RAM; the log names which one won.
 
@@ -232,10 +235,10 @@ and the per-worker batches interleaved, so every volume is read by exactly one
 worker. The buffer is sized to hold the window, so a non-streamable run holds
 `max(batch_size + 1, shuffle_window)` volumes per worker.
 
-```{warning}
-`shuffle_window` is for single-process training. Each rank windows its own shard,
-so the ranks can disagree on the number of batches in an epoch and the collective
-will hang. Leave it `null` for multi-GPU runs.
+```{note}
+`shuffle_window` works under DDP: the sampler's length is the mapping's length, so
+the window reorders without changing the count, and each training shard is padded to
+the longest one. Ranks stay in step.
 ```
 
 ### Free patch axes: sizing by measurement

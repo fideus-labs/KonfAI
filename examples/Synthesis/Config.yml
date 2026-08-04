@@ -152,7 +152,6 @@ Trainer:
       extend_slice: 4 # Number of neighboring slices used as context (2 above and 2 below for 2.5D input)
     subset: None  # Use the full dataset (or give a case-list file / list of files; prefix entries with ~ to exclude cases)
     shuffle: true # Shuffle samples at each epoch
-    filter: None # Optional dataset filtering rule
     dataset_filenames:  # Dataset sources (format: folder_path:mode:image_format; mode = a = add cases, i = keep only common cases across datasets)
     - ./Dataset/:a:mha
     inline_augmentations: true # Apply new augmentations at each epoch
@@ -180,7 +179,7 @@ Trainer:
   - CT/IMAGES/5
   - MR/IMAGES/5
   - Head:Tanh/IMAGES/5
-  save_checkpoint_mode: BEST  # Keep the best checkpoint plus the last one. ALL keeps every one (~300 MB each)
+  save_checkpoint_mode: BEST  # Keep only the best checkpoint. ALL keeps every one (~300 MB each)
   EarlyStopping: # Metrics to monitor for early stopping ([] = sum of all metrics, or specify a metric name)
     monitor: []
     patience: 30  #Training stops if no improvement after 30 validations

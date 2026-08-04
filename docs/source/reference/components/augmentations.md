@@ -16,7 +16,7 @@ Dataset:
       data_augmentations:
         Flip:                     # bare name → konfai.data.augmentation.Flip
           f_prob: [0, 0.5, 0.5]   # per-axis flip probability
-        prob: 1
+          prob: 1                 # belongs UNDER the augmentation, not beside it
       nb: 1                       # number of augmented copies per sample
 ```
 
@@ -29,8 +29,9 @@ test-time augmentation reassembly.
 ```
 
 ```{important}
-**Only `Mask` and `Permute` may change spatial shape** (verified against the
-code). Everything else preserves geometry.
+**`Mask`, `Permute` and `Rotate` may change spatial shape.** `Rotate` only does so
+on a quarter turn, which transposes the extents it swaps (`is_quarter=True`); a
+sampled angle keeps the grid. Everything else preserves geometry.
 ```
 
 ```{note}
@@ -53,7 +54,7 @@ Reversible affine warps via `grid_sample` (nearest-neighbour for label tensors).
 | Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
 | `Translate` | Random translation (voxels). | `t_min=-10, t_max=10, is_int=False` | no | **yes** | **yes** — a halo of the drawn shift (plus a voxel for interpolation), while that stays within half the patch |
-| `Rotate` | Random rotation (degrees). | `a_min=0, a_max=360, is_quarter=False` | no | **yes** | **yes** with `is_quarter: true` (an index remap); no for a free angle — the shift grows with distance from the centre |
+| `Rotate` | Random rotation (degrees). | `a_min=0, a_max=360, is_quarter=False` | **yes** with `is_quarter: true` | **yes** | **yes** with `is_quarter: true` (an index remap); no for a free angle — the shift grows with distance from the centre |
 | `Scale` | Random log2-normal isotropic scale. | `s_std=0.2` | no | **yes** | no — the shift grows with distance from the centre, so no fixed halo covers it |
 | `Flip` | Per-axis random flip; optional vector-field channel negation. | `f_prob=[0.33,0.33,0.33], vector_field=False` | no | **yes** (self-inverse) | **yes** — index remap; no with `vector_field: true` (negating a channel changes values) |
 | `Elastix` | Random BSpline elastic warp (SimpleITK). | `grid_spacing=16, max_displacement=16` | no | no | no — the displacement field is built at the full shape and indexed by absolute position |

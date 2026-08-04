@@ -67,8 +67,13 @@ For a weight-exact pair,
 leaf modules in forward-execution order and checks every local state shape. It
 is useful when graph names differ but execution structure and parameters match.
 
-This bridge is strict, not universal. A different leaf count, ordering, or
-shape raises `ConfigError`; it does not guess or silently skip weights. Preserve
+This bridge is strict, not universal. It raises `ConfigError` on a different leaf
+count, a per-leaf key or shape mismatch, a target tensor no traced leaf owns, and a
+tensor the target ties across two leaves — and it fills every target tensor or
+raises, never reporting a partial load as success. What it cannot detect is
+**ordering**: two identically-shaped leaves swapped would pair silently, since the
+pairing is execution order itself. Unreached *source* branches (an nnU-Net
+deep-supervision head) are ignored on purpose. Preserve
 the reference preprocessing, class order, normalization, and output convention
 when validating a transferred checkpoint.
 

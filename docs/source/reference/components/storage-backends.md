@@ -191,8 +191,9 @@ Two Python libraries read OME-NGFF: the OME consortium's `ome-zarr` and
 > with every other format without a bespoke geometry adapter.
 
 It also handles multiscale selection transparently and adds helpers tuned for 3-D
-medical/bioimage workflows. When `ngff-zarr` is unavailable, the reader falls back
-to parsing the `.zattrs` JSON with `zarr` alone.
+medical/bioimage workflows. `ngff-zarr` is required, not optional: without it the
+reader raises `DatasetManagerError` pointing at `pip install konfai[omezarr]`. Bare
+`zarr` is used only to read KonfAI's own attribute sidecar, never as a reader fallback.
 
 ## Use as a KonfAI dataset
 
@@ -228,7 +229,8 @@ loads a whole volume when it can avoid it:
   `[128,128,128]`), `overlap` (`None` → auto-tiling), `pad_value` (`None` → pad
   with `data.min()`), `extend_slice` (2.5-D context, only when `patch_size[0]==1`).
 - **`ModelPatch`** — patching applied *inside* a model graph, with a
-  `patch_combine` blender (`Mean` or `Cosinus`) for overlap reassembly.
+  `patch_combine` blender for overlap reassembly: `Mean`, `Cosinus`, `Trim`, or
+  `Gaussian` (nnU-Net-style importance weighting).
 - **Streaming** reads a planned source region through `read_data_slice`.
   Transform and sampled-augmentation locality determines whether that region is
   exact, haloed, index-remapped, cropped, rescaled, or unavailable. When the

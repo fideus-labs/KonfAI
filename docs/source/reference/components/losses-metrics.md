@@ -79,7 +79,7 @@ groups act as a mask.
 | `Dice` | `(Tensor, dict)` dual-use | Soft Dice per label; loss `= 1 − mean(dice)`, per-label dict logged. Resamples target to output (nearest). | `labels=None` (None → all present labels) |
 | `CrossEntropyLoss` | `Tensor` loss | Wraps `nn.CrossEntropyLoss` (squeezes the target channel). | `weight=None, reduction="mean"` |
 | `FocalLoss` | `Tensor` loss | Multi-class focal loss. Note: `alpha` is a per-label weight list indexed by label id. | `gamma=2.0, alpha=[0.5,2.0,0.5,0.5,1], reduction="mean"` |
-| `Accuracy` | `Tensor` metric | Running classification accuracy (accumulates across the run). | — |
+| `Accuracy` | `Tensor` metric | This batch's classification accuracy. It keeps no state: the logging window averages it over the batches and resets between train and validation, so one figure never blends epochs or splits. | — |
 | `DiceSaveMap` | 3-tuple | Dice + voxelwise error map (for a save-map consumer). | `labels=None, dataset=None, group=None` |
 
 ## Adversarial / style
@@ -113,7 +113,9 @@ groups act as a mask.
 ## IMPACT feature-based criteria
 
 These download TorchScript feature extractors from Hugging Face at construction
-(`hf_hub_download`), so they need **network access**; the sanity check uses GPU 0.
+(`hf_hub_download`), so they need **network access**. The sanity check that probes the
+extractor runs on the **CPU** — deliberately, since touching a GPU there crashed
+CPU-only hosts and pinned every DDP rank to the same device.
 All are `CriterionWithAttribute` and consume per-group `Attribute` statistics.
 
 | Name | Purpose | Key args (defaults) |
@@ -133,8 +135,10 @@ Imported lazily; a missing package raises a `MeasureError` with an install hint.
 | `FID` | `konfai[fid]` (scipy + torchvision) | Fréchet Inception Distance (InceptionV3). | — |
 
 ```{note}
-`IMPACT*` and `SAM_Perceptual` pin the sanity check to GPU 0; `LPIPS`/`FID` also
-run on CUDA device 0.
+None of these pins a device. The `IMPACT*` sanity check probes its TorchScript
+extractor on the CPU and discards the result; `LPIPS` and `FID` follow the device
+of the tensor they are given — the rank's GPU under DDP, or the CPU. `SAM_Perceptual`
+runs no sanity check at all.
 ```
 
 ## Next steps
