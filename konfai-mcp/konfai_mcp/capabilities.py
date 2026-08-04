@@ -56,6 +56,7 @@ def describe_konfai_capabilities() -> dict[str, Any]:
             "train": "Config.yml (Trainer:) -> run_train",
             "prediction": "Prediction.yml (Predictor:) -> run_prediction",
             "evaluation": "Evaluation.yml (Evaluator:) -> run_evaluation",
+            "transform": "Transform.yml (Transformer:) -> run_transform (no model: reads, transforms, writes)",
             "schema_tool": "describe_config_schema(workflow)",
         },
         "components": {

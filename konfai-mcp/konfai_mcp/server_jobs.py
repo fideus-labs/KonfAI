@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Literal, TextIO, cast
 
 from .experiment_state import job_diagnosis
-from .server_support import WorkspaceLayout
+from .server_support import WORKFLOW_CONFIG_FILES, WorkspaceLayout
 from .workflows import APP_JOB_KINDS, JOB_RETRY_TOOLS, WORKFLOW_DONE_NEXT, JobKind
 
 
@@ -385,7 +385,7 @@ class JobRegistry:
         configs_dir = self.workspace_layout.job_configs_dir(job.job_id)
         configs_dir.mkdir(parents=True, exist_ok=True)
         copied: dict[str, str] = {}
-        for filename in ("Config.yml", "Prediction.yml", "Evaluation.yml"):
+        for filename in WORKFLOW_CONFIG_FILES.values():
             source = job.cwd / filename
             if not source.exists():
                 continue

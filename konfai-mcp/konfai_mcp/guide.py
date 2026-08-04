@@ -502,6 +502,26 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. "
         "Next: wait_for_job."
     ),
+    "plan_transform": (
+        "Use BEFORE run_transform, always: it is the dry run, and it writes no data. "
+        "This plans every (case, chain) from the session Transform.yml. The plan is a measurement, not an "
+        "estimate -- it opens and removes a real region-write on each destination -- so its verdict is the one "
+        "the run will act on: STREAM (bounded memory), WHOLE-VOLUME (the case is assembled whole, with the stage "
+        "that refused it named), SKIP (already written), REDUCE, REFUSED. "
+        "Outputs: {ok, report, verdict_counts, budget, needs_attention[], over_budget[]}. A non-empty over_budget "
+        "means run_transform would refuse before writing anything. "
+        "Next: fix what needs_attention names, or run_transform."
+    ),
+    "run_transform": (
+        "Use to apply a transform chain to a dataset with NO model: read, transform, write. "
+        "Read plan_transform first -- this writes a dataset, and the plan is what says how much and how. "
+        "This launches a transform job from the session Transform.yml and returns structured job resources. "
+        "The run replans, stores the plan, and refuses outright when a case can neither stream nor fit "
+        "memory_budget. A case whose output already exists is skipped, so an interrupted run resumes; pass "
+        "overwrite to recompute. "
+        "Outputs: job payload with resources and next_actions; or a blocker payload when a prerequisite is missing. "
+        "Next: wait_for_job then inspect_dataset on what it wrote."
+    ),
     "run_evaluation": (
         "Use after evaluation config review/validation and when required artifacts exist. "
         "This launches an evaluation job and returns structured job resources. "

@@ -34,6 +34,7 @@ _RUN_ROOT_KIND = {
     "Predictions": "prediction",
     "Evaluations": "evaluation",
     "Uncertainties": "uncertainty",
+    "Transforms": "transform",
 }
 
 
@@ -161,6 +162,7 @@ def _discover_run_logs(job: dict[str, Any]) -> list[tuple[Path, str, str]]:
         "Predictions/*/log_0.txt",
         "Evaluations/*/log_0.txt",
         "Uncertainties/*/log_0.txt",
+        "Transforms/*/log_0.txt",
     ):
         for log in sorted(base.glob(pattern)):
             if log in seen:
@@ -214,6 +216,32 @@ def _runtime_events(line: str, run: str, kind: str, step: int) -> tuple[list[dic
     return [], step
 
 
+def _run_data_dir(session: str, base: str) -> str:
+    """Where a run's DATA is, when that is not the run directory itself.
+
+    A transform's run directory holds a log, a plan and a config copy — the volumes land wherever each
+    ``Write`` pointed, which the workflow records in ``outputs.json``. Pointing Browse at the run
+    directory would open a YAML file for someone who just asked to see what was produced. Answers ""
+    for every kind whose data IS under its run directory, and the caller keeps its usual path.
+    """
+    manifest = _session_dir(session) / base / "outputs.json"
+    if not manifest.is_file():
+        return ""
+    try:
+        outputs = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(outputs, list) or not outputs or not isinstance(outputs[0], dict):
+        return ""
+    dataset = outputs[0].get("dataset")
+    if not isinstance(dataset, str) or not dataset:
+        return ""
+    # Session-relative when it lives inside the session, so Browse resolves it like every other path.
+    with suppress(ValueError):
+        return str(Path(dataset).relative_to(_session_dir(session)))
+    return dataset
+
+
 def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]]:
     """Every run of the experiment as (log_path, run_name, kind, status, base) — one per runtime log.
 
@@ -260,7 +288,12 @@ def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]
             base = log.parent.name
         found.append((log, run_name, kind, status, base, log.stat().st_mtime))
 
-    for root, kind in (("Statistics", "train"), ("Predictions", "prediction"), ("Evaluations", "evaluation")):
+    for root, kind in (
+        ("Statistics", "train"),
+        ("Predictions", "prediction"),
+        ("Evaluations", "evaluation"),
+        ("Transforms", "transform"),
+    ):
         directory = base_root / root
         if directory.is_dir():
             for log in directory.glob("*/log_0.txt"):

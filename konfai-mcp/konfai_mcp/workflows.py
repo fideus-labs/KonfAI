@@ -73,6 +73,16 @@ WORKFLOW_SPECS: dict[str, WorkflowSpec] = {
             "run_evaluation",
             ("eval", "evaluate", "evaluator"),
         ),
+        WorkflowSpec(
+            "transform",
+            "Transform.yml",
+            "Transformer",
+            "konfai.transformer",
+            "Transformer",
+            "TRANSFORM",
+            "run_transform",
+            ("transformer", "process"),
+        ),
     )
 }
 
@@ -98,8 +108,25 @@ WORKFLOW_DONE_NEXT: dict[str, list[str]] = {
     "train": ["run_prediction", "read_training_curves", "summarize_session"],
     "prediction": ["run_evaluation", "summarize_session"],
     "evaluation": ["get_run_metrics", "leaderboard", "compare_runs"],
+    # A transformed dataset is an input, not a result: what follows is using it.
+    "transform": ["inspect_dataset", "summarize_session"],
 }
 
+
+def workflow_choice_description(action: str) -> str:
+    """``"<action>: train -> Config.yml (Trainer), ..."`` — a tool's ``workflow`` parameter, from the table.
+
+    Generated, because these descriptions are the only view an agent has of what a parameter accepts:
+    a workflow missing from the prose is a workflow the agent never tries, whatever the type allows.
+    """
+    options = ", ".join(
+        f"{kind} -> {spec.config_file} ({spec.root_key})" for kind, spec in sorted(WORKFLOW_SPECS.items())
+    )
+    return f"{action}: {options}."
+
+
 # Static mirrors of the table for tool signatures; pinned to it by the drift test.
-WorkflowKind = Literal["train", "prediction", "evaluation"]
-JobKind = Literal["train", "prediction", "evaluation", "infer", "finetune", "evaluate", "uncertainty", "pipeline"]
+WorkflowKind = Literal["train", "prediction", "evaluation", "transform"]
+JobKind = Literal[
+    "train", "prediction", "evaluation", "transform", "infer", "finetune", "evaluate", "uncertainty", "pipeline"
+]
