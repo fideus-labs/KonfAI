@@ -124,10 +124,19 @@ halo of a geometric draw is that draw's own.
 | `HALO` | bounded neighbourhood, radius `halo` per axis in array order (Z, Y, X) | nothing — the dispatcher reads the enlarged region and crops |
 | `ORIENTATION` | flip or permute | `stream_region_source` |
 | `CROP` | source region is the target region translated | `stream_region_source` |
-| `GLOBAL_STAT` | needs whole-volume statistics, `stat_keys` a subset of Min/Max/Mean/Std | nothing — the dispatcher seeds the statistic from disk |
-| `RESCALE` | resample | subclass `Resample` |
+| `GLOBAL_STAT` | needs whole-volume statistics, `stat_keys` a subset of Min/Max/Mean/Std (or their `…PerChannel` forms) | nothing — the dispatcher seeds the statistic from disk |
+| `RESCALE` | resample by a ratio | subclass `Resample` |
+| `REGRID` | resample onto a grid declared elsewhere — a stored reference, not a ratio — so the source region is computed from the two geometries | subclass `Resample`; declare a halo when a displacement field is composed in |
 | `SLAB` | a per-voxel value map plus a side effect that needs the slab's place in the volume | `stream_slab(name, tensor, region, spatial_shape, cache_attribute)`, and optionally `stream_abort`. The **read** dispatcher has no slab context and treats it as `WHOLE_VOLUME`; the gain is on the write side |
 | `WHOLE_VOLUME` | needs the whole volume | nothing — this is the default |
+
+A sampler you write yourself should take its arithmetic from
+`konfai.data.transform`'s own: `sampling_dtype` (what to accumulate a weighted
+sum in — an integer input and a CPU half both need float32), `nearest_index`
+(ITK's round-half-up, which `torch.round` and `F.interpolate` each get wrong in
+their own way) and `window_index` (a global source index clamped into the
+sub-region that was actually read). A sampler that is only *nearly* the same as
+the ones shipped here makes every comparison against them a negotiation.
 
 A declaration is bound by three rules:
 

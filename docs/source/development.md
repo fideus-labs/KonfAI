@@ -238,24 +238,32 @@ the framework, the two sibling packages, and every published App.
 ### Cutting a release
 
 Versions are **tag-derived** — `setuptools_scm` reads the tag, so no *package*
-version is committed anywhere that could drift from it. `CHANGELOG.md` is generated
-from the commit history, and the publish workflow renders the section for the tag it
-is running on as the GitHub Release body, so the file and the release page cannot
-describe a version differently.
+version is committed anywhere that could drift from it. `CHANGELOG.md` is drafted
+from the commit history and then edited, and the publish workflow takes the committed
+section for the tag it is running on **verbatim** as the GitHub Release body, so the
+file and the release page cannot describe a version differently. A tag whose section
+is missing — **or present but empty** — fails the job rather than publishing a release
+with nothing in it. A tag carrying a pre-release segment (`v1.8.0rc1`, `v1.8.0.dev1`)
+publishes as a pre-release and does not take `latest`; a post-release (`v1.8.0.post1`)
+is stable and does.
 
-```{important}
-One version string **is** committed and does not follow the tag:
-`ARG KONFAI_PYPI_VERSION` in `docker/Dockerfile`. The published image is unaffected —
-the workflow passes the tag's version as `--build-arg` — but it is what a local
-`docker build` without that flag installs, so bump it when you cut a release. It sat
-at `1.6.0` through 1.7.
+```{note}
+No version string is committed anywhere, the Docker image included: it installs the
+wheels found in `dist/`, which the release workflow fills from the tag's own build. That
+also means the image never waits on PyPI to serve what the run just uploaded.
 ```
 
 That order matters: **the changelog is written before the tag**, because the
-workflow renders what the history already says.
+workflow publishes what the file already says.
+
+The generated draft is a starting point, not the answer. It sees commit subjects
+only, so a squash merge collapses to one line, a subject with no conventional
+prefix is dropped, and a subject written for a reviewer tells a reader nothing.
+Take the draft, then say what a *user* of the package gets that they did not have —
+and re-read it against anything that landed after you drafted it.
 
 ```bash
-# 1. Write the section for the version you are about to cut
+# 1. Draft the section for the version you are about to cut, then edit it
 uvx --from commitizen cz changelog --unreleased-version vX.Y.Z --start-rev v1.5.8
 
 # 2. Commit it

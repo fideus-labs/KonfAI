@@ -1,5 +1,7 @@
 name: konfai_ci
 
+# config_guide and examples/Transform are sources here: the integration tests extract the YAML blocks
+# from those pages and run the example's configs as shipped, so editing either is editing a fixture.
 on:
   push:
     branches: [main]
@@ -8,6 +10,8 @@ on:
       - "konfai/**"
       - "konfai-apps/**"
       - "tests/**"
+      - "docs/source/config_guide/**"
+      - "examples/Transform/**"
       - "pyproject.toml"
       - "README.md"
   pull_request:
@@ -16,6 +20,8 @@ on:
       - "konfai/**"
       - "konfai-apps/**"
       - "tests/**"
+      - "docs/source/config_guide/**"
+      - "examples/Transform/**"
       - "pyproject.toml"
       - "README.md"
 
@@ -29,10 +35,14 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # This job runs code the pull request controls; the token has no business staying
+          # in .git/config while it does.
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -51,10 +61,14 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # This job runs code the pull request controls; the token has no business staying
+          # in .git/config while it does.
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -67,10 +81,14 @@ jobs:
   format:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # This job runs code the pull request controls; the token has no business staying
+          # in .git/config while it does.
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -83,12 +101,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          # This job runs code the pull request controls; the token has no business staying
+          # in .git/config while it does.
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -108,7 +129,7 @@ jobs:
         run: pytest tests/unit/test_packaging.py -m slow
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: konfai-wheel
           path: dist/*.whl

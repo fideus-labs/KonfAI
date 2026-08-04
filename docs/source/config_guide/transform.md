@@ -1,9 +1,10 @@
 # Transform configuration
 
-Transform configuration lives under the `Transformer` root object. It is the one
-workflow with **no model**: it reads a dataset, applies a chain of transforms,
-and writes the result. If you never train anything, this is the only page you
-need.
+Transform configuration lives under the `Transformer` root object. It runs **no
+model** — nor does `EVALUATION`, and the difference is what comes out: an
+evaluation measures, this one **makes**. It reads a dataset, applies a chain of
+transforms, and writes a dataset. If you never train anything, this is the only
+page you need.
 
 ```yaml
 Transformer:
@@ -47,8 +48,10 @@ workflow emits no scalars.
 
 ## Read the plan before you read anything else
 
-Every run prints its plan first, and writes it to
-`./Transforms/<name>/plan.txt`. Nothing is written until the plan is accepted.
+Every run prints its plan first, and a run that proceeds writes it to
+`./Transforms/<name>/plan.txt`, next to an `outputs.json` naming where each
+chain's deliverable lands. No *data* is written until the plan is accepted, and
+`--plan` prints and stops without leaving either file behind.
 
 ```text
 [Transformer] plan over 1 rank(s) | per-rank budget 7.45 GiB ('8G') | fallback working set
@@ -143,11 +146,12 @@ a byte is read:
   streaming re-reads the source while writing, so an in-place transform would
   read its own half-written output;
 - a `Save` with no `dataset` of its own, which would write next to the source;
-- **any key this page does not document — a stage's arguments included.** A
-  typo'd `memory_budge:` or `Clip: {min_val: …}` would otherwise be ignored and
-  its default used silently; here it is an error naming the exact path and the
-  legal keys. (A stage that takes `**kwargs` or resolves nowhere is left to the
-  loader's own error.)
+- **any structural key the grammar does not list, and any stage argument its
+  constructor does not take.** A typo'd `memory_budge:` or
+  `Clip: {min_val: …}` would otherwise be ignored and its default used
+  silently; here it is an error naming the exact path and the legal keys. (A
+  stage that takes `**kwargs` or resolves nowhere is left to the loader's own
+  error, and the contents of `subset:` are not walked.)
 
 ## Fields
 
@@ -215,18 +219,29 @@ That writes **one** entry named `template`, whatever the cohort's size.
 
 | Field | Default | Effect |
 | --- | --- | --- |
-| `operator` | `Median` | A classpath resolved against `konfai.data.reduction`: `Mean`, `Median`, `Concat`, or your own `Reduction` subclass. An operator's own parameters go in the same mapping, next to `operator`. |
+| `operator` | `Median` | A classpath resolved against `konfai.data.reduction`: `Mean`, `Median`, `Vote`, `Concat`, or your own `Reduction` subclass. An operator's own parameters go in the same mapping, next to `operator`. |
 | `output` | — | **Required**: the entry name the single result is written under. |
 | `grid` | `strict` | How much agreement between members is demanded before a byte is read (below). |
 | `grid_tolerance` | `1e-6` | The tolerance `strict` compares geometry within. |
 | `provenance` | `true` | Record the operator and the folded case list in the output's header — a cohort that silently changed between two runs writes a different volume under the same name, and nothing about the output would look wrong. |
 
 **Operators.** `Mean` folds one case at a time, so its working set is two
-regions whatever N is. `Median` needs every case per region — N + 1 resident
-regions, which is what `memory_budget` sizes and refuses. `Concat` puts the
-cases side by side: the output carries `N × C` channels. A custom operator must
-declare `voxel_local = True` — one that reads across space cannot stream and is
-refused outright.
+regions whatever N is. `Median` needs every case per region, and stacks and
+sorts them on top — the plan says how many regions that is, and `memory_budget`
+sizes and refuses against it. `Concat` puts the cases side by side: the output
+carries `N × C` channels. A custom operator must declare `voxel_local = True` —
+one that reads across space cannot stream and is refused outright. It should
+also declare `working_multiple` if it allocates over the buffer it is handed,
+or the plan promises a working set the run exceeds.
+
+```{warning}
+`Mean` and `Median` are for intensities. Both answer with values that were in no
+input — the median of labels `1` and `5` is `3`, a different structure — and
+both widen an integer input to float32. Over exactly two cases `Median` *is*
+`Mean`, so the robustness the name promises is not there. Fold segmentations
+with **`Vote`**, which takes the label the most cases agree on, keeps the input
+dtype, and breaks a tie toward the smallest label so the fold is reproducible.
+```
 
 **`grid` decides what counts as "the same space"**, compared on the grid each
 case's chain *lands* on (a `Resample` before the `Reduce` counts):
@@ -344,6 +359,18 @@ taps clamped to the buffer, nearest by round-half-up, and `fill` wherever the
 reference grid reaches past the case.
 ```
 
+**Label maps.** Left unset, `interpolation` is read off the dtype: `uint8` takes
+the nearest voxel, everything else is interpolated. A dtype cannot decide this
+on its own — a CT is `int16` and so is nothing else about it — so a label map
+stored as anything but `uint8` must say so:
+
+```yaml
+ResampleToReference: {entry: case_0, group: Labels, interpolation: nearest}
+```
+
+Getting it wrong is silent. Two labels blended give a third that was never in
+the source, the dtype is unchanged, and the result is still a label map.
+
 **What it refuses**, rather than write something plausible and wrong:
 
 - a case or a reference carrying no `Origin` / `Spacing` / `Direction` — without
@@ -401,6 +428,14 @@ Each stage is parameterised on the grid and the case state the stages before it
 leave: a draw that permutes axes hands the next stage its own extent, and a
 resample between two draws is seen by the second. That is the same contract a
 transform has — a draw is a stage, not a separate phase.
+
+```{warning}
+A bare name resolves against `konfai.data.transform` **first**, and only then
+against `konfai.data.augmentation`. `Flip`, `Permute`, `Mask` and `Foreign`
+exist in both, so `Flip: {f_prob: [0.33, 0.33, 0.33]}` binds the deterministic
+*transform* and fails on an argument it does not take. Spell the draw out:
+`konfai.data.augmentation:Flip`.
+```
 
 `pattern` is a `str.format` template and **both** tokens are required: `{name}`
 keeps cases apart, `{a}` (1-based) keeps a case's copies apart. A pattern missing
