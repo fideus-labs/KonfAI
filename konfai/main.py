@@ -191,6 +191,65 @@ def _run(parser: argparse.ArgumentParser) -> None:
         help="Directory where evaluation outputs are written (default: ./Evaluations/).",
     )
 
+    devices_for_transform = cuda_visible_devices()
+    transform_p = subparsers.add_parser(str(State.TRANSFORM), help="Apply a transform chain to a dataset. No model.")
+    # Deliberately NOT add_common_args: -tb has no scalar to show, so refusing it here is a parse
+    # error, not a silent no-op. --gpu exists for one reason: a KonfAIInference stage runs a nested
+    # inference that does use the device; plain read transforms stay on CPU either way.
+    transform_p.add_argument(
+        "-c",
+        "--config",
+        type=str,
+        default=None,
+        help="Path to the configuration file (YAML). If omitted, Transform.yml is used.",
+    )
+    transform_p.add_argument(
+        "-y",
+        "--overwrite",
+        action="store_true",
+        help="Rewrite outputs that already exist. Without it, a case whose output exists is skipped.",
+    )
+
+    def positive_int_transform(value: str) -> int:
+        ivalue = int(value)
+        if ivalue <= 0:
+            raise argparse.ArgumentTypeError("CPU value must be > 0")
+        return ivalue
+
+    transform_device = transform_p.add_mutually_exclusive_group()
+    transform_device.add_argument(
+        "--gpu",
+        type=int,
+        nargs="+",
+        choices=devices_for_transform,
+        default=[],
+        help="GPU device ids for chains that run a nested inference (KonfAIInference). "
+        "Plain read transforms run on CPU regardless.",
+    )
+    transform_device.add_argument(
+        "--cpu",
+        type=positive_int_transform,
+        default=None,
+        help="Shard the cases over N worker processes (default: 1).",
+    )
+    transform_p.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution"
+    )
+    transform_p.add_argument(
+        "--plan",
+        action="store_true",
+        help="Print the per-case streaming plan and exit without transforming. The plan probes each"
+        " destination with a real region-write open (created then removed), so it reports the run's"
+        " actual verdict — it touches the output directories even in plan mode.",
+    )
+    transform_p.add_argument(
+        "--transforms-dir",
+        "--transforms_dir",
+        type=str,
+        default="./Transforms/",
+        help="Directory where run logs and the plan are written (default: ./Transforms/).",
+    )
+
     parser.add_argument(
         "--version",
         action="version",
@@ -200,25 +259,41 @@ def _run(parser: argparse.ArgumentParser) -> None:
 
     args = vars(parser.parse_args())
 
-    if args["command"] == "PREDICTION":
+    if args["command"] == str(State.PREDICTION):
         from konfai.predictor import predict
 
         if args["config"] is not None:
             args["prediction_file"] = args.pop("config")
         predict(**args)
-    elif args["command"] == "EVALUATION":
+    elif args["command"] == str(State.EVALUATION):
         from konfai.evaluator import evaluate
 
         if args["config"] is not None:
             args["evaluations_file"] = args.pop("config")
 
         evaluate(**args)
-    else:
+    elif args["command"] == str(State.TRANSFORM):
+        from konfai.transformer import plan_transform, transform
+
+        if args["config"] is not None:
+            args["transform_file"] = args.pop("config")
+        # --plan must SHORT-CIRCUIT here: the distributed wrapper filters kwargs by the entrypoint's
+        # signature, so passing 'plan' through would be dropped and the run would proceed as if the
+        # flag had never been given.
+        if args.pop("plan", False):
+            plan_transform(**args)
+        else:
+            transform(**args)
+    elif args["command"] in (str(State.TRAIN), str(State.RESUME)):
         from konfai.trainer import train
 
         if args["config"] is None:
             del args["config"]
         train(**args)
+    else:
+        # Exhaustive on purpose: the old catch-all silently launched the trainer for any command it
+        # did not know, which is how a new workflow could train a UNet instead of failing.
+        parser.error(f"Unknown command '{args['command']}'.")
 
 
 def main():
