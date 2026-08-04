@@ -151,6 +151,51 @@ jobs:
         with:
           packages-dir: dist
 
+  github_release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # to create the release
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # cz renders a version's section from the history
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist_all
+
+      - name: Flatten dists
+        run: |
+          mkdir -p dist
+          find dist_all -type f \( -name "*.whl" -o -name "*.tar.gz" \) -print0 | xargs -0 -I {} cp {} dist/
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Commitizen
+        run: python -m pip install commitizen==4.13.0
+
+      # The release notes ARE the changelog section for this tag, rendered from the same commits the
+      # committed CHANGELOG.md was generated from -- so the release page and the file cannot say
+      # different things about one version.
+      - name: Render the release notes for this tag
+        run: cz changelog "${GITHUB_REF_NAME}" --file-name /tmp/release-notes.md
+
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: /tmp/release-notes.md
+          # A tag carrying a pre-release segment publishes as one, so `v1.8.0rc1` never lands on
+          # users following the latest release.
+          prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') || contains(github.ref_name, 'dev') }}
+          files: dist/*
+          fail_on_unmatched_files: false
+
   publish_docker:
     needs: publish
     runs-on: ubuntu-latest
