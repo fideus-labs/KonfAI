@@ -148,3 +148,36 @@ def test_register_multi_preset_averages_and_warps_once(tmp_path: Path) -> None:
     # keep_dvf persists each preset's field for a later uncertainty pass
     assert (case / "Ensemble" / "A.mha").is_file() and (case / "Ensemble" / "B.mha").is_file()
     assert (case / "Moved.mha").is_file()
+
+
+def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Path) -> None:
+    """A preset is complete with a displacement field alone: the moved image is derived here.
+
+    The field IS the registration; the moved image is that field applied to the moving. Requiring both
+    made every preset carry a second output whose content the orchestrator can produce itself — and
+    for the tiled presets, blend across every patch seam only to have it thrown away.
+    """
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    reference = sitk.ReadImage(str(moving))
+    app = reg.ImpactRegKonfAIApp()
+
+    def field_only(preset, fixed_image, mov_image, fixed_mask, moving_mask, work, *args, **kwargs):
+        out = Path(work) / preset
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
+        return None, out / "DVF.mha"
+
+    app._infer_preset = field_only  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+
+    case = out / "P000"
+    assert (case / "Moved.mha").is_file(), "the orchestrator did not derive the moved image"
+    # moved(p) = moving(p + d), and d is +2 along x on a unit grid: moving is z*64 + y*8 + x.
+    moved = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "Moved.mha")))
+    np.testing.assert_allclose(moved[0, 0, 0], 2.0, atol=1e-6)
+    np.testing.assert_allclose(moved[1, 1, 0], 74.0, atol=1e-6)

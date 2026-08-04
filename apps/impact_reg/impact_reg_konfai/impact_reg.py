@@ -17,8 +17,10 @@
 """Orchestrator for IMPACT-Reg.
 
 Each IMPACT-Reg *preset* is a self-contained KonfAI app on ``VBoussot/ImpactReg`` (one preset = one app):
-its model produces, on the FIXED grid, the moving image resampled onto the fixed image (``MovedImage``)
-and the displacement field (``DisplacementField``). This orchestrator adds the registration-specific
+its model produces the displacement field (``DisplacementField``) on the FIXED grid, and optionally the
+moving image resampled onto the fixed one (``MovedImage``). The field is what a registration preset must
+declare; the moved image IS that field applied to the moving, so a preset that leaves it out is complete
+and this orchestrator derives it. This layer adds the registration-specific
 logic that does not fit the generic ``konfai-apps`` pipeline, split into three composable operations
 (mirroring ``konfai-apps`` infer/eval/uncertainty) so a UI/CLI can run them independently:
 
@@ -79,8 +81,13 @@ def get_available_presets(force_update: bool = False) -> list[str]:
     return list(get_available_apps_on_hf_repo(IMPACT_REG_KONFAI_REPO, force_update))
 
 
-def _find_output(root: Path, stem: str) -> Path:
+def _find_output(root: Path, stem: str, required: bool = True) -> Path | None:
     """Locate the single output named ``stem`` under ``root``, whatever form the preset wrote it in.
+
+    ``required=False`` returns None instead of raising, for an output a preset may legitimately not
+    declare: the displacement field is what a registration preset must produce, and the moved image is
+    that field applied to the moving -- derivable here (see :func:`_derive_moved`) rather than a second
+    thing every preset has to remember to write.
 
     Matched on the name rather than on a fixed filename: a displacement field may come out as an ITK
     image or as an OME-Zarr store, and a store is a DIRECTORY whose ``Path.stem`` is "DVF.ome" -- so a
@@ -88,6 +95,8 @@ def _find_output(root: Path, stem: str) -> Path:
     """
     matches = sorted(root.rglob(f"{stem}.*"))
     if not matches:
+        if not required:
+            return None
         raise FileNotFoundError(f"Preset inference did not produce '{stem}' under {root}.")
     return matches[0]
 
@@ -158,6 +167,74 @@ def _write_displacement_field(field: sitk.Image, dest: Path) -> None:
         )
     else:
         sitk.WriteImage(field, str(dest))
+
+
+def _read_image(path: Path) -> sitk.Image:
+    """An image, from an ITK file OR an OME-Zarr store — the input side of :func:`_write_image`.
+
+    ``sitk.ReadImage`` cannot open a store, so any path that re-reads an input has to know both forms
+    or silently only work for one. This is the one place that knows, mirroring konfai's
+    ``read_displacement_field`` for fields.
+    """
+    if not path.is_dir():
+        return sitk.ReadImage(str(path))
+    from konfai.utils.dataset import data_to_image, ome_zarr_attributes
+    from konfai.utils.ome_zarr import get_ome_zarr_info, read_ome_zarr_data_slice
+
+    axes = get_ome_zarr_info(path)["axes"]
+    n_axes = 1 + sum(axis in axes for axis in ("z", "y", "x"))  # channel-first C[Z]YX
+    data, metadata = read_ome_zarr_data_slice(path, tuple(slice(None) for _ in range(n_axes)))
+    # Origin, Spacing and Direction together: NGFF scale/translation alone cannot express the
+    # direction matrix, so the geometry comes from the konfai sidecar through data_to_image.
+    return data_to_image(data, ome_zarr_attributes(metadata))
+
+
+def _write_image(image: sitk.Image, dest: Path) -> None:
+    """Write an image in the form ``dest`` names — the scalar counterpart of
+    :func:`_write_displacement_field`."""
+    if "".join(dest.suffixes).endswith(".ome.zarr"):
+        from konfai.utils.dataset import image_to_data
+        from konfai.utils.ome_zarr import write_ome_zarr
+
+        data, attributes = image_to_data(image)
+        write_ome_zarr(
+            dest, data, spacing=image.GetSpacing(), origin=image.GetOrigin(), attributes=dict(attributes)
+        )
+    else:
+        sitk.WriteImage(image, str(dest))
+
+
+def _derive_moved(moving_image: Path, dvf_path: Path, dest_dir: Path, field: sitk.Image | None = None) -> Path:
+    """The moved image, resampled from the moving through the displacement field.
+
+    A preset that emits only a field is complete: the moved image IS that field applied to the moving,
+    so deriving it belongs to the orchestrator rather than being a second output every preset has to
+    remember to declare.
+
+    FORMAT IN, SAME FORMAT OUT. Both ends go through the dispatch above, so an OME-Zarr moving yields
+    an OME-Zarr moved and an ITK one an ITK file; the resample never decides the format. Reading the
+    moving with ``sitk.ReadImage`` instead -- what this replaces -- cannot open a store at all, which
+    is why the ensemble path could not be used with OME-Zarr inputs.
+
+    Resampled through SimpleITK for the reason konfai's own ``ResampleTransform`` gives: the stored
+    displacement is in world (x, y, z) units, and adding it onto a (z, y, x) voxel grid by hand
+    transposes the axes and reads millimetres as voxels. The output grid is the field's own -- a
+    displacement field is defined ON the fixed grid, so that is where the moved image belongs.
+    """
+    if field is None:
+        field = read_displacement_field(dvf_path)
+    # Read the grid off the field BEFORE the transform takes it: DisplacementFieldTransform assumes
+    # ownership of the image it is given and leaves it empty behind.
+    size, origin = field.GetSize(), field.GetOrigin()
+    spacing, direction = field.GetSpacing(), field.GetDirection()
+    transform = sitk.DisplacementFieldTransform(field)
+    moving = _read_image(moving_image)
+    moved = sitk.Resample(
+        moving, size, transform, sitk.sitkLinear, origin, spacing, direction, 0.0, moving.GetPixelID()
+    )
+    dest = _output_path(dest_dir, "Moved", "".join(dvf_path.suffixes))
+    _write_image(moved, dest)
+    return dest
 
 
 def _displacement_transform(dvf_path: Path) -> sitk.Transform:
@@ -241,7 +318,7 @@ class ImpactRegKonfAIApp:
         subprocess.run(command, check=True)  # nosec B603
         # The model emits both the moved image and the displacement field on the fixed grid; reusing them
         # (rather than re-resampling here) keeps the single-preset path free of any extra image read/write.
-        return _find_output(out, "Moved"), _find_output(out, "DVF")
+        return _find_output(out, "Moved", required=False), _find_output(out, "DVF")
 
     def register(
         self,
@@ -301,23 +378,26 @@ class ImpactRegKonfAIApp:
                     dvf_paths.append(dvf)
 
                 if len(presets) == 1:
-                    # One preset: the model already produced the moved image AND the displacement field on
-                    # the fixed grid — reuse them verbatim. No input re-read, no re-resample, and the input
-                    # format is whatever the model handled (OME-Zarr included).
-                    _copy_output(moved_paths[0], case_out, "Moved")
                     dvf_out = _copy_output(dvf_paths[0], case_out, "DVF")
+                    if moved_paths[0] is not None:
+                        # The model already produced the moved image on the fixed grid — reuse it
+                        # verbatim. No input re-read, no re-resample, and the input format is whatever
+                        # the model handled (OME-Zarr included).
+                        _copy_output(moved_paths[0], case_out, "Moved")
+                    else:
+                        # A preset that declares only a field is complete: the moved image is that
+                        # field applied to the moving, and producing it belongs here.
+                        _derive_moved(moving_image, dvf_out, case_out)
                 else:
                     # Ensemble: average the presets' displacement fields (all on the fixed grid) and warp the
                     # moving image once with that averaged field — the one output no single preset produced.
                     avg_dvf = self._average_displacement(dvf_paths)
                     dvf_out = _output_path(case_out, "DVF", "".join(dvf_paths[0].suffixes))
                     _write_displacement_field(avg_dvf, dvf_out)
-                    transform = sitk.DisplacementFieldTransform(sitk.Cast(avg_dvf, sitk.sitkVectorFloat64))
-                    moving = sitk.ReadImage(str(moving_image))
-                    sitk.WriteImage(
-                        sitk.Resample(moving, avg_dvf, transform, sitk.sitkLinear, 0.0, moving.GetPixelID()),
-                        str(_output_path(case_out, "Moved", ".mha")),
-                    )
+                    # Through the same derivation as the single-preset path, which reads the moving in
+                    # either form: the sitk.ReadImage this replaces cannot open a store at all, so an
+                    # ensemble of OME-Zarr inputs failed here and nowhere else.
+                    _derive_moved(moving_image, dvf_out, case_out, field=sitk.Cast(avg_dvf, sitk.sitkVectorFloat64))
 
                 # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid displacement
                 # field as a SimpleITK transform.

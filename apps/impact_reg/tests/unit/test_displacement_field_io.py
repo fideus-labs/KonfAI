@@ -35,6 +35,7 @@ from impact_reg_konfai.impact_reg import (  # noqa: E402
     _displacement_transform,
     _find_output,
     _output_path,
+    _read_image,
     _write_displacement_field,
 )
 from konfai.utils.errors import TransformError  # noqa: E402
@@ -215,3 +216,31 @@ def test_transform_reads_back_identically_from_either_form(tmp_path: Path, suffi
     reference = sitk.DisplacementFieldTransform(sitk.Image(original))
     for point in ((9.0, -1.0, 12.0), (7.5, -2.5, 11.0)):
         assert restored.TransformPoint(point) == pytest.approx(reference.TransformPoint(point))
+
+
+@pytest.mark.skipif(not _zarr_v3_available(), reason="writing an OME-Zarr store needs zarr 3")
+def test_read_image_opens_an_ome_zarr_store(tmp_path) -> None:
+    """An ordinary image reads back from a store, not only from an ITK file.
+
+    ``sitk.ReadImage`` cannot open a directory, so every place that re-read an input was silently
+    ITK-only. That is what made the ensemble path unusable with OME-Zarr inputs while the
+    single-preset path — which reuses the model's output and never re-reads — worked fine.
+    """
+    volume = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    store = tmp_path / "moving.ome.zarr"
+    write_ome_zarr(store, volume[np.newaxis], spacing=(1.5, 2.0, 2.5), origin=(3.0, -1.0, 0.5))
+
+    image = _read_image(store)
+
+    assert image.GetSpacing() == pytest.approx((1.5, 2.0, 2.5))
+    assert image.GetOrigin() == pytest.approx((3.0, -1.0, 0.5))
+    np.testing.assert_allclose(sitk.GetArrayFromImage(image), volume)
+
+
+def test_read_image_still_opens_an_itk_file(tmp_path) -> None:
+    """The other half of the dispatch: a plain file goes straight through SimpleITK."""
+    volume = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+    path = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(volume), str(path))
+
+    np.testing.assert_allclose(sitk.GetArrayFromImage(_read_image(path)), volume)
