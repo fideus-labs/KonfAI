@@ -208,7 +208,13 @@ class AugmentedStage:
 
 
 # The region kinds a composed streamed read (or write) carries between its pointwise stages.
-_REGION_KINDS = (LocalityKind.HALO, LocalityKind.ORIENTATION, LocalityKind.CROP, LocalityKind.RESCALE)
+_REGION_KINDS = (
+    LocalityKind.HALO,
+    LocalityKind.ORIENTATION,
+    LocalityKind.CROP,
+    LocalityKind.RESCALE,
+    LocalityKind.REGRID,
+)
 
 
 # The pull maps are callable dataclasses, not closures, because a plan crosses a process boundary:

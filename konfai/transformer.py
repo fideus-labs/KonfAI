@@ -40,7 +40,7 @@ from konfai import config_file, transforms_directory
 from konfai.data.case_reduction import CaseReduction, split_chain
 from konfai.data.data_manager import DataTransform, _format_gib, _node_local_ranks
 from konfai.data.patching import DatasetManager, _save_destination
-from konfai.data.transform import Save, split_expand
+from konfai.data.transform import Save, Transform, split_expand
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformerError
@@ -98,6 +98,10 @@ class TransformPlan:
     world_size: int
     dropped_cases: dict[str, int]
     dtype_hypothesis: str
+    #: What the stages themselves asked the plan to say (``Transform.plan_note``) — a cost the
+    #: columns above have no room for. Part of the plan, not of the run, so ``--plan`` carries it:
+    #: a note only worth reading after the bytes are written is not worth printing.
+    notes: tuple[str, ...] = ()
 
     @property
     def fallback_entries(self) -> list[TransformPlanEntry]:
@@ -135,6 +139,7 @@ class TransformPlan:
                     f"[Transformer] {dropped} case(s) present in '{group_src}' only are DROPPED:"
                     " several groups_src keep the intersection of their case names."
                 )
+        lines.extend(f"[Transformer] NOTE: {note}" for note in self.notes)
         by_chain: dict[tuple[str, str], list[TransformPlanEntry]] = {}
         for entry in self.entries:
             by_chain.setdefault((entry.group_src, entry.group_dest), []).append(entry)
@@ -515,7 +520,39 @@ class Transformer(DistributedObject):
                     available.update(dataset.get_names(group_src))
             dropped[group_src] = len(available - kept)
         dtype_hypothesis = f"{'/'.join(sorted(planned_dtypes)) or 'float32'} / source channels"
-        return TransformPlan(entries, per_rank_budget, budget.description, world_size, dropped, dtype_hypothesis)
+        return TransformPlan(
+            entries,
+            per_rank_budget,
+            budget.description,
+            world_size,
+            dropped,
+            dtype_hypothesis,
+            tuple(self._plan_notes()),
+        )
+
+    def _plan_notes(self) -> list[str]:
+        """What the stages themselves ask the plan to say, in chain order, each said once.
+
+        A verdict and a byte count are what the plan can compute ABOUT a chain; this is what the
+        chain knows about itself — a nested inference whose memory nothing here can bound, a case
+        that meets only part of the grid it is being resampled onto. Deduplicated because a note
+        about the stage repeats identically for every case of its chain, while a note about the
+        case does not: what is printed is the set of distinct things there are to say.
+        """
+        notes: list[str] = []
+        for group_dest, managers in self._managers().items():
+            for manager in managers:
+                for stage in manager.transforms:
+                    # A chain's stages are transforms AND draws; only a transform declares a note.
+                    # A draw has nothing to add anyway: what its copies cost is the `regime` column.
+                    if not isinstance(stage, Transform):
+                        continue
+                    note = stage.plan_note(
+                        group_dest, manager.name, list(manager.base_shape[1:]), manager.stored_attributes
+                    )
+                    if note is not None and note not in notes:
+                        notes.append(note)
+        return notes
 
     def setup(self, world_size: int):
         """Plan, print, enforce, shard — before any spawn, before any byte."""
@@ -556,18 +593,6 @@ class Transformer(DistributedObject):
                             " single-file store, and every rank would write into the same file.",
                             "Use one process, or a directory destination (omezarr, mha, nii.gz).",
                         )
-
-        inference_chains = sorted(
-            group_dest
-            for group_dest, managers in self._managers().items()
-            if managers and any(type(t).__name__ == "KonfAIInference" for t in managers[0].transforms)
-        )
-        if inference_chains:
-            print(
-                f"[Transformer] NOTE: chain(s) {', '.join(inference_chains)} run a NESTED KonfAI"
-                " inference: its GPU and RAM usage live outside the declared memory_budget, and the"
-                " plan cannot bound them."
-            )
 
         violations = plan.budget_violations()
         if violations:
