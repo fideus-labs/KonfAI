@@ -113,10 +113,12 @@ def test_a_user_stage_streams_and_equals_the_whole_volume(tmp_path: Path) -> Non
 
 def test_a_streamed_user_stage_never_reads_the_volume(tmp_path: Path, monkeypatch) -> None:
     source = _field(tmp_path)
-    manager = _manager(source, [_CentreAndScale(step=0.25), Write(f"{tmp_path / 'out'}:h5")])
 
     def refuse(*args, **kwargs):
         raise AssertionError("the user stage assembled the volume")
 
+    # Installed before the manager exists, not after: building it resolves the chain and plans the
+    # reads, and a whole-volume read there would fall outside a guard armed later.
     monkeypatch.setattr(Dataset, "read_data", refuse)
+    manager = _manager(source, [_CentreAndScale(step=0.25), Write(f"{tmp_path / 'out'}:h5")])
     assert manager.materialize() is True

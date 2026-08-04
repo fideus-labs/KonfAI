@@ -542,16 +542,29 @@ class Transformer(DistributedObject):
         notes: list[str] = []
         for group_dest, managers in self._managers().items():
             for manager in managers:
-                for stage in manager.transforms:
+                # Each stage is asked about ITS OWN input, not about the case as stored: past a
+                # Resample or a Crop the grid a stage meets is no longer the one on disk. Folded the
+                # way the streamed planner folds it, over a copy of the stored state.
+                shape = [int(extent) for extent in manager.base_shape[1:]]
+                attributes = manager.stored_attributes
+                # Only as far as a Reduce. Past it the grid is the COHORT's -- another case's
+                # entirely under `reference:<case>` -- and a fold started from this case would hand
+                # the stages after it a geometry belonging to nobody. What the reduction writes is
+                # its own plan line, not a note derived from one of its members.
+                for stage in split_chain(manager.transforms)[0]:
                     # A chain's stages are transforms AND draws; only a transform declares a note.
                     # A draw has nothing to add anyway: what its copies cost is the `regime` column.
                     if not isinstance(stage, Transform):
                         continue
-                    note = stage.plan_note(
-                        group_dest, manager.name, list(manager.base_shape[1:]), manager.stored_attributes
-                    )
+                    note = stage.plan_note(group_dest, manager.name, list(shape), Attribute(attributes))
                     if note is not None and note not in notes:
                         notes.append(note)
+                    source = list(shape)
+                    shape = [
+                        int(extent)
+                        for extent in stage.transform_shape(manager.group_src, manager.name, source, attributes)
+                    ]
+                    stage.write_stream_cache_attribute(attributes, source)
         return notes
 
     def setup(self, world_size: int):
