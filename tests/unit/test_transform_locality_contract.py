@@ -96,6 +96,13 @@ _SPACING = [1.5, 1.5, 2.0]
 _REFERENCE_SPATIAL = (7, 8, 9)
 _REFERENCE_SPACING = [1.8, 1.2, 2.5]
 
+# A displacement field on a grid COARSER than either, which is how one is actually solved: the field
+# is in world units, so it is read where it is asked rather than resampled to match anything first.
+# Its displacements stay inside _FIELD_BOUND, which is what the halo is sized from and checked against.
+_FIELD_SPATIAL = (4, 5, 5)
+_FIELD_SPACING = [3.0, 2.4, 4.0]
+_FIELD_BOUND = 3.0
+
 # No extent is a multiple of the patch size, so the last patch of every axis is a border patch the read
 # plan has to pad: the grid is 3x3x3 and 19 of its 27 patches touch a border.
 _PEAK = 450.0
@@ -174,6 +181,13 @@ _CASES: dict[str, list[_Case]] = {
     "ResampleToReference": [
         _Case(ResampleToReference(entry=_CASE_NAME, group="Reference")),
         _Case(ResampleToReference(entry=_CASE_NAME, group="Reference"), group="Labels"),
+        # Onto the same grid THROUGH a field, which is the whole operation in one stage: the source
+        # region a target region pulls is the affine box grown by the declared displacement, and the
+        # sampling is no longer separable. Same contract, and the same atol: one sampler, global
+        # coordinates.
+        _Case(
+            ResampleToReference(entry=_CASE_NAME, group="Reference", field_group="Field", max_displacement=_FIELD_BOUND)
+        ),
     ],
     "ResampleTransform": [_Case(ResampleTransform({"transform": True}))],
     "Save": [_Case(Save("Dataset"))],
@@ -246,14 +260,25 @@ def _volumes() -> dict[str, np.ndarray]:
         # A grid of its OWN -- other extent, other spacing, other origin -- for a stage that resamples
         # onto a reference rather than about the case's own extent. Only its header is ever read.
         "Reference": rng.standard_normal(_REFERENCE_SPATIAL).astype(np.float32)[None],
+        # A displacement field, component-first in physical (x, y, z), each component a different
+        # function so a reversed axis order cannot pass unnoticed. Bounded by _FIELD_BOUND.
+        "Field": np.stack(
+            [
+                2.0 * np.cos(np.arange(_FIELD_SPATIAL[2]))[None, None, :] * np.ones(_FIELD_SPATIAL),
+                1.5 * np.sin(np.arange(_FIELD_SPATIAL[1]))[None, :, None] * np.ones(_FIELD_SPATIAL),
+                1.0 * np.cos(np.arange(_FIELD_SPATIAL[0]))[:, None, None] * np.ones(_FIELD_SPATIAL),
+            ]
+        ).astype(np.float32),
     }
 
 
 def _attributes(group: str) -> Attribute:
     """The metadata a group is stored with -- and so what a declaration about it is handed."""
     attributes = Attribute()
-    attributes["Origin"] = np.asarray([-1.0, 6.0, 12.0] if group == "Reference" else [-3.0, 5.0, 11.0])
-    attributes["Spacing"] = np.asarray(_REFERENCE_SPACING if group == "Reference" else _SPACING)
+    origins = {"Reference": [-1.0, 6.0, 12.0], "Field": [-4.0, 4.0, 10.0]}
+    spacings = {"Reference": _REFERENCE_SPACING, "Field": _FIELD_SPACING}
+    attributes["Origin"] = np.asarray(origins.get(group, [-3.0, 5.0, 11.0]))
+    attributes["Spacing"] = np.asarray(spacings.get(group, _SPACING))
     attributes["Direction"] = {"Oblique": _OBLIQUE, "Permuting": _PERMUTING}.get(group, _AXIS_ALIGNED).reshape(-1)
     if group == "Ensemble":
         # What a `combine: Concat` reduction writes: the per-model channel counts MergeLabels and

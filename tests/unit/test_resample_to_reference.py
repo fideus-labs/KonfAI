@@ -475,3 +475,315 @@ def test_the_inverse_declares_the_whole_volume_and_says_why(dataset: Dataset) ->
     locality = _stage(dataset).inverse_patch_locality(Attribute())
     assert locality.kind is LocalityKind.WHOLE_VOLUME
     assert locality.reason is not None and "reference grid" in locality.reason
+
+
+# --------------------------------------------------------------------- through a field
+
+# The field's own grid: coarser than the case AND than the reference, with an origin of its own --
+# which is the point. A field solved at one resolution moves a volume stored at another, because it
+# is defined in world units and read where it is asked.
+_FIELD_SPATIAL = (5, 6, 7)
+_FIELD_ORIGIN, _FIELD_SPACING = [-4.0, 3.0, 9.0], [4.0, 4.5, 5.0]
+_BOUND = 20.0
+
+
+def _displacement(shape: tuple[int, ...] = _FIELD_SPATIAL) -> np.ndarray:
+    """A field whose three components are DIFFERENT functions of DIFFERENT axes.
+
+    Component-first, in physical (x, y, z). Every component varies, and none is a multiple of
+    another, so swapping two of them — or reversing the component axis against the array axes —
+    moves the anatomy somewhere a comparison against SimpleITK cannot miss.
+    """
+    z, y, x = np.meshgrid(*[np.arange(n) for n in shape], indexing="ij")
+    return np.stack([2.0 + 0.5 * x, -1.5 + 0.3 * y, 0.8 * np.sin(z * 0.9)]).astype(np.float32)
+
+
+def _high_frequency(shape: tuple[int, ...] = _SOURCE_SPATIAL) -> np.ndarray:
+    """A source whose detail a second interpolation would visibly smooth away."""
+    z, y, x = np.meshgrid(*[np.arange(n) for n in shape], indexing="ij")
+    return (100 * np.sin(z * 1.7) * np.cos(y * 2.1) + 80 * np.sin(x * 2.9)).astype(np.float32)[None]
+
+
+@pytest.fixture
+def warped(tmp_path: Path) -> tuple[Dataset, Dataset, np.ndarray]:
+    """A case, a reference grid and a field — three grids that agree about nothing."""
+    images = Dataset(tmp_path / "Images", "h5")
+    volume = _high_frequency()
+    images.write("Case", _CASE, volume, _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
+    images.write("Reference", _CASE, _volume(_REFERENCE_SPATIAL, 1), _attributes(_REFERENCE_ORIGIN, _REFERENCE_SPACING))
+    fields = Dataset(tmp_path / "Fields", "h5")
+    fields.write("DVF", _CASE, _displacement(), _attributes(_FIELD_ORIGIN, _FIELD_SPACING))
+    return images, fields, volume
+
+
+def _warping(images: Dataset, fields: Dataset, **kwargs: object) -> ResampleToReference:
+    arguments: dict[str, object] = {
+        "entry": _CASE,
+        "group": "Reference",
+        "field": f"{fields.filename}:h5",
+        "field_group": "DVF",
+        "max_displacement": _BOUND,
+        "fill": _FILL,
+        **kwargs,
+    }
+    stage = ResampleToReference(**arguments)  # type: ignore[arg-type]
+    stage.set_datasets([images])
+    return stage
+
+
+def _simpleitk_warp(volume: np.ndarray, field: np.ndarray | None = None) -> np.ndarray:
+    """``sitk.Resample(image, grid, DisplacementFieldTransform(field))`` — the one-pass authority."""
+    image = sitk.GetImageFromArray(volume[0])
+    image.SetOrigin(_SOURCE_ORIGIN)
+    image.SetSpacing(_SOURCE_SPACING)
+    grid = sitk.Image(*reversed(_REFERENCE_SPATIAL), sitk.sitkFloat32)
+    grid.SetOrigin(_REFERENCE_ORIGIN)
+    grid.SetSpacing(_REFERENCE_SPACING)
+    transform: sitk.Transform = sitk.Transform()
+    if field is not None:
+        # sitk wants a vector image, (z, y, x, component), where KonfAI stores component-first.
+        vector = sitk.GetImageFromArray(np.moveaxis(field, 0, -1).astype(np.float64), isVector=True)
+        vector.SetOrigin(_FIELD_ORIGIN)
+        vector.SetSpacing(_FIELD_SPACING)
+        transform = sitk.DisplacementFieldTransform(sitk.Cast(vector, sitk.sitkVectorFloat64))
+    return sitk.GetArrayFromImage(sitk.Resample(image, grid, transform, sitk.sitkLinear, _FILL))
+
+
+def test_it_warps_onto_the_reference_where_simpleitk_does(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
+    """The whole operation, against the one call that defines it.
+
+    Three grids, none agreeing on extent, spacing or origin, and a field with a different function
+    per component: a mistake in any of the axis-order conversions lands the anatomy elsewhere, and
+    a comparison against SimpleITK is the only thing that would notice.
+    """
+    images, fields, volume = warped
+    got = _warping(images, fields)(_CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
+    want = _simpleitk_warp(volume, _displacement())
+
+    assert list(got.shape[1:]) == list(_REFERENCE_SPATIAL)
+    span = float(want.max() - want.min())
+    np.testing.assert_allclose(got.numpy()[0], want, rtol=0, atol=64 * float(np.spacing(np.float32(span))))
+
+
+def test_the_displaced_edge_is_where_simpleitk_puts_it(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
+    """Which voxels have no source is decided by the DISPLACED coordinate, so it tests the whole map.
+
+    A composition that is off by a fraction of a voxel still interpolates real data almost
+    everywhere; the rim is where it stops having any, and matching it voxel for voxel is a much
+    sharper statement than any tolerance on the values.
+    """
+    images, fields, volume = warped
+    got = _warping(images, fields)(_CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
+    want = _simpleitk_warp(volume, _displacement())
+
+    assert 0 < int((want == _FILL).sum()) < want.size, "the fixture must have a rim, and not be all rim"
+    np.testing.assert_array_equal(got.numpy()[0] == _FILL, want == _FILL)
+
+
+def test_the_field_components_are_not_reversed(tmp_path: Path) -> None:
+    """The (x, y, z) / (z, y, x) test, built so that reversing the two orders cannot pass.
+
+    One component is non-zero and the displacement is a whole number of source voxels on that axis,
+    so the answer is the source shifted by an exact voxel count along ONE array axis. Put the
+    displacement on z instead of x — which is what reversing the component axis does — and the
+    result is shifted along the wrong axis, by a different number of voxels, because the spacings
+    differ too.
+    """
+    images = Dataset(tmp_path / "Images", "h5")
+    fields = Dataset(tmp_path / "Fields", "h5")
+    geometry = _attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    volume = _high_frequency((6, 7, 8))
+    images.write("Case", _CASE, volume, geometry)
+    # The reference IS the source grid here: the only thing moving anything is the field.
+    images.write("Reference", _CASE, volume, geometry)
+    # +2 world units on x alone, uniform: with unit spacing that is exactly two voxels on array axis 2.
+    uniform = np.zeros((3, 6, 7, 8), dtype=np.float32)
+    uniform[0] = 2.0
+    fields.write("DVF", _CASE, uniform, geometry)
+
+    stage = ResampleToReference(
+        entry=_CASE,
+        group="Reference",
+        field=f"{fields.filename}:h5",
+        field_group="DVF",
+        max_displacement=4.0,
+        fill=0.0,
+    )
+    stage.set_datasets([images])
+    got = stage(_CASE, torch.from_numpy(volume.copy()), Attribute(geometry)).numpy()[0]
+
+    # output(o) = input(o + 2) along the LAST array axis, which is physical x.
+    np.testing.assert_allclose(got[:, :, :-2], volume[0][:, :, 2:], rtol=0, atol=1e-4)
+    # And nothing moved along z: a reversed component axis would have shifted this one instead.
+    assert not np.allclose(got[:-2, :, :], volume[0][2:, :, :], atol=1e-4)
+
+
+def test_it_interpolates_once_not_twice(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
+    """The reason this is one stage: two resamples cost detail that the second cannot put back.
+
+    The two-pass baseline is built entirely in SimpleITK — resample onto the grid, then warp on it —
+    so what it costs is measured independently of anything here. On a high-frequency source that
+    cost is a large fraction of the range, while this stage sits at float rounding from the one-pass
+    result. Asserted as an ORDER OF MAGNITUDE, not a number: the point is the gap, not its digits.
+    """
+    images, fields, volume = warped
+    got = _warping(images, fields)(
+        _CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
+    ).numpy()[0]
+    one_pass = _simpleitk_warp(volume, _displacement())
+
+    intermediate = sitk.GetImageFromArray(_simpleitk_warp(volume, None))
+    intermediate.SetOrigin(_REFERENCE_ORIGIN)
+    intermediate.SetSpacing(_REFERENCE_SPACING)
+    vector = sitk.GetImageFromArray(np.moveaxis(_displacement(), 0, -1).astype(np.float64), isVector=True)
+    vector.SetOrigin(_FIELD_ORIGIN)
+    vector.SetSpacing(_FIELD_SPACING)
+    grid = sitk.Image(*reversed(_REFERENCE_SPATIAL), sitk.sitkFloat32)
+    grid.SetOrigin(_REFERENCE_ORIGIN)
+    grid.SetSpacing(_REFERENCE_SPACING)
+    two_pass = sitk.GetArrayFromImage(
+        sitk.Resample(
+            intermediate,
+            grid,
+            sitk.DisplacementFieldTransform(sitk.Cast(vector, sitk.sitkVectorFloat64)),
+            sitk.sitkLinear,
+            _FILL,
+        )
+    )
+
+    both = (one_pass != _FILL) & (two_pass != _FILL)
+    second_pass_costs = float(np.abs(one_pass[both] - two_pass[both]).max())
+    this_stage_costs = float(np.abs(got[both] - one_pass[both]).max())
+    assert second_pass_costs > 1.0, "the fixture must be one a second interpolation actually damages"
+    assert this_stage_costs < second_pass_costs / 1000.0, (
+        f"this stage is {this_stage_costs:.3g} from the one-pass result where a second interpolation"
+        f" costs {second_pass_costs:.3g}: it is not resampling once"
+    )
+
+
+def test_the_streamed_warp_equals_the_whole_volume(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
+    """Region by region through a field, against the same chain run whole."""
+    images, fields, volume = warped
+
+    def manager() -> DatasetManager:
+        return DatasetManager(
+            index=0,
+            group_src="Case",
+            group_dest="Case",
+            name=_CASE,
+            dataset=images,
+            patch=None,
+            transforms=[_warping(images, fields)],
+            data_augmentations_list=[],
+        )
+
+    streaming = manager()
+    assert streaming.stream_refusal(0) is None
+    whole = _warping(images, fields)(
+        _CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
+    ).numpy()
+    extent = streaming.spatial_shape
+    got = np.empty((1, *extent), dtype=np.float32)
+    for start in range(0, extent[0], 3):
+        stop = min(start + 3, extent[0])
+        got[:, start:stop] = streaming.read_region(
+            (slice(start, stop), slice(0, extent[1]), slice(0, extent[2]))
+        ).numpy()
+    np.testing.assert_array_equal(got, whole)
+
+
+def test_the_warped_run_never_assembles_the_volume(warped: tuple[Dataset, Dataset, np.ndarray], tmp_path: Path) -> None:
+    """The memory bound, through a field: neither the case nor the field is ever read whole."""
+    images, fields, _volume = warped
+    manager = DatasetManager(
+        index=0,
+        group_src="Case",
+        group_dest="Case",
+        name=_CASE,
+        dataset=images,
+        patch=None,
+        transforms=[_warping(images, fields), Write(str(tmp_path / "Warped"))],
+        data_augmentations_list=[],
+    )
+    assert manager.stream_refusal(0) is None
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the chain read a whole volume")
+
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(Dataset, "read_data", refuse)
+    try:
+        assert manager.materialize() is True
+    finally:
+        monkeypatched.undo()
+    written = Dataset(tmp_path / "Warped", "mha").read_data("Case", _CASE)[0]
+    assert list(written.shape[1:]) == list(_REFERENCE_SPATIAL)
+
+
+def test_a_field_beyond_its_declared_bound_is_refused(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
+    """The halo is a promise about what was read; a field that breaks it must not sample zeros.
+
+    Sampling past the region that was read gives a dark rim around the moved anatomy and nothing
+    else to see, which is the shape of a mistake nobody finds.
+    """
+    images, fields, volume = warped
+    stage = _warping(images, fields, max_displacement=0.5)
+    with pytest.raises(TransformError, match="displaces up to"):
+        stage(_CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
+
+
+def test_a_field_with_no_bound_declares_the_whole_volume(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
+    """Warp's rule, and for the same reason: an unbounded reach cannot size a region."""
+    images, fields, _volume = warped
+    locality = _warping(images, fields, max_displacement=0.0).patch_locality(
+        _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
+    )
+    assert locality.kind is LocalityKind.WHOLE_VOLUME
+    assert locality.reason is not None and "max_displacement" in locality.reason
+    # And without a field it is a region stage whatever the bound says.
+    assert _stage_regrid_kind(images) is LocalityKind.REGRID
+
+
+def _stage_regrid_kind(images: Dataset) -> LocalityKind:
+    stage = ResampleToReference(entry=_CASE, group="Reference")
+    stage.set_datasets([images])
+    return stage.patch_locality(_attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)).kind
+
+
+def test_a_field_on_another_direction_is_refused(warped: tuple[Dataset, Dataset, np.ndarray], tmp_path: Path) -> None:
+    """A field whose axes do not line up with the case's would need a rotation, not a per-axis map."""
+    images, _fields, _volume = warped
+    turned = Dataset(tmp_path / "Turned", "h5")
+    rotated = np.asarray([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    turned.write("DVF", _CASE, _displacement(), _attributes(_FIELD_ORIGIN, _FIELD_SPACING, rotated))
+    stage = _warping(images, turned)
+    with pytest.raises(TransformError, match="Direction"):
+        stage.transform_shape("Case", _CASE, list(_SOURCE_SPATIAL), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
+
+
+def test_fields_can_live_beside_the_cases(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
+    """No 'field' path: the fields are a group of the run's own roots, one entry per case.
+
+    That is how a cohort registered in place stores them, and it is the same answer as naming the
+    store explicitly — which is what makes it a shorthand rather than a second code path.
+    """
+    images, fields, volume = warped
+    images.write("DVF", _CASE, _displacement(), _attributes(_FIELD_ORIGIN, _FIELD_SPACING))
+    beside = ResampleToReference(entry=_CASE, group="Reference", field_group="DVF", max_displacement=_BOUND, fill=_FILL)
+    beside.set_datasets([images])
+
+    got = beside(_CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
+    want = _warping(images, fields)(
+        _CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
+    )
+    np.testing.assert_array_equal(got.numpy(), want.numpy())
+
+
+def test_a_bound_with_no_field_is_refused() -> None:
+    """A max_displacement and nothing to apply it to is a chain that silently does not warp.
+
+    The stage would resample onto the grid perfectly well and the declaration would simply have no
+    effect — which is the failure that leaves a plausible volume and no error.
+    """
+    with pytest.raises(TransformError, match="no field to apply"):
+        ResampleToReference(entry=_CASE, group="Reference", max_displacement=1.0)

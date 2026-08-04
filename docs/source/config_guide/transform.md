@@ -283,6 +283,54 @@ transforms:
 reference can live anywhere — which is the atlas loop: point round N+1 at the
 store round N wrote its template into.
 
+#### Through a displacement field, in one interpolation
+
+Add `field:` and the stage becomes the whole of a registration's apply step —
+`sitk.Resample(image, reference_grid, DisplacementFieldTransform(field))`. For
+each voxel of the **target** grid the field is read at that voxel's world
+position, added, and the source sampled **once** at the displaced point:
+
+```yaml
+transforms:
+  ResampleToReference:
+    entry: case_0
+    group: CT
+    field: ./Fields:mha
+    field_group: DVF
+    max_displacement: 4.0
+  Write: {dataset: ./Registered:mha}
+```
+
+Fields stored *beside* the cases — one entry per case, in the same roots — need
+no path at all: `field_group: DVF` on its own finds them.
+
+Doing this as two stages instead (resample onto the grid, then `Warp`) costs
+**two** interpolations, and the second cannot restore the detail the first
+smoothed away. That is not a small effect: on a high-frequency volume the
+second pass moves voxels by a large fraction of the range, which is exactly why
+an atlas rebuilds its appearance from native volumes rather than from resampled
+ones.
+
+The field lives on **its own grid**, usually coarser than either the source or
+the target, and is read where it is asked — it is defined in world units, so a
+field solved at 120 µm moves a volume stored at 30 µm without being upsampled
+first. Outside its own extent the displacement is zero: the transform is the
+identity where the field says nothing, as SimpleITK has it.
+
+`max_displacement` sizes the source region each target region must read, and is
+**checked against every field region actually read** — a field that exceeds
+what it declared raises rather than sampling zeros, which would show up as a
+dark rim around the moved anatomy and nothing else. It takes `auto`, reading
+the bound KonfAI records on a field it writes. With no bound at all the stage
+declares `WHOLE_VOLUME` and says so in the plan, exactly as `Warp` does.
+
+```{note}
+`Warp` still exists and is not this: it adds a displacement on the case's *own*
+grid, which is the shape update of an atlas build, and it neither changes the
+grid nor needs a reference. Use it when the field was solved on the very grid
+it is applied to.
+```
+
 Naming an image rather than fifteen numbers is deliberate. A grid is an extent
 in array order `(Z, Y, X)` plus an origin, a spacing and a direction in physical
 `(x, y, z)` — transcribing those by hand is the mistake that actually gets made,
@@ -460,32 +508,22 @@ not. `Clip` then `Normalize` therefore takes the whole-volume path, and the plan
 says so. Reorder the chain, or cut it with a `Save`.
 ```
 
-### `ShapeUpdate`: the shape residual of a displacement field
+### Statistics a stage may ask for
 
-The shape update of an atlas build: `output = -step * (field - t)`, where `t` is
-the field's per-component spatial mean in world units. Resampling a template
-through the result moves it along the cohort's shape residual, at ANTs'
-gradient step.
+A stage that needs a figure over the WHOLE volume does not have to assemble it.
+Declaring the statistic in `PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=…)`
+tells the planner to read it once from the stored volume; the stage is then a
+value map, and a volume of any size runs region by region.
 
-```yaml
-transforms:
-  ShapeUpdate:
-    step: 0.25
-  Write:
-    dataset: ./Update:omezarr
-```
+Alongside the pooled `Mean`, `Min`, `Max` and `Std`, a **per-component** mean is
+available as `MeanPerChannel`. It exists because a per-channel quantity has as
+many parts as the volume has components, and the pooled mean of all of them
+describes none of them — a three-component displacement field centred by one
+number is centred on no axis.
 
-`t` is **stripped, not applied**, and that is the whole point of the stage. A
-total field maps template coordinates into each specimen's OWN world frame, so
-its spatial mean is dominated by the frame-to-frame offset, not by any pose error
-of the template. Applying it in full translates the template out of its own grid
-and clips the anatomy; stripping it is what keeps the template anchored — the
-same thing ANTs' `AverageAffineTransformNoRigid` is for.
-
-Because the statistic is declared rather than recomputed per region, a field of
-any size runs region by region: the volume is never assembled. Handed the whole
-volume anyway — a chain that fell back for another reason — the stage takes the
-statistic from the tensor in hand, so both paths leave the same state behind.
+Handed the whole volume anyway — a chain that fell back for another reason — a
+stage should take the statistic from the tensor in hand and record it, so both
+paths leave the same state behind.
 
 ## Writing your own transform
 
