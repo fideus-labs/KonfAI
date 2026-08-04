@@ -819,3 +819,13 @@ def test_reduce_reads_a_reference_case_through_the_space_yaml_leaves() -> None:
     assert Reduce(operator="konfai.data.reduction:Mean", output="template", grid="reference: CASE_000").grid == (
         "reference:CASE_000"
     )
+
+
+def test_an_unknown_stage_name_names_both_namespaces_and_the_closest_match() -> None:
+    """A misspelled bare stage name is a KonfAI refusal naming the two searched namespaces, never a
+    raw AttributeError blaming an internal module with Python's own (wrong) suggestion."""
+    from konfai.data.transform import TransformLoader
+
+    with pytest.raises(TransformError, match="No transform or augmentation is named 'Clipp'") as excinfo:
+        TransformLoader().get_transform("Clipp", "X")
+    assert "Closest name: 'Clip'" in str(excinfo.value)

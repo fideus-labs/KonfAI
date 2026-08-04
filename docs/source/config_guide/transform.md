@@ -92,7 +92,7 @@ few percent of the budget can still exceed it.
 | --- | --- |
 | `allow` | Take the whole-volume path silently — but the plan still names it. |
 | `warn` (default) | Same, plus a warning line after the plan. |
-| `error` | Refuse the run. Nothing is written. |
+| `error` | Refuse the run. Nothing is written. A fallback only discovered mid-run (a failed sweep, a `Warp` bound exceeded) stops at that case — earlier cases stay written, and the per-case resume covers the rerun. |
 
 Independently of `on_fallback`, a case that **cannot stream and does not fit
 `memory_budget`** always refuses the whole run, before the first byte. Writing
@@ -143,9 +143,11 @@ a byte is read:
   streaming re-reads the source while writing, so an in-place transform would
   read its own half-written output;
 - a `Save` with no `dataset` of its own, which would write next to the source;
-- **any key this page does not document.** A typo'd `memory_budge:` would
-  otherwise be ignored and its default used silently; here it is an error naming
-  the exact path.
+- **any key this page does not document — a stage's arguments included.** A
+  typo'd `memory_budge:` or `Clip: {min_val: …}` would otherwise be ignored and
+  its default used silently; here it is an error naming the exact path and the
+  legal keys. (A stage that takes `**kwargs` or resolves nowhere is left to the
+  loader's own error.)
 
 ## Fields
 

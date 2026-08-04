@@ -71,6 +71,12 @@ _SWEEP_SLAB_ROWS = 64
 _SWEEP_RESIDENT_SLABS = 2
 _SWEEP_ELEMENT_BYTES = 4
 
+# What a whole-volume fallback holds while a case is in flight -- the assembled tensor plus one
+# transform output -- and the bytes each element travels as. The transform plan and the run-time
+# budget check (_enforce_fallback_budget) must agree on this figure.
+_FALLBACK_INFLIGHT_FACTOR = 2
+_CASE_ELEMENT_BYTES = 4
+
 
 def _halo_radii(halo: tuple[int, ...], n_axes: int) -> list[int]:
     """The per-axis radius a declared halo means, in array order (one radius covers every axis)."""
@@ -2132,7 +2138,13 @@ class DatasetManager:
         tensor, _attribute, _keys = self._replay_streamed_region(source, target, self.stored_attributes, None)
         return tensor
 
-    def materialize(self, a: int = 0, rewrite: bool = False, fallback_budget_bytes: float | None = None) -> bool:
+    def materialize(
+        self,
+        a: int = 0,
+        rewrite: bool = False,
+        fallback_budget_bytes: float | None = None,
+        allow_fallback: bool = True,
+    ) -> bool:
         """Write this case's chain to disk by the cheapest path that can, and say which one it took.
 
         Two branches, and they are the whole write side: the streamed one sweeps every unsatisfied
@@ -2141,6 +2153,8 @@ class DatasetManager:
         writes the same caches from the assembled volume. The bytes are the same either way; only
         the peak memory differs, which is why the caller must be told the answer rather than left to
         assume the cheap one. Returns whether the streamed path wrote the case.
+        ``allow_fallback=False`` raises instead of taking the second branch, for a caller whose
+        contract is that a fallback refuses rather than costs a volume.
 
         Never routed through :meth:`get_data`: a case with no declared patch is a single
         whole-volume patch, so asking for data would read back the volume this just wrote. The
@@ -2158,6 +2172,12 @@ class DatasetManager:
         apply_augmentations = self._expand is not None and a > 0
         if self._stream_ready(a, apply_augmentations=apply_augmentations):
             return True
+        if not allow_fallback:
+            raise PatchError(
+                f"Case '{self.name}' would take the whole-volume path at run time.",
+                self.stream_refusal(a, apply_augmentations) or self._sweep_failure or "the chain cannot stream.",
+                "Nothing was written for this case; the caller forbids the whole-volume fallback.",
+            )
         self._enforce_fallback_budget(fallback_budget_bytes)
         self._assemble_and_write(a)
         self.unload()
@@ -2193,7 +2213,7 @@ class DatasetManager:
             return
         # The plan's promise holds at run time too: a case whose sweep failed here (a refusal the
         # probe could not see) must not assemble a volume the budget cannot hold.
-        case_bytes = int(np.prod(self.base_shape, dtype=np.int64)) * 4 * 2
+        case_bytes = int(np.prod(self.base_shape, dtype=np.int64)) * _CASE_ELEMENT_BYTES * _FALLBACK_INFLIGHT_FACTOR
         if case_bytes > fallback_budget_bytes:
             raise PatchError(
                 f"Case '{self.name}' fell back to the whole-volume path at run time and its"
@@ -2222,6 +2242,7 @@ class DatasetManager:
         copies: list[int],
         rewrite: bool = False,
         fallback_budget_bytes: float | None = None,
+        allow_fallback: bool = True,
     ) -> dict[int, str]:
         """Write the :class:`Expand` copies of this case by the cheapest regime each can take.
 
@@ -2292,10 +2313,18 @@ class DatasetManager:
         for a in sorted(solo):
             verdicts[a] = (
                 "stream"
-                if self.materialize(a, rewrite, fallback_budget_bytes=fallback_budget_bytes)
+                if self.materialize(
+                    a, rewrite, fallback_budget_bytes=fallback_budget_bytes, allow_fallback=allow_fallback
+                )
                 else "whole-volume"
             )
         if fallback:
+            if not allow_fallback:
+                raise PatchError(
+                    f"{len(fallback)} cop(ies) of case '{self.name}' would take the whole-volume path at run time.",
+                    self.stream_refusal(fallback[0], apply_augmentations=True) or "the copies' chains cannot stream.",
+                    "Nothing was written for these copies; the caller forbids the whole-volume fallback.",
+                )
             self._enforce_fallback_budget(fallback_budget_bytes)
             for a in fallback:
                 self._assemble_and_write(a)
@@ -2609,7 +2638,7 @@ class DatasetManager:
         information, but one without (a reduction reading through this cache) has to raise, and it
         can only be as specific as what was kept here.
         """
-        self._sweep_failure = f"The Save cache '{sweep.group}/{sweep.entry}' could not be swept: {reason}"
+        self._sweep_failure = f"'{sweep.group}/{sweep.entry}' could not be written region by region: {reason}"
         warnings.warn(f"{self._sweep_failure} Falling back to the whole-volume path.", stacklevel=3)
         return False
 

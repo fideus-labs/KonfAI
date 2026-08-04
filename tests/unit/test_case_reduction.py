@@ -203,8 +203,11 @@ def test_a_cohort_that_disagrees_on_geometry_is_refused_before_reading(tmp_path:
     )
     refusal = engine.check_grid()
     assert refusal is not None and "Spacing" in refusal and "CASE_002" in refusal
-    with pytest.raises(ReductionError, match="cannot stream"):
+    with pytest.raises(ReductionError, match="cannot stream") as excinfo:
         engine.materialize()
+    # The remedy must address the GRID: a Save changes nothing about the members' geometry, so the
+    # generic put-a-Save advice would send the reader in a circle.
+    assert "resample them onto a common grid" in str(excinfo.value)
 
 
 def test_shape_only_accepts_approximate_headers(tmp_path: Path) -> None:
