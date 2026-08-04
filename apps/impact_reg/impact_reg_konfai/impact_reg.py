@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import SimpleITK as sitk
@@ -169,39 +170,41 @@ def _write_displacement_field(field: sitk.Image, dest: Path) -> None:
         sitk.WriteImage(field, str(dest))
 
 
-def _read_image(path: Path) -> sitk.Image:
-    """An image, from an ITK file OR an OME-Zarr store — the input side of :func:`_write_image`.
+def _dataset_entry(path: Path) -> tuple[Any, str, str]:
+    """Address one file or store as a konfai ``Dataset`` entry: ``(dataset, group, name)``.
 
-    ``sitk.ReadImage`` cannot open a store, so any path that re-reads an input has to know both forms
-    or silently only work for one. This is the one place that knows, mirroring konfai's
-    ``read_displacement_field`` for fields.
+    Dataset is the layer that already knows every format konfai supports -- h5, DICOM, OME-Zarr, and
+    every ITK extension through SitkFile, which probes them itself. Going through it is what makes
+    this orchestrator format-agnostic without owning a dispatch of its own: a hand-written
+    ``if path.is_dir()`` knows exactly the two formats whoever wrote it thought of.
+
+    A dataset addresses ``{root}/{name}/{group}.{ext}``. An orchestrator input is a bare path, so the
+    case is empty: the parent directory is the root and the stem is the entry. The extension only
+    seeds the format token -- Dataset normalises it (``.ome.zarr`` / ``.zarr`` -> ``omezarr``) and
+    re-detects a directory store from disk regardless of what the token said.
     """
-    if not path.is_dir():
-        return sitk.ReadImage(str(path))
-    from konfai.utils.dataset import data_to_image, ome_zarr_attributes
-    from konfai.utils.ome_zarr import get_ome_zarr_info, read_ome_zarr_data_slice
+    from konfai.utils.dataset import Dataset
 
-    axes = get_ome_zarr_info(path)["axes"]
-    n_axes = 1 + sum(axis in axes for axis in ("z", "y", "x"))  # channel-first C[Z]YX
-    data, metadata = read_ome_zarr_data_slice(path, tuple(slice(None) for _ in range(n_axes)))
-    # Origin, Spacing and Direction together: NGFF scale/translation alone cannot express the
-    # direction matrix, so the geometry comes from the konfai sidecar through data_to_image.
-    return data_to_image(data, ome_zarr_attributes(metadata))
+    suffixes = "".join(path.suffixes)
+    stem = path.name[: len(path.name) - len(suffixes)] if suffixes else path.name
+    file_format = "omezarr" if suffixes.lower().endswith((".ome.zarr", ".zarr")) else suffixes.lstrip(".")
+    return Dataset(path.parent, file_format or "mha"), stem, ""
+
+
+def _read_image(path: Path) -> sitk.Image:
+    """An image, in whatever format it is stored — read through konfai's Dataset."""
+    dataset, group, name = _dataset_entry(path)
+    return dataset.read_image(group, name)
 
 
 def _write_image(image: sitk.Image, dest: Path) -> None:
-    """Write an image in the form ``dest`` names — the scalar counterpart of
-    :func:`_write_displacement_field`."""
-    if "".join(dest.suffixes).endswith(".ome.zarr"):
-        from konfai.utils.dataset import image_to_data
-        from konfai.utils.ome_zarr import write_ome_zarr
+    """Write an image in the form ``dest`` names — through the same layer that read it.
 
-        data, attributes = image_to_data(image)
-        write_ome_zarr(
-            dest, data, spacing=image.GetSpacing(), origin=image.GetOrigin(), attributes=dict(attributes)
-        )
-    else:
-        sitk.WriteImage(image, str(dest))
+    So the format out is the format in, for every format konfai writes, and not only for the two an
+    ``if`` here would have enumerated.
+    """
+    dataset, group, name = _dataset_entry(dest)
+    dataset.write(group, name, image)
 
 
 def _derive_moved(moving_image: Path, dvf_path: Path, dest_dir: Path, field: sitk.Image | None = None) -> Path:
@@ -454,10 +457,10 @@ class ImpactRegKonfAIApp:
             try:
                 # Image: moving resampled onto the fixed grid vs fixed (MAE). Mask is optional.
                 if index < len(fixed_images) and index < len(moving_images):
-                    fixed = sitk.ReadImage(str(fixed_images[index]))
+                    fixed = _read_image(fixed_images[index])
                     moved = work / "moved_image.nii.gz"
                     sitk.WriteImage(
-                        sitk.Resample(sitk.ReadImage(str(moving_images[index])), fixed, transform), str(moved)
+                        sitk.Resample(_read_image(moving_images[index]), fixed, transform), str(moved)
                     )
                     app.evaluate(
                         inputs=[[fixed_images[index]]],
@@ -473,11 +476,11 @@ class ImpactRegKonfAIApp:
 
                 # Segmentation: moving seg warped onto fixed vs fixed seg (Dice).
                 if index < len(gt_fixed_seg) and index < len(gt_moving_seg):
-                    fixed_seg = sitk.ReadImage(str(gt_fixed_seg[index]))
+                    fixed_seg = _read_image(gt_fixed_seg[index])
                     moved_seg = work / "moved_seg.nii.gz"
                     sitk.WriteImage(
                         sitk.Resample(
-                            sitk.ReadImage(str(gt_moving_seg[index])), fixed_seg, transform, sitk.sitkNearestNeighbor
+                            _read_image(gt_moving_seg[index]), fixed_seg, transform, sitk.sitkNearestNeighbor
                         ),
                         str(moved_seg),
                     )
