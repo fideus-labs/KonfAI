@@ -460,7 +460,7 @@ class Transformer(DistributedObject):
                 planned_dtypes.add(str(self._dtype_hypothesis(managers[0])))
             expansion = split_expand(managers[0].transforms)[1] if managers else None
             for manager in managers:
-                case_bytes = int(np.prod(manager.base_shape, dtype=np.int64)) * _CASE_ELEMENT_BYTES
+                case_bytes = manager.peak_case_bytes()
                 destination, group = self._terminal_destination(manager)
                 if expansion is not None:
                     # One line per copy: the copies are the outputs, each with its own resume, its

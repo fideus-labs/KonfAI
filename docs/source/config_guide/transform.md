@@ -195,6 +195,64 @@ One chain changes its cardinality at most once. Composing the two — augment a
 cohort, then fold it — is two invocations, the second reading the first one's
 output back.
 
+### `Reduce`: N cases, one volume
+
+Everything before the marker runs once per case, `Reduce` folds the cohort at
+fixed voxel, and everything after it runs once on the result. The chain is
+driven by the reduction engine — it walks the *output's* regions and, within a
+region, the cases — so peak memory is a few regions, never N volumes:
+
+```yaml
+transforms:
+  Clip: {min_value: 0.0, max_value: 400.0}
+  Reduce:
+    operator: Mean
+    output: template
+  Write: {dataset: ./Atlas:h5}
+```
+
+That writes **one** entry named `template`, whatever the cohort's size.
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `operator` | `Median` | A classpath resolved against `konfai.data.reduction`: `Mean`, `Median`, `Concat`, or your own `Reduction` subclass. An operator's own parameters go in the same mapping, next to `operator`. |
+| `output` | — | **Required**: the entry name the single result is written under. |
+| `grid` | `strict` | How much agreement between members is demanded before a byte is read (below). |
+| `grid_tolerance` | `1e-6` | The tolerance `strict` compares geometry within. |
+| `provenance` | `true` | Record the operator and the folded case list in the output's header — a cohort that silently changed between two runs writes a different volume under the same name, and nothing about the output would look wrong. |
+
+**Operators.** `Mean` folds one case at a time, so its working set is two
+regions whatever N is. `Median` needs every case per region — N + 1 resident
+regions, which is what `memory_budget` sizes and refuses. `Concat` puts the
+cases side by side: the output carries `N × C` channels. A custom operator must
+declare `voxel_local = True` — one that reads across space cannot stream and is
+refused outright.
+
+**`grid` decides what counts as "the same space"**, compared on the grid each
+case's chain *lands* on (a `Resample` before the `Reduce` counts):
+
+- `strict` (default) — equal extents **and** equal `Spacing`/`Origin`/
+  `Direction` within `grid_tolerance`.
+- `shape_only` — equal extents alone: the escape hatch for volumes already
+  resampled together but carrying approximate headers.
+- `reference:<case>` — equal extents, and the output adopts that member's
+  geometry: how a cohort says its members disagree on their headers and which
+  one to believe.
+
+```{warning}
+Nothing can verify that the members truly live in a common space — only that
+they claim to. `shape_only` and `reference:` will happily average misaligned
+volumes; the result still looks like a volume and is an artefact. Resample the
+cohort onto one grid first if it is not co-registered.
+```
+
+**A reduction has no whole-volume fallback.** Folding every case in memory is
+what it exists to avoid, so a `Reduce` that cannot stream refuses the run
+whatever `on_fallback` says — the plan prints `REFUSED` and the reason. Only
+voxel-local stages (and statistics, seeded by an extra pass of the engine's
+own) may follow the `Reduce` in the same chain: anything reading across space
+belongs in a second chain that reads the written output back.
+
 ### `Expand`: one case, N copies
 
 `Expand` multiplies, and nothing else. The draws are **ordinary stages of the

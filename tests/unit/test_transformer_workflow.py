@@ -147,8 +147,8 @@ def test_plan_leaves_no_probe_case_in_a_directory_store(tmp_path: Path) -> None:
     """A dry run must leave the output directory as it found it.
 
     Aborting the probe stream drops the entry, but a directory dataset gives every case a directory
-    of its own, and that one outlived the stream: ``--plan`` left ``__konfai_plan_probe__/`` sitting
-    in the output root, shaped exactly like a case and listed as one by ``get_names``.
+    of its own, and that one outlives the stream: left behind, ``__konfai_plan_probe__/`` sits in
+    the output root shaped exactly like a case, and ``get_names`` lists it as one.
     """
     _write_source(tmp_path)
     _write_config(tmp_path, _DIRECTORY_CHAIN.format(out=tmp_path / "out"))
@@ -215,6 +215,33 @@ def test_budget_is_a_hard_constraint_for_fallback_cases(tmp_path: Path) -> None:
     with pytest.raises(TransformerError, match="budget"):
         workflow.setup(1)
     assert not Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "CASE_000")
+
+
+_PADS_THEN_FALLS_BACK = """\
+              Padding:
+                padding: [0, 0, 0, 0, 12, 12]
+              Standardize:
+                inverse: false
+              Write:
+                dataset: {out}:h5
+"""
+
+
+def test_the_budget_measures_the_largest_intermediate_not_the_stored_case(tmp_path: Path) -> None:
+    """A whole-volume fallback holds its BIGGEST tensor, which the chain decides, not the store.
+
+    Padding to twice the depth doubles what has to be resident, and Standardize is what sends the
+    case down the fallback path. Sized on the stored extent the case looks half as heavy as it is,
+    passes the budget it does not fit, and is OOM-killed with nothing written.
+    """
+    _write_source(tmp_path)
+    config_path = _write_config(tmp_path, _PADS_THEN_FALLS_BACK.format(out=tmp_path / "out"))
+    stored = 1 * 12 * 10 * 8 * 4 * 2  # [1, 12, 10, 8] float32, times the in-flight copy
+    # A budget the stored case fits and the padded one does not.
+    config_path.write_text(config_path.read_text().replace("memory_budget: auto", f"memory_budget: {stored + 1}b"))
+
+    with pytest.raises(TransformerError, match="budget"):
+        _build(tmp_path).setup(1)
 
 
 def test_chain_without_write_is_refused_at_parse(tmp_path: Path) -> None:
@@ -421,9 +448,9 @@ def test_multi_rank_accepts_a_directory_store_and_refuses_a_single_file(tmp_path
 
 
 def test_overwrite_rewrites_a_geometry_changing_chain_correctly(tmp_path: Path) -> None:
-    """The bak-poisoning regression: planning a second run reads the OUTPUT's header through the
-    satisfied boundary, and a rewrite replanned from that geometry would resample by a factor of 1 —
-    silently overwriting the deliverable with untransformed data."""
+    """A forced rewrite replans from the case as STORED, never from the satisfied boundary:
+    planning a second run reads the OUTPUT's header, and a rewrite replanned from that geometry
+    would resample by a factor of 1 and overwrite the deliverable with untransformed data."""
     import os
 
     _write_source(tmp_path)

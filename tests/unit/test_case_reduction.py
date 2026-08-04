@@ -230,9 +230,8 @@ def test_shape_only_accepts_approximate_headers(tmp_path: Path) -> None:
 def test_a_named_reference_adopts_its_geometry_instead_of_demanding_agreement(tmp_path: Path) -> None:
     """``reference:<case>`` is how a cohort says its members disagree and which one to believe.
 
-    It was running the ``strict`` geometry comparison anyway, and against the FIRST case rather than
-    the named one -- so the policy refused exactly the cohorts it exists for, and named the wrong
-    case when it did. Its documented contract is equal extents, and that member's geometry.
+    Its contract is exactly two checks: equal extents across the cohort, and the NAMED member's
+    geometry on the output -- no strict header comparison, whichever case happens to come first.
     """
     engine, destination, volumes = _run(
         tmp_path,

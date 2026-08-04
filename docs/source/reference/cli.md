@@ -100,9 +100,10 @@ after a run your YAML will contain the resolved defaults. See
   inference that does use the device. Plain read transforms run on CPU either
   way. There is no `-tb`: the workflow emits no scalars.
 - `--plan` short-circuits before the distributed wrapper, so it runs in one
-  process and spawns no ranks. `--cpu` is still read: it is the rank count the
-  plan divides the `memory_budget` by, so `--plan --cpu 4` reports the per-rank
-  budget a four-process run would actually get.
+  process and spawns no ranks. `--cpu` is still read: an `auto` budget is the
+  node's memory split across that many ranks, so `--plan --cpu 4` reports the
+  per-rank budget a four-process run would actually get. An explicit
+  `memory_budget` is already per rank and is not divided.
 
 ```{note}
 **Device selection quirks.** The CLI default is **CPU** (`--gpu` defaults to an

@@ -291,8 +291,8 @@ def _run(parser: argparse.ArgumentParser) -> None:
             del args["config"]
         train(**args)
     else:
-        # Exhaustive on purpose: the old catch-all silently launched the trainer for any command it
-        # did not know, which is how a new workflow could train a UNet instead of failing.
+        # Exhaustive on purpose: a catch-all else would silently launch the trainer for any command
+        # it does not know -- a new workflow would train a UNet instead of failing.
         parser.error(f"Unknown command '{args['command']}'.")
 
 

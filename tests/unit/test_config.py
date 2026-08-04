@@ -354,12 +354,11 @@ def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_confi
 
 
 def test_apply_config_refuses_a_nested_block_where_a_value_is_expected(write_config) -> None:
-    """``subset:`` is the one that bit: documented as a mapping, and ``str`` swallows any mapping.
+    """A mapping where the annotation says ``str`` is a parse error, not a stringified mapping.
 
-    ``str(CommentedMap)`` never fails, so the binder walked its union in declaration order, bound
-    ``subset`` to the literal text ``"{'CT': ['CASE_000']}"``, and the run died much later with
-    "All data entries were excluded" -- which reads as a matching problem and is a parsing one. The
-    config file was even rewritten with the mapping intact, so nothing ever looked wrong.
+    ``str(CommentedMap)`` never fails, so a union containing ``str`` would otherwise bind a nested
+    block to its repr, and the failure would surface far from the config line that caused it ("All
+    data entries were excluded" -- a matching symptom for a parsing cause).
     """
     write_config("Root:\n  subset:\n    CT:\n      - CASE_000\n      - CASE_001\n")
 
