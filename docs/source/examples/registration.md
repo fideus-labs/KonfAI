@@ -1,14 +1,17 @@
 # Registration example
 
 This example is the shortest complete path from a fixed/moving image pair to a
-registered medical image in KonfAI. It generates its own small dataset, trains
+registered medical image in KonfAI. It prepares its own small dataset, trains
 the built-in `VoxelMorph`, writes the warped image back as `.mha`, and measures
 the error before and after registration.
 
 It is deliberately a transparent learning task, not a clinical registration
-recipe. Every `MOVING` image is a synthetic Gaussian-blob image translated by a
-known offset, so you can inspect whether the workflow improves alignment without
-downloading patient data.
+recipe. Every `MOVING` image is a **real pelvis CT slice** pushed through a
+displacement field the data-preparation script picks, so the answer is known
+exactly while the anatomy is real. For registration between two *different*
+patients — a genuine anatomical difference with no ground-truth field, scored on
+reference segmentations — see {doc}`the IMPACT-Reg example <../usage/apps>` and
+`examples/ImpactReg/`.
 
 ## Before you start
 
@@ -21,41 +24,53 @@ python -m pip install -e ".[itk,tensorboard]"
 cd examples/Registration
 ```
 
-A GPU is optional. The commands below show GPU 0; replace `--gpu 0` with
-`--cpu 1` for a CPU-only run.
+`make_dataset.py` additionally needs `huggingface_hub` (it fetches the public CT
+subset) and `scipy` (it applies the displacement field).
+
+The commands below show GPU 0; replace `--gpu 0` with `--cpu 1` for a CPU-only
+run, but note the shipped configuration is 400 epochs at `256 × 256` — about
+three minutes on a GPU, considerably longer on CPU.
 
 ## What the example contains
 
 ```text
 examples/Registration/
-├── make_dataset.py   # creates eight known FIXED/MOVING translations
-├── Config.yml        # training workflow
-├── Prediction.yml    # checkpoint inference and MOVED output
-├── Evaluation.yml    # MAE/MSE before and after registration
+├── make_dataset.py            # builds the FIXED/MOVING pairs from real CT slices
+├── Config.yml                 # training workflow
+├── Prediction.yml             # checkpoint inference and MOVED output
+├── Evaluation.yml             # MAE/MSE before and after registration
+├── Registration_demo.ipynb    # the whole workflow as a runnable notebook
 └── README.md
 ```
 
-The generated dataset has one single-slice, `64 × 64` pair per case:
+`make_dataset.py` takes six axial slices from each of the five public pelvis CT
+cases, windows them to `[0, 1]`, and crops each to `256 × 256` around the body —
+30 single-slice pairs in all:
 
 ```text
 Dataset/
-├── CASE_000/
+├── 1PC006_z014/
 │   ├── FIXED.mha
 │   └── MOVING.mha
-├── CASE_001/
+├── 1PC006_z029/
 │   ├── FIXED.mha
 │   └── MOVING.mha
 └── …
 ```
 
-`FIXED` is the reference image. `MOVING` is the same image translated by
-`(5, 4)` voxels in `(Y, X)`. Generate all eight cases locally:
+`FIXED` is the CT slice as acquired. `MOVING` is that same slice pushed through a
+smooth displacement field of up to 8 voxels that the script chooses, so the
+deformation to recover is known exactly while the anatomy is real. Build them
+with:
 
 ```bash
 python make_dataset.py
 ```
 
-No patient data or network download is involved.
+The CT comes from `VBoussot/konfai-demo` on the Hugging Face Hub, cached after
+the first run. For registration between two *different* patients — a genuine
+anatomical difference with no ground-truth field, scored on the reference
+segmentations — see `examples/ImpactReg`.
 
 ## How the two images reach the model
 
@@ -71,12 +86,17 @@ module output `MovingImageResample`. Training attaches an MSE loss to that
 output against `FIXED`.
 
 ```{important}
-The current VoxelMorph warping components support `dim: 2`. Keep its configured
-`shape: [64, 64]` aligned with the spatial part of the dataset patch
-`patch_size: [1, 64, 64]` when adapting this example.
+The current VoxelMorph warping components support `dim: 2`. Three values must
+agree when adapting this example: VoxelMorph's `shape: [256, 256]`, the spatial
+part of the patch `patch_size: [1, 256, 256]` in **both** `Config.yml` and
+`Prediction.yml`, and `CROP` in `make_dataset.py`. A mismatch surfaces as a
+`state_dict` load error at PREDICTION, not as a configuration error.
 ```
 
 ## Run train → predict → evaluate
+
+`Registration_demo.ipynb` runs the three commands below and plots the
+before/after — run every cell. To do it by hand instead:
 
 ### 1. Train the registration model
 
@@ -84,8 +104,8 @@ The current VoxelMorph warping components support `dim: 2`. Keep its configured
 konfai TRAIN -y --gpu 0 --config Config.yml
 ```
 
-The supplied configuration trains for 60 epochs, reserves 25% of the eight
-cases for validation, and writes:
+The supplied configuration trains for 400 epochs (with `StepLR step_size: 150`
+to match), reserves 25% of the 30 cases for validation, and writes:
 
 ```text
 Checkpoints/REG_BASELINE/
@@ -124,10 +144,13 @@ The JSON contains both baselines:
 - `MOVING:FIXED:MAE` and `MOVING:FIXED:MSE` measure error before registration.
 - `MOVED:FIXED:MAE` and `MOVED:FIXED:MSE` measure error after registration.
 
-The repository example reports typical 60-epoch CPU results around `0.078 →
-0.017` for MAE and `0.021 → 0.0008` for MSE. Exact values may vary, but a useful
-run should make the after-registration errors clearly lower than the matching
-before-registration errors.
+On the 30 shipped CT slices at 400 epochs, a typical run reports `0.069 → 0.033`
+for MAE and `0.017 → 0.0042` for MSE — a little over 2x and 4x. Exact values may
+vary, but a useful run should make the after-registration errors clearly lower
+than the matching before-registration errors.
+
+Real anatomy is a far harder target than a synthetic phantom, and 400 epochs over
+22 training slices is a demonstration rather than a trained model.
 
 ## What this baseline does—and does not—prove
 
@@ -146,13 +169,13 @@ successful execution as clinical evidence.
 
 The four cards below come from a separate, executed IMPACT-Reg App run on
 de-identified SynthRAD 2025 Task 1 abdomen case `1ABB123` (CC BY-NC 4.0).
-They are **not outputs from the synthetic VoxelMorph
-tutorial above**. This section demonstrates the packaged App path on real
+They are **not outputs from the VoxelMorph tutorial
+above**. This section demonstrates the packaged App path on real
 medical images; the tutorial remains the small, reproducible learning exercise.
 Full attribution and hashes are in the
 <a href="../_static/apps/ASSET_PROVENANCE.md">asset provenance manifest</a>.
 
-<ul class="kf-example-grid kf-example-grid--registration" aria-label="Real IMPACT-Reg execution stages, separate from the synthetic VoxelMorph tutorial">
+<ul class="kf-example-grid kf-example-grid--registration" aria-label="Real IMPACT-Reg execution stages, separate from the VoxelMorph tutorial">
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moving-before.png" aria-label="Open the real moving MR before registration"><img src="../_static/apps/impact-reg/moving-before.png" alt="Coronal view of the real moving abdominal MR before registration, with fixed CT contours showing the controlled spatial offset." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · REAL APP INPUT</span><strong>Moving MR — before</strong><span>Fixed-CT contours expose the controlled metadata-only offset.</span><span class="kf-example-stats">NCC 0.129 · MAE 106.11</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/fixed-ct.png" aria-label="Open the real fixed CT target"><img src="../_static/apps/impact-reg/fixed-ct.png" alt="Coronal view of the real fixed abdominal CT that defines the registration target and output geometry." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">02 · REAL REFERENCE</span><strong>Fixed CT target</strong><span>The reference image defines the physical output grid.</span><span class="kf-example-stats">222 × 226 × 124 · 2 MM GRID</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moved-after.png" aria-label="Open the real moved MR after registration"><img src="../_static/apps/impact-reg/moved-after.png" alt="Coronal view of the real moved abdominal MR after ConvexAdam Composite registration on the fixed CT grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">03 · REAL APP OUTPUT</span><strong>Moved MR — after</strong><span><code>ConvexAdam_Composite</code> writes the moved image on the fixed grid.</span><span class="kf-example-stats">NCC 0.937 · MAE 21.09</span></figcaption></figure></li>

@@ -70,7 +70,9 @@ From source:
 
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
-python -m pip install -e apps/impact_reg
+# konfai-apps must come from the same checkout: this app pins konfai-apps== its own
+# setuptools_scm version, which only exists on PyPI at a release tag.
+python -m pip install -e konfai-apps -e apps/impact_reg
 ```
 
 ---

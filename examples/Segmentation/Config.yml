@@ -1,22 +1,22 @@
 Trainer:
   Model:
-    classpath: UNet.yml
+    classpath: UNet.yml  # The declarative model graph; `Model:UNet` in Model.py builds the same network
     UNet:
       parameters:
-        dim: 2
-        channels:
+        dim: 2  # 2D: the network sees one slice at a time
+        channels:  # Feature channels per level; channels[0] = 1 = a single-channel CT input
         - 1
         - 32
         - 64
         - 128
         - 256
-        nb_class: 41
-      outputs_criterions:
-        UNetBlock_0:Head:Conv:
+        nb_class: 41  # Background + 40 labels
+      outputs_criterions:  # Losses, keyed by the dotted path of the module output they read
+        UNetBlock_0:Head:Conv:  # Raw logits
           targets_criterions:
             SEG:
               criterions_loader:
-                CrossEntropyLoss:
+                CrossEntropyLoss:  # Per-voxel classification term
                   is_loss: true
                   schedulers:
                     Constant:
@@ -28,7 +28,22 @@ Trainer:
                   accumulation: false
                   weight: None
                   reduction: mean
-      optimizer:
+        UNetBlock_0:Head:Softmax:  # Class probabilities
+          targets_criterions:
+            SEG:
+              criterions_loader:
+                Dice:  # Overlap term. Without it the 40 small structures lose to the background and
+                  is_loss: true  # the network predicts background almost everywhere.
+                  schedulers:
+                    Constant:
+                      nb_step: 0
+                      value: 1
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
+                  labels: None  # None = every label present in the patch
+      optimizer:  # Optimizer used to update model weights during training
         name: AdamW
         lr: 0.001
         weight_decay: 0.0001
@@ -42,7 +57,7 @@ Trainer:
         capturable: false
         differentiable: false
         fused: None
-      schedulers:
+      schedulers:  # Learning rate scheduler: multiply LR by gamma every step_size epochs
         StepLR:
           step_size: 20
           gamma: 0.5
@@ -52,12 +67,12 @@ Trainer:
       ModelPatch: None
       yaml_str: None
   Dataset:
-    groups_src:
+    groups_src:  # Mapping between dataset modalities and how the model consumes them
       CT:
         groups_dest:
           CT:
             transforms:
-              Standardize:
+              Standardize:  # Zero mean, unit variance, computed per case
                 lazy: false
                 mean: None
                 std: None
@@ -69,24 +84,24 @@ Trainer:
         groups_dest:
           SEG:
             transforms:
-              TensorCast:
+              TensorCast:  # Label maps must be integers
                 dtype: int64
                 inverse: false
             patch_transforms: None
-            is_input: false
-    augmentations:
+            is_input: false  # Target, not an input
+    augmentations:  # Data augmentations applied during training
       DataAugmentation_0:
         data_augmentations:
           Flip:
-            f_prob:
+            f_prob:  # Probability of flipping each axis (slice, height, width)
             - 0
             - 0.5
             - 0.5
             prob: 1
             vector_field: false
         nb: 1
-    Patch:
-      patch_size:
+    Patch:  # Patch extraction: volumes are never loaded whole
+      patch_size:  # [slice, height, width]; one 256x256 tile of a single slice
       - 1
       - 256
       - 256
@@ -97,11 +112,11 @@ Trainer:
     subset: None
     shuffle: true
     filter: None
-    dataset_filenames:
+    dataset_filenames:  # Dataset source (format: folder_path:mode:image_format)
     - ./Dataset:a:mha
     inline_augmentations: true
     batch_size: 8
-    validation: 0.2
+    validation: 0.2  # Hold out 20% of the cases for validation
     validation_augmentations: true
     shuffle_window: None
     memory_budget: None
@@ -109,15 +124,15 @@ Trainer:
     pin_memory: false
     prefetch_factor: None
     persistent_workers: None
-  train_name: SEG_BASELINE
+  train_name: SEG_BASELINE  # Training name; drives the output folder structure
   manual_seed: 32
-  epochs: 100
-  it_validation: 500
+  epochs: 5  # Demo-sized, so the example finishes in minutes. Raise it (100+) to train for real.
+  it_validation: None  # Validate once per epoch
   autocast: false
   gradient_checkpoints: None
   gpu_checkpoints: None
   ema_decay: 0
   data_log: None
-  save_checkpoint_mode: BEST
+  save_checkpoint_mode: BEST  # Keep the best checkpoint (plus the last one)
   EarlyStopping: None
   it_lr_update: None

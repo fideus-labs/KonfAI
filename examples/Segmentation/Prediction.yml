@@ -43,6 +43,11 @@ Predictor:
     dataset_filenames:
     - ./Dataset:a:mha
     batch_size: 8
+    memory_budget: None
+    num_workers: None
+    pin_memory: false
+    prefetch_factor: None
+    persistent_workers: None
   outputs_dataset:
     UNetBlock_0:Head:Argmax:
       OutputDataset:
@@ -59,6 +64,7 @@ Predictor:
         patch_combine: None
         reduction: Mean
         Mean: {}
+        attributes: None
   train_name: SEG_BASELINE
   manual_seed: 32
   gpu_checkpoints: None

@@ -4,6 +4,12 @@ This example shows how to run a complete **medical image synthesis workflow** wi
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/Synthesis/Synthesis_demo.ipynb)
 
+**Fastest way to run it:** open `Synthesis_demo.ipynb` and run every cell. It downloads the demo
+data, trains, predicts, evaluates, and plots the synthetic CT beside the real one.
+
+> The generator wraps `segmentation_models_pytorch`, which the base install does not pull in. Install
+> `konfai[smp]` before running from the command line — the notebook does it for you.
+
 It is the best starting point if you want to understand how KonfAI combines:
 
 - configuration files
@@ -57,25 +63,31 @@ The **GAN** (`Config_GAN.yml`) stays Python: `Gan` composes a generator and a di
 with a bespoke adversarial `forward`, which a feed-forward graph cannot express. Rule of thumb:
 **feed-forward graph → YAML; custom `forward` / multi-network training loop → Python.**
 
-## Recommended way to start
+## How good is the demo result?
 
-If you only want to get KonfAI running once and understand the folder structure:
+`epochs: 1` is sized so the notebook finishes: one pass over the two demo cases takes about six minutes
+on a GPU and reaches roughly
 
-1. download the demo dataset
-2. run training
-3. run prediction on the same dataset
-4. run evaluation
-5. inspect `Checkpoints/`, `Predictions/`, and `Evaluations/`
+| Metric (inside `MASK`) | Value |
+|---|---|
+| MAE  | ~98 HU |
+| PSNR | ~26.5 dB |
+| SSIM | ~0.92  |
 
-If you prefer a guided walkthrough, open:
+Soft tissue, lungs and bone all come out at plausible Hounsfield values; the residual error sits on
+bone edges and the sharpest air/tissue boundaries. That is a demonstration, not a trained model — real
+training is 100 epochs on far more than two cases, and `epochs` in `Config.yml` is the knob.
 
-- `Synthesis_demo.ipynb`
+### The prediction transforms must mirror the training transforms
 
-The notebook is designed to work from a **fresh environment**, including **Google Colab**. Its first setup cells can:
+This is worth knowing before you adapt the example. `Config.yml` standardizes the MR on **whole-volume**
+statistics (`Standardize` with `mask: None`). If `Prediction.yml` standardizes inside the body mask
+instead — which looks like the more careful choice — the network receives an intensity scale it never
+saw in training, and the same checkpoint scores **409 HU instead of 98**: four times worse, with no
+error message anywhere. Training with the masked statistics instead is not the answer either; measured
+on this data it lands at 143 HU.
 
-- clone the KonfAI repository if needed
-- install KonfAI and its Python dependencies
-- download the public demo subset automatically
+So: whatever preprocessing you change, change it in both files.
 
 ## Demo dataset
 
@@ -124,13 +136,12 @@ Dataset groups used by the example:
 
 ## Quick start
 
-Run all commands from this directory:
+`Synthesis_demo.ipynb` runs all three steps below and plots the result. To do it by hand instead, run
+every command from this directory:
 
 ```bash
 cd examples/Synthesis
 ```
-
-For the smoothest first run on a fresh machine or in Colab, start with `Synthesis_demo.ipynb`.
 
 ### 1. Train
 

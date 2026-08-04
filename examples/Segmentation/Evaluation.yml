@@ -30,4 +30,9 @@ Evaluator:
     dataset_filenames:
     - ./Dataset:a:mha
     - ./Predictions/SEG_BASELINE/Dataset:i:mha
+    memory_budget: None
+    num_workers: None
+    pin_memory: false
+    prefetch_factor: None
+    persistent_workers: None
   train_name: SEG_BASELINE

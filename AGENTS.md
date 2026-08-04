@@ -222,6 +222,12 @@ Three, and only three, places decide trust — keep them honest:
   (the `num_workers>0` default) freezes inline augmentations at their first-epoch draw.
 - **The train/val split is drawn from the unseeded global RNG at `Trainer.__init__`** (before per-rank
   seeding) — `manual_seed` does not cover it and RESUME re-splits.
+- **Nothing checks that `Prediction.yml` preprocesses a group the way `Config.yml` did**, so a
+  train/predict transform mismatch is silent: the run succeeds and only the output is wrong. The
+  Synthesis example shipped with `Standardize(mask: None)` in training against `Standardize(mask: MASK)`
+  plus an extra input `Mask` in prediction — same checkpoint, **409 HU of MAE instead of 98**. The tell
+  is an evaluated metric that contradicts the training loss by an order of magnitude (training MAE
+  0.018 in `[-1, 1]` ≈ 36 HU); diff the two transform stacks before blaming the model or the epochs.
 
 ## 8. Conventions & rules
 

@@ -11,7 +11,7 @@ Trainer:
   Dataset:
     ...
   train_name: SEG_BASELINE
-  epochs: 100
+  epochs: 100          # examples/Segmentation ships 5, sized so a first run finishes
 ```
 
 ## Running it
@@ -100,13 +100,17 @@ outputs_criterions:
     targets_criterions:
       SEG:
         criterions_loader:
-          torch:nn:CrossEntropyLoss:
+          CrossEntropyLoss:
             is_loss: true
             schedulers:
               Constant:
                 nb_step: 0
                 value: 1
 ```
+
+Several criteria can share one output, and several outputs can each carry their own —
+`examples/Segmentation` pairs the cross entropy above with a `Dice` loss on
+`UNetBlock_0:Head:Softmax`, because the two want different forms of the same head.
 
 Structure:
 

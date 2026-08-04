@@ -139,6 +139,7 @@ Trainer:
             - 0.5 # 50% chance to flip vertically
             - 0.5 # 50% chance to flip horizontally
             prob: 1 # Apply this augmentation pipeline with probability 1
+            vector_field: false
         nb: 1 # Number of augmentations generated per sample
     Patch: # Patch extraction parameters used during training
       patch_size: # Size of extracted patches [slice, height, width]
@@ -158,10 +159,16 @@ Trainer:
     batch_size: 1 # Number of samples per training batch
     validation: None  # None = no validation split, or use a case-list file / list of files / case names
     validation_augmentations: true # Set to false to validate only on non-augmented samples
+    shuffle_window: None
+    memory_budget: None
+    num_workers: None
+    pin_memory: false
+    prefetch_factor: None
+    persistent_workers: None
   train_name: TRAIN_01  # Training name used to create the output folder structure
   manual_seed: 32 # Fixed seed for reproducibility
-  epochs: 100
-  it_validation: 2500  # Number of iterations between validation and TensorBoard updates (None = once per epoch)
+  epochs: 1  # Demo-sized: one pass already yields CT-like anatomy. Raise it (100+) to train for real.
+  it_validation: None  # Number of iterations between validation and TensorBoard updates (None = once per epoch)
 
   # Memory optimization settings to reduce GPU VRAM usage
   autocast: false
@@ -173,9 +180,10 @@ Trainer:
   - CT/IMAGES/5
   - MR/IMAGES/5
   - Head:Tanh/IMAGES/5
-  save_checkpoint_mode: ALL  # Save all checkpoints at each validation (other modes: BEST = keep best + last)
+  save_checkpoint_mode: BEST  # Keep the best checkpoint plus the last one. ALL keeps every one (~300 MB each)
   EarlyStopping: # Metrics to monitor for early stopping ([] = sum of all metrics, or specify a metric name)
     monitor: []
     patience: 30  #Training stops if no improvement after 30 validations
     min_delta: 0.0
     mode: min
+  it_lr_update: None
