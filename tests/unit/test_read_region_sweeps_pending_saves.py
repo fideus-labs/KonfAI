@@ -18,10 +18,9 @@
 
 ``Save`` is the remedy KonfAI recommends in its own refusal messages -- a statistic that follows a
 value-changing stage cannot stream, and cutting the chain with a ``Save`` makes the cache the source
-the statistic seeds from. That advice was sound, and the region path under it was not: ``read_region``
-resolved its stream source and replayed it directly, so the pending sweeps the source carried were
-never consumed. The chain planned STREAM and then failed at the first region -- the worst shape of
-answer, because the plan is what a caller reads before committing.
+the statistic seeds from. A ``read_region`` that replayed its stream source
+directly, without consuming the pending sweeps it carries, would plan STREAM and fail at the first
+region -- the worst shape of answer, because the plan is what a caller reads before committing.
 
 The whole-volume result is the reference here, as everywhere on this path: streaming is an
 optimisation of memory, never of meaning.

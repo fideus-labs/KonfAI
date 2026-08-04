@@ -112,8 +112,8 @@ def test_split_expand_is_the_chain_around_its_marker() -> None:
 def test_copies_are_written_under_their_own_names_and_carry_their_draw(tmp_path: Path) -> None:
     """With the draw declared after the marker, what lands on disk is AUGMENTED.
 
-    Before this feature the draws lived in a separate section and were applied after the whole
-    chain — that is, after the Write — so every copy's entry held the un-augmented volume.
+    Draws declared in a separate section would apply after the whole chain — after the Write —
+    and every copy's entry would hold the un-augmented volume.
     """
     source = _source(tmp_path)
     out = Dataset(tmp_path / "out", "h5")

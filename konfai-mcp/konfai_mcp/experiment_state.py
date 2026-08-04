@@ -116,8 +116,8 @@ STAGE_ACTIONS: dict[str, list[str]] = {
 }
 
 # Which config file each launcher needs, so an action is never offered for a workflow this session has
-# not written. A session holding only a Transform.yml was told to "run train" -- an action naming a file
-# that is not there -- while the workflow it could actually run was offered by nothing.
+# not written. Without the gate, a session holding only a Transform.yml is told to "run train" -- an
+# action naming a file that is not there -- while the workflow it could run is offered by nothing.
 _LAUNCHER_CONFIG: dict[str, str] = {
     "run_train": "Config.yml",
     "run_prediction": "Prediction.yml",

@@ -1334,7 +1334,7 @@ class DatasetManager:
         self.total_augmentations = 0
 
         # The chain around its Expand: pre runs once per case, post once per copy. Without a marker
-        # the split is (everything, None, []) and every fold below reduces to what it always was.
+        # the split is (everything, None, []) and every fold below reduces to the plain per-case chain.
         self._expand_pre, self._expand, self._expand_post = split_expand(transforms)
         for transform_function in self._expand_pre:
             _shape = _spatial(transform_function.transform_shape(self.group_src, self.name, _shape, cache_attribute))
@@ -1387,7 +1387,7 @@ class DatasetManager:
         # from the source and each stream's finalize renames over the old entry. Never the default --
         # the boundary IS the per-case resume.
         self._rewrite_saves = False
-        # The per-rank budget the sweeps size their slabs against (None = the historical fixed rows).
+        # The per-rank budget the sweeps size their slabs against (None = the fixed _SWEEP_SLAB_ROWS).
         self._sweep_budget_bytes: float | None = None
         self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None], dict[str, float]] = {}
         # Save caches already swept by THIS run, keyed by (store, group, entry): under --overwrite the
@@ -1467,7 +1467,7 @@ class DatasetManager:
 
     def _draw_augmentation_lists(self, reset_state: bool) -> None:
         """The training form: copies declared as ``Dataset.augmentations`` lists, applied after the
-        whole chain. Untouched — a chain with no ``Expand`` is exactly what it always was."""
+        whole chain."""
         i = 1
         for data_augmentations in self.data_augmentations_list:
             shape = []
@@ -1712,9 +1712,9 @@ class DatasetManager:
         """Validate a chain's locality declarations and plan its region stages, which compose.
 
         Returns ``(streamable, stage_plans, evolved, refusal)`` — ``refusal`` naming the stage and
-        the reason when the chain cannot stream (``None`` when it can): the identity of the stage is
-        in hand at the exact moment each check fails, and dropping it is what made every fallback
-        silent. ``evolved`` is the case state the plan
+        the reason when the chain cannot stream (``None`` when it can): the stage's identity is only
+        in hand at the moment each check fails, so the reason is built here -- dropping it would
+        leave every fallback silent. ``evolved`` is the case state the plan
         leaves, which a :class:`Save` sweep writes as its cache header. The chain streams when every
         stage is pointwise, a region kind (``HALO``/``ORIENTATION``/``CROP``/``RESCALE`` — any
         number, each pulling through the one before it), or a ``GLOBAL_STAT`` with a pre-populated
@@ -1956,7 +1956,7 @@ class DatasetManager:
                     sweep_refusal = planned_refusal
             trailing_transforms.append(transform)
 
-        # What copy `a` is. Without an Expand, the historical order: the trailing transforms, then
+        # What copy `a` is. Without an Expand, the training order: the trailing transforms, then
         # its own draw appended last. With one, the draw was spliced at the marker above, and the
         # whole thing is planned as one chain either way -- a region transform and a region
         # augmentation are then two regions, which is exactly what they are.
@@ -2117,10 +2117,8 @@ class DatasetManager:
         :meth:`stream_refusal` gives the reason before committing to this path.
 
         Goes through :meth:`_stream_ready`, so a chain reading through an unwritten ``Save`` gets it
-        swept first, exactly as the DataLoader path does. Resolving the source directly instead --
-        which this did -- planned green against caches that did not exist yet and then failed at the
-        first region, which is precisely the remedy KonfAI recommends in its own refusal messages
-        ("put a Save before the Reduce"): the advice was sound and the path under it was not.
+        swept first, exactly as the DataLoader path does -- resolving the source directly would plan
+        green against caches that do not exist yet and fail at the first region.
         """
         if not self._stream_ready(a, apply_augmentations):
             raise PatchError(
@@ -2208,12 +2206,36 @@ class DatasetManager:
         self.cache_attributes_bak = copy.deepcopy(self._cache_attributes_pristine)
         self.cache_attributes = copy.deepcopy(self._cache_attributes_pristine)
 
+    def peak_case_bytes(self) -> int:
+        """The largest single tensor the whole-volume path holds, from the chain's declared shapes.
+
+        The stored extent is a floor, not the answer: a chain that pads or resamples upward holds
+        its LARGEST intermediate, and that is the one a budget has to cover. Every stage declares
+        that extent through ``transform_shape``, so the fold is exact for the stages that know their
+        own geometry and identity for the rest -- it can only bring the figure closer, never lower.
+
+        Headers-only still, and still a floor for the one thing it cannot see: a stage that widens
+        the dtype beyond what it declares.
+        """
+        spatial = [int(extent) for extent in self.base_shape[1:]]
+        channels = int(self.base_shape[0])
+        peak = int(np.prod(self.base_shape, dtype=np.int64))
+        attributes = Attribute(self.stored_attributes)
+        for stage in self.transforms:
+            if not isinstance(stage, Transform):
+                continue
+            source = list(spatial)
+            spatial = [int(extent) for extent in stage.transform_shape(self.group_src, self.name, source, attributes)]
+            stage.write_stream_cache_attribute(attributes, source)
+            peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
+        return peak * _CASE_ELEMENT_BYTES
+
     def _enforce_fallback_budget(self, fallback_budget_bytes: float | None) -> None:
         if fallback_budget_bytes is None:
             return
         # The plan's promise holds at run time too: a case whose sweep failed here (a refusal the
         # probe could not see) must not assemble a volume the budget cannot hold.
-        case_bytes = int(np.prod(self.base_shape, dtype=np.int64)) * _CASE_ELEMENT_BYTES * _FALLBACK_INFLIGHT_FACTOR
+        case_bytes = self.peak_case_bytes() * _FALLBACK_INFLIGHT_FACTOR
         if case_bytes > fallback_budget_bytes:
             raise PatchError(
                 f"Case '{self.name}' fell back to the whole-volume path at run time and its"
@@ -2645,7 +2667,7 @@ class DatasetManager:
     def _sweep_rows(self, spatial: list[int], channels: int) -> int:
         """How many rows one sweep slab holds: the declared budget folded down, never up.
 
-        The historical fixed height is the CAP -- the chunk-friendly default that needs no budget --
+        The fixed default height is the CAP -- chunk-friendly, needing no budget --
         and a declared ``memory_budget`` can only lower it: a sweep holds the pulled slab and the
         landed block (plus the write buffer), so half the budget over that working set is the honest
         height. Below one row nothing fits; the row is the floor, and the fallback budget check is

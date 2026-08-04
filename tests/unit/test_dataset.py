@@ -76,9 +76,9 @@ def test_attribute_repeated_set_returns_latest_version() -> None:
 def test_attribute_built_from_a_store_sidecar_holds_text_a_writer_accepts() -> None:
     """An OME-Zarr sidecar is JSON, so it hands back live lists -- ``MaxDisplacement`` is one.
 
-    Construction used to deep-copy values through untouched while ``__setitem__`` normalized them,
-    so an entry read back from its own store carried a ``list`` that ``Image.SetMetaData`` refuses
-    ("argument 3 of type 'std::string const &'"): a field could be written and never reopened.
+    Both doors normalize to text, construction included: a value deep-copied through construction
+    untouched reaches ``Image.SetMetaData``, which accepts only ``std::string`` -- a field that
+    can be written but never reopened.
     """
     attribute = Attribute({"MaxDisplacement": [1.19, 2.39, 3.59], "Spacing": (1.5, 1.5, 2.0)})
 

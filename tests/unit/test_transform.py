@@ -829,3 +829,23 @@ def test_an_unknown_stage_name_names_both_namespaces_and_the_closest_match() -> 
     with pytest.raises(TransformError, match="No transform or augmentation is named 'Clipp'") as excinfo:
         TransformLoader().get_transform("Clipp", "X")
     assert "Closest name: 'Clip'" in str(excinfo.value)
+
+
+def test_a_qualified_stage_key_whose_class_is_missing_is_refused_the_same_way() -> None:
+    """The bare form is refused by KonfAI; the qualified one fell through to a raw AttributeError.
+
+    Both are the same authoring mistake, and only one of them told the author what to do about it.
+    """
+    from konfai.data.transform import TransformLoader
+
+    with pytest.raises(TransformError, match="names no 'Missing' in module"):
+        TransformLoader().get_transform("konfai.data.transform:Missing", "X")
+
+
+def test_a_stage_key_naming_a_function_is_refused_as_not_a_class() -> None:
+    """A module attribute that is not a class cannot be a stage: building it would call it bare and
+    die far away on whatever it returns."""
+    from konfai.data.transform import TransformLoader
+
+    with pytest.raises(TransformError, match="names a function, not a stage class"):
+        TransformLoader().get_transform("split_expand", "X")

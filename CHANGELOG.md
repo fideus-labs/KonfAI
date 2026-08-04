@@ -1,38 +1,65 @@
 # Changelog
 
-Generated from the commit history by [Commitizen](https://commitizen-tools.github.io/commitizen/) —
-every entry is a conventional commit, and each version's section is exactly what the GitHub Release
-for that tag carries. Regenerate with:
+Generated from the commit history by [Commitizen](https://commitizen-tools.github.io/commitizen/).
+Each version's section is what the GitHub Release for that tag carries. Regenerate with:
 
 ```bash
 cz changelog --start-rev v1.5.8
 ```
 
-`--start-rev` is not a preference: Conventional Commits only took hold at `v1.5.9`, so rendering
-further back produces version headings with nothing under them. What came before is described below.
+Conventional Commits started at `v1.5.9`; rendering further back produces empty version headings.
 
-## v1.8.0 (2026-08-01)
+## v1.8.0 (2026-08-04)
 
 ### ✨ Features
 
+- **data**: give a chain a per-component statistic, and a shape update that uses it
 - **transform**: let Warp read the bound the fields recorded, with max_displacement: auto
 - **studio**: show a transform run, and point Browse at the data rather than its log
 - **mcp**: let an agent plan and run a transform, and read the table for what it accepts
 - **transform**: a fifth workflow that reads a dataset, applies a chain, and writes it
 - **data**: declare an OME-Zarr pyramid from a Write, and let a field carry its own bound
 - **impact-reg**: seed the rigid from the centre of mass, not only the frame
+- **studio**: bundle icons through the app interface, and a way to stop Studio (#75)
 
 ### 🐛 Bug Fixes
 
+- **transform**: refuse a stage key that names something not a class
+- **transform**: print the plan's reduction and dropped lines once
+- **transform**: give refusals their true remedy and name
+- **transform**: hold on_fallback error at run time too
+- **transform**: refuse unknown roots and typo'd stage arguments
+- **mcp**: name the launcher from the normalized workflow, and plan a transform first
+- **mcp**: offer the workflow a session actually wrote, not the one the stage table names
+- **data**: refuse two chains that name the same destination group
+- **studio**: actually carry a transform's data directory to the panel
+- **transform**: keep the auto bound scan's header reads inside its own guard
+- **mcp**: guard plan_transform's config from a child that never returns
+- **transform**: report the dtype the plan probed with, not a constant beside it
+- **transform**: refuse two chains that share an intermediate Save
+- **budget**: size the transform plan against the node's ranks, not the cluster's
+- **patching**: drop a recorded sweep failure when the Save boundary flips
+- **budget**: split a node-scoped auto budget across the node's ranks, not the cluster's
 - **transform**: let a WHOLE_VOLUME declaration say why, and make Warp use it
 - **data**: make a read plan's pull maps picklable, so a plan can cross the spawn
 - **data**: bind a group's chain once, however often prepare is called
+- **metric**: let Dice and FocalLoss take the integer label map a segmentation target is
+- **transform**: refuse a Reduce grid policy that names no reference case
+- **omezarr**: publish derived levels by rename, so the original is never the gap
+- **transform**: ask a field store for its groups by the name Dataset exposes
+- **dataset**: record a long array whole instead of NumPy's elided print
 - **config**: refuse a nested block where a value is expected, instead of binding its repr
 - **dataset**: normalize an attribute's value at construction, not only on assignment
 - **data**: sweep a chain's pending Saves before serving a region, not after failing on one
 
+### ⚡ Performance
+
+- **data**: chunk a store on the region shape its writer declares
+- **runtime**: run a single rank in this process instead of a child (#76)
+
 ### ♻️ Refactoring
 
+- **data**: share the fallback constants and the Welford kernel
 - **data**: move the reduction operators out of the predictor, into one shared vocabulary
 - **data**: give the resolved memory budget a type that knows its own scope
 
@@ -291,10 +318,8 @@ further back produces version headings with nothing under them. What came before
 
 ## Earlier releases (v1.0.0 – v1.5.8)
 
-Not generated, and not reconstructed. The history before `v1.5.9` predates Conventional Commits, so
-there is no structure to render — and inventing one would describe a history that never happened.
-
-What those commit messages announce themselves:
+The history before `v1.5.9` predates Conventional Commits and is not rendered here. The main
+releases, as announced by their commit messages:
 
 | Version | Date | Announced as |
 | --- | --- | --- |
@@ -302,8 +327,4 @@ What those commit messages announce themselves:
 | `1.4.0` | 2025-11-26 | Enable Windows inference and improve konfai-apps |
 | `1.0.0` | 2025-06-02 | First functional version of KonfAI |
 
-For anything finer, read the log:
-
-```bash
-git log --oneline v1.5.8
-```
+For anything finer: `git log --oneline v1.5.8`.

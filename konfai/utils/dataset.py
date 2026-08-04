@@ -1494,9 +1494,7 @@ class Dataset:
 
         ``scale_factors`` is the WRITE-side counterpart: it makes the store this backend writes a
         pyramid instead of a single level. Reading indexes a pyramid BY POSITION, so a producer that
-        writes one and a consumer that asks for ``@1`` are two halves of the same contract -- and
-        until this parameter existed only the whole-array path could honour it, so a volume too large
-        to assemble came out single-level exactly when its pyramid was most needed.
+        writes one and a consumer that asks for ``@1`` are two halves of the same contract.
         """
 
         def __init__(
@@ -1687,12 +1685,11 @@ class Dataset:
             shape = [axis_sizes.get("c", 1), *[axis_sizes[axis] for axis in ("z", "y", "x") if axis in axis_sizes]]
             metadata["shape"] = shape
             attributes = self._attributes(metadata)
-            # Marked on the HEADERS path, so a field stays a field on the streamed one too. file_to_data
-            # marks it as well, but only there -- so an entry read region by region lost its RFC-5 type
-            # on the way in, and the store written from those regions came out an ordinary 3-channel
-            # image: read streamed, write streamed, and a displacement field silently stopped declaring
-            # itself. This is the once-per-case call (Dataset caches it), not the per-patch one, which
-            # is why the check belongs here and not in file_to_data_slice.
+            # Marked on the HEADERS path, so a field stays a field on the streamed read too --
+            # file_to_data marks it only on the whole-volume read, and a store written from unmarked
+            # regions is an ordinary 3-channel image. This is the once-per-case call (Dataset caches
+            # it), not the per-patch one, which is why the check belongs here and not in
+            # file_to_data_slice.
             if is_displacement_field(self._path(name)):
                 attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
             return shape, attributes

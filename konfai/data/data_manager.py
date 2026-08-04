@@ -1128,9 +1128,9 @@ class Data(ABC):
         """A destination group names ONE chain, whatever source group it reads.
 
         It is the key everything downstream indexes by: the prepared managers, the sample handed to
-        a model, the plan's lines. Two source groups declaring the same destination name silently
-        kept only the last one -- the first chain was built, then dropped, and nothing anywhere
-        looked wrong. Naming the chain is free: what a chain WRITES is the ``Write``'s own ``group``,
+        a model, the plan's lines. Two source groups declaring the same destination name would
+        silently keep only the last one -- the first chain built, then dropped, with nothing
+        anywhere looking wrong. Naming the chain is free: what a chain WRITES is the ``Write``'s own ``group``,
         which is a separate word for a separate thing.
         """
         owner: dict[str, str] = {}

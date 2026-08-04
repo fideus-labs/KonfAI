@@ -358,9 +358,22 @@ class TransformLoader:
                     + "A bare name resolves in konfai.data.transform, then konfai.data.augmentation;"
                     " use 'module:Class' for a class anywhere else.",
                 )
+        if not hasattr(module, name):
+            # The qualified form reaches here: the module imported, the class in it did not exist.
+            raise TransformError(
+                f"'{classpath}' names no '{name}' in module '{module.__name__}'.",
+                "Check the class name, or drop the module to resolve a KonfAI stage by name alone.",
+            )
+        factory = getattr(module, name)
+        if not isinstance(factory, type):
+            raise TransformError(
+                f"'{classpath}' names a {type(factory).__name__}, not a stage class.",
+                "A chain stage is a class -- a Transform, a DataAugmentation, or a foreign class to"
+                " wrap. Name one, e.g. 'Clip' or 'monai.transforms:ScaleIntensity'.",
+            )
         # A key is read as a dotted path, and a classpath naming its module carries dots of its own.
         subtree = f"{konfai_args}.{_escape_key_component(classpath)}"
-        transform = apply_config(subtree)(getattr(module, name))()
+        transform = apply_config(subtree)(factory)()
         if isinstance(transform, Transform):
             transform.prepare(subtree)
             return transform
