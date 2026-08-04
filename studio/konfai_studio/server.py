@@ -851,15 +851,49 @@ async def apps(session: str = Query("apps")) -> dict[str, Any]:
     return {"ok": ok, "apps": listed}
 
 
+#: Tasks kept alive across their own await. The loop holds only a weak reference to a bare
+#: ``create_task``, so a task that sleeps before doing its work can be collected before it runs.
+_SHUTDOWN_TASKS: set[asyncio.Task] = set()
+
+
+def _forwarded_by_a_proxy(request: Request) -> bool:
+    """Whether anything in front of this server claims to have forwarded the request.
+
+    Any of them is enough, and the prefix is matched rather than a list: a proxy that sets only
+    ``X-Real-IP``, or only a vendor's own ``X-Forwarded-Host``, still means the peer address belongs
+    to the proxy. What matters is not which header arrived but that one did.
+    """
+    return any(
+        name == "forwarded" or name == "x-real-ip" or name.startswith("x-forwarded-") for name in request.headers
+    )
+
+
+def _trusts_proxy_headers() -> bool:
+    """Whether uvicorn was told to rewrite the peer address from ``X-Forwarded-For``.
+
+    Set by the CLI, because the app is imported from a string and never sees its arguments. Read at
+    call time rather than at import so a test can set it.
+    """
+    return os.environ.get("KONFAI_STUDIO_PROXY_HEADERS") == "1"
+
+
 @app.post("/api/quit")
 async def quit_server(request: Request) -> dict[str, bool]:
     """Stop the Studio server (graceful: the lifespan teardown closes agents and reaps TensorBoards).
 
-    Two guards, because neither alone is enough. The client must be on this machine, so a remote
-    user cannot take a shared server down, token or not. And it must send the header below: the
-    loopback check only proves the TCP peer is local, which any page open in the user's browser
-    also is, so without it a drive-by form POST to localhost would shut Studio down. A custom
-    header is unforgeable from a form and, cross-origin, needs a preflight this server never grants.
+    Three guards, because none of them alone is enough.
+
+    The client must be on this machine, so a remote user cannot take a shared server down, token or
+    not. That reads the TCP peer, which is the real client only when nothing sits in front: behind
+    the same-host reverse proxy REMOTE.md documents, every request arrives from 127.0.0.1. Uvicorn
+    rewrites the peer from ``X-Forwarded-For`` under ``--proxy-headers``, so a forwarding header
+    arriving WITHOUT that flag means the peer belongs to the proxy and the loopback check answers a
+    question nobody asked — refuse instead.
+
+    And it must send the header below: the loopback check only proves the TCP peer is local, which
+    any page open in the user's browser also is, so without it a drive-by form POST to localhost
+    would shut Studio down. A custom header is unforgeable from a form and, cross-origin, needs a
+    preflight this server never grants.
 
     Slicer's Studio button and the titlebar power button rely on this — the server runs detached,
     with no terminal to Ctrl+C.
@@ -869,6 +903,12 @@ async def quit_server(request: Request) -> dict[str, bool]:
     client = request.client.host if request.client else ""
     if client not in ("127.0.0.1", "::1"):
         raise HTTPException(403, "the Studio server can only be stopped from its own machine")
+    if _forwarded_by_a_proxy(request) and not _trusts_proxy_headers():
+        raise HTTPException(
+            403,
+            "this request came through a proxy and the server was not started with --proxy-headers,"
+            " so it cannot tell which machine it is from",
+        )
     if request.headers.get("x-konfai-studio") != "quit":
         raise HTTPException(403, "missing the X-KonfAI-Studio header — stop Studio from its own UI")
 
@@ -876,7 +916,9 @@ async def quit_server(request: Request) -> dict[str, bool]:
         await asyncio.sleep(0.3)  # let this response leave before the shutdown begins
         os.kill(os.getpid(), signal.SIGTERM)
 
-    asyncio.get_running_loop().create_task(_after_reply())
+    # Held: the loop keeps only a weak reference and would collect the task mid-sleep.
+    _SHUTDOWN_TASKS.add(task := asyncio.get_running_loop().create_task(_after_reply()))
+    task.add_done_callback(_SHUTDOWN_TASKS.discard)
     return {"ok": True}
 
 
