@@ -312,8 +312,61 @@ When the shared prefix is expensive (a `Warp`, a resample), put a `Save` before
 the `Expand`: it is materialized once and every copy reads the cache.
 
 Resume is **per copy**: a copy whose entry exists is skipped, so an interrupted
-run picks up at the copy it stopped on — and because `Expand.seed` fixes the
-draws, the copies it keeps are the copies it would have written.
+run picks up at the copy it stopped on — and because the draws come from
+`manual_seed` rather than from the order a generator was consumed in, the copies
+it keeps are the copies it would have written.
+
+## Statistics a stage can ask for
+
+A stage that needs a whole-volume figure declares it rather than computing it:
+`GLOBAL_STAT` with the keys it reads. The planner obtains them once, by scanning
+the stored entry without materialising it, and the stage is then an ordinary
+value map — so it streams. That is how `Normalize` and `Standardize` work.
+
+Two grains are available, and they come from the **same single pass**:
+
+| Keys | What they are |
+| --- | --- |
+| `Min` `Max` `Mean` `Std` | the figure over the whole volume, every channel pooled |
+| `MinPerChannel` `MaxPerChannel` `MeanPerChannel` `StdPerChannel` | one figure per channel |
+
+The per-channel form exists because some quantities have no single mean. The
+spatial mean of a displacement field is a **translation**: it has one part per
+component, and pooling them into one number describes nothing.
+
+```{warning}
+A statistic is the STORED volume's. It is still the stage's own input only when
+every stage before it preserves statistics — a reorientation does, a `Clip` does
+not. `Clip` then `Normalize` therefore takes the whole-volume path, and the plan
+says so. Reorder the chain, or cut it with a `Save`.
+```
+
+### `ShapeUpdate`: the shape residual of a displacement field
+
+The shape update of an atlas build: `output = -step * (field - t)`, where `t` is
+the field's per-component spatial mean in world units. Resampling a template
+through the result moves it along the cohort's shape residual, at ANTs'
+gradient step.
+
+```yaml
+transforms:
+  ShapeUpdate:
+    step: 0.25
+  Write:
+    dataset: ./Update:omezarr
+```
+
+`t` is **stripped, not applied**, and that is the whole point of the stage. A
+total field maps template coordinates into each specimen's OWN world frame, so
+its spatial mean is dominated by the frame-to-frame offset, not by any pose error
+of the template. Applying it in full translates the template out of its own grid
+and clips the anatomy; stripping it is what keeps the template anchored — the
+same thing ANTs' `AverageAffineTransformNoRigid` is for.
+
+Because the statistic is declared rather than recomputed per region, a field of
+any size runs region by region: the volume is never assembled. Handed the whole
+volume anyway — a chain that fell back for another reason — the stage takes the
+statistic from the tensor in hand, so both paths leave the same state behind.
 
 ## Writing your own transform
 
@@ -383,6 +436,7 @@ refused (cheaper to load the volume), and the plan says so.
 | a translated sub-box | `CROP` | `stream_region_source()` |
 | a resampled grid | `RESCALE` | inherit from `Resample` |
 | whole-volume Min/Max/Mean/Std | `GLOBAL_STAT`, with `stat_keys` | nothing |
+| the same, per component | `GLOBAL_STAT`, with `MinPerChannel`/`MaxPerChannel`/`MeanPerChannel`/`StdPerChannel` | nothing |
 | genuinely the whole volume | nothing (the default) | nothing |
 
 A transform that does not subclass `Transform` still works — it is wrapped

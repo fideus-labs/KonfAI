@@ -105,7 +105,7 @@ KONFAI_MCP_APP_CATALOG = "/path/to/my_apps.json"   # optional: your own app sour
 | Dataset | `browse_dataset`, `inspect_dataset`, `read_dataset_file`, `preview_volume`, `prepare_dataset_aliases` |
 | Author | `design_config_strategy`, `initialize_session`, `write_workflow_config`, `write_session_file` |
 | Validate | `review_config_semantics`, `validate_config_semantics` |
-| Run & monitor | `run_train`, `run_prediction`, `run_evaluation`, `wait_for_job`, `read_live_metrics`, `leaderboard` |
+| Run & monitor | `run_train`, `run_prediction`, `run_evaluation`, `plan_transform` → `run_transform`, `wait_for_job`, `read_live_metrics`, `leaderboard` |
 | Use an app | `list_apps`, `describe_app`, `list_app_parameters`, `run_app_infer`, `run_app_evaluate`, `run_app_uncertainty`, `run_app_pipeline`, `import_app` (modify-then-run) |
 | Adapt & package | `fine_tune_app`, `import_app` → `run_resume` (`weights_only=True`), `package_app_from_session`, `export_app`, `register_app_source` |
 

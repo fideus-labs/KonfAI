@@ -2,7 +2,7 @@
 
 > GENERATED from the registry by `konfai-mcp/scripts/generate_tool_reference.py` — do not edit by hand.
 
-60 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
+62 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
 
 ## Tools
 
@@ -28,7 +28,7 @@ Use to CREATE a named session workspace (and switch to it by default), so differ
 
 ### `delete_run`
 
-Use to remove ONE run's outputs from the current session, leaving the rest of the workspace intact. This deletes the run's directory under the kind's output root (train removes Statistics/<run_name> and Checkpoints/<run_name>; prediction, evaluation, uncertainty remove their <run_name> folder), jailed to the session workspace. It refuses a run_name containing a path separator, and never touches configs or the dataset. Outputs: the deleted paths (relative to the workspace). Next: summarize_session, or leaderboard to compare the remaining runs.
+Use to remove ONE run's outputs from the current session, leaving the rest of the workspace intact. This deletes the run's directory under the kind's output root (train removes Statistics/<run_name> and Checkpoints/<run_name>; prediction, evaluation, uncertainty remove their <run_name> folder; transform removes Transforms/<run_name>, its log and plan only -- never the transformed data), jailed to the session workspace. It refuses a run_name containing a path separator, and never touches configs or the dataset. Outputs: the deleted paths (relative to the workspace). Next: summarize_session, or leaderboard to compare the remaining runs.
 
 ### `delete_session`
 
@@ -40,7 +40,7 @@ Use to read one app's manifest so you can decide whether it matches the user's t
 
 ### `describe_config_schema`
 
-Use before authoring a config to learn the top-level schema of a workflow. This is GENERATED from the Trainer/Predictor/Evaluator constructor via KonfAI's reflection engine, so it never drifts: it returns each top-level field with its type, default, whether it is required, and -- for nested config objects -- a classpath to drill into with inspect_object_signature. It does not return a full ready-to-run config; combine it with the example templates. Outputs: root_key, yaml_path, fields[{name,yaml_key,type,default,default_hidden,required,nested_config_classpath}], next_actions. Each field's yaml_key is the LITERAL key to write in the YAML (no casing guesses); default_hidden=true means the default exists but is not JSON-serializable here. Next: describe_config_schema with a deeper path, inspect_object_signature, then write_workflow_config.
+Use before authoring a config to learn the top-level schema of a workflow. This is GENERATED from the Trainer/Predictor/Evaluator/Transformer constructor via KonfAI's reflection engine, so it never drifts: it returns each top-level field with its type, default, whether it is required, and -- for nested config objects -- a classpath to drill into with inspect_object_signature. It does not return a full ready-to-run config; combine it with the example templates. Outputs: root_key, yaml_path, fields[{name,yaml_key,type,default,default_hidden,required,nested_config_classpath}], next_actions. Each field's yaml_key is the LITERAL key to write in the YAML (no casing guesses); default_hidden=true means the default exists but is not JSON-serializable here. Next: describe_config_schema with a deeper path, inspect_object_signature, then write_workflow_config.
 
 ### `describe_extension_points`
 
@@ -48,7 +48,7 @@ Use when you want to ADD or EXTEND a component (a new loss, metric, model/networ
 
 ### `describe_konfai_capabilities`
 
-Use at the start, or whenever you need to orient, to learn what KonfAI can do and which tool to reach for. This returns a capability overview: the three workflows, the component kinds (+ list_components), the extension model (+ describe_extension_points, including external-library classpaths), modeling modes, advanced capabilities, and which actions are safe vs should prefer human confirmation. It is a router to other tools and to AGENTS.md (the canonical reference), not a workflow to execute. Next: inspect_dataset, describe_config_schema, list_components, describe_extension_points.
+Use at the start, or whenever you need to orient, to learn what KonfAI can do and which tool to reach for. This returns a capability overview: the four workflows, the component kinds (+ list_components), the extension model (+ describe_extension_points, including external-library classpaths), modeling modes, advanced capabilities, and which actions are safe vs should prefer human confirmation. It is a router to other tools and to AGENTS.md (the canonical reference), not a workflow to execute. Next: inspect_dataset, describe_config_schema, list_components, describe_extension_points.
 
 ### `describe_model_outputs`
 
@@ -129,6 +129,10 @@ Use when you need the current job registry state. This lists jobs for the curren
 ### `package_app_from_session`
 
 Use to PACKAGE a model trained in the current session (the train-from-scratch branch) into a resolvable KonfAI app bundle -- the same endpoint fine_tune_app produces, so a from-scratch run can also finish as a reusable app. It gathers the session's checkpoints and a config, writes an app.json from the metadata you give, and assembles a bundle (app.json + config + checkpoint + optional Model.py/requirements) that describe_app / run_app_infer / import_app can consume. It does not train, and it does not upload the bundle anywhere. Outputs: bundle_path, the packaged checkpoints/configs, next_actions (and onnx path if requested). Next: describe_app or run_app_infer on the produced bundle.
+
+### `plan_transform`
+
+Use BEFORE run_transform, always: it is the dry run, and it writes no data. This plans every (case, chain) from the session Transform.yml. The plan is a measurement, not an estimate -- it opens and removes a real region-write on each destination -- so its verdict is the one the run will act on: STREAM (bounded memory), WHOLE-VOLUME (the case is assembled whole, with the stage that refused it named), SKIP (already written), REDUCE, REFUSED. Outputs: {ok, report, verdict_counts, budget, needs_attention[], over_budget[]}. A non-empty over_budget means run_transform would refuse before writing anything. Next: fix what needs_attention names, or run_transform.
 
 ### `prepare_dataset_aliases`
 
@@ -213,6 +217,10 @@ Use to RESUME an interrupted or crashed training run from a checkpoint: model, o
 ### `run_train`
 
 Use after train config review and validation succeed. This launches a training job and returns structured job resources. It does not choose the device or repair config issues automatically -- omitting gpu trains on CPU, so pass gpu explicitly for GPU training. Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. Next: read_live_metrics or wait_for_job.
+
+### `run_transform`
+
+Use to apply a transform chain to a dataset with NO model: read, transform, write. Read plan_transform first -- this writes a dataset, and the plan is what says how much and how. This launches a transform job from the session Transform.yml and returns structured job resources. The run replans, stores the plan, and refuses outright when a case can neither stream nor fit memory_budget. A case whose output already exists is skipped, so an interrupted run resumes; pass overwrite to recompute. Outputs: job payload with resources and next_actions; or a blocker payload when a prerequisite is missing. Next: wait_for_job then inspect_dataset on what it wrote.
 
 ### `set_live_tunables`
 
