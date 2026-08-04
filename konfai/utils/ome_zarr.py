@@ -601,8 +601,18 @@ def append_ome_zarr_levels(
             group = zarr.open_group(str(staging), mode="r+")
             group.attrs[_KONFAI_ATTR_KEY] = {"attributes": dict(sidecar)}
             zarr.consolidate_metadata(str(staging))
-        shutil.rmtree(store)
-        staging.rename(store)
+        # Rename in both directions, so no instant exists with neither store on disk: deleting the
+        # original first opens a window as long as a full tree delete, which the ``finally`` below
+        # then completes by clearing the replacement too.
+        replaced = store.with_name(f"{store.name}.replaced")
+        shutil.rmtree(replaced, ignore_errors=True)
+        store.rename(replaced)
+        try:
+            staging.rename(store)
+        except BaseException:
+            replaced.rename(store)
+            raise
+        shutil.rmtree(replaced, ignore_errors=True)
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)

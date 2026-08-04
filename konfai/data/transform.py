@@ -1670,15 +1670,18 @@ class Reduce(Transform):
                 " case name to inherit -- borrowing a member's would tie the deliverable to"
                 " iteration order.",
             )
-        if grid not in ("strict", "shape_only") and not str(grid).startswith("reference:"):
+        policy = str(grid)
+        reference = policy.split(":", 1)[1].strip() if policy.startswith("reference:") else ""
+        if policy not in ("strict", "shape_only") and not reference:
             raise TransformError(
                 f"'Reduce' has an unknown grid policy '{grid}'.",
                 "Use 'strict' (extents + geometry), 'shape_only' (extents only) or"
-                " 'reference:<case>' (adopt that member's geometry).",
+                " 'reference:<case>' (adopt that member's geometry) -- 'reference:' alone names no"
+                " case.",
             )
         self.operator_classpath = str(operator)
         self.output = str(output).strip()
-        self.grid = str(grid)
+        self.grid = f"reference:{reference}" if reference else policy
         self.grid_tolerance = float(grid_tolerance)
         self.provenance = bool(provenance)
 

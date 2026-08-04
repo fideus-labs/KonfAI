@@ -57,6 +57,23 @@ class TestFocalLoss:
         assert torch.allclose(loss, reference)
 
 
+@pytest.mark.parametrize("criterion", ["Dice", "FocalLoss"])
+def test_a_criterion_accepts_the_integer_label_map_a_segmentation_target_is(criterion: str) -> None:
+    """A segmentation target comes off disk as integer labels, not as floats.
+
+    Both criteria resample the target onto the output grid, and nearest-neighbour interpolation has
+    no integer kernel -- so the dtype the dataset actually produces reached torch as an unsupported
+    one. Every other test here hands a float, which is why the training path was the first to meet it.
+    """
+    output = torch.rand(1, 3, 8, 8)
+    target = torch.randint(0, 3, (1, 1, 8, 8))
+    assert target.dtype is torch.int64
+
+    loss = Dice()(output, target)[0] if criterion == "Dice" else FocalLoss()(output, target)
+
+    assert torch.isfinite(loss).all()
+
+
 class TestDice:
     def test_loss_averages_over_present_labels_only(self):
         """A perfect prediction must give a loss of 0 even when some requested labels are absent."""

@@ -453,7 +453,10 @@ class Dice(Criterion):
 
     @staticmethod
     def _loss(labels: list[int] | None, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        target = F.interpolate(targets[0], output.shape[2:], mode="nearest")
+        # Resampled in float: nearest-neighbour interpolation has no integer kernel, and a
+        # segmentation target is a label map. Nearest picks values rather than blending them, so
+        # every label comes back exactly.
+        target = F.interpolate(targets[0].float(), output.shape[2:], mode="nearest")
         result = {}
         loss = torch.tensor(0, dtype=torch.float32).to(output.device)
         if labels is None:
@@ -858,7 +861,7 @@ class FocalLoss(Criterion):
         self.reduction = reduction
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        target = F.interpolate(targets[0], output.shape[2:], mode="nearest").long()
+        target = F.interpolate(targets[0].float(), output.shape[2:], mode="nearest").long()
 
         logpt = F.log_softmax(output, dim=1)
         pt = torch.exp(logpt)
