@@ -152,6 +152,11 @@ written replaces it.
   a caller whose system temp directory is a tmpfs can now stage volume-sized intermediates on real disk
   instead of overriding `TMPDIR` from outside; the same change also writes the moved image and the
   displacement field once per run instead of twice
+- **impact-reg**: `register` accepts a whole dataset per input, not only one volume — a directory is
+  expanded into one case per volume it holds, exactly as `konfai-apps infer` already does, and every case
+  gets its own field, moved image and transform. Previously the cases were counted from the command-line
+  arguments while konfai-apps counted them from the expanded units, so a directory input produced N
+  results and only the first was collected, silently
 - **impact-reg**: a registration preset now owes exactly one output, its displacement field, in whatever
   format it declares — `register` derives the moved image from it instead of expecting a second output.
   A preset can drop `MovedImage` entirely, which for a tiled one also drops blending a full-size moved

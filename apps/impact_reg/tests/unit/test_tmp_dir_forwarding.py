@@ -48,8 +48,8 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
 
     def fake_run(command, **kwargs):
         captured.append(list(command))
-        # Stand in for the preset run: konfai-apps would leave its outputs under -o.
-        write_preset_output(Path(command[command.index("-o") + 1]))
+        # Stand in for the preset run: konfai-apps leaves one case directory per unit under -o.
+        write_preset_output(Path(command[command.index("-o") + 1]) / "P000")
         return None
 
     monkeypatch.setattr("impact_reg_konfai.impact_reg.subprocess.run", fake_run)
@@ -57,7 +57,9 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
     work = tmp_path / "work"
     work.mkdir()
     app = ImpactRegKonfAIApp()
-    app._infer_preset("FireANTs_SyN", tmp_path / "f.mha", tmp_path / "m.mha", None, None, work, [], None, True)
+    app._infer_preset(
+        "FireANTs_SyN", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], 1, work, [], None, True
+    )
 
     assert len(captured) == 1
     assert _tmp_dir_value(captured[0]) == str(work / "FireANTs_SyN")
