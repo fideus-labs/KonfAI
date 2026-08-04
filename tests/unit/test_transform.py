@@ -40,6 +40,7 @@ from konfai.data.transform import (
     Normalize,
     OneHot,
     Padding,
+    Reduce,
     ResampleToResolution,
     ResampleToShape,
     Squeeze,
@@ -800,3 +801,21 @@ def test_a_half_cast_moves_a_ct_value() -> None:
     through_half = TensorCast("float16")("CT", volume.clone(), Attribute()).to(torch.float32)
     assert not torch.equal(volume, through_half)
     assert torch.equal(volume, TensorCast("float32")("CT", volume.clone(), Attribute()))
+
+
+@pytest.mark.parametrize("grid", ["reference:", "reference:   ", "whatever", ""])
+def test_reduce_refuses_a_grid_policy_that_names_nothing(grid: str) -> None:
+    """``reference:`` alone passes a prefix test and names no case.
+
+    Accepted, it is diagnosed much later by the reduction engine -- as a case that is not being
+    reduced, which is not what went wrong -- after every member's manager has been built.
+    """
+    with pytest.raises(TransformError, match="grid policy"):
+        Reduce(operator="konfai.data.reduction:Mean", output="template", grid=grid)
+
+
+def test_reduce_reads_a_reference_case_through_the_space_yaml_leaves() -> None:
+    """``grid: reference: CASE_000`` is the ordinary YAML spelling, and the space is not part of the name."""
+    assert Reduce(operator="konfai.data.reduction:Mean", output="template", grid="reference: CASE_000").grid == (
+        "reference:CASE_000"
+    )

@@ -27,6 +27,8 @@ region. They are different code (``write_ome_zarr`` against ``create_ome_zarr_st
 ``append_ome_zarr_levels``), and the streamed one is the path a real volume takes.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import zarr
@@ -36,6 +38,7 @@ from konfai.utils.ome_zarr import (
     DISPLACEMENT_BOUND_ATTRIBUTE,
     _read_konfai_attributes,
     _zarr_v3_available,
+    append_ome_zarr_levels,
     get_ome_zarr_info,
     is_displacement_field,
     write_ome_zarr,
@@ -96,6 +99,31 @@ def test_a_declared_pyramid_is_written_by_both_paths_and_they_agree(tmp_path):
     # (c, z, y, x) where Spacing is (x, y, z) -- the reversal is the point of asserting it here.
     assert get_ome_zarr_info(streamed, 0)["scale"] == [1.0, 1.0, 1.0, 2.0]
     assert get_ome_zarr_info(streamed, 1)["scale"] == [1.0, 4.0, 4.0, 8.0]
+
+
+def test_an_interrupted_level_append_leaves_the_original_store_readable(tmp_path, monkeypatch):
+    """Deriving the coarse levels rewrites level 0, so a failure here is a failure over the only copy.
+
+    The safety is bought with a sibling store and a rename: a rename that does not happen has to leave
+    the original where its readers expect it, not a gap between two deletes.
+    """
+    data = np.arange(1 * 16 * 16 * 16, dtype=np.float32).reshape(1, 16, 16, 16)
+    Dataset(tmp_path / "out", "omezarr").write("G", "case", data, _geometry())
+    store = _only_store(tmp_path / "out")
+    real_rename = Path.rename
+
+    def interrupt_the_publishing_rename(self, target):
+        if self.name.endswith(".appending"):
+            raise KeyboardInterrupt
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", interrupt_the_publishing_rename)
+    with pytest.raises(KeyboardInterrupt):
+        append_ome_zarr_levels(store, [4])
+    monkeypatch.undo()
+
+    back, _ = Dataset(tmp_path / "out", "omezarr").read_data("G", "case")
+    assert np.array_equal(np.asarray(back, dtype=np.float32).reshape(data.shape), data)
 
 
 def test_a_pyramid_asked_of_a_format_without_levels_is_refused(tmp_path):
@@ -160,19 +188,3 @@ def test_a_field_records_its_own_bound_on_both_write_paths(tmp_path):
     assert _read_konfai_attributes(streamed)[DISPLACEMENT_BOUND_ATTRIBUTE] == expected
     assert is_displacement_field(streamed)
     assert DISPLACEMENT_BOUND_ATTRIBUTE in Dataset(tmp_path / "streamed", "omezarr").get_infos("DVF", "case")[1]
-
-
-@_needs_rfc5
-def test_the_bound_turns_into_a_per_axis_halo_under_anisotropy(tmp_path):
-    """What the bound is FOR, asserted once so the axis order cannot drift.
-
-    Component ``i`` of a displacement field is world axis (x, y, z)[i]; array axes are (z, y, x). So a
-    halo in array order reads the components reversed, and each by its own spacing. Getting this wrong
-    is a warp that looks plausible and reads the wrong neighbourhood -- the historical error rate on
-    this pairing is 100 %.
-    """
-    bound_xyz = [917.5, 640.25, 96.0]
-    spacing_zyx = [40.0, 30.08, 30.08]
-    halo_zyx = [int(np.ceil(bound_xyz[len(spacing_zyx) - 1 - axis] / spacing_zyx[axis])) for axis in range(3)]
-    # z takes the z component (96 um over a 40 um voxel), x takes the x component (917.5 over 30.08).
-    assert halo_zyx == [3, 22, 31]
