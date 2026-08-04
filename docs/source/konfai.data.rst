@@ -12,6 +12,14 @@ konfai.data.augmentation module
    :show-inheritance:
    :undoc-members:
 
+konfai.data.case\_reduction module
+----------------------------------
+
+.. automodule:: konfai.data.case_reduction
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 konfai.data.data\_manager module
 --------------------------------
 
@@ -24,6 +32,14 @@ konfai.data.patching module
 ---------------------------
 
 .. automodule:: konfai.data.patching
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+konfai.data.reduction module
+----------------------------
+
+.. automodule:: konfai.data.reduction
    :members:
    :show-inheritance:
    :undoc-members:

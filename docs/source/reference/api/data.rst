@@ -24,6 +24,11 @@ Dataset configuration objects
    :show-inheritance:
    :no-index:
 
+.. autoclass:: DataTransform
+   :members:
+   :show-inheritance:
+   :no-index:
+
 .. autoclass:: DatasetIter
    :members:
    :show-inheritance:

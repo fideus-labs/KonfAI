@@ -40,6 +40,9 @@ up the environment:
 .. autofunction:: statistics_directory
    :no-index:
 
+.. autofunction:: transforms_directory
+   :no-index:
+
 See also
 --------
 

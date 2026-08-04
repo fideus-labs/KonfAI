@@ -47,6 +47,14 @@ konfai.trainer module
    :show-inheritance:
    :undoc-members:
 
+konfai.transformer module
+-------------------------
+
+.. automodule:: konfai.transformer
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 Module contents
 ---------------
 

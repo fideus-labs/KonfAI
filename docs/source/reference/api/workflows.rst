@@ -1,12 +1,13 @@
 Workflows API
 =============
 
-The low-level KonfAI workflows are exposed through three entrypoint functions
-and three root classes:
+The low-level KonfAI workflows are exposed through four entrypoint functions
+and four root classes:
 
 - training
 - prediction
 - evaluation
+- transform (no model)
 
 These are the main Python APIs behind the ``konfai`` CLI.
 
@@ -65,6 +66,35 @@ Evaluation
    :no-index:
 
 .. autoclass:: Statistics
+   :members:
+   :show-inheritance:
+   :no-index:
+
+Transform
+---------
+
+.. currentmodule:: konfai.transformer
+
+.. autofunction:: transform
+   :no-index:
+
+.. autofunction:: build_transform
+   :no-index:
+
+.. autofunction:: plan_transform
+   :no-index:
+
+.. autoclass:: Transformer
+   :members:
+   :show-inheritance:
+   :no-index:
+
+.. autoclass:: TransformPlan
+   :members:
+   :show-inheritance:
+   :no-index:
+
+.. autoclass:: TransformPlanEntry
    :members:
    :show-inheritance:
    :no-index:

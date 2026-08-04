@@ -12,7 +12,7 @@ KonfAI uses four main command-line entrypoints:
 
 ## `konfai`
 
-Low-level workflow runner for training, prediction, and evaluation.
+Low-level workflow runner for training, prediction, evaluation, and transformation.
 
 Use `konfai` when you are still designing a workflow directly from YAML.
 
@@ -24,17 +24,22 @@ Use `konfai` when you are still designing a workflow directly from YAML.
 | `RESUME` | Resume training from a checkpoint. |
 | `PREDICTION` | Run inference using one or more checkpoints. |
 | `EVALUATION` | Compute metrics on saved outputs. |
+| `TRANSFORM` | Apply a transform chain to a dataset — no model. |
 
 ### Common options
+
+These apply to `TRAIN`, `RESUME`, `PREDICTION`, and `EVALUATION`. `TRANSFORM`
+builds its own parser: it takes `-c`, `-y`, `--gpu`, `--cpu` and `-q` with the
+meanings noted below, and has **no** `-tb`.
 
 | Option | Meaning |
 | --- | --- |
 | `-c`, `--config` | YAML file to use. |
-| `-y`, `--overwrite` | Overwrite existing outputs without prompting. |
+| `-y`, `--overwrite` | Overwrite existing outputs without prompting. Under `TRANSFORM`: recompute cases whose output exists — without it such a case is skipped, and nothing prompts. |
 | `--gpu` | One or more GPU ids. |
-| `--cpu` | Number of CPU workers when not using GPUs. |
+| `--cpu` | Number of CPU workers when not using GPUs. Under `TRANSFORM`: shard the cases over N worker processes (default 1). |
 | `-q`, `--quiet` | Reduce console output. |
-| `-tb`, `--tensorboard` | Launch TensorBoard. |
+| `-tb`, `--tensorboard` | Launch TensorBoard. Not accepted by `TRANSFORM`. |
 
 ### Default config file per command
 
@@ -46,6 +51,7 @@ current directory**:
 | `TRAIN` / `RESUME` | `./Config.yml` | `Trainer:` |
 | `PREDICTION` | `./Prediction.yml` | `Predictor:` |
 | `EVALUATION` | `./Evaluation.yml` | `Evaluator:` |
+| `TRANSFORM` | `./Transform.yml` | `Transformer:` |
 
 ```{note}
 The `--config` help text mentions `Train.yml`, but the real TRAIN default is
@@ -77,6 +83,21 @@ after a run your YAML will contain the resolved defaults. See
 `EVALUATION`
 
 - `--evaluations-dir` / `--evaluations_dir` (default `./Evaluations/`)
+
+`TRANSFORM`
+
+- `--plan` — print the per-case streaming plan and exit. The plan probes each
+  destination with a real region-write open (created, then removed), so its
+  verdict is the run's own — and even plan mode touches the output directories.
+- `--transforms-dir` / `--transforms_dir` (default `./Transforms/`) — run logs
+  and the plan; the outputs go where each `Write:` says.
+- `--gpu` exists for one reason: a `KonfAIInference` stage runs a nested
+  inference that does use the device. Plain read transforms run on CPU either
+  way. There is no `-tb`: the workflow emits no scalars.
+- `--plan` short-circuits before the distributed wrapper, so it runs in one
+  process and spawns no ranks. `--cpu` is still read: it is the rank count the
+  plan divides the `memory_budget` by, so `--plan --cpu 4` reports the per-rank
+  budget a four-process run would actually get.
 
 ```{note}
 **Device selection quirks.** The CLI default is **CPU** (`--gpu` defaults to an
