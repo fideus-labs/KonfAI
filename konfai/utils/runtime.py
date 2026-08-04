@@ -59,6 +59,7 @@ from konfai import (
     konfai_state,
     predictions_directory,
     statistics_directory,
+    transforms_directory,
 )
 from konfai.utils.errors import ConfigError
 from konfai.utils.utils import env_flag
@@ -313,6 +314,7 @@ class State(Enum):
     RESUME = "RESUME"
     PREDICTION = "PREDICTION"
     EVALUATION = "EVALUATION"
+    TRANSFORM = "TRANSFORM"
 
     def __str__(self) -> str:
         return self.value
@@ -580,6 +582,8 @@ class Log(MinimalLog):
             path = predictions_directory()
         elif konfai_state() == "EVALUATION":
             path = evaluations_directory()
+        elif konfai_state() == "TRANSFORM":
+            path = transforms_directory()
         else:
             path = statistics_directory()
         # ``name`` is train_name from the config; an absolute path or '..' segments would place the logs

@@ -160,6 +160,16 @@ _CASES: dict[str, list[_Case]] = {
     "ResampleToShape": [_Case(ResampleToShape([12, 8, 14]), atol=_RESCALE_ATOL)],
     "ResampleTransform": [_Case(ResampleTransform({"transform": True}))],
     "Save": [_Case(Save("Dataset"))],
+    # Warp needs a field on disk to run, which this registry cannot build: with no declared
+    # displacement it declares WHOLE_VOLUME, so it stays out of the equivalence sweep below. Its
+    # streamed-equals-whole-volume proof lives in test_warp.py, where a field exists.
+    "Warp": [_Case(Warp(field="Dataset:h5", group="DVF"))],
+    # Reduce is a cardinality marker the cohort engine splits out of the chain, never a per-case
+    # stage: it declares WHOLE_VOLUME so a chain reaching the ordinary planner refuses rather than
+    # streams, which is what puts it out of the equivalence sweep below.
+    "Reduce": [_Case(Reduce(output="reduced"))],
+    # Write is Save with a required destination: same boundary, same WHOLE_VOLUME declaration.
+    "Write": [_Case(Write("Dataset"))],
     "SegmentationDisagreement": [_Case(SegmentationDisagreement(), group="Ensemble")],
     "SelectLabel": [_Case(SelectLabel(["(1,2)", "(3,1)"]), group="Labels")],
     "Softmax": [_Case(Softmax(0), group="Ensemble")],
@@ -168,16 +178,6 @@ _CASES: dict[str, list[_Case]] = {
     "StandardDeviation": [_Case(StandardDeviation(), group="Ensemble")],
     "Sum": [_Case(Sum(0), group="Ensemble")],
     "Variance": [_Case(Variance(), group="Ensemble")],
-    # Warp needs a field on disk to run, which this registry cannot build: with no declared
-    # displacement it declares WHOLE_VOLUME, so it stays out of the equivalence sweep below. Its
-    # streamed-equals-whole-volume proof lives in test_warp.py, where a field exists.
-    "Warp": [_Case(Warp(field="Dataset:h5", group="DVF"))],
-    # Reduce is a cardinality marker a cohort engine splits out of the chain, never a per-case
-    # stage: it declares WHOLE_VOLUME so a chain reaching the ordinary planner refuses rather than
-    # streams, which is what puts it out of the equivalence sweep below.
-    "Reduce": [_Case(Reduce(output="reduced"))],
-    # Write is Save with a required destination: same boundary, same WHOLE_VOLUME declaration.
-    "Write": [_Case(Write("Dataset"))],
 }
 
 

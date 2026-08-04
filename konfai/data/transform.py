@@ -222,6 +222,15 @@ class Transform(NeedDevice, ABC):
         del region, spatial_shape
         return self(name, tensor, cache_attribute)
 
+    def prepare(self, konfai_args: str) -> None:
+        """Told where this stage's own configuration lives, once, right after it was built.
+
+        The loader knows the subtree a stage read its arguments from; a stage that instantiates
+        something ELSE from configuration — an operator named by classpath — cannot know it, and
+        without this would have to build that object with no arguments at all. The base holds
+        nothing: only a stage with a sub-object of its own overrides it.
+        """
+
     def stream_abort(self, name: str) -> None:
         """Drop whatever ``stream_slab`` holds open for ``name`` after a mid-case failure.
 
@@ -337,11 +346,32 @@ class TransformLoader:
 
     def get_transform(self, classpath: str, konfai_args: str) -> Transform:
         module, name = get_module(classpath, "konfai.data.transform")
+        if not hasattr(module, name) and ":" not in classpath:
+            # A bare name the transform package does not have may be an AUGMENTATION: those are
+            # stages too, and a chain declares them exactly where they apply (see Expand). Looked up
+            # second, so a transform never loses its name to a same-named draw.
+            module, name = get_module(classpath, "konfai.data.augmentation")
         # A key is read as a dotted path, and a classpath naming its module carries dots of its own.
-        transform = apply_config(f"{konfai_args}.{_escape_key_component(classpath)}")(getattr(module, name))()
+        subtree = f"{konfai_args}.{_escape_key_component(classpath)}"
+        transform = apply_config(subtree)(getattr(module, name))()
         if isinstance(transform, Transform):
+            transform.prepare(subtree)
+            return transform
+        if _is_augmentation(transform):
+            # A draw is handed over as itself: the manager binds it to a copy (AugmentedStage) once
+            # it knows which copy it is planning, which is the one thing the loader cannot know.
+            transform.load(1.0)
             return transform
         return Foreign(transform, classpath)
+
+
+def _is_augmentation(candidate: object) -> bool:
+    """Whether this object is a KonfAI draw, asked without importing the augmentation module here.
+
+    ``konfai.data.augmentation`` imports this module, so the dependency only runs one way; the check
+    walks the class's own ancestry instead of using ``isinstance``.
+    """
+    return any(base.__name__ == "DataAugmentation" for base in type(candidate).__mro__)
 
 
 class Foreign(Transform):
@@ -1513,8 +1543,8 @@ class Warp(Transform):
     dark rim around the moved anatomy and nothing else.
 
     ``max_displacement`` is in the same world units as ``Spacing`` (micrometres for these stores).
-    Left at zero, or with no ``Spacing`` on the case, the stage declares ``WHOLE_VOLUME`` and says
-    which of the two is missing -- correct, and as expensive as it sounds.
+    Left at zero, or with no ``Spacing`` on the case, the stage declares ``WHOLE_VOLUME`` and the
+    dispatcher hands it the volume -- correct, and as expensive as it sounds.
     """
 
     def __init__(
@@ -1706,10 +1736,16 @@ class Reduce(Transform):
                 " case.",
             )
         self.operator_classpath = str(operator)
+        # Where this stage was configured from, so its operator binds its own parameters from the
+        # same mapping -- None when the chain was built in Python, where there is no config to read.
+        self.konfai_args: str | None = None
         self.output = str(output).strip()
         self.grid = f"reference:{reference}" if reference else policy
         self.grid_tolerance = float(grid_tolerance)
         self.provenance = bool(provenance)
+
+    def prepare(self, konfai_args: str) -> None:
+        self.konfai_args = konfai_args
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # A cardinality marker, not a per-case stage: the reduction engine SPLITS it out of the chain
@@ -1723,6 +1759,96 @@ class Reduce(Transform):
             "A chain containing Reduce is run by the reduction engine of the TRANSFORM workflow; it"
             " has no meaning as an ordinary per-case transform.",
         )
+
+
+class Expand(Transform):
+    """Turn one case into ``nb`` copies, at a declared point of the chain — ``Reduce``'s mirror.
+
+    The stage that changes a chain's cardinality the other way. Everything BEFORE it runs once per
+    case (a ``Save`` there is a cache every copy shares); everything AFTER it runs once per copy,
+    and a ``Save``/``Write`` there writes one entry per copy.
+
+    It multiplies, and nothing else: the draws are ordinary stages of the chain, declared where they
+    apply, so transforms and augmentations interleave freely after the marker::
+
+        transforms:
+          Clip:   {min_value: 0.0, max_value: 400.0}   # once per case
+          Expand: {nb: 8, pattern: "{name}_r{a:02d}"}
+          Rotate: {a_min: -15, a_max: 15}              # a draw, per copy
+          ResampleToResolution: {spacing: [2, 2, 2]}   # a transform, per copy
+          Brightness: {b_std: 0.2}                     # another draw, per copy
+          Write:  {dataset: ./Augmented:omezarr}
+
+    Each draw is parameterised on the grid the stages before it leave, so a shape-changing draw hands
+    the next stage its own extent — a chain, exactly like the transforms it sits among.
+
+    ``pattern`` names each copy's entry: ``str.format`` over ``{name}`` (the case) and ``{a}`` (the
+    copy ordinal, 1-based). Both tokens are required — without ``{a}`` every copy of a case writes
+    over the previous one, without ``{name}`` every case does.
+
+    Every draw after this marker is parameterised from ``(seed, case, which draw this is)`` rather
+    than from a shared RNG, whose consumption order two chains cannot agree on. Left unset, ``seed``
+    is the run's ``manual_seed``, so an image chain and its mask chain produce matching copies —
+    copy ``k`` of the mask carries copy ``k`` of the image's rotation. Set it to decouple one chain
+    deliberately: that is the only way to ask two chains for DIFFERENT copies of the same cases.
+    """
+
+    def __init__(self, nb: int = 2, pattern: str = "{name}_{a:02d}", seed: int | None = None) -> None:
+        super().__init__()
+        self.seed = None if seed is None else int(seed)
+        if int(nb) < 1:
+            raise TransformError(
+                f"'Expand' asks for {nb} copies.",
+                "A cardinality is at least one: nb: 8 writes eight entries per case.",
+            )
+        self.nb = int(nb)
+        pattern = str(pattern)
+        try:
+            first, second = pattern.format(name="case", a=1), pattern.format(name="case", a=2)
+        except (KeyError, IndexError, ValueError) as error:
+            raise TransformError(
+                f"'Expand' cannot format its pattern '{pattern}': {error}.",
+                "The pattern is a str.format template over {name} and {a}, e.g. pattern: '{name}_r{a:02d}'.",
+            ) from error
+        if "{name" not in pattern or first == second:
+            raise TransformError(
+                f"'Expand' has a pattern ('{pattern}') that does not vary over "
+                + ("{name}" if "{name" not in pattern else "{a}")
+                + ", so its entries would collide.",
+                "Use both tokens, e.g. pattern: '{name}_r{a:02d}': {name} keeps cases apart,"
+                " {a} keeps a case's copies apart.",
+            )
+        self.pattern = pattern
+
+    @property
+    def draw_seed(self) -> int:
+        """The seed the copies are actually drawn from: this marker's own, or the run's."""
+        return 0 if self.seed is None else self.seed
+
+    def entry(self, name: str, a: int) -> str:
+        """The entry name copy ``a`` of case ``name`` writes under."""
+        return self.pattern.format(name=name, a=a)
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # A cardinality marker, not a per-case stage: the dispatcher splices the copy's own draw at
+        # this position and never runs the marker itself. This declaration is only the safety net for
+        # a chain that reached a workflow without expansion semantics, where refusing is right.
+        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        raise TransformError(
+            "'Expand' was applied to one tensor, which expands nothing.",
+            "A chain containing Expand is run by the TRANSFORM workflow, which replaces the marker"
+            " with each copy's draw; it has no meaning as an ordinary per-case transform.",
+        )
+
+
+def split_expand(transforms: list[Transform]) -> tuple[list[Transform], "Expand | None", list[Transform]]:
+    """A chain around its ``Expand``: what runs once per case, the marker, what runs per copy."""
+    for index, transform in enumerate(transforms):
+        if isinstance(transform, Expand):
+            return list(transforms[:index]), transform, list(transforms[index + 1 :])
+    return list(transforms), None, []
 
 
 class Flatten(Transform):

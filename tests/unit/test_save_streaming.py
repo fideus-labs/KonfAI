@@ -158,7 +158,7 @@ def test_failed_multi_slab_sweep_leaves_no_partial_cache(tmp_path: Path, monkeyp
         real_write(self, slices, data)
 
     monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", failing_after_first)
-    with pytest.warns(UserWarning, match="falling back to the whole-volume path"):
+    with pytest.warns(UserWarning, match="Falling back to the whole-volume path"):
         patch = manager.get_data(0, 0, [], True)
     monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", real_write)
 
@@ -238,15 +238,54 @@ def test_failed_sweep_falls_back_to_the_whole_volume_path(tmp_path: Path, monkey
         raise OSError("disk full")
 
     monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", broken_write)
-    with pytest.warns(UserWarning, match="falling back to the whole-volume path"):
+    with pytest.warns(UserWarning, match="Falling back to the whole-volume path"):
         patch = manager.get_data(0, 0, [], True)
     monkeypatch.undo()
 
     assert manager._sweep_failed
+    # The reason is KEPT, not only warned: a caller with no whole-volume path to fall back to (a
+    # reduction reading through this cache) has to raise, and "see the warning it emitted" is no
+    # answer for a warning a filter may have swallowed.
+    assert manager._sweep_failure is not None
+    assert "CT/CASE_000" in manager._sweep_failure and "disk full" in manager._sweep_failure
     assert torch.equal(patch, reference[0])
     # The aborted sweep left no debris; the whole-volume fallback wrote the cache classically.
     assert not list((tmp_path / "cache").glob("**/*.tmp"))
     assert Dataset(tmp_path / "cache", "mha").is_dataset_exist("CT", "CASE_000")
+
+
+def test_a_rank_dropping_stage_refuses_instead_of_writing_a_broadcast_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Sum(dim=0)` drops the leading axis, so its slab is no longer C[Z]YX.
+
+    Written anyway, the header takes the slab's first spatial extent for a channel count and
+    publishes that many broadcast copies -- a store whose rank disagrees with the whole-volume path,
+    with no exception raised. It must refuse and fall back instead."""
+    from konfai.data import patching as patching_module
+    from konfai.data.transform import Sum
+
+    monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 2)
+    rng = np.random.default_rng(0)
+    volume = rng.random((5, 12, 10, 8)).astype(np.float32)
+    source = Dataset(tmp_path / "source", "h5")
+    source.write("CT", "CASE_000", volume, Attribute())
+
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=source,
+        patch=None,
+        transforms=[Sum(dim=0), Save(f"{tmp_path / 'out'}:h5")],
+        data_augmentations_list=[],
+    )
+    with pytest.warns(UserWarning, match="Falling back to the whole-volume path"):
+        assert manager.materialize() is False
+
+    written, _ = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")
+    np.testing.assert_allclose(written, volume.sum(axis=0), rtol=1e-6)
 
 
 def test_kill_switch_keeps_the_whole_volume_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

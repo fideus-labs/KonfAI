@@ -61,6 +61,11 @@ def statistics_directory() -> Path:
     return Path(_get_env("KONFAI_STATISTICS_DIRECTORY"))
 
 
+def transforms_directory() -> Path:
+    """Return the configured transform output directory."""
+    return Path(_get_env("KONFAI_TRANSFORMS_DIRECTORY"))
+
+
 def config_file() -> Path:
     """Return the active configuration file used by the current workflow."""
     return Path(_get_env("KONFAI_config_file"))

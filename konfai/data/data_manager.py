@@ -27,6 +27,7 @@ from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import TypeAlias, cast
 
 import numpy as np
@@ -37,12 +38,21 @@ from torch.utils import data
 from torch.utils.data import DataLoader, Sampler
 
 from konfai import konfai_root, konfai_state
-from konfai.data.augmentation import DataAugmentationsList
+from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import LocalityKind, Transform, TransformInverse, TransformLoader
+from konfai.data.transform import (
+    Expand,
+    LocalityKind,
+    Reduce,
+    Save,
+    Transform,
+    TransformInverse,
+    TransformLoader,
+    Write,
+)
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import ConfigError, DatasetManagerError
+from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
 from konfai.utils.runtime import (
     State,
     available_memory_bytes,
@@ -348,6 +358,22 @@ class GroupTransformMetric(GroupTransform):
         super().__init__(transforms, {})
 
 
+class GroupTransformOut(GroupTransform):
+    """Transform-workflow group: a plain chain, no patch-time transforms, no ``is_input``.
+
+    Every group of a model-less workflow is an input, so the flag is not a question to ask; and the
+    patch grid is an execution detail the planner owns, so a per-patch transform would make the
+    OUTPUT a function of the declared budget."""
+
+    def __init__(
+        self,
+        transforms: dict[str, TransformLoader] = {
+            "default|Normalize|Standardize|TensorCast|ResampleIsotropic|Write": TransformLoader()
+        },
+    ):
+        super().__init__(transforms, {})
+
+
 class Group(dict[str, GroupTransform]):
     """Mapping of destination group names to transform pipelines."""
 
@@ -364,6 +390,16 @@ class GroupMetric(dict[str, GroupTransformMetric]):
     def __init__(
         self,
         groups_dest: dict[str, GroupTransformMetric] = {"default|group_dest": GroupTransformMetric()},
+    ):
+        super().__init__(groups_dest)
+
+
+class GroupOut(dict[str, GroupTransformOut]):
+    """Transform-workflow variant of :class:`Group`."""
+
+    def __init__(
+        self,
+        groups_dest: dict[str, GroupTransformOut] = {"default|group_dest": GroupTransformOut()},
     ):
         super().__init__(groups_dest)
 
@@ -557,7 +593,7 @@ class DatasetIter(data.Dataset):
         rank: int,
         data: dict[str, list[DatasetManager]],
         mapping: list[tuple[int, int, int]],
-        groups_src: Mapping[str, Group | GroupMetric],
+        groups_src: Mapping[str, Group | GroupMetric | GroupOut],
         inline_augmentations: bool,
         data_augmentations_list: list[DataAugmentationsList],
         patch_size: list[int] | None,
@@ -866,7 +902,7 @@ class Data(ABC):
         return False
 
     @classmethod
-    def _groups_require_single_process_loading(cls, groups_src: Mapping[str, Group | GroupMetric]) -> bool:
+    def _groups_require_single_process_loading(cls, groups_src: Mapping[str, Group | GroupMetric | GroupOut]) -> bool:
         for group in groups_src.values():
             for group_transform in group.values():
                 for configured_transforms in (group_transform._transforms, group_transform._patch_transforms):
@@ -898,7 +934,7 @@ class Data(ABC):
     def __init__(
         self,
         dataset_filenames: list[str],
-        groups_src: Mapping[str, Group | GroupMetric],
+        groups_src: Mapping[str, Group | GroupMetric | GroupOut],
         patch: DatasetPatch | None,
         use_cache: bool,
         subset: Subset,
@@ -1525,7 +1561,10 @@ class Data(ABC):
             return [[] for _ in range(world_size)]
 
         mappings: list[list[tuple[int, int, int]]] = []
-        if konfai_state() == str(State.PREDICTION) or konfai_state() == str(State.EVALUATION):
+        # One-pass workflows shard by CASE; the default branch below is the TRAIN one, whose
+        # duplicate-padding (for DDP) would hand the same case to two ranks — two concurrent writers
+        # of the same output file for a workflow that writes per case.
+        if konfai_state() in (str(State.PREDICTION), str(State.EVALUATION), str(State.TRANSFORM)):
             mapping_by_index: dict[int, list[tuple[int, int, int]]] = {}
             for entry in mapping:
                 mapping_by_index.setdefault(entry[0], []).append(entry)
@@ -1835,3 +1874,185 @@ class DataMetric(Data):
             persistent_workers=False if persistent_workers is None else persistent_workers,
             memory_budget=memory_budget,
         )
+
+
+@config("Dataset")
+class DataTransform(Data):
+    """Dataset configuration used by the transform workflow.
+
+    The amputated grammar, on the DataMetric precedent: no patch (the planner cuts slabs, never the
+    user), no batch, no validation split, no shuffle, and no ``augmentations`` section — a draw is a
+    stage, so it is declared IN the chain, at the place it applies, after an
+    :class:`~konfai.data.transform.Expand` marker. What remains is what the workflow is: sources,
+    chains, a budget. Everything decidable from the config alone is refused here, before a single
+    byte is read.
+    """
+
+    # One pass: each case is read once, a cache is never re-read -- always stream/buffer.
+    _budget_caches_when_fit = False
+
+    def __init__(
+        self,
+        dataset_filenames: list[str] = ["default|./Dataset:mha"],
+        groups_src: dict[str, GroupOut] = {"default": GroupOut()},
+        memory_budget: str | float = "auto",
+        subset: PredictionSubset = PredictionSubset(),
+    ) -> None:
+        super().__init__(
+            dataset_filenames=dataset_filenames,
+            groups_src=groups_src,
+            patch=None,
+            use_cache=False,
+            subset=subset,
+            batch_size=1,
+            validation=None,
+            validation_augmentations=False,
+            inline_augmentations=False,
+            data_augmentations_list={},
+            # The engine is materialize(), never a DataLoader: no torch workers, no FIFO.
+            num_workers=0,
+            pin_memory=False,
+            prefetch_factor=None,
+            persistent_workers=False,
+            memory_budget=memory_budget,
+        )
+        #: The run's seed, set by the workflow before :meth:`prepare`. Stamped onto every ``Expand``
+        #: below, which is where the only randomness of a transform run lives.
+        self.manual_seed = 0
+
+    def prepare(self) -> None:
+        # The chains are bound first and the cardinality checked BEFORE any manager exists: a draw
+        # declared outside a copy has no shape map, so the manager's own fold would die on an
+        # AttributeError naming a method instead of refusing with the place to move the draw to.
+        for group_src in self.groups_src:
+            for group_dest in self.groups_src[group_src]:
+                self.groups_src[group_src][group_dest].prepare(group_src, group_dest)
+        self._validate_expansion()
+        self._seed_expansions()
+        super().prepare()
+        self._validate_write_chains()
+
+    def _seed_expansions(self) -> None:
+        """Hand the run's seed to every ``Expand`` that did not declare one of its own.
+
+        Done before ``super().prepare()``, which is where the managers are built and the copies
+        drawn. Every chain inheriting the same number is what makes an image chain and its mask
+        chain agree: they never meet, they derive from one seed they both hold. A chain that
+        declares ``seed`` keeps it, which is how two chains are asked for different copies.
+        """
+        for group_src in self.groups_src:
+            for group_dest in self.groups_src[group_src]:
+                for transform in self.groups_src[group_src][group_dest].transforms:
+                    if isinstance(transform, Expand) and transform.seed is None:
+                        transform.seed = self.manual_seed
+
+    def _output_destinations(self) -> dict[tuple[str, str], list[tuple[str, str]]]:
+        """Resolved ``(root, group)`` of every Save/Write, keyed by chain — the parse-time view of
+        what the run would write, resolved exactly as ``_save_destination`` will resolve it."""
+        destinations: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        for group_src in self.groups_src:
+            for group_dest, group_transform in self.groups_src[group_src].items():
+                entries = []
+                for transform in group_transform.transforms:
+                    if isinstance(transform, Save) and transform.dataset:
+                        filename, _flag, _file_format = split_path_spec(
+                            transform.dataset, default_format="mha", supported_extensions=SUPPORTED_EXTENSIONS
+                        )
+                        entries.append((str(Path(filename).resolve()), transform.group or group_dest))
+                destinations[(group_src, group_dest)] = entries
+        return destinations
+
+    def _validate_write_chains(self) -> None:
+        """The parse-time refusals: everything below is decidable before any byte is read, so failing
+        later — or worse, succeeding wrongly — would be a silent failure by choice."""
+        write_targets: dict[tuple[str, str], tuple[str, str]] = {}
+        source_roots = {str(Path(filename).resolve()) for filename in self.datasets}
+        destinations = self._output_destinations()
+        for (group_src, group_dest), group_transform in (
+            ((gs, gd), self.groups_src[gs][gd]) for gs in self.groups_src for gd in self.groups_src[gs]
+        ):
+            chain = f"groups_src.{group_src}.groups_dest.{group_dest}"
+            transforms = group_transform.transforms
+            if not transforms or not isinstance(transforms[-1], Write):
+                after = (
+                    f"'{type(transforms[-1]).__name__}' follows the last Write, so its result is written nowhere."
+                    if transforms and any(isinstance(t, Write) for t in transforms)
+                    else "The chain declares no Write, so the run would read everything and write nothing."
+                )
+                raise TransformerError(
+                    f"'{chain}' does not end with a 'Write'. {after}",
+                    "End the chain with Write: {dataset: <path>[:format]}; use 'Save' for intermediate milestones.",
+                )
+            for transform in transforms:
+                if not isinstance(transform, Save) or isinstance(transform, Write):
+                    continue
+                if not transform.dataset:
+                    raise TransformerError(
+                        f"'{chain}' has a 'Save' with no dataset: it would write next to the source.",
+                        "Give the Save its own destination, e.g. Save: {dataset: ./Work:h5}.",
+                    )
+            for root, _group in destinations[(group_src, group_dest)]:
+                for source_root in source_roots:
+                    if root == source_root or Path(root).is_relative_to(source_root):
+                        raise TransformerError(
+                            f"'{chain}' writes into the source dataset ('{root}').",
+                            "Reading is lazy and streaming re-reads the source while writing: an"
+                            " in-place transform would read its own half-written output. Write to a"
+                            " separate directory.",
+                        )
+            terminal = transforms[-1]
+            filename, _flag, _file_format = split_path_spec(
+                terminal.dataset, default_format="mha", supported_extensions=SUPPORTED_EXTENSIONS
+            )
+            target = (str(Path(filename).resolve()), terminal.group or group_dest)
+            if target in write_targets:
+                other = write_targets[target]
+                raise TransformerError(
+                    f"'{chain}' and 'groups_src.{other[0]}.groups_dest.{other[1]}' both write"
+                    f" '{target[1]}' under '{target[0]}'.",
+                    "The second chain would find the first one's output and report the case as"
+                    " already done. Give each Write its own (dataset, group).",
+                )
+            write_targets[target] = (group_src, group_dest)
+
+    def _validate_expansion(self) -> None:
+        """The Expand contract, decidable from the config alone.
+
+        A draw only means something behind a cardinality change: applied once per case it is a
+        random transform, which is not what an augmentation is for and not what a reproducible
+        data-processing pass should contain. So a draw before the marker — or with no marker at
+        all — is refused with the place to move it to.
+        """
+        for (group_src, group_dest), group_transform in (
+            ((gs, gd), self.groups_src[gs][gd]) for gs in self.groups_src for gd in self.groups_src[gs]
+        ):
+            chain = f"groups_src.{group_src}.groups_dest.{group_dest}"
+            transforms = group_transform.transforms
+            expands = [t for t in transforms if isinstance(t, Expand)]
+            if len(expands) > 1:
+                raise TransformerError(
+                    f"'{chain}' declares {len(expands)} Expand markers; a chain changes its cardinality at most once.",
+                    "Keep one Expand per chain. Successive expansions compose across two"
+                    " invocations, the second reading the first one's output back.",
+                )
+            if expands and any(isinstance(t, Reduce) for t in transforms):
+                raise TransformerError(
+                    f"'{chain}' declares both an Expand and a Reduce.",
+                    "One chain changes its cardinality once (1-to-N or N-to-1). Compose the two"
+                    " across invocations, the second reading the first one's output back.",
+                )
+            head = transforms if not expands else transforms[: transforms.index(expands[0])]
+            for stage in head:
+                if isinstance(stage, DataAugmentation):
+                    where = "before the Expand marker" if expands else "but the chain has no Expand marker"
+                    raise TransformerError(
+                        f"'{chain}' declares the draw '{type(stage).__name__}' {where}.",
+                        "A draw makes COPIES, so it belongs after an Expand: transforms: [Clip,"
+                        " Expand: {nb: 8}, Rotate, Write]. Applied once per case it would just be a"
+                        " random transform, and the run would not be reproducible.",
+                    )
+            if expands and not any(isinstance(t, DataAugmentation) for t in transforms):
+                raise TransformerError(
+                    f"'{chain}' declares an Expand but no draw follows it, so every copy would be identical.",
+                    "Put the draws after the marker, e.g. Expand: {nb: 8} then Rotate: {a_min: -15, a_max: 15}.",
+                )
