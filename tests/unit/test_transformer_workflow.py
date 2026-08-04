@@ -395,6 +395,37 @@ def test_the_plan_reports_the_dtype_it_probed_the_destinations_with(
     assert probed and all(dtype == np.dtype("uint8") for dtype in probed)
 
 
+_RESAMPLED_THEN_REFERENCED = """\
+              ResampleToResolution:
+                spacing: [2.0, 2.0, 2.0]
+              ResampleToReference:
+                entry: CASE_000
+                group: CT
+              Write:
+                dataset: {out}:h5
+"""
+
+
+def test_a_stage_is_asked_about_its_own_input_not_the_case_as_stored(tmp_path: Path) -> None:
+    """The note a stage declares describes the grid it MEETS, which the stages before it decide.
+
+    Here the resample takes 12x10x8 down to 12x7x2, so the case covers 67.5% of the reference. Asked
+    about the case as stored it covers all of it and says nothing -- the plan stays silent about the
+    remaining third of the output, which will be fill.
+    """
+    _write_source(tmp_path)
+    _write_config(tmp_path, _RESAMPLED_THEN_REFERENCED.format(out=tmp_path / "out"))
+    workflow = _build(tmp_path)
+    manager = workflow._managers()["CT_out"][0]
+    stored = [int(extent) for extent in manager.base_shape[1:]]
+    reference = manager.transforms[1]
+
+    notes = workflow._plan_notes()
+
+    assert reference.plan_note("CT_out", "CASE_000", stored, manager.stored_attributes) is None
+    assert notes and all("covers 67.5%" in note for note in notes)
+
+
 def test_unknown_key_is_refused_with_its_path(tmp_path: Path) -> None:
     """The strict mode: a typo'd key is a parse error, never a silently-used default."""
     _write_source(tmp_path)
