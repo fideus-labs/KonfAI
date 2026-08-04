@@ -17,10 +17,10 @@
 """Orchestrator for IMPACT-Reg.
 
 Each IMPACT-Reg *preset* is a self-contained KonfAI app on ``VBoussot/ImpactReg`` (one preset = one app):
-its model produces the displacement field (``DisplacementField``) on the FIXED grid, and optionally the
-moving image resampled onto the fixed one (``MovedImage``). The field is what a registration preset must
-declare; the moved image IS that field applied to the moving, so a preset that leaves it out is complete
-and this orchestrator derives it. This layer adds the registration-specific
+its model produces one thing: the displacement field (``DisplacementField``) on the FIXED grid, in
+whatever format it declares. That is the whole contract. The moved image IS that field applied to the
+moving, so this orchestrator derives it rather than asking every preset to write it as well. This layer
+adds the registration-specific
 logic that does not fit the generic ``konfai-apps`` pipeline, split into three composable operations
 (mirroring ``konfai-apps`` infer/eval/uncertainty) so a UI/CLI can run them independently:
 
@@ -82,13 +82,8 @@ def get_available_presets(force_update: bool = False) -> list[str]:
     return list(get_available_apps_on_hf_repo(IMPACT_REG_KONFAI_REPO, force_update))
 
 
-def _find_output(root: Path, stem: str, required: bool = True) -> Path | None:
+def _find_output(root: Path, stem: str) -> Path:
     """Locate the single output named ``stem`` under ``root``, whatever form the preset wrote it in.
-
-    ``required=False`` returns None instead of raising, for an output a preset may legitimately not
-    declare: the displacement field is what a registration preset must produce, and the moved image is
-    that field applied to the moving -- derivable here (see :func:`_derive_moved`) rather than a second
-    thing every preset has to remember to write.
 
     Matched on the name rather than on a fixed filename: a displacement field may come out as an ITK
     image or as an OME-Zarr store, and a store is a DIRECTORY whose ``Path.stem`` is "DVF.ome" -- so a
@@ -96,8 +91,6 @@ def _find_output(root: Path, stem: str, required: bool = True) -> Path | None:
     """
     matches = sorted(root.rglob(f"{stem}.*"))
     if not matches:
-        if not required:
-            return None
         raise FileNotFoundError(f"Preset inference did not produce '{stem}' under {root}.")
     return matches[0]
 
@@ -214,10 +207,11 @@ def _derive_moved(moving_image: Path, dvf_path: Path, dest_dir: Path, field: sit
     so deriving it belongs to the orchestrator rather than being a second output every preset has to
     remember to declare.
 
-    FORMAT IN, SAME FORMAT OUT. Both ends go through the dispatch above, so an OME-Zarr moving yields
-    an OME-Zarr moved and an ITK one an ITK file; the resample never decides the format. Reading the
-    moving with ``sitk.ReadImage`` instead -- what this replaces -- cannot open a store at all, which
-    is why the ensemble path could not be used with OME-Zarr inputs.
+    THE FORMAT FOLLOWS THE FIELD, not the moving. Measured: a preset fed ``.mha`` inputs writes its
+    field as ``.ome.zarr`` when that is what it declares, so the input's form says nothing about the
+    output's -- the field is the only thing the preset committed to, so the derived moved matches it.
+    The moving is read through the dataset layer either way; ``sitk.ReadImage``, what this replaces,
+    cannot open a store at all, which is why the ensemble path failed on OME-Zarr inputs.
 
     Resampled through SimpleITK for the reason konfai's own ``ResampleTransform`` gives: the stored
     displacement is in world (x, y, z) units, and adding it onto a (z, y, x) voxel grid by hand
@@ -280,8 +274,8 @@ class ImpactRegKonfAIApp:
         quiet: bool,
         tta: int = 0,
         config_overrides: list[str] | None = None,
-    ) -> tuple[Path, Path]:
-        """Run one preset app on the fixed/moving pair (+ optional masks); return its (moved, displacement) paths.
+    ) -> Path:
+        """Run one preset app on the fixed/moving pair (+ optional masks); return its displacement field.
 
         Each preset runs through the ``konfai-apps`` CLI in its own subprocess: konfai keeps
         process-global state (its ``Config`` singleton, the ``KONFAI_*`` environment), so several preset
@@ -319,9 +313,12 @@ class ImpactRegKonfAIApp:
         if self._force_update:
             command.append("--force_update")
         subprocess.run(command, check=True)  # nosec B603
-        # The model emits both the moved image and the displacement field on the fixed grid; reusing them
-        # (rather than re-resampling here) keeps the single-preset path free of any extra image read/write.
-        return _find_output(out, "Moved", required=False), _find_output(out, "DVF")
+        # THE PRESET'S CONTRACT IS THE FIELD, AND ONLY THE FIELD. A registration app produces a
+        # displacement field on the fixed grid, in whatever format it declares; anything else that can
+        # be computed from it -- the moved image above all -- is this layer's job. Looking for a Moved
+        # here would make every preset carry an output it does not owe, and a tiled one blend it across
+        # every patch seam for a caller that has the field.
+        return _find_output(out, "DVF")
 
     def register(
         self,
@@ -360,9 +357,9 @@ class ImpactRegKonfAIApp:
                 fixed_mask = fixed_masks[index] if index < len(fixed_masks) else None
                 moving_mask = moving_masks[index] if index < len(moving_masks) else None
 
-                moved_paths, dvf_paths = [], []
+                dvf_paths = []
                 for preset in presets:
-                    moved, dvf = self._infer_preset(
+                    dvf = self._infer_preset(
                         preset,
                         fixed_image,
                         moving_image,
@@ -377,20 +374,11 @@ class ImpactRegKonfAIApp:
                     )
                     if keep_dvf:
                         dvf = _copy_output(dvf, case_out / _ENSEMBLE_DIR, preset)
-                    moved_paths.append(moved)
                     dvf_paths.append(dvf)
 
                 if len(presets) == 1:
                     dvf_out = _copy_output(dvf_paths[0], case_out, "DVF")
-                    if moved_paths[0] is not None:
-                        # The model already produced the moved image on the fixed grid — reuse it
-                        # verbatim. No input re-read, no re-resample, and the input format is whatever
-                        # the model handled (OME-Zarr included).
-                        _copy_output(moved_paths[0], case_out, "Moved")
-                    else:
-                        # A preset that declares only a field is complete: the moved image is that
-                        # field applied to the moving, and producing it belongs here.
-                        _derive_moved(moving_image, dvf_out, case_out)
+                    _derive_moved(moving_image, dvf_out, case_out)
                 else:
                     # Ensemble: average the presets' displacement fields (all on the fixed grid) and warp the
                     # moving image once with that averaged field — the one output no single preset produced.

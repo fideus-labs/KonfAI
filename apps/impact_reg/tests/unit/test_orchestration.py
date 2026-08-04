@@ -98,21 +98,19 @@ def test_average_displacement_is_the_voxelwise_mean_with_reference_geometry(tmp_
 
 
 def _stub_infer(app: reg.ImpactRegKonfAIApp, moving_image: Path, dvf_by_preset: dict[str, tuple]):
-    """Replace ``_infer_preset`` so it writes a Moved.mha + a constant DVF.mha (per preset) on the moving grid."""
+    """Replace ``_infer_preset`` so it writes a constant DVF.mha per preset on the moving grid."""
     reference = sitk.ReadImage(str(moving_image))
 
     def fake(preset, fixed_image, mov_image, fixed_mask, moving_mask, work, *args, **kwargs):
         out = Path(work) / preset
         out.mkdir(parents=True, exist_ok=True)
-        moved = sitk.Image(reference)
-        sitk.WriteImage(moved, str(out / "Moved.mha"))
         _write_dvf(out / "DVF.mha", dvf_by_preset[preset], reference)
-        return out / "Moved.mha", out / "DVF.mha"
+        return out / "DVF.mha"
 
     app._infer_preset = fake  # type: ignore[method-assign]
 
 
-def test_register_single_preset_reuses_model_outputs(tmp_path: Path) -> None:
+def test_register_single_preset_reuses_the_field_and_derives_the_moved(tmp_path: Path) -> None:
     moving = tmp_path / "moving.mha"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
     fixed = tmp_path / "fixed.mha"
@@ -169,7 +167,7 @@ def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Pat
         out = Path(work) / preset
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
-        return None, out / "DVF.mha"
+        return out / "DVF.mha"
 
     app._infer_preset = field_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
