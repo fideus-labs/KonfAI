@@ -50,10 +50,10 @@ from konfai.data.patching import (
     SlabAligner,
     SlabRegionStream,
     StreamingAccumulator,
-    _halo_pull,
     _halo_radii,
-    _remap_pull,
-    _scale_pull,
+    _HaloPull,
+    _RemapPull,
+    _ScalePull,
     blend_overlap,
 )
 from konfai.data.transform import (
@@ -1009,7 +1009,7 @@ class OutSameAsGroupDataset(OutputDataset):
                 kinds.append(locality.kind)
                 snapshot = Attribute(walking)
                 if locality.kind is LocalityKind.HALO:
-                    pull_fns.append(_halo_pull(_halo_radii(locality.halo, len(shape)), shape))
+                    pull_fns.append(_HaloPull(_halo_radii(locality.halo, len(shape)), shape))
                     shapes.append(list(shape))
                     probe = stage(name, probe, walking)
                 elif locality.kind is LocalityKind.RESCALE:
@@ -1024,7 +1024,7 @@ class OutSameAsGroupDataset(OutputDataset):
                         return None
                     resample = cast(Resample, stage.transform)
                     if stage.inverted:
-                        pull_fns.append(_remap_pull(resample.stream_region_target, shape, snapshot))
+                        pull_fns.append(_RemapPull(resample.stream_region_target, shape, snapshot))
                         out = resample._inverse_geometry(walking)
                     else:
                         out = [
@@ -1034,16 +1034,16 @@ class OutSameAsGroupDataset(OutputDataset):
                             )
                         ]
                         scales = [shape[k] / out[k] for k in range(len(shape))]
-                        pull_fns.append(_scale_pull(scales, shape))
+                        pull_fns.append(_ScalePull(scales, shape))
                         resample.write_stream_cache_attribute(walking, shape)
                     shapes.append([int(extent) for extent in out])
                 elif locality.kind in _REGION_KINDS:
                     if stage.inverted:
                         remapper = cast(TransformInverse, stage.transform)
-                        pull_fns.append(_remap_pull(remapper.stream_region_target, shape, snapshot))
+                        pull_fns.append(_RemapPull(remapper.stream_region_target, shape, snapshot))
                         out = remapper.inverse_transform_shape(list(shape), Attribute(walking))
                     else:
-                        pull_fns.append(_remap_pull(stage.transform.stream_region_source, shape, snapshot))
+                        pull_fns.append(_RemapPull(stage.transform.stream_region_source, shape, snapshot))
                         out = stage.transform.transform_shape(self.group_src, name, list(shape), Attribute(walking))
                     shapes.append([int(extent) for extent in out])
                     # The stage's attribute transition, on a one-voxel corner: a crop's tensor answer

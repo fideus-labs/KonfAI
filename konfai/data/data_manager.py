@@ -77,6 +77,24 @@ def _format_gib(num_bytes: float) -> str:
     return f"{num_bytes / 2**30:.2f} GiB"
 
 
+@dataclass(frozen=True)
+class MemoryBudget:
+    """A resolved memory budget that knows its own scope.
+
+    The one decision no consumer may make for itself: an ``auto`` budget measures the NODE, so
+    ranks sharing it split it; an explicit budget is the user's per-rank figure, taken as is.
+    Handing consumers a bare number with an ``is_auto`` flag makes each of them re-derive that
+    rule — this object answers it once, through :meth:`per_rank_bytes`.
+    """
+
+    total_bytes: float
+    description: str
+    shared_across_ranks: bool
+
+    def per_rank_bytes(self, world_size: int) -> float:
+        return self.total_bytes / max(1, world_size) if self.shared_across_ranks else self.total_bytes
+
+
 def _parse_memory_budget_bytes(value: str | float) -> int:
     """Parse an explicit memory budget to bytes: a bare number is GiB, a string carries its own unit.
 
@@ -251,8 +269,16 @@ class GroupTransform:
         self.transforms: list[Transform] = []
         self.patch_transforms: list[Transform] = []
         self.is_input = is_input
+        self._prepared = False
 
     def prepare(self, group_src: str, group_dest: str) -> None:
+        # Binds ONCE. A workflow that inspects its chains before handing over to Data.prepare() calls
+        # this first, and Data.prepare() calls it again for every group -- so without the guard every
+        # stage is constructed twice, and anything the workflow attached to the first set is silently
+        # thrown away with it. A stage's __init__ is user code and may not be run twice for free.
+        if self._prepared:
+            return
+        self._prepared = True
         self.transforms = []
         self.patch_transforms = []
         if self._transforms is not None:
@@ -905,22 +931,24 @@ class Data(ABC):
         self._prepared_train_names: list[str] = []
         self._prepared_validation_names: list[str] = []
 
-    def _resolved_budget_bytes(self) -> tuple[float, str, bool]:
-        """The configured memory budget as ``(bytes, description, is_auto)``.
+    def resolved_budget(self) -> MemoryBudget:
+        """The configured memory budget as an object that knows its own scope.
 
         ``None``/``"auto"`` offers ``_AUTO_MEMORY_SAFETY_FRACTION`` of the node's allocatable
         memory — a NODE budget, which ranks sharing the node split; an explicit budget is the
-        caller's own figure, taken as is."""
+        caller's own figure, per rank as declared."""
         if self.memory_budget is None or (
             isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto"
         ):
             node_bytes, source = available_memory_bytes()
-            return (
+            return MemoryBudget(
                 node_bytes * _AUTO_MEMORY_SAFETY_FRACTION,
                 f"auto: {_format_gib(node_bytes)} {source} x {_AUTO_MEMORY_SAFETY_FRACTION:.0%}",
-                True,
+                shared_across_ranks=True,
             )
-        return float(_parse_memory_budget_bytes(self.memory_budget)), f"{self.memory_budget!r}", False
+        return MemoryBudget(
+            float(_parse_memory_budget_bytes(self.memory_budget)), f"{self.memory_budget!r}", shared_across_ranks=False
+        )
 
     def _configure_data_loading(self, use_cache: bool) -> None:
         """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
@@ -1012,9 +1040,9 @@ class Data(ABC):
         dataset_bytes = self._estimate_cached_bytes()
         per_rank_bytes = dataset_bytes / world_size
 
-        budget, budget_desc, is_auto = self._resolved_budget_bytes()
-        per_rank_budget = budget / world_size if is_auto else budget
-        budget_desc = f"{budget_desc}, per-rank"
+        budget = self.resolved_budget()
+        per_rank_budget = budget.per_rank_bytes(world_size)
+        budget_desc = f"{budget.description}, per-rank"
 
         use_cache = per_rank_bytes <= per_rank_budget
         self._configure_data_loading(use_cache)
@@ -1732,16 +1760,14 @@ class DataMetric(Data):
             spatial_by_name,
             key=lambda name: channels_by_name[name] * int(np.prod(spatial_by_name[name], dtype=np.int64)),
         )
-        budget, _budget_desc, is_auto = self._resolved_budget_bytes()
-        if is_auto:
-            # The auto budget is the NODE's memory, shared by every rank evaluating on it. Sizing runs
-            # at build time -- before the spawn where world_size exists -- so the launcher leaves the
-            # per-node rank count in the environment (an explicit budget is per-rank by contract, and a
-            # caller without the launcher -- or with a garbled variable -- keeps the undivided default).
-            try:
-                budget //= max(1, int(os.environ.get("KONFAI_LOCAL_RANKS", "1")))
-            except ValueError:
-                pass
+        # Sizing runs at build time -- before the spawn where world_size exists -- so the launcher
+        # leaves the per-node rank count in the environment (a caller without the launcher, or with
+        # a garbled variable, keeps the undivided default).
+        try:
+            local_ranks = max(1, int(os.environ.get("KONFAI_LOCAL_RANKS", "1")))
+        except ValueError:
+            local_ranks = 1
+        budget = self.resolved_budget().per_rank_bytes(local_ranks)
         sized = resolve_patch(
             [0] * len(spatial_by_name[worst]),
             spatial_by_name[worst],
