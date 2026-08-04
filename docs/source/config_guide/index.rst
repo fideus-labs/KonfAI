@@ -9,7 +9,7 @@ the shipped examples. For built-in models, transforms, and metrics, the exact
 available parameters still depend on the selected classpath.
 
 **Start here:** read :doc:`training` first — it introduces the structures
-(``Model``, ``Dataset``, ``outputs_criterions``) that the other two files
+(``Model``, ``Dataset``, ``outputs_criterions``) that the other pages
 reuse. Then read :doc:`prediction` and :doc:`evaluation` as you reach those
 workflows.
 

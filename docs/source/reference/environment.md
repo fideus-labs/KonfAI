@@ -38,6 +38,7 @@ path or to tune the gate.
 | `KONFAI_STREAM_LINEAR_RESAMPLE` | `0` restores bit-exact (non-streamed) linear resample inverses. |
 | `KONFAI_STREAM_WORTH_THRESHOLD` | Overrides the "worth streaming" accumulator-size threshold (fraction of allocatable memory). |
 | `KONFAI_ASYNC_WRITES` | Controls the background writer for disjoint-file sinks. |
+| `KONFAI_INLINE_SINGLE_RANK` | Default on. `0` forces a single rank through the spawn path instead of running it in-process — useful when a host process must keep its own CUDA context. |
 
 ### Hugging Face authentication
 
@@ -72,15 +73,38 @@ The codebase also references internal variables such as:
 - `KONFAI_CONFIG_MODE`, `KONFAI_CONFIG_PATH` — the config binder's mode machine
 - `KONFAI_APPS_CONFIG`
 - `KONFAI_DEBUG`, `KONFAI_DEBUG_LAST_LAYER`
-- `KONFAI_MASTER_PORT`, `KONFAI_LOCAL_RANKS` — distributed rendezvous bookkeeping
+- `KONFAI_MASTER_PORT` — distributed rendezvous bookkeeping
+- `KONFAI_LOCAL_RANKS` — how many ranks share one node's RAM, published by the
+  launcher so a node-scoped `memory_budget` is divided before the spawn. It changes
+  the cache-versus-stream decision, so it is not mere bookkeeping.
 - `KONFAI_ATTR_KEY`, `KONFAI_DEPS`, `KONFAI_COMPONENT_BASES`, `KONFAI_VERSION`
 
 These are part of KonfAI's internal execution model and are best treated as
 implementation details unless you are actively extending the framework.
 
 The `konfai-mcp` server has its own `KONFAI_MCP_*` family (workspace root,
-transport, host/port, bearer token, log level, subprocess timeout, session and
-app-catalog selection) — documented in the MCP guide.
+transport, host/port, bearer token, log level, log-tail length, mount path,
+subprocess timeout, validation root, session and app-catalog selection) —
+documented in the MCP guide.
+
+## KonfAI Studio
+
+`konfai-studio` reads its own family. The first two are security-relevant: Studio
+drives arbitrary host compute, so binding a non-loopback address without a token is
+refused unless you override it. See `studio/docs/REMOTE.md`.
+
+| Variable | Effect |
+| --- | --- |
+| `KONFAI_STUDIO_TOKEN` | Shared bearer token. **Unset means no authentication**, which is why a non-loopback bind is refused without it. |
+| `KONFAI_STUDIO_INSECURE_COOKIE` | Drops the `Secure` flag on the session cookie — for plain-HTTP testing only. |
+| `KONFAI_STUDIO_LLM` | Which backend drives the agent (for example `anthropic`, or an OpenAI-compatible server). |
+| `KONFAI_STUDIO_LLM_API_KEY` | Key for that backend. |
+| `KONFAI_STUDIO_LLM_BASE_URL` | Base URL of an OpenAI-compatible server (vLLM / Ollama / LM Studio). |
+| `KONFAI_STUDIO_MODEL` | Main model id. |
+| `KONFAI_STUDIO_SIDE_MODEL` | Model used for the cheaper side calls. |
+| `KONFAI_STUDIO_MAX_TOKENS` | Per-response token ceiling. |
+| `KONFAI_STUDIO_MAX_TURNS` | Agent-loop turn ceiling. |
+| `KONFAI_STUDIO_TERMINAL` | Enables the in-app terminal. |
 
 ## Next steps
 

@@ -38,7 +38,7 @@ Trainer:
     classpath: UNet.yml          # a model, referenced by name
   Dataset:
     groups_src: { CT: {...}, SEG: {...} }   # channel-first, lazy, patch-based
-  epochs: 100
+  epochs: 100                             # the shipped example ships 5, sized for a first run
 ```
 
 ```bash
@@ -119,7 +119,7 @@ registration systems—not reduced demonstration networks:
 | --- | --- | --- |
 | **TotalSegmentator-KonfAI** | CT: 117 labels / 5 models · MRI: 50 labels / 2 models | **CT `total`: ≈42 s / ≈20 GB VRAM / ≈19 GB RAM** — 1.5–3.6× faster, 2.7–4.1× less host RAM than the original |
 | **MRSegmentator-KonfAI** | MRI: 40 labels, 5-fold ensemble | **≈27 s / ≈22 GB VRAM** — 1.6–2.6× faster, up to ~6× less host RAM than the original |
-| **ImpactSynth** | four MR/CBCT→sCT variants, 2.5D UNet++, 5 models each | ≈24 s / ≈16 GB VRAM for the benchmark inference; ≈82 s full ensemble; ≈2 GB RAM |
+| **ImpactSynth** | three MR/CBCT→sCT variants, 2.5D UNet++, 5 models each | ≈24 s / ≈16 GB VRAM for the benchmark inference; ≈82 s full ensemble; ≈2 GB RAM |
 | **ImpactSeg** | one model segments 11 structures from CT, MRI, or CBCT | ≈7 s / ≈10 GB VRAM / ≈1.6 GB RAM |
 | **IMPACT-Reg** | 13 multimodal presets across elastix+IMPACT, ConvexAdam, and FireANTs | `ConvexAdam_Composite`: ≈5.1 s / ≈2.1 GB VRAM |
 
@@ -153,7 +153,7 @@ pip install konfai                # core only (bring your own data reader)
 ```
 
 `[imaging]` pulls SimpleITK / h5py / pydicom / zarr — needed to read `.mha`,
-`.nii.gz`, DICOM, and OME-Zarr. For the full extras matrix (`ssim`, `fid`,
+`.nii.gz`, DICOM, and OME-Zarr. For the full extras matrix (`smp`, `ssim`, `fid`,
 `lpips`, `export`, `cluster`, …) and a reproducible Pixi setup, see the
 [installation guide](https://konfai.readthedocs.io/en/latest/getting-started/installation.html).
 
@@ -187,16 +187,17 @@ pip install -U "huggingface_hub[cli]"
 hf download VBoussot/konfai-demo --repo-type dataset --include "Segmentation/**" --local-dir Dataset
 mv Dataset/Segmentation/* Dataset/ && rmdir Dataset/Segmentation && rm -rf Dataset/.cache
 
-# For a short smoke run, first set `epochs: 1` in Config.yml.
 konfai TRAIN -y --gpu 0 --config Config.yml     # use --cpu 1 if you have no GPU
 ```
 
 > 💡 After a run, `Config.yml` will contain the resolved defaults KonfAI
 > materialised — that's expected, and it's what makes runs reproducible.
 
-Runtime depends on dataset size, hardware, and whether you keep the shipped
-100-epoch setting. The one-epoch edit checks the complete path quickly; it is
-not intended to produce a useful checkpoint.
+The shipped `epochs: 5` is demo-sized: it walks the complete path in a few
+minutes and is not meant to produce a useful checkpoint — raise it to 100+ for a
+real run. To do all of the above in one go, including predict, evaluate and a
+plot of the result, run every cell of
+[`examples/Segmentation/Segmentation_demo.ipynb`](examples/Segmentation/Segmentation_demo.ipynb).
 
 The full walkthrough (predict, evaluate, what to inspect, common first issues,
 notebook entry points) lives in the
@@ -318,7 +319,7 @@ for what is shipped vs. in-progress.
 - [Large images](https://konfai.readthedocs.io/en/latest/usage/large-images.html) — regional reads, fallback, and tuning
 - [Adopt from PyTorch/MONAI](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html) — reuse and tool choice
 - [Component catalogue](https://konfai.readthedocs.io/en/latest/reference/components/index.html) — everything you can configure
-- [Examples](https://konfai.readthedocs.io/en/latest/examples/index.html) — runnable Segmentation & Synthesis workflows
+- [Examples](https://konfai.readthedocs.io/en/latest/examples/index.html) — runnable Segmentation, Synthesis & Registration workflows, plus five published-app demos
 
 🐳 **Docker:** `vboussot/konfai` —
 [guide](https://konfai.readthedocs.io/en/latest/usage/docker.html).

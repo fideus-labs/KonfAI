@@ -78,10 +78,12 @@ of each case, and the transient peak while a case is being built. Treat it as a
 coarse switch, not as a memory bound.
 ```
 
-```{warning}
-Do not combine `shuffle_window` with multi-GPU training. Each rank sizes its
-sampler from its own shard, so ranks can disagree on the number of batches and
-the run hangs in NCCL.
+```{note}
+`shuffle_window` is safe under DDP. `WindowedCaseSampler.__len__` returns the
+mapping's length, so windowing chooses the *order* and never the count, and
+`Data._split` pads every training shard to the longest one — the two together are
+what keep the ranks in step. An earlier release did hang here; it was fixed in
+`317dd81`.
 ```
 
 ## What decides whether a chain streams
@@ -98,6 +100,7 @@ which region of the file a patch needs.
 | `CROP` | the source region is the target translated | the region — reading it *is* the answer |
 | `GLOBAL_STAT` | needs whole-volume `Min`/`Max`/`Mean`/`Std` | the statistic once from disk, then the exact patch |
 | `RESCALE` | resample | the region through the scale mapping, plus an interpolation halo |
+| `SLAB` | a per-voxel value map plus a side effect that needs the slab's place in the volume | nothing on the read path — the dispatcher treats it as `WHOLE_VOLUME`; it streams on the write side (`Mask`, `InferenceStack`) |
 | `WHOLE_VOLUME` | genuinely needs everything | the volume — the fallback |
 
 `WHOLE_VOLUME` is the default. A transform that declares nothing loads the
@@ -111,13 +114,16 @@ is the group's `transforms` followed by the copy's own augmentation draw — one
 list, so a region transform and a region augmentation compose exactly like two
 region transforms.
 
-Five conditions reject streaming:
+Seven conditions reject streaming:
 
-1. any `WHOLE_VOLUME` declaration;
+1. any `WHOLE_VOLUME` **or `SLAB`** declaration — the read dispatcher has no slab
+   context, so it treats `SLAB` as a whole load;
 2. a halo wider than half the read extent on any axis;
 3. a `GLOBAL_STAT` preceded by a stage that does not preserve statistics;
 4. a `GLOBAL_STAT` whose statistic cannot be read from disk;
-5. a `RESCALE` on a case with no `Spacing`.
+5. a `RESCALE` declared by a stage that is not a `Resample` subclass;
+6. a `RESCALE` on a case with no `Spacing`;
+7. a chain whose folded shapes do not land on the target grid.
 
 ### Why `[Clip(-200, 400), Standardize()]` does not stream
 
@@ -157,8 +163,10 @@ patch maps through the last stage's rewrite, that region maps through the stage
 before it, and so on down to one region on disk. KonfAI reads that one region
 and runs the chain forward over it. `[Dilate(1), Gradient()]` is two halos that
 add, `[Canonical(), Permute('2|1|0')]` is two reorientations that pull through
-each other — both stream from a single bounded read, as does the whole
-`[Canonical, ResampleToResolution, Padding]` reorient-resample-pad pipeline. The
+each other — both stream from a single bounded read. The reorient-resample-pad
+stack `[Canonical, ResampleToResolution, Padding]` streams on the **write** side but
+not on the read side: `Padding` declares no forward locality, so it inherits
+`WHOLE_VOLUME` and the chain is refused at that stage. The
 one thing a region stage cannot do is read a statistic of its own input, because
 that input never exists whole on disk (rule 3).
 
@@ -245,9 +253,11 @@ Subclass `konfai.data.transform.Transform` and you inherit the safe default:
 your transform reports `WHOLE_VOLUME`, KonfAI loads the volume, and your patches
 are correct without you knowing streaming exists.
 
-Subclassing is **required**. A class that merely looks like a transform fails
-inside the planner with a bare `AttributeError` rather than a KonfAI error with a
-remedy.
+Subclassing is how you *state* a contract, but it is not required: a class that is
+neither a `Transform` nor an augmentation is wrapped in `konfai.data.transform.Foreign`,
+which reports `WHOLE_VOLUME`, leaves geometry alone and refuses a shape change with a
+named `TransformError`. Subclass when you need to declare a locality, an inverse, or a
+shape change.
 
 To opt in, override `patch_locality` under three rules:
 

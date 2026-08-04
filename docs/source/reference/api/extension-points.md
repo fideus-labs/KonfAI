@@ -39,9 +39,12 @@ Why it exists:
 - it lets `apply_config(...)` instantiate the object from the right YAML branch
 - it keeps the YAML structure aligned with constructor signatures
 
-For local custom classes next to YAML files, do not use `@config()` by default.
-Without any decorator, the class reads its constructor parameters directly from
-the current YAML branch, which is usually the most readable layout.
+For transforms and criteria, an undecorated class reads its constructor parameters
+directly from the branch the loader already appended for the classpath, which is
+usually the most readable layout. **Models are different**: the model loader appends
+the class name when the class has no `_key`, so an undecorated `UNetpp5` still reads
+from `Trainer.Model.UNetpp5` — exactly where `@config()` would put it. For a model a
+decorator only *renames* the subtree.
 
 In the current codebase, when you do use a decorator:
 
@@ -84,12 +87,15 @@ Runtime contracts:
   `TransformInverse`
 - augmentations should inherit `konfai.data.augmentation.DataAugmentation`
 
-Inheriting the base class is required, not conventional. The loader resolves a
-`classpath` with `getattr` and applies no type check, so a class that is not a
-`Transform` is admitted and then fails inside the patch planner with a bare
-`AttributeError` on the first contract method it lacks — `transform_shape`, then
-`patch_locality`. Subclass the base and you get every contract method with a safe
-default.
+Inheriting the base class is the way to state a contract, not a formality — but it
+is not required. The loader type-checks what it built: a `Transform` is prepared and
+returned, an augmentation is handed over as itself, and anything else is wrapped in
+`konfai.data.transform.Foreign` (augmentations have their own `Foreign` in
+`konfai.data.augmentation`). The wrapper reads the whole volume, leaves geometry
+alone, and **checks** the returned shape — a foreign class that changes it raises a
+named `TransformError` telling you to subclass `Transform` and implement
+`transform_shape()`. Subclass the base when you need to declare a locality, an
+inverse, or a shape change; name the foreign class directly when you do not.
 
 ## Patch locality
 
@@ -120,6 +126,7 @@ halo of a geometric draw is that draw's own.
 | `CROP` | source region is the target region translated | `stream_region_source` |
 | `GLOBAL_STAT` | needs whole-volume statistics, `stat_keys` a subset of Min/Max/Mean/Std | nothing — the dispatcher seeds the statistic from disk |
 | `RESCALE` | resample | subclass `Resample` |
+| `SLAB` | a per-voxel value map plus a side effect that needs the slab's place in the volume | `stream_slab(name, tensor, region, spatial_shape, cache_attribute)`, and optionally `stream_abort`. The **read** dispatcher has no slab context and treats it as `WHOLE_VOLUME`; the gain is on the write side |
 | `WHOLE_VOLUME` | needs the whole volume | nothing — this is the default |
 
 A declaration is bound by three rules:
@@ -146,8 +153,9 @@ stage runs on the region, so the `Origin`, `Spacing` or `Direction` its `__call_
 records describe that region rather than the case; those writes land on a throwaway
 `Attribute` and are dropped. `write_stream_cache_attribute` is called once per
 case, on the persistent attribute, with the full source spatial shape: write the
-case-level geometry there. Omitting it is silent — the case keeps its source
-geometry and every key the stage wrote is lost. `Canonical` is an `ORIENTATION`
+case-level geometry there. Omitting it is **refused**, not silent: a region stage that records geometry on the
+throwaway scope and implements no `write_stream_cache_attribute()` raises a
+`PatchError` naming the keys it recorded. `Canonical` is an `ORIENTATION`
 transform and implements it: its new origin is the corner the volume mirrors onto,
 which only the full extent gives. The base is a no-op, for a transform that leaves
 geometry alone.
@@ -201,21 +209,29 @@ values one-to-one.
 
 ## Transforms from another framework
 
-A foreign class named directly as a `classpath` is admitted and then fails. The
-loader imports the module and calls `getattr` with no type check, so nothing
-rejects it at resolution, and how far it gets depends on its constructor:
+**Name it directly.** A class that is not a `Transform` is wrapped in `Foreign`, so
+the short form works:
 
-- Defaults that YAML can represent: the class is instantiated, and the patch
-  planner then raises a bare `AttributeError` on `transform_shape`, the first
-  contract method a foreign class lacks.
-- A default YAML cannot represent: config binding raises
-  `yaml.representer.RepresenterError` before the class is ever built. Resolved
-  defaults are written back to the config file, and a value that cannot be written
-  stops the run. `monai.transforms:ScaleIntensity` takes this path — its `dtype`
-  defaults to `np.float32`.
+```yaml
+transforms:
+  monai.transforms:ScaleIntensity:
+    minv: 0.0
+    maxv: 1.0
+```
 
-Wrap it instead, in a local module next to your YAML. The wrapper's own signature
-is what YAML binds, which keeps the foreign constructor out of the config file:
+`Foreign` reads the whole volume — what a class saying nothing about where its
+output comes from is owed — leaves geometry as it stands, and verifies that the
+returned shape matches the input. A class that resamples, crops or reorients owns
+both shape and geometry, and it will be refused with a `TransformError` pointing at
+`transform_shape()`.
+
+Type defaults are not a problem either: the config writer records a `type` value as
+its `__name__`, so `ScaleIntensity`'s `dtype=np.float32` is written back as
+`float32` rather than failing to serialise.
+
+**Write a wrapper when you need more than that** — a locality declaration, an
+inverse, a shape change, or to keep a large foreign signature out of the config
+file. The wrapper's own signature is what YAML binds:
 
 ```python
 # MonaiTransform.py
@@ -241,8 +257,8 @@ class MonaiScaleIntensity(Transform):
 Referenced as `MonaiTransform:MonaiScaleIntensity`. KonfAI tensors are
 channel-first `[C, (Z), Y, X]`.
 
-The wrapper is safe by default: it declares no locality, so it takes the
-whole-volume path and sees exactly the tensor the foreign transform expects. Add a
+Both routes are safe by default: neither declares a locality, so both take the
+whole-volume path and see exactly the tensor the foreign transform expects. Add a
 `patch_locality` only once you can state which kind is honest for it.
 
 Two traps:
@@ -259,10 +275,12 @@ Two traps:
   Let the group configuration do the pairing.
 
 A transform reads another group through `self.datasets`, by group name — the
-built-in `Mask` does, and so can yours. It reads that group whole: `__call__` is
-not told where its tensor sits in the volume, so it cannot ask for the matching
-region. That is why `Mask` is a whole-volume transform, and why a wrapper that
-reaches for a second group should stay one.
+built-in `Mask` does, and so can yours. Inside `__call__` it reads that group whole: `__call__` is not told where its tensor
+sits in the volume, so it cannot ask for the matching region — which is why a wrapper
+that reaches for a second group from `__call__` alone should declare nothing and take
+the whole-volume path. `Mask` itself goes one step further: it declares `SLAB` and
+implements `stream_slab`, so on the write path it reads only the slab's rows of the
+mask. That is the kind to reach for when your second-group read *can* be located.
 
 ## Criteria and schedulers
 
@@ -276,19 +294,22 @@ targets. The relevant extension points live in:
 This is the mechanism used by the examples to define reconstruction losses,
 Dice-based evaluation, adversarial losses, and scheduled weights.
 
-Runtime contracts:
+Runtime contracts — each base class names exactly what you must implement:
 
-- simple criteria should inherit `konfai.metric.measure.Criterion`
-- criteria that need model graph initialization should inherit
-  `CriterionWithInit`
-- criteria that need per-sample metadata should inherit
-  `CriterionWithAttribute`
+| Base class | You must implement | Also worth setting |
+| --- | --- | --- |
+| `konfai.metric.measure.Criterion` | `forward(output, *targets) -> Tensor` | `maximize` (higher-is-better, drives ranking) and `reducible` (whether streamed evaluation may accumulate it) — both default `False` |
+| `CriterionWithInit` | `forward`, plus `init(model, output_group, target_group) -> str` | — |
+| `CriterionWithAttribute` | `forward(output, *targets, attributes: list[list[Attribute]])` — `attributes` is **keyword-only** | — |
+| `konfai.data.transform.Transform` | `__call__(name, tensor, cache_attribute)` | `transform_shape()` if the shape changes, `patch_locality()` to stream |
+| `konfai.data.transform.TransformInverse` | the above, plus `inverse(name, tensor, cache_attribute)` | — |
+| `konfai.data.augmentation.DataAugmentation` | three: `_state_init(index, shapes, caches_attribute)`, `_compute(name, index, a, tensor)`, `_inverse(index, a, tensor)` | — |
 
 ## Quick contract table
 
 | Extension point | Recommended base class | Typical YAML entry point |
 | --- | --- | --- |
-| Custom model | `konfai.network.network.Network` | `Trainer.Model.classpath` |
+| Custom model | `konfai.network.network.Network` — recommended, not required: a plain `torch.nn.Module` is wrapped in `MinimalModel` automatically | `Trainer.Model.classpath` |
 | Custom transform | `konfai.data.transform.Transform` or `TransformInverse` | `groups_dest.<group>.transforms` |
 | Custom augmentation | `konfai.data.augmentation.DataAugmentation` | `Dataset.augmentations.*.data_augmentations` |
 | Custom loss / metric | `konfai.metric.measure.Criterion` family | `outputs_criterions.*.targets_criterions.*.criterions_loader` |

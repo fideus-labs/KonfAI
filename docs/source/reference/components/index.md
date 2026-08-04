@@ -31,8 +31,11 @@ storage-backends
 
 ## How a name is resolved
 
-Every component name in a config is resolved by `konfai.utils.utils.get_module`
-in one of two ways:
+Most component names in a config are resolved by `konfai.utils.utils.get_module` in
+one of two ways. Three kinds do **not** go through it: loss-weight schedulers and
+optimizers are looked up directly inside `konfai.metric.schedulers` and `torch.optim`
+(so `module:Class` is not accepted for them), and a storage backend is never named at
+all — you pick a format token in `dataset_filenames`.
 
 | Form | Example | Resolves to |
 | --- | --- | --- |
@@ -58,9 +61,21 @@ ways to get the exhaustive list for any component:
    fully-expanded subtree to edit. (This is the same
    [config-mutation behaviour](../../concepts/configuration.md) that surprises
    new users — here it is a feature.)
-2. **Read the signature.** Bare names map to `konfai/metric/measure.py`,
-   `konfai/data/transform.py`, `konfai/data/augmentation.py`,
-   `konfai/models/**`, and `konfai/metric/schedulers.py`.
+2. **Read the signature.** Where a bare name is looked up depends on the kind:
+
+   | Kind | Bare name resolves in |
+   | --- | --- |
+   | criteria | `konfai/metric/measure.py` |
+   | transforms | `konfai/data/transform.py`, then `konfai/data/augmentation.py` |
+   | augmentations | `konfai/data/augmentation.py` |
+   | models | `konfai/models/python/**` |
+   | learning-rate schedulers | `torch.optim.lr_scheduler` **first**, then `konfai/metric/schedulers.py` |
+   | loss-weight schedulers | `konfai/metric/schedulers.py` only |
+   | patch blending (`patch_combine`) | `konfai/data/patching.py` |
+   | prediction reduction | `konfai/predictor.py` |
+   | case reduction | `konfai/data/reduction.py` |
+
+   So a bare `StepLR` resolves *outside* KonfAI, in torch.
 
 ## Next steps
 

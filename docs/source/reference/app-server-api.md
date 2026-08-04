@@ -61,9 +61,14 @@ All five accept a **multipart form** and return the same job envelope:
   "job_id": "<12 hex>",
   "status_url": "/jobs/<id>",
   "logs_url":   "/jobs/<id>/logs",
-  "result_url": "/jobs/<id>/result"
+  "result_url": "/jobs/<id>/result",
+  "accepted_options": ["batch_size", "patch_size"]
 }
 ```
+
+`accepted_options` is always present, empty list included: its presence is how the
+client knows the tunables it sent were applied. A server too old to send it makes
+`KonfAIAppClient` abort the job rather than let the overrides be ignored.
 
 **Multipart fields** (files via `File`, scalars via `Form`; `*_groups` are CSV
 group-size lists used to re-split the flat file list into per-group folders):
@@ -80,6 +85,11 @@ group-size lists used to re-split the flat file list into per-group folders):
 - **fine_tune** — `dataset` (single zip, required — extracted with zip-slip
   protection), `name` (`Finetune`), `epochs` (10), `it_validation` (1000),
   `models` (CSV), `config_file` (`Config.yml`), `lr` (optional), `gpu`/`cpu`/`quiet`.
+
+Every one of the five also takes **`options`** (a JSON object, default `"{}"`) — the
+only channel for the tunables the plain form fields cannot carry: `patch_size` and
+`batch_size` on `infer`/`pipeline`, and `config_overrides` on those two plus
+`fine_tune`. An unknown key, or a malformed value, is rejected with **422**.
 
 ### Job control
 
@@ -99,6 +109,7 @@ Admission control: at most one stream per job (else 429), and a global cap of 20
 | Limit | Value | Effect |
 | --- | --- | --- |
 | Active jobs | `MAX_ACTIVE_JOBS = 32` | **429 "Server busy"** beyond it |
+| Unknown/malformed `options` key | validated per operation | **422** with the offending key |
 | Per-file upload | 2 GB | **413** on overflow |
 | Total upload | 6 GB | **413** on overflow |
 | GPU scheduling | one semaphore per visible GPU | auto mode waits for any free GPU; explicit mode acquires all requested (400 unknown id, 503 if none) |

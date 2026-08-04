@@ -10,9 +10,11 @@ entirely from YAML.
 ```{note}
 **"YAML-buildable" column.** A model is buildable from a `.yml` (via the safe
 {doc}`../../concepts/yaml-model-builder`) only if it is a pure graph of registry
-node types. Models with a custom `forward()` (diffusion, StyleGAN, ConvNeXt,
-VoxelMorph, …) are written as Python classes. The registry is deliberately small
-— see {doc}`../../concepts/yaml-model-builder`.
+node types. Models whose graph contains a leaf the registry does not know —
+diffusion samplers, StyleGAN, ConvNeXt, VoxelMorph's warping components — are
+written as Python classes instead. (Most of them do not override `forward()`; what
+keeps them out of YAML is the node types they compose, not a custom forward pass.)
+The registry is deliberately small — see {doc}`../../concepts/yaml-model-builder`.
 ```
 
 ## Segmentation — `konfai.models.python.segmentation`
@@ -33,7 +35,7 @@ training start. 2D-only (SMP's encoder zoo is 2D); use slice-wise patches or
 | --- | --- | --- | --- | --- | --- |
 | `UNet` | `segmentation.UNet.UNet` | Classic encoder–decoder U-Net; optional attention gates and deep-supervision heads. | `channels=[1,64,128,256,512,1024]`, `nb_class=2`, `dim=3`, `block_config=BlockConfig()`, `nb_conv_per_stage=2`, `downsample_mode="MAXPOOL"`, `upsample_mode="CONV_TRANSPOSE"`, `attention=False`, `block_type="Conv"` | 2D / 3D | Yes |
 | `NestedUNet` | `segmentation.NestedUNet.NestedUNet` | UNet++ with dense nested skips and per-level deep-supervision heads. | as `UNet` + `activation="Softmax"` | 2D / 3D | Yes |
-| `UNetPlusPlus` | `segmentation.unetplusplus.UNetPlusPlus` | Parametric UNet++ on a **pretrained ResNet backbone** — **weight-exact vs `smp.UnetPlusPlus`** (resnet18/34). Use this to load an smp / ImpactSynth checkpoint into an addressable KonfAI graph. | `dim=2`, `in_channels=1`, `classes=1`, `encoder_name="resnet34"`, `activation=None` (`"tanh"` for sCT) | 2D | Yes (params) |
+| `UNetPlusPlus` | `segmentation.unetplusplus.UNetPlusPlus` | Parametric UNet++ on a **pretrained ResNet backbone** — **weight-exact vs `smp.UnetPlusPlus`** (resnet18/34). Use this to load an smp / ImpactSynth checkpoint into an addressable KonfAI graph. | `dim=2`, `in_channels=3`, `classes=1`, `encoder_name="resnet34"`, `decoder_channels=[256,128,64,32,16]`, `activation=None` (`"tanh"` for sCT) | 2D or 3D | Yes (params) |
 | `ResidualEncoderUNet` | `segmentation.residualencoderunet.ResidualEncoderUNet` | Parametric nnU-Net **residual-encoder** U-Net for any topology — **weight-exact vs `dynamic_network_architectures.ResidualEncoderUNet`**. Loads a real nnU-Net ResEnc / ImpactSeg checkpoint via the bridge. | `dim=3`, `in_channels=1`, `n_stages=6`, `features_per_stage=[32,64,128,256,320,320]`, `strides=[1,2,2,2,2,2]`, `n_blocks_per_stage=[1,3,4,6,6,6]`, `num_classes=2`, `deep_supervision=True` | 2D / 3D | Yes (params) |
 
 ```{note}
@@ -54,7 +56,7 @@ The `Model:UNetpp5` used in the `Synthesis` example is a **local** class in
 | Model | Classpath | Purpose | Key args (defaults) | Dims | YAML-buildable |
 | --- | --- | --- | --- | --- | --- |
 | `ResNet` | `classification.resnet.ResNet` | ResNet-18/34/50/101/152 family with torchvision-compatible weight aliases. | `dim=3`, `in_channels=1`, `depths=[2,2,2,2]`, `widths=[64,64,128,256,512]`, `num_classes=10`, `use_bottleneck=False` | 2D / 3D | Yes |
-| `ConvNeXt` | `classification.convNeXt.ConvNeXt` | ConvNeXt (tiny→xlarge presets) with a multi-head classifier (`num_classes` is a list). | `dim=3`, `in_channels=1`, `depths=[3,3,27,3]`, `widths=[128,256,512,1024]`, `drop_p=0.1`, `num_classes=[4,7]` | 2D | No (custom `forward`) |
+| `ConvNeXt` | `classification.convNeXt.ConvNeXt` | ConvNeXt (tiny→xlarge presets) with a multi-head classifier (`num_classes` is a list). | `dim=3`, `in_channels=1`, `depths=[3,3,27,3]`, `widths=[128,256,512,1024]`, `drop_p=0.1`, `num_classes=[4,7]` | 2D or 3D (`dim` parameterised) | No (non-registry leaves) |
 
 ## Generation — `konfai.models.python.generation`
 

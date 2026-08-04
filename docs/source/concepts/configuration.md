@@ -52,10 +52,13 @@ This is why KonfAI configuration keys should generally:
 - match the actual Python constructor arguments
 - stay close to the shipped examples when you introduce a custom class
 
-One important detail in the current codebase: `@config()` defaults to the class
-name. For local custom classes, this usually adds an unnecessary extra subtree.
-Without any decorator, a custom class `UNetpp5` loaded through
-`classpath: Model:UNetpp5` reads its parameters directly from `Trainer.Model`.
+One important detail about models: the nesting is the same with or without a
+decorator. `@config()` defaults to the class name, and an *undecorated* class gets
+its class name appended by the model loader — so `classpath: Model:UNetpp5` reads
+from `Trainer.Model.UNetpp5` either way. A decorator only *renames* that subtree; it
+never removes it. `examples/Synthesis` shows the shape: `Model.py` decorates
+`UNetpp5` with `@config()`, and `Config.yml` nests its parameters under
+`Trainer.Model.UNetpp5`.
 
 ## Runtime environment variables
 
@@ -117,8 +120,10 @@ provided (see below).
 | `Import` | Skip config binding entirely. The decorated object is called with the arguments it was given, without reading the YAML — used when importing or constructing classes outside the config-driven flow. |
 | `remove` | Delete the config file on context exit instead of writing it back — used for throwaway configs, for example in tests. |
 
-An unset or unknown value behaves like `Done`. Tests that build configurable
-objects directly must therefore set **both** variables explicitly.
+An *unknown* value behaves like `Done`. An **unset** `KONFAI_CONFIG_MODE` is
+different: `apply_config` binds nothing at all (as under `Import`), and using
+`Config` directly raises `KeyError` on exit. Tests that build configurable objects
+directly must therefore set **both** variables explicitly.
 
 ## `classpath`
 

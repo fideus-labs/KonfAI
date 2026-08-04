@@ -85,7 +85,7 @@ until it declares otherwise.
 
 | Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
-| `Clip` | Clamp intensities to a fixed or data-dependent range. | `min_value=-1024, max_value=1024, mask=None` | no | no | **yes** — fixed bounds clamp each voxel on its own, and a `"min"`/`"max"` bound is read from disk; no with `mask=` (a second volume) or a `"percentile:<float>"` bound (the whole histogram) |
+| `Clip` | Clamp intensities to a fixed or data-dependent range. | `min_value=-1024, max_value=1024, save_clip_min=False, save_clip_max=False, mask=None` | no | no | **yes** — fixed bounds clamp each voxel on its own, and a `"min"`/`"max"` bound is read from disk; no with `mask=` (a second volume) or a `"percentile:<float>"` bound (the whole histogram) |
 | `Normalize` | Linear map to `[min,max]`; caches Min/Max. | `min_value=-1, max_value=1, channels=None, lazy=False, inverse=True` | no | **yes** | **yes** — Min/Max read from disk |
 | `UnNormalize` | Map `[-1,1] → [min,max]` (fixed). | `min_value=-1024, max_value=3071` | no | no | **yes** |
 | `Standardize` | Zero-mean / unit-std from cached, given, or mask-derived stats. | `mean=None, std=None, mask=None, lazy=False, inverse=True` | no | **yes** | **yes** — Mean/Std read from disk, or neither when both are given; no with `mask=` (a second volume) |
@@ -101,7 +101,7 @@ until it declares otherwise.
 | `ResampleToShape` | Resample to a target shape (per-axis `0/<0` = keep). | `shape=[100,256,256], inverse=True` | **yes** | **yes** | **yes** — resampled from the source region |
 | `ResampleTransform` | Warp by stored SimpleITK transforms read from the dataset. | `transforms`, `inverse=True` | no | no | no — nothing bounds how far the stored displacement reaches |
 | `Warp` | Resample a case through a displacement field on the **same grid** — the shape update of an atlas build. Warping onto a different grid is a resample too, and is not this stage. The declared bound is CHECKED per component against every region read, so a field that exceeds it raises instead of sampling zeros (which would read as a dark rim and nothing else). | `field` (required), `group=None`, `max_displacement=0.0`, `interpolation="linear"` | no | no | **yes** — halo = bound / spacing. `max_displacement: auto` reads the bound the fields recorded when KonfAI wrote them (OME-Zarr only); with no bound at all it declares whole-volume and says which one is missing |
-| `Canonical` | Reorient to canonical direction (3-D); updates Origin/Direction. | `inverse=True` | no | **yes** | **yes** — when the case's direction is a signed axis permutation; no on an oblique one (it is resampled) |
+| `Canonical` | Reorient to canonical direction (3-D); updates Origin/Direction. | `inverse=True` | **yes** — a remap that transposes extents moves the patch grid | **yes** | **yes** — when the case's direction is a signed axis permutation; no on an oblique one (it is resampled) |
 | `Permute` | Permute spatial axes. `dims` is a pipe-separated axis list. | `dims="1\|0\|2", inverse=True` | **yes** | **yes** | **yes** — index remap |
 | `Flip` | Flip spatial axes. | `dims="1\|0\|2", inverse=True` | no | **yes** (self-inverse) | **yes** — index remap |
 | `Squeeze` | `tensor.squeeze(dim)`. `transform_shape` drops a squeezed spatial axis and leaves a channel-axis squeeze shape-preserving, so the patch grid folds it. | `dim` (required), `inverse=True` | **yes** | **yes** | no‡ |

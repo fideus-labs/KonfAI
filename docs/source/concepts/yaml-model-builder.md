@@ -159,10 +159,10 @@ with any divergence from the reference documented in the file header:
 | `ResidualEncoderUNet` *(parametric)* | weight-exact vs nnU-Net `dynamic_network_architectures.ResidualEncoderUNet` (`deep_supervision` toggle) | nnU-Net ResEnc / ImpactSeg checkpoints (via the bridge) |
 | `UNetPlusPlus` *(parametric)* | weight-exact vs `segmentation_models_pytorch.UnetPlusPlus` (ResNet-18/34 encoder, `activation` configurable) | smp / ImpactSynth checkpoints (via the bridge) |
 
-`PlainConvUNet`, `ResidualEncoderUNet` and `UNetPlusPlus` are **parametric** models
-(`konfai/models/python/segmentation/`): rather than a fixed-topology `.yml`, you reference
-the class and declare the architecture inline, so one model covers any depth / width / class
-count — e.g.
+`PlainConvUNet`, `ResidualEncoderUNet` and `UNetPlusPlus` ship **both** ways: as a
+fixed-topology entry in the catalog above, and as a **parametric** Python class
+(`konfai/models/python/segmentation/`). Reference the class when you want one model to
+cover any depth / width / class count and declare the architecture inline — e.g.
 
 ```yaml
 Model:
@@ -194,8 +194,8 @@ not redundant — pick by what you need:
 | You want to… | Use | Why |
 |---|---|---|
 | Train/run the vanilla model as-is, one output, one loss | `classpath: monai.networks.nets:SegResNet` (or any installed class) | KonfAI wraps any `nn.Module` in `MinimalModel` automatically — no rebuild needed. Simplest path. |
-| Supervise **internal** layers (deep supervision, feature/perceptual losses), edit the architecture without code, or share it safely | `classpath: default|SegResNet.yml` | The YAML builds a KonfAI `Network` whose every submodule is addressable in `outputs_criterions`, editable in YAML, and safe by construction (registry-only, no imported code). |
-| Do the above **and** start from someone's pretrained weights | `default|<Name>.yml` + the pretrained bridge (below) | You get the reference's trained weights inside the addressable KonfAI graph. |
+| Supervise **internal** layers (deep supervision, feature/perceptual losses), edit the architecture without code, or share it safely | `classpath: default\|SegResNet.yml` | The YAML builds a KonfAI `Network` whose every submodule is addressable in `outputs_criterions`, editable in YAML, and safe by construction (registry-only, no imported code). |
+| Do the above **and** start from someone's pretrained weights | `default\|<Name>.yml` + the pretrained bridge (below) | You get the reference's trained weights inside the addressable KonfAI graph. |
 
 An imported `nn.Module` is a black box: only its final output is visible to KonfAI's
 loss/evaluation machinery. The YAML form is what unlocks per-node supervision — that is

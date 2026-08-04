@@ -229,7 +229,6 @@ Trainer:
       extend_slice: 0
     subset: None
     shuffle: true
-    filter: None
     dataset_filenames:
     - ./Dataset/:a:mha
     inline_augmentations: true

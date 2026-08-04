@@ -15,7 +15,7 @@ It is intentionally small and self-contained, and is meant to be:
 
 The current baseline uses:
 
-- the built-in diffeomorphic `VoxelMorph` model (`konfai/models/registration`)
+- the built-in diffeomorphic `VoxelMorph` model (`konfai/models/python/registration/`)
 - a 2D slice-wise setup
 - patch-based training
 - an `MSE` image-similarity loss during training
@@ -79,7 +79,13 @@ adversarial loops — stay in Python; standard feed-forward graphs can be YAML.
 
 `make_dataset.py` takes six axial slices from each of the five public pelvis CT cases
 (`VBoussot/konfai-demo`, cached by the Hub after the first run), windows them to `[0, 1]`, and crops
-each to `256x256` around the body. Run all commands from this directory:
+each to `256x256` around the body.
+
+It needs two packages the base install does not pull in: `huggingface_hub` to fetch the CT and
+`scipy` to apply the displacement field (`scipy` ships with KonfAI only under the `fid` extra). The
+notebook installs both; from a terminal, `pip install huggingface_hub scipy` first.
+
+Run all commands from this directory:
 
 ```bash
 cd examples/Registration

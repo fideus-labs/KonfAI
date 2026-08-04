@@ -78,7 +78,8 @@ all = [
   "konfai[cluster]",
   "konfai[dicom]",
   "konfai[omezarr]",
-  "konfai[export]"
+  "konfai[export]",
+  "konfai[smp]"
 ]
 dev = [
   "SimpleITK",

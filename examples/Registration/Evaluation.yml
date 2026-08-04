@@ -44,7 +44,6 @@ Evaluator:
             is_input: true
     subset: None
     validation: None
-    filter: None
     dataset_filenames:  # Ground-truth pair + predicted registered image
     - ./Dataset:a:mha
     - ./Predictions/REG_BASELINE/Dataset:i:mha
