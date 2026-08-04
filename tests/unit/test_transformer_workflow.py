@@ -665,7 +665,13 @@ def test_an_expanded_copy_carries_its_draw_and_resumes_per_copy(tmp_path: Path) 
 
 
 def test_transforms_and_draws_interleave_after_the_marker(tmp_path: Path) -> None:
-    """`T, draw, T, draw` is expressible, which is the point of declaring draws in the chain."""
+    """`draw, T, draw` is expressible, which is the point of declaring draws in the chain.
+
+    `Rotate` and not a bare `Flip`: two classes carry that name and the loader resolves the
+    TRANSFORM first, so a bare `Flip` in a chain is the deterministic axis flip, not the draw.
+    """
+    from konfai.data.augmentation import DataAugmentation
+
     _write_source(tmp_path, cases=1)
     _write_expand_config(
         tmp_path,
@@ -673,7 +679,7 @@ def test_transforms_and_draws_interleave_after_the_marker(tmp_path: Path) -> Non
         '                pattern: "{name}_r{a:02d}"\n'
         "              Brightness:\n                b_std: 0.2\n"
         "              TensorCast:\n                dtype: float32\n"
-        "              Flip:\n                f_prob: [0, 1, 0]\n"
+        "              Rotate:\n                is_quarter: true\n"
         "              Write:\n"
         f"                dataset: {tmp_path / 'out'}:h5\n",
     )
@@ -683,9 +689,10 @@ def test_transforms_and_draws_interleave_after_the_marker(tmp_path: Path) -> Non
         "Expand",
         "Brightness",
         "TensorCast",
-        "Flip",
+        "Rotate",
         "Write",
     ]
+    assert isinstance(chain[1], DataAugmentation) and isinstance(chain[3], DataAugmentation)
     workflow.setup(1)
     workflow.run_process(1, 0, 0, [])
     out = Dataset(tmp_path / "out", "h5")
@@ -752,3 +759,84 @@ def test_an_expanded_run_never_reads_a_whole_volume(tmp_path: Path, monkeypatch:
     out = Dataset(tmp_path / "out", "h5")
     assert out.is_dataset_exist("CT_out", "CASE_000_r01")
     assert out.is_dataset_exist("CT_out", "CASE_001_r03")
+
+
+def test_a_config_without_the_transformer_root_is_refused(tmp_path: Path) -> None:
+    """A typo'd root ('Transformr:') must not bind an all-defaults workflow over the user's file."""
+    from konfai.transformer import _reject_unknown_keys
+
+    config = tmp_path / "Transform.yml"
+    config.write_text("Transformr:\n  name: X\n")
+    with pytest.raises(ConfigError, match="no 'Transformer' root"):
+        _reject_unknown_keys(config)
+
+
+def test_a_typo_stage_argument_is_refused_instead_of_binding_its_default(tmp_path: Path) -> None:
+    """A stage argument the signature does not name is a parse error: the binder would otherwise
+    materialize the default beside the typo, and `Clip: {min_val: 0}` would clip at -1024, exit 0."""
+    from konfai.transformer import _reject_unknown_keys
+
+    config = tmp_path / "Transform.yml"
+    config.write_text(
+        "Transformer:\n  Dataset:\n    groups_src:\n      CT:\n        groups_dest:\n"
+        "          CT_out:\n            transforms:\n"
+        "              Clip: {min_val: 0.0, max_value: 400.0}\n"
+        "              Write: {dataset: ./Out:h5}\n"
+    )
+    with pytest.raises(ConfigError, match=r"Unknown argument 'min_val' for 'Clip'"):
+        _reject_unknown_keys(config)
+
+
+def test_a_reduce_mapping_carries_its_operator_arguments_and_refuses_a_typo(tmp_path: Path) -> None:
+    """A Reduce's mapping legitimately holds its operator's own parameters (resolve_operator binds
+    them from the same mapping); only a key neither signature names is refused."""
+    from konfai.transformer import _reject_unknown_keys
+
+    config = tmp_path / "Transform.yml"
+    template = (
+        "Transformer:\n  Dataset:\n    groups_src:\n      CT:\n        groups_dest:\n"
+        "          CT_out:\n            transforms:\n"
+        "              Reduce: {{operator: Mean, output: atlas{extra}}}\n"
+        "              Write: {{dataset: ./Out:h5}}\n"
+    )
+    config.write_text(template.format(extra=", grid: shape_only"))
+    _reject_unknown_keys(config)
+    config.write_text(template.format(extra=", grib: shape_only"))
+    with pytest.raises(ConfigError, match=r"Unknown argument 'grib' for 'Reduce'"):
+        _reject_unknown_keys(config)
+
+
+def test_a_stage_that_resolves_nowhere_is_left_to_the_loader(tmp_path: Path) -> None:
+    """An unresolvable stage name must not be reported as a wrong ARGUMENT: the loader owns that
+    refusal and names the searched packages."""
+    from konfai.transformer import _reject_unknown_keys
+
+    config = tmp_path / "Transform.yml"
+    config.write_text(
+        "Transformer:\n  Dataset:\n    groups_src:\n      CT:\n        groups_dest:\n"
+        "          CT_out:\n            transforms:\n"
+        "              Clipp: {min_value: 0.0}\n"
+        "              Write: {dataset: ./Out:h5}\n"
+    )
+    _reject_unknown_keys(config)
+
+
+def test_on_fallback_error_holds_at_run_time_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """'error' means nothing is quietly written by the whole-volume path: a fallback only discovered
+    mid-run (here, a sweep that fails after a green plan) raises at that case instead of costing an
+    unannounced volume."""
+    from konfai.data.patching import DatasetManager
+    from konfai.utils.errors import PatchError
+
+    _write_source(tmp_path)
+    _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"), header="  on_fallback: error\n")
+    workflow = _build(tmp_path)
+    workflow.setup(1)
+    monkeypatch.setattr(
+        DatasetManager,
+        "_materialize_save",
+        lambda self, sweep: self._sweep_failed_because(sweep, "OSError: no space left on device"),
+    )
+    with pytest.raises(PatchError, match="whole-volume path at run time"), pytest.warns(UserWarning):
+        workflow.run_process(1, 0, 0, [])
+    assert not Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "CASE_000")

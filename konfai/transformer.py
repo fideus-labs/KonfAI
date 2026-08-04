@@ -25,6 +25,7 @@ Nothing here falls back silently: a chain that cannot stream says which stage re
 """
 
 import contextlib
+import inspect
 import json
 import os
 import shutil
@@ -39,8 +40,8 @@ from ruamel.yaml import YAML
 from konfai import config_file, transforms_directory
 from konfai.data.case_reduction import CaseReduction, split_chain
 from konfai.data.data_manager import DataTransform, _format_gib, _node_local_ranks
-from konfai.data.patching import DatasetManager, _save_destination
-from konfai.data.transform import Save, split_expand
+from konfai.data.patching import _CASE_ELEMENT_BYTES, _FALLBACK_INFLIGHT_FACTOR, DatasetManager, _save_destination
+from konfai.data.transform import Reduce, Save, split_expand
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformerError
@@ -50,11 +51,8 @@ from konfai.utils.runtime import (
     configure_workflow_environment,
     run_distributed_app,
 )
+from konfai.utils.utils import get_module
 
-#: Working copies the whole-volume fallback holds while a case is in flight: the assembled tensor
-#: plus one transform output. Streamed cases hold a slab instead; this factor sizes the fallback.
-_FALLBACK_INFLIGHT_FACTOR = 2
-_CASE_ELEMENT_BYTES = 4  # volumes travel as float32 through the chain
 _PROBE_ENTRY = "__konfai_plan_probe__"
 
 
@@ -602,12 +600,22 @@ class Transformer(DistributedObject):
             )
         if plan.refused_entries:
             first = plan.refused_entries[0]
+            reduction = self._reduction(first.group_dest, self._managers().get(first.group_dest, []))
+            # A grid disagreement gets its own remedy: a Save changes nothing about the grids, so
+            # the generic advice would send the reader in a circle.
+            remedy = (
+                "The members do not land on one grid: resample them onto a common grid before the"
+                " Reduce, or declare grid: reference:<case> / shape_only if the cohort is already"
+                " aligned."
+                if reduction is not None and reduction.check_grid() is not None
+                else "A reduction has no whole-volume path to fall back to -- folding every case in"
+                " memory is what it exists to avoid -- so this refuses the run whatever on_fallback"
+                " says. Fix the refusing stage, or put a Save before the Reduce."
+            )
             raise TransformerError(
                 f"The reduction into '{first.case}' ({first.group_src} -> {first.group_dest}) cannot"
                 f" stream: {first.reason or 'see the plan'}",
-                "A reduction has no whole-volume path to fall back to -- folding every case in memory"
-                " is what it exists to avoid -- so this refuses the run whatever on_fallback says."
-                " Fix the refusing stage, or put a Save before the Reduce.",
+                remedy,
             )
         if self.on_fallback == "warn" and plan.fallback_entries:
             print(
@@ -636,6 +644,9 @@ class Transformer(DistributedObject):
         managers = self._managers()
         shard = self._shards[global_rank]
         counts = {"STREAM": 0, "WHOLE-VOLUME": 0, "SKIP": 0, "REDUCE": 0}
+        # 'error' holds at run time too: a fallback the plan could not see (a sweep that fails, a
+        # Warp bound exceeded) raises at that case instead of quietly costing a volume.
+        allow_fallback = self.on_fallback != "error"
 
         def description() -> str:
             return (
@@ -676,7 +687,10 @@ class Transformer(DistributedObject):
                         ]
                         counts["SKIP"] += len(copies) - len(todo)
                         regimes = manager.materialize_copies(
-                            todo, rewrite=self._overwrite, fallback_budget_bytes=self._budget_bytes
+                            todo,
+                            rewrite=self._overwrite,
+                            fallback_budget_bytes=self._budget_bytes,
+                            allow_fallback=allow_fallback,
                         )
                         shared = sum(1 for regime in regimes.values() if regime == "stream-shared")
                         own = sum(1 for regime in regimes.values() if regime == "stream")
@@ -693,7 +707,10 @@ class Transformer(DistributedObject):
                         progress.write(f"[Transformer] case '{manager.name}' ({group_dest}): SKIP (already written)")
                     else:
                         streamed = manager.materialize(
-                            0, rewrite=self._overwrite, fallback_budget_bytes=self._budget_bytes
+                            0,
+                            rewrite=self._overwrite,
+                            fallback_budget_bytes=self._budget_bytes,
+                            allow_fallback=allow_fallback,
                         )
                         verdict = "STREAM" if streamed else "WHOLE-VOLUME"
                         counts[verdict] += 1
@@ -703,7 +720,8 @@ class Transformer(DistributedObject):
 
 
 #: The grammar the strict mode accepts, level by level. ``None`` marks free-form levels (group
-#: names, classpaths, transform parameters -- those bind to the transform's own signature).
+#: names); ``"chain"`` marks a transforms mapping, whose keys are classpaths and whose arguments
+#: are checked against each stage's own signature.
 _STRICT_GRAMMAR: dict[str, object] = {
     "name": None,
     "on_fallback": None,
@@ -712,9 +730,80 @@ _STRICT_GRAMMAR: dict[str, object] = {
         "dataset_filenames": None,
         "memory_budget": None,
         "subset": None,
-        "groups_src": {"*": {"groups_dest": {"*": {"transforms": None}}}},
+        "groups_src": {"*": {"groups_dest": {"*": {"transforms": "chain"}}}},
     },
 }
+
+
+def _stage_class(classpath: str, default_classpath: str = "konfai.data.transform") -> type | None:
+    """The class a chain stage's key names, resolved exactly as ``TransformLoader`` will resolve it.
+
+    ``None`` when it resolves nowhere: the loader raises its own error for that case, and refusing
+    the arguments of a class that does not exist would report the wrong problem.
+    """
+    try:
+        module, name = get_module(classpath, default_classpath)
+        if not hasattr(module, name) and ":" not in classpath and default_classpath == "konfai.data.transform":
+            module, name = get_module(classpath, "konfai.data.augmentation")
+        candidate = getattr(module, name, None)
+    except Exception:  # an unresolvable stage is the loader's error to raise, with its own message
+        return None
+    return candidate if isinstance(candidate, type) else None
+
+
+def _stage_arguments(classpath: str, mapping: dict) -> set[str] | None:
+    """The argument names one stage accepts, or ``None`` when they cannot be known from here.
+
+    A ``Reduce`` also accepts its operator's own parameters -- ``resolve_operator`` binds them from
+    the same mapping -- so its allowed set is the union of the two signatures.
+    """
+    stage = _stage_class(str(classpath))
+    if stage is None:
+        return None
+    classes = [stage]
+    if issubclass(stage, Reduce):
+        operator = _stage_class(str(mapping.get("operator", "Median")), "konfai.data.reduction")
+        if operator is None:
+            return None
+        classes.append(operator)
+    allowed: set[str] = set()
+    for cls in classes:
+        if all("__init__" not in vars(base) for base in cls.__mro__ if base is not object):
+            # No __init__ anywhere in the MRO: the class takes no arguments at all, and object's
+            # own (*args, **kwargs) signature must not read as "accepts anything".
+            continue
+        try:
+            parameters = dict(inspect.signature(cls).parameters)
+        except (TypeError, ValueError):
+            return None
+        if any(p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL) for p in parameters.values()):
+            return None
+        allowed |= set(parameters)
+    return allowed
+
+
+def _reject_unknown_stage_arguments(chain: object, path: str) -> None:
+    """A typo'd stage argument is refused like a typo'd structural key.
+
+    The binder reads only the parameters a stage's signature names and materializes the default
+    beside anything else -- ``Clip: {min_val: 0}`` clips at -1024 and exits 0. A stage that resolves
+    nowhere, takes ``**kwargs`` or hides its signature is left to the loader's own error.
+    """
+    if not isinstance(chain, dict):
+        return
+    for classpath, arguments in chain.items():
+        if not isinstance(arguments, dict):
+            continue
+        allowed = _stage_arguments(str(classpath), arguments)
+        if allowed is None:
+            continue
+        for argument in arguments:
+            if str(argument) not in allowed:
+                raise ConfigError(
+                    f"Unknown argument '{argument}' for '{classpath}' at '{path}.{classpath}'.",
+                    f"'{classpath}' takes: {sorted(allowed)}. A typo'd argument would otherwise be"
+                    " ignored and its default silently used in its place.",
+                )
 
 
 def _reject_unknown_keys(config_path: Path) -> None:
@@ -722,14 +811,21 @@ def _reject_unknown_keys(config_path: Path) -> None:
 
     The binder reads a key when it exists and materializes the default when it does not — a typo'd
     ``memory_budge:`` silently becomes ``memory_budget: auto``. On this workflow the config IS the
-    product, so an unknown key is refused with its exact path instead of being carried along.
+    product, so an unknown key is refused with its exact path instead of being carried along. The
+    same bar holds inside a chain: a stage's arguments are checked against its own signature.
     """
     if not config_path.exists():
         return
     with open(config_path) as stream:
         tree = YAML().load(stream)
-    if not isinstance(tree, dict) or "Transformer" not in tree:
+    if not isinstance(tree, dict):
         return
+    if "Transformer" not in tree:
+        raise ConfigError(
+            f"'{config_path}' declares no 'Transformer' root (found: {sorted(str(key) for key in tree)}).",
+            "The TRANSFORM workflow reads the 'Transformer:' block; anything else would be ignored"
+            " and a full default block appended to the file in its place.",
+        )
 
     def walk(node: object, grammar: dict[str, object], path: str) -> None:
         if not isinstance(node, dict):
@@ -742,7 +838,9 @@ def _reject_unknown_keys(config_path: Path) -> None:
                     f"Known keys at this level: {sorted(k for k in grammar if k != '*')}. A typo'd"
                     " key would otherwise be ignored and its default silently used.",
                 )
-            if isinstance(child, dict):
+            if child == "chain":
+                _reject_unknown_stage_arguments(value, f"{path}.{key}")
+            elif isinstance(child, dict):
                 walk(value, child, f"{path}.{key}")
 
     walk(tree["Transformer"], _STRICT_GRAMMAR, "Transformer")

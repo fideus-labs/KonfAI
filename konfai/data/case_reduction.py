@@ -39,7 +39,13 @@ from konfai.data.patching import DatasetManager
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, Reduce, Transform
 from konfai.utils.config import apply_config
-from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.dataset import (
+    Attribute,
+    Dataset,
+    DataStream,
+    _finalize_running_statistics,
+    _update_running_statistics,
+)
 from konfai.utils.errors import ReductionError
 from konfai.utils.utils import get_module
 
@@ -114,43 +120,26 @@ class ReductionPlan:
 class _RunningStatistics:
     """Min/Max/Mean/Std accumulated over regions, so the volume is never resident.
 
-    Mean and variance come from Welford's recurrence rather than from sums of squares: the naive
-    ``E[x^2] - E[x]^2`` cancels catastrophically once the mean is large next to the spread, and a
-    volume of intensities in the thousands with a spread of ones is exactly that case -- it can
-    return a negative variance.
+    The store-scan recurrence (:func:`konfai.utils.dataset._update_running_statistics`) is the one
+    Welford kernel; this feeds it blocks and writes the keys in KonfAI's own spelling.
     """
 
-    minimum: float = float("inf")
-    maximum: float = float("-inf")
-    mean: float = 0.0
-    _sum_square_deviation: float = 0.0
-    count: int = 0
+    _state: dict | None = None
 
     def update(self, block: torch.Tensor) -> None:
-        values = block.detach().double()
-        size = values.numel()
-        if size == 0:
-            return
-        self.minimum = min(self.minimum, float(values.min()))
-        self.maximum = max(self.maximum, float(values.max()))
-        batch_mean = float(values.mean())
-        batch_deviation = float(((values - batch_mean) ** 2).sum())
-        delta = batch_mean - self.mean
-        total = self.count + size
-        self._sum_square_deviation += batch_deviation + delta * delta * self.count * size / total
-        self.mean += delta * size / total
-        self.count = total
+        self._state = _update_running_statistics(self._state, block.detach().cpu().numpy().reshape(1, -1))
 
     def write_into(self, attribute: Attribute) -> None:
         """Seed the attribute the way the rest of KonfAI already spells these keys: Min/Max bare
         scalars, Mean/Std one-element arrays. A second convention reads back as a string and fails
         inside whichever transform consumed it."""
-        if self.count == 0:
+        if self._state is None or not self._state["count"]:
             raise ReductionError("Statistics were requested over an empty volume.", "Check the output extent.")
-        attribute["Min"] = np.float32(self.minimum)
-        attribute["Max"] = np.float32(self.maximum)
-        attribute["Mean"] = np.asarray([self.mean], dtype=np.float32)
-        attribute["Std"] = np.asarray([(self._sum_square_deviation / self.count) ** 0.5], dtype=np.float32)
+        statistics = _finalize_running_statistics(self._state)
+        attribute["Min"] = np.float32(statistics["min"])
+        attribute["Max"] = np.float32(statistics["max"])
+        attribute["Mean"] = np.asarray([statistics["mean"]], dtype=np.float32)
+        attribute["Std"] = np.asarray([statistics["std"]], dtype=np.float32)
 
 
 def split_chain(transforms: list[Transform]) -> tuple[list[Transform], Reduce | None, list[Transform]]:
@@ -454,11 +443,17 @@ class CaseReduction:
             return True
         plan = self.plan()
         if not plan.streams:
-            raise ReductionError(
-                f"The reduction into '{self.reduce.output}' cannot stream: {plan.refusal}.",
-                "A reduction has no whole-volume fallback. Fix the refusing stage, or put a Save"
-                " before the Reduce so each case's chain is materialized first.",
+            # A grid disagreement gets its own remedy: a Save changes nothing about the grids, so
+            # the generic advice would send the reader in a circle.
+            remedy = (
+                "The members do not land on one grid: resample them onto a common grid before the"
+                " Reduce, or declare grid: reference:<case> / shape_only if the cohort is already"
+                " aligned."
+                if self.check_grid() is not None
+                else "A reduction has no whole-volume fallback. Fix the refusing stage, or put a Save"
+                " before the Reduce so each case's chain is materialized first."
             )
+            raise ReductionError(f"The reduction into '{self.reduce.output}' cannot stream: {plan.refusal}.", remedy)
 
         spatial = plan.spatial
         attribute = self._output_attributes(plan)

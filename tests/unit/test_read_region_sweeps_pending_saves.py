@@ -115,7 +115,7 @@ def test_a_sweep_failure_does_not_survive_the_flip_to_rewriting_saves(tmp_path, 
         "_materialize_save",
         lambda sweep: manager._sweep_failed_because(sweep, "OSError: no space left on device"),
     )
-    with pytest.warns(UserWarning, match="could not be swept"):
+    with pytest.warns(UserWarning, match="could not be written region by region"):
         assert not manager._stream_ready(0, apply_augmentations=False)
     monkeypatch.undo()
 

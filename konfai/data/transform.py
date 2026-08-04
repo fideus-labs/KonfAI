@@ -351,6 +351,13 @@ class TransformLoader:
             # stages too, and a chain declares them exactly where they apply (see Expand). Looked up
             # second, so a transform never loses its name to a same-named draw.
             module, name = get_module(classpath, "konfai.data.augmentation")
+            if not hasattr(module, name):
+                raise TransformError(
+                    f"No transform or augmentation is named '{name}'.",
+                    self._closest_stage_name(name)
+                    + "A bare name resolves in konfai.data.transform, then konfai.data.augmentation;"
+                    " use 'module:Class' for a class anywhere else.",
+                )
         # A key is read as a dotted path, and a classpath naming its module carries dots of its own.
         subtree = f"{konfai_args}.{_escape_key_component(classpath)}"
         transform = apply_config(subtree)(getattr(module, name))()
@@ -363,6 +370,25 @@ class TransformLoader:
             transform.load(1.0)
             return transform
         return Foreign(transform, classpath)
+
+    @staticmethod
+    def _closest_stage_name(name: str) -> str:
+        """A 'did you mean' over BOTH stage namespaces, so the suggestion is never Python's own
+        guess from whichever module happened to fail last."""
+        import difflib
+
+        from konfai.data import augmentation
+
+        candidates = {
+            candidate
+            for namespace in (globals(), vars(augmentation))
+            for candidate, obj in namespace.items()
+            if isinstance(obj, type)
+            and not candidate.startswith("_")
+            and any(base.__name__ in ("Transform", "DataAugmentation") for base in obj.__mro__)
+        }
+        closest = difflib.get_close_matches(name, sorted(candidates), n=1)
+        return f"Closest name: '{closest[0]}'. " if closest else ""
 
 
 def _is_augmentation(candidate: object) -> bool:
