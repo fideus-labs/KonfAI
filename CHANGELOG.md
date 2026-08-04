@@ -152,6 +152,10 @@ written replaces it.
   a caller whose system temp directory is a tmpfs can now stage volume-sized intermediates on real disk
   instead of overriding `TMPDIR` from outside; the same change also writes the moved image and the
   displacement field once per run instead of twice
+- **impact-reg**: a preset may declare only its displacement field — `register` derives the moved image
+  from it rather than requiring every preset to write a second output. Reading the moving image now
+  handles an OME-Zarr store as well as an ITK file, which also fixes the ensemble path: averaging
+  several presets over OME-Zarr inputs failed there, and nowhere else, on `sitk.ReadImage`
 - **studio**: bundle icons through the app interface, and a way to stop Studio (#75)
 - **examples**: a Transform example -- a template folded out of a cohort, and drawn copies of a case
 
