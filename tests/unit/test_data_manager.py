@@ -852,6 +852,19 @@ def test_data_prediction_disables_persistent_workers_by_default() -> None:
     assert dataset.dataLoader_args["persistent_workers"] is False
 
 
+def test_data_prediction_forwards_its_declared_augmentations() -> None:
+    """Test-time augmentation IS the ``augmentations:`` section of a prediction config.
+
+    The parameter binds whether or not the dataset passes it on, so dropping it costs no error and
+    no warning: every TTA copy simply stops existing, and the run reports a plain single-pass
+    prediction that looks entirely normal.
+    """
+    augmentations = DataAugmentationsList(nb=4)
+    dataset = DataPrediction(augmentations={"DataAugmentation_0": augmentations})
+
+    assert dataset.data_augmentations_list == {"DataAugmentation_0": augmentations}
+
+
 def test_data_prediction_disables_workers_for_konfai_inference_transforms() -> None:
     dataset = DataPrediction(
         augmentations=None,

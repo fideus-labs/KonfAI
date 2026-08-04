@@ -28,6 +28,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import warnings
@@ -177,19 +178,23 @@ _h5_read_pool = _H5ReadPool()
 
 
 def _attribute_text(value: Any) -> str:
-    """One value as an attribute holds it: its printed form, on one line.
+    """One value as an attribute holds it: its printed form, on one line and complete.
 
     The single place a value stops being a live object, because every consumer takes text --
-    ``SetMetaData`` on a SimpleITK image, an h5 attribute, a zarr sidecar. Plain ``str`` and nothing
-    more: a sequence has two printed forms, :meth:`Attribute.get_np_array` reads both, and
+    ``SetMetaData`` on a SimpleITK image, an h5 attribute, a zarr sidecar. The printed form is left
+    as each type prints it: a sequence has two, :meth:`Attribute.get_np_array` reads both, and
     ``ast.literal_eval`` (:meth:`Dataset.read_transform`, on the parameter keys) needs the Python
-    one. Normalising to either form here breaks the other reader.
+    one, so normalising to either here breaks the other reader.
+
+    Complete, because an attribute is a record and not a display: NumPy's own printing elides values
+    past a threshold, and an elided record is one no reader can parse back.
     """
     if isinstance(value, torch.Tensor):
         # Accept a tensor from any device: attributes are host-side strings, and finalize transforms
         # (Normalize, Statistics, ...) may hand over stats computed on a CUDA-resident volume.
         value = value.detach().cpu().numpy()
-    return str(value).replace("\n", "")
+    with np.printoptions(threshold=sys.maxsize):
+        return str(value).replace("\n", "")
 
 
 class Attribute(dict[str, Any]):

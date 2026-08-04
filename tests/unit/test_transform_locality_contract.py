@@ -61,6 +61,7 @@ from konfai.data.transform import (
     OneHot,
     PatchLocality,
     Percentage,
+    Reduce,
     ResampleToResolution,
     ResampleToShape,
     ResampleTransform,
@@ -73,8 +74,11 @@ from konfai.data.transform import (
     Sum,
     Transform,
     Variance,
+    Warp,
+    Write,
 )
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.errors import TransformError
 
 pytest.importorskip("SimpleITK")
 
@@ -164,6 +168,16 @@ _CASES: dict[str, list[_Case]] = {
     "StandardDeviation": [_Case(StandardDeviation(), group="Ensemble")],
     "Sum": [_Case(Sum(0), group="Ensemble")],
     "Variance": [_Case(Variance(), group="Ensemble")],
+    # Warp needs a field on disk to run, which this registry cannot build: with no declared
+    # displacement it declares WHOLE_VOLUME, so it stays out of the equivalence sweep below. Its
+    # streamed-equals-whole-volume proof lives in test_warp.py, where a field exists.
+    "Warp": [_Case(Warp(field="Dataset:h5", group="DVF"))],
+    # Reduce is a cardinality marker a cohort engine splits out of the chain, never a per-case
+    # stage: it declares WHOLE_VOLUME so a chain reaching the ordinary planner refuses rather than
+    # streams, which is what puts it out of the equivalence sweep below.
+    "Reduce": [_Case(Reduce(output="reduced"))],
+    # Write is Save with a required destination: same boundary, same WHOLE_VOLUME declaration.
+    "Write": [_Case(Write("Dataset"))],
 }
 
 
@@ -257,7 +271,15 @@ def _cases_of(cls: type[Transform]) -> list[_Case]:
         return _CASES[cls.__name__]
     if any(parameter.default is parameter.empty for parameter in inspect.signature(cls).parameters.values()):
         return []
-    return [_Case(cls())]
+    try:
+        return [_Case(cls())]
+    except TransformError:
+        # A transform can carry a default for every parameter and still refuse the combination:
+        # `Reduce` defaults `output` to "" and rejects it, because a reduction has no case name to
+        # inherit. Such a transform cannot be exercised from its defaults -- it belongs in the table
+        # above, or nowhere. Enumerating it here turned that refusal into a collection error, which
+        # takes the whole file down rather than skipping one transform.
+        return []
 
 
 def _kind_of(case: _Case) -> LocalityKind:

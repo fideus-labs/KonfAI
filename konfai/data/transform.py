@@ -1550,11 +1550,12 @@ class Warp(Transform):
     def _group_for(self, name: str) -> str:
         if self.field_group is not None:
             return self.field_group
-        groups = self.field_dataset.get_groups() if hasattr(self.field_dataset, "get_groups") else []
+        groups = [str(group) for group in self.field_dataset.get_group()]
         if len(groups) == 1:
-            return str(groups[0])
+            return groups[0]
         raise TransformError(
-            f"'Warp' cannot tell which group of '{self.field_dataset.filename}' holds the field for case '{name}'.",
+            f"'Warp' cannot tell which group of '{self.field_dataset.filename}' holds the field for"
+            f" case '{name}': it has {len(groups)}.",
             "Name it: Warp: {field: ./DVF:omezarr, group: DVF}.",
         )
 
