@@ -84,6 +84,10 @@ class TransformError(NamedKonfAIError):
     TYPE = "Transform"
 
 
+class ReductionError(NamedKonfAIError):
+    TYPE = "Reduction"
+
+
 class AppRepositoryError(NamedKonfAIError):
     TYPE = "App repository"
 
