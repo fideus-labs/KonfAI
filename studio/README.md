@@ -19,19 +19,34 @@ compares, keeps & reproduces experiments, then deploys the frozen model privatel
     `openai` (local vLLM/Ollama or any OpenAI-compatible endpoint), `anthropic` (Claude API)
   - `web/` — the built front (`index.html` + `assets/`, git-ignored; logos are committed)
 - `frontend/` — the React + Vite source (chat panel + NiiVue viewer; `npm run build` emits into `web/`)
-- `docs/` — the spec, the build plan, and the strategy briefs
+- `docs/` — the spec and the remote-deployment guide
 
 ## Run
 
 ```bash
-pip install -e ./studio                 # deps: fastapi, uvicorn, fastmcp, claude-agent-sdk
-npm --prefix studio/frontend install    # once
-npm --prefix studio/frontend run build  # builds the front into konfai_studio/web/
+pip install konfai-studio
 konfai-studio                           # -> http://127.0.0.1:8730
 ```
 
-The default brain uses your **Claude Code subscription** (no API key). For a local model:
+The published wheel already ships the built front. The default brain uses your
+**Claude Code subscription** (no API key); `konfai-studio[openai]` and
+`konfai-studio[anthropic]` add the alternatives. For a local model:
 `KONFAI_STUDIO_LLM=openai KONFAI_STUDIO_LLM_BASE_URL=http://localhost:11434/v1 KONFAI_STUDIO_MODEL=qwen2.5:14b konfai-studio`.
+
+## Develop from a checkout
+
+The front is git-ignored, so a checkout has to build it. `konfai-mcp` comes first:
+Studio pins it to its own setuptools_scm version, which only exists on PyPI at a
+release tag.
+
+```bash
+pip install -e ./konfai-mcp             # must precede studio: the pin is version-exact
+pip install -e ./studio                 # deps: fastapi, uvicorn, fastmcp, claude-agent-sdk
+npm --prefix studio/frontend install    # once
+npm --prefix studio/frontend run build  # builds the front into konfai_studio/web/
+```
+
 Front hot-reload during development: `npm --prefix studio/frontend run dev` (proxies to the BFF).
 
-See [`docs/STUDIO_SPEC.md`](docs/STUDIO_SPEC.md) and [`docs/PLAN.md`](docs/PLAN.md).
+See [`docs/STUDIO_SPEC.md`](docs/STUDIO_SPEC.md) for the design, and
+[`docs/REMOTE.md`](docs/REMOTE.md) to serve it beyond loopback.

@@ -81,14 +81,14 @@ adversarial loops — stay in Python; standard feed-forward graphs can be YAML.
 (`VBoussot/konfai-demo`, cached by the Hub after the first run), windows them to `[0, 1]`, and crops
 each to `256x256` around the body.
 
-It needs two packages the base install does not pull in: `huggingface_hub` to fetch the CT and
-`scipy` to apply the displacement field (`scipy` ships with KonfAI only under the `fid` extra). The
-notebook installs both; from a terminal, `pip install huggingface_hub scipy` first.
+It needs `scipy` to apply the displacement field, which the base install does not pull in — KonfAI
+carries it only under the `fid` extra. (`huggingface_hub`, which fetches the CT, is a core dependency.)
 
 Run all commands from this directory:
 
 ```bash
 cd examples/Registration
+pip install scipy
 python make_dataset.py
 ```
 
@@ -132,10 +132,11 @@ This creates:
 
 ### 2. Predict
 
-Use one checkpoint from `Checkpoints/REG_BASELINE/`:
+Checkpoints are named after the moment they were written, and this example keeps only the best one, so
+a glob resolves to exactly one file:
 
 ```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/REG_BASELINE/<checkpoint>.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/REG_BASELINE/*.pt
 ```
 
 This creates `Predictions/REG_BASELINE/`, where each case now has a `MOVED.mha` (the registered image).

@@ -22,8 +22,11 @@ folder written by training:
 
 ```bash
 konfai PREDICTION -y --gpu 0 --config Prediction.yml \
-  --models Checkpoints/SEG_BASELINE/<checkpoint>.pt
+  --models Checkpoints/SEG_BASELINE/*.pt
 ```
+
+Checkpoints are named after the moment they were written, so there is no fixed
+filename to type; the glob picks up whatever training kept.
 
 You can also pass multiple checkpoints:
 

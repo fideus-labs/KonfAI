@@ -53,13 +53,17 @@ CT / body mask). Every notebook fetches what it needs, and the Hub caches it aft
 
 ## Running from the command line instead
 
-Every notebook only calls the CLI, so you can do the same by hand. From an example directory:
+Every notebook only calls the CLI, so you can do the same by hand. From `Segmentation/`:
 
 ```bash
 konfai TRAIN      -y --gpu 0 --config Config.yml
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/<train_name>/<checkpoint>.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/*.pt
 konfai EVALUATION -y          --config Evaluation.yml
 ```
+
+`SEG_BASELINE` is that example's `train_name` — `Registration` uses `REG_BASELINE` and `Synthesis`
+`TRAIN_01`. Checkpoints are named after the moment they were written, so the glob is what saves you
+looking the filename up.
 
 Each run writes a workspace keyed by `train_name`: `Checkpoints/`, `Statistics/` (TensorBoard logs
 and the resolved config), `Predictions/`, and `Evaluations/` (the metric JSON).

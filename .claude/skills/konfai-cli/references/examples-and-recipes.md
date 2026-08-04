@@ -124,11 +124,19 @@ The Synthesis example is the template for custom architectures/transforms:
 
 ## Demo data
 
-All three examples pull a public subset from `huggingface.co/datasets/VBoussot/konfai-demo`
-(`hf download VBoussot/konfai-demo --repo-type dataset --include "Segmentation/**" --local-dir Dataset`);
-Registration fetches it through `make_dataset.py` instead. The `*_demo.ipynb` notebooks automate
-clone + install + download + the whole workflow for a fresh machine or Colab — run every cell,
-nothing is gated behind a flag.
+Segmentation and Synthesis pull a public subset from `huggingface.co/datasets/VBoussot/konfai-demo`:
+the subset named after the example, flattened into `Dataset/` because the configs read `./Dataset`
+directly.
+
+```bash
+hf download VBoussot/konfai-demo --repo-type dataset --include "Segmentation/**" --local-dir Dataset
+mv Dataset/Segmentation/* Dataset/ && rmdir Dataset/Segmentation && rm -rf Dataset/.cache
+```
+
+Synthesis is the same two lines with `Synthesis` in place of `Segmentation`; Registration fetches its
+subset through `make_dataset.py` instead. The `*_demo.ipynb` notebooks automate clone + install +
+download + the whole workflow for a fresh machine or Colab — run every cell, nothing is gated behind
+a flag.
 
 ## When to stop using raw YAML
 

@@ -6,7 +6,7 @@ Studio drives konfai-mcp, which reads arbitrary host paths and runs jobs — arb
 design. On loopback that is the operator's own machine; exposed on a network it is not. A single
 shared token (KONFAI_STUDIO_TOKEN) turns on authentication: unset, everything is open exactly as
 before (trusted-local); set, every request must carry a valid session cookie or bearer token. TLS
-is the reverse proxy's job (see docs/REMOTE.md).
+is the reverse proxy's job (see studio/docs/REMOTE.md).
 """
 
 from __future__ import annotations

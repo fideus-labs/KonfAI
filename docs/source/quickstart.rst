@@ -7,22 +7,16 @@ dataset, train a model, run prediction, then evaluate the saved outputs. Use it
 for your very first contact with KonfAI — each phase below ends with an
 explicit success signal so you always know whether to continue.
 
-By the end of this page, you should have:
-
-- one trained checkpoint under ``Checkpoints/SEG_BASELINE/``
-- one statistics folder under ``Statistics/SEG_BASELINE/``
-- optionally one prediction dataset and one evaluation JSON
-
-If you prefer a notebook-driven first run, especially on a fresh machine or in
-Google Colab, use ``examples/Segmentation/Segmentation_demo.ipynb`` instead of
-the CLI flow below.
+``examples/Segmentation/Segmentation_demo.ipynb`` runs this entire page for you —
+download, train, predict, evaluate, and a plot of the prediction against the
+reference. Prefer it on a fresh machine or in Google Colab; run every cell.
 
 Prerequisites
 -------------
 
 - Python 3.10 or newer
-- a working KonfAI installation
-- a terminal in the repository root
+- a KonfAI checkout (the install step below clones it)
+- a GPU is recommended; ``--cpu 1`` works everywhere the commands say ``--gpu 0``
 
 Runtime expectations
 --------------------
@@ -39,26 +33,19 @@ Training optimises ``CrossEntropyLoss`` **and** ``Dice`` together. The overlap t
 matters: each of the 40 foreground labels covers under 3% of a volume, so cross
 entropy on its own is minimised by predicting background nearly everywhere.
 
-``examples/Segmentation/Segmentation_demo.ipynb`` runs this entire page — download,
-train, predict, evaluate, and a plot of the prediction against the reference. Run
-every cell; nothing is gated behind a flag.
-
 Install KonfAI
 --------------
 
-From PyPI:
-
-.. code-block:: bash
-
-   python -m pip install "konfai[imaging]"
-
-From source:
+The examples live in the repository, not in the published wheel:
 
 .. code-block:: bash
 
    git clone https://github.com/fideus-labs/KonfAI.git
    cd KonfAI
    python -m pip install -e ".[imaging]"
+
+For your own project, once you no longer need the shipped examples,
+``python -m pip install "konfai[imaging]"`` from PyPI is all you need.
 
 .. note::
 
@@ -75,13 +62,6 @@ Verify the install:
 **Success signal:** ``konfai --help`` prints the CLI help. If it fails with an
 import error instead, revisit the install commands above.
 
-What to keep in mind before you start:
-
-- run the commands from the directory that contains the YAML files
-- `Config.yml` is the training workflow
-- `Prediction.yml` writes model outputs to disk
-- `Evaluation.yml` compares those saved outputs against references
-
 .. warning::
 
    **KonfAI rewrites your config.** After any run, ``Config.yml`` will contain
@@ -93,10 +73,8 @@ What to keep in mind before you start:
 Download the demo dataset
 -------------------------
 
-Run these commands from the repository root. **From here on, every command
-assumes your working directory is the example directory itself
-(``examples/Segmentation``)** — local YAML references and Python modules
-resolve relative to it.
+**From here on every command runs from the example directory itself** — its YAML
+references local modules and dataset paths relative to the working directory.
 
 .. code-block:: bash
 
@@ -142,9 +120,8 @@ Run the checked-in configuration:
 
    konfai TRAIN -y --gpu 0 --config Config.yml
 
-Reading a config rewrites it with the defaults KonfAI materialised, which is
-expected and is what makes a run reproducible. If you would rather keep the
-template pristine while you experiment, work on a copy:
+To keep the shipped template pristine while you experiment, work on a copy — the
+run rewrites whichever file you point it at:
 
 .. code-block:: bash
 
@@ -165,22 +142,20 @@ If you only want a first success today, it is reasonable to stop here.
 Run prediction
 --------------
 
-Use one checkpoint from ``Checkpoints/SEG_BASELINE``. ``Prediction.yml`` defines
-which outputs are written and under which group names.
+``Prediction.yml`` defines which outputs are written and under which group names.
 
-First list what training produced, then substitute a real filename for
-``<checkpoint>.pt``:
-
-.. code-block:: bash
-
-   ls Checkpoints/SEG_BASELINE/
+A checkpoint is named after the moment it was written
+(``2026_08_03_02_36_00.pt``), so there is no fixed filename to type. This example
+keeps only the best one, so a glob resolves to exactly one file:
 
 .. code-block:: bash
 
    konfai PREDICTION -y --gpu 0 --config Prediction.yml \
-     --models Checkpoints/SEG_BASELINE/<checkpoint>.pt
+     --models Checkpoints/SEG_BASELINE/*.pt
 
-Pass several checkpoints to ``--models`` to run an ensemble.
+``--models`` accepts several checkpoints and runs them as an ensemble — which is
+what the same glob does on its own once ``save_checkpoint_mode: ALL`` makes
+training keep every save.
 
 **Success signal:** prediction writes:
 

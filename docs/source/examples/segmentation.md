@@ -37,5 +37,5 @@ Dice labels together.
 
 Next steps:
 
-- {doc}`../quickstart` — a minimal first end-to-end run outside the examples
+- {doc}`../quickstart` — this same example, walked step by step, with a success signal after each phase
 - {doc}`../config_guide/training` — reference for the training-side configuration keys

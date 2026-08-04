@@ -1490,6 +1490,7 @@ class KonfAIApp(AbstractKonfAIApp):
         Fine-tune one or several checkpoints of the app locally.
 
         Steps:
+
         1. Install training assets/config and resolve the selected checkpoint(s) via
            `self.app_repository.install_fine_tune`.
         2. Link the user dataset into ./Dataset.

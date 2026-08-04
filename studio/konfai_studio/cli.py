@@ -52,7 +52,7 @@ def main() -> None:
         # Refuse by default (a printed warning is invisible under systemd); require a deliberate override.
         parser.error(
             f"refusing to bind {args.host} with no KONFAI_STUDIO_TOKEN — this exposes an unauthenticated UI "
-            "and host shell to the network. Set a token and serve over TLS (see docs/REMOTE.md), or pass "
+            "and host shell to the network. Set a token and serve over TLS (see studio/docs/REMOTE.md), or pass "
             "--i-know-this-is-insecure to override."
         )
     if not loopback and not authed:

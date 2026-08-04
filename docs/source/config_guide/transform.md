@@ -67,7 +67,8 @@ The verdicts, and each one is a fact about *your* run:
 - **WHOLE-VOLUME** — the case is assembled in memory, then written. Always
   correct, never bounded. The line says which stage refused and why.
 - **SKIP** — the output already exists; nothing is recomputed.
-- **REDUCE** / **REFUSED** — a chain that folds the cohort (`Reduce`, below)
+- **REDUCE** / **REFUSED** — a chain that folds the cohort into one entry
+  ({doc}`Reduce <../reference/components/transforms>`)
   prints one line for the whole cohort rather than one per case: `REDUCE` when
   the fold streams, `REFUSED` when it cannot. A reduction has no whole-volume
   path to fall back to, so `REFUSED` refuses the run whatever `on_fallback`

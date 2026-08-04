@@ -10,6 +10,12 @@ The screenshots below show Apps running through the real SlicerKonfAI client.
 They are actual interface captures with medical inputs and returned results—not
 procedural illustrations or simulated predictions.
 
+```{tip}
+Five published Apps ship as runnable notebooks — each fetches a demo case, runs
+the model, and plots the result, with no training and no YAML to write. They are
+the fastest way to see what an App produces: see {doc}`../examples/index`.
+```
+
 ## What an app is
 
 Where low-level KonfAI workflows are designed directly through YAML files and
@@ -80,7 +86,7 @@ konfai-apps bundle CT_SEG \
   --out dist \
   --app-json app.json \
   --config Prediction.yml Evaluation.yml \
-  --checkpoint Checkpoints/SEG_BASELINE/best.pt \
+  --checkpoint Checkpoints/SEG_BASELINE/*.pt \
   --model-py Model.py
 ```
 
@@ -140,16 +146,22 @@ metadata consumed by CLI, server, and Slicer clients.
 
 | App | Executable workload | Published bundle benchmark |
 | --- | --- | --- |
-| `TotalSegmentator-KonfAI` | CT → 117 labels (`total`: 5 models; `total-3mm`: 1), MRI → 50 labels (`total_mr`: 2; `total_mr-3mm`: 1) | CT `total`: ≈42 s, ≈20 GB VRAM and ≈19 GB RAM; original TotalSegmentator ≈76 s on the same case |
-| `MRSegmentator-KonfAI:MRSegmentator` | MRI → 40 labels, five-fold ensemble | ≈27 s, ≈22 GB VRAM and ≈2 GB RAM; original MRSegmentator ≈35 s and ≈11 GB RAM on the same case |
+| `TotalSegmentator-KonfAI` | CT → 117 labels (`total`: 5 models; `total-3mm`: 1), MRI → 50 labels (`total_mr`: 2; `total_mr-3mm`: 1) | CT `total` on a 295 × 259 × 219 2 mm case: ≈42 s, ≈20 GB VRAM, ≈19 GB RAM. Head to head on a 533 × 390 × 177 case: **17 s / 6.5 GB RAM** against the original's **61 s / 26.5 GB** |
+| `MRSegmentator-KonfAI:MRSegmentator` | MRI → 40 labels, five-fold ensemble | ≈27 s and ≈22 GB VRAM on a 295 × 259 × 219 2 mm case. Head to head on a 533 × 390 × 177 case: **25 s / 7.5 GB RAM** against the original's **65 s / 14.6 GB** |
 | `ImpactSeg:body` | one CT/MR/CBCT model → 11 structures | ≈7 s, ≈10 GB VRAM and ≈1.6 GB RAM |
 | `ImpactSynth` | three MR/CBCT→sCT variants, five models each | ≈24 s and ≈16 GB VRAM for the benchmark inference; ≈82 s for all five; ≈2 GB RAM |
 | `ImpactReg:ConvexAdam_Composite` | fixed + moving → `MovedImage` and `DisplacementField` on the fixed grid | ≈5.1 s and ≈2.1 GB VRAM on a real abdominal MR→CT pair |
 
-These are the conditions reported by each bundle README on an NVIDIA RTX PRO
-5000 24 GB. Inputs and tasks differ, so the rows demonstrate deployable scale;
-they are not an apples-to-apples model leaderboard. Patch size, ensemble size,
-case dimensions and GPU placement are part of every result.
+Every figure is quoted from the matching bundle README, measured on an NVIDIA RTX PRO
+5000 24 GB. The one exception is the `ImpactReg` row: that bundle's README has no
+performance section, so the number comes from the repository README and cannot be
+reproduced from this tree. Each README times its own benchmark case and, separately,
+a head-to-head case against the original tool — the two are different volumes, which
+is why the comparisons above state their dimensions.
+
+Rows are not comparable to each other: the inputs, tasks and ensemble sizes differ, so
+the table shows deployable scale rather than a model leaderboard. Patch size, ensemble
+size, case dimensions and GPU placement are part of every result.
 
 Together these READMEs describe four TotalSegmentator tasks, a five-fold
 MRSegmentator, one modality-agnostic ImpactSeg model, three ImpactSynth variants,
