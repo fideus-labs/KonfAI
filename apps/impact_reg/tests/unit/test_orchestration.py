@@ -53,9 +53,9 @@ def test_get_available_presets_keeps_only_registration_apps(tmp_path: Path, monk
     assert reg.get_available_presets() == ["FireANTs_SyN", "Generic_Rigid"]
 
 
-def test_find_output_raises_when_missing(tmp_path: Path) -> None:
+def test_find_outputs_raises_when_missing(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match=r"Moved\.mha"):
-        reg._find_output(tmp_path, "Moved.mha")
+        reg._find_outputs(tmp_path, "Moved.mha")
 
 
 # --------------------------------------------------------------------------- mask sentinel
@@ -101,11 +101,11 @@ def _stub_infer(app: reg.ImpactRegKonfAIApp, moving_image: Path, dvf_by_preset: 
     """Replace ``_infer_preset`` so it writes a constant DVF.mha per preset on the moving grid."""
     reference = sitk.ReadImage(str(moving_image))
 
-    def fake(preset, fixed_image, mov_image, fixed_mask, moving_mask, work, *args, **kwargs):
-        out = Path(work) / preset
+    def fake(preset, fixed, moving, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", dvf_by_preset[preset], reference)
-        return out / "DVF.mha"
+        return {"P000": out / "DVF.mha"}
 
     app._infer_preset = fake  # type: ignore[method-assign]
 
@@ -163,11 +163,11 @@ def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Pat
     reference = sitk.ReadImage(str(moving))
     app = reg.ImpactRegKonfAIApp()
 
-    def field_only(preset, fixed_image, mov_image, fixed_mask, moving_mask, work, *args, **kwargs):
-        out = Path(work) / preset
+    def field_only(preset, fixed, moving, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
-        return out / "DVF.mha"
+        return {"P000": out / "DVF.mha"}
 
     app._infer_preset = field_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
