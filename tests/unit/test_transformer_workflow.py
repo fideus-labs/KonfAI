@@ -340,19 +340,32 @@ _CAST_CHAIN = """\
 """
 
 
-def test_the_plan_reports_the_dtype_it_probed_the_destinations_with(tmp_path: Path) -> None:
+def test_the_plan_reports_the_dtype_it_probed_the_destinations_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The report is the probe's own answer, not a constant beside it.
 
-    The write probe already opens with the chain's last declared cast; a report that says float32
-    whatever the chain casts to describes a run nobody asked for -- and a destination that refuses
-    uint8 would have been caught by the probe while the plan claimed float32 was fine.
+    The write probe must open with the chain's last declared cast: a report that says float32
+    whatever the chain casts to describes a run nobody asked for, and a destination that refuses
+    uint8 would be green-lit by a probe that still opened float32.
     """
+    from konfai.transformer import Transformer
+
     _write_source(tmp_path)
     _write_config(tmp_path, _CAST_CHAIN.format(out=tmp_path / "out"))
 
+    probed: list[np.dtype] = []
+    original = Transformer._probe_destination
+
+    def spy(destination, group, shape, dtype, attributes):
+        probed.append(np.dtype(dtype))
+        return original(destination, group, shape, dtype, attributes)
+
+    monkeypatch.setattr(Transformer, "_probe_destination", staticmethod(spy))
     plan = _build(tmp_path).compute_plan(1, overwrite=False)
 
     assert "assumed uint8 / source channels" in plan.report()
+    assert probed and all(dtype == np.dtype("uint8") for dtype in probed)
 
 
 def test_unknown_key_is_refused_with_its_path(tmp_path: Path) -> None:
@@ -383,7 +396,9 @@ def test_second_run_skips_and_overwrite_rewrites(tmp_path: Path) -> None:
     os.environ["KONFAI_OVERWRITE"] = "True"
     workflow = _build(tmp_path)
     workflow.setup(1)
+    stamp = (tmp_path / "out.h5").stat().st_mtime_ns
     workflow.run_process(1, 0, 0, [])
+    assert (tmp_path / "out.h5").stat().st_mtime_ns != stamp, "the forced rewrite never wrote"
     after, _ = Dataset(tmp_path / "out", "h5").read_data("CT_out", "CASE_000")
     np.testing.assert_array_equal(after, before)
 
@@ -840,3 +855,41 @@ def test_on_fallback_error_holds_at_run_time_too(tmp_path: Path, monkeypatch: py
     with pytest.raises(PatchError, match="whole-volume path at run time"), pytest.warns(UserWarning):
         workflow.run_process(1, 0, 0, [])
     assert not Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "CASE_000")
+
+
+def test_the_strict_grammar_knows_every_key_the_binder_can_read() -> None:
+    """The grammar mirrors the two __init__ signatures: a parameter added to either without a
+    grammar entry would be refused in every config that sets it."""
+    import inspect
+
+    from konfai.data.data_manager import DataTransform
+    from konfai.transformer import _STRICT_GRAMMAR, Transformer
+
+    workflow_params = set(inspect.signature(Transformer.__init__).parameters) - {"self", "dataset"}
+    assert workflow_params | {"Dataset"} == set(_STRICT_GRAMMAR)
+    dataset_grammar = _STRICT_GRAMMAR["Dataset"]
+    assert isinstance(dataset_grammar, dict)
+    dataset_params = set(inspect.signature(DataTransform.__init__).parameters) - {"self"}
+    assert dataset_params == set(dataset_grammar)
+
+
+def test_two_ranks_partition_the_cases_and_every_output_is_written_once(tmp_path: Path) -> None:
+    """The DDP contract, executed: the shards partition the work items, and running each rank's
+    shard writes every case exactly once -- a case in no shard (or in two) is a wrong dataset
+    delivered with exit code 0."""
+    _write_source(tmp_path, cases=3)
+    _write_config(
+        tmp_path,
+        "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_dir'}/:omezarr\n",
+    )
+    workflow = _build(tmp_path)
+    workflow.setup(2)
+    flattened = sorted(index for shard in workflow._shards for index in shard)
+    assert flattened == list(range(3)), "the shards must partition the work items exactly"
+    workflow.run_process(2, 0, 0, [])
+    workflow.run_process(2, 1, 1, [])
+    out = Dataset(f"{tmp_path / 'out_dir'}/", "omezarr")
+    for index in range(3):
+        assert out.is_dataset_exist("CT_out", f"CASE_{index:03d}")

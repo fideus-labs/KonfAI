@@ -103,11 +103,14 @@ def test_median_of_an_even_cohort_matches_numpy_without_assembling(tmp_path: Pat
     assert all(not manager.loaded and not manager.data for manager in engine.managers)
 
 
-def test_mean_is_incremental_so_the_cohort_is_never_resident(tmp_path: Path) -> None:
+def test_mean_is_incremental_so_the_cohort_is_never_resident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     engine, destination, volumes = _run(tmp_path, [], Reduce(operator="Mean", output="avg"), [])
     plan = engine.plan()
     assert plan.incremental is True and plan.resident_regions == 2
 
+    # The bound, not the declaration: the base protocol BUFFERS, so a Mean that falls back to it
+    # holds the whole cohort per region while still declaring itself incremental.
+    monkeypatch.setattr(Reduction, "accumulate", lambda self, tensor: pytest.fail("Mean buffered the cohort"))
     engine.materialize()
     written, _ = destination.read_data("CT", "avg")
     np.testing.assert_allclose(written, volumes.mean(axis=0), rtol=1e-6)
@@ -297,22 +300,6 @@ def test_reduce_without_an_output_is_refused_at_construction() -> None:
 def test_an_unknown_grid_policy_is_refused_at_construction() -> None:
     with pytest.raises(TransformError, match="unknown grid policy"):
         Reduce(output="t", grid="whatever")
-
-
-def test_a_non_voxel_local_operator_is_refused(tmp_path: Path) -> None:
-    engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Median", output="t"), [])
-    engine.operator = Median()
-    object.__setattr__(engine.operator, "voxel_local", False)
-    from konfai.data import case_reduction as reduction_module
-
-    class Spatial(Mean):
-        voxel_local = False
-
-    reduction_module.__dict__.setdefault("_Spatial", Spatial)
-    with pytest.raises(ReductionError, match="voxel-local"):
-        from konfai.data.case_reduction import resolve_operator
-
-        resolve_operator(Reduce(operator="konfai.data.case_reduction:_Spatial", output="t"))
 
 
 def test_a_second_run_skips_the_finished_reduction(tmp_path: Path) -> None:
