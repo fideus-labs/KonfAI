@@ -255,3 +255,31 @@ check_untyped_defs = true
 # ---------------------------------------------------------------------------
 [tool.commitizen]
 name = "cz_conventional_commits"
+# The git tag is the only place a version exists -- setuptools_scm derives the package version from
+# it, and `scm` makes Commitizen read it from there too. No version string is committed anywhere, so
+# none can drift from the tag that built the wheel.
+version_provider = "scm"
+tag_format = "v$version"
+annotated_tag = true
+changelog_file = "CHANGELOG.md"
+# The changelog IS the release notes: the publish workflow renders one version's section and posts it
+# as the GitHub Release body, so a released version is never described in two places that disagree.
+update_changelog_on_bump = true
+
+# Conventional Commits' own changelog set: feat, fix, refactor, perf and breaking changes -- what a
+# reader of this package gets that they did not have. `docs`, `test`, `ci` and `chore` are out. They
+# could be let in, but only by shipping a Commitizen plugin to widen `commit_parser` (a class
+# attribute, not a setting), and a package to maintain is a steep price for two more bullet points.
+change_type_order = [
+    "BREAKING CHANGE",
+    "✨ Features",
+    "🐛 Bug Fixes",
+    "⚡ Performance",
+    "♻️ Refactoring",
+]
+
+[tool.commitizen.change_type_map]
+feat = "✨ Features"
+fix = "🐛 Bug Fixes"
+perf = "⚡ Performance"
+refactor = "♻️ Refactoring"
