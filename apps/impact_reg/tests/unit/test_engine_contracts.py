@@ -74,3 +74,25 @@ def test_fireants_impact_metric_requires_a_feature_model() -> None:
 
     with pytest.raises(ValueError, match="requires at least one feature model"):
         RegistrationNet(deformable_metric="impact", models={})
+
+
+def test_fireants_linear_method_reaches_the_engine() -> None:
+    # The knob is only useful if it survives the config binding: a value that stops at RegistrationNet
+    # leaves the engine on its default, and a tiled pass would run the per-patch linear it asked to
+    # skip -- silently, because the run still produces a plausible field.
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    for method in ("rigid_affine", "rigid", "none"):
+        net = RegistrationNet(linear_method=method)
+        assert net["Registration"]._engine._linear_method == method
+
+
+def test_fireants_refuses_a_registration_with_no_stage_at_all() -> None:
+    # linear_method='none' and deformable_method='none' together optimise nothing. Left to run it
+    # would return the identity: a Moved equal to the moving image and a zero field, which no
+    # downstream check tells apart from a pair that needed no moving. Refused at build time, like the
+    # missing-feature-model case, rather than after the stages have burned minutes.
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    with pytest.raises(ValueError, match="leaves nothing to optimise"):
+        RegistrationNet(linear_method="none", deformable_method="none")
