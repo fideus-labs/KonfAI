@@ -60,13 +60,18 @@ float32 / source channels until the first slab
     worst fallback case ~= 3.10 GiB vs per-rank budget 7.45 GiB
 ```
 
-Three verdicts, and each one is a fact about *your* run:
+The verdicts, and each one is a fact about *your* run:
 
 - **STREAM** — the case is read and written region by region. Memory is one
   slab, whatever the volume's size.
 - **WHOLE-VOLUME** — the case is assembled in memory, then written. Always
   correct, never bounded. The line says which stage refused and why.
 - **SKIP** — the output already exists; nothing is recomputed.
+- **REDUCE** / **REFUSED** — a chain that folds the cohort (`Reduce`, below)
+  prints one line for the whole cohort rather than one per case: `REDUCE` when
+  the fold streams, `REFUSED` when it cannot. A reduction has no whole-volume
+  path to fall back to, so `REFUSED` refuses the run whatever `on_fallback`
+  says.
 
 The plan is a measurement, not a prediction: it opens a **real** region-write
 stream on each destination and removes it immediately, so the verdict it prints

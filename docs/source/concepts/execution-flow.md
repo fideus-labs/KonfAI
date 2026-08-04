@@ -17,7 +17,7 @@ KonfAI ships four low-level workflows and one higher-level app layer.
 
 ## Low-level workflows
 
-The `konfai` CLI dispatches to three public functions:
+The `konfai` CLI dispatches to four public functions:
 
 - `konfai.trainer.train`
 - `konfai.predictor.predict`
