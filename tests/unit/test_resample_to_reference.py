@@ -532,12 +532,18 @@ def _warping(images: Dataset, fields: Dataset, **kwargs: object) -> ResampleToRe
     return stage
 
 
-def _simpleitk_warp(volume: np.ndarray, field: np.ndarray | None = None) -> np.ndarray:
+def _simpleitk_warp(
+    volume: np.ndarray,
+    field: np.ndarray | None = None,
+    interpolator: int = sitk.sitkLinear,
+    pixel: int = sitk.sitkFloat32,
+    fill: float = _FILL,
+) -> np.ndarray:
     """``sitk.Resample(image, grid, DisplacementFieldTransform(field))`` — the one-pass authority."""
     image = sitk.GetImageFromArray(volume[0])
     image.SetOrigin(_SOURCE_ORIGIN)
     image.SetSpacing(_SOURCE_SPACING)
-    grid = sitk.Image(*reversed(_REFERENCE_SPATIAL), sitk.sitkFloat32)
+    grid = sitk.Image(*reversed(_REFERENCE_SPATIAL), pixel)
     grid.SetOrigin(_REFERENCE_ORIGIN)
     grid.SetSpacing(_REFERENCE_SPACING)
     transform: sitk.Transform = sitk.Transform()
@@ -547,7 +553,71 @@ def _simpleitk_warp(volume: np.ndarray, field: np.ndarray | None = None) -> np.n
         vector.SetOrigin(_FIELD_ORIGIN)
         vector.SetSpacing(_FIELD_SPACING)
         transform = sitk.DisplacementFieldTransform(sitk.Cast(vector, sitk.sitkVectorFloat64))
-    return sitk.GetArrayFromImage(sitk.Resample(image, grid, transform, sitk.sitkLinear, _FILL))
+    return sitk.GetArrayFromImage(sitk.Resample(image, grid, transform, interpolator, fill))
+
+
+def _spaced_labels() -> np.ndarray:
+    """Two labels far apart, so any value between them can only have come from blending."""
+    index = np.arange(int(np.prod(_SOURCE_SPATIAL))).reshape(_SOURCE_SPATIAL)
+    return np.where((index // 3) % 2 == 0, 0, 100).astype(np.uint8)[None]
+
+
+def test_a_label_map_warped_through_a_field_takes_the_nearest_voxel(tmp_path: Path) -> None:
+    """The warped path has a sampler of its own, and it has to pick a label rather than blend two.
+
+    Blending is silent here: two labels average into a third that was never in the source, the dtype
+    is unchanged, and the result is still a label map -- so nothing downstream reports it. The
+    fixture holds only 0 and 100 so that any other value can only have come from an interpolation.
+    """
+    images = Dataset(tmp_path / "Images", "h5")
+    labels = _spaced_labels()
+    images.write("Case", _CASE, labels, _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
+    images.write("Reference", _CASE, _volume(_REFERENCE_SPATIAL, 1), _attributes(_REFERENCE_ORIGIN, _REFERENCE_SPACING))
+    fields = Dataset(tmp_path / "Fields", "h5")
+    fields.write("DVF", _CASE, _displacement(), _attributes(_FIELD_ORIGIN, _FIELD_SPACING))
+    source = _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
+
+    stage = _warping(images, fields, fill=0.0)
+    got = stage(_CASE, torch.from_numpy(labels.copy()), Attribute(source)).numpy()
+    want = _simpleitk_warp(
+        labels, _displacement(), interpolator=sitk.sitkNearestNeighbor, pixel=sitk.sitkUInt8, fill=0.0
+    )
+
+    assert got.dtype == np.uint8
+    assert set(np.unique(got).tolist()) <= {0, 100}, "nearest picks a label, it does not blend two"
+    np.testing.assert_array_equal(got[0], want)
+
+
+@pytest.mark.parametrize("warping", [False, True], ids=["grid_change", "composed_with_a_field"])
+def test_an_explicit_interpolation_is_honoured_on_both_paths(tmp_path: Path, warping: bool) -> None:
+    """A dtype cannot decide this on its own -- a CT is int16 and so is nothing else about it -- so
+    the heuristic only ever claims uint8 and ``interpolation`` covers everything it cannot know.
+
+    Parametrised over BOTH gathers on purpose. A declaration honoured by the composed path and
+    ignored by the plain one is worse than no declaration: the page that tells a user to set it for
+    a label map is then right about half their chains, and the half it is wrong about says nothing.
+    """
+    images = Dataset(tmp_path / "Images", "h5")
+    # int16, not uint8: a dtype the heuristic deliberately does not claim, so only the declaration
+    # can be what decides.
+    labels = _spaced_labels().astype(np.int16)
+    images.write("Case", _CASE, labels, _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
+    images.write("Reference", _CASE, _volume(_REFERENCE_SPATIAL, 1), _attributes(_REFERENCE_ORIGIN, _REFERENCE_SPACING))
+    fields = Dataset(tmp_path / "Fields", "h5")
+    fields.write("DVF", _CASE, _displacement(), _attributes(_FIELD_ORIGIN, _FIELD_SPACING))
+    source = _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
+
+    def resample(**kwargs: object) -> set[int]:
+        stage = _warping(images, fields, fill=0.0, **kwargs) if warping else _stage(images, fill=0.0, **kwargs)
+        got = stage(_CASE, torch.from_numpy(labels.copy()), Attribute(source)).numpy()
+        return set(np.unique(got).tolist())
+
+    assert not resample(interpolation="nearest") - {0, 100}, "nearest picks a label, it does not blend"
+    assert resample(interpolation="linear") - {0, 100}, "asking for linear must actually interpolate"
+    assert resample() - {0, 100}, "int16 is not a label map the dtype can claim"
+
+    with pytest.raises(TransformError, match="unknown interpolation"):
+        _warping(images, fields, interpolation="cubic")
 
 
 def test_it_warps_onto_the_reference_where_simpleitk_does(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
@@ -809,3 +879,29 @@ def test_a_bound_with_no_field_is_refused() -> None:
     """
     with pytest.raises(TransformError, match="no field to apply"):
         ResampleToReference(entry=_CASE, group="Reference", max_displacement=1.0)
+
+
+def test_the_two_gathers_agree_bit_for_bit_through_an_identity_field(tmp_path: Path) -> None:
+    """One arithmetic, two loops: per-axis maps, and eight corners at a coordinate volume.
+
+    The separable loop cannot serve a displacement (a displacement is not separable) and the flat
+    gather is the slower way to do a map that is. So both exist, and both have to obey the same
+    inside interval, the same tap clamp and the same fill. A ZERO field is where that is checkable:
+    the composed path reduces to the grid change alone, so the two must land on the same voxels.
+
+    Bit for bit, not close. A tolerance here would hide exactly the drift this guards -- one loop
+    keeping a rule the other quietly dropped, which is how the CPU-half guard went missing once.
+    """
+    images = Dataset(tmp_path / "Images", "h5")
+    volume = _high_frequency()
+    images.write("Case", _CASE, volume, _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
+    images.write("Reference", _CASE, _volume(_REFERENCE_SPATIAL, 1), _attributes(_REFERENCE_ORIGIN, _REFERENCE_SPACING))
+    fields = Dataset(tmp_path / "Fields", "h5")
+    fields.write("DVF", _CASE, np.zeros((3, *_FIELD_SPATIAL), np.float32), _attributes(_FIELD_ORIGIN, _FIELD_SPACING))
+    source = _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
+
+    separable = _stage(images, fill=_FILL)(_CASE, torch.from_numpy(volume.copy()), Attribute(source)).numpy()
+    composed = _warping(images, fields, fill=_FILL)(_CASE, torch.from_numpy(volume.copy()), Attribute(source)).numpy()
+
+    assert 0 < int((separable == _FILL).sum()) < separable.size, "the fixture must have a rim, and not be all rim"
+    np.testing.assert_array_equal(composed, separable)

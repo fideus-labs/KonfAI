@@ -1703,10 +1703,11 @@ class ModelComposite(Network):
     Args:
         model (Network): The base network to replicate.
         nb_models (int): Number of copies of the model to create.
-        combine (Reduction): The reduction method used to combine outputs from all model replicas.
+        combine (konfai.data.reduction.Reduction): The reduction method used to combine outputs from
+            all model replicas.
 
     Attributes:
-        combine (Reduction): The reduction method used during forward inference.
+        combine (konfai.data.reduction.Reduction): The reduction used during forward inference.
     """
 
     def __init__(self, model: Network, combine: Reduction):
@@ -1866,7 +1867,7 @@ class Predictor(DistributedObject):
 
     Attributes:
         model (Network): The neural network model to use for prediction.
-        dataset (DataPrediction): Dataset manager for prediction data.
+        dataset (konfai.data.data_manager.DataPrediction): Dataset manager for prediction data.
         combine_classpath (str): Path to the reduction strategy (e.g., "Mean").
         autocast (bool): Whether to enable AMP inference.
         outputs_dataset (dict[str, OutputDataset]): Mapping from layer names to output writers.

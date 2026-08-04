@@ -897,6 +897,49 @@ class Squeeze(TransformInverse):
         return tensor.unsqueeze(self.dim)
 
 
+# --------------------------------------------------------------------------------------------------
+# The rules every sampler below obeys. There are two gather strategies for one arithmetic -- per-axis
+# maps where the coordinate is separable, eight flat corners where a displacement makes it not -- and
+# the strategies differ for a measured reason. The RULES must not: written out at each site they
+# drift, and the drift is silent because a resampled volume looks right either way.
+
+
+def sampling_dtype(tensor: torch.Tensor) -> torch.dtype:
+    """The dtype to accumulate a weighted sum of ``tensor``'s voxels in.
+
+    An integer input has no arithmetic of its own to interpolate with. A CPU half does, and it should
+    not be used: torch's CPU Half kernels are missing from older releases and lossy over a sum of
+    eight terms, at values a scanner actually produces. A CUDA half keeps its own -- every mode has a
+    Half kernel there, and upcasting a whole multi-class volume would double its memory for nothing.
+    """
+    if not tensor.is_floating_point():
+        return torch.float32
+    if tensor.device.type == "cpu" and tensor.dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    return tensor.dtype
+
+
+def nearest_index(coordinate: torch.Tensor) -> torch.Tensor:
+    """ITK's nearest: round half UP on the continuous source index.
+
+    ``torch.round`` breaks a tie to the even index, and ``F.interpolate``'s nearest is
+    ``floor(o * scale)`` -- a statement about a size RATIO, which says nothing once the target grid
+    carries an origin of its own. On a label map either wrong rule still yields a label map.
+    """
+    return torch.floor(coordinate + 0.5).to(torch.long)
+
+
+def window_index(index: torch.Tensor, n_in: int, region_start: int, window: int) -> torch.Tensor:
+    """A global source index as an offset into the sub-region that was actually read.
+
+    Clamped twice, and both matter: to the SOURCE first, so a tap past the volume reproduces the
+    border value rather than wrapping, and to the WINDOW second, so it stays inside the buffer on
+    hand. The second clamp is only ever load-bearing where the first already put the sample outside,
+    which the caller masks to fill -- or, for a halo'd read, where the declared bound was checked.
+    """
+    return torch.clamp(torch.clamp(index, 0, n_in - 1) - region_start, 0, window - 1)
+
+
 class Resample(TransformInverse, ABC):
     def __init__(self, inverse: bool) -> None:
         super().__init__(inverse)
@@ -914,17 +957,7 @@ class Resample(TransformInverse, ABC):
         else:
             mode = "trilinear"
 
-        # Interpolate in the tensor's own float dtype on CUDA. The model output is float16 and CUDA has
-        # Half kernels for every mode, so upcasting the whole (channels x volume) tensor to float32 would
-        # double the memory of a multi-class output resample for no argmax benefit. On the CPU, compute in
-        # float32: Half CPU kernels are missing from older torch releases. Integer inputs (uint8 labels)
-        # still need a float grid for interpolation.
-        if not tensor.is_floating_point() or (
-            tensor.device.type == "cpu" and tensor.dtype in (torch.float16, torch.bfloat16)
-        ):
-            work = tensor.type(torch.float32)
-        else:
-            work = tensor
+        work = tensor.type(sampling_dtype(tensor))
         # Return on the input's device (interpolate preserves it): a CPU input stays on the CPU, a
         # GPU-resident output volume stays on the GPU so the whole finalize runs where the volume is.
         return F.interpolate(work.unsqueeze(0), size=tuple(size), mode=mode).squeeze(0).type(tensor.dtype)
@@ -979,8 +1012,22 @@ class Resample(TransformInverse, ABC):
     # Every patch derives its source coordinates from the same global scale (n_in / n_out, from the
     # truncated integer sizes F.interpolate itself uses), which is what makes the streamed patches
     # agree with the whole-volume call and with each other across a seam.
+    #: What this stage interpolates with, or ``None`` to read it off the dtype. A subclass taking an
+    #: ``interpolation`` argument assigns it here, and every sampler asks the one method below --
+    #: a declaration honoured on one path and not another is worse than none, because the page that
+    #: tells a user to set it is then right about half the chains.
+    interpolation: str | None = None
+
     def _stream_mode(self, tensor: torch.Tensor) -> str:
-        if tensor.dtype == torch.uint8:
+        """``nearest``, or the rank's linear name -- what a sampler asks before it blends anything.
+
+        A dtype cannot settle this on its own: a CT is int16 and so is nothing else about it. The
+        heuristic therefore claims ``uint8`` and nothing more, and a stage exposing ``interpolation``
+        answers for everything it cannot know. Getting it wrong is silent -- two blended labels give
+        a third that was in no input, in a volume that is still a label map.
+        """
+        declared = self.interpolation or ("nearest" if tensor.dtype == torch.uint8 else "linear")
+        if declared == "nearest":
             return "nearest"
         return "bilinear" if len(tensor.shape) < 4 else "trilinear"
 
@@ -1105,12 +1152,7 @@ class Resample(TransformInverse, ABC):
             # pure coordinate gather, so composing the axes changes no value).
             return sub_tensor[(slice(None), *torch.meshgrid(*indices, indexing="ij"))]
 
-        if not sub_tensor.is_floating_point() or (
-            sub_tensor.device.type == "cpu" and sub_tensor.dtype in (torch.float16, torch.bfloat16)
-        ):
-            work = sub_tensor.type(torch.float32)
-        else:
-            work = sub_tensor
+        work = sub_tensor.type(sampling_dtype(sub_tensor))
         taps: list[tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]] = []
         for k in range(ndim):
             o = torch.arange(target_slices[k].start, target_slices[k].stop, device=dev, dtype=work.dtype)
@@ -1182,22 +1224,14 @@ class Resample(TransformInverse, ABC):
             return torch.full(out_shape, outside, device=device, dtype=torch.float32).type(sub_tensor.dtype)
 
         def local(index: torch.Tensor, k: int) -> torch.Tensor:
-            """A global source index as an offset into the window that was read, kept in range."""
-            return torch.clamp(torch.clamp(index, 0, n_in[k] - 1) - region_starts[k], 0, window[k] - 1)
+            return window_index(index, n_in[k], region_starts[k], window[k])
 
         if self._stream_mode(sub_tensor) == "nearest":
-            # floor(c + 0.5) is ITK's nearest -- round half up -- not F.interpolate's floor(o * scale),
-            # which is a statement about a size ratio and says nothing once a grid has its own origin.
-            picks = [local(torch.floor(axis + 0.5).long(), k) for k, axis in enumerate(coordinates)]
+            picks = [local(nearest_index(axis), k) for k, axis in enumerate(coordinates)]
             gathered = sub_tensor[(slice(None), *torch.meshgrid(*picks, indexing="ij"))]
             out = gathered if gathered.is_floating_point() else gathered.type(torch.float32)
         else:
-            if not sub_tensor.is_floating_point() or (
-                sub_tensor.device.type == "cpu" and sub_tensor.dtype in (torch.float16, torch.bfloat16)
-            ):
-                work = sub_tensor.type(torch.float32)
-            else:
-                work = sub_tensor
+            work = sub_tensor.type(sampling_dtype(sub_tensor))
             taps = []
             for k, axis in enumerate(coordinates):
                 base = torch.floor(axis)
@@ -1415,9 +1449,17 @@ class ResampleToReference(Resample):
         field_group: str | None = None,
         max_displacement: float | str = 0.0,
         fill: float = 0.0,
+        interpolation: str | None = None,
         inverse: bool = True,
     ) -> None:
         super().__init__(inverse)
+        if interpolation is not None and interpolation not in ("linear", "nearest"):
+            raise TransformError(
+                f"'ResampleToReference' has an unknown interpolation '{interpolation}'.",
+                "Use 'linear' for an image or 'nearest' for a label map. Left unset, uint8 is taken"
+                " for a label map and everything else is interpolated.",
+            )
+        self.interpolation = interpolation
         if not entry or not str(entry).strip():
             raise TransformError(
                 "'ResampleToReference' needs an 'entry': the stored image whose grid to adopt.",
@@ -1446,7 +1488,11 @@ class ResampleToReference(Resample):
                 " this stage resamples onto the grid and nothing more.",
             )
         self.displacement: _DisplacementSource | None = (
-            _DisplacementSource("ResampleToReference", field, field_group, max_displacement) if declared else None
+            _DisplacementSource(
+                "ResampleToReference", field, field_group, max_displacement, group_keyword="field_group"
+            )
+            if declared
+            else None
         )
         self._grid: tuple[list[int], np.ndarray, np.ndarray, np.ndarray] | None = None
         # Each case's map, kept from where its own header was in hand. See _recorded().
@@ -1891,17 +1937,25 @@ class ResampleToReference(Resample):
             return torch.full(out_shape, self.fill_value, device=sub_tensor.device, dtype=torch.float32).type(
                 sub_tensor.dtype
             )
-        work = sub_tensor if sub_tensor.is_floating_point() else sub_tensor.type(torch.float32)
+        work = sub_tensor.type(sampling_dtype(sub_tensor))
         flat_source = work.reshape(int(work.shape[0]), -1)
+
+        def _tap(offsets: list[torch.Tensor]) -> torch.Tensor:
+            flat_index = torch.zeros(extent, dtype=torch.long, device=sub_tensor.device)
+            for axis, offset in enumerate(offsets):
+                index = window_index(offset, n_in[axis], region_starts[axis], window[axis])
+                flat_index = flat_index * window[axis] + index
+            return flat_source.index_select(1, flat_index.reshape(-1)).reshape(out_shape)
+
+        if self._stream_mode(sub_tensor) == "nearest":
+            picked = _tap([nearest_index(axis).expand(extent) for axis in coordinates])
+            return picked.masked_fill(~inside.unsqueeze(0), self.fill_value).type(sub_tensor.dtype)
         out = torch.zeros(out_shape, device=sub_tensor.device, dtype=work.dtype)
         for corner in itertools.product((0, 1), repeat=rank):
-            flat_index = torch.zeros(extent, dtype=torch.long, device=sub_tensor.device)
             weight = torch.ones(extent, device=sub_tensor.device, dtype=work.dtype)
             for axis, step in enumerate(corner):
-                index = torch.clamp(bases[axis].to(torch.long) + step, 0, n_in[axis] - 1) - region_starts[axis]
-                flat_index = flat_index * window[axis] + torch.clamp(index, 0, window[axis] - 1)
                 weight = weight * (weights[axis] if step else 1 - weights[axis]).to(work.dtype)
-            out += flat_source.index_select(1, flat_index.reshape(-1)).reshape(out_shape) * weight
+            out += _tap([bases[axis].to(torch.long) + step for axis, step in enumerate(corner)]) * weight
         return out.masked_fill(~inside.unsqueeze(0), self.fill_value).type(sub_tensor.dtype)
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
@@ -2361,11 +2415,22 @@ class _DisplacementSource:
     exceeds that bound are the same questions, and were answered twice before this existed.
 
     ``owner`` is the stage's name, so a refusal reads as coming from the stage the user declared and
-    not from a helper they have never heard of.
+    not from a helper they have never heard of. ``group_keyword`` goes with it: the two owners spell
+    the field's group differently -- ``Warp`` calls it ``group`` because it has no other, and
+    ``ResampleToReference`` calls it ``field_group`` because ``group`` is already the reference's. A
+    remedy naming the wrong one sends the user to change the wrong argument.
     """
 
-    def __init__(self, owner: str, field: str | None, group: str | None, max_displacement: float | str) -> None:
+    def __init__(
+        self,
+        owner: str,
+        field: str | None,
+        group: str | None,
+        max_displacement: float | str,
+        group_keyword: str = "group",
+    ) -> None:
         self.owner = owner
+        self.group_keyword = group_keyword
         # A root of its own, or none: with no ``field`` path the fields are a GROUP of the run's own
         # dataset_filenames, one entry per case — which is how a cohort registered in place stores
         # them, beside the volumes they were solved on.
@@ -2377,7 +2442,7 @@ class _DisplacementSource:
             raise TransformError(
                 f"'{owner}' has neither a 'field' path nor a group to find the fields in.",
                 f"Name the store — {owner}: {{field: ./DVF:omezarr}} — or, for fields stored beside"
-                f" the cases, the group they are in: {owner}: {{field_group: DVF}}.",
+                f" the cases, the group they are in: {owner}: {{{group_keyword}: DVF}}.",
             )
         self.group = group
         #: The run's own roots, handed over by the owner; only consulted when there is no path.
@@ -2455,7 +2520,7 @@ class _DisplacementSource:
         if self.dataset is None:  # unreachable: a source with no path was given a group to use
             raise TransformError(
                 f"'{self.owner}' has no field store of its own and no group to look for one in.",
-                f"Name the group the fields are in: {self.owner}: {{field_group: DVF}}.",
+                f"Name the group the fields are in: {self.owner}: {{{self.group_keyword}: DVF}}.",
             )
         groups = [str(group) for group in self.dataset.get_group()]
         if len(groups) == 1:
@@ -2463,7 +2528,7 @@ class _DisplacementSource:
         where = f"the field for case '{name}'" if name is not None else "the fields"
         raise TransformError(
             f"'{self.owner}' cannot tell which group of '{self.dataset.filename}' holds {where}: it has {len(groups)}.",
-            f"Name it: {self.owner}: {{field: ./DVF:omezarr, group: DVF}}.",
+            f"Name it: {self.owner}: {{field: ./DVF:omezarr, {self.group_keyword}: DVF}}.",
         )
 
     def _root_for(self, name: str | None) -> Dataset:
@@ -2622,7 +2687,13 @@ class Warp(Transform):
         the wrong way.
         """
         extent = list(tensor.shape[1:])
-        axes = torch.meshgrid(*[torch.arange(size, dtype=torch.float32) for size in extent], indexing="ij")
+        # Grid and field follow the VOLUME's device: a field is read from disk onto the CPU, the
+        # volume may be GPU-resident, and grid_sample takes both from one device.
+        device = tensor.device
+        field = field.to(device)
+        axes = torch.meshgrid(
+            *[torch.arange(size, dtype=torch.float32, device=device) for size in extent], indexing="ij"
+        )
         sample = []
         for axis in range(len(extent)):
             # field component for array axis `axis` (z,y,x) is the reversed one (x,y,z)
@@ -2660,6 +2731,10 @@ class Warp(Transform):
                 "Use a source whose geometry is readable (mha, nii, h5 or omezarr written by KonfAI).",
             )
         field = self.displacement.read(name, None, len(tensor.shape) - 1)
+        # The declared bound is checked against every field read, on this path as on the streamed
+        # one: it is what sizes the halo, and a bound smaller than the field streams a region whose
+        # edge is missing.
+        self.displacement.check_bound(field, name)
         return self._sample(tensor, field, spacing)
 
 

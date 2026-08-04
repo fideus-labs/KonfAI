@@ -65,6 +65,13 @@ class Reduction(ABC):
     #: wrong ``False`` only costs memory.
     incremental: bool = False
 
+    #: Regions this operator allocates ON TOP of the ones it is handed, counted in buffers-worth.
+    #: ``0`` folds what it already holds; an operator that stacks its inputs into a new tensor, or
+    #: sorts a copy of them, is holding that many buffers again while it runs. The plan multiplies
+    #: this into the peak it sizes regions against, so leaving it at ``0`` for an operator that
+    #: copies is a plan promising a working set the run then exceeds.
+    working_multiple: float = 0.0
+
     @abstractmethod
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         raise NotImplementedError()
@@ -158,9 +165,16 @@ class Median(Reduction):
     Not incremental, and cannot be: a median needs every case before it can name the middle one.
     Its working set is therefore every case at one region, which is what bounds the region size
     rather than the volume.
+
+    **Not for label maps.** Averaging the middle pair means the result can be a value that was in no
+    input -- over labels 1 and 5 it is 3, a different structure -- and over exactly two cases it is
+    the mean, so the robustness the name promises is gone. Fold segmentations with :class:`Vote`.
     """
 
     voxel_local = True
+    # ``torch.stack`` copies the buffer into a new tensor and ``torch.quantile`` sorts a copy of
+    # that: two buffers-worth live alongside the one already held, for the duration of the call.
+    working_multiple = 2.0
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         if len(tensors) == 1:
@@ -169,11 +183,39 @@ class Median(Reduction):
         return middle.to(_averaged_dtype(tensors[0].dtype))
 
 
+class Vote(Reduction):
+    """The label the most cases agree on, per voxel. The operator for folding SEGMENTATIONS.
+
+    ``Mean`` and ``Median`` both answer with a value that was in no input: the median of labels 1 and
+    5 is 3, which is a different structure. A label map made of invented labels is still a label map,
+    so nothing downstream reports it, and the dtype widens to float32 on top. This one picks and never
+    blends, and the result keeps the input's dtype.
+
+    A tie goes to the SMALLEST label, so a cohort folds to the same volume on every run and on every
+    rank. That is arbitrary but it has to be *something*, and an arbitrary rule stated here beats a
+    stable-sort detail nobody can see.
+
+    Not incremental: a majority needs every case before it can be counted.
+    """
+
+    voxel_local = True
+    # ``torch.mode`` sorts a copy of the stack it is handed, alongside the stack itself.
+    working_multiple = 2.0
+
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        if len(tensors) == 1:
+            return tensors[0]
+        return torch.mode(torch.stack(tensors, dim=0), dim=0).values.to(tensors[0].dtype)
+
+
 class Concat(Reduction):
     """Concatenate the cases along the channel dimension."""
 
     # Cats along the channel axis, orthogonal to the spatial axes -- per-voxel, so region-local.
     voxel_local = True
+    # Nothing on top of the buffer: the concatenation IS the output region, and the plan charges that
+    # separately at this operator's own (wider) output width.
+    working_multiple = 0.0
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         return torch.cat(tensors, dim=1)

@@ -40,7 +40,7 @@ from ruamel.yaml import YAML
 from konfai import config_file, transforms_directory
 from konfai.data.case_reduction import CaseReduction, split_chain
 from konfai.data.data_manager import DataTransform, _format_gib, _node_local_ranks
-from konfai.data.patching import _CASE_ELEMENT_BYTES, _FALLBACK_INFLIGHT_FACTOR, DatasetManager, _save_destination
+from konfai.data.patching import CASE_ELEMENT_BYTES, FALLBACK_INFLIGHT_FACTOR, DatasetManager, save_destination
 from konfai.data.transform import Reduce, Save, Transform, split_expand
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
@@ -83,7 +83,7 @@ class TransformPlanEntry:
         A reduction's ``case_bytes`` is already its resident regions (it holds one region per case,
         not one volume), where a whole-volume fallback holds the case plus one in-flight copy.
         """
-        return self.case_bytes if self.reduced else self.case_bytes * _FALLBACK_INFLIGHT_FACTOR
+        return self.case_bytes if self.reduced else self.case_bytes * FALLBACK_INFLIGHT_FACTOR
 
 
 @dataclass
@@ -128,7 +128,7 @@ class TransformPlan:
         lines = [
             f"[Transformer] plan over {self.world_size} rank(s) | per-rank budget"
             f" {_format_gib(self.budget_bytes)} ({self.budget_desc}) | fallback working set = case"
-            f" x {_CASE_ELEMENT_BYTES} B x {_FALLBACK_INFLIGHT_FACTOR} (in-flight copy), headers-only"
+            f" x {CASE_ELEMENT_BYTES} B x {FALLBACK_INFLIGHT_FACTOR} (in-flight copy), headers-only"
             f" estimate | output dtype/channels assumed {self.dtype_hypothesis} until the first slab"
         ]
         for group_src, dropped in sorted(self.dropped_cases.items()):
@@ -248,7 +248,7 @@ class Transformer(DistributedObject):
                 f"The chain writing '{manager.group_dest}' does not end with a Write, so it has no destination.",
                 "End every chain with Write: {dataset: <path>[:format]}.",
             )
-        return _save_destination(terminal, manager.dataset, manager.group_dest)
+        return save_destination(terminal, manager.dataset, manager.group_dest)
 
     def _reduction(self, group_dest: str, managers: list[DatasetManager]) -> CaseReduction | None:
         """The reduction this chain declares, or ``None`` when it is an ordinary per-case chain.
@@ -293,7 +293,7 @@ class Transformer(DistributedObject):
                 "A reduction writes one entry, so the chain carrying it must say where:"
                 " Write: {dataset: <path>[:format]}.",
             )
-        destination, group = _save_destination(terminal, managers[0].dataset, group_dest)
+        destination, group = save_destination(terminal, managers[0].dataset, group_dest)
         reduction = CaseReduction(
             managers=cases,
             reduce=reduce,
@@ -334,7 +334,7 @@ class Transformer(DistributedObject):
         channels = int(manager.base_shape[0])
         dtype = self._dtype_hypothesis(manager)
         for transform, spatial, attributes in manager.write_targets(a):
-            destination, group = _save_destination(transform, manager.dataset, manager.group_dest)
+            destination, group = save_destination(transform, manager.dataset, manager.group_dest)
             key = (str(destination.filename), group)
             if key in probed:
                 continue
@@ -422,7 +422,10 @@ class Transformer(DistributedObject):
             group_src = self._group_src_of(group_dest)
             reduction = self._reduction(group_dest, managers)
             if reduction is not None:
-                reduction_dtype = np.dtype("float32")
+                # Read off the chain, not assumed: a pointwise cast is allowed after the Reduce, and
+                # the probe below opens the destination with this dtype. A constant here would test
+                # a write the run never makes -- and mha refuses on dtype.
+                reduction_dtype = self._dtype_hypothesis(managers[0])
                 planned_dtypes.add(str(reduction_dtype))
                 reduction_plan = reduction.plan()
                 skipped = not overwrite and reduction.destination.is_dataset_exist(
@@ -593,7 +596,7 @@ class Transformer(DistributedObject):
                 for transform in managers[0].transforms if managers else []:
                     if not isinstance(transform, Save):
                         continue
-                    destination, _group = _save_destination(transform, managers[0].dataset, managers[0].group_dest)
+                    destination, _group = save_destination(transform, managers[0].dataset, managers[0].group_dest)
                     # The question here is NOT concurrent_write_safe(): that one asks whether two
                     # entries of one shared store may be written at once, and answers no for omezarr
                     # -- which would refuse the very destination this workflow recommends. Ranks

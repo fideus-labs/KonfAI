@@ -197,16 +197,35 @@ def _attribute_text(value: Any) -> str:
         return str(value).replace("\n", "")
 
 
-def _store_chunks(shape: list[int], region_shape: list[int] | None) -> tuple[int, ...] | None:
+def _store_chunks(shape: list[int], region_shape: list[int] | None, dtype: Any) -> tuple[int, ...] | None:
     """Chunks a store should use, given the region shape its writer declared.
 
     A region write that straddles a chunk becomes a read-modify-write of the whole chunk, so the
-    honest chunking is the writer's own region, clamped to the array. ``None`` when the writer
-    declared nothing: the store keeps its own default rather than a guess made here.
+    writer's own region is the honest starting point. Taking it verbatim is not: a slab sweep
+    declares the whole trailing plane, which at 2048x2048 float32 is a gigabyte in one chunk -- past
+    what zarr will hold in a single buffer at 4096x4096 -- and every later partial read pays it,
+    including readers that are not KonfAI.
+
+    So an axis the region covers END TO END is tiled, and an axis where the region is a strict
+    sub-range keeps the writer's size. Tiling a fully-covered axis cannot split a region write, since
+    every chunk along it falls inside one region either way; splitting a partial axis is exactly the
+    read-modify-write this exists to avoid. Innermost axes go first, so the chunk stays long on the
+    axis the writer actually advances along.
+
+    ``None`` when the writer declared nothing: the store keeps its own default rather than a guess.
     """
+    from konfai.utils.ome_zarr import CHUNK_SPATIAL_TILE, CHUNK_TARGET_BYTES
+
     if region_shape is None or len(region_shape) != len(shape):
         return None
-    return tuple(max(1, min(int(region), int(extent))) for region, extent in zip(region_shape, shape, strict=True))
+    chunk = [max(1, min(int(region), int(extent))) for region, extent in zip(region_shape, shape, strict=True)]
+    itemsize = max(1, np.dtype(dtype).itemsize)
+    covered = [axis for axis, extent in enumerate(shape) if chunk[axis] >= int(extent)]
+    for axis in reversed(covered):
+        if int(np.prod(chunk, dtype=np.int64)) * itemsize <= CHUNK_TARGET_BYTES:
+            break
+        chunk[axis] = min(chunk[axis], CHUNK_SPATIAL_TILE)
+    return tuple(chunk)
 
 
 class Attribute(dict[str, Any]):
@@ -1636,10 +1655,11 @@ class Dataset:
                 origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
                 attributes=dict(attributes),
                 displacement_field=DISPLACEMENT_FIELD_ATTRIBUTE in attributes,
-                # Chunk on what the writer says it will write. Guessing costs a read-modify-write on
-                # every region whose extent straddles a chunk -- measured 1.8x on a slab sweep, paid
-                # on every byte, and invisible because the bytes are correct either way.
-                chunks=_store_chunks(shape, region_shape),
+                # Chunked against what the writer says it will write, capped to something a reader
+                # can open. Guessing the writer's access pattern costs a read-modify-write on every
+                # region whose extent straddles a chunk -- measured 1.8x on a slab sweep, paid on
+                # every byte, and invisible because the bytes are correct either way.
+                chunks=_store_chunks(shape, region_shape, dtype),
             )
             # The pyramid cannot be created up front -- no level exists until the last region lands --
             # so the stream derives it at finalize, on the TEMPORARY store, before the rename. That

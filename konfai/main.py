@@ -37,12 +37,15 @@ def _run(parser: argparse.ArgumentParser) -> None:
 
     This function:
     1) defines common arguments used by TRAIN / RESUME / PREDICTION / EVALUATION
-       (config file, overwrite, device selection, quiet, tensorboard)
+       (config file, overwrite, device selection, quiet, tensorboard) -- TRANSFORM
+       declares its own set, since it has no TOP-LEVEL model and so nothing to
+       write scalars about (a chain may still embed a `KonfAIInference` stage)
     2) defines subcommands and their command-specific arguments
     3) parses CLI args and dispatches to the correct implementation:
        - `konfai.trainer.train` for TRAIN and RESUME
        - `konfai.predictor.predict` for PREDICTION
        - `konfai.evaluator.evaluate` for EVALUATION
+       - `konfai.transformer.transform` for TRANSFORM
 
     Device selection
     ----------------
@@ -308,11 +311,13 @@ def main():
     - RESUME
     - PREDICTION
     - EVALUATION
+    - TRANSFORM
 
     Notes
     -----
     The actual execution logic is implemented in `konfai.trainer.train`,
-    `konfai.predictor.predict`, and `konfai.evaluator.evaluate`.
+    `konfai.predictor.predict`, `konfai.evaluator.evaluate`, and
+    `konfai.transformer.transform` -- the one command with no top-level model.
     """
     parser = argparse.ArgumentParser(
         prog="konfAI", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False
