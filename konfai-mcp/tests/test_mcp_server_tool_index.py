@@ -53,7 +53,17 @@ def test_job_payload_next_actions_are_registered_tools(
     from konfai_mcp.server_jobs import Job, JobRegistry
 
     registry = JobRegistry({"queued", "running"})
-    for kind in ("train", "prediction", "evaluation", "infer", "finetune", "evaluate", "uncertainty", "pipeline"):
+    for kind in (
+        "train",
+        "prediction",
+        "evaluation",
+        "transform",
+        "infer",
+        "finetune",
+        "evaluate",
+        "uncertainty",
+        "pipeline",
+    ):
         for status in ("running", "done", "error", "killed"):
             job = Job(
                 job_id=f"{kind}-{status}",

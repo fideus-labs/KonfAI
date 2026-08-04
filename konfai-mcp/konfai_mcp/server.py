@@ -87,7 +87,7 @@ from .server_support import (
     workflow_root_name,
     write_config,
 )
-from .workflows import WORKFLOW_SPECS, JobKind, WorkflowKind
+from .workflows import WORKFLOW_SPECS, JobKind, WorkflowKind, workflow_choice_description
 
 mcp = FastMCP("KonfAI")
 
@@ -1192,9 +1192,7 @@ def describe_konfai_capabilities() -> dict[str, Any]:
 def describe_config_schema(
     workflow: Annotated[
         str,
-        Field(
-            description="Workflow whose schema to describe: 'train', 'prediction', or 'evaluation' (aliases like 'trainer'/'predict'/'eval' accepted)."
-        ),
+        Field(description=workflow_choice_description("Workflow whose schema to describe") + " Aliases accepted."),
     ],
     path: Annotated[
         str | None,
@@ -2327,7 +2325,10 @@ _RUN_OUTPUT_ROOTS: dict[str, tuple[str, ...]] = {
     "prediction": ("Predictions",),
     "evaluation": ("Evaluations",),
     "uncertainty": ("Uncertainties",),
-    "all": ("Statistics", "Checkpoints", "Predictions", "Evaluations", "Uncertainties"),
+    # 'Transforms' holds the run log and the plan; the transformed data itself lives wherever each
+    # Write: pointed, which is the user's own tree and never deleted from here.
+    "transform": ("Transforms",),
+    "all": ("Statistics", "Checkpoints", "Predictions", "Evaluations", "Uncertainties", "Transforms"),
 }
 
 
@@ -2335,10 +2336,11 @@ _RUN_OUTPUT_ROOTS: dict[str, tuple[str, ...]] = {
 def delete_run(
     run_name: Annotated[str, Field(description="The run to delete (a train_name, e.g. 'MR2CT_01').")],
     kind: Annotated[
-        Literal["train", "prediction", "evaluation", "uncertainty", "all"],
+        Literal["train", "prediction", "evaluation", "uncertainty", "transform", "all"],
         Field(
             description="Which output to remove: train (Statistics + Checkpoints), prediction, evaluation, uncertainty, "
-            "or 'all' to remove every output of that run name."
+            "transform (its log and plan only -- never the transformed data), or 'all' to remove every "
+            "output of that run name."
         ),
     ],
 ) -> dict[str, Any]:
@@ -2501,15 +2503,11 @@ def summarize_session(
 def write_workflow_config(
     workflow: Annotated[
         WorkflowKind,
-        Field(
-            description="Which config file to write: train -> Config.yml, prediction -> Prediction.yml, evaluation -> Evaluation.yml."
-        ),
+        Field(description=workflow_choice_description("Which config file to write")),
     ],
     content: Annotated[
         str,
-        Field(
-            description="Full YAML content; the top-level root key must match the workflow (Trainer/Predictor/Evaluator)."
-        ),
+        Field(description="Full YAML content; the top-level root key must match the workflow."),
     ],
     overwrite: Annotated[
         bool, Field(description="Replace an existing config (default True); False raises if the file exists.")
@@ -3039,6 +3037,68 @@ def run_evaluation(
         target=job_spec["target"],
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu),
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_transform"]))
+def run_transform(
+    cpu: Annotated[int | None, Field(description="Shard the cases over N worker processes (default 1).")] = None,
+    overwrite: Annotated[
+        bool, Field(description="Recompute cases whose output already exists (KonfAI --overwrite).")
+    ] = False,
+    quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
+    single_process: Annotated[bool, Field(description="Inline, one process (no spawn).")] = False,
+) -> dict[str, Any]:
+    """Launch a dataset transform job from the current session `Transform.yml`. No model involved."""
+    config_path = SESSION.config_path("transform")
+    if not config_path.exists():
+        raise ValueError("Transform.yml not found. Write a transform config first.")
+    blocked = SESSION.workflow_blocker("transform")
+    if blocked is not None:
+        return blocked
+    job_spec = _runtime_job_spec(
+        kind="transform",
+        config_path=config_path,
+        # No GPU: the read transforms run on CPU, so reserving devices would misreport the resource.
+        gpu=None,
+        cpu=cpu,
+        overwrite=overwrite,
+        quiet=quiet,
+        single_process=single_process,
+    )
+    return _launch_job(
+        "transform",
+        job_spec["command"],
+        config_path,
+        extra_manifest={"devices": {"gpu": [], "cpu": cpu}},
+        target=job_spec["target"],
+        kwargs=job_spec["kwargs"],
+        devices=_job_devices(None, cpu),
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["plan_transform"]))
+def plan_transform(
+    cpu: Annotated[int | None, Field(description="Rank count the plan is sized for (default 1).")] = None,
+    overwrite: Annotated[
+        bool, Field(description="Plan as if --overwrite: cases whose output exists are not counted as SKIP.")
+    ] = False,
+) -> dict[str, Any]:
+    """Plan the transform without running it: per-case verdicts, budget, and what needs attention."""
+    config_path = SESSION.config_path("transform")
+    if not config_path.exists():
+        raise ValueError("Transform.yml not found. Write a transform config first.")
+    blocked = SESSION.workflow_blocker("transform")
+    if blocked is not None:
+        return blocked
+    return _run_api_in_subprocess(
+        "konfai_mcp.runner:plan_transform_api",
+        {
+            "workspace_dir": str(SESSION.workspace_dir()),
+            "config": str(config_path),
+            "cpu": max(1, int(cpu or 1)),
+            "overwrite": bool(overwrite),
+        },
     )
 
 

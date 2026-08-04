@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from konfai.utils.utils import split_path_spec
 from ruamel.yaml import YAML
@@ -41,6 +41,7 @@ from .server_support import (
     template_groups,
     workflow_root_name,
 )
+from .workflows import WORKFLOW_SPECS, WorkflowKind
 
 YAML_SAFE = YAML(typ="safe")
 
@@ -93,6 +94,8 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         normalized_workflow = self._normalize_workflow(workflow)
         if normalized_workflow == "train":
             return self.workspace_dir() / "Statistics"
+        if normalized_workflow == "transform":
+            return self.workspace_dir() / "Transforms"
         return {
             "prediction": self.workspace_layout.predictions_dir(),
             "evaluation": self.workspace_layout.evaluations_dir(),
@@ -803,7 +806,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             "next_checks": next_checks,
         }
 
-    def review_config_semantics(self, workflow: Literal["train", "prediction", "evaluation"]) -> dict[str, Any]:
+    def review_config_semantics(self, workflow: WorkflowKind) -> dict[str, Any]:
         normalized_workflow = self._normalize_workflow(workflow)
         config_path = self.config_path(normalized_workflow)
         if not config_path.exists():
@@ -920,26 +923,22 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             path = (self.workspace_dir() / path).resolve()
         return path
 
-    def configured_run_name(self, kind: Literal["train", "prediction", "evaluation"], config_path: Path) -> str | None:
+    def configured_run_name(self, kind: WorkflowKind, config_path: Path) -> str | None:
         if not config_path.exists():
             return None
         data = YAML_SAFE.load(config_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return None
-        root_key = {
-            "train": "Trainer",
-            "prediction": "Predictor",
-            "evaluation": "Evaluator",
-        }[kind]
-        root = data.get(root_key)
+        root = data.get(WORKFLOW_SPECS[kind].root_key)
         if not isinstance(root, dict):
             return None
-        value = root.get("train_name")
+        # A model-less workflow names its run 'name': there is no training to name it after.
+        value = root.get("train_name", root.get("name"))
         return value if isinstance(value, str) and value not in {"", "None"} else None
 
     def runtime_log_path_for(
         self,
-        kind: Literal["train", "prediction", "evaluation"],
+        kind: WorkflowKind,
         config_path: Path,
     ) -> Path | None:
         run_name = self.configured_run_name(kind, config_path)
@@ -1023,11 +1022,9 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         if job.runtime_log_path is not None:
             return job.runtime_log_path
         kind = job.kind
-        # Spelled with != rather than `not in` so every mypy narrows `kind` to the three workflow literals
-        # that configured_run_name accepts (JobKind also carries the app kinds).
-        if kind != "train" and kind != "prediction" and kind != "evaluation":
+        if kind not in WORKFLOW_SPECS:
             return None  # an app job has no session YAML, so there is no configured run to locate
-        run_name = self.configured_run_name(kind, job.config_path)
+        run_name = self.configured_run_name(cast("WorkflowKind", kind), job.config_path)
         if run_name is None:
             return None
         return self._workflow_runtime_root(kind) / run_name / "log_0.txt"

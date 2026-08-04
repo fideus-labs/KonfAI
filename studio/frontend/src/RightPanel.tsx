@@ -775,7 +775,7 @@ function ExperimentView({
 // Validation reads amber, everything else sage-green — so a metric's train/val lines are told apart at a
 // glance (orange = validation, the one comparison that matters on a training chart).
 // The workflow order runs happen in — drives the sub-tab order (train first, evaluation last).
-const KIND_ORDER: Record<string, number> = { train: 0, finetune: 1, prediction: 2, uncertainty: 3, evaluation: 4 };
+const KIND_ORDER: Record<string, number> = { train: 0, finetune: 1, prediction: 2, uncertainty: 3, evaluation: 4, transform: 5 };
 
 const SAGE = "var(--sage)";
 const AMBER = "var(--working)";
@@ -1364,7 +1364,9 @@ export default function RightPanel({
           ? `Evaluations/${r.run}`
           : r.kind === "uncertainty"
             ? `Uncertainties/${r.run}`
-            : `Statistics/${r.run}`);
+            : r.kind === "transform"
+              ? `Transforms/${r.run}`
+              : `Statistics/${r.run}`);
     const [dir, open] =
       r.kind === "prediction"
         ? [`${root}/Dataset`, "volume"]

@@ -244,6 +244,8 @@ _JOB_KIND_STAGE: dict[str, str] = {
     "evaluate": "evaluation",
     "pipeline": "evaluation",
     "uncertainty": "completed",
+    # A transformed dataset is an input for the next run, not a result to review.
+    "transform": "action_selection",
 }
 
 # What a finished job of each kind must have left in the workspace. A session workflow writes there by

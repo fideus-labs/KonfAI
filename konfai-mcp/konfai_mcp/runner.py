@@ -29,12 +29,13 @@ import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from queue import Empty
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from konfai.evaluator import build_evaluate
 from konfai.predictor import build_predict
 from konfai.trainer import build_train
+from konfai.transformer import build_transform
 from konfai.utils.runtime import State, execute_distributed_object
 
 
@@ -243,6 +244,11 @@ def _build_workflow(
             evaluations_file=resolved_config,
             evaluations_dir=Path("./Evaluations").resolve(),
         )
+    if command == "TRANSFORM":
+        return build_transform(
+            transform_file=resolved_config,
+            transforms_dir=Path("./Transforms").resolve(),
+        )
     raise ValueError(f"Unsupported command: {command}")
 
 
@@ -278,7 +284,7 @@ def run_workflow_api(
     cluster_kwargs: dict[str, Any] | None = None,
     cwd: str | None = None,
 ) -> None:
-    """Child entrypoint that runs one KonfAI workflow (TRAIN/RESUME/PREDICTION/EVALUATION) to completion."""
+    """Child entrypoint that runs one KonfAI workflow (TRAIN/RESUME/PREDICTION/EVALUATION/TRANSFORM)."""
     with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
         _ensure_local_imports()
         if single_process:
@@ -697,6 +703,68 @@ def _run_one_train_step(workflow_object: Any) -> dict[str, Any]:
     return result
 
 
+def plan_transform_api(
+    *,
+    workspace_dir: str,
+    config: str,
+    cpu: int = 1,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Child entrypoint for the TRANSFORM dry-run: plan every case, write nothing.
+
+    The plan is the workflow's own verdict, not a prediction — it opens and removes a real
+    region-write on each destination — so it is the one thing an agent should read before launching
+    a job that writes a dataset. Runs in a spawn child like every other workflow API: the config is
+    rewritten in place by KonfAI's own binder, so its bytes are snapshotted and restored.
+    """
+    from konfai.transformer import Transformer, build_transform
+
+    config_path = Path(config).resolve()
+    config_backup = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
+    workspace = Path(workspace_dir).resolve()
+    with _runtime_context(cwd=workspace, env_updates={"KONFAI_VERBOSE": "False"}):
+        _ensure_local_imports()
+        _purge_workspace_modules(workspace)
+        try:
+            workflow = cast(
+                Transformer,
+                build_transform(
+                    transform_file=config_path,
+                    transforms_dir=(workspace / "Transforms").resolve(),
+                ),
+            )
+            plan = workflow.compute_plan(max(1, int(cpu)), bool(overwrite))
+        finally:
+            if config_backup is not None:
+                config_path.write_text(config_backup, encoding="utf-8")
+    counts: dict[str, int] = {}
+    for entry in plan.entries:
+        counts[entry.verdict] = counts.get(entry.verdict, 0) + 1
+    return {
+        "ok": True,
+        "config_path": str(config_path),
+        "report": plan.report(),
+        "verdict_counts": counts,
+        "budget_bytes": plan.budget_bytes,
+        "budget": plan.budget_desc,
+        "world_size": plan.world_size,
+        # The entries a reader has to act on. STREAM lines are the expected case and would drown them.
+        "needs_attention": [
+            {
+                "case": entry.case,
+                "group_src": entry.group_src,
+                "group_dest": entry.group_dest,
+                "verdict": entry.verdict,
+                "reason": entry.reason,
+                "working_set_bytes": entry.working_set_bytes,
+            }
+            for entry in plan.entries
+            if entry.verdict in ("WHOLE-VOLUME", "REFUSED")
+        ][:50],
+        "over_budget": [entry.case for entry in plan.budget_violations()],
+    }
+
+
 def validate_workflow_api(
     *,
     workflow: str,
@@ -724,7 +792,14 @@ def validate_workflow_api(
     validate_statistics = resolved_validate_root / "Statistics"
     validate_predictions = resolved_validate_root / "Predictions"
     validate_evaluations = resolved_validate_root / "Evaluations"
-    for path in (validate_checkpoints, validate_statistics, validate_predictions, validate_evaluations):
+    validate_transforms = resolved_validate_root / "Transforms"
+    for path in (
+        validate_checkpoints,
+        validate_statistics,
+        validate_predictions,
+        validate_evaluations,
+        validate_transforms,
+    ):
         path.mkdir(parents=True, exist_ok=True)
     env_updates = {
         "KONFAI_VERBOSE": "False",
@@ -767,6 +842,11 @@ def validate_workflow_api(
                 workflow_object = build_evaluate(
                     evaluations_file=Path(config).resolve(),
                     evaluations_dir=validate_evaluations,
+                )
+            elif workflow == "transform":
+                workflow_object = build_transform(
+                    transform_file=Path(config).resolve(),
+                    transforms_dir=validate_transforms,
                 )
             else:
                 raise ValueError(f"Unsupported validation workflow: {workflow}")
