@@ -41,7 +41,7 @@ def setup(repo_dir: Path, example: str, *packages: str | tuple[str, str]) -> tup
     """Install what is missing and return the example directory, its dataset directory, and the device flags.
 
     `packages` are pip requirements, installed only when already absent. The import name is derived
-    from the requirement (`konfai[imaging]` -> `konfai`, `scikit-image` -> `scikit_image`); pass a
+    from the requirement (`konfai[imaging]` -> `konfai`, `huggingface-hub` -> `huggingface_hub`); pass a
     `(import_name, requirement)` pair when it cannot be, as for a local path.
     """
     global _WORKDIR
@@ -59,7 +59,15 @@ def setup(repo_dir: Path, example: str, *packages: str | tuple[str, str]) -> tup
     import torch
 
     _WORKDIR = repo_dir / "examples" / example
-    device = ["--gpu", "0"] if torch.cuda.is_available() else ["--cpu", "1"]
+    # The first VISIBLE device, not device 0: `--gpu` is validated against cuda_visible_devices(),
+    # which reports the raw CUDA_VISIBLE_DEVICES values, so on a workstation exporting
+    # CUDA_VISIBLE_DEVICES=1 argparse rejects `--gpu 0` outright.
+    if torch.cuda.is_available():
+        from konfai import cuda_visible_devices
+
+        device = ["--gpu", str(cuda_visible_devices()[0])]
+    else:
+        device = ["--cpu", "1"]
     print("KonfAI :", repo_dir)
     print("Example:", _WORKDIR)
     print("Device :", " ".join(device))
@@ -92,6 +100,9 @@ def run(*command: str) -> None:
             print("   ", tail[-1][:140], flush=True)
             next_print = time.time() - started + interval
             interval = min(interval * 1.6, 30.0)
+    if pending.strip():
+        # The final line carries no terminator, and on a crash that line is the exception.
+        tail = [*tail, pending][-40:]
     if process.wait():
         raise RuntimeError("\n".join(tail[-25:]))
     print(f"    done in {time.time() - started:.0f} s\n", flush=True)

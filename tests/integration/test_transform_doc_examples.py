@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from harness import subprocess_env
+from harness import konfai_cli_command, subprocess_env
 from ruamel.yaml import YAML
 
 pytest.importorskip("SimpleITK")
@@ -142,8 +142,9 @@ def _write_fields(root: Path, cases: int = 2, shape=(4, 6, 6)) -> None:
 
 
 def _doc_examples() -> list[tuple[int, str]]:
-    if not DOC.is_file():
-        return []
+    # Asserted, not skipped: an empty parametrize set is a pass, so a page that moved would retire
+    # this whole guard without a single red test.
+    assert DOC.is_file(), f"the page this guards is not where it is expected: {DOC}"
     text = DOC.read_text(encoding="utf-8")
     return [(line, config) for line, body in _yaml_blocks(text) if (config := _as_config(body)) is not None]
 
@@ -179,7 +180,7 @@ def test_a_documented_example_plans_and_runs(line: int, config: str, tmp_path: P
     # The plan is computed on the launcher and the run then spawns: planning green proves nothing
     # about what crosses that boundary.
     executed = subprocess.run(
-        [_konfai(), "TRANSFORM", "--config", "Transform.yml", "--transforms-dir", "Transforms"],
+        [*konfai_cli_command(), "TRANSFORM", "--config", "Transform.yml", "--transforms-dir", "Transforms"],
         capture_output=True,
         text=True,
         env=environment,
@@ -187,10 +188,3 @@ def test_a_documented_example_plans_and_runs(line: int, config: str, tmp_path: P
         timeout=900,
     )
     assert executed.returncode == 0, f"transform.md:{line} plans but does not run:\n{executed.stdout}{executed.stderr}"
-
-
-def _konfai() -> str:
-    konfai = Path(sys.executable).with_name("konfai")
-    if not konfai.exists():
-        pytest.skip("the konfai console script is not installed in this environment")
-    return str(konfai)

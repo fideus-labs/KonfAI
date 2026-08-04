@@ -1,0 +1,29 @@
+# The other direction: 1 case in, N copies out.
+#
+#   konfai TRANSFORM --config Transform_expand.yml --plan
+#   konfai TRANSFORM --config Transform_expand.yml
+#
+# Writes ./Augmented/<case>_r01 .. _r04 -- four drawn copies of every case.
+Transformer:
+  name: AUGMENT
+  on_fallback: error
+  # Every draw derives from this and the case, so the run is reproducible and two chains asked for
+  # the same case draw the SAME copies -- which is how an image and its mask stay paired.
+  manual_seed: 7
+  Dataset:
+    dataset_filenames:
+      - ./Raw:mha
+    memory_budget: 2G
+    groups_src:
+      CT:
+        groups_dest:
+          CT_aug:
+            transforms:
+              Clip: {min_value: 0.0, max_value: 400.0}
+              # Above the marker: once per case. Below it: once per copy.
+              Expand: {nb: 4, pattern: "{name}_r{a:02d}"}
+              # A draw belongs after the marker. Declared before one -- or with no marker at all --
+              # it is applied once per case, which is a random transform, not an augmentation.
+              # Brightness is pointwise, so the copies share a single read pass over the source.
+              Brightness: {b_std: 25.0}
+              Write: {dataset: ./Augmented:mha}

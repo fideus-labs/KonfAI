@@ -30,16 +30,24 @@ There are two command-line surfaces:
 
 ## The canonical loop (`konfai`)
 
-Three workflows map to three files, each with one mandatory root key:
+Each workflow maps to one file with one mandatory root key:
 
 | Command | File | Root key |
 |---|---|---|
 | `TRAIN` / `RESUME` | `Config.yml` | `Trainer:` |
 | `PREDICTION` | `Prediction.yml` | `Predictor:` |
 | `EVALUATION` | `Evaluation.yml` | `Evaluator:` |
+| `TRANSFORM` | `Transform.yml` | `Transformer:` |
+
+`TRANSFORM` sits outside the loop: it runs no model. It reads a dataset, applies a chain, and writes
+a dataset — resampling a cohort onto one grid, folding it into a template (`Reduce`, N→1), expanding
+each case into drawn copies (`Expand`, 1→N). A chain may still embed a `KonfAIInference` stage, so
+"no model" means no top-level one. It takes no `-tb`, and `--plan` prints what a run would do and
+stops without writing the deliverable — it does probe each destination with a real region-write it
+then removes, so the output store may be created.
 
 **Don't write configs from scratch — copy a runnable template from `examples/`** (Segmentation,
-Synthesis or Registration) and adapt it. Then:
+Synthesis, Registration or Transform) and adapt it. Then:
 
 ```bash
 cd examples/Segmentation                 # always run from the dir holding the configs + Dataset/
@@ -47,6 +55,10 @@ cd examples/Segmentation                 # always run from the dir holding the c
 konfai TRAIN      -y --gpu 0 --config Config.yml
 konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/<train_name>/<checkpoint>.pt
 konfai EVALUATION -y          --config Evaluation.yml
+
+cd ../Transform                          # no model, no GPU
+konfai TRANSFORM     --config Transform.yml --plan   # what it would do; writes no deliverable
+konfai TRANSFORM     --config Transform.yml
 ```
 
 Outputs are namespaced by the `train_name` in the config: `Checkpoints/<train_name>/`,

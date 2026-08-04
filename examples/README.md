@@ -9,17 +9,20 @@ README, then *Runtime > Run all*.
 
 ## Start here
 
-These three are the framework itself: a YAML config, the `konfai` CLI, and nothing else.
+These four are the framework itself: a YAML config, the `konfai` CLI, and nothing else.
 
 | Example | What you get | Time on a GPU |
 |---|---|---|
 | [`Registration`](Registration/) | Train a `VoxelMorph` to align real pelvis CT slices, and measure how much of a *known* deformation it recovered. | ~3 min |
 | [`Segmentation`](Segmentation/) | Train a UNet on five pelvis CT cases, predict the labels, score them with Dice. | ~7 min |
 | [`Synthesis`](Synthesis/) | Turn an MR volume into a synthetic CT, scored with MAE / PSNR / SSIM inside the body mask. | ~7 min |
+| [`Transform`](Transform/) | Fold a cohort into one template, and expand each case into drawn copies. No model at all. | ~1 min, CPU |
 
 `Registration` is the shortest way to see the whole `TRAIN -> PREDICTION -> EVALUATION` loop.
 `Segmentation` is the best template to copy for your own data. `Synthesis` shows the richer patterns:
 a custom Python model, a perceptual loss, test-time augmentation, and an optional GAN variant.
+`Transform` is the odd one out and the quickest: no network, no checkpoint, no download — it is the
+workflow for when what you need is data rather than a prediction.
 
 Their training runs are **deliberately short** — enough to see the pipeline work end to end, not
 enough to produce a usable model. Each README says what score to expect and which knob to raise.
