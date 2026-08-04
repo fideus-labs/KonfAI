@@ -15,8 +15,8 @@ from collections.abc import Iterator
 import pytest
 
 pytest.importorskip("fastapi")
-from konfai_studio import server as bff  # noqa: E402
-from starlette.testclient import TestClient  # noqa: E402
+from konfai_studio import server as bff
+from starlette.testclient import TestClient
 
 HEADER = {"X-KonfAI-Studio": "quit"}
 
@@ -70,3 +70,38 @@ def test_a_client_off_this_machine_cannot_stop_the_server(killed: list[int]) -> 
 
     assert response.status_code == 403
     assert not killed
+
+
+@pytest.mark.parametrize(
+    "header", ["X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded"]
+)
+def test_a_request_through_an_untrusted_proxy_cannot_stop_the_server(
+    killed: list[int], monkeypatch: pytest.MonkeyPatch, header: str
+) -> None:
+    """Behind the same-host reverse proxy REMOTE.md documents, every peer IS 127.0.0.1.
+
+    Without ``--proxy-headers`` uvicorn does not rewrite it, so the loopback check says local about
+    a request that came from anywhere. A forwarding header is the tell.
+    """
+    monkeypatch.delenv("KONFAI_STUDIO_PROXY_HEADERS", raising=False)
+    with TestClient(bff.app, client=("127.0.0.1", 54321)) as client:
+        response = client.post("/api/quit", json={}, headers={**HEADER, header: "203.0.113.7"})
+
+    assert response.status_code == 403
+    assert "proxy" in response.json()["detail"]
+    assert not killed
+
+
+def test_a_trusted_proxy_leaves_the_loopback_check_meaningful(
+    killed: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the flag, uvicorn rewrites the peer from the header before the endpoint sees it, so the
+    loopback check is a statement about the real client and a forwarding header is not a reason to
+    refuse."""
+    monkeypatch.setenv("KONFAI_STUDIO_PROXY_HEADERS", "1")
+    with TestClient(bff.app, client=("127.0.0.1", 54321)) as client:
+        response = client.post("/api/quit", json={}, headers={**HEADER, "X-Forwarded-For": "127.0.0.1"})
+        signalled = _wait_for_signal(killed)
+
+    assert response.status_code == 200
+    assert signalled

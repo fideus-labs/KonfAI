@@ -16,7 +16,8 @@ def main() -> None:
     parser.add_argument(
         "--proxy-headers",
         action="store_true",
-        help="trust X-Forwarded-* from a reverse proxy (set when behind nginx/Caddy for correct client IP + scheme)",
+        help="trust X-Forwarded-* from a reverse proxy: correct client IP + scheme, and what lets"
+        " /api/quit tell a local user from a remote one (set when behind nginx/Caddy)",
     )
     parser.add_argument(
         "--forwarded-allow-ips",
@@ -61,6 +62,9 @@ def main() -> None:
         )
     scheme = "https" if args.ssl_certfile else "http"
     print(f"KonfAI Studio -> {scheme}://{args.host}:{args.port}  (auth {'on' if authed else 'off'})")
+    # The app is imported by uvicorn from a string, so it cannot read these arguments. /api/quit
+    # needs to know whether the peer it sees was rewritten from X-Forwarded-For or is a proxy's.
+    os.environ["KONFAI_STUDIO_PROXY_HEADERS"] = "1" if args.proxy_headers else "0"
     uvicorn.run(
         "konfai_studio.server:app",
         host=args.host,
