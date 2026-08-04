@@ -438,6 +438,7 @@ class FireANTsEngine:
         cc_kernel: int,
         affine_metric: str,
         affine_lr: float,
+        moments_init: str,
         deformable_method: str,
         deformable_metric: str,
         deformable_lr: float,
@@ -453,6 +454,7 @@ class FireANTsEngine:
         self._cc_kernel = int(cc_kernel)
         self._affine_metric = affine_metric
         self._affine_lr = float(affine_lr)
+        self._moments_init = moments_init
         self._deformable_method = deformable_method
         self._deformable_metric = deformable_metric
         self._deformable_lr = float(deformable_lr)
@@ -463,6 +465,55 @@ class FireANTsEngine:
         # IMPACT deformable metric (only used when deformable_metric == "impact"): KonfAI IMPACT feature
         # models drive the SyN/greedy stage instead of the analytic CC/MI/MSE.
         self._impact_specs = impact_specs
+
+    @staticmethod
+    def _center_of_mass_translation(
+        fixed: sitk.Image,
+        moving: sitk.Image,
+        fixed_mask: "sitk.Image | None",
+        moving_mask: "sitk.Image | None",
+        device: str,
+    ) -> torch.Tensor:
+        """Seed translation ``com_moving - com_fixed`` from intensity-weighted centres of mass.
+
+        Computed here rather than through FireANTs' ``MomentsRegistration``: on anisotropic-spacing
+        volumes that class mis-estimates the centre of mass (measured ~18-25 voxels off in Y/Z on
+        ExaSPIM light-sheet data), and the wrong seed pushes the affine into an anisotropic minimum
+        that looks like a metric failure and is not one.
+
+        Each subject's centre is taken in its OWN physical space (mask-restricted when a real mask is
+        given), so origin/spacing/direction differences between the two frames are handled exactly.
+        Only the centroid is used: second-order moments (rotation/scale) were tried and hurt, because a
+        near-symmetric subject has ambiguous principal axes.
+
+        Returns the ``[1, 3]`` physical-space translation ``RigidRegistration(init_translation=...)``
+        expects.
+        """
+
+        def com_phys(img: sitk.Image, mask: "sitk.Image | None") -> np.ndarray:
+            array = sitk.GetArrayFromImage(img).astype(np.float64)  # (z, y, x)
+            array = np.clip(array, 0, None)
+            if mask is not None:
+                array = array * (sitk.GetArrayFromImage(mask).astype(np.float64) > 0.5)
+            positive = array > 0
+            if not positive.any():
+                # An all-zero (or all-negative) subject has no centre of mass to speak of; the frame
+                # centre is the only defensible answer and matches what "cof" would have done.
+                size = img.GetSize()
+                return np.asarray(
+                    img.TransformContinuousIndexToPhysicalPoint([(extent - 1) / 2.0 for extent in size])
+                )
+            index = np.array(np.nonzero(positive))  # (3, N) in z, y, x
+            weight = array[positive]
+            centre_voxel = (index * weight).sum(axis=1) / weight.sum()  # z, y, x
+            return np.asarray(
+                img.TransformContinuousIndexToPhysicalPoint(
+                    [float(centre_voxel[2]), float(centre_voxel[1]), float(centre_voxel[0])]
+                )
+            )
+
+        translation = com_phys(moving, moving_mask) - com_phys(fixed, fixed_mask)
+        return torch.tensor(translation, device=device, dtype=torch.float32).reshape(1, 3)
 
     @staticmethod
     def _is_partial_mask(mask: "sitk.Image | None") -> bool:
@@ -536,8 +587,21 @@ class FireANTsEngine:
         affine_loss = f"masked_{self._affine_metric}" if masked else self._affine_metric
         deformable_loss = f"masked_{self._deformable_metric}" if masked else self._deformable_metric
 
-        # Linear: Rigid(MI, COM init) -> Affine(MI, seeded by the rigid), mirroring ANTs. The affine
-        # seeds the deformable stage (or is the whole transform when deformable_method == "none").
+        # Linear: Rigid(MI) -> Affine(MI, seeded by the rigid), mirroring ANTs. The affine seeds the
+        # deformable stage (or is the whole transform when deformable_method == "none").
+        #
+        # The rigid's starting translation mirrors ANTs' ``-r [fixed,moving,N]``: "cof" is the centre
+        # of FRAME (N=0), "com" the centre of MASS (N=1). "cof" aligns the image frames, not the
+        # subjects, so a subject sitting off its frame centre starts the whole chain misplaced.
+        init_translation: "str | torch.Tensor" = "cof"
+        if self._moments_init == "com":
+            init_translation = self._center_of_mass_translation(
+                fixed,
+                moving,
+                fixed_mask if use_fixed_mask else None,
+                moving_mask if use_moving_mask else None,
+                device,
+            )
         rigid = RigidRegistration(
             scales=self._scales,
             iterations=self._affine_iterations,
@@ -547,7 +611,7 @@ class FireANTsEngine:
             optimizer="Adam",
             optimizer_lr=self._affine_lr,
             cc_kernel_size=self._cc_kernel,
-            init_translation="cof",
+            init_translation=init_translation,
         )
         rigid.optimize()
         rigid_matrix = rigid.get_rigid_matrix().detach()
@@ -721,6 +785,12 @@ class RegistrationNet(network.Network):
         affine_lr: Annotated[
             float, Range(0.0, 10.0), "Gradient step size of the affine optimisation; higher converges faster but risks overshoot."
         ] = 0.003,
+        moments_init: Annotated[
+            Literal["cof", "com"],
+            "Initial translation seeding the rigid stage, mirroring ANTs' -r [fixed,moving,N]: 'cof' = centre "
+            "of frame (N=0), 'com' = intensity-weighted centre of mass (N=1). Prefer 'com' when the subject "
+            "sits off its frame centre, where aligning frames starts the chain misplaced.",
+        ] = "cof",
         deformable_method: Annotated[
             Literal["none", "syn", "greedy"],
             "Deformable algorithm: 'syn' (symmetric diffeomorphic), 'greedy', or 'none' to stop after the affine stage.",
@@ -772,6 +842,7 @@ class RegistrationNet(network.Network):
             cc_kernel,
             affine_metric,
             affine_lr,
+            moments_init,
             deformable_method,
             deformable_metric,
             deformable_lr,

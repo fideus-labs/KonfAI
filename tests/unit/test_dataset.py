@@ -73,6 +73,29 @@ def test_attribute_repeated_set_returns_latest_version() -> None:
     np.testing.assert_array_equal(attribute.get_np_array("Origin"), np.asarray([5.0, 5.0, 5.0]))
 
 
+def test_attribute_built_from_a_store_sidecar_holds_text_a_writer_accepts() -> None:
+    """An OME-Zarr sidecar is JSON, so it hands back live lists -- ``MaxDisplacement`` is one.
+
+    Construction used to deep-copy values through untouched while ``__setitem__`` normalized them,
+    so an entry read back from its own store carried a ``list`` that ``Image.SetMetaData`` refuses
+    ("argument 3 of type 'std::string const &'"): a field could be written and never reopened.
+    """
+    attribute = Attribute({"MaxDisplacement": [1.19, 2.39, 3.59], "Spacing": (1.5, 1.5, 2.0)})
+
+    assert all(isinstance(value, str) for value in attribute.values())
+    # And readable back: a list prints comma-separated, which np.fromstring alone could not read.
+    np.testing.assert_allclose(attribute.get_np_array("MaxDisplacement"), [1.19, 2.39, 3.59])
+    np.testing.assert_allclose(attribute.get_np_array("Spacing"), [1.5, 1.5, 2.0])
+
+
+def test_attribute_assigned_a_plain_list_round_trips_as_an_array() -> None:
+    """Both doors normalize the same way, so a list assigned in Python reads back like an ndarray."""
+    attribute = Attribute()
+    attribute["Origin"] = [1.0, 2.0, 3.0]
+
+    np.testing.assert_allclose(attribute.get_np_array("Origin"), [1.0, 2.0, 3.0])
+
+
 # --------------------------------------------------------------------------------------
 # HDF5 backend — directories, modes, and per-file locking
 # --------------------------------------------------------------------------------------

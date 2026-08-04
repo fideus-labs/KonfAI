@@ -34,6 +34,7 @@ Optional dependencies: ``zarr`` + ``ngff-zarr`` (``pip install konfai[omezarr]``
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
@@ -66,10 +67,31 @@ except ImportError:
 _KONFAI_ATTR_KEY = "konfai"
 _SPATIAL = ("z", "y", "x")
 
+
+def _native_byteorder(array: np.ndarray) -> np.ndarray:
+    """The same samples in the machine's own byte order.
+
+    A store may hold big-endian samples -- some acquisition software writes them, and zarr keeps the
+    dtype it was given -- and a non-native array poisons everything downstream in two different ways.
+    ``torch.from_numpy`` refuses it outright ("given numpy array has byte order different from the
+    native byte order"), which is the loud half. The quiet half is numpy: the flag rides along
+    through slicing and arithmetic, so a value read here compares and writes correctly while any
+    consumer that reinterprets the buffer -- a raw ``.tobytes()``, a memory-mapped write, a C
+    extension taking a pointer -- sees the bytes swapped. Normalising once at the read boundary is
+    what every caller would otherwise have to remember to do by hand.
+    """
+    return array.astype(array.dtype.newbyteorder("="), copy=False) if array.dtype.byteorder == ">" else array
+
+
 # NGFF RFC-5 types the component axis of a vector field, so a displacement field says what it is on
 # disk. Those types only exist from NGFF 0.6 (zarr v3); 0.4 (zarr v2 layout) stays the default
 # everywhere else, being the version portable across the whole CI matrix.
 _DISPLACEMENT_AXIS_TYPE = "displacement"
+
+#: Largest absolute displacement per component, world units, recorded by the producer of a field.
+#: A consumer sizes the region it must read from this, and reading it costs a header where measuring
+#: it costs a scan of the whole field.
+DISPLACEMENT_BOUND_ATTRIBUTE = "MaxDisplacement"
 _RFC5_VERSION = "0.6"
 _DEFAULT_VERSION = "0.4"
 
@@ -150,14 +172,22 @@ def _load_image(store_path: str, level: int) -> Any:
     _require_ngff_zarr()
     try:
         multiscales = ngff_zarr.from_ngff_zarr(str(store_path))
-        if len(multiscales.images) == 1:
-            return multiscales.images[0]
-        return multiscales.images[level]
     except (KeyError, IndexError, OSError, TypeError, ValueError) as exc:
         raise DatasetManagerError(
             f"Cannot open OME-Zarr store '{store_path}' (level {level}).",
             "Ensure the directory is a valid OME-NGFF store.",
         ) from exc
+    if len(multiscales.images) == 1:
+        return multiscales.images[0]
+    if not 0 <= level < len(multiscales.images):
+        # Its own message: the store is fine, the LEVEL is not. Reporting an out-of-range level as
+        # "not a valid OME-NGFF store" sends the reader to inspect a store that has nothing wrong
+        # with it -- the mismatch is in what was asked of it.
+        raise DatasetManagerError(
+            f"OME-Zarr store '{store_path}' has {len(multiscales.images)} level(s); level {level} is out of range.",
+            f"Ask for a level in 0..{len(multiscales.images) - 1} (0 is the finest).",
+        )
+    return multiscales.images[level]
 
 
 def clear_ome_zarr_cache() -> None:
@@ -249,7 +279,7 @@ def read_ome_zarr_data_slice(
         "translation": _ordered(dict(image.translation), dims),
         "attributes": _read_konfai_attributes(store_path),
     }
-    return np.asarray(patch), metadata
+    return _native_byteorder(np.asarray(patch)), metadata
 
 
 def _spatial_geometry(
@@ -278,6 +308,28 @@ def _spatial_geometry(
     return spatial_axes, scale_values, translation_values
 
 
+def _downsample_method(downsample_method: str | None) -> Any:
+    """Resolve a downsampling method name to ngff-zarr's enum, defaulting to BIN_SHRINK.
+
+    NOT ngff-zarr's own default, which is ``ITKWASM_GAUSSIAN``: a pyramid is indexed by position and
+    read as "the same image, coarser", so a level that has been smoothed is a change of pixels that
+    no reader can see. Measured on a real volume, the gaussian keeps a 0.9998 correlation while
+    crushing the peak intensity by 20 % -- the shape of difference that passes a sanity check and
+    resurfaces months later. ``ITKWASM_BIN_SHRINK`` is a plain block mean, so a caller that already
+    downsamples by averaging blocks gets the same voxels from this writer.
+    """
+    _require_ngff_zarr()
+    if downsample_method is None:
+        return ngff_zarr.Methods.ITKWASM_BIN_SHRINK
+    try:
+        return ngff_zarr.Methods[downsample_method]
+    except KeyError:
+        raise DatasetManagerError(
+            f"Unknown downsample_method '{downsample_method}'.",
+            f"Use one of: {', '.join(sorted(m.name for m in ngff_zarr.Methods))}.",
+        ) from None
+
+
 def write_ome_zarr(
     store_path: str | Path,
     data: np.ndarray,
@@ -287,8 +339,17 @@ def write_ome_zarr(
     attributes: dict[str, Any] | None = None,
     chunks: Sequence[int] | None = None,
     displacement_field: bool = False,
+    scale_factors: Sequence[int] | None = None,
+    downsample_method: str | None = None,
 ) -> None:
-    """Write one channel-first KonfAI array as a single-level OME-NGFF store.
+    """Write one channel-first KonfAI array as an OME-NGFF store, single-level or a pyramid.
+
+    ``scale_factors`` makes it a pyramid: ``[4]`` writes level 0 plus level 0 shrunk 4x per spatial
+    axis, ``[4, 4]`` adds a third at 16x. Consumers index a pyramid BY POSITION, so the order is the
+    contract -- 0 finest. Each level carries its OWN scale and translation, and ngff-zarr shifts the
+    coarse origin by half the spacing delta, which is the centre-of-voxel convention these stores
+    use; getting that wrong biases every voxel by a fraction of a coarse voxel and still looks like a
+    plausible image. ``downsample_method`` selects how (see :func:`_downsample_method`).
 
     ``displacement_field`` writes it as a vector FIELD rather than an image: the component axis is
     typed ``displacement`` (NGFF RFC-5), which is what makes a registration DVF self-describing
@@ -318,7 +379,11 @@ def write_ome_zarr(
     # it is inflated besides, by itemsize once per dimension, so a 13.6 GiB field reports 868 GiB and
     # takes that path every time.
     multiscales = ngff_zarr.to_multiscales(
-        image, scale_factors=[], chunks=tuple(chunks) if chunks is not None else None, cache=False
+        image,
+        scale_factors=[int(f) for f in scale_factors] if scale_factors else [],
+        method=_downsample_method(downsample_method) if scale_factors else None,
+        chunks=tuple(chunks) if chunks is not None else None,
+        cache=False,
     )
     version = _DEFAULT_VERSION
     if displacement_field:
@@ -327,9 +392,51 @@ def write_ome_zarr(
         version = _RFC5_VERSION
     ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=version)
 
-    if attributes:
+    recorded = dict(attributes) if attributes else {}
+    if displacement_field:
+        # The producer holds the samples, so the bound is free here and a full scan anywhere else.
+        recorded[DISPLACEMENT_BOUND_ATTRIBUTE] = displacement_bound(data)
+    if recorded:
         group = zarr.open_group(str(store_path), mode="r+")
-        group.attrs[_KONFAI_ATTR_KEY] = {"attributes": dict(attributes)}
+        group.attrs[_KONFAI_ATTR_KEY] = {"attributes": recorded}
+
+
+def displacement_bound(data: np.ndarray) -> list[float]:
+    """The largest absolute displacement per component, in the field's own world units.
+
+    This is the number a consumer needs to size the region it must read before resampling through the
+    field, and it is a property of the DATA, not of any parameter -- so the only place it is free is
+    here, where the producer already holds the samples. Read back from the store's attributes it costs
+    a header; recomputed by the consumer it costs a full scan of a field that can be 13.6 GiB.
+
+    Per component, not one scalar: the component axis is (x, y, z) where the array axes are (z, y, x),
+    and a consumer turns each bound into voxels by its OWN axis spacing -- these grids are anisotropic
+    (40 um in z against 30.08 in x/y here), so a single collapsed maximum over-reads two axes.
+
+    Computed in float32, the dtype a field is stored in: a bound rounded up in float64 and then
+    compared against float32 samples is the one failure mode this is meant to remove.
+    """
+    field = np.asarray(data)
+    if field.ndim < 2:
+        return []
+    flat = field.reshape(field.shape[0], -1)
+    return [float(np.abs(flat[component]).max(initial=np.float32(0.0))) for component in range(flat.shape[0])]
+
+
+def update_konfai_attributes(store_path: str | Path, extra: dict[str, Any]) -> None:
+    """Merge ``extra`` into the store's KonfAI attribute sidecar, keeping what is already there.
+
+    For facts that are only knowable once the last region has landed -- a streamed field's own bound
+    being the case that motivated it -- so they can still be recorded without holding the volume.
+    """
+    if not extra:
+        return
+    _require_zarr()
+    group = zarr.open_group(str(store_path), mode="r+")
+    sidecar = dict(dict(group.attrs).get(_KONFAI_ATTR_KEY, {}).get("attributes", {}))
+    sidecar.update(extra)
+    group.attrs[_KONFAI_ATTR_KEY] = {"attributes": sidecar}
+    clear_ome_zarr_cache()
 
 
 def _type_component_axis(multiscales: Any, axis_type: str) -> None:
@@ -439,8 +546,82 @@ def create_ome_zarr_store(
     return array
 
 
+def append_ome_zarr_levels(
+    store_path: str | Path,
+    scale_factors: Sequence[int],
+    *,
+    downsample_method: str | None = None,
+) -> None:
+    """Add coarser levels to a store that already holds its level 0.
+
+    The companion of :func:`create_ome_zarr_store`: a store written region by region cannot be given
+    ``scale_factors`` up front, because no level exists until the last region lands. This derives the
+    pyramid afterwards, from what is on disk.
+
+    It REWRITES level 0 rather than adding beside it -- ngff-zarr composes a multiscales as a whole,
+    and there is no supported way to graft a level onto a published one. The cost is real and
+    proportional to the store (measured ~42 s for a 2 GiB store) while the peak stays chunk-sized.
+    Worth knowing before calling it in a loop; not worth hiding.
+
+    It writes to a SIBLING store and renames over the original, rather than in place. In place is not
+    slower, it is wrong: level 0 is read lazily, ``to_ngff_zarr(overwrite=True)`` truncates the store
+    before dask pulls a single chunk through it, and the pyramid comes out uniformly zero -- with
+    correct metadata, correct shapes, and nothing raised. The rename also makes the operation atomic,
+    so an interrupted call leaves the original store intact instead of a half-written one.
+
+    The KonfAI attribute sidecar and an RFC-5 displacement typing are carried across, because
+    ``to_ngff_zarr`` writes a root of its own -- and both losses are silent, one landing as an
+    identity Direction and the other as an anonymous 3-channel image.
+    """
+    _require_ngff_zarr()
+    if not scale_factors:
+        return
+    store = Path(store_path)
+    clear_ome_zarr_cache()
+    field = is_displacement_field(store)
+    sidecar = _read_konfai_attributes(store)
+    staging = store.with_name(f"{store.name}.appending")
+    if staging.exists():
+        shutil.rmtree(staging)
+    try:
+        base = ngff_zarr.from_ngff_zarr(str(store)).images[0]
+        multiscales = ngff_zarr.to_multiscales(
+            base,
+            scale_factors=[int(f) for f in scale_factors],
+            method=_downsample_method(downsample_method),
+            cache=False,
+        )
+        version = _DEFAULT_VERSION
+        if field:
+            _require_zarr_v3_for_rfc5()
+            _type_component_axis(multiscales, _DISPLACEMENT_AXIS_TYPE)
+            version = _RFC5_VERSION
+        ngff_zarr.to_ngff_zarr(str(staging), multiscales, overwrite=True, version=version)
+        if sidecar:
+            group = zarr.open_group(str(staging), mode="r+")
+            group.attrs[_KONFAI_ATTR_KEY] = {"attributes": dict(sidecar)}
+            zarr.consolidate_metadata(str(staging))
+        shutil.rmtree(store)
+        staging.rename(store)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        clear_ome_zarr_cache()
+
+
 def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
-    """Return OME-Zarr metadata (raw axis-order shape) without reading pixel data."""
+    """OME-Zarr metadata, without reading pixel data.
+
+    Three of these keys describe the same level in two different orders, and mixing them is the
+    single most productive mistake this module invites. ``shape``, ``scale`` and ``translation``
+    follow the STORE's own axes, listed in ``axes`` -- a scalar volume written without a channel
+    axis has three of each. ``canonical_shape`` is the C[Z]YX form the reader indexes. So a caller
+    that sizes its slices from ``canonical_shape`` and then reads ``scale[1:]`` for the spatial
+    spacing is off by one axis, with plausible numbers and no error.
+
+    ``geometry`` exists so that never has to be reasoned about: it maps each axis NAME to its
+    ``(scale, translation)``. Prefer it.
+    """
     image = _load_image(str(store_path), level)
     dims = [str(axis).lower() for axis in image.dims]
     try:
@@ -450,10 +631,25 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
     return {
         "axes": dims,
         "shape": list(image.data.shape),
+        # The shape the slices of `read_ome_zarr_data_slice` are indexed against. Both are here
+        # because they differ whenever the store's axes are not already C[Z]YX, and a caller sizing
+        # its slices from "shape" then reads a transposed region -- with the right rank, plausible
+        # values, and nothing raised. "shape" stays the store's own order; this one is the reader's.
+        "canonical_shape": _canonical_shape(dims, image.data.shape),
         "chunks": list(getattr(image.data, "chunks", []) or []),
         "dtype": str(image.data.dtype),
         "scale": _ordered(dict(image.scale), dims),
         "translation": _ordered(dict(image.translation), dims),
+        # Keyed by axis name, so no caller has to know which of the two orders it is holding.
+        "geometry": {
+            axis: {"scale": float(scale), "translation": float(translation)}
+            for axis, scale, translation in zip(
+                dims,
+                _ordered(dict(image.scale), dims),
+                _ordered(dict(image.translation), dims),
+                strict=True,
+            )
+        },
         "n_levels": n_levels,
         "attributes": _read_konfai_attributes(store_path),
     }

@@ -244,7 +244,11 @@ markers = [
 [tool.mypy]
 ignore_missing_imports = true
 check_untyped_defs = true
-python_version = "3.10"
+# No `python_version`: mypy analyses as the interpreter it runs on, which is the only version whose
+# stubs are installed. Pinning it to the floor of `requires-python` makes mypy refuse to parse
+# NumPy's stubs (they use `type` statements) and a parse error inside a dependency stops the whole
+# analysis. Syntax newer than 3.10 is caught by ruff instead, which infers its target from
+# `requires-python` (rule set `UP`).
 
 # ---------------------------------------------------------------------------
 # Commitizen

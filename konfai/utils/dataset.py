@@ -176,14 +176,35 @@ class _H5ReadPool:
 _h5_read_pool = _H5ReadPool()
 
 
+def _attribute_text(value: Any) -> str:
+    """One value as an attribute holds it: its printed form, on one line.
+
+    The single place a value stops being a live object, because every consumer takes text --
+    ``SetMetaData`` on a SimpleITK image, an h5 attribute, a zarr sidecar. Plain ``str`` and nothing
+    more: a sequence has two printed forms, :meth:`Attribute.get_np_array` reads both, and
+    ``ast.literal_eval`` (:meth:`Dataset.read_transform`, on the parameter keys) needs the Python
+    one. Normalising to either form here breaks the other reader.
+    """
+    if isinstance(value, torch.Tensor):
+        # Accept a tensor from any device: attributes are host-side strings, and finalize transforms
+        # (Normalize, Statistics, ...) may hand over stats computed on a CUDA-resident volume.
+        value = value.detach().cpu().numpy()
+    return str(value).replace("\n", "")
+
+
 class Attribute(dict[str, Any]):
-    """Metadata container storing repeated values with a stack-like naming scheme."""
+    """Metadata container storing repeated values with a stack-like naming scheme.
+
+    Values are text, always. Both doors normalize -- assignment and construction -- so an attribute
+    built from a store's own sidecar, which JSON hands back as live lists, is the same thing as one
+    assigned in Python. Anything less and a value can be stored and not written back out.
+    """
 
     def __init__(self, attributes: dict[str, Any] | None = None) -> None:
         super().__init__()
         attributes = attributes or {}
         for k, v in attributes.items():
-            super().__setitem__(copy.deepcopy(k), copy.deepcopy(v))
+            super().__setitem__(copy.deepcopy(k), _attribute_text(v))
 
     @staticmethod
     def _is_stack_member(stored_key: str, key: str) -> bool:
@@ -206,13 +227,7 @@ class Attribute(dict[str, Any]):
         raise NameError(f"{key} not in cache_attribute")
 
     def __setitem__(self, key: str, value: Any) -> None:
-        if isinstance(value, torch.Tensor):
-            # Accept a tensor from any device: attributes are host-side strings, and finalize transforms
-            # (Normalize, Statistics, ...) may hand over stats computed on a CUDA-resident volume.
-            result = str(value.detach().cpu().numpy())
-        else:
-            result = str(value)
-        result = result.replace("\n", "")
+        result = _attribute_text(value)
         if "_" not in key:
             super().__setitem__(f"{key}_{self._count_key(key)}", result)
         else:
@@ -226,14 +241,24 @@ class Attribute(dict[str, Any]):
             return super().pop(key)
         raise NameError(f"{key} not in cache_attribute")
 
+    @staticmethod
+    def _parse_array(text: str) -> np.ndarray:
+        """Both printed forms of a sequence: NumPy's ``[1.5 1.5 2.]`` and Python's ``[1.5, 1.5, 2.0]``.
+
+        Which one an attribute holds follows from what the writer handed over -- an ``ndarray``, or
+        the plain list a JSON sidecar gives back -- and no reader should have to make that
+        distinction. ``np.fromstring`` reads whitespace only, so the commas go first.
+        """
+        return np.fromstring(text[1:-1].replace(",", " "), sep=" ", dtype=np.double)
+
     def get_np_array(self, key: str) -> np.ndarray:
-        return np.fromstring(self[key][1:-1], sep=" ", dtype=np.double)
+        return Attribute._parse_array(self[key])
 
     def get_tensor(self, key: str) -> torch.Tensor:
         return torch.tensor(self.get_np_array(key)).to(torch.float32)
 
     def pop_np_array(self, key: str) -> np.ndarray:
-        return np.fromstring(self.pop(key)[1:-1], sep=" ", dtype=np.double)
+        return Attribute._parse_array(self.pop(key))
 
     def pop_tensor(self, key: str) -> torch.Tensor:
         return torch.tensor(self.pop_np_array(key))
@@ -670,20 +695,59 @@ class _MhaDataStream(DataStream):
 
 
 class _OmeZarrDataStream(DataStream):
-    def __init__(self, array: Any, store_path: Path, final_path: Path) -> None:
+    def __init__(
+        self,
+        array: Any,
+        store_path: Path,
+        final_path: Path,
+        scale_factors: list[int] | None = None,
+        downsample_method: str | None = None,
+        displacement_field: bool = False,
+    ) -> None:
         self._array = array
         self._store_path = store_path
         self._final_path = final_path
+        self._scale_factors = scale_factors
+        self._downsample_method = downsample_method
+        self._displacement_field = displacement_field
+        # Running per-component bound of a streamed field. Accumulated from the regions as they are
+        # written -- the only place the samples are ever all seen, since the point of this path is
+        # that the field never exists whole.
+        self._bound: list[float] = []
 
     def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
         self._array[slices] = data
+        if self._displacement_field:
+            from konfai.utils.ome_zarr import displacement_bound
+
+            block = displacement_bound(data)
+            if len(self._bound) < len(block):
+                self._bound.extend([0.0] * (len(block) - len(self._bound)))
+            for component, value in enumerate(block):
+                self._bound[component] = max(self._bound[component], value)
 
     def _close(self, success: bool) -> None:
-        from konfai.utils.ome_zarr import clear_ome_zarr_cache
+        from konfai.utils.ome_zarr import (
+            DISPLACEMENT_BOUND_ATTRIBUTE,
+            append_ome_zarr_levels,
+            clear_ome_zarr_cache,
+            update_konfai_attributes,
+        )
 
         if not success:
             shutil.rmtree(self._store_path, ignore_errors=True)
             return
+        if self._displacement_field and self._bound:
+            # Recorded before the levels are derived and before the rename, so the store is published
+            # complete: a consumer that finds the entry finds its bound with it, or the entry is not
+            # there at all.
+            update_konfai_attributes(self._store_path, {DISPLACEMENT_BOUND_ATTRIBUTE: self._bound})
+        if self._scale_factors:
+            # On the temporary store, so the rename below publishes level 0 and its coarser levels in
+            # one step. append_ome_zarr_levels REWRITES level 0 (ngff-zarr composes a multiscales as a
+            # whole), which is why this costs a pass over what was just written rather than nothing.
+            append_ome_zarr_levels(self._store_path, self._scale_factors, downsample_method=self._downsample_method)
+            self._array = None
         # Move an existing store aside instead of deleting it up front, so a replaced entry stays
         # recoverable (at <name>.replaced-<pid>) until the new store is renamed into place -- a directory
         # swap is not atomic, and deleting first loses both stores on a crash in the window.
@@ -839,12 +903,12 @@ class Dataset:
             dataset = self._get_dataset(groups, name)
             data = np.zeros(dataset.shape, dataset.dtype)
             dataset.read_direct(data)
-            return data, Attribute({k: str(v) for k, v in dataset.attrs.items()})
+            return data, Attribute(dict(dataset.attrs))
 
         def file_to_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
             dataset = self._get_dataset(groups, name)
             data = np.asarray(dataset[slices])
-            return data, Attribute({k: str(v) for k, v in dataset.attrs.items()})
+            return data, Attribute(dict(dataset.attrs))
 
         def file_to_data_statistics(
             self,
@@ -982,7 +1046,7 @@ class Dataset:
             dataset = self._get_dataset(groups, name)
             return (
                 dataset.shape,
-                Attribute({k: str(v) for k, v in dataset.attrs.items()}),
+                Attribute(dict(dataset.attrs)),
             )
 
     class SitkFile(AbstractFile):
@@ -1353,12 +1417,27 @@ class Dataset:
         ``level`` selects the multiscale pyramid resolution to read (0 = full
         resolution, higher = coarser); it comes from the ``omezarr@<level>``
         dataset-spec suffix.
+
+        ``scale_factors`` is the WRITE-side counterpart: it makes the store this backend writes a
+        pyramid instead of a single level. Reading indexes a pyramid BY POSITION, so a producer that
+        writes one and a consumer that asks for ``@1`` are two halves of the same contract -- and
+        until this parameter existed only the whole-array path could honour it, so a volume too large
+        to assemble came out single-level exactly when its pyramid was most needed.
         """
 
-        def __init__(self, filename: str, read: bool, level: int = 0) -> None:
+        def __init__(
+            self,
+            filename: str,
+            read: bool,
+            level: int = 0,
+            scale_factors: list[int] | None = None,
+            downsample_method: str | None = None,
+        ) -> None:
             self.filename = filename if filename.endswith("/") else f"{filename}/"
             self.read = read
             self.level = level
+            self.scale_factors = list(scale_factors) if scale_factors else None
+            self.downsample_method = downsample_method
 
         def __enter__(self):
             return self
@@ -1459,6 +1538,8 @@ class Dataset:
                 origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
                 attributes=dict(attributes),
                 displacement_field=displacement_field,
+                scale_factors=self.scale_factors,
+                downsample_method=self.downsample_method,
             )
 
         def open_data_stream(
@@ -1483,7 +1564,18 @@ class Dataset:
                 attributes=dict(attributes),
                 displacement_field=DISPLACEMENT_FIELD_ATTRIBUTE in attributes,
             )
-            return _OmeZarrDataStream(array, store_path, final_path)
+            # The pyramid cannot be created up front -- no level exists until the last region lands --
+            # so the stream derives it at finalize, on the TEMPORARY store, before the rename. That
+            # order is what keeps publication atomic: a reader never sees a store whose level 0 is
+            # complete but whose coarser levels are not.
+            return _OmeZarrDataStream(
+                array,
+                store_path,
+                final_path,
+                self.scale_factors,
+                self.downsample_method,
+                DISPLACEMENT_FIELD_ATTRIBUTE in attributes,
+            )
 
         def get_names(self, group: str) -> list[str]:
             return self.get_group()
@@ -1508,14 +1600,23 @@ class Dataset:
                 return False
 
         def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
-            from konfai.utils.ome_zarr import get_ome_zarr_info
+            from konfai.utils.ome_zarr import get_ome_zarr_info, is_displacement_field
 
             metadata = get_ome_zarr_info(self._path(name), level=self.level)
             axes = [str(axis).lower() for axis in metadata["axes"]]
             axis_sizes = dict(zip(axes, metadata["shape"], strict=True))
             shape = [axis_sizes.get("c", 1), *[axis_sizes[axis] for axis in ("z", "y", "x") if axis in axis_sizes]]
             metadata["shape"] = shape
-            return shape, self._attributes(metadata)
+            attributes = self._attributes(metadata)
+            # Marked on the HEADERS path, so a field stays a field on the streamed one too. file_to_data
+            # marks it as well, but only there -- so an entry read region by region lost its RFC-5 type
+            # on the way in, and the store written from those regions came out an ordinary 3-channel
+            # image: read streamed, write streamed, and a displacement field silently stopped declaring
+            # itself. This is the once-per-case call (Dataset caches it), not the per-patch one, which
+            # is why the check belongs here and not in file_to_data_slice.
+            if is_displacement_field(self._path(name)):
+                attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+            return shape, attributes
 
     class DicomFile(AbstractFile):
         """DICOM series backend with header-only metadata and slice-level reads."""
@@ -1643,18 +1744,30 @@ class Dataset:
             return info["shape"], self._attributes(info)
 
     class File:
-        def __init__(self, filename: str, read: bool, file_format: str, level: int = 0) -> None:
+        def __init__(
+            self,
+            filename: str,
+            read: bool,
+            file_format: str,
+            level: int = 0,
+            scale_factors: list[int] | None = None,
+            downsample_method: str | None = None,
+        ) -> None:
             self.filename = filename
             self.read = read
             self.file: Dataset.AbstractFile | None = None
             self.file_format = file_format
             self.level = level
+            self.scale_factors = scale_factors
+            self.downsample_method = downsample_method
 
         def __enter__(self) -> Dataset.AbstractFile:
             if self.file_format == "h5":
                 self.file = Dataset.H5File(self.filename, self.read)
             elif self.file_format == "omezarr":
-                self.file = Dataset.OmeZarrFile(self.filename, self.read, self.level)
+                self.file = Dataset.OmeZarrFile(
+                    self.filename, self.read, self.level, self.scale_factors, self.downsample_method
+                )
             elif self.file_format == "dicom":
                 self.file = Dataset.DicomFile(self.filename, self.read)
             else:
@@ -1666,7 +1779,13 @@ class Dataset:
             if self.file is not None:
                 self.file.__exit__(exc_type, value, traceback)
 
-    def __init__(self, filename: str | Path, file_format: str) -> None:
+    def __init__(
+        self,
+        filename: str | Path,
+        file_format: str,
+        scale_factors: list[int] | None = None,
+        downsample_method: str | None = None,
+    ) -> None:
         base_format, self.level = split_format_level(file_format)
         normalized_format = base_format.lower().removeprefix(".").replace("_", "-")
         file_format = {"ome-zarr": "omezarr", "zarr": "omezarr"}.get(normalized_format, normalized_format)
@@ -1679,6 +1798,17 @@ class Dataset:
         detected = Dataset._detect_directory_store_format(self.filename) if self.is_directory else None
         if detected is not None:
             self.file_format = detected
+        # Write-side pyramid, declared by the Save/Write that owns this destination. Refused here
+        # rather than ignored: only OME-NGFF has multiple levels, so a pyramid asked of an mha or an
+        # h5 is a request the format cannot serve, and silently writing one level would leave the
+        # consumer's ``@1`` resolving to a level that does not exist.
+        if scale_factors and self.file_format != "omezarr":
+            raise DatasetManagerError(
+                f"A pyramid was asked of a '{self.file_format}' destination, which has no levels.",
+                "Only ':omezarr' stores levels. Drop scale_factors, or write to ':omezarr'.",
+            )
+        self.scale_factors = list(scale_factors) if scale_factors else None
+        self.downsample_method = downsample_method
         self._names_cache: dict[str, list[str]] = {}
         self._infos_cache: dict[tuple[str, str], tuple[list[int], Attribute]] = {}
 
@@ -1768,8 +1898,23 @@ class Dataset:
             if len(s_group) > 1:
                 name = f"{'/'.join(s_group[:-1])}/{name}"
                 group = s_group[-1]
-            return Dataset.File(f"{self.filename}{name}", False, self.file_format, self.level), group
-        return Dataset.File(self.filename, False, self.file_format, self.level), f"{group}/{name}"
+            return (
+                Dataset.File(
+                    f"{self.filename}{name}",
+                    False,
+                    self.file_format,
+                    self.level,
+                    self.scale_factors,
+                    self.downsample_method,
+                ),
+                group,
+            )
+        return (
+            Dataset.File(
+                self.filename, False, self.file_format, self.level, self.scale_factors, self.downsample_method
+            ),
+            f"{group}/{name}",
+        )
 
     def write(
         self,
@@ -1924,6 +2069,10 @@ class Dataset:
         One entry, one probe: O(1) in the number of cases, where the listing is O(N) headers, and cheaper
         than the listing it replaces.
         """
+        if not self._exists_on_disk():
+            # A store that is not there yet holds nothing -- the first probe of every fresh
+            # destination, which a single-file backend would otherwise turn into an open error.
+            return False
         if self.is_directory:
             entry_group = group.split("/")[-1]
             for sub_directory in self._get_sub_directories(group):
