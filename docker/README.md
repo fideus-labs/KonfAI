@@ -27,23 +27,23 @@ docker run --rm vboussot/konfai
 
 ## Local Build
 
-Build the default image from this repository. It installs the KonfAI release the
-`KONFAI_PYPI_VERSION` argument names — currently `1.8.0`:
+The image installs the wheels it finds in `dist/`, so build them first. It then ships the
+working tree — there is no version to name anywhere, and none to keep in sync:
 
 ```bash
+python -m build --wheel --outdir dist .
+python -m build --wheel --outdir dist ./konfai-apps
 docker build -f docker/Dockerfile -t konfai .
 ```
 
-Build a different KonfAI version from PyPI:
+The release workflow does exactly this with the wheels the tag built, which is why the
+published image never waits on an index to serve what was just uploaded.
+
+**For an image of a published release, pull it** — every version has its own tag:
 
 ```bash
-docker build -f docker/Dockerfile \
-  --build-arg KONFAI_PYPI_VERSION=1.7.0 \
-  -t konfai .
+docker pull vboussot/konfai:1.7.0
 ```
-
-The published images never rely on that default: the release workflow passes the tag's
-version as `--build-arg`, so the image for `vX.Y.Z` always installs `X.Y.Z`.
 
 Build with additional optional dependencies:
 
@@ -146,4 +146,5 @@ docker run --rm -it -p 8000:8000 \
 
 - The image is intended for CLI workflows executed from a mounted workspace.
 - The default image is GPU-oriented; use a custom `TORCH_INDEX_URL` if you want a CPU-only variant.
-- For reproducibility, pin the PyPI version with `KONFAI_PYPI_VERSION` when rebuilding locally.
+- A local rebuild ships the working tree, since it installs the wheels in `dist/`. For a
+  published release, pull its tag rather than rebuilding it.

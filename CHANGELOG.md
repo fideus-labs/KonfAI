@@ -1,29 +1,58 @@
 # Changelog
 
-Generated from the commit history by [Commitizen](https://commitizen-tools.github.io/commitizen/).
-Each version's section is what the GitHub Release for that tag carries. Regenerate with:
+Drafted from the commit history by [Commitizen](https://commitizen-tools.github.io/commitizen/), then
+edited. Each version's section is what the GitHub Release for that tag carries.
 
 ```bash
-cz changelog --start-rev v1.5.8
+cz changelog --unreleased-version vX.Y.Z --start-rev v1.5.8   # a DRAFT, not the final file
 ```
 
 Conventional Commits started at `v1.5.9`; rendering further back produces empty version headings.
+
+The draft is a starting point, not the answer. It sees only commit subjects, so a squash merge
+collapses to one line, a subject with no conventional prefix is dropped entirely, and a subject
+written for a reviewer ("what reviewing the data surface turned up") tells a reader nothing. Take the
+draft, then say what a user of the package gets that they did not have -- and re-read the section
+against the commits that landed *after* you drafted it. Running the command over a section already
+written replaces it.
 
 ## v1.8.0 (2026-08-04)
 
 ### ✨ Features
 
-- **data**: give a chain a per-component statistic, and a shape update that uses it
+- **transform**: resample a case onto the grid of a declared reference
+- **transform**: compose the grid change and the warp into one pass
+- **data**: give a chain a per-component statistic
 - **transform**: let Warp read the bound the fields recorded, with max_displacement: auto
 - **studio**: show a transform run, and point Browse at the data rather than its log
 - **mcp**: let an agent plan and run a transform, and read the table for what it accepts
 - **transform**: a fifth workflow that reads a dataset, applies a chain, and writes it
+- **transform**: give ResampleToReference an `interpolation`, as Warp already had
+- **data**: Vote, the reduction operator that folds segmentations without inventing a label
 - **data**: declare an OME-Zarr pyramid from a Write, and let a field carry its own bound
 - **impact-reg**: seed the rigid from the centre of mass, not only the frame
 - **studio**: bundle icons through the app interface, and a way to stop Studio (#75)
+- **examples**: a Transform example -- a template folded out of a cohort, and drawn copies of a case
 
 ### 🐛 Bug Fixes
 
+- **transform**: sample a label map by nearest on the warped path too, instead of blending labels
+- **transform**: check Warp's declared bound on the whole-volume path, not only the streamed one
+- **transform**: build Warp's grid on the volume's device, so a GPU-resident case does not raise
+- **data**: cap an OME-Zarr chunk instead of taking the writer's whole trailing plane
+- **data**: keep the store's chunking when a Write appends pyramid levels
+- **data**: refuse a statistic after a Reduce that an earlier post stage invalidates
+- **data**: budget a reduction for what its operator allocates over the buffer it holds
+- **data**: refuse a geometry key `grid: strict` cannot compare, instead of skipping it
+- **data**: stop a chained sweep at the first failure, so the recorded reason is the cause
+- **data**: record the landed state only for a plan that holds
+- **data**: restore the CUDA generators a draw's seeding touched
+- **transform**: name the argument the stage actually takes in a field refusal
+- **transform**: count a chain's Reduce markers where its Expand markers were already counted
+- **konfai-mcp**: require the konfai that has the module it imports at load
+- **studio**: refuse /api/quit when a proxy header arrives and the peer cannot be trusted
+- **examples**: install scikit-image where SSIM is evaluated, and ask for a GPU that exists
+- **transform**: hold the auto bound to the cohort, and plan a resampled case on the grid it lands on
 - **transform**: refuse a stage key that names something not a class
 - **transform**: print the plan's reduction and dropped lines once
 - **transform**: give refusals their true remedy and name
@@ -62,6 +91,49 @@ Conventional Commits started at `v1.5.9`; rendering further back produces empty 
 - **data**: share the fallback constants and the Welford kernel
 - **data**: move the reduction operators out of the predictor, into one shared vocabulary
 - **data**: give the resolved memory budget a type that knows its own scope
+- **data**: name what patching shares with the transform workflow, instead of reaching into privates
+- **transform**: state each sampling rule once, over the two gathers that share the one arithmetic
+- **ci**: pin every action to a commit SHA, and take the release notes from the committed changelog
+
+### ⚠️ Behaviour changes
+
+No YAML key, class or default was renamed, but the following answer differently for a config that
+was not touched. Several are new refusals: what they refuse was being done before, silently and
+wrongly.
+
+- **`reduction: Median` returns a different number on an even count.** `torch.median` hands back the
+  lower of the two middle values, which over two tensors is the element-wise minimum; it now averages
+  the middle pair as `numpy.median` does. A 2-model ensemble or a 2-draw TTA that reduced to `1.0`
+  over `[1.0, 3.0]` now reduces to `2.0`. On an odd count the two agree.
+- **`Mean` and `Median` widen an integer input to float32**, including the single-tensor path that
+  previously returned the tensor untouched. Rounding an average back onto an integer grid is a wrong
+  number, not a narrower one -- but a `uint8` prediction output now lands as float32, four times the
+  bytes on disk, and a downstream stage sees the wider dtype.
+- Together those two make **`Median` the wrong operator for a label map**: it can answer with a
+  label that was in no input (over 1 and 5 it gives 3), and over exactly two cases it *is* `Mean`.
+  Fold segmentations with the new **`Vote`**, which picks the label the most cases agree on and
+  keeps the dtype.
+- **A whole-volume statistic after a `Reduce` is refused when an earlier post stage changes the
+  values.** The stat pass measures the fold, so `[Reduce, Clip, Normalize]` normalised by the
+  *unclipped* statistic and wrote a volume its own header did not describe. The per-case planner
+  already refused this; the reduction now does too. Split the chain at the value-changing stage.
+- **Two source groups may no longer declare the same destination group name.** The name is the key
+  everything downstream indexes by, so the second chain used to be built and then silently dropped;
+  it is now refused when the dataset is prepared, in every workflow. Give the chains distinct names
+  and say `group:` on each `Write` to store both under one group.
+- **A `uint8` label map resampled through a `field` now takes the nearest voxel.** The warped path
+  consulted no interpolation rule, so it blended labels and truncated: over a source holding
+  `{0, 100}` it returned 29, 79 and 99. Anything stored as another integer dtype needs
+  `interpolation: nearest` spelled out -- a dtype cannot tell a label map from a CT.
+- **A chain declaring two `Reduce` markers is refused at parse time**, naming the cardinality
+  marker, where the second one used to fall past the split and be reported as an ordinary stage
+  reading across space.
+- **`grid: strict` refuses a geometry key no header records**, rather than skipping the comparison
+  it promised. A missing `Direction` is a flip that shows in neither extent nor spacing. Use
+  `grid: shape_only` for a cohort that means to fold on extent alone.
+- **New OME-Zarr stores are chunked to a size a reader can open.** A streamed writer declaring the
+  whole trailing plane produced a chunk of a gigabyte at 2048², past what zarr holds in one buffer
+  at 4096². Existing stores keep their own chunking; zarr is self-describing.
 
 ## v1.7.0 (2026-07-29)
 
