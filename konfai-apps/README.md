@@ -69,6 +69,12 @@ konfai-apps infer VBoussot/ImpactSynth:CBCT --host 127.0.0.1 --port 8000 ...
 
 ## Quick Start
 
+> ⚠️ **Trust model.** Resolving an app **copies and imports its `.py` files**, so it
+> **runs arbitrary code**, and it **pip-installs its `requirements.txt` by default**
+> (only missing or mismatched packages; core packages like `torch`/`konfai` are never
+> touched — opt out with `KONFAI_APPS_INSTALL_REQUIREMENTS=0`). **Only resolve apps
+> from sources you trust.**
+
 ### Local inference
 
 ```bash

@@ -12,6 +12,7 @@ model, and plots a multi-organ label map over the input. The model is fetched fr
 The same thing from a terminal:
 
 ```bash
+cd /path/to/KonfAI                                 # the three paths below are relative to the repo root
 pip install . ./konfai-apps ./apps/mrsegmentator   # all three from this checkout: the app pins konfai== and konfai-apps==
 mrsegmentator-konfai segment -i input.mha -o ./Output/ --gpu 0
 ```

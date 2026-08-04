@@ -141,6 +141,7 @@ every command from this directory:
 
 ```bash
 cd examples/Synthesis
+pip install "konfai[smp]"    # the generator wraps segmentation_models_pytorch
 ```
 
 ### 1. Train
@@ -158,10 +159,11 @@ This creates:
 
 ### 2. Predict
 
-Use one checkpoint from `Checkpoints/TRAIN_01/`:
+Checkpoints are named after the moment they were written, and this example keeps only the best one, so
+a glob resolves to exactly one file:
 
 ```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_01/<checkpoint>.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_01/*.pt
 ```
 
 This creates:
@@ -250,7 +252,7 @@ Predict from the generator weights saved inside the GAN checkpoint with the shar
 Before running prediction, set `train_name` in `Prediction.yml` to `TRAIN_GAN_01` so the outputs are written to the right folder.
 
 ```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_GAN_01/<checkpoint>.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_GAN_01/*.pt
 ```
 
 Then evaluate the GAN predictions with the shared evaluation workflow:

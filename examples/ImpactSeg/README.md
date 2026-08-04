@@ -12,6 +12,7 @@ model, and plots a segmentation label map over the input. The model is fetched f
 The same thing from a terminal:
 
 ```bash
+cd /path/to/KonfAI                              # the paths below are relative to the repo root
 pip install . ./konfai-apps ./apps/impact_seg   # all three from this checkout: the app pins konfai== and konfai-apps==
 impact-seg-konfai segment body -i input.mha -o ./Output/ --gpu 0
 ```

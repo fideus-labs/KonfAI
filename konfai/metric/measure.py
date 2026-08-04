@@ -317,7 +317,7 @@ class MAESaveMap(MAE):
         self.group = group
 
     def partial_map(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        """Per-voxel |output - target| (masked where a mask is given). VOXEL-LOCAL by construction:
+        """Per-voxel ``|output - target|`` (masked where a mask is given). VOXEL-LOCAL by construction:
         a patch's map equals the same region of the whole-case map, which is what lets the streamed
         evaluation write it region by region instead of needing the whole case."""
         if len(targets) == 2:

@@ -68,6 +68,13 @@ Tests:
 
 ## Installation
 
+```bash
+pip install konfai-mcp
+```
+
+Add `pip install "konfai[imaging]"` if the agent will read `.mha`/`.nii` data or
+run training. This gives you the MCP entrypoint, `konfai-mcp`.
+
 ### From the KonfAI repository
 
 For local development, install both the KonfAI core package and the MCP package:
@@ -358,8 +365,6 @@ which:
 - builds the standalone MCP package
 - smoke-imports `konfai_mcp`
 - runs `pytest -q konfai-mcp/tests`
-
-> This package lives on the `konfai-mcp` branch of the repository.
 
 ## Current Scope and Limitations
 

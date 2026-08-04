@@ -12,6 +12,7 @@ model, and plots a whole-body label map over the input. The model is fetched fro
 The same thing from a terminal:
 
 ```bash
+cd /path/to/KonfAI                                    # the paths below are relative to the repo root
 pip install . ./konfai-apps ./apps/totalsegmentator   # all three from this checkout: the app pins konfai== and konfai-apps==
 totalsegmentator-konfai segment total -i input.mha -o ./Output/ --gpu 0
 ```

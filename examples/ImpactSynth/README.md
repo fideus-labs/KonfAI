@@ -12,6 +12,7 @@ model, and plots a synthetic CT on the input grid over the input. The model is f
 The same thing from a terminal:
 
 ```bash
+cd /path/to/KonfAI                                # the paths below are relative to the repo root
 pip install . ./konfai-apps ./apps/impact_synth   # all three from this checkout: the app pins konfai== and konfai-apps==
 impact-synth-konfai synthesize MR -i input.mha -o ./Output/ --gpu 0
 ```

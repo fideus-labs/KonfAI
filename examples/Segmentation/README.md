@@ -131,8 +131,11 @@ konfai TRAIN -y --gpu 0 --config Config.yml
 
 ### 2. Predict
 
+Checkpoints are named after the moment they were written, and this example keeps only the best one, so
+a glob resolves to exactly one file:
+
 ```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/<checkpoint>.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/*.pt
 ```
 
 ### 3. Evaluate

@@ -31,11 +31,13 @@ automatically:
 konfai TRAIN -y --gpu 0 --config Config.yml -tb
 ```
 
-Resume from an existing checkpoint with `RESUME`:
+Resume from an existing checkpoint with `RESUME`. Checkpoints are named after the
+moment they were written, so substitute the one training produced — `--model`
+takes exactly one:
 
 ```bash
 konfai RESUME -y --config Config.yml \
-  --model Checkpoints/SEG_BASELINE/<checkpoint>.pt
+  --model Checkpoints/SEG_BASELINE/2026_08_03_02_36_00.pt
 ```
 
 You can also change the output directories:

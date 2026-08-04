@@ -77,11 +77,18 @@ an explicit `allow_untrusted_code=True`. A **remote** app runs on the user's own
 Install the core package and the MCP package, then launch the entrypoint:
 
 ```bash
-pip install -e ".[dev,imaging]"
-pip install -e ./konfai-apps
-pip install -e ./konfai-mcp
+pip install "konfai[imaging]" konfai-apps konfai-mcp
 
 konfai-mcp            # stdio transport by default
+```
+
+From a checkout instead — for development, or to expose edited core code to the
+agent:
+
+```bash
+git clone https://github.com/fideus-labs/KonfAI.git
+cd KonfAI
+pip install -e ".[dev,imaging]" -e ./konfai-apps -e ./konfai-mcp
 ```
 
 Point an MCP client at the `konfai-mcp` command. Example client entry:
@@ -89,7 +96,6 @@ Point an MCP client at the `konfai-mcp` command. Example client entry:
 ```toml
 [mcp_servers.konfai]
 command = "/path/to/venv/bin/konfai-mcp"
-cwd = "/path/to/KonfAI/konfai-mcp"
 tool_timeout_sec = 3600
 
 [mcp_servers.konfai.env]

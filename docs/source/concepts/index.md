@@ -1,5 +1,10 @@
 # Core concepts
 
+Nothing here is needed for a first run — the {doc}`../quickstart` stands on its
+own. Read this section once that run worked and you want to know what it did, or
+when you hit something the task guides assume. {doc}`configuration` is the one
+page that pays off immediately; the rest are on-demand.
+
 KonfAI is easiest to understand when you keep five ideas in mind:
 
 1. **YAML builds Python objects** rather than acting as a loose parameter blob.

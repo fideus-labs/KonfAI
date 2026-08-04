@@ -3,12 +3,16 @@
 This page lists the main command-line entrypoints used in the repository. Use
 it as the quick map of "which command should I run?".
 
-KonfAI uses four main command-line entrypoints:
+KonfAI ships six command-line entrypoints, across four packages:
 
-- `konfai`
-- `konfai-apps`
-- `konfai-apps-server`
-- `konfai-cluster`
+| Command | Package | Purpose |
+| --- | --- | --- |
+| `konfai` | `konfai` | run a YAML workflow: train, predict, evaluate, transform |
+| `konfai-cluster` | `konfai` (`cluster` extra) | submit those workflows to SLURM |
+| `konfai-apps` | `konfai-apps` | run a packaged App |
+| `konfai-apps-server` | `konfai-apps` | serve Apps over HTTP |
+| `konfai-mcp` | `konfai-mcp` | expose KonfAI to an LLM agent |
+| `konfai-studio` | `konfai-studio` | the web UI over `konfai-mcp` |
 
 ## `konfai`
 
@@ -232,17 +236,62 @@ Important options:
 
 ## `konfai-cluster`
 
-Cluster-oriented wrapper around the low-level `konfai` commands.
+Cluster-oriented wrapper around the low-level `konfai` commands: it takes the
+same workflow arguments and submits them to SLURM through `submitit`. Depends on
+the optional `cluster` extra.
 
-It adds job-submission options such as:
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--name` | **required** | SLURM job name. |
+| `--num-nodes` | `1` | Nodes to request. |
+| `--memory` | `16` | Memory per node, in GB. |
+| `--time-limit` | `1440` | Wall-clock limit, in minutes. |
+| `--resubmit` | off | Accepted, but **not implemented** — the run warns and does not requeue. |
 
-- `--name`
-- `--num-nodes`
-- `--memory`
-- `--time-limit`
-- `--resubmit`
+Otherwise `konfai-cluster` takes the same subcommands and arguments as `konfai`.
+**The cluster options come before the subcommand** — they sit on the top-level
+parser, so putting them after it fails with `the following arguments are
+required: --name`:
 
-The cluster command depends on the optional `cluster` extra.
+```bash
+konfai-cluster --name my_job --num-nodes 2 TRAIN -y --config Config.yml
+```
+
+## `konfai-mcp`
+
+Runs the MCP server that exposes KonfAI to an LLM agent. Every option also reads
+an environment variable, so a client that can only set `env` can configure the
+server without arguments — see {doc}`environment`.
+
+| Option | Meaning |
+| --- | --- |
+| `--transport` | `stdio` (default), `sse`, or `streamable-http`. |
+| `--session` | Default session name for this server process. |
+| `--workspace-root` | Directory holding MCP sessions and datasets. |
+| `--log-tail-lines` | Default maximum lines returned by log-tail helpers. |
+| `--host` / `--port` | Bind address and port, for the SSE/HTTP transports. |
+| `--path` | HTTP path prefix, for the SSE/HTTP transports. |
+| `--log-level` | FastMCP/Uvicorn log level, where the transport supports it. |
+| `--bearer-token` | Token required by the SSE/HTTP transports. |
+
+## `konfai-studio`
+
+Launches the Studio web UI and its BFF. Binds loopback by default; anything else
+requires authentication, because Studio drives arbitrary host compute.
+
+| Option | Meaning |
+| --- | --- |
+| `--host` / `--port` | Bind address (default `127.0.0.1`) and port (default `8730`). |
+| `--proxy-headers` | Trust `X-Forwarded-*`; set this behind nginx or Caddy. |
+| `--forwarded-allow-ips` | Proxy IPs allowed to set those headers (default `127.0.0.1`). |
+| `--ssl-certfile` / `--ssl-keyfile` | Serve HTTPS directly; the two go together. |
+| `--i-know-this-is-insecure` | Bind a public address with no `KONFAI_STUDIO_TOKEN`. |
+
+```{warning}
+Binding a non-loopback address without `KONFAI_STUDIO_TOKEN` is refused, not
+warned about: an unauthenticated Studio is a shell on the host. Set a token and
+serve over TLS — see `studio/docs/REMOTE.md`.
+```
 
 ## ONNX export is not a subcommand
 

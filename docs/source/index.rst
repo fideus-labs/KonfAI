@@ -44,7 +44,7 @@ KonfAI
            <div class="kf-codecard">
              <div class="kf-chead"><span class="kf-dots"><i></i><i></i><i></i></span><span>terminal</span></div>
              <pre><span class="p">$</span> <span class="cmd">konfai TRAIN</span>      <span class="fl">-y --gpu 0 --config Config.yml</span>
-   <span class="p">$</span> <span class="cmd">konfai PREDICTION</span> <span class="fl">--config Prediction.yml --models &hellip;/best.pt</span>
+   <span class="p">$</span> <span class="cmd">konfai PREDICTION</span> <span class="fl">--config Prediction.yml --models Checkpoints/&hellip;/*.pt</span>
    <span class="p">$</span> <span class="cmd">konfai EVALUATION</span> <span class="fl">--config Evaluation.yml</span></pre>
            </div>
          </div>
@@ -260,7 +260,7 @@ KonfAI
 
 .. toctree::
    :maxdepth: 2
-   :caption: Core concepts
+   :caption: Going deeper
    :hidden:
 
    concepts/index

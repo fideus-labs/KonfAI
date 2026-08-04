@@ -1,25 +1,30 @@
 # Examples
 
-KonfAI ships three low-level, YAML-driven examples under `examples/`. They are
-the best starting point when you want to understand the framework before
-building a reusable KonfAI App.
+Every example under `examples/` is a notebook you open and run top to bottom. It
+fetches its own data, runs the real `konfai` commands, and ends by showing the
+result — from a fresh environment, Google Colab included.
 
-All three are backed by public demo data on Hugging Face:
+**Five run a published model** — no training, no YAML, a real result in about a
+minute. Start there to see what KonfAI produces before learning how it is
+configured. They are KonfAI {doc}`Apps <../usage/apps>`.
 
-- `VBoussot/konfai-demo/Segmentation` — pelvis CT with a 41-label reference. Used by
-  **Segmentation** directly, and by **Registration** through its `make_dataset.py`.
-- `VBoussot/konfai-demo/Synthesis` — paired MR / CT / body mask. Used by **Synthesis**.
+| Run a published model | Task | |
+| --- | --- | --- |
+| `TotalSegmentator` | whole-body CT segmentation, 117 labels | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/TotalSegmentator/TotalSegmentator_demo.ipynb) |
+| `MRSegmentator` | multi-organ MR segmentation, 40 labels | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/MRSegmentator/MRSegmentator_demo.ipynb) |
+| `ImpactSeg` | one model, 11 structures from CT, MR or CBCT | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/ImpactSeg/ImpactSeg_demo.ipynb) |
+| `ImpactSynth` | synthetic CT from MR or CBCT | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/ImpactSynth/ImpactSynth_demo.ipynb) |
+| `ImpactReg` | register two *different* patients, scored on their reference labels | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/ImpactReg/register_demo.ipynb) |
 
-Registration turns those CT slices into fixed/moving pairs by pushing each one through
-a displacement field the script picks, so the answer stays known. ImpactReg goes further
-and aligns two *different* patients, with the reference segmentations as the only ground
-truth.
+**The other three are the framework itself** — a YAML config, the `konfai` CLI,
+and nothing else. They are what you copy for your own experiment, and the pages
+below document them. Their training runs are deliberately short, so the scores
+demonstrate the pipeline rather than the method.
 
-Each example ships a notebook that runs the whole workflow — data, training,
-prediction, evaluation, and a plot of the result — from a fresh environment,
-Google Colab included. Run every cell; nothing is gated behind a flag. Their
-training runs are deliberately short, so the scores demonstrate the pipeline
-rather than the method.
+Both tiers use the public demo data on Hugging Face: `VBoussot/konfai-demo` ships
+a `Segmentation/` subset (pelvis CT, 41-label reference — also the source
+`Registration` deforms into fixed/moving pairs) and a `Synthesis/` subset (paired
+MR / CT / body mask).
 
 <figure class="kf-visual kf-visual--execution">
   <a class="kf-visual-frame" href="../_static/readme/execution-flow.svg" aria-label="Open the KonfAI execution-flow diagram at full resolution">

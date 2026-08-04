@@ -82,10 +82,27 @@ The codebase also references internal variables such as:
 These are part of KonfAI's internal execution model and are best treated as
 implementation details unless you are actively extending the framework.
 
-The `konfai-mcp` server has its own `KONFAI_MCP_*` family (workspace root,
-transport, host/port, bearer token, log level, log-tail length, mount path,
-subprocess timeout, validation root, session and app-catalog selection) —
-documented in the MCP guide.
+## konfai-mcp
+
+Every `konfai-mcp` command-line option has a matching variable, so an MCP client
+that can only set `env` configures the server without arguments. The option wins
+when both are given.
+
+| Variable | Equivalent option | Effect |
+| --- | --- | --- |
+| `KONFAI_MCP_WORKSPACES_ROOT` | `--workspace-root` | Directory holding MCP sessions and datasets. |
+| `KONFAI_MCP_SESSION` | `--session` | Default session name for this server process. |
+| `KONFAI_MCP_TRANSPORT` | `--transport` | `stdio` (default), `sse`, or `streamable-http`. |
+| `KONFAI_MCP_HOST` / `KONFAI_MCP_PORT` | `--host` / `--port` | Bind address and port, for the SSE/HTTP transports. |
+| `KONFAI_MCP_PATH` | `--path` | HTTP path prefix, for those same transports. |
+| `KONFAI_MCP_BEARER_TOKEN` | `--bearer-token` | Token required by the SSE/HTTP transports. |
+| `KONFAI_MCP_LOG_LEVEL` | `--log-level` | FastMCP/Uvicorn log level. |
+| `KONFAI_MCP_LOG_TAIL_LINES` | `--log-tail-lines` | Default maximum lines returned by log-tail helpers. |
+
+An invalid `KONFAI_MCP_TRANSPORT` is rejected at startup rather than passed
+through. A few further `KONFAI_MCP_*` names configure internals with no option of
+their own — the app catalog, the subprocess timeout, the validation root — and
+are covered in {doc}`../usage/mcp`.
 
 ## KonfAI Studio
 
