@@ -82,17 +82,23 @@ def get_available_presets(force_update: bool = False) -> list[str]:
     return list(get_available_apps_on_hf_repo(IMPACT_REG_KONFAI_REPO, force_update))
 
 
-def _find_output(root: Path, stem: str) -> Path:
-    """Locate the single output named ``stem`` under ``root``, whatever form the preset wrote it in.
+def _find_outputs(root: Path, stem: str) -> dict[str, Path]:
+    """Every output named ``stem`` under ``root``, keyed by the CASE it belongs to.
 
     Matched on the name rather than on a fixed filename: a displacement field may come out as an ITK
     image or as an OME-Zarr store, and a store is a DIRECTORY whose ``Path.stem`` is "DVF.ome" -- so a
     fixed "DVF.mha" finds nothing and the run dies with the output sitting in the directory it listed.
+
+    A MAPPING, NOT THE FIRST MATCH. konfai-apps writes one dataset per output group --
+    ``<run>/<group>/<case>/<group>.<ext>`` -- and one run produces as many cases as the inputs expanded
+    to, which is not the number of paths on the command line: a directory is walked so each volume in
+    it becomes its own case. Taking ``matches[0]`` therefore kept P000 and dropped every case after it,
+    silently, with the results sitting on disk. The case is the entry's parent directory.
     """
     matches = sorted(root.rglob(f"{stem}.*"))
     if not matches:
         raise FileNotFoundError(f"Preset inference did not produce '{stem}' under {root}.")
-    return matches[0]
+    return {match.parent.name: match for match in matches}
 
 
 def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
@@ -105,6 +111,15 @@ def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
     for stale in [p for p in dest_dir.iterdir() if p.name.startswith(f"{stem}.")]:
         shutil.rmtree(stale) if stale.is_dir() else stale.unlink()
     return dest_dir / (stem + suffixes)
+
+
+def _neutral_masks(work: Path, side: str, count: int) -> list[Path]:
+    """``count`` all-ones sentinels, one per case, standing in for a mask group the caller left out.
+
+    Input groups pair by POSITION, so a group that is present at all must carry as many units as the
+    others: one sentinel would pair with the first case and leave the rest unmasked on that side.
+    """
+    return [_neutral_mask(work / f"{side}Mask_{index:03d}.mha") for index in range(count)]
 
 
 def _work_dir(tmp_dir: Path | None, prefix: str) -> Path:
@@ -264,31 +279,40 @@ class ImpactRegKonfAIApp:
     def _infer_preset(
         self,
         preset: str,
-        fixed_image: Path,
-        moving_image: Path,
-        fixed_mask: Path | None,
-        moving_mask: Path | None,
+        fixed_images: list[Path],
+        moving_images: list[Path],
+        fixed_masks: list[Path],
+        moving_masks: list[Path],
+        n_cases: int,
         work: Path,
         gpu: list[int],
         cpu: int | None,
         quiet: bool,
         tta: int = 0,
         config_overrides: list[str] | None = None,
-    ) -> Path:
-        """Run one preset app on the fixed/moving pair (+ optional masks); return its displacement field.
+    ) -> dict[str, Path]:
+        """Run one preset app on every case at once; return its displacement field per case.
 
-        Each preset runs through the ``konfai-apps`` CLI in its own subprocess: konfai keeps
-        process-global state (its ``Config`` singleton, the ``KONFAI_*`` environment), so several preset
-        inferences in one process would clash. The ``-i`` inputs map positionally to the app's input groups.
+        ONE RUN, NOT ONE PER CASE. Each ``-i`` is an input GROUP, and konfai-apps expands each group's
+        paths into units -- a file is one, a store or DICOM series is one, a plain directory is walked
+        so each volume in it becomes one -- then pairs the groups by position into ``Dataset/P{i:03d}``.
+        So the whole cohort goes in a single invocation and the model is loaded once, rather than once
+        per case.
+
+        Each preset still runs in its own subprocess: konfai keeps process-global state (its ``Config``
+        singleton, the ``KONFAI_*`` environment), so several preset inferences in one process would clash.
+
         Masks are optional: konfai-apps fills any we omit with an all-ones default, so with no mask we pass
         only fixed+moving. Because the mapping is positional, a lone moving mask still needs the fixed-mask
-        slot present, so send the pair (defaulting the absent one to an all-ones sentinel) once either is given.
+        slot present -- filled with one all-ones sentinel per case so the groups keep pairing.
         """
         out = work / preset
-        command = ["konfai-apps", "infer", _app_id(preset), "-i", str(fixed_image), "-i", str(moving_image)]
-        if fixed_mask is not None or moving_mask is not None:
-            command += ["-i", str(fixed_mask or _neutral_mask(work / "FixedMask.mha"))]
-            command += ["-i", str(moving_mask or _neutral_mask(work / "MovingMask.mha"))]
+        command = ["konfai-apps", "infer", _app_id(preset)]
+        command += ["-i", *(str(path) for path in fixed_images)]
+        command += ["-i", *(str(path) for path in moving_images)]
+        if fixed_masks or moving_masks:
+            command += ["-i", *(str(path) for path in fixed_masks or _neutral_masks(work, "Fixed", n_cases))]
+            command += ["-i", *(str(path) for path in moving_masks or _neutral_masks(work, "Moving", n_cases))]
         command += ["-o", str(out)]
         # Hand konfai-apps a workspace we own, which is what every other app CLI does by exposing
         # --tmp-dir. Without it konfai-apps auto-creates one under TMPDIR, writes the prediction to
@@ -318,7 +342,7 @@ class ImpactRegKonfAIApp:
         # be computed from it -- the moved image above all -- is this layer's job. Looking for a Moved
         # here would make every preset carry an output it does not owe, and a tiled one blend it across
         # every patch seam for a caller that has the field.
-        return _find_output(out, "DVF")
+        return _find_outputs(out, "DVF")
 
     def register(
         self,
@@ -336,42 +360,69 @@ class ImpactRegKonfAIApp:
         config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
     ) -> None:
-        """Register each fixed/moving pair with the selected presets and ensemble their DVFs.
+        """Register every case with the selected presets and ensemble their DVFs.
+
+        A case is whatever konfai-apps makes of the inputs: one image per group gives one case, and a
+        directory per group gives one case per volume inside it, paired by position. So the caller may
+        pass single volumes or whole datasets, exactly as ``konfai-apps infer`` accepts them.
 
         Masks are optional and restrict the metric region; when omitted a whole-image mask is auto-filled,
         so every preset app always receives the four inputs (fixed, moving, fixed mask, moving mask) it declares.
 
         ``tmp_dir`` names where the intermediates are staged; see :func:`_work_dir`.
         """
-        for index, (fixed_image, moving_image) in enumerate(zip(fixed_images, moving_images, strict=True)):
-            case_out = output / f"P{index:03d}"
-            case_out.mkdir(parents=True, exist_ok=True)
-            # The per-preset displacement fields are large; only persist them (under Ensemble/) when the
-            # caller asks, so `uncertainty` can measure the ensemble spread afterwards.
-            if keep_dvf:
-                (case_out / _ENSEMBLE_DIR).mkdir(parents=True, exist_ok=True)
-            work = _work_dir(tmp_dir, "impact_reg_")
-            try:
-                # Masks are optional (they restrict the metric region); pass only those the caller gave and
-                # let konfai-apps fill the rest with an all-ones default — no input read on the no-mask path.
-                fixed_mask = fixed_masks[index] if index < len(fixed_masks) else None
-                moving_mask = moving_masks[index] if index < len(moving_masks) else None
+        # The cases are konfai-apps' to define, not ours to count. It expands each input GROUP into
+        # units -- a file, a store, a DICOM series, or every volume inside a plain directory -- and pairs
+        # the groups by position. Asking it for the moving group's units is what tells this layer which
+        # volume belongs to which case, in the same order it will use, so a dataset in and a single pair
+        # in go down one path.
+        moving_units = [source for source, _ in KonfAIApp._list_input_units(list(moving_images))]
+
+        work = _work_dir(tmp_dir, "impact_reg_")
+        try:
+            fields_by_preset = {
+                preset: self._infer_preset(
+                    preset,
+                    list(fixed_images),
+                    list(moving_images),
+                    list(fixed_masks),
+                    list(moving_masks),
+                    len(moving_units),
+                    work,
+                    gpu,
+                    cpu,
+                    quiet,
+                    tta,
+                    config_overrides,
+                )
+                for preset in presets
+            }
+            cases = sorted(fields_by_preset[presets[0]])
+            for preset, fields in fields_by_preset.items():
+                if sorted(fields) != cases:
+                    raise RuntimeError(
+                        f"preset '{preset}' produced cases {sorted(fields)} where '{presets[0]}' produced "
+                        f"{cases}; an ensemble can only be averaged case by case."
+                    )
+            if len(cases) != len(moving_units):
+                raise RuntimeError(
+                    f"the presets produced {len(cases)} case(s) for {len(moving_units)} moving unit(s); "
+                    "the moved image is derived per case and needs the two to line up."
+                )
+
+            for case, moving_image in zip(cases, moving_units, strict=True):
+                # konfai-apps already named the cases; reusing its names keeps the two layers' notion of
+                # a case identical instead of renumbering from the command line and hoping they agree.
+                case_out = output / case
+                case_out.mkdir(parents=True, exist_ok=True)
+                # The per-preset displacement fields are large; only persist them (under Ensemble/) when the
+                # caller asks, so `uncertainty` can measure the ensemble spread afterwards.
+                if keep_dvf:
+                    (case_out / _ENSEMBLE_DIR).mkdir(parents=True, exist_ok=True)
 
                 dvf_paths = []
                 for preset in presets:
-                    dvf = self._infer_preset(
-                        preset,
-                        fixed_image,
-                        moving_image,
-                        fixed_mask,
-                        moving_mask,
-                        work,
-                        gpu,
-                        cpu,
-                        quiet,
-                        tta,
-                        config_overrides,
-                    )
+                    dvf = fields_by_preset[preset][case]
                     if keep_dvf:
                         dvf = _copy_output(dvf, case_out / _ENSEMBLE_DIR, preset)
                     dvf_paths.append(dvf)
@@ -393,8 +444,8 @@ class ImpactRegKonfAIApp:
                 # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid displacement
                 # field as a SimpleITK transform.
                 sitk.WriteTransform(_displacement_transform(dvf_out), str(case_out / "Transform.h5"))
-            finally:
-                shutil.rmtree(work, ignore_errors=True)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def _average_displacement(self, dvf_paths: list[Path]) -> sitk.Image:
         """Average several presets' displacement fields (all on the same fixed grid) into one field.

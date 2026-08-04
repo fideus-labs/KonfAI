@@ -33,7 +33,7 @@ pytest.importorskip("ngff_zarr")
 from impact_reg_konfai.impact_reg import (  # noqa: E402
     _copy_output,
     _displacement_transform,
-    _find_output,
+    _find_outputs,
     _output_path,
     _read_image,
     _write_displacement_field,
@@ -71,18 +71,27 @@ def _write_store(dest: Path, field: "sitk.Image") -> Path:
 
 
 @pytest.mark.parametrize("suffix", [".mha", ".ome.zarr"])
-def test_find_output_locates_either_form(tmp_path: Path, suffix: str) -> None:
+def test_find_outputs_locates_either_form(tmp_path: Path, suffix: str) -> None:
     """Discovery is by name, not by filename: a store is a directory whose stem is 'DVF.ome'."""
     produced = tmp_path / "P000"
     produced.mkdir()
     _write_displacement_field(_field(), produced / f"DVF{suffix}")
 
-    assert _find_output(tmp_path, "DVF").name == f"DVF{suffix}"
+    assert _find_outputs(tmp_path, "DVF")["P000"].name == f"DVF{suffix}"
 
 
-def test_find_output_reports_the_name_it_looked_for(tmp_path: Path) -> None:
+def test_find_outputs_keys_every_case_the_run_produced(tmp_path: Path) -> None:
+    """One run yields one entry per case, so none is silently dropped."""
+    for case in ("P000", "P001", "P002"):
+        (tmp_path / case).mkdir()
+        _write_displacement_field(_field(), tmp_path / case / "DVF.mha")
+
+    assert sorted(_find_outputs(tmp_path, "DVF")) == ["P000", "P001", "P002"]
+
+
+def test_find_outputs_reports_the_name_it_looked_for(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="DVF"):
-        _find_output(tmp_path, "DVF")
+        _find_outputs(tmp_path, "DVF")
 
 
 @pytest.mark.parametrize("suffix", [".mha", ".ome.zarr"])
@@ -180,7 +189,7 @@ def test_output_path_clears_the_stem_whatever_the_previous_form(tmp_path: Path) 
 
 def test_rerunning_in_the_other_form_leaves_one_output(tmp_path: Path) -> None:
     """Discovery is by stem, so a run that emits the other form must not leave the previous one
-    beside it -- ``_find_output`` returns the first match, and ``DVF.mha`` sorts before its store."""
+    beside it -- discovery is by stem, and ``DVF.mha`` sorts before its store."""
     source, destination = tmp_path / "src", tmp_path / "out"
     source.mkdir()
     destination.mkdir()
@@ -191,7 +200,7 @@ def test_rerunning_in_the_other_form_leaves_one_output(tmp_path: Path) -> None:
     _copy_output(source / "DVF.ome.zarr", destination, "DVF")
 
     assert [p.name for p in destination.iterdir()] == ["DVF.ome.zarr"]
-    assert _find_output(destination, "DVF").name == "DVF.ome.zarr"
+    assert _find_outputs(destination, "DVF")[destination.name].name == "DVF.ome.zarr"
 
 
 def test_store_written_by_the_orchestrator_is_a_declared_field(tmp_path: Path) -> None:
