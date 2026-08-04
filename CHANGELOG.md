@@ -1,8 +1,15 @@
 # Changelog
 
-Generated from the commit history by [Commitizen](https://commitizen-tools.github.io/commitizen/):
-every entry is a conventional commit, and each released version's section is what the GitHub Release
-for that tag carries. Regenerate with `cz changelog`.
+Generated from the commit history by [Commitizen](https://commitizen-tools.github.io/commitizen/) —
+every entry is a conventional commit, and each version's section is exactly what the GitHub Release
+for that tag carries. Regenerate with:
+
+```bash
+cz changelog --start-rev v1.5.8
+```
+
+`--start-rev` is not a preference: Conventional Commits only took hold at `v1.5.9`, so rendering
+further back produces version headings with nothing under them. What came before is described below.
 
 ## v1.8.0 (2026-08-01)
 
@@ -282,46 +289,21 @@ for that tag carries. Regenerate with `cz changelog`.
 - **predict**: cache ensemble state_dicts in RAM
 - **patching**: make Accumulator.is_full O(1) via a filled counter
 
-## v1.5.8 (2026-06-01)
+## Earlier releases (v1.0.0 – v1.5.8)
 
-## v1.5.7 (2026-05-28)
+Not generated, and not reconstructed. The history before `v1.5.9` predates Conventional Commits, so
+there is no structure to render — and inventing one would describe a history that never happened.
 
-## v1.5.6 (2026-05-28)
+What those commit messages announce themselves:
 
-### 🐛 Bug Fixes
+| Version | Date | Announced as |
+| --- | --- | --- |
+| `1.4.1` | 2025-11-27 | Fix the missing resource package on Windows; handle `CUDA_VISIBLE_DEVICES` when CUDA is unavailable |
+| `1.4.0` | 2025-11-26 | Enable Windows inference and improve konfai-apps |
+| `1.0.0` | 2025-06-02 | First functional version of KonfAI |
 
-- **data**: handle Windows subset file paths
-- **transform**: preserve source spacing when resample spacing uses 0
-- **prediction**: release VRAM after patch prediction
+For anything finer, read the log:
 
-### ⚡ Performance
-
-- **data**: avoid eager infos reads and speed up shard remapping
-
-## v1.5.5 (2026-05-21)
-
-## v1.5.4 (2026-03-06)
-
-## v1.5.3 (2026-02-02)
-
-### ✨ Features
-
-- **KonfAI-app**: optional inference stack for faster inference
-
-## v1.5.2 (2026-01-29)
-
-## v1.5.1 (2026-01-28)
-
-## v1.5.0 (2026-01-19)
-
-## v1.4.9 (2026-01-13)
-
-### ✨ Features
-
-- **apps**: add remote execution support and client/server mode
-
-## v1.4.7 (2026-01-03)
-
-## v1.4.6 (2026-01-02)
-
-## v1.4.5 (2025-12-31)
+```bash
+git log --oneline v1.5.8
+```

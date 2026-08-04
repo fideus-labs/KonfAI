@@ -142,6 +142,27 @@ Before tagging: `pixi run check` green; both sibling suites green; and — becau
 the **source tree** — confirm the built wheel still ships `konfai/models/python/**` and `konfai/models/yaml/*.yml`
 by installing it **non-editable** in a clean venv (an editable install hides PEP 420 / `package-data` breakage).
 
+**The changelog is written before the tag, not after.** `CHANGELOG.md` is generated from the commits and the
+publish workflow renders the same section into the GitHub Release, so the file must already contain the version
+being tagged:
+
+```bash
+uvx --from commitizen cz changelog --unreleased-version vX.Y.Z --start-rev v1.5.8   # 1. write the section
+git commit -am "ci: changelog for vX.Y.Z"                                          # 2. commit it
+git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z                            # 3. sign, tag, push
+```
+
+`-s` and not `-a`: releases are signed (`v1.7.0` is), and `tag.gpgsign` already makes `-a` sign on a machine
+that has it configured — which is exactly why `-s` is spelled out. On a machine that does not, `-a` publishes an
+unsigned release in silence where `-s` refuses. Commitizen's own `gpg_sign` is deliberately NOT set: it would
+only apply to `cz bump`, which does not tag here, so it would be a setting that describes an intention nothing
+acts on.
+
+`cz bump` computes the right increment (`cz bump --dry-run` is a good second opinion on major/minor/patch) but
+does **not** tag here: with `version_provider = "scm"` there is no version file to write, so when the changelog
+is already current it has nothing to commit and stops silently. Tag by hand. `--start-rev v1.5.8` is required —
+Conventional Commits only took hold at `v1.5.9`, and rendering further back emits empty version headings.
+
 ## 7. Invariants — do NOT break
 
 - **Never load a full volume into RAM.** Use lazy/patch/streaming access (`can_stream_patch`, `read_data_slice`).

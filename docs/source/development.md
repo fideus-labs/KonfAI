@@ -233,6 +233,42 @@ The bundles pin `konfai==` and `konfai-apps==` the same version, so the whole
 matrix releases in lockstep. A change to the core package can therefore affect
 the framework, the two sibling packages, and every published App.
 
+### Cutting a release
+
+Versions are **tag-derived** — `setuptools_scm` reads the tag, and no version
+string is committed anywhere that could drift from it. `CHANGELOG.md` is
+generated from the commit history, and the publish workflow renders the section
+for the tag it is running on as the GitHub Release body, so the file and the
+release page cannot describe a version differently.
+
+That order matters: **the changelog is written before the tag**, because the
+workflow renders what the history already says.
+
+```bash
+# 1. Write the section for the version you are about to cut
+uvx --from commitizen cz changelog --unreleased-version vX.Y.Z --start-rev v1.5.8
+
+# 2. Commit it
+git commit -am "ci: changelog for vX.Y.Z"
+
+# 3. Sign, tag and push — this is what triggers the publish workflow
+git tag -s vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+Releases are signed. `tag.gpgsign = true` already makes an annotated tag signed
+on a machine that has a key configured, so `-s` is spelled out for the machine
+that does not: it refuses rather than publishing an unsigned release in silence.
+
+`cz bump --dry-run` is a useful second opinion on whether the commits imply a
+major, minor or patch bump. Do not rely on `cz bump` to tag: with
+`version_provider = "scm"` there is no version file for it to write, so once the
+changelog is current it has nothing to commit and stops without tagging.
+
+`--start-rev v1.5.8` is not a preference. Conventional Commits only took hold at
+`v1.5.9`; rendering further back emits version headings with nothing under them,
+and everything older is summarised in the changelog's own closing section.
+
 ## AI agent rules
 
 If you are an AI agent contributing to this repository, read `AGENTS.md` at
