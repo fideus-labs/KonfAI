@@ -134,38 +134,46 @@ class AugmentedStage:
 _REGION_KINDS = (LocalityKind.HALO, LocalityKind.ORIENTATION, LocalityKind.CROP, LocalityKind.RESCALE)
 
 
-def _halo_pull(radii: list[int], shape: list[int]) -> Callable[[tuple[slice, ...]], list[slice]]:
+# The pull maps are callable dataclasses, not closures, because a plan crosses a process boundary:
+# the launcher plans every case, `mp.spawn` then pickles the workflow object whole, and a local
+# function cannot be pickled. Everything a plan memoizes must survive that trip.
+
+
+@dataclass(frozen=True)
+class _HaloPull:
     """A halo stage's pull map: the region enlarged by the radius, clamped to the volume."""
 
-    def pull(target: tuple[slice, ...]) -> list[slice]:
+    radii: list[int]
+    shape: list[int]
+
+    def __call__(self, target: tuple[slice, ...]) -> list[slice]:
         return [
             slice(max(0, t.start - radius), min(extent, t.stop + radius))
-            for t, radius, extent in zip(target, radii, shape, strict=False)
+            for t, radius, extent in zip(target, self.radii, self.shape, strict=False)
         ]
 
-    return pull
 
-
-def _remap_pull(
-    remap: Callable[[tuple[slice, ...], list[int], Attribute], list[slice]],
-    shape: list[int],
-    attribute: Attribute,
-) -> Callable[[tuple[slice, ...]], list[slice]]:
+@dataclass(frozen=True)
+class _RemapPull:
     """An index-remap stage's pull map, bound to the case state the stages before it left."""
 
-    def pull(target: tuple[slice, ...]) -> list[slice]:
-        return remap(target, list(shape), Attribute(attribute))
+    remap: Callable[[tuple[slice, ...], list[int], Attribute], list[slice]]
+    shape: list[int]
+    attribute: Attribute
 
-    return pull
+    def __call__(self, target: tuple[slice, ...]) -> list[slice]:
+        return self.remap(target, list(self.shape), Attribute(self.attribute))
 
 
-def _scale_pull(scales: list[float], shape: list[int]) -> Callable[[tuple[slice, ...]], list[slice]]:
+@dataclass(frozen=True)
+class _ScalePull:
     """A rescale stage's pull map: the source window of the scale mapping plus its interpolation halo."""
 
-    def pull(target: tuple[slice, ...]) -> list[slice]:
-        return Resample.source_window(target, scales, shape)
+    scales: list[float]
+    shape: list[int]
 
-    return pull
+    def __call__(self, target: tuple[slice, ...]) -> list[slice]:
+        return Resample.source_window(target, self.scales, self.shape)
 
 
 @dataclass(frozen=True)
@@ -1585,16 +1593,16 @@ class DatasetManager:
             return _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), None)
         if loc.kind is LocalityKind.HALO:
             return _ReadStagePlan(
-                loc.kind, tuple(shape), tuple(shape), _halo_pull(_halo_radii(loc.halo, len(shape)), list(shape))
+                loc.kind, tuple(shape), tuple(shape), _HaloPull(_halo_radii(loc.halo, len(shape)), list(shape))
             )
         if loc.kind is LocalityKind.RESCALE:
             resample = cast(Resample, stage)
             out = [int(e) for e in resample.transform_shape(self.group_src, self.name, list(shape), Attribute(evolved))]
             scales = [shape[k] / out[k] for k in range(len(shape))]
             resample.write_stream_cache_attribute(evolved, list(shape))
-            return _ReadStagePlan(loc.kind, tuple(shape), tuple(out), _scale_pull(scales, list(shape)))
+            return _ReadStagePlan(loc.kind, tuple(shape), tuple(out), _ScalePull(scales, list(shape)))
         # ORIENTATION / CROP: the stage's own remap, evaluated on the state the stages before it left.
-        pull = _remap_pull(stage.stream_region_source, list(shape), Attribute(evolved))
+        pull = _RemapPull(stage.stream_region_source, list(shape), Attribute(evolved))
         if isinstance(stage, Transform):
             out = [int(e) for e in stage.transform_shape(self.group_src, self.name, list(shape), Attribute(evolved))]
         else:
