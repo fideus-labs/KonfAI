@@ -388,8 +388,24 @@ def test_the_write_probe_targets_the_copys_grid_not_the_cases(tmp_path: Path) ->
 # --------------------------------------------------------------------- resume
 
 
-def test_a_written_copy_is_not_rewritten_and_overwrite_forces_it(tmp_path: Path) -> None:
+def test_a_written_copy_is_not_rewritten_and_overwrite_forces_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume is per copy: the entry already on disk is the one that is skipped.
+
+    Counted at the store's own door rather than read off the file, because both of those proxies
+    lie in one direction each -- a timestamp two writes share within a tick reads as 'skipped', and
+    so do identical bytes for a draw that is reproducible, which is what this codebase aims at.
+    """
     source = _source(tmp_path)
+    opened: list[str] = []
+    real_open = Dataset.open_data_stream
+
+    def spy(self: Dataset, group: str, entry: str, *args, **kwargs):
+        opened.append(entry)
+        return real_open(self, group, entry, *args, **kwargs)
+
+    monkeypatch.setattr(Dataset, "open_data_stream", spy)
 
     def build() -> DatasetManager:
         return _manager(
@@ -403,14 +419,16 @@ def test_a_written_copy_is_not_rewritten_and_overwrite_forces_it(tmp_path: Path)
         )
 
     build().materialize_copies([1, 2])
-    store = tmp_path / "out.h5"
-    stamp = store.stat().st_mtime_ns
+    written = list(opened)
+    assert len(written) == 2, written
 
+    opened.clear()
     build().materialize_copies([1, 2])
-    assert store.stat().st_mtime_ns == stamp
+    assert opened == [], "a copy already on disk was written again"
 
+    opened.clear()
     build().materialize_copies([1, 2], rewrite=True)
-    assert store.stat().st_mtime_ns != stamp
+    assert opened == written, "rewrite=True did not force both copies"
 
 
 def test_a_shared_cache_before_the_marker_is_swept_once_for_every_copy(tmp_path: Path) -> None:

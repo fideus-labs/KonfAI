@@ -270,6 +270,91 @@ def test_two_chains_writing_the_same_target_are_refused(tmp_path: Path) -> None:
         _build(tmp_path)
 
 
+def test_two_chains_sharing_an_intermediate_save_are_refused(tmp_path: Path) -> None:
+    """The terminal Write is not the only boundary two chains can collide on.
+
+    A Save is keyed by (dataset, group, case) and nothing else, so the second chain finds the first
+    one's cache already written, adopts it as its own source, and skips its own prefix -- producing a
+    deliverable computed from another chain's transforms, with no warning and no failed case.
+    """
+    _write_source(tmp_path)
+    source = tmp_path / "source"
+    (tmp_path / "Transform.yml").write_text(
+        "Transformer:\n"
+        "  name: TEST\n"
+        "  Dataset:\n"
+        "    dataset_filenames:\n"
+        f"      - {source}:mha\n"
+        "    groups_src:\n"
+        "      CT:\n"
+        "        groups_dest:\n"
+        "          A:\n"
+        "            transforms:\n"
+        "              Clip:\n"
+        "                min_value: 0.0\n"
+        "                max_value: 50.0\n"
+        "              Save:\n"
+        f"                dataset: {tmp_path / 'work'}:h5\n"
+        "                group: shared\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_a'}:h5\n"
+        "          B:\n"
+        "            transforms:\n"
+        "              Clip:\n"
+        "                min_value: 0.0\n"
+        "                max_value: 10.0\n"
+        "              Save:\n"
+        f"                dataset: {tmp_path / 'work'}:h5\n"
+        "                group: shared\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_b'}:h5\n"
+    )
+    with pytest.raises(TransformerError, match="both write"):
+        _build(tmp_path)
+
+
+def test_one_chain_may_publish_its_own_save_through_its_write(tmp_path: Path) -> None:
+    """The refusal is about two chains, not two stages: a chain's Write over its own Save is legal."""
+    _write_source(tmp_path)
+    _write_config(
+        tmp_path,
+        "              Save:\n"
+        f"                dataset: {tmp_path / 'out'}:h5\n"
+        "                group: same\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out'}:h5\n"
+        "                group: same\n",
+    )
+
+    assert _build(tmp_path) is not None
+
+
+_CAST_CHAIN = """\
+              Clip:
+                min_value: 0.0
+                max_value: 50.0
+              TensorCast:
+                dtype: uint8
+              Write:
+                dataset: {out}:h5
+"""
+
+
+def test_the_plan_reports_the_dtype_it_probed_the_destinations_with(tmp_path: Path) -> None:
+    """The report is the probe's own answer, not a constant beside it.
+
+    The write probe already opens with the chain's last declared cast; a report that says float32
+    whatever the chain casts to describes a run nobody asked for -- and a destination that refuses
+    uint8 would have been caught by the probe while the plan claimed float32 was fine.
+    """
+    _write_source(tmp_path)
+    _write_config(tmp_path, _CAST_CHAIN.format(out=tmp_path / "out"))
+
+    plan = _build(tmp_path).compute_plan(1, overwrite=False)
+
+    assert "assumed uint8 / source channels" in plan.report()
+
+
 def test_unknown_key_is_refused_with_its_path(tmp_path: Path) -> None:
     """The strict mode: a typo'd key is a parse error, never a silently-used default."""
     _write_source(tmp_path)

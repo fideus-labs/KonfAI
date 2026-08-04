@@ -55,6 +55,7 @@ from .guide import (
     SOLVE_TASK_PROMPT,
     TOOL_DESCRIPTIONS,
 )
+from .runner import preserved_config
 from .runner import run_api_in_subprocess as _run_api_in_subprocess
 from .server_apps import AppService
 from .server_experiments import SessionService
@@ -3091,15 +3092,16 @@ def plan_transform(
     blocked = SESSION.workflow_blocker("transform")
     if blocked is not None:
         return blocked
-    return _run_api_in_subprocess(
-        "konfai_mcp.runner:plan_transform_api",
-        {
-            "workspace_dir": str(SESSION.workspace_dir()),
-            "config": str(config_path),
-            "cpu": max(1, int(cpu or 1)),
-            "overwrite": bool(overwrite),
-        },
-    )
+    with preserved_config(config_path):
+        return _run_api_in_subprocess(
+            "konfai_mcp.runner:plan_transform_api",
+            {
+                "workspace_dir": str(SESSION.workspace_dir()),
+                "config": str(config_path),
+                "cpu": max(1, int(cpu or 1)),
+                "overwrite": bool(overwrite),
+            },
+        )
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["cancel_job"]))

@@ -1991,7 +1991,8 @@ class DataTransform(Data):
                         f"'{chain}' has a 'Save' with no dataset: it would write next to the source.",
                         "Give the Save its own destination, e.g. Save: {dataset: ./Work:h5}.",
                     )
-            for root, _group in destinations[(group_src, group_dest)]:
+            chain_targets: list[tuple[str, str]] = []
+            for root, group in destinations[(group_src, group_dest)]:
                 for source_root in source_roots:
                     if root == source_root or Path(root).is_relative_to(source_root):
                         raise TransformerError(
@@ -2000,20 +2001,20 @@ class DataTransform(Data):
                             " in-place transform would read its own half-written output. Write to a"
                             " separate directory.",
                         )
-            terminal = transforms[-1]
-            filename, _flag, _file_format = split_path_spec(
-                terminal.dataset, default_format="mha", supported_extensions=SUPPORTED_EXTENSIONS
-            )
-            target = (str(Path(filename).resolve()), terminal.group or group_dest)
-            if target in write_targets:
-                other = write_targets[target]
-                raise TransformerError(
-                    f"'{chain}' and 'groups_src.{other[0]}.groups_dest.{other[1]}' both write"
-                    f" '{target[1]}' under '{target[0]}'.",
-                    "The second chain would find the first one's output and report the case as"
-                    " already done. Give each Write its own (dataset, group).",
-                )
-            write_targets[target] = (group_src, group_dest)
+                if (root, group) in write_targets:
+                    other = write_targets[(root, group)]
+                    raise TransformerError(
+                        f"'{chain}' and 'groups_src.{other[0]}.groups_dest.{other[1]}' both write"
+                        f" '{group}' under '{root}'.",
+                        "A Save is a source boundary keyed by (dataset, group, case) alone, so the"
+                        " second chain would take the first one's entry as satisfied and skip its own"
+                        " prefix. Give each Save and each Write its own (dataset, group).",
+                    )
+                chain_targets.append((root, group))
+            # Registered once the chain is through, not as each target is seen: one chain may name the
+            # same target twice (a Save its terminal Write publishes over); two chains may not.
+            for target in chain_targets:
+                write_targets[target] = (group_src, group_dest)
 
     def _validate_expansion(self) -> None:
         """The Expand contract, decidable from the config alone.

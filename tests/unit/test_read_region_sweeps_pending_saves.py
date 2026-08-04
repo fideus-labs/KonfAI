@@ -28,6 +28,7 @@ optimisation of memory, never of meaning.
 """
 
 import numpy as np
+import pytest
 import torch
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Save, Standardize
@@ -93,3 +94,31 @@ def test_the_swept_cache_is_written_where_the_save_named_it(tmp_path):
     )
     manager.read_region((slice(0, 2), slice(0, 8), slice(0, 8)), 0, False)
     assert Dataset(tmp_path / "work", "h5").is_dataset_exist("CT", "CASE_000")
+
+
+def test_a_sweep_failure_does_not_survive_the_flip_to_rewriting_saves(tmp_path, monkeypatch):
+    """A failed sweep is a verdict about one boundary answer, and ``--overwrite`` asks the other.
+
+    Kept across the flip it condemns every Save of the new mode to the whole-volume path -- the one
+    path a case too large to assemble cannot take.
+    """
+    _source(tmp_path)
+    chain = [
+        Clip(min_value=-50.0, max_value=50.0),
+        Save(dataset=f"{tmp_path / 'work'}:h5"),
+        Standardize(),
+    ]
+    manager = _manager(tmp_path, chain)
+
+    monkeypatch.setattr(
+        manager,
+        "_materialize_save",
+        lambda sweep: manager._sweep_failed_because(sweep, "OSError: no space left on device"),
+    )
+    with pytest.warns(UserWarning, match="could not be swept"):
+        assert not manager._stream_ready(0, apply_augmentations=False)
+    monkeypatch.undo()
+
+    manager._set_rewrite(True)
+
+    assert manager._stream_ready(0, apply_augmentations=False)
