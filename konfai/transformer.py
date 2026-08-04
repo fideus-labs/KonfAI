@@ -130,8 +130,8 @@ class TransformPlan:
         for group_src, dropped in sorted(self.dropped_cases.items()):
             if dropped:
                 lines.append(
-                    f"[Transformer] {dropped} case(s) present in '{group_src}' only are DROPPED:"
-                    " several groups_src keep the intersection of their case names."
+                    f"[Transformer] {dropped} case(s) of '{group_src}' are DROPPED: the run keeps"
+                    " the cases every groups_src shares, minus what 'subset' excludes."
                 )
         by_chain: dict[tuple[str, str], list[TransformPlanEntry]] = {}
         for entry in self.entries:
@@ -427,7 +427,9 @@ class Transformer(DistributedObject):
                 reason = (
                     reduction_plan.refusal
                     if not reduction_plan.streams
-                    else reduction_plan.describe().split("\n", 1)[1].strip()
+                    # All of describe() but its header and its trailing case list, which report()
+                    # prints on lines of its own.
+                    else "\n".join(reduction_plan.describe().splitlines()[1:-1]).strip()
                 )
                 if verdict == "REDUCE":
                     # A reduction has no whole-volume fallback, so a destination that would refuse
