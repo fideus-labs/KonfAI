@@ -32,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from harness import subprocess_env
 from ruamel.yaml import YAML
 
 pytest.importorskip("SimpleITK")
@@ -136,7 +137,12 @@ def test_a_documented_example_plans_and_runs(line: int, config: str, tmp_path: P
     (workdir / "Transform.yml").write_text(config, encoding="utf-8")
     for filename, source in _python_modules(DOC.read_text(encoding="utf-8")).items():
         (workdir / filename).write_text(source, encoding="utf-8")
-    environment = {"KONFAI_CLI": "False", "PYTHONPATH": str(workdir)}
+    # The checkout under test has to stay on the child's path: PYTHONPATH replaced wholesale makes
+    # the examples run against whatever konfai is installed, and green then says nothing about this
+    # tree. The workdir comes first so the doc's own modules still win.
+    environment = subprocess_env()
+    environment["KONFAI_CLI"] = "False"
+    environment["PYTHONPATH"] = f"{workdir}{os.pathsep}{environment['PYTHONPATH']}"
 
     script = workdir / "_plan.py"
     script.write_text(PLAN_SCRIPT, encoding="utf-8")
@@ -144,7 +150,7 @@ def test_a_documented_example_plans_and_runs(line: int, config: str, tmp_path: P
         [sys.executable, str(script), str(workdir)],
         capture_output=True,
         text=True,
-        env={**os.environ, **environment},
+        env=environment,
         timeout=600,
     )
     assert planned.returncode == 0, f"transform.md:{line} does not plan:\n{planned.stdout}{planned.stderr}"
@@ -155,7 +161,7 @@ def test_a_documented_example_plans_and_runs(line: int, config: str, tmp_path: P
         [_konfai(), "TRANSFORM", "--config", "Transform.yml", "--transforms-dir", "Transforms"],
         capture_output=True,
         text=True,
-        env={**os.environ, **environment},
+        env=environment,
         cwd=str(workdir),
         timeout=900,
     )

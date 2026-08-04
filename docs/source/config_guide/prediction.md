@@ -80,7 +80,7 @@ Key fields:
 | `groups_src` | mapping | Input groups and preprocessing transforms. |
 | `augmentations` | mapping | Test-time augmentation definitions. |
 | `Patch` | mapping | Sliding-window or slice-wise inference setup. |
-| `subset` | string / list / null | Restricts evaluated cases: a flat selector — a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
+| `subset` | string / list / null | Restricts which cases are predicted: a flat selector — a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `batch_size` | int | Number of patches per inference batch. |
 
 Use `Dataset.Patch` when:
