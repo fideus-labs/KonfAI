@@ -242,8 +242,8 @@ case's chain *lands* on (a `Resample` before the `Reduce` counts):
 ```{warning}
 Nothing can verify that the members truly live in a common space — only that
 they claim to. `shape_only` and `reference:` will happily average misaligned
-volumes; the result still looks like a volume and is an artefact. Resample the
-cohort onto one grid first if it is not co-registered.
+volumes; the result still looks like a volume and is an artefact. Put the
+cohort on one grid first — `ResampleToReference`, below.
 ```
 
 **A reduction has no whole-volume fallback.** Folding every case in memory is
@@ -252,6 +252,64 @@ whatever `on_fallback` says — the plan prints `REFUSED` and the reason. Only
 voxel-local stages (and statistics, seeded by an extra pass of the engine's
 own) may follow the `Reduce` in the same chain: anything reading across space
 belongs in a second chain that reads the written output back.
+
+### `ResampleToReference`: making `strict` true rather than waived
+
+A cohort as acquired rarely passes `strict`: extents differ, and origins can
+differ by more than the volumes are wide, because an acquisition's stage
+coordinates are not an anatomical frame. `ResampleToReference` is what makes
+`strict` true rather than waived — it resamples each case onto the grid of a
+**declared reference**, adopting its extent, spacing, origin and direction:
+
+```yaml
+transforms:
+  ResampleToReference: {entry: case_0, group: CT, fill: 0.0}
+  Reduce: {operator: Median, output: template, grid: strict}
+  Write: {dataset: ./Template:mha}
+```
+
+The reference is a stored image, named by `entry` — and by `group` when the
+store holds more than one. It is looked up by entry, not by the case being
+processed, because one grid serves the whole cohort: in the run's own
+`dataset_filenames`, or in a store of its own.
+
+```yaml
+transforms:
+  ResampleToReference: {entry: case_1, group: CT, dataset: ./Raw:mha}
+  Write: {dataset: ./OnTemplate:mha}
+```
+
+`dataset:` takes the same `path[:format]` spec as everywhere else, so the
+reference can live anywhere — which is the atlas loop: point round N+1 at the
+store round N wrote its template into.
+
+Naming an image rather than fifteen numbers is deliberate. A grid is an extent
+in array order `(Z, Y, X)` plus an origin, a spacing and a direction in physical
+`(x, y, z)` — transcribing those by hand is the mistake that actually gets made,
+and a transposed grid resamples perfectly well onto the wrong place. A header
+cannot make that mistake.
+
+```{note}
+It streams: a slab of the output reads only the part of the input under it, so a
+case never has to fit in memory. The sampler is `sitk.Resample`'s — linear with
+taps clamped to the buffer, nearest by round-half-up, and `fill` wherever the
+reference grid reaches past the case.
+```
+
+**What it refuses**, rather than write something plausible and wrong:
+
+- a case or a reference carrying no `Origin` / `Spacing` / `Direction` — without
+  geometry there is no physical space to resample in, and a size ratio must not
+  quietly stand in for one;
+- a reference whose `Direction` differs from the case's — the map between them
+  is then a rotation, not a scale and a shift per axis. Reorient first
+  (`Canonical`);
+- a case that does not meet the reference grid **anywhere** — its output would
+  be `fill` from edge to edge, and a median would take that as anatomy.
+
+Partial overlap is legal and ordinary: the rest of the output is `fill`, and the
+plan prints the fraction of the grid each case covers. "Most of this template is
+background" is then something read before the run rather than after it.
 
 ### `Expand`: one case, N copies
 
@@ -495,7 +553,8 @@ refused (cheaper to load the volume), and the plan says so.
 | a bounded neighbourhood | `HALO`, with `halo=(r,)` | nothing |
 | the volume flipped/permuted | `ORIENTATION` | `stream_region_source()` |
 | a translated sub-box | `CROP` | `stream_region_source()` |
-| a resampled grid | `RESCALE` | inherit from `Resample` |
+| the same box, resampled | `RESCALE` | inherit from `Resample` |
+| another grid entirely | `REGRID` | `stream_region_source()` and `stream_region()` |
 | whole-volume Min/Max/Mean/Std | `GLOBAL_STAT`, with `stat_keys` | nothing |
 | the same, per component | `GLOBAL_STAT`, with `MinPerChannel`/`MaxPerChannel`/`MeanPerChannel`/`StdPerChannel` | nothing |
 | genuinely the whole volume | nothing (the default) | nothing |

@@ -62,6 +62,7 @@ from konfai.data.transform import (
     PatchLocality,
     Percentage,
     Reduce,
+    ResampleToReference,
     ResampleToResolution,
     ResampleToShape,
     ResampleTransform,
@@ -86,6 +87,14 @@ _CASE_NAME = "CASE_000"
 _SPATIAL = (9, 10, 11)
 _PATCH_SIZE = [4, 4, 4]
 _SPACING = [1.5, 1.5, 2.0]
+
+# The grid the "Reference" group is stored on, for a stage that resamples onto a declared reference.
+# Chosen so the two boxes OVERLAP WITHOUT NESTING: in physical x the reference runs to 13.4 where the
+# case stops at 12.0, so its last columns read from outside the case and take the fill. A reference
+# contained in its case would prove the sampler and never the boundary, which is the half that
+# differs between the streamed and whole-volume paths.
+_REFERENCE_SPATIAL = (7, 8, 9)
+_REFERENCE_SPACING = [1.8, 1.2, 2.5]
 
 # No extent is a multiple of the patch size, so the last patch of every axis is a border patch the read
 # plan has to pad: the grid is 3x3x3 and 19 of its 27 patches touch a border.
@@ -158,6 +167,14 @@ _CASES: dict[str, list[_Case]] = {
         _Case(ResampleToResolution([2.0, 1.0, 3.0]), group="Labels"),
     ],
     "ResampleToShape": [_Case(ResampleToShape([12, 8, 14]), atol=_RESCALE_ATOL)],
+    # Onto a grid of its own, so part of the target reads from outside the case and takes the fill.
+    # atol is 0: unlike the scale-only resamples -- whose whole-volume path is F.interpolate and whose
+    # streamed path is resample_region, two implementations that agree to a rounding -- both paths of
+    # this one run the SAME sampler over global coordinates, so they agree bit for bit or not at all.
+    "ResampleToReference": [
+        _Case(ResampleToReference(entry=_CASE_NAME, group="Reference")),
+        _Case(ResampleToReference(entry=_CASE_NAME, group="Reference"), group="Labels"),
+    ],
     "ResampleTransform": [_Case(ResampleTransform({"transform": True}))],
     "Save": [_Case(Save("Dataset"))],
     # Warp needs a field on disk to run, which this registry cannot build: with no declared
@@ -226,14 +243,17 @@ def _volumes() -> dict[str, np.ndarray]:
         # Stored with the foreground box already on it, which is how a crop is a translation rather
         # than a question about the voxels.
         "Boxed": intensity.astype(np.float32)[None],
+        # A grid of its OWN -- other extent, other spacing, other origin -- for a stage that resamples
+        # onto a reference rather than about the case's own extent. Only its header is ever read.
+        "Reference": rng.standard_normal(_REFERENCE_SPATIAL).astype(np.float32)[None],
     }
 
 
 def _attributes(group: str) -> Attribute:
     """The metadata a group is stored with -- and so what a declaration about it is handed."""
     attributes = Attribute()
-    attributes["Origin"] = np.asarray([-3.0, 5.0, 11.0])
-    attributes["Spacing"] = np.asarray(_SPACING)
+    attributes["Origin"] = np.asarray([-1.0, 6.0, 12.0] if group == "Reference" else [-3.0, 5.0, 11.0])
+    attributes["Spacing"] = np.asarray(_REFERENCE_SPACING if group == "Reference" else _SPACING)
     attributes["Direction"] = {"Oblique": _OBLIQUE, "Permuting": _PERMUTING}.get(group, _AXIS_ALIGNED).reshape(-1)
     if group == "Ensemble":
         # What a `combine: Concat` reduction writes: the per-model channel counts MergeLabels and
@@ -299,6 +319,9 @@ def _streamable_cases() -> list[_Case]:
 
 
 def _manager(dataset: Dataset, case: _Case) -> DatasetManager:
+    # What a run does before it builds a manager (Data.prepare): a stage that reads a SECOND entry --
+    # a mask, a field, a reference grid -- is handed the roots to find it in.
+    case.transform.set_datasets([dataset])
     return DatasetManager(
         index=0,
         group_src=case.group,
