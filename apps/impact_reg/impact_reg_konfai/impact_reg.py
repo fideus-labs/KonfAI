@@ -388,6 +388,7 @@ class ImpactRegKonfAIApp:
                         gpu=gpu,
                         cpu=cpu,
                         quiet=quiet,
+                        tmp_dir=work,
                     )
 
                 # Segmentation: moving seg warped onto fixed vs fixed seg (Dice).
@@ -408,6 +409,7 @@ class ImpactRegKonfAIApp:
                         gpu=gpu,
                         cpu=cpu,
                         quiet=quiet,
+                        tmp_dir=work,
                     )
 
                 # Landmarks (TRE): the transform is defined on the fixed grid and maps fixed->moving, so the
@@ -428,6 +430,7 @@ class ImpactRegKonfAIApp:
                         gpu=gpu,
                         cpu=cpu,
                         quiet=quiet,
+                        tmp_dir=work,
                     )
             finally:
                 shutil.rmtree(work, ignore_errors=True)
@@ -470,7 +473,11 @@ class ImpactRegKonfAIApp:
             stack.SetDirection(direction.flatten())
             sitk.WriteImage(stack, str(work / "DVFs.mha"))
 
-            command = ["konfai-apps", "uncertainty", _app_id(preset), "-i", str(work / "DVFs.mha"), "-o", str(output)]
+            # Same workspace hand-off as _infer_preset: without it konfai-apps auto-creates one under
+            # TMPDIR and stages Uncertainties there before copying it into -o, which is the staging
+            # this option exists to place. `work` is ours and already sits wherever tmp_dir asked for.
+            command = ["konfai-apps", "uncertainty", _app_id(preset), "-i", str(work / "DVFs.mha"),
+                       "-o", str(output), "--tmp-dir", str(work)]
             if gpu:
                 command += ["--gpu", *(str(g) for g in gpu)]
             elif cpu is not None:
