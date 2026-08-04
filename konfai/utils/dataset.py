@@ -197,6 +197,18 @@ def _attribute_text(value: Any) -> str:
         return str(value).replace("\n", "")
 
 
+def _store_chunks(shape: list[int], region_shape: list[int] | None) -> tuple[int, ...] | None:
+    """Chunks a store should use, given the region shape its writer declared.
+
+    A region write that straddles a chunk becomes a read-modify-write of the whole chunk, so the
+    honest chunking is the writer's own region, clamped to the array. ``None`` when the writer
+    declared nothing: the store keeps its own default rather than a guess made here.
+    """
+    if region_shape is None or len(region_shape) != len(shape):
+        return None
+    return tuple(max(1, min(int(region), int(extent))) for region, extent in zip(region_shape, shape, strict=True))
+
+
 class Attribute(dict[str, Any]):
     """Metadata container storing repeated values with a stack-like naming scheme.
 
@@ -880,6 +892,7 @@ class Dataset:
             shape: list[int],
             dtype: np.dtype,
             attributes: Attribute,
+            region_shape: list[int] | None = None,
         ) -> DataStream | None:
             """Open ``name`` for incremental region writes; ``None`` when this backend cannot."""
             return None
@@ -1033,6 +1046,7 @@ class Dataset:
             shape: list[int],
             dtype: np.dtype,
             attributes: Attribute,
+            region_shape: list[int] | None = None,
         ) -> DataStream | None:
             if self.h5 is None:
                 return None
@@ -1416,6 +1430,7 @@ class Dataset:
             shape: list[int],
             dtype: np.dtype,
             attributes: Attribute,
+            region_shape: list[int] | None = None,
         ) -> DataStream | None:
             # Only an uncompressed local-data MetaImage is region-writable (ASCII header + flat raw
             # block); every other SimpleITK format writes the whole image in one WriteImage call.
@@ -1607,6 +1622,7 @@ class Dataset:
             shape: list[int],
             dtype: np.dtype,
             attributes: Attribute,
+            region_shape: list[int] | None = None,
         ) -> DataStream | None:
             from konfai.utils.ome_zarr import create_ome_zarr_store
 
@@ -1622,6 +1638,10 @@ class Dataset:
                 origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
                 attributes=dict(attributes),
                 displacement_field=DISPLACEMENT_FIELD_ATTRIBUTE in attributes,
+                # Chunk on what the writer says it will write. Guessing costs a read-modify-write on
+                # every region whose extent straddles a chunk -- measured 1.8x on a slab sweep, paid
+                # on every byte, and invisible because the bytes are correct either way.
+                chunks=_store_chunks(shape, region_shape),
             )
             # The pyramid cannot be created up front -- no level exists until the last region lands --
             # so the stream derives it at finalize, on the TEMPORARY store, before the rename. That
@@ -2003,19 +2023,25 @@ class Dataset:
         shape: list[int],
         dtype: np.dtype,
         attributes: Attribute | None = None,
+        region_shape: list[int] | None = None,
     ) -> DataStream | None:
         """Open one entry for incremental region writes.
 
         Returns ``None`` when the write format cannot serve region writes; the caller then assembles
         the volume and uses ``write``. The returned stream is a context manager: a clean exit
         finalizes the entry, an exception removes the partial one.
+
+        ``region_shape`` is the extent the caller will write at a time, channels included. A store
+        that chunks on it never pays a read-modify-write; a store left to guess pays one on every
+        region that straddles a chunk. Declaring it is the writer's job -- it is the only party that
+        knows its own access pattern.
         """
         if attributes is None:
             attributes = Attribute()
         file, entry = self._write_target(group, name)
         backend = file.__enter__()
         try:
-            stream = backend.open_data_stream(entry, shape, dtype, attributes)
+            stream = backend.open_data_stream(entry, shape, dtype, attributes, region_shape)
         except BaseException:
             file.__exit__(None, None, None)
             raise

@@ -115,6 +115,23 @@ STAGE_ACTIONS: dict[str, list[str]] = {
     "completed": ["summarize_session", "package_app_from_session", "leaderboard"],
 }
 
+# Which config file each launcher needs, so an action is never offered for a workflow this session has
+# not written. A session holding only a Transform.yml was told to "run train" -- an action naming a file
+# that is not there -- while the workflow it could actually run was offered by nothing.
+_LAUNCHER_CONFIG: dict[str, str] = {
+    "run_train": "Config.yml",
+    "run_prediction": "Prediction.yml",
+    "run_evaluation": "Evaluation.yml",
+    "run_transform": "Transform.yml",
+}
+
+# The dry run that must precede a launcher, where one exists. A transform writes a dataset, so its plan
+# comes first: it is what says how much, how, and whether the run would refuse before writing a byte.
+_LAUNCHER_DRY_RUN: dict[str, str] = {"run_transform": "plan_transform"}
+
+# Where offering a workflow's launcher makes sense: the stages at which a config is the thing in hand.
+_LAUNCH_STAGES = frozenset({"configuration", "action_selection"})
+
 
 @dataclass(frozen=True)
 class Diagnosis:
@@ -329,7 +346,18 @@ def stage_actions(stage: str, facts: Facts) -> list[str]:
         blocked.add("package_app_from_session")
     if not facts.metrics:
         blocked |= {"leaderboard", "compare_runs", "get_run_metrics"}
+    present = set(facts.configs)
+    if stage in _LAUNCH_STAGES:
+        # Only here does a launcher describe what the session HAS. Elsewhere it names the step that
+        # comes next -- `checkpoint_selection` offers `run_prediction` precisely because the
+        # Prediction.yml does not exist yet -- so the config a launcher needs is not a filter there.
+        blocked |= {action for action, config in _LAUNCHER_CONFIG.items() if config not in present}
     kept = [action for action in STAGE_ACTIONS.get(stage, []) if action not in blocked]
+    if stage in _LAUNCH_STAGES:
+        # Every workflow this session HAS written is a move, not just the one the stage table names.
+        for action, config in _LAUNCHER_CONFIG.items():
+            if config in present and action not in kept:
+                kept.extend([step for step in (_LAUNCHER_DRY_RUN.get(action), action) if step])
     return kept or ["summarize_session"]
 
 

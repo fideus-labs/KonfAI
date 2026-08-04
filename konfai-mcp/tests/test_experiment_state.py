@@ -63,6 +63,8 @@ def workspace(tmp_path: Path, **contents: Any) -> Path:
     root.mkdir(exist_ok=True)
     if contents.get("config"):
         (root / "Config.yml").write_text(CONFIG, encoding="utf-8")
+    if contents.get("transform_config"):
+        (root / "Transform.yml").write_text("Transformer:\n  name: T\n", encoding="utf-8")
     for name in contents.get("apps", []):
         (root / "Apps" / name).mkdir(parents=True, exist_ok=True)
     for name in contents.get("checkpoints", []):
@@ -166,6 +168,30 @@ def test_the_workspace_decides_the_stage_even_with_no_job_history(tmp_path: Path
 
 
 # --- a run's outcome ---------------------------------------------------------------------------------
+
+
+def test_a_session_is_offered_the_workflow_it_actually_wrote(tmp_path: Path) -> None:
+    """The action bar is built from these, so a workflow missing here is unreachable in Studio.
+
+    A session holding only a Transform.yml was told to "run train" — an action naming a file it does
+    not have — while the one workflow it could run was offered by nothing.
+    """
+    payload = state(workspace(tmp_path, transform_config=True))
+
+    assert "run_train" not in payload["next_actions"]
+    actions = payload["next_actions"]
+    assert actions.index("plan_transform") < actions.index("run_transform")
+
+
+def test_choosing_among_configs_does_not_hide_the_step_that_comes_next(tmp_path: Path) -> None:
+    """A launcher only describes what the session HAS while it is choosing among its configs.
+
+    At `checkpoint_selection` it names the step that follows, and `run_prediction` is offered exactly
+    because no Prediction.yml exists yet — filtering there would remove the whole point of the stage.
+    """
+    payload = state(workspace(tmp_path, config=True, checkpoints=["run_01"]), [job("done")])
+
+    assert payload["next_actions"][0] == "run_prediction"
 
 
 def test_an_open_job_is_running_and_says_what_to_wait_for(tmp_path: Path) -> None:

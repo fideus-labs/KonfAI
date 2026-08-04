@@ -35,6 +35,7 @@ from konfai_mcp import runner as mcp_runner  # noqa: E402
 from konfai_mcp.server_experiments import SessionService  # noqa: E402
 from konfai_mcp.server_jobs import JobRegistry  # noqa: E402
 from konfai_mcp.server_support import WorkspaceLayout  # noqa: E402
+from konfai_mcp.workflows import WORKFLOW_SPECS  # noqa: E402
 from mcp_test_helpers import yaml_dump  # noqa: E402
 
 
@@ -50,8 +51,42 @@ def _service(tmp_path: Path) -> SessionService:
         max_log_tail_lines=20,
         active_job_states={"queued", "running"},
         validation_levels={"instantiate", "setup"},
-        workflows={"train", "prediction", "evaluation"},
+        # The set the server builds from the workflow table, not a copy of it: a fixture that knows
+        # three workflows cannot exercise the fourth, which is how transform stayed unreachable.
+        workflows=set(WORKFLOW_SPECS),
     )
+
+
+def test_a_ready_transform_is_offered_like_every_other_workflow(tmp_path: Path) -> None:
+    """Readiness is what Studio builds its buttons from, so a workflow missing from it is unreachable.
+
+    Every other workflow gets a `run_*` in `next_actions` once its config is ready; transform got none,
+    so `run_transform` and `plan_transform` existed as tools that nothing ever proposed. The plan comes
+    first: this one writes a dataset, and the plan is what says how much and whether it would refuse.
+    """
+    service = _service(tmp_path)
+    readiness = {
+        "transform": True,
+        "configs_present": dict.fromkeys(service.ordered_workflows(), True),
+        "blocked": {w: {"missing_paths": [], "missing_models": []} for w in service.ordered_workflows()},
+    }
+
+    actions = service._next_actions_for_readiness(readiness)
+
+    assert actions.index("plan_transform") < actions.index("run_transform")
+
+
+def test_a_transform_that_is_not_ready_is_not_offered(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    readiness = {
+        "transform": False,
+        "configs_present": dict.fromkeys(service.ordered_workflows(), True),
+        "blocked": {w: {"missing_paths": [], "missing_models": []} for w in service.ordered_workflows()},
+    }
+
+    actions = service._next_actions_for_readiness(readiness)
+
+    assert "run_transform" not in actions and "plan_transform" not in actions
 
 
 def test_default_prediction_checkpoint_is_scoped_to_the_run(tmp_path: Path) -> None:

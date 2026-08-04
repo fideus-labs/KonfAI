@@ -1085,7 +1085,8 @@ def design_config_strategy(
     workflows: Annotated[
         str | list[str] | None,
         Field(
-            description="Workflow name(s) to plan for: train/prediction/evaluation (string or list; default: all three)."
+            description="Workflow name(s) to plan for: train/prediction/evaluation/transform"
+            " (string or list; default: every workflow that has a config file)."
         ),
     ] = None,
     modeling_intent: Annotated[
@@ -2366,7 +2367,8 @@ def validate_config_semantics(
     workflow: Annotated[
         str,
         Field(
-            description="'train', 'prediction', 'evaluation', or 'all' to validate every present config (case-insensitive; default 'train')."
+            description="'train', 'prediction', 'evaluation', 'transform', or 'all' to validate every"
+            " present config (case-insensitive; default 'train')."
         ),
     ] = "train",
     level: Annotated[
