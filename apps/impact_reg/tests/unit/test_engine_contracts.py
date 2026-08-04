@@ -87,6 +87,16 @@ def test_fireants_linear_method_reaches_the_engine() -> None:
         assert net["Registration"]._engine._linear_method == method
 
 
+def test_fireants_refuses_an_unknown_linear_method() -> None:
+    # Every unrecognised value would otherwise fall through to the rigid-then-affine branch, so a
+    # typo registers with a stage the caller did not ask for and returns a plausible result. The
+    # Literal annotation only guards a config-driven call; a direct Python one reaches the engine.
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    with pytest.raises(ValueError, match="Unknown linear_method 'affine'"):
+        RegistrationNet(linear_method="affine")
+
+
 def test_fireants_refuses_a_registration_with_no_stage_at_all() -> None:
     # linear_method='none' and deformable_method='none' together optimise nothing. Left to run it
     # would return the identity: a Moved equal to the moving image and a zero field, which no
