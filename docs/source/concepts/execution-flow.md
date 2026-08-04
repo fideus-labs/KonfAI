@@ -1,16 +1,19 @@
 # Execution flow
 
-This page walks through what happens when you launch the three KonfAI
-workflows — `TRAIN`, `PREDICTION`, and `EVALUATION` — from config parsing to
-the files each one writes. Read it to know where a run's outputs land and how
-the distributed runtime wraps every command.
+This page walks through what happens when you launch the four KonfAI
+workflows — `TRAIN`, `PREDICTION`, `EVALUATION`, and `TRANSFORM` — from config
+parsing to the files each one writes. Read it to know where a run's outputs land
+and how the distributed runtime wraps every command.
 
-**All three workflows write into a single workspace keyed by `train_name` —
+**The model workflows write into a single workspace keyed by `train_name` —
 `Checkpoints/<train_name>/`, `Predictions/<train_name>/`,
 `Evaluations/<train_name>/` — so the `train_name` in each config file must name
-the run you intend to touch.**
+the run you intend to touch. `TRANSFORM` is the exception: it is keyed by `name`,
+and only its log, its plan and a copy of its config land in the workspace
+(`Transforms/<name>/`) — the data goes wherever each `Write:` stage says, which
+that run directory records in `outputs.json`.**
 
-KonfAI ships three low-level workflows and one higher-level app layer.
+KonfAI ships four low-level workflows and one higher-level app layer.
 
 ## Low-level workflows
 
@@ -19,6 +22,7 @@ The `konfai` CLI dispatches to three public functions:
 - `konfai.trainer.train`
 - `konfai.predictor.predict`
 - `konfai.evaluator.evaluate`
+- `konfai.transformer.transform`
 
 Each wrapper prepares a small execution context, then instantiates the
 corresponding configured object:
@@ -26,6 +30,7 @@ corresponding configured object:
 - `Trainer`
 - `Predictor`
 - `Evaluator`
+- `Transformer`
 
 The key environment variables are documented in
 {doc}`../reference/environment`.
@@ -77,6 +82,26 @@ Outputs are written to:
 - `Evaluations/<train_name>/Metric_TRAIN.json`
 - optionally `Evaluations/<train_name>/Metric_VALIDATION.json`
 
+## What happens during a transform
+
+`TRANSFORM` runs no model:
+
+1. parses `Transform.yml` into a `Transformer`, refusing any key its grammar
+   does not know
+2. binds every chain and runs the parse-time refusals — a chain not ending in
+   `Write`, two chains writing the same target, a `Write` inside a source
+3. computes and prints the per-case plan — `STREAM`, `WHOLE-VOLUME`, `REDUCE`,
+   `SKIP` or `REFUSED` — probing each destination with a real region-write open
+4. refuses **before writing a byte** when an entry's working set exceeds the
+   per-rank `memory_budget`
+5. shards the cases across ranks and materializes each chain's `Write` stages,
+   skipping any case whose output already exists unless `-y`
+
+Outputs are written to:
+
+- wherever each `Write: {dataset: ...}` points
+- `Transforms/<name>/plan.txt`, `outputs.json`, the copied config, and the logs
+
 ## Programmatic vs CLI entrypoints
 
 The same workflows can also be built programmatically through:
@@ -84,9 +109,12 @@ The same workflows can also be built programmatically through:
 - `build_train(...)`
 - `build_predict(...)`
 - `build_evaluate(...)`
+- `build_transform(transform_file=..., transforms_dir=...)`
 
 This is useful when you want to validate a config before launching the full
-runtime.
+runtime. `konfai.transformer.plan_transform(...)` goes one step further: it
+builds the workflow, computes the plan, prints it, and returns the
+`TransformPlan` without transforming anything — the `--plan` flag's entrypoint.
 
 ## Distributed execution
 
@@ -116,3 +144,4 @@ See {doc}`../usage/apps`.
 - {doc}`../config_guide/training` — every `Config.yml` key the training workflow reads.
 - {doc}`../config_guide/prediction` — configuring checkpoints, patch inference, and `outputs_dataset`.
 - {doc}`../config_guide/evaluation` — turning predictions and ground truth into metric JSON.
+- {doc}`../config_guide/transform` — the model-less workflow: chains, `Write`, and the plan.

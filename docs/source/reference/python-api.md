@@ -8,8 +8,8 @@ with the same behaviour as the CLI.
 ```{note}
 This is the `konfai_apps` package API (install it separately — see
 {doc}`../getting-started/installation`). The low-level workflow functions
-`konfai.trainer.train` / `konfai.predictor.predict` / `konfai.evaluator.evaluate`
-are documented under {doc}`api/workflows`; here we cover the app layer on top.
+`konfai.trainer.train` / `konfai.predictor.predict` / `konfai.evaluator.evaluate` /
+`konfai.transformer.transform` are documented under {doc}`api/workflows`; here we cover the app layer on top.
 ```
 
 ## Public exports
@@ -125,4 +125,4 @@ side, the `--apps` allowlist is the trust boundary; keep it tightly scoped.
 - {doc}`cli` — the `konfai-apps` / `konfai-apps-server` command line
 - {doc}`app-server-api` — the HTTP endpoints these clients call
 - {doc}`../ecosystem/index` — where the app bundles live
-- {doc}`api/workflows` — the low-level `train`/`predict`/`evaluate` functions
+- {doc}`api/workflows` — the low-level `train`/`predict`/`evaluate`/`transform` functions

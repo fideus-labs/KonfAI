@@ -36,7 +36,8 @@ per augmented copy, not once per dataset, so a chain that streams for one
 augmentation draw may load the volume for the next.
 
 The regime is not a config key. Training defaults to the cache (epochs re-read
-every case); prediction and evaluation default to streaming (one pass). A
+every case); prediction, evaluation and transform default to streaming (one
+pass). A
 `memory_budget` replaces the default with a measured decision — see below.
 
 ## What you control
@@ -45,7 +46,7 @@ Two keys under `Dataset:`:
 
 | Key | Default | Where | Effect |
 | --- | --- | --- | --- |
-| `memory_budget` | `null` = `auto` | all three workflows | Derives the regime from the dataset's size; an absent key means `auto`. |
+| `memory_budget` | `null` = `auto` | all four workflows | Derives the regime from the dataset's size; an absent key means `auto`. Under `Transformer:` it is a per-rank ceiling that can **refuse** the run when a whole-volume case or a reduction exceeds it. |
 | `shuffle_window` | `null` | `Trainer:` | Bounds how many cases stay resident on the buffer path. |
 
 Both are listed in {doc}`../config_guide/training`.

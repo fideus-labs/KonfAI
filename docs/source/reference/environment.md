@@ -52,13 +52,14 @@ be managed manually in day-to-day usage.**
 
 | Variable | Set by | Purpose |
 | --- | --- | --- |
-| `KONFAI_config_file` | train/predict/evaluate wrappers | Active YAML file path. |
-| `KONFAI_ROOT` | train/predict/evaluate wrappers | Root config object: `Trainer`, `Predictor`, or `Evaluator`. |
-| `KONFAI_STATE` | train/predict/evaluate wrappers | Active workflow state. |
+| `KONFAI_config_file` | workflow wrappers | Active YAML file path. |
+| `KONFAI_ROOT` | workflow wrappers | Root config object: `Trainer`, `Predictor`, `Evaluator`, or `Transformer`. |
+| `KONFAI_STATE` | workflow wrappers | Active workflow state: `TRAIN`, `RESUME`, `PREDICTION`, `EVALUATION`, or `TRANSFORM`. |
 | `KONFAI_CHECKPOINTS_DIRECTORY` | training wrapper | Checkpoint output directory. |
 | `KONFAI_STATISTICS_DIRECTORY` | training wrapper | Statistics output directory. |
 | `KONFAI_PREDICTIONS_DIRECTORY` | prediction wrapper | Prediction output directory. |
 | `KONFAI_EVALUATIONS_DIRECTORY` | evaluation wrapper | Evaluation output directory. |
+| `KONFAI_TRANSFORMS_DIRECTORY` | transform wrapper | Transform run logs and plan directory. |
 | `KONFAI_OVERWRITE` | distributed wrapper | Mirrors the `--overwrite` flag. |
 | `KONFAI_TENSORBOARD_PORT` | distributed wrapper | Selected TensorBoard port. |
 | `KONFAI_VERBOSE` | distributed wrapper | Mirrors the inverse of `--quiet`. |

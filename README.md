@@ -65,7 +65,7 @@ registration, and synthesis:
 
 > 🤖 **Agent-operable.** KonfAI ships an **[MCP server](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
 > so an LLM agent can drive the *entire* experiment loop — inspect a dataset, author & validate YAML,
-> launch train / predict / evaluate, monitor jobs, and compare runs — always grounded in the same
+> launch train / predict / evaluate / transform, monitor jobs, and compare runs — always grounded in the same
 > reproducible configs a human would run. → **[Agents & MCP](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
 
 ---
@@ -159,7 +159,7 @@ pip install konfai                # core only (bring your own data reader)
 
 ---
 
-## Three workflows, three configs
+## Four workflows, four configs
 
 KonfAI is command-driven; each CLI state maps to one YAML file:
 
@@ -168,6 +168,7 @@ KonfAI is command-driven; each CLI state maps to one YAML file:
 | `konfai TRAIN` / `RESUME` | `Config.yml` (`Trainer:`) | fit a model |
 | `konfai PREDICTION` | `Prediction.yml` (`Predictor:`) | patch/TTA/ensemble inference → datasets |
 | `konfai EVALUATION` | `Evaluation.yml` (`Evaluator:`) | metrics on saved predictions |
+| `konfai TRANSFORM` | `Transform.yml` (`Transformer:`) | no model: a transform chain → datasets (1→1, N→1, 1→N) |
 
 Full CLI reference (flags, `konfai-cluster`, `konfai-apps`):
 [docs/reference/cli](https://konfai.readthedocs.io/en/latest/reference/cli.html).
@@ -206,22 +207,28 @@ notebook entry points) lives in the
 ## 🩻 How volumes are read
 
 Volumes are read as patches. Whether the volume is *also* held in RAM depends on
-the workflow's loading regime (training caches, prediction and evaluation
-stream; `memory_budget` makes it adaptive) and on whether your preprocessing
-chain can be streamed — KonfAI derives streamability from the transforms you
-declared:
+the workflow's loading regime (training caches, and `memory_budget` makes that
+adaptive; prediction, evaluation and transform read each case once and never
+cache) and on whether your preprocessing chain can be streamed — KonfAI derives
+streamability from the transforms you declared:
 
 | Regime | When | Memory held |
 | --- | --- | --- |
 | **Cache** | training default | every case, resident for the whole run |
-| **Stream** | predict/eval default or budget exceeded; chain streamable | one patch |
-| **Buffer** | same triggers; chain not streamable | a FIFO of `max(batch_size + 1, shuffle_window)` cases |
+| **Stream** | predict/eval default or budget exceeded; transform default; chain streamable | one patch, or a budget-sized slab under `TRANSFORM` |
+| **Buffer** | predict/eval, chain not streamable | a FIFO of `max(batch_size + 1, shuffle_window)` cases |
+| **Whole-volume** | transform, chain not streamable | one case plus one in-flight copy |
 
 A chain streams when every step declares the region it needs: the exact patch
 (`OneHot`), a halo (`Dilate`), a remap (`Flip`), a resample (`ResampleToShape`),
 or a whole-volume statistic read once from disk (`Normalize`). On the stream
 path, a 16 GiB uncompressed `.mha` trains at patch 64³ under an 8 GiB memory cap
 with a peak resident set of 0.46 GiB.
+
+`konfai TRANSFORM` prints that decision per case *before* it writes a byte —
+STREAM, WHOLE-VOLUME, REDUCE or SKIP, naming the stage that refused to stream —
+and keeps the report at `./Transforms/<name>/plan.txt`. `--plan` prints the same
+report and stops without transforming.
 
 → [**Patch streaming**](https://konfai.readthedocs.io/en/latest/concepts/streaming.html) — what streams, what does not, and why.
 
@@ -254,7 +261,7 @@ experimentation**. Through the **KonfAI-MCP server**, an agent can:
 
 - 🔎 inspect datasets and infer their structure
 - 📝 generate and validate YAML configurations
-- 🚀 launch training / prediction / evaluation runs
+- 🚀 launch training / prediction / evaluation / transform runs
 - 📈 read live metrics, compare runs, and iterate
 
 Every execution stays **reproducible, structured, and grounded in the same YAML

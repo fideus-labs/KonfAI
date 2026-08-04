@@ -6,7 +6,7 @@ the actual transform implementations.
 ```
 
 Transforms are **deterministic** pre/post-processing steps in
-`konfai/data/transform.py`. They run every time (train / predict / evaluate),
+`konfai/data/transform.py`. They run every time (train / predict / evaluate / transform),
 either whole-image at load time (`transforms:`) or per extracted patch
 (`patch_transforms:`), under a dataset group:
 
@@ -41,8 +41,9 @@ resident. The **Stream** column below is that answer, per transform.
 
 Streaming happens where the cache is off. A cached case is already in memory, so
 its patches are cut from memory whatever the column says. Training caches by
-default (epochs re-read every case); PREDICTION and EVALUATION stream. A
-`memory_budget` under `Dataset:` overrides all three with a size estimate.
+default (epochs re-read every case); PREDICTION, EVALUATION and TRANSFORM
+stream. A `memory_budget` under `Dataset:` overrides all four with a size
+estimate.
 
 Three things govern the chain rather than any single transform:
 
@@ -140,6 +141,9 @@ Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 | --- | --- | --- |
 | `Statistics` | Records ImageMin/Max/Mean/Std to the attribute cache and returns the tensor unchanged (feeds the perceptual criteria `SAM_Perceptual`, `IMPACTSynth`, `IMPACTReg`). Order in the transform list matters. | no‡ |
 | `Save` | Writes the preprocessed volume to a cache dataset and passes the tensor through. Once that cache exists it is read instead, and the transforms before it are skipped. A group written this way is also readable, within the same run, by anything that names it (`Mask: {path: <group>}`), including when the write comes from a loader worker — every backend. On `h5` the reader and the writer share one store, which HDF5 does not define for concurrent access without SWMR: the entry is seen, but a read racing a write can raise. One file per case (`mha`/`nii`/…) has no such window. | no — it needs the whole volume to write |
+| `Write` | A `Save` that is a **deliverable**: same boundary semantics, but `dataset` has no default, so a bare `Write:` fails at config time instead of writing into the source tree. The TRANSFORM workflow plans, resumes and reports on `Write` stages and requires every chain to end with one; a `Save` between them is an opportunistic milestone. Args: `dataset` (required), `group=None`, `scale_factors=None`, `downsample_method=None`. | region-writes where the backend allows (uncompressed `mha` / `h5` / `omezarr`) |
+| `Reduce` | Folds every case of a group into one volume at fixed voxel — the stage that makes a chain N-to-1. `operator` is a classpath resolved against `konfai.data.reduction` (`Mean`, `Median`, `Concat`, or your own `Reduction`); `output` is required. `grid` is `strict` / `shape_only` / `reference:<case>`. Args: `operator="Median", output="", grid="strict", grid_tolerance=1e-6, provenance=True`. **TRANSFORM only** — applied to one case it raises. | driven by the reduction engine, one region at a time |
+| `Expand` | Turns one case into `nb` copies at a declared point of the chain — `Reduce`'s mirror (1-to-N). Stages before it run once per case, stages after it once per copy, and the draws after it are ordinary stages. `pattern` is a `str.format` template and **both** `{name}` and `{a}` are required. Args: `nb=2, pattern="{name}_{a:02d}", seed=None`. **TRANSFORM only** — applied to one case it raises. | per copy, sharing one read pass when every per-copy stage is pointwise |
 | `KonfAIInference` | Run a nested KonfAI app inference in a spawned subprocess. Needs `konfai-apps` and `num_workers: 0`; defaults to a specific HF repo. | no‡ |
 
 `†` changes the **channel** dimension, not spatial — no `transform_shape`

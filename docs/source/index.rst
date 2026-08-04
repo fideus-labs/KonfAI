@@ -71,8 +71,8 @@ KonfAI
      <section class="kf-block" id="mental-model">
        <div class="kf-sechead">
          <p class="kf-eyebrow">The 20-second mental model</p>
-         <h2 style="border:0; padding:0;">One config, built once, run three ways.</h2>
-         <p>Three YAML files, one root key each, three commands. Each command reads <em>its</em> file,
+         <h2 style="border:0; padding:0;">One config, built once, run four ways.</h2>
+         <p>Four YAML files, one root key each, four commands. Each command reads <em>its</em> file,
             builds the object graph by reflection, and writes its outputs. That's the whole mapping
             to remember:</p>
        </div>
@@ -106,11 +106,19 @@ KonfAI
            <span class="kf-larrow">&rarr;</span>
            <div class="kf-lout"><b>Evaluations/</b>&lt;train_name&gt;/Metric_TRAIN.json</div>
          </div>
+         <div class="kf-lrow">
+           <div class="kf-lfile"><span class="fname">Transform.yml</span><span class="rootkey">Transformer:</span></div>
+           <span class="kf-larrow">&rarr;</span>
+           <span class="kf-lcmd"><span class="p">$</span> konfai TRANSFORM</span>
+           <span class="kf-larrow">&rarr;</span>
+           <div class="kf-lout">wherever each <b>Write:</b> says &middot; <b>Transforms/</b>&lt;name&gt;/plan.txt</div>
+         </div>
          <div class="kf-lfoot">
            <span>Same engine underneath: reflection reads the root key and builds
-                 <code>Model &middot; Dataset &middot; Losses &middot; Optimizer</code>.</span>
-           <span>Every output folder is keyed by <code>train_name</code> &mdash; keep it consistent
-                 across the three files.</span>
+                 <code>Model &middot; Dataset &middot; Losses &middot; Optimizer</code> &mdash;
+                 <code>Transformer:</code> builds a <code>Dataset</code> and nothing else.</span>
+           <span>Every output folder is keyed by <code>train_name</code> (<code>name</code> under
+                 <code>Transformer:</code>) &mdash; keep it consistent across the files.</span>
          </div>
        </div>
 
