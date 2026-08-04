@@ -114,6 +114,8 @@ class PatchLocality:
     tuple broadcasts to every axis. ``stat_keys`` are the ``Attribute`` keys a ``GLOBAL_STAT``
     transform reads before running (a subset of ``Min``/``Max``/``Mean``/``Std``). ``stat_channels``
     restricts the statistic to those channels (``Normalize.channels``).
+
+    ``reason`` is how a ``WHOLE_VOLUME`` declaration explains itself.
     """
 
     kind: LocalityKind
@@ -124,6 +126,12 @@ class PatchLocality:
     # that maps no value (TensorCast to a float dtype) may declare True so a later GLOBAL_STAT can
     # still seed from the stored volume.
     preserves_statistics: bool | None = None
+    #: Why this stage needs the whole volume, in the words the plan prints. A stage that is
+    #: INHERENTLY whole-volume (it changes the tensor's rank) leaves this None and the planner says
+    #: so generically. A stage that is whole-volume only because something was left undeclared owes
+    #: the reader that sentence: "it needs the whole volume" reads as a property of the transform
+    #: when it is in fact a property of the configuration, and the reader then has nothing to change.
+    reason: str | None = None
 
     @property
     def statistics_preserving(self) -> bool:
@@ -1505,8 +1513,8 @@ class Warp(Transform):
     dark rim around the moved anatomy and nothing else.
 
     ``max_displacement`` is in the same world units as ``Spacing`` (micrometres for these stores).
-    Left at zero, or with no ``Spacing`` on the case, the stage declares ``WHOLE_VOLUME`` and the
-    dispatcher hands it the volume -- correct, and as expensive as it sounds.
+    Left at zero, or with no ``Spacing`` on the case, the stage declares ``WHOLE_VOLUME`` and says
+    which of the two is missing -- correct, and as expensive as it sounds.
     """
 
     def __init__(
@@ -1542,8 +1550,26 @@ class Warp(Transform):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         spacing = self._spacing(cache_attribute)
-        if self.max_displacement <= 0.0 or spacing is None:
-            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        # Both fallbacks say what is missing. A Warp that silently costs the whole volume is the
+        # expensive failure of this stage: the result is right, so nothing looks wrong -- only the
+        # peak memory, which is the one thing the reader was trying to control by streaming.
+        if self.max_displacement <= 0.0:
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason=(
+                    "no 'max_displacement' is declared, so how far this warp reaches into its source"
+                    " is unknown and the region it must read is unbounded. Declare it in the case's"
+                    " world units (e.g. max_displacement: 250.0) to stream with a halo"
+                ),
+            )
+        if spacing is None:
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason=(
+                    "the case carries no 'Spacing', so a 'max_displacement' in world units cannot be"
+                    " turned into a halo in voxels"
+                ),
+            )
         halo = tuple(int(np.ceil(self.max_displacement / extent)) if extent > 0 else 0 for extent in spacing)
         return PatchLocality(LocalityKind.HALO, halo=halo)
 

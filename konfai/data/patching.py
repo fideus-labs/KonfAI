@@ -1520,8 +1520,15 @@ class DatasetManager:
             label = f"stage {stage_index} '{type(stage).__name__}'"
             if loc.kind in (LocalityKind.WHOLE_VOLUME, LocalityKind.SLAB):
                 # SLAB is a write-side contract: its side effect needs the slab's place in the
-                # OUTPUT, which a patch read has no notion of.
-                return False, (), evolved, f"{label} declares {loc.kind.name}: it needs the whole volume."
+                # OUTPUT, which a patch read has no notion of. A stage that is whole-volume only
+                # because something was left undeclared says so itself (PatchLocality.reason), so
+                # the reader is told what to change instead of what happened.
+                return (
+                    False,
+                    (),
+                    evolved,
+                    f"{label} declares {loc.kind.name}: {loc.reason or 'it needs the whole volume'}.",
+                )
             if loc.kind is LocalityKind.GLOBAL_STAT:
                 # The seed is the STORED volume's statistic, which is this transform's input only when
                 # every earlier stage preserves it; otherwise ([Clip(-200, 400), Standardize()]) every

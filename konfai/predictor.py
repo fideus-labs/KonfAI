@@ -56,6 +56,11 @@ from konfai.data.patching import (
     _ScalePull,
     blend_overlap,
 )
+
+# Re-exported: the operators moved to konfai.data.reduction, where the transform workflow can
+# reach them without importing the predictor. Existing configs name them by the classpath
+# `konfai.predictor.Median`, so the names must stay resolvable here.
+from konfai.data.reduction import Concat, Mean, Median, Reduction
 from konfai.data.transform import (
     LocalityKind,
     PatchLocality,
@@ -82,73 +87,6 @@ from konfai.utils.runtime import (
 )
 from konfai.utils.utils import concretize_patch_size, env_flag, get_module, size_free_axes, split_path_spec
 from konfai.utils.vram import next_patch_candidate, usable_vram
-
-
-class Reduction(ABC):
-    """Aggregate a list of predictions (one per model in an ensemble, or per TTA augmentation) into one.
-
-    A ``Reduction`` is a KonfAI extension point: subclass it and reference it by classpath in the
-    ``OutputDataset`` config. ``__call__`` receives the stacked predictions and returns the aggregate.
-    """
-
-    #: Streamed-write contract. ``True`` declares this reduction a **pure per-voxel** operation over the
-    #: model/TTA (stack) axis — every output voxel depends only on the SAME voxel of each input, never on
-    #: a spatial neighbour. The streamed-write gate reads this flag to decide whether the finalize chain
-    #: may run slab by slab.
-    #:
-    #: Rules for a custom reduction:
-    #: - **Default False.** Leave it False unless you are sure: an unknown reduction then takes the
-    #:   whole-volume path, costing the streaming optimisation but never correctness.
-    #: - **Set True only if voxel-local.** Reducing/stacking along the stack axis (dim 0) or the channel
-    #:   axis (dim 1) is fine — those are orthogonal to the spatial slab axis. Anything that reads across
-    #:   spatial positions (a spatial blur, a resample, a global-argmax over Z) must stay False.
-    #: - **A wrong True corrupts the streamed output** (each slab would be reduced with only its own data);
-    #:   the gate trusts this flag and checks nothing else.
-    voxel_local: bool = False
-
-    @abstractmethod
-    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
-        raise NotImplementedError()
-
-
-class Mean(Reduction):
-    """Average ensemble or augmentation predictions element-wise."""
-
-    voxel_local = True
-
-    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
-        # A single element (no TTA / a lone model) is its own mean; skip the float32 clone + accumulate,
-        # which for a whole-volume multi-class output is a large no-op allocation (fp16->fp32 round-trips
-        # to the same values). Returns the same values as the general path.
-        if len(tensors) == 1:
-            return tensors[0]
-        acc = tensors[0].float().clone()
-        for t in tensors[1:]:
-            acc.add_(t.float())
-        acc.div_(len(tensors))
-        return acc.to(dtype=tensors[0].dtype)
-
-
-class Median(Reduction):
-    """Compute the element-wise median across prediction tensors."""
-
-    voxel_local = True
-
-    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
-        # A single element is its own median; skip the float32 stack (a large no-op for whole volumes).
-        if len(tensors) == 1:
-            return tensors[0]
-        return torch.median(torch.stack(tensors, dim=0).float(), dim=0).values.to(tensors[0].dtype)
-
-
-class Concat(Reduction):
-    """Concatenate prediction tensors along the channel dimension."""
-
-    # Cats along the channel axis, orthogonal to the spatial slab axis -- per-voxel, so slab-local.
-    voxel_local = True
-
-    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
-        return torch.cat(tensors, dim=1)
 
 
 class _AsyncWriter:
