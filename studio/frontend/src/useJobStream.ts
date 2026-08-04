@@ -46,6 +46,7 @@ export type RunFeed = {
   run: string; // display name (train_name)
   kind: string;
   base: string; // run dir relative to the session root — "Statistics/<run>" or "<app_output>-<hash>/…/<run>"
+  data: string; // where the run's DATA is, when that is not its run dir (a transform writes elsewhere); "" otherwise
   status: string;
   startedAt: number;
   series: Record<string, Series>; // keyed `${label}/${metric}`
@@ -127,7 +128,17 @@ export function useJobStream(session: string, runNonce: number): JobStream {
         const next = prev.slice();
         let i = next.findIndex((feed) => feed.key === key);
         if (i < 0) {
-          next.push({ key, run: r, kind: k, base: "", status: "running", startedAt: Date.now(), series: {}, live: null });
+          next.push({
+            key,
+            run: r,
+            kind: k,
+            base: "",
+            data: "",
+            status: "running",
+            startedAt: Date.now(),
+            series: {},
+            live: null,
+          });
           if (next.length > RUN_CAP) next.shift();
           i = next.findIndex((feed) => feed.key === key);
         }
@@ -184,7 +195,12 @@ export function useJobStream(session: string, runNonce: number): JobStream {
         } else if (ev.type === "run") {
           // A run of the experiment was announced or discovered — make sure its tab exists, even before
           // it has produced a single metric.
-          withRun(ev.run, ev.kind || "", (r) => ({ ...r, status: ev.status || r.status, base: ev.base || r.base }));
+          withRun(ev.run, ev.kind || "", (r) => ({
+            ...r,
+            status: ev.status || r.status,
+            base: ev.base || r.base,
+            data: ev.data || r.data,
+          }));
         } else if (ev.type === "idle") {
           setStatus("");
         } else if (ev.type === "log") {

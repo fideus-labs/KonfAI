@@ -90,6 +90,38 @@ def test_a_workflow_job_gets_its_tab_before_it_writes_anything(tmp_path: Path, m
     assert [(run["run"], run["kind"]) for run in runs] == [("MR2CT", "train")]
 
 
+def test_a_transform_run_carries_where_its_data_went(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transform's run directory holds a log, a plan and a config copy — never the volumes.
+
+    They land wherever each `Write:` pointed, which the run records in `outputs.json`. Without the
+    `data` field the panel would answer "what did it produce" by opening a YAML file, so the field
+    has to reach the client, not merely exist on the server.
+    """
+    session = tmp_path / "sessions" / "exp"
+    run = session / "Transforms" / "CT_PREP"
+    run.mkdir(parents=True)
+    (run / "log_0.txt").write_text("log\n", encoding="utf-8")
+    (run / "outputs.json").write_text(
+        json.dumps([{"group_dest": "CT_prep", "dataset": str(session / "Prepared"), "format": "omezarr"}]),
+        encoding="utf-8",
+    )
+
+    runs = announced_runs(session, monkeypatch, tmp_path)
+
+    assert [(run["run"], run["kind"], run["data"]) for run in runs] == [("CT_PREP", "transform", "Prepared")]
+
+
+def test_a_run_whose_data_is_its_own_directory_carries_no_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every other kind writes under its run directory, and the client keeps its usual path."""
+    session = tmp_path / "sessions" / "exp"
+    session.mkdir(parents=True)
+    job_record(session, kind="train", run_name="MR2CT", runtime_log_path=str(session / "Statistics/MR2CT/log_0.txt"))
+
+    assert all(run["data"] == "" for run in announced_runs(session, monkeypatch, tmp_path))
+
+
 def test_an_app_job_is_not_announced_under_a_name_it_will_not_keep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

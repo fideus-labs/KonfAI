@@ -1124,11 +1124,34 @@ class Data(ABC):
             return self._prepared_validation_mapping
         return [entry for entry in self._prepared_validation_mapping if entry[1] == 0]
 
+    def _check_destination_groups_are_unique(self) -> None:
+        """A destination group names ONE chain, whatever source group it reads.
+
+        It is the key everything downstream indexes by: the prepared managers, the sample handed to
+        a model, the plan's lines. Two source groups declaring the same destination name silently
+        kept only the last one -- the first chain was built, then dropped, and nothing anywhere
+        looked wrong. Naming the chain is free: what a chain WRITES is the ``Write``'s own ``group``,
+        which is a separate word for a separate thing.
+        """
+        owner: dict[str, str] = {}
+        for group_src in self.groups_src:
+            for group_dest in self.groups_src[group_src]:
+                if group_dest in owner:
+                    raise DatasetManagerError(
+                        f"'groups_src.{owner[group_dest]}' and 'groups_src.{group_src}' both declare"
+                        f" a destination group named '{group_dest}'.",
+                        "A destination group names one chain. Give them distinct names; to store"
+                        " both under the same group name, say so on each Write:"
+                        " Write: {dataset: ./Out:omezarr, group: " + group_dest + "}.",
+                    )
+                owner[group_dest] = group_src
+
     def prepare(self) -> None:
         """Instantiate config-driven transforms and augmentations before runtime."""
         if self._prepared_data is not None and self._prepared_validation_data is not None:
             return
 
+        self._check_destination_groups_are_unique()
         model_have_input = False
         last_group_src: str | None = None
         for group_src in self.groups_src:

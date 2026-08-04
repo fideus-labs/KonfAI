@@ -358,7 +358,20 @@ async def live(session: str = Query("default")) -> StreamingResponse:
             if announced.get(key) == status:
                 return []
             announced[key] = status
-            out = [_sse({"type": "run", "run": run, "kind": kind, "status": status, "base": base})]
+            out = [
+                _sse(
+                    {
+                        "type": "run",
+                        "run": run,
+                        "kind": kind,
+                        "status": status,
+                        "base": base,
+                        # Empty unless the run's data lives outside its run directory; the client then
+                        # browses the run directory as it does for every other kind.
+                        "data": _run_data_dir(name, base) if base else "",
+                    }
+                )
+            ]
             if status in _TERMINAL_STATUS:
                 out.append(_sse({"type": "status", "run": run, "kind": kind, "status": status}))
             return out

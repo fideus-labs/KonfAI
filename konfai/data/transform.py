@@ -1833,6 +1833,49 @@ class Reduce(Transform):
         )
 
 
+class ShapeUpdate(Transform):
+    """Pull a template toward the mean SHAPE a displacement field carries, leaving its pose alone.
+
+    ``output = -step * (field - t)``, where ``t`` is the field's per-component spatial mean in world
+    units. Resampling a template through the result moves it along the cohort's shape residual at
+    ANTs' gradient step — the shape update of an atlas build.
+
+    WHY ``t`` IS STRIPPED RATHER THAN APPLIED. A total field maps template coordinates into each
+    specimen's OWN world frame, so its spatial mean is dominated by the frame-to-frame offset, not by
+    any pose error of the template. Applying it translates the template out of its own grid and clips
+    the anatomy; stripping it is what keeps the template anchored.
+
+    Per-component on purpose: a translation has as many parts as the field has components, and the
+    pooled mean of all of them describes nothing. That is why this declares ``MeanPerChannel`` — the
+    statistic is read once from the stored volume, and the stage is then a value map, so a field of
+    any size runs region by region.
+    """
+
+    def __init__(self, step: float = 0.25) -> None:
+        super().__init__()
+        self.step = float(step)
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"MeanPerChannel"}))
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "MeanPerChannel" not in cache_attribute:
+            # Whole volume in hand: the statistic IS this tensor's, so take it rather than demand a
+            # seed. Recorded on the case, as the streamed path records its own, so both leave the
+            # same state behind and an inverse finds it where it expects.
+            cache_attribute["MeanPerChannel"] = tensor.reshape(int(tensor.shape[0]), -1).to(torch.float32).mean(dim=1)
+        mean = torch.as_tensor(cache_attribute.get_np_array("MeanPerChannel"), dtype=torch.float32)
+        if mean.numel() != tensor.shape[0]:
+            raise TransformError(
+                f"'ShapeUpdate' was handed {mean.numel()} component mean(s) for a"
+                f" {tensor.shape[0]}-component field on '{name}'.",
+                "The statistic is read per channel from the stored entry: check that the entry is the"
+                " displacement field itself and not a derived volume.",
+            )
+        centred = tensor.to(torch.float32) - mean.reshape(-1, *([1] * (tensor.dim() - 1)))
+        return -self.step * centred
+
+
 class Expand(Transform):
     """Turn one case into ``nb`` copies, at a declared point of the chain — ``Reduce``'s mirror.
 

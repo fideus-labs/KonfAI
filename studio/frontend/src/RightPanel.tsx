@@ -1367,8 +1367,12 @@ export default function RightPanel({
             : r.kind === "transform"
               ? `Transforms/${r.run}`
               : `Statistics/${r.run}`);
-    const [dir, open] =
-      r.kind === "prediction"
+    // A transform's run dir holds a log, a plan and a config copy; its volumes land wherever each
+    // Write: pointed, which the run records in outputs.json and the feed carries as `data`. Opening
+    // the run dir would answer "what did it produce" with a YAML file.
+    const [dir, open] = r.data
+      ? [r.data, "volume"]
+      : r.kind === "prediction"
         ? [`${root}/Dataset`, "volume"]
         : r.kind === "evaluation"
           ? [root, "metric"]
