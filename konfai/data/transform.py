@@ -91,6 +91,22 @@ class LocalityKind(Enum):
 
 
 @dataclass(frozen=True)
+class RegionContext:
+    """Where a streamed region sits, for a stage that needs to know.
+
+    ``source`` is the part of the stage's INPUT the tensor covers, ``target`` the part of its OUTPUT
+    it must produce; they differ whenever the stage moves or resizes data (a halo read, a resample,
+    a warp onto another grid). ``source_shape`` and ``target_shape`` are the two whole extents those
+    regions are cut from -- a region alone cannot say how far it is from an edge.
+    """
+
+    source: tuple[slice, ...]
+    target: tuple[slice, ...]
+    source_shape: tuple[int, ...]
+    target_shape: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class PatchLocality:
     """A transform's declared patch-locality contract (see :class:`LocalityKind`).
 
@@ -215,6 +231,29 @@ class Transform(NeedDevice, ABC):
         patch-local one it wrote on the way is dropped rather than persisted. The base is a no-op --
         a transform that leaves geometry alone has nothing to record.
         """
+
+    def stream_region(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        context: RegionContext,
+        cache_attribute: Attribute,
+    ) -> torch.Tensor:
+        """Apply this stage to a region, told WHERE that region sits in the volume.
+
+        The dispatcher already computes this position -- it has to, to know what to read -- and by
+        default throws it away, because almost nothing needs it: a value map gives the same answer
+        wherever its input came from. Override this when the answer does depend on the place, which
+        in practice means a stage reading a SECOND volume aligned with the first (a displacement
+        field, a mask, a bias field): ``region`` says which part of that companion to read.
+
+        ``context`` says which part of the input the tensor covers and which part of the output is
+        expected back. The default delegates to :meth:`__call__`, so every existing transform keeps
+        its behaviour and the whole-volume path stays the reference: an override must give the same
+        answer as ``__call__`` would on the full volume, restricted to ``context.target``.
+        """
+        del context
+        return self(name, tensor, cache_attribute)
 
     @abstractmethod
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -1382,10 +1421,38 @@ class FlatLabel(Transform):
 
 
 class Save(Transform):
-    def __init__(self, dataset: str, group: str | None = None) -> None:
+    """Write the chain's state here, and become a source boundary.
+
+    ``scale_factors`` writes an OME-NGFF PYRAMID instead of a single level: ``[4]`` adds a level 1 at
+    a quarter of the extent per axis, ``[4, 4]`` a level 2 at a sixteenth. Every reader indexes a
+    pyramid BY POSITION -- ``:omezarr@1`` is the second entry, not one named "1" -- so the order is
+    the contract, 0 finest. It applies on both write paths: assembled in memory, or region by region,
+    where the levels are derived once the last region has landed.
+
+    ``downsample_method`` names how the coarse levels are derived, and its default is
+    ``ITKWASM_BIN_SHRINK`` (block averaging), NOT ngff-zarr's own ``ITKWASM_GAUSSIAN``. Measured on a
+    real volume, the Gaussian holds a 0.9998 correlation while crushing peak intensity by 20 % --
+    exactly the shape of a difference that passes a sanity check and resurfaces months later.
+    """
+
+    def __init__(
+        self,
+        dataset: str,
+        group: str | None = None,
+        scale_factors: list[int] | None = None,
+        downsample_method: str | None = None,
+    ) -> None:
         super().__init__()
         self.dataset = dataset
         self.group = group
+        if scale_factors and any(int(factor) < 2 for factor in scale_factors):
+            raise TransformError(
+                f"'{type(self).__name__}' was given a scale factor below 2 in {list(scale_factors)}.",
+                "A pyramid level shrinks its parent, so each factor is 2 or more: scale_factors: [4]"
+                " writes one extra level at a quarter of the extent per axis.",
+            )
+        self.scale_factors = [int(factor) for factor in scale_factors] if scale_factors else None
+        self.downsample_method = downsample_method
 
     # WHOLE_VOLUME by declaration, yet the case may still stream: a Save whose cache exists is a
     # source boundary, and an unsatisfied Save with a streamable prefix is materialized slab by slab
@@ -1393,6 +1460,239 @@ class Save(Transform):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor
+
+
+class Write(Save):
+    """A :class:`Save` that is a deliverable, not a cache.
+
+    Same object, same boundary semantics, one difference that is the point: ``dataset`` has no
+    default, so a bare ``Write:`` fails at config time instead of silently writing into the source
+    tree (a bare ``Save:`` binds ``dataset`` to nothing and falls back to the manager's own
+    dataset). The TRANSFORM workflow plans, resumes and reports on its ``Write`` stages; a ``Save``
+    between them stays an opportunistic milestone — never written when a satisfied ``Write``
+    downstream lets the boundary skip the whole prefix.
+    """
+
+    def __init__(
+        self,
+        dataset: str,
+        group: str | None = None,
+        scale_factors: list[int] | None = None,
+        downsample_method: str | None = None,
+    ) -> None:
+        if not dataset or not str(dataset).strip():
+            raise TransformError(
+                "'Write' needs a destination: its 'dataset' is empty.",
+                "Declare where the deliverable lands, e.g. Write: {dataset: ./Out:omezarr}. For an"
+                " opportunistic cache next to the source, use 'Save' instead.",
+            )
+        super().__init__(dataset, group, scale_factors, downsample_method)
+
+
+class Warp(Transform):
+    """Resample a case through a displacement field defined on the same grid.
+
+    ``output(p) = input(p + d(p))``, with ``d`` read from ``field`` in world units. Field and case
+    must share a grid: this is the shape update of an atlas build, where the field was solved on the
+    very grid it is applied to. Warping ONTO A DIFFERENT grid is a resample as well as a warp, and
+    is not this stage.
+
+    THE HALO IS DECLARED, AND VERIFIED. How far a target voxel reaches into the source is the
+    displacement itself, so the region this needs is the target enlarged by ``max_displacement``.
+    That bound cannot be read from the field without scanning it, and a locality declaration may do
+    no I/O -- so it is declared here, and then CHECKED against every region actually read. A field
+    that exceeds what was declared raises; it does not quietly sample zeros, which would look like a
+    dark rim around the moved anatomy and nothing else.
+
+    ``max_displacement`` is in the same world units as ``Spacing`` (micrometres for these stores).
+    Left at zero, or with no ``Spacing`` on the case, the stage declares ``WHOLE_VOLUME`` and the
+    dispatcher hands it the volume -- correct, and as expensive as it sounds.
+    """
+
+    def __init__(
+        self,
+        field: str,
+        group: str | None = None,
+        max_displacement: float = 0.0,
+        interpolation: str = "linear",
+    ) -> None:
+        super().__init__()
+        if not field or not str(field).strip():
+            raise TransformError(
+                "'Warp' needs a 'field': the displacement field to resample through.",
+                "Declare it, e.g. Warp: {field: ./DVF:omezarr, max_displacement: 250.0}.",
+            )
+        if interpolation not in ("linear", "nearest"):
+            raise TransformError(
+                f"'Warp' has an unknown interpolation '{interpolation}'.",
+                "Use 'linear' for an image or 'nearest' for a label map.",
+            )
+        filename, _flag, file_format = split_path_spec(str(field), default_format="mha")
+        self.field_dataset = Dataset(Path(filename), file_format)
+        self.field_group = group
+        self.max_displacement = float(max_displacement)
+        self.interpolation = interpolation
+
+    def _spacing(self, cache_attribute: Attribute) -> list[float] | None:
+        """The case's spacing in array order (z, y, x); ``Spacing`` is stored (x, y, z)."""
+        if "Spacing" not in cache_attribute:
+            return None
+        spacing = [float(value) for value in np.asarray(cache_attribute.get_np_array("Spacing")).ravel()]
+        return list(reversed(spacing))
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        spacing = self._spacing(cache_attribute)
+        if self.max_displacement <= 0.0 or spacing is None:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        halo = tuple(int(np.ceil(self.max_displacement / extent)) if extent > 0 else 0 for extent in spacing)
+        return PatchLocality(LocalityKind.HALO, halo=halo)
+
+    def _group_for(self, name: str) -> str:
+        if self.field_group is not None:
+            return self.field_group
+        groups = self.field_dataset.get_groups() if hasattr(self.field_dataset, "get_groups") else []
+        if len(groups) == 1:
+            return str(groups[0])
+        raise TransformError(
+            f"'Warp' cannot tell which group of '{self.field_dataset.filename}' holds the field for case '{name}'.",
+            "Name it: Warp: {field: ./DVF:omezarr, group: DVF}.",
+        )
+
+    def _read_field(self, name: str, region: tuple[slice, ...] | None, channels: int) -> torch.Tensor:
+        group = self._group_for(name)
+        if region is None:
+            data, _attributes = self.field_dataset.read_data(group, name)
+        else:
+            data, _attributes = self.field_dataset.read_data_slice(group, name, (slice(None), *region))
+        field = torch.from_numpy(np.ascontiguousarray(data)).float()
+        if field.shape[0] != channels:
+            raise TransformError(
+                f"The field for case '{name}' has {field.shape[0]} component(s) where the case has"
+                f" {channels} spatial axis/axes.",
+                "A displacement field carries one component per spatial axis, component-first.",
+            )
+        return field
+
+    def _sample(self, tensor: torch.Tensor, field: torch.Tensor, spacing: list[float]) -> torch.Tensor:
+        """``output(p) = input(p + d(p))`` over the block handed in, sampled with grid_sample.
+
+        The field's components are (x, y, z) where the array axes are (z, y, x) -- the two orders
+        meet here, and reversing one of them is a warp that looks plausible and moves the anatomy
+        the wrong way.
+        """
+        extent = list(tensor.shape[1:])
+        axes = torch.meshgrid(*[torch.arange(size, dtype=torch.float32) for size in extent], indexing="ij")
+        sample = []
+        for axis in range(len(extent)):
+            # field component for array axis `axis` (z,y,x) is the reversed one (x,y,z)
+            displacement = field[len(extent) - 1 - axis] / spacing[axis]
+            sample.append(axes[axis] + displacement)
+        # grid_sample wants the LAST dim ordered (x, y, z) and coordinates normalised to [-1, 1].
+        grid = torch.stack(
+            [2.0 * sample[axis] / max(1, extent[axis] - 1) - 1.0 for axis in reversed(range(len(extent)))], dim=-1
+        )
+        moved = F.grid_sample(
+            tensor.unsqueeze(0).float(),
+            grid.unsqueeze(0),
+            mode="bilinear" if self.interpolation == "linear" else "nearest",
+            padding_mode="zeros",
+            align_corners=True,
+        )
+        return moved.squeeze(0).to(tensor.dtype)
+
+    def _check_declared_bound(self, field: torch.Tensor, name: str) -> None:
+        largest = float(field.abs().max()) if field.numel() else 0.0
+        if self.max_displacement > 0.0 and largest > self.max_displacement:
+            raise TransformError(
+                f"The field for case '{name}' displaces up to {largest:.3f}, beyond the declared"
+                f" max_displacement of {self.max_displacement:.3f}.",
+                "Raise max_displacement to at least the field's true maximum: the region read is"
+                " sized from it, so a larger displacement samples outside what was read.",
+            )
+
+    def stream_region(
+        self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
+    ) -> torch.Tensor:
+        spacing = self._spacing(cache_attribute)
+        if spacing is None:
+            return self(name, tensor, cache_attribute)
+        field = self._read_field(name, context.source, len(tensor.shape) - 1)
+        self._check_declared_bound(field, name)
+        return self._sample(tensor, field, spacing)
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        spacing = self._spacing(cache_attribute)
+        if spacing is None:
+            raise TransformError(
+                f"'Warp' needs the case's Spacing to turn a world displacement into voxels, and"
+                f" case '{name}' declares none.",
+                "Use a source whose geometry is readable (mha, nii, h5 or omezarr written by KonfAI).",
+            )
+        field = self._read_field(name, None, len(tensor.shape) - 1)
+        return self._sample(tensor, field, spacing)
+
+
+class Reduce(Transform):
+    """Fold every case of a group into one volume, at fixed voxel.
+
+    The stage that changes a chain's CARDINALITY: everything before it runs once per case, this
+    folds the cases together, everything after it runs once on the result. A chain carrying one is
+    driven by the reduction engine rather than the per-case loop, so it is never applied as an
+    ordinary transform -- ``__call__`` says so rather than quietly reducing one case to itself.
+
+    ``operator`` is a classpath resolved against :mod:`konfai.data.reduction` (``Mean``, ``Median``,
+    ``Concat``, or your own :class:`~konfai.data.reduction.Reduction`). ``output`` is the entry name
+    the result is written under, and it is required: a reduction has no case name to inherit, and
+    letting it borrow one member's would tie the deliverable to iteration order.
+
+    ``grid`` decides how much agreement between members is demanded before a byte is read:
+    ``strict`` compares extents AND geometry (Spacing/Origin/Direction) within ``grid_tolerance``;
+    ``shape_only`` compares extents alone, the honest escape hatch for volumes already resampled
+    together but carrying approximate headers; ``reference:<case>`` adopts that member's geometry
+    for the output and still demands equal extents. Nothing can verify that the members truly live
+    in a common space -- only that they claim to, which is why the claim is checked and printed.
+    """
+
+    def __init__(
+        self,
+        operator: str = "Median",
+        output: str = "",
+        grid: str = "strict",
+        grid_tolerance: float = 1e-6,
+        provenance: bool = True,
+    ) -> None:
+        super().__init__()
+        if not output or not str(output).strip():
+            raise TransformError(
+                "'Reduce' needs an 'output': the name its single result is written under.",
+                "Declare it, e.g. Reduce: {operator: Median, output: template}. A reduction has no"
+                " case name to inherit -- borrowing a member's would tie the deliverable to"
+                " iteration order.",
+            )
+        if grid not in ("strict", "shape_only") and not str(grid).startswith("reference:"):
+            raise TransformError(
+                f"'Reduce' has an unknown grid policy '{grid}'.",
+                "Use 'strict' (extents + geometry), 'shape_only' (extents only) or"
+                " 'reference:<case>' (adopt that member's geometry).",
+            )
+        self.operator_classpath = str(operator)
+        self.output = str(output).strip()
+        self.grid = str(grid)
+        self.grid_tolerance = float(grid_tolerance)
+        self.provenance = bool(provenance)
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # A cardinality marker, not a per-case stage: the reduction engine SPLITS it out of the chain
+        # before any manager is built, so this declaration is only the safety net for a chain that
+        # reached the ordinary planner by mistake -- where refusing to stream is the right answer.
+        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        raise TransformError(
+            f"'Reduce' (output '{self.output}') was applied to one case, which reduces nothing.",
+            "A chain containing Reduce is run by the reduction engine of the TRANSFORM workflow; it"
+            " has no meaning as an ordinary per-case transform.",
+        )
 
 
 class Flatten(Transform):

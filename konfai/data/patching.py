@@ -29,10 +29,10 @@ import torch
 import torch.nn.functional as F
 
 from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
-from konfai.data.transform import LocalityKind, PatchLocality, Resample, Save, Transform
+from konfai.data.transform import LocalityKind, PatchLocality, RegionContext, Resample, Save, Transform
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
-from konfai.utils.errors import PatchError
+from konfai.utils.errors import ConfigError, PatchError
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
     OverlapSpec,
@@ -81,6 +81,10 @@ class Stage(Protocol):
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None: ...
 
+    def stream_region(
+        self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
+    ) -> torch.Tensor: ...
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor: ...
 
 
@@ -106,6 +110,14 @@ class AugmentedStage:
         cache_attribute: Attribute,
     ) -> list[slice]:
         return self.augmentation.stream_region_source(self.index, self.a, target_slices, source_spatial_shape)
+
+    def stream_region(
+        self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
+    ) -> torch.Tensor:
+        # A draw is parameterised by the case and the copy, never by where in the volume it lands:
+        # nothing an augmentation does depends on the region's position.
+        del context
+        return self(name, tensor, cache_attribute)
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
         """An augmentation draws a copy of the case rather than restating its geometry: nothing to record."""
@@ -176,8 +188,16 @@ def _save_destination(save: Save, default_dataset: Dataset, default_group: str) 
             default_format="mha",
             supported_extensions=SUPPORTED_EXTENSIONS,
         )
-        dataset = Dataset(filename, file_format)
+        dataset = Dataset(filename, file_format, save.scale_factors, save.downsample_method)
     else:
+        # No destination of its own: the Save caches into the manager's dataset, whose write format
+        # is not this stage's to redecorate -- a pyramid asked here would silently not happen.
+        if save.scale_factors:
+            raise ConfigError(
+                f"A '{type(save).__name__}' asks for a pyramid but names no dataset of its own.",
+                "scale_factors describes a store this stage writes, so give it one:"
+                " Write: {dataset: ./Out:omezarr, scale_factors: [4]}.",
+            )
         dataset = default_dataset
     return dataset, save.group if save.group else default_group
 
@@ -1236,14 +1256,22 @@ class DatasetManager:
         self.shapes: list[list[int]] = [_shape]
         self.data_augmentations_list = data_augmentations_list
         self._patch_stream_sources: dict[tuple[int, bool], _PatchStreamSource | None] = {}
+        self._stream_refusals: dict[tuple[int, bool], str] = {}
         self._stream_attributes_persisted: set[int] = set()
         self._sweep_failed = False
+        # Rewrite mode: every satisfied-Save probe answers "not written yet", so the case recomputes
+        # from the source and each stream's finalize renames over the old entry. Never the default --
+        # the boundary IS the per-case resume.
+        self._rewrite_saves = False
         self._disk_statistics: dict[tuple[Dataset, str, tuple[int, ...] | None], dict[str, float]] = {}
         # reset_state=False: the first manager built for a case draws (state_init draws a missing
         # index), and every later group's manager reuses that draw -- redrawing here would give each
         # group its own geometry and desynchronise the per-copy patch grids across groups.
         self.reset_augmentation(reset_state=False)
         self.cache_attributes_bak = copy.deepcopy(self.cache_attributes)
+        # The case as STORED, untouched forever: a boundary-based plan legitimately rewrites the
+        # backup with the cache's header, but a rewrite replan must start from the original source.
+        self._cache_attributes_pristine = copy.deepcopy(self.cache_attributes_bak)
 
     def reset_augmentation(self, reset_state: bool = True):
         self.cache_attributes[:] = self.cache_attributes[:1]
@@ -1253,6 +1281,7 @@ class DatasetManager:
         # the draw's own, and a re-draw is a new one. Drop every plan, so the next request replans
         # against the draw the copies actually carry.
         self._patch_stream_sources.clear()
+        self._stream_refusals.clear()
         self._stream_attributes_persisted.clear()
         self.total_augmentations = 0
         i = 1
@@ -1293,7 +1322,7 @@ class DatasetManager:
         for transform_function in reversed(pre_transform):
             if isinstance(transform_function, Save):
                 dataset, group_dest = _save_destination(transform_function, self.dataset, self.group_dest)
-                if dataset.is_dataset_exist(group_dest, self.name):
+                if not self._rewrite_saves and dataset.is_dataset_exist(group_dest, self.name):
                     data, attrib = dataset.read_data(group_dest, self.name)
                     self.cache_attributes[0].update(attrib)
                     break
@@ -1451,10 +1480,13 @@ class DatasetManager:
         source_spatial_shape: list[int],
         landing_shape: list[int] | None = None,
         seed_statistics: bool = True,
-    ) -> tuple[bool, tuple[_ReadStagePlan, ...], Attribute]:
+    ) -> tuple[bool, tuple[_ReadStagePlan, ...], Attribute, str | None]:
         """Validate a chain's locality declarations and plan its region stages, which compose.
 
-        Returns ``(streamable, stage_plans, evolved)`` — ``evolved`` being the case state the plan
+        Returns ``(streamable, stage_plans, evolved, refusal)`` — ``refusal`` naming the stage and
+        the reason when the chain cannot stream (``None`` when it can): the identity of the stage is
+        in hand at the exact moment each check fails, and dropping it is what made every fallback
+        silent. ``evolved`` is the case state the plan
         leaves, which a :class:`Save` sweep writes as its cache header. The chain streams when every
         stage is pointwise, a region kind (``HALO``/``ORIENTATION``/``CROP``/``RESCALE`` — any
         number, each pulling through the one before it), or a ``GLOBAL_STAT`` with a pre-populated
@@ -1474,41 +1506,75 @@ class DatasetManager:
         shape = [int(extent) for extent in source_spatial_shape]
         localities: list[PatchLocality] = []
         plans: list[_ReadStagePlan] = []
-        for stage in stages:
+        for stage_index, stage in enumerate(stages):
             loc = stage.patch_locality(Attribute(evolved))
             localities.append(loc)
+            label = f"stage {stage_index} '{type(stage).__name__}'"
             if loc.kind in (LocalityKind.WHOLE_VOLUME, LocalityKind.SLAB):
                 # SLAB is a write-side contract: its side effect needs the slab's place in the
                 # OUTPUT, which a patch read has no notion of.
-                return False, (), evolved
+                return False, (), evolved, f"{label} declares {loc.kind.name}: it needs the whole volume."
             if loc.kind is LocalityKind.GLOBAL_STAT:
                 # The seed is the STORED volume's statistic, which is this transform's input only when
                 # every earlier stage preserves it; otherwise ([Clip(-200, 400), Standardize()]) every
                 # patch would be standardized by the pre-Clip statistic -- fall back to the whole volume.
                 if not all(previous.statistics_preserving for previous in localities[:-1]):
-                    return False, (), evolved
+                    return (
+                        False,
+                        (),
+                        evolved,
+                        f"{label} needs whole-volume statistics, but an earlier stage changes the values"
+                        " -- the stored volume's statistic is not this stage's input.",
+                    )
                 if seed_statistics and not self._ensure_stream_stats(
                     source_dataset, source_group, cache_attribute, set(loc.stat_keys), loc.stat_channels
                 ):
-                    return False, (), evolved
+                    return (
+                        False,
+                        (),
+                        evolved,
+                        f"{label} needs statistics {sorted(loc.stat_keys)} that the source cannot provide.",
+                    )
                 # The evolving case state carries the seed too: a Save sweep writes it as the cache
                 # header, exactly as the whole-volume pass leaves the statistic in the attribute.
                 for stat_key in loc.stat_keys:
                     if stat_key in cache_attribute and stat_key not in evolved:
                         evolved[stat_key] = cache_attribute[stat_key]
             if loc.kind is LocalityKind.HALO and not self._affords_halo(a, loc.halo):
-                return False, (), evolved
+                return (
+                    False,
+                    (),
+                    evolved,
+                    f"{label} declares a halo of {loc.halo} that is too wide for this grid to be worth"
+                    " reading (over half the patch extent per axis).",
+                )
             if loc.kind is LocalityKind.RESCALE and (not isinstance(stage, Resample) or "Spacing" not in evolved):
                 # A resample is patch-native only when the source geometry is known: the scale is read
                 # from the evolving 'Spacing' (a free geometry stat, no read_data_statistics).
-                return False, (), evolved
+                return (
+                    False,
+                    (),
+                    evolved,
+                    f"{label} declares RESCALE but "
+                    + (
+                        "does not inherit from Resample."
+                        if not isinstance(stage, Resample)
+                        else "the source carries no 'Spacing' to scale from."
+                    ),
+                )
             plan = self._plan_read_stage(stage, loc, shape, evolved)
             plans.append(plan)
             shape = list(plan.out_shape)
         expected = landing_shape if landing_shape is not None else self.shapes[a]
         if shape != [int(extent) for extent in expected]:
-            return False, (), evolved
-        return True, tuple(plans), evolved
+            return (
+                False,
+                (),
+                evolved,
+                f"the chain's shapes fold to {shape} but the target grid is"
+                f" {[int(extent) for extent in expected]} -- a stage's shape map is missing or wrong.",
+            )
+        return True, tuple(plans), evolved, None
 
     def _plan_read_stage(
         self, stage: Stage, loc: PatchLocality, shape: list[int], evolved: Attribute
@@ -1551,11 +1617,12 @@ class DatasetManager:
         stream_cache_attribute = Attribute(self.cache_attributes_bak[0])
         pending: list[_PendingSweep] = []
         trailing_transforms: list[Stage] = []
+        sweep_refusal: str | None = None
 
         for transform in self.transforms:
             if isinstance(transform, Save):
                 dataset, group = _save_destination(transform, self.dataset, self.group_dest)
-                if dataset.is_dataset_exist(group, self.name):
+                if not self._rewrite_saves and dataset.is_dataset_exist(group, self.name):
                     source_dataset, source_group = dataset, group
                     source_shape, boundary_attributes = dataset.get_infos(group, self.name)
                     source_shape = list(source_shape)
@@ -1567,8 +1634,9 @@ class DatasetManager:
                         stream_cache_attribute[attribute_key] = attribute_value
                     pending.clear()
                     trailing_transforms = []
+                    sweep_refusal = None
                     continue
-                planned = self._plan_save_sweep(
+                planned, planned_attribute, planned_refusal = self._plan_save_sweep(
                     dataset,
                     group,
                     trailing_transforms,
@@ -1578,13 +1646,18 @@ class DatasetManager:
                     stream_cache_attribute,
                     seed_statistics=not pending,
                 )
-                if planned is not None:
-                    sweep, stream_cache_attribute = planned
+                if planned is not None and planned_attribute is not None:
+                    stream_cache_attribute = planned_attribute
                     source_dataset, source_group = dataset, group
-                    source_shape = [source_shape[0], *sweep.out_spatial]
-                    pending.append(sweep)
+                    source_shape = [source_shape[0], *planned.out_spatial]
+                    pending.append(planned)
                     trailing_transforms = []
                     continue
+                # An unplannable Save stays in the chain, where its WHOLE_VOLUME declaration refuses
+                # the whole plan -- keep the sweep's own reason, or the chain-level one would only
+                # ever say "Save needs the whole volume" and mask the actual cause.
+                if sweep_refusal is None:
+                    sweep_refusal = planned_refusal
             trailing_transforms.append(transform)
 
         # What copy `a` is: the trailing transforms, then its own draw. The draw is applied to the
@@ -1592,7 +1665,7 @@ class DatasetManager:
         # transform and a region augmentation are then two regions, which is exactly what they are.
         stages = trailing_transforms + (self._augmentation_stages(a) if apply_augmentations else [])
 
-        streamable, stage_plans, _ = self._plan_stream_region(
+        streamable, stage_plans, _, chain_refusal = self._plan_stream_region(
             a,
             stages,
             source_dataset,
@@ -1602,6 +1675,7 @@ class DatasetManager:
             seed_statistics=not pending,
         )
         if not streamable:
+            self._stream_refusals[key] = sweep_refusal or chain_refusal or "the chain cannot stream."
             self._patch_stream_sources[key] = None
         elif pending:
             # The pending source only answers the regime probes: no attribute is persisted and no
@@ -1628,13 +1702,17 @@ class DatasetManager:
         source_shape: list[int],
         base_attributes: Attribute,
         seed_statistics: bool,
-    ) -> tuple[_PendingSweep, Attribute] | None:
-        """Plan the materialization of one unsatisfied :class:`Save`, or ``None`` to leave it on the
-        whole-volume path: the segment feeding it must itself stream, and the destination must serve
-        region writes (probed by capability, so a refusal costs nothing). Returns the pending sweep
-        and the case state its cache will carry, which the stages after the Save plan against."""
-        if self._sweep_failed or not env_flag("KONFAI_STREAMED_WRITES", True):
-            return None
+    ) -> tuple[_PendingSweep | None, Attribute | None, str | None]:
+        """Plan the materialization of one unsatisfied :class:`Save`, or refuse with the reason and
+        leave it on the whole-volume path: the segment feeding it must itself stream, and the
+        destination must serve region writes (probed by capability, so a refusal costs nothing).
+        Returns ``(sweep, evolved, None)`` on success — the pending sweep and the case state its
+        cache will carry, which the stages after the Save plan against — and ``(None, None,
+        reason)`` on refusal."""
+        if self._sweep_failed:
+            return None, None, "an earlier sweep failed for this case; every Save takes the whole-volume path."
+        if not env_flag("KONFAI_STREAMED_WRITES", True):
+            return None, None, "KONFAI_STREAMED_WRITES=0 disables streamed writes."
         landing = [int(extent) for extent in source_shape[1:]]
         probe = Attribute(base_attributes)
         for stage in segment:
@@ -1642,7 +1720,7 @@ class DatasetManager:
                 int(e) for e in cast(Transform, stage).transform_shape(self.group_src, self.name, landing, probe)
             ]
         planning = Attribute(base_attributes)
-        streamable, _, evolved = self._plan_stream_region(
+        streamable, _, evolved, refusal = self._plan_stream_region(
             0,
             segment,
             source_dataset,
@@ -1652,8 +1730,15 @@ class DatasetManager:
             landing_shape=landing,
             seed_statistics=seed_statistics,
         )
-        if not streamable or not destination.can_stream_data(evolved):
-            return None
+        if not streamable:
+            return None, None, refusal
+        if not destination.can_stream_data(evolved):
+            return (
+                None,
+                None,
+                f"destination '{destination.filename}' cannot serve region writes for this entry"
+                " (h5 and omezarr always can; mha only with image geometry).",
+            )
         sweep = _PendingSweep(
             destination,
             group,
@@ -1664,10 +1749,115 @@ class DatasetManager:
             tuple(landing),
             planning,
         )
-        return sweep, evolved
+        return sweep, evolved, None
 
     def can_stream_patch(self, a: int, apply_augmentations: bool = True) -> bool:
         return self._resolve_patch_stream_source(a, apply_augmentations) is not None
+
+    def stream_refusal(self, a: int = 0, apply_augmentations: bool = True) -> str | None:
+        """Why this copy cannot stream — the reified refusal — or ``None`` when it can.
+
+        Resolves the plan (a probe, never a write) and hands back the first stage-level reason the
+        planner met: the whole-volume fallback stays available, but it stops being silent."""
+        if self._resolve_patch_stream_source(a, apply_augmentations) is not None:
+            return None
+        return self._stream_refusals.get((a, apply_augmentations), "the chain cannot stream.")
+
+    @property
+    def spatial_shape(self) -> list[int]:
+        """The spatial extent this case's chain lands on -- the source folded by every stage."""
+        return list(self.shapes[0])
+
+    @property
+    def stored_attributes(self) -> Attribute:
+        """The case as STORED: the geometry of the entry on disk, before any stage ran.
+
+        A copy, and pristine on purpose: the live attribute carries what earlier regions or epochs
+        wrote into it, so anything planning against it would be handed a stage's own output as the
+        description of its input.
+        """
+        return Attribute(self.cache_attributes_bak[0])
+
+    def read_region(self, target: tuple[slice, ...], a: int = 0, apply_augmentations: bool = False) -> torch.Tensor:
+        """Run this case's chain over one region of its output, reading only what that region pulls.
+
+        The public form of the streamed read: the region stages' pull maps fold backward to the
+        stored volume, so one bounded read serves the whole chain and the volume is never assembled.
+        ``target`` indexes the SPATIAL axes of :attr:`spatial_shape`; every channel is read.
+
+        Raises rather than falling back, because a caller asking for one region has already decided
+        the volume does not fit -- quietly loading it would answer a question they did not ask.
+        :meth:`stream_refusal` gives the reason before committing to this path.
+
+        Goes through :meth:`_stream_ready`, so a chain reading through an unwritten ``Save`` gets it
+        swept first, exactly as the DataLoader path does. Resolving the source directly instead --
+        which this did -- planned green against caches that did not exist yet and then failed at the
+        first region, which is precisely the remedy KonfAI recommends in its own refusal messages
+        ("put a Save before the Reduce"): the advice was sound and the path under it was not.
+        """
+        if not self._stream_ready(a, apply_augmentations):
+            raise PatchError(
+                f"Case '{self.name}' cannot stream its chain, so it cannot serve a region.",
+                self.stream_refusal(a, apply_augmentations)
+                or (
+                    "A Save this chain reads through could not be swept; see the warning it emitted."
+                    if self._sweep_failed
+                    else "See stream_refusal() for the refusing stage."
+                ),
+            )
+        source = self._resolve_patch_stream_source(a, apply_augmentations)
+        if source is None:  # pragma: no cover - _stream_ready just resolved it
+            raise PatchError(
+                f"Case '{self.name}' cannot stream its chain, so it cannot serve a region.",
+                self.stream_refusal(a, apply_augmentations) or "See stream_refusal() for the refusing stage.",
+            )
+        tensor, _attribute, _keys = self._replay_streamed_region(source, target, self.stored_attributes, None)
+        return tensor
+
+    def materialize(self, a: int = 0, rewrite: bool = False, fallback_budget_bytes: float | None = None) -> bool:
+        """Write this case's chain to disk by the cheapest path that can, and say which one it took.
+
+        Two branches, and they are the whole write side: the streamed one sweeps every unsatisfied
+        :class:`Save` slab by slab and never holds the volume; when it refuses — a WHOLE_VOLUME
+        stage, a destination that cannot serve region writes, a sweep that failed — the classic load
+        writes the same caches from the assembled volume. The bytes are the same either way; only
+        the peak memory differs, which is why the caller must be told the answer rather than left to
+        assume the cheap one. Returns whether the streamed path wrote the case.
+
+        Never routed through :meth:`get_data`: a case with no declared patch is a single
+        whole-volume patch, so asking for data would read back the volume this just wrote. The
+        volume is released before returning, so a caller sweeping a dataset holds one case at a
+        time. A chain whose caches all exist already writes nothing and streams — that is the
+        per-case resume; a chain with no :class:`Save` at all writes nothing either, which is why
+        declaring an output is checked before a case is ever handed here. ``rewrite=True`` recomputes
+        the case from the source and every stream's finalize renames over the old entry — the forced
+        path behind ``--overwrite``, never the default.
+        """
+        if rewrite != self._rewrite_saves:
+            # The memoized plans were probed under the other boundary answer: replan. And replan from
+            # the case as STORED -- an earlier boundary-based plan wrote the OUTPUT's header into the
+            # backup (its Spacing, its Size), and a rewrite planned from that geometry re-writes
+            # untransformed data over the deliverable without an error.
+            self._rewrite_saves = rewrite
+            self._patch_stream_sources.clear()
+            self._stream_refusals.clear()
+            self.cache_attributes_bak = copy.deepcopy(self._cache_attributes_pristine)
+            self.cache_attributes = copy.deepcopy(self._cache_attributes_pristine)
+        if self._stream_ready(a, apply_augmentations=False):
+            return True
+        if fallback_budget_bytes is not None:
+            # The plan's promise holds at run time too: a case whose sweep failed here (a refusal the
+            # probe could not see) must not assemble a volume the budget cannot hold.
+            case_bytes = int(np.prod(self.base_shape, dtype=np.int64)) * 4 * 2
+            if case_bytes > fallback_budget_bytes:
+                raise PatchError(
+                    f"Case '{self.name}' fell back to the whole-volume path at run time and its"
+                    f" working set (~{case_bytes / 2**30:.2f} GiB) exceeds the per-rank budget.",
+                    "Nothing was written for this case. Raise 'memory_budget' or make the chain streamable.",
+                )
+        self.load(self.transforms, [], load_augmentations=False)
+        self.unload()
+        return False
 
     def _stream_ready(self, a: int, apply_augmentations: bool = True) -> bool:
         """Whether this copy can stream its patches, materializing what that requires.
@@ -1686,6 +1876,7 @@ class DatasetManager:
         # Every copy replans: the pending plans pointed at caches that did not exist yet (or, after a
         # failure, never will -- _sweep_failed reroutes them to the whole-volume path).
         self._patch_stream_sources.clear()
+        self._stream_refusals.clear()
         return not self._sweep_failed and self._resolve_patch_stream_source(a, apply_augmentations) is not None
 
     def _materialize_save(self, sweep: _PendingSweep) -> bool:
@@ -1699,9 +1890,9 @@ class DatasetManager:
         complete (a DataStream renames on finalize), so a concurrent resolve never takes a partial
         entry as a source boundary; on failure the partial entry is removed and the case falls back
         to the whole-volume path, which writes the cache classically."""
-        if sweep.destination.is_dataset_exist(sweep.group, self.name):
+        if not self._rewrite_saves and sweep.destination.is_dataset_exist(sweep.group, self.name):
             return True
-        streamable, stage_plans, evolved = self._plan_stream_region(
+        streamable, stage_plans, evolved, _refusal = self._plan_stream_region(
             0,
             sweep.stages,
             sweep.source_dataset,
@@ -1727,6 +1918,22 @@ class DatasetManager:
                     source, target, Attribute(sweep.base_attributes), Attribute(evolved) if start == 0 else None
                 )
                 block = tensor.numpy()
+                if block.ndim != len(spatial) + 1:
+                    # The chain dropped (or added) a leading axis, so this slab is not C[Z]YX. Writing
+                    # it anyway is the worst outcome available: the header would take this slab's
+                    # FIRST spatial extent for a channel count, publish a store of that many
+                    # "channels" each holding a broadcast copy, and raise nothing -- the whole-volume
+                    # path meanwhile returns the right rank, so the two silently disagree. A rank is
+                    # not something a slab can carry an opinion about: refuse, and let the caller's
+                    # handler fall back to the whole volume, which reduces correctly.
+                    raise PatchError(
+                        f"A stage of the chain writing '{sweep.group}/{self.name}' returned a rank-{block.ndim}"
+                        f" slab where the channel-first layout needs rank {len(spatial) + 1}"
+                        f" (C, {', '.join(str(e) for e in spatial)}).",
+                        "A transform that reduces the leading axis must keep it (`keepdim=True`), so a"
+                        " slab stays C[Z]YX; only then does a region write mean the same thing as the"
+                        " whole-volume pass.",
+                    )
                 if stream is None:
                     # The header is the plan-time case state, completed by what the chain's stages
                     # add in __call__ -- the same keys the whole-volume pass would leave at the Save.
@@ -1884,7 +2091,15 @@ class DatasetManager:
 
         for stage, plan, source, target in zip(stages, plans, spans[:-1], spans[1:], strict=True):
             if plan.kind not in _REGION_KINDS:
-                tensor = stage(self.name, tensor, cache_attribute)
+                # The span is handed over rather than dropped: a stage reading a second aligned
+                # volume needs to know WHICH part of it lines up with this region, and the
+                # dispatcher is the only thing that knows. The default hook ignores it.
+                tensor = stage.stream_region(
+                    self.name,
+                    tensor,
+                    RegionContext(tuple(source), tuple(target), tuple(plan.in_shape), tuple(plan.out_shape)),
+                    cache_attribute,
+                )
                 continue
             # A region stage's geometry writes describe the region's extent, not the volume's: give it
             # a throwaway scope, and write the case-level answer once from the FULL shape below
@@ -1899,7 +2114,14 @@ class DatasetManager:
                     list(plan.in_shape),
                 )
             elif plan.kind is not LocalityKind.CROP:
-                tensor = stage(self.name, tensor, scoped)
+                # A HALO stage is handed the ENLARGED region it asked for, and told so: what it
+                # returns is cropped back to the target just below.
+                tensor = stage.stream_region(
+                    self.name,
+                    tensor,
+                    RegionContext(tuple(source), tuple(target), tuple(plan.in_shape), tuple(plan.out_shape)),
+                    scoped,
+                )
                 if plan.kind is LocalityKind.HALO:
                     lead = tensor.dim() - len(target)
                     crop = [slice(t.start - s.start, t.stop - s.start) for t, s in zip(target, source, strict=False)]

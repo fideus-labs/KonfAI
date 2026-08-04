@@ -22,7 +22,7 @@ import logging
 import os
 import types
 import typing
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
@@ -420,6 +420,17 @@ def _convert_union_sequence_value(
                 matched = candidate_type is bool if isinstance(value, bool) else isinstance(value, candidate_type)
                 if matched:
                     return value
+
+    if isinstance(value, Mapping):
+        # No member of these unions can hold a mapping, and the coercion loop must not see one:
+        # `str` is a member of most of them, `str(mapping)` never fails, and a block bound as its
+        # own repr fails far from here, on whatever that text then selects. This key is the last
+        # place the shape of the YAML is still visible.
+        raise ConfigError(
+            f"Parameter '{param_name}' was given a nested block, but it takes a value.",
+            f"Expected one of: {valid_types}.",
+            f"Write it on one line ('{param_name}: <value>'); keys nested under it select nothing.",
+        )
 
     converted = None
     last_error: Exception | None = None

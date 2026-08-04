@@ -353,6 +353,26 @@ def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_confi
     assert list(root.per_axis) == [10, 20, 0] and isinstance(root.per_axis, list)  # not the string "[10, 20, 0]"
 
 
+def test_apply_config_refuses_a_nested_block_where_a_value_is_expected(write_config) -> None:
+    """``subset:`` is the one that bit: documented as a mapping, and ``str`` swallows any mapping.
+
+    ``str(CommentedMap)`` never fails, so the binder walked its union in declaration order, bound
+    ``subset`` to the literal text ``"{'CT': ['CASE_000']}"``, and the run died much later with
+    "All data entries were excluded" -- which reads as a matching problem and is a parsing one. The
+    config file was even rewritten with the mapping intact, so nothing ever looked wrong.
+    """
+    write_config("Root:\n  subset:\n    CT:\n      - CASE_000\n      - CASE_001\n")
+
+    class Root:
+        def __init__(self, subset: str | list[int] | list[str] | None = None) -> None:
+            self.subset = subset
+
+    with pytest.raises(ConfigError) as error:
+        apply_config("Root")(Root)()
+
+    assert "subset" in str(error.value) and "nested block" in str(error.value)
+
+
 def test_apply_config_binds_scalar_float_or_str_union(write_config) -> None:
     # Mirrors the Clip transform (``min_value``/``max_value: float | str``) which accepts numeric
     # bounds as well as string sentinels such as ``min`` / ``percentile:99.5``.
