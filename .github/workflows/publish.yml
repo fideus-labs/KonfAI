@@ -161,6 +161,10 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0  # cz renders a version's section from the history
+          # Nothing here pushes -- the release is created through the API by the action below -- and
+          # this is the only job that asks for `contents: write`. Left on the default, checkout would
+          # leave that write-scoped token in .git/config while pip and commitizen run.
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
