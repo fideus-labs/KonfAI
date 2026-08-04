@@ -1536,22 +1536,29 @@ class Warp(Transform):
     is not this stage.
 
     THE HALO IS DECLARED, AND VERIFIED. How far a target voxel reaches into the source is the
-    displacement itself, so the region this needs is the target enlarged by ``max_displacement``.
-    That bound cannot be read from the field without scanning it, and a locality declaration may do
-    no I/O -- so it is declared here, and then CHECKED against every region actually read. A field
-    that exceeds what was declared raises; it does not quietly sample zeros, which would look like a
-    dark rim around the moved anatomy and nothing else.
+    displacement itself, so the region this needs is the target enlarged by the largest
+    displacement. That bound is then CHECKED against every region actually read: a field that
+    exceeds it raises, rather than quietly sampling zeros — which would look like a dark rim around
+    the moved anatomy and nothing else.
 
-    ``max_displacement`` is in the same world units as ``Spacing`` (micrometres for these stores).
-    Left at zero, or with no ``Spacing`` on the case, the stage declares ``WHOLE_VOLUME`` and the
-    dispatcher hands it the volume -- correct, and as expensive as it sounds.
+    ``max_displacement`` is in the same world units as ``Spacing`` (micrometres for these stores),
+    and takes ``auto``: a field records its own per-component bound when KonfAI writes it, so
+    ``auto`` reads it back from the headers instead of asking you for a number you would have to
+    measure. It is the cohort's bound, not this case's — a locality is declared once for the stage,
+    while the field is per case — so it over-reads for a gentle case and is never short for a wild
+    one. Give a number when you know one and want the tightest halo.
+
+    With no bound at all — ``0.0``, an ``auto`` the headers cannot answer, or a case with no
+    ``Spacing`` — the stage declares ``WHOLE_VOLUME`` and says which, because a `Warp` that silently
+    costs the whole volume is this stage's expensive failure: the result is right, so nothing looks
+    wrong except the peak memory the reader was streaming to control.
     """
 
     def __init__(
         self,
         field: str,
         group: str | None = None,
-        max_displacement: float = 0.0,
+        max_displacement: float | str = 0.0,
         interpolation: str = "linear",
     ) -> None:
         super().__init__()
@@ -1568,8 +1575,55 @@ class Warp(Transform):
         filename, _flag, file_format = split_path_spec(str(field), default_format="mha")
         self.field_dataset = Dataset(Path(filename), file_format)
         self.field_group = group
-        self.max_displacement = float(max_displacement)
+        self.auto_displacement = isinstance(max_displacement, str) and max_displacement.strip().lower() == "auto"
+        if isinstance(max_displacement, str) and not self.auto_displacement:
+            try:
+                max_displacement = float(max_displacement)
+            except ValueError:
+                raise TransformError(
+                    f"'Warp' has a max_displacement of '{max_displacement}', which is neither a number nor 'auto'.",
+                    "Give a distance in the case's world units (max_displacement: 250.0), or 'auto'"
+                    " to read the bound the fields recorded when they were written.",
+                ) from None
+        # Per component, in the field's own (x, y, z) order. A scalar bound broadcasts to all three;
+        # `auto` fills this from the headers on first use. Per component and not one number, because
+        # these grids are anisotropic: one collapsed maximum over-reads the fine axes.
+        self.max_displacement = 0.0 if self.auto_displacement else float(max_displacement)
+        self._auto_bound: list[float] | None = None
+        self._auto_resolved = False
         self.interpolation = interpolation
+
+    def _component_bound(self) -> list[float] | None:
+        """The per-component bound this stage warps within, or ``None`` when it has none.
+
+        For ``auto``, the largest bound any field in the group recorded, read from headers alone and
+        memoized. If a single entry carries no bound the answer is ``None``: a maximum over the
+        others would be a bound for them and a guess for that one, and this number is what sizes the
+        region every read depends on.
+        """
+        if not self.auto_displacement:
+            return [self.max_displacement] * 3 if self.max_displacement > 0.0 else None
+        if self._auto_resolved:
+            return self._auto_bound
+        self._auto_resolved = True
+        from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE
+
+        bound: list[float] = []
+        try:
+            group = self._group_for(None)
+            # The header reads belong inside: a directory store lists its entries from the filesystem
+            # alone, so an unreadable field can only surface here, one entry at a time.
+            for entry in self.field_dataset.get_names(group):
+                _shape, attribute = self.field_dataset.get_infos(group, entry)
+                if DISPLACEMENT_BOUND_ATTRIBUTE not in attribute:
+                    return self._auto_bound
+                recorded = [float(value) for value in attribute.get_np_array(DISPLACEMENT_BOUND_ATTRIBUTE).ravel()]
+                bound = recorded if not bound else [max(a, b) for a, b in zip(bound, recorded, strict=False)]
+        except Exception:  # an unreadable field dataset is a whole-volume answer, not a crash
+            return self._auto_bound
+        if bound and max(bound) > 0.0:
+            self._auto_bound = bound
+        return self._auto_bound
 
     def _spacing(self, cache_attribute: Attribute) -> list[float] | None:
         """The case's spacing in array order (z, y, x); ``Spacing`` is stored (x, y, z)."""
@@ -1579,39 +1633,46 @@ class Warp(Transform):
         return list(reversed(spacing))
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        spacing = self._spacing(cache_attribute)
-        # Both fallbacks say what is missing. A Warp that silently costs the whole volume is the
-        # expensive failure of this stage: the result is right, so nothing looks wrong -- only the
-        # peak memory, which is the one thing the reader was trying to control by streaming.
-        if self.max_displacement <= 0.0:
+        bound = self._component_bound()
+        if bound is None:
             return PatchLocality(
                 LocalityKind.WHOLE_VOLUME,
                 reason=(
-                    "no 'max_displacement' is declared, so how far this warp reaches into its source"
-                    " is unknown and the region it must read is unbounded. Declare it in the case's"
-                    " world units (e.g. max_displacement: 250.0) to stream with a halo"
-                ),
+                    "max_displacement is 'auto' and the fields carry no recorded bound to read"
+                    " (KonfAI records one on an OME-Zarr field it writes; other formats and other"
+                    " producers do not)"
+                    if self.auto_displacement
+                    else "no 'max_displacement' is declared"
+                )
+                + " -- how far this warp reaches into its source is unknown and the region it must"
+                " read is unbounded. Declare it in the case's world units (e.g."
+                " max_displacement: 250.0) to stream with a halo",
             )
+        spacing = self._spacing(cache_attribute)
         if spacing is None:
             return PatchLocality(
                 LocalityKind.WHOLE_VOLUME,
                 reason=(
-                    "the case carries no 'Spacing', so a 'max_displacement' in world units cannot be"
+                    "the case carries no 'Spacing', so a displacement in world units cannot be"
                     " turned into a halo in voxels"
                 ),
             )
-        halo = tuple(int(np.ceil(self.max_displacement / extent)) if extent > 0 else 0 for extent in spacing)
+        # The bound is per component in (x, y, z); a halo is per array axis in (z, y, x).
+        per_axis = list(reversed(bound))[-len(spacing) :] if len(bound) >= len(spacing) else [max(bound)] * len(spacing)
+        halo = tuple(
+            int(np.ceil(value / extent)) if extent > 0 else 0 for value, extent in zip(per_axis, spacing, strict=False)
+        )
         return PatchLocality(LocalityKind.HALO, halo=halo)
 
-    def _group_for(self, name: str) -> str:
+    def _group_for(self, name: str | None) -> str:
         if self.field_group is not None:
             return self.field_group
         groups = [str(group) for group in self.field_dataset.get_group()]
         if len(groups) == 1:
             return groups[0]
+        where = f"the field for case '{name}'" if name is not None else "the fields"
         raise TransformError(
-            f"'Warp' cannot tell which group of '{self.field_dataset.filename}' holds the field for"
-            f" case '{name}': it has {len(groups)}.",
+            f"'Warp' cannot tell which group of '{self.field_dataset.filename}' holds {where}: it has {len(groups)}.",
             "Name it: Warp: {field: ./DVF:omezarr, group: DVF}.",
         )
 
@@ -1658,14 +1719,25 @@ class Warp(Transform):
         return moved.squeeze(0).to(tensor.dtype)
 
     def _check_declared_bound(self, field: torch.Tensor, name: str) -> None:
-        largest = float(field.abs().max()) if field.numel() else 0.0
-        if self.max_displacement > 0.0 and largest > self.max_displacement:
-            raise TransformError(
-                f"The field for case '{name}' displaces up to {largest:.3f}, beyond the declared"
-                f" max_displacement of {self.max_displacement:.3f}.",
-                "Raise max_displacement to at least the field's true maximum: the region read is"
-                " sized from it, so a larger displacement samples outside what was read.",
-            )
+        """The declaration is a promise about the region that was read; check it against the samples.
+
+        Per component, matching how the halo was derived: a field that stays under the collapsed
+        maximum can still exceed the bound on one axis, which is the axis whose halo was too small.
+        """
+        bound = self._component_bound()
+        if bound is None or not field.numel():
+            return
+        for component in range(field.shape[0]):
+            declared = bound[component] if component < len(bound) else max(bound)
+            largest = float(field[component].abs().max())
+            if largest > declared:
+                raise TransformError(
+                    f"The field for case '{name}' displaces up to {largest:.3f} on component"
+                    f" {component}, beyond the {declared:.3f} this stage sized its region from.",
+                    "Raise max_displacement to at least the field's true maximum, or use"
+                    " max_displacement: auto: the region read is sized from that number, so a larger"
+                    " displacement samples outside what was read.",
+                )
 
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
