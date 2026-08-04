@@ -104,6 +104,28 @@ def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
     return dest_dir / (stem + suffixes)
 
 
+def _work_dir(tmp_dir: Path | None, prefix: str) -> Path:
+    """A private scratch directory for one command's intermediates.
+
+    Under ``tmp_dir`` when the caller named one, under ``tempfile.gettempdir()`` otherwise — which is
+    the same contract every other KonfAI app CLI offers through ``--tmp-dir``.
+
+    THE DEFAULT IS NOT ALWAYS A GOOD PLACE, WHICH IS WHY THE OPTION EXISTS. What is staged here is
+    volume-sized: the moved image and the displacement field are written before being collected into
+    ``--output``. Where TMPDIR is a tmpfs that traffic is charged to RAM, on top of the volumes the run
+    already holds; on a large 3D case that is what fills memory or the temp quota mid-run. A caller who
+    knows better — a pipeline node with its results on real disk — names a directory here instead of
+    overriding ``TMPDIR`` from outside, which would also move things TMPDIR legitimately owns (torch's
+    DataLoader opens its worker sockets there, and AF_UNIX addresses cap at ~108 bytes).
+
+    The directory returned is always freshly created and owned by the caller of this function, never
+    ``tmp_dir`` itself: the command removes what it made and leaves the directory it was given.
+    """
+    if tmp_dir is not None:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=str(tmp_dir) if tmp_dir is not None else None))
+
+
 def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
     """Copy an output beside the results, keeping the form the preset produced (file or store)."""
     dest = _output_path(dest_dir, stem, "".join(src.suffixes))
@@ -194,6 +216,13 @@ class ImpactRegKonfAIApp:
             command += ["-i", str(fixed_mask or _neutral_mask(work / "FixedMask.mha"))]
             command += ["-i", str(moving_mask or _neutral_mask(work / "MovingMask.mha"))]
         command += ["-o", str(out)]
+        # Hand konfai-apps a workspace we own, which is what every other app CLI does by exposing
+        # --tmp-dir. Without it konfai-apps auto-creates one under TMPDIR, writes the prediction to
+        # ./Predictions inside it, and copies that into `-o` before deleting it: one extra full-size
+        # write of the moved image AND the displacement field, on whatever filesystem TMPDIR names.
+        # Given a caller-owned workspace it writes straight into `-o` (see konfai_apps
+        # _stage_result_dir / _collect_result), so the copy disappears and `out` is where it always was.
+        command += ["--tmp-dir", str(out)]
         if tta:
             command += ["--tta", str(tta)]
         # Preset-parameter tuning: forwarded verbatim to `konfai-apps infer --set` (applies to every preset).
@@ -228,11 +257,14 @@ class ImpactRegKonfAIApp:
         tta: int = 0,
         keep_dvf: bool = False,
         config_overrides: list[str] | None = None,
+        tmp_dir: Path | None = None,
     ) -> None:
         """Register each fixed/moving pair with the selected presets and ensemble their DVFs.
 
         Masks are optional and restrict the metric region; when omitted a whole-image mask is auto-filled,
         so every preset app always receives the four inputs (fixed, moving, fixed mask, moving mask) it declares.
+
+        ``tmp_dir`` names where the intermediates are staged; see :func:`_work_dir`.
         """
         for index, (fixed_image, moving_image) in enumerate(zip(fixed_images, moving_images, strict=True)):
             case_out = output / f"P{index:03d}"
@@ -241,7 +273,7 @@ class ImpactRegKonfAIApp:
             # caller asks, so `uncertainty` can measure the ensemble spread afterwards.
             if keep_dvf:
                 (case_out / _ENSEMBLE_DIR).mkdir(parents=True, exist_ok=True)
-            work = Path(tempfile.mkdtemp(prefix="impact_reg_"))
+            work = _work_dir(tmp_dir, "impact_reg_")
             try:
                 # Masks are optional (they restrict the metric region); pass only those the caller gave and
                 # let konfai-apps fill the rest with an all-ones default — no input read on the no-mask path.
@@ -324,6 +356,7 @@ class ImpactRegKonfAIApp:
         gpu: list[int] = [],
         cpu: int | None = None,
         quiet: bool = False,
+        tmp_dir: Path | None = None,
     ) -> None:
         """Evaluate a registration on any subset of modalities (image MAE, seg Dice, landmark TRE).
 
@@ -337,7 +370,7 @@ class ImpactRegKonfAIApp:
             transform_path = transforms[index] if index < len(transforms) else None
             transform = sitk.ReadTransform(str(transform_path)) if transform_path else sitk.Transform()
             eval_out = output / f"P{index:03d}" / "Evaluation"
-            work = Path(tempfile.mkdtemp(prefix="impact_reg_eval_"))
+            work = _work_dir(tmp_dir, "impact_reg_eval_")
             try:
                 # Image: moving resampled onto the fixed grid vs fixed (MAE). Mask is optional.
                 if index < len(fixed_images) and index < len(moving_images):
@@ -409,6 +442,7 @@ class ImpactRegKonfAIApp:
         gpu: list[int] = [],
         cpu: int | None = None,
         quiet: bool = False,
+        tmp_dir: Path | None = None,
     ) -> None:
         """Estimate registration uncertainty as the voxel-wise spread of an ensemble of displacement fields.
 
@@ -419,7 +453,7 @@ class ImpactRegKonfAIApp:
         """
         if len(dvfs) < 2:
             raise ValueError("Uncertainty needs at least two ensemble displacement fields.")
-        work = Path(tempfile.mkdtemp(prefix="impact_reg_unc_"))
+        work = _work_dir(tmp_dir, "impact_reg_unc_")
         try:
             reference = read_displacement_field(dvfs[0])
             rank = reference.GetDimension()
