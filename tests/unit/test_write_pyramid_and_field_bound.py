@@ -188,3 +188,30 @@ def test_a_field_records_its_own_bound_on_both_write_paths(tmp_path):
     assert _read_konfai_attributes(streamed)[DISPLACEMENT_BOUND_ATTRIBUTE] == expected
     assert is_displacement_field(streamed)
     assert DISPLACEMENT_BOUND_ATTRIBUTE in Dataset(tmp_path / "streamed", "omezarr").get_infos("DVF", "case")[1]
+
+
+@_needs_rfc5
+def test_the_recorded_bound_turns_into_a_per_axis_halo_under_anisotropy(tmp_path) -> None:
+    """What the bound is FOR, read by the stage that consumes it.
+
+    Component ``i`` of a displacement field is world axis (x, y, z)[i], while array axes are
+    (z, y, x). So a halo in array order reads the components reversed, each against its own spacing.
+    Getting the pairing wrong is a warp that raises nothing and reads the wrong neighbourhood.
+    """
+    from konfai.data.transform import LocalityKind, Warp
+
+    field = np.zeros((3, 8, 8, 8), dtype=np.float32)
+    field[0, 4, 4, 4], field[1, 2, 2, 2], field[2, 1, 1, 1] = 917.5, -640.25, 96.0
+    store = tmp_path / "fields" / "case" / "DVF.ome.zarr"
+    store.parent.mkdir(parents=True)
+    write_ome_zarr(store, field, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), displacement_field=True)
+
+    warp = Warp(field=f"{tmp_path / 'fields'}:omezarr", group="DVF", max_displacement="auto")
+    attribute = Attribute()
+    attribute["Spacing"] = np.array([30.08, 30.08, 40.0])  # stored (x, y, z)
+
+    locality = warp.patch_locality(attribute)
+
+    # z takes the z component (96 um over a 40 um voxel), x the x component (917.5 over 30.08).
+    assert locality.kind is LocalityKind.HALO
+    assert locality.halo == (3, 22, 31)

@@ -26,10 +26,18 @@ import pytest
 import torch
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import LocalityKind, RegionContext, Save, Warp
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset
 from konfai.utils.errors import TransformError
+from konfai.utils.ome_zarr import _zarr_v3_available
 
 pytest.importorskip("SimpleITK")
+
+# A field records its bound in an RFC-5 store, which is zarr v3 (NGFF >= 0.5) -- and zarr 2.x, the
+# newest release for Python 3.10, cannot write one. Everything else here reads an h5 field.
+_needs_rfc5 = pytest.mark.skipif(
+    not _zarr_v3_available(),
+    reason="a displacement field's bound is recorded in a zarr v3 store (zarr>=3, Python>=3.11)",
+)
 
 SPACING = (2.0, 1.0, 1.0)  # (x, y, z) SimpleITK order
 
@@ -83,10 +91,75 @@ def test_declares_a_halo_sized_by_the_declared_displacement() -> None:
 
 def test_without_a_declared_bound_it_refuses_to_stream() -> None:
     """The safety net: an undeclared reach is an unbounded read, so the whole volume it is."""
-    assert Warp(field="./x:h5", group="DVF").patch_locality(_attributes()).kind is LocalityKind.WHOLE_VOLUME
-    assert Warp(field="./x:h5", group="DVF", max_displacement=4.0).patch_locality(Attribute()).kind is (
-        LocalityKind.WHOLE_VOLUME
-    )
+    undeclared = Warp(field="./x:h5", group="DVF").patch_locality(_attributes())
+    assert undeclared.kind is LocalityKind.WHOLE_VOLUME
+    # And it says which of the two is missing: a Warp that silently costs the whole volume still
+    # produces the right result, so the reason is the only thing that shows.
+    assert undeclared.reason is not None and "max_displacement" in undeclared.reason
+
+    no_geometry = Warp(field="./x:h5", group="DVF", max_displacement=4.0).patch_locality(Attribute())
+    assert no_geometry.kind is LocalityKind.WHOLE_VOLUME
+    assert no_geometry.reason is not None and "Spacing" in no_geometry.reason
+
+
+@_needs_rfc5
+def test_auto_reads_the_bound_the_fields_recorded_when_they_were_written(tmp_path: Path) -> None:
+    """``max_displacement: auto`` is the number the producer already knew.
+
+    A field records its own per-component bound at write time, so asking the user to measure it is
+    asking for something the store can answer from a header. Per component and not one collapsed
+    maximum: these grids are anisotropic, and one number over-reads the fine axes.
+    """
+    fields = Dataset(tmp_path / "dvf", "omezarr")
+    for case, shift in (("CASE_000", (1.0, 2.0, 3.0)), ("CASE_001", (0.5, 6.0, 1.0))):
+        field = np.zeros((3, 4, 5, 6), dtype=np.float32)
+        for component, value in enumerate(shift):
+            field[component] = value
+        attribute = _attributes()
+        attribute[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+        fields.write("DVF", case, field, attribute)
+
+    warp = Warp(field=f"{tmp_path / 'dvf'}:omezarr", group="DVF", max_displacement="auto")
+    locality = warp.patch_locality(_attributes())
+
+    # The cohort's bound is (x=1.0, y=6.0, z=3.0); spacing in array order (z, y, x) is (1, 1, 2).
+    assert locality.kind is LocalityKind.HALO
+    assert locality.halo == (3, 6, 1)
+
+
+def test_auto_survives_an_unreadable_entry_in_the_field_group(tmp_path: Path) -> None:
+    """The whole group is header-read, including entries this run never warps.
+
+    A directory store lists its entries from the filesystem alone, so a corrupt one is only met at
+    its header -- and the planner reads them all before any case is chosen. Left to raise, one bad
+    file anywhere under the field root aborts the run with a SimpleITK error instead of the
+    whole-volume answer the same guard promises for a field dataset it cannot read.
+    """
+    fields = Dataset(tmp_path / "dvf", "mha")
+    field = np.zeros((3, 4, 5, 6), dtype=np.float32)
+    for case in ("CASE_000", "CASE_001"):
+        fields.write("DVF", case, field, _attributes())
+    # The first entry the scan meets, so the read reaches it before any bound-less entry ends the scan.
+    (tmp_path / "dvf" / "CASE_000" / "DVF.mha").write_bytes(b"not an image")
+
+    locality = Warp(field=f"{tmp_path / 'dvf'}:mha", group="DVF", max_displacement="auto").patch_locality(_attributes())
+
+    assert locality.kind is LocalityKind.WHOLE_VOLUME
+
+
+def test_auto_falls_back_to_the_whole_volume_when_no_field_recorded_a_bound(tmp_path: Path) -> None:
+    """Only an OME-Zarr field KonfAI wrote carries the bound, so `auto` must answer for the rest."""
+    _source, _fields, _volume = _fixture(tmp_path)  # an h5 field: no bound recorded
+
+    locality = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement="auto").patch_locality(_attributes())
+
+    assert locality.kind is LocalityKind.WHOLE_VOLUME
+    assert locality.reason is not None and "no recorded bound" in locality.reason
+
+
+def test_a_max_displacement_that_is_neither_a_number_nor_auto_is_refused() -> None:
+    with pytest.raises(TransformError, match="neither a number nor 'auto'"):
+        Warp(field="./x:h5", group="DVF", max_displacement="lots")
 
 
 def test_a_constant_shift_moves_the_volume_by_that_many_voxels(tmp_path: Path) -> None:
@@ -119,11 +192,15 @@ def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_a_field_beyond_the_declared_bound_raises(tmp_path: Path) -> None:
     """Declared, then verified: sampling outside what was read would show as a dark rim and nothing
-    else, so the mismatch is raised instead."""
+    else, so the mismatch is raised instead.
+
+    Checked per component, the way the halo is derived: a field under the collapsed maximum can
+    still exceed the bound on one axis, and that axis is the one whose halo was too small.
+    """
     _source, _fields, volume = _fixture(tmp_path, shift_um=(0.0, 0.0, 9.0))
     warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement=1.0)
 
-    with pytest.raises(TransformError, match="beyond the declared"):
+    with pytest.raises(TransformError, match=r"on component 2, beyond the 1\.000"):
         whole = (slice(0, 10), slice(0, 12), slice(0, 14))
         warp.stream_region(
             "CASE_000",
