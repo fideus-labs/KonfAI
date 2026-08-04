@@ -28,13 +28,21 @@ composable stages (GPU, Riemannian Adam), each seeding the next like ANTs' ``-t`
 
     Rigid (MI, centre-of-mass init) -> Affine (MI, seeded by the rigid) -> deformable
 
-The deformable stage is selected by ``deformable_method`` — the ONE knob that specialises this shared
-module into the different presets (exactly as ConvexAdam's shared module is specialised by
-``stages``):
+Two mirrored knobs specialise this shared module into the different presets (as ConvexAdam's shared
+module is specialised by ``stages``). ``deformable_method`` picks the deformable stage:
 
     "syn"    symmetric diffeomorphic SyN (CC)   — invertible, higher quality, averages cleanly for ensembling
     "greedy" greedy diffeomorphic (CC)          — one-directional, faster / lower VRAM
     "none"   linear only                        — Rigid+Affine, no deformable (the FireANTs_Affine preset)
+
+and ``linear_method`` picks the linear one:
+
+    "rigid_affine"  Rigid then Affine, as ANTs   — the default
+    "rigid"         Rigid only                   — no free scale or shear
+    "none"          deformable from identity     — for a pair already globally aligned
+
+The two cannot both be "none": that leaves nothing to optimise, and the engine says so rather than
+returning an identity transform.
 
 Masks: the optional Fixed/Moving masks restrict the metric to a region. FireANTs implements this by
 carrying the mask as the last image channel and prefixing the metric with ``masked_``; a mask is only
@@ -439,6 +447,7 @@ class FireANTsEngine:
         affine_metric: str,
         affine_lr: float,
         moments_init: str,
+        linear_method: str,
         deformable_method: str,
         deformable_metric: str,
         deformable_lr: float,
@@ -455,7 +464,15 @@ class FireANTsEngine:
         self._affine_metric = affine_metric
         self._affine_lr = float(affine_lr)
         self._moments_init = moments_init
+        self._linear_method = linear_method
         self._deformable_method = deformable_method
+        if linear_method == "none" and deformable_method == "none":
+            # Refused at BUILD time, as the missing-feature-model check above is. Left to run, this
+            # optimises nothing and returns the identity: a Moved equal to the moving image and a
+            # zero field, which no downstream check tells apart from a pair that needed no moving.
+            raise ValueError(
+                "linear_method='none' with deformable_method='none' leaves nothing to optimise."
+            )
         self._deformable_metric = deformable_metric
         self._deformable_lr = float(deformable_lr)
         self._integrator_n = int(integrator_n)
@@ -590,45 +607,60 @@ class FireANTsEngine:
         # Linear: Rigid(MI) -> Affine(MI, seeded by the rigid), mirroring ANTs. The affine seeds the
         # deformable stage (or is the whole transform when deformable_method == "none").
         #
-        # The rigid's starting translation mirrors ANTs' ``-r [fixed,moving,N]``: "cof" is the centre
-        # of FRAME (N=0), "com" the centre of MASS (N=1). "cof" aligns the image frames, not the
-        # subjects, so a subject sitting off its frame centre starts the whole chain misplaced.
-        init_translation: "str | torch.Tensor" = "cof"
-        if self._moments_init == "com":
-            init_translation = self._center_of_mass_translation(
-                fixed,
-                moving,
-                fixed_mask if use_fixed_mask else None,
-                moving_mask if use_moving_mask else None,
-                device,
+        # ``linear_method`` is ``deformable_method``'s mirror. "none" skips the linear stage entirely
+        # and starts the deformable from identity: for a pair already globally aligned -- a tiled
+        # refinement at full resolution, where each patch sees only local anatomy, so a per-patch
+        # rigid has no global meaning and neighbouring patches would each estimate a different one
+        # and tear the blended field at the seams.
+        affine_matrix: "torch.Tensor | None"
+        if self._linear_method == "none":
+            affine_matrix = None  # the deformable stage builds its own identity init
+        else:
+            # The rigid's starting translation mirrors ANTs' ``-r [fixed,moving,N]``: "cof" is the
+            # centre of FRAME (N=0), "com" the centre of MASS (N=1). "cof" aligns the image frames,
+            # not the subjects, so a subject sitting off its frame centre starts the chain misplaced.
+            init_translation: "str | torch.Tensor" = "cof"
+            if self._moments_init == "com":
+                init_translation = self._center_of_mass_translation(
+                    fixed,
+                    moving,
+                    fixed_mask if use_fixed_mask else None,
+                    moving_mask if use_moving_mask else None,
+                    device,
+                )
+            rigid = RigidRegistration(
+                scales=self._scales,
+                iterations=self._affine_iterations,
+                fixed_images=bf,
+                moving_images=bm,
+                loss_type=affine_loss,
+                optimizer="Adam",
+                optimizer_lr=self._affine_lr,
+                cc_kernel_size=self._cc_kernel,
+                init_translation=init_translation,
             )
-        rigid = RigidRegistration(
-            scales=self._scales,
-            iterations=self._affine_iterations,
-            fixed_images=bf,
-            moving_images=bm,
-            loss_type=affine_loss,
-            optimizer="Adam",
-            optimizer_lr=self._affine_lr,
-            cc_kernel_size=self._cc_kernel,
-            init_translation=init_translation,
-        )
-        rigid.optimize()
-        rigid_matrix = rigid.get_rigid_matrix().detach()
+            rigid.optimize()
+            rigid_matrix = rigid.get_rigid_matrix().detach()
 
-        affine = AffineRegistration(
-            scales=self._scales,
-            iterations=self._affine_iterations,
-            fixed_images=bf,
-            moving_images=bm,
-            loss_type=affine_loss,
-            optimizer="Adam",
-            optimizer_lr=self._affine_lr,
-            cc_kernel_size=self._cc_kernel,
-            init_rigid=rigid_matrix,
-        )
-        affine.optimize()
-        affine_matrix = affine.get_affine_matrix().detach()
+            if self._linear_method == "rigid":
+                # The rigid -- rotation and translation, no scale or shear -- IS the linear transform.
+                # For inspecting the linear stage without the affine's free scale, and for a pair whose
+                # scale difference is known to be nothing the affine should be free to invent.
+                affine_matrix = rigid_matrix
+            else:
+                affine = AffineRegistration(
+                    scales=self._scales,
+                    iterations=self._affine_iterations,
+                    fixed_images=bf,
+                    moving_images=bm,
+                    loss_type=affine_loss,
+                    optimizer="Adam",
+                    optimizer_lr=self._affine_lr,
+                    cc_kernel_size=self._cc_kernel,
+                    init_rigid=rigid_matrix,
+                )
+                affine.optimize()
+                affine_matrix = affine.get_affine_matrix().detach()
 
         # Deformable stage (or none). SyN and Greedy share the same constructor surface; both warm-start
         # from the affine so their TOTAL transform already bakes in the linear pre-align.
@@ -791,6 +823,13 @@ class RegistrationNet(network.Network):
             "of frame (N=0), 'com' = intensity-weighted centre of mass (N=1). Prefer 'com' when the subject "
             "sits off its frame centre, where aligning frames starts the chain misplaced.",
         ] = "cof",
+        linear_method: Annotated[
+            Literal["rigid_affine", "rigid", "none"],
+            "Linear stage before the deformable: 'rigid_affine' (rigid then affine, as ANTs), 'rigid' to stop "
+            "after the rigid and leave scale and shear alone, or 'none' to skip it and start the deformable "
+            "from identity. Use 'none' only on a pair already globally aligned -- a tiled pass at full "
+            "resolution, where a patch sees no global context and a per-patch linear has no global meaning.",
+        ] = "rigid_affine",
         deformable_method: Annotated[
             Literal["none", "syn", "greedy"],
             "Deformable algorithm: 'syn' (symmetric diffeomorphic), 'greedy', or 'none' to stop after the affine stage.",
@@ -843,6 +882,7 @@ class RegistrationNet(network.Network):
             affine_metric,
             affine_lr,
             moments_init,
+            linear_method,
             deformable_method,
             deformable_metric,
             deformable_lr,
