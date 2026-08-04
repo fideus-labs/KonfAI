@@ -15,12 +15,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """konfai_mcp/runner.py contracts: bounded final join on a wedged spawn child, config-restore
-failures surfaced in the payload, and a non-differentiable loss propagating into the smoke-test
-ok flag."""
+failures surfaced in the payload, the parent-side config guard around a child that may be killed,
+and a non-differentiable loss propagating into the smoke-test ok flag."""
 
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -72,6 +74,72 @@ def test_validate_config_restore_failure_is_surfaced(tmp_path: Path, monkeypatch
 
     assert payload["ok"] is True  # the build itself succeeded
     assert payload["config_restore_failed"] == "read-only filesystem"  # the leak is recorded, not hidden
+
+
+def test_preserved_config_puts_back_what_a_child_that_never_returned_rewrote(tmp_path: Path) -> None:
+    """The child restores the config in its own ``finally``, which a timeout kill never reaches.
+
+    Only the parent is guaranteed to outlive the child, so its snapshot is the one that has to hold --
+    including when the call leaves by an exception rather than a return.
+    """
+    config_path = tmp_path / "Transform.yml"
+    authored = "Transformer:\n  name: TEST\n"
+    config_path.write_text(authored, encoding="utf-8")
+
+    with pytest.raises(RuntimeError), runner.preserved_config(config_path):
+        config_path.write_text(f"{authored}  manual_seed: 0\n  Dataset:\n    subset: None\n", encoding="utf-8")
+        raise RuntimeError("Isolated subprocess failed.")
+
+    assert config_path.read_text(encoding="utf-8") == authored
+
+
+def test_a_restore_that_fails_part_way_leaves_a_whole_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing backs this guard up, so a half-written restore is the file the agent is left with.
+
+    The KonfAI-rewritten config is verbose but valid; a fragment of the authored one is neither, and
+    the authored bytes are already off disk by the time the restore starts.
+    """
+    config_path = tmp_path / "Transform.yml"
+    authored = "Transformer:\n  name: TEST\n" + "  # a line the author wrote\n" * 40
+    config_path.write_text(authored, encoding="utf-8")
+    rewritten = "Transformer:\n  name: TEST\n  manual_seed: 0\n"
+
+    def truncate_then_fail(self: Path, *_args: Any, **_kwargs: Any) -> int:
+        # What a real write does when the device fills: the file is opened truncated, then fails.
+        self.write_bytes(b"Transfor")
+        raise OSError("no space left on device")
+
+    with pytest.raises(OSError), runner.preserved_config(config_path):
+        config_path.write_text(rewritten, encoding="utf-8")
+        monkeypatch.setattr(Path, "write_text", truncate_then_fail)
+
+    monkeypatch.undo()
+    assert config_path.read_text(encoding="utf-8") == rewritten
+    assert [entry.name for entry in tmp_path.iterdir()] == ["Transform.yml"]
+
+
+def test_plan_transform_is_covered_by_that_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    """The tool builds a Transformer from the agent's own config, so it needs the guard the validate
+    path already had -- otherwise a plan slower than the timeout returns the config KonfAI-rewritten."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    server = load_mcp_server()
+    config_path = Path(server.SESSION.config_path("transform"))
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    authored = "Transformer:\n  name: TEST\n"
+    config_path.write_text(authored, encoding="utf-8")
+
+    def killed_child(*_args: Any, **_kwargs: Any) -> None:
+        config_path.write_text(f"{authored}  manual_seed: 0\n", encoding="utf-8")
+        raise RuntimeError("Isolated subprocess failed.")
+
+    monkeypatch.setattr(server, "_run_api_in_subprocess", killed_child)
+
+    with pytest.raises(RuntimeError):
+        server.plan_transform(cpu=1)
+
+    assert config_path.read_text(encoding="utf-8") == authored
 
 
 def test_smoke_test_non_differentiable_loss_is_not_ok(tmp_path: Path) -> None:

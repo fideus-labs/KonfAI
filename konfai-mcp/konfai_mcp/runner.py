@@ -156,6 +156,31 @@ def run_api_in_subprocess(target: str, kwargs: dict[str, Any], timeout_s: float 
     return result["payload"]
 
 
+@contextmanager
+def preserved_config(config_path: Path):
+    """Keep the authored config bytes across a child that builds a workflow from them.
+
+    Building materializes every default into the file, and the child puts it back in its own
+    ``finally`` -- which a timeout kill (SIGTERM) never reaches. Only the parent is guaranteed to
+    outlive the child, so the snapshot belongs on this side of the spawn.
+    """
+    backup = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
+    try:
+        yield
+    finally:
+        if backup is not None and config_path.is_file() and config_path.read_text(encoding="utf-8") != backup:
+            # Written aside then renamed, like the restore in validate_workflow_api: this is the last
+            # guard on the file, so a write that fails part-way must leave the config KonfAI rewrote
+            # rather than a fragment of the authored one.
+            staging = config_path.with_name(f".{config_path.name}.{uuid4().hex}.tmp")
+            try:
+                staging.write_text(backup, encoding="utf-8")
+                os.replace(staging, config_path)
+            except OSError:
+                staging.unlink(missing_ok=True)
+                raise
+
+
 _OUTPUT_TAIL = 4000  # enough for a traceback and the lines around it, short enough to hand to an agent
 
 
@@ -776,11 +801,16 @@ def validate_workflow_api(
     validate_root: str | None = None,
     collect_model_outputs: bool = False,
 ) -> dict[str, Any]:
-    """Child entrypoint that builds (and optionally sets up / one-steps) a workflow without side effects.
+    """Child entrypoint that builds (and optionally sets up / one-steps) a workflow, and puts back what it touched.
 
     Levels: 'instantiate' builds the workflow object, 'setup' also builds datasets/dataloaders,
     'train_step' additionally runs one forward+backward on one batch. The authored config bytes are
-    snapshotted and restored, and all outputs go to a throwaway validate root.
+    snapshotted and restored, and all outputs go to a throwaway validate root -- with one exception.
+    ``workflow='transform'`` at ``level='setup'`` runs ``Transformer.setup``, whose plan opens and
+    removes a real region-write probe on every destination the config's Write/Save stages name: those
+    are the author's own stores, not the validate root. A directory store gets a probe case created
+    then removed; a single-file store (h5) is created if it was not already there. ``plan_transform``
+    is the tool for a plan.
     """
     resolved_validate_root = (
         Path(validate_root).resolve()

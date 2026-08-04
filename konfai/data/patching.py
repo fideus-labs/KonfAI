@@ -2161,6 +2161,7 @@ class DatasetManager:
         self._stream_refusals.clear()
         self._stream_evolved.clear()
         self._swept_entries.clear()
+        self._sweep_failure = None
         self.cache_attributes_bak = copy.deepcopy(self._cache_attributes_pristine)
         self.cache_attributes = copy.deepcopy(self._cache_attributes_pristine)
 

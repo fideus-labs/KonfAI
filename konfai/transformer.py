@@ -38,7 +38,7 @@ from ruamel.yaml import YAML
 
 from konfai import config_file, transforms_directory
 from konfai.data.case_reduction import CaseReduction, split_chain
-from konfai.data.data_manager import DataTransform, _format_gib
+from konfai.data.data_manager import DataTransform, _format_gib, _node_local_ranks
 from konfai.data.patching import DatasetManager, _save_destination
 from konfai.data.transform import Save, split_expand
 from konfai.utils.config import apply_config, config
@@ -408,17 +408,19 @@ class Transformer(DistributedObject):
     def compute_plan(self, world_size: int = 1, overwrite: bool = False) -> TransformPlan:
         """Plan every (case, chain) on the launcher, headers plus one write probe per destination."""
         budget = self.dataset.resolved_budget()
-        per_rank_budget = budget.per_rank_bytes(world_size)
+        per_rank_budget = budget.per_rank_bytes(_node_local_ranks(world_size))
         # Resolved before anything is planned, because a reduction sizes its regions against it --
         # the plan must measure the same run setup() will enforce.
         self._budget_bytes = per_rank_budget
         entries: list[TransformPlanEntry] = []
         probed: set[tuple[str, str]] = set()
-        dtype_hypothesis = "float32 / source channels"
+        planned_dtypes: set[str] = set()
         for group_dest, managers in self._managers().items():
             group_src = self._group_src_of(group_dest)
             reduction = self._reduction(group_dest, managers)
             if reduction is not None:
+                reduction_dtype = np.dtype("float32")
+                planned_dtypes.add(str(reduction_dtype))
                 reduction_plan = reduction.plan()
                 skipped = not overwrite and reduction.destination.is_dataset_exist(
                     reduction.group, reduction.reduce.output
@@ -436,7 +438,7 @@ class Transformer(DistributedObject):
                         reduction.destination,
                         reduction.group,
                         [reduction_plan.channels, *reduction_plan.spatial],
-                        np.dtype("float32"),
+                        reduction_dtype,
                         reduction.reference.landed_attributes(),
                     )
                     if probe_failure is not None:
@@ -453,6 +455,9 @@ class Transformer(DistributedObject):
                     )
                 )
                 continue
+            if managers:
+                # Every manager of a group shares one chain object, so one of them answers for all.
+                planned_dtypes.add(str(self._dtype_hypothesis(managers[0])))
             expansion = split_expand(managers[0].transforms)[1] if managers else None
             for manager in managers:
                 case_bytes = int(np.prod(manager.base_shape, dtype=np.int64)) * _CASE_ELEMENT_BYTES
@@ -509,6 +514,7 @@ class Transformer(DistributedObject):
                 if dataset.is_group_exist(group_src):
                     available.update(dataset.get_names(group_src))
             dropped[group_src] = len(available - kept)
+        dtype_hypothesis = f"{'/'.join(sorted(planned_dtypes)) or 'float32'} / source channels"
         return TransformPlan(entries, per_rank_budget, budget.description, world_size, dropped, dtype_hypothesis)
 
     def setup(self, world_size: int):

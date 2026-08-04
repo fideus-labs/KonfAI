@@ -873,30 +873,24 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             blocked["semantic_review"] = semantic_review
             return blocked
 
-        # The child restores the authored config in its own finally, but a timeout kills it with SIGTERM
-        # and that finally never runs. Snapshot in the parent (which outlives the child) and restore
-        # unconditionally, so a slow-model timeout can never leave the agent's config KonfAI-rewritten.
-        config_backup = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
-        try:
-            with tempfile.TemporaryDirectory(prefix=f"konfai_mcp_validate_{normalized_workflow}_") as tmp_dir:
-                # Isolated spawn child: agent-authored code never executes in the server process and
-                # edited workspace modules are always re-imported fresh.
-                payload = mcp_runner.run_api_in_subprocess(
-                    "konfai_mcp.runner:validate_workflow_api",
-                    {
-                        "workflow": normalized_workflow,
-                        "level": level,
-                        "workspace_dir": str(workspace),
-                        "config": str(config_path),
-                        "models": resolved_models or None,
-                        "validate_root": tmp_dir,
-                        "collect_model_outputs": collect_model_outputs,
-                    },
-                )
-        finally:
-            if config_backup is not None and config_path.is_file():
-                if config_path.read_text(encoding="utf-8") != config_backup:
-                    config_path.write_text(config_backup, encoding="utf-8")
+        with (
+            mcp_runner.preserved_config(config_path),
+            tempfile.TemporaryDirectory(prefix=f"konfai_mcp_validate_{normalized_workflow}_") as tmp_dir,
+        ):
+            # Isolated spawn child: agent-authored code never executes in the server process and
+            # edited workspace modules are always re-imported fresh.
+            payload = mcp_runner.run_api_in_subprocess(
+                "konfai_mcp.runner:validate_workflow_api",
+                {
+                    "workflow": normalized_workflow,
+                    "level": level,
+                    "workspace_dir": str(workspace),
+                    "config": str(config_path),
+                    "models": resolved_models or None,
+                    "validate_root": tmp_dir,
+                    "collect_model_outputs": collect_model_outputs,
+                },
+            )
         payload["returncode"] = 0 if payload.get("ok", False) else 1
         payload["semantic_review"] = semantic_review
         return payload
