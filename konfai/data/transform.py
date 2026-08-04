@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing import current_process, get_context
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -1105,6 +1105,7 @@ class Resample(TransformInverse, ABC):
         scales: list[float],
         n_in: list[int],
         offsets: list[float],
+        fill: float | None = None,
     ) -> torch.Tensor:
         """``resample_region`` for an offset map: ITK's sampler, and a fill where the source stops.
 
@@ -1118,7 +1119,12 @@ class Resample(TransformInverse, ABC):
         Coordinates are global (the target index, not its offset within the region), so a region and
         the whole volume put the same sample in the same place -- which is what makes the streamed
         and whole-volume paths equal by construction here rather than by agreement.
+
+        ``fill`` overrides :attr:`fill_value` for a caller sampling something that is not the case's
+        own voxels: a displacement field says nothing outside its extent, and what it means there is
+        zero -- the identity -- not the image's background.
         """
+        outside = self.fill_value if fill is None else fill
         device = sub_tensor.device
         ndim = len(target_slices)
         window = [int(extent) for extent in sub_tensor.shape[1:]]
@@ -1134,7 +1140,7 @@ class Resample(TransformInverse, ABC):
             # Nothing of this region is on the source. Real for a REGRID -- a target grid may reach
             # past its case -- and worth its own exit: the gather below would read a window that was
             # only ever clamped to something legal, and then be overwritten by the fill anyway.
-            return torch.full(out_shape, self.fill_value, device=device, dtype=torch.float32).type(sub_tensor.dtype)
+            return torch.full(out_shape, outside, device=device, dtype=torch.float32).type(sub_tensor.dtype)
 
         def local(index: torch.Tensor, k: int) -> torch.Tensor:
             """A global source index as an offset into the window that was read, kept in range."""
@@ -1176,7 +1182,7 @@ class Resample(TransformInverse, ABC):
         # Filled while still floating, then cast ONCE: torch implements masked_fill for float dtypes
         # and not for every integer one -- uint16 is a microscope's native dtype and has no fill at
         # all -- so filling after the cast fails on exactly the volumes this stage is built for.
-        return out.masked_fill(~mask.unsqueeze(0), self.fill_value).type(sub_tensor.dtype)
+        return out.masked_fill(~mask.unsqueeze(0), outside).type(sub_tensor.dtype)
 
     @abstractmethod
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
@@ -1287,6 +1293,29 @@ class ResampleToShape(Resample):
         cache_attribute["Size"] = shape
 
 
+@dataclass(frozen=True)
+class _ReferenceMap:
+    """Everything a case needs to be read onto a reference grid, computed once from the headers.
+
+    All in array order (Z, Y, X) except ``source_spacing`` and ``direction``, which stay in the
+    physical (x, y, z) their headers are written in — a displacement's components are physical too,
+    and converting them is the one place the two orders meet.
+    """
+
+    target: list[int]
+    #: Where a target voxel reads from: ``source_index = scale * target_index + offset``.
+    scales: list[float]
+    offsets: list[float]
+    source_spacing: list[float]
+    direction: np.ndarray
+    #: The same affine map from the target grid to the FIELD's grid, when one is declared. The field
+    #: has a grid of its own -- typically coarser than both -- and is interpolated where it is asked,
+    #: which is what lets a field solved at 120 um move a volume stored at 30 um.
+    field_scales: list[float] | None = None
+    field_offsets: list[float] | None = None
+    field_shape: list[int] | None = None
+
+
 class ResampleToReference(Resample):
     """Resample a case onto the grid of a declared reference — extent, spacing, origin, direction.
 
@@ -1304,19 +1333,38 @@ class ResampleToReference(Resample):
     place. Naming an image cannot make that mistake: the header IS the declaration. It is also what
     an atlas loop needs, where round N+1's reference is round N's own output.
 
+    ``field`` MAKES IT A RECALAGE, IN ONE INTERPOLATION. With a displacement field declared, this is
+    ``sitk.Resample(image, reference_grid, DisplacementFieldTransform(field))`` — for each voxel of
+    the TARGET grid, the field is read at that voxel's world position, added, and the source sampled
+    once at the displaced point. Doing it as two stages instead (this one, then ``Warp``) resamples
+    twice, and a volume that has been interpolated twice has lost detail the second pass invented no
+    more of — which is the whole reason the appearance of an atlas is rebuilt from native volumes.
+
+    The field lives on ITS OWN grid, and is read where it is asked: it is defined in world units, so
+    a field solved at 120 um moves a volume stored at 30 um without being upsampled first. Outside
+    its own extent the displacement is zero, as SimpleITK has it — the transform is the identity
+    where the field says nothing.
+
+    ``max_displacement`` sizes the source region a target region needs, exactly as on ``Warp``, and
+    is CHECKED against every field region actually read.
+
     WHAT IT REFUSES, rather than resample onto a grid it cannot honestly reach:
 
-    - a case, or a reference, whose header carries no ``Origin``/``Spacing``/``Direction`` — with no
-      geometry there is no physical space to resample IN, and a size ratio would silently stand in
-      for one;
-    - a reference whose ``Direction`` differs from the case's — the two grids' axes then do not line
+    - a case, a reference or a field whose header carries no ``Origin``/``Spacing``/``Direction`` —
+      with no geometry there is no physical space to resample IN, and a size ratio would silently
+      stand in for one;
+    - a reference or a field whose ``Direction`` differs from the case's — the axes then do not line
       up, and the map is a rotation, not a scale and a shift per axis. ``Canonical`` first;
     - a case that does not meet the reference grid at all — the output would be pure ``fill``, and
-      an all-background member is a plausible, wrong contribution to a median.
+      an all-background member is a plausible, wrong contribution to a median;
+    - a field that displaces further than ``max_displacement`` declared, because the region read was
+      sized from that number and sampling past it returns zeros — a dark rim around the anatomy and
+      nothing else to see.
 
     Everything else it declares. A case that reaches only part of the reference is legal and
     common — the rest takes ``fill`` — and the plan prints how much of the grid each case covers,
-    because "most of this template is fill" is not something to discover in a viewer.
+    because "most of this template is fill" is not something to discover in a viewer. A field with
+    no bound at all declares ``WHOLE_VOLUME`` and says so, as ``Warp`` does.
     """
 
     def __init__(
@@ -1324,6 +1372,9 @@ class ResampleToReference(Resample):
         entry: str,
         group: str | None = None,
         dataset: str | None = None,
+        field: str | None = None,
+        field_group: str | None = None,
+        max_displacement: float | str = 0.0,
         fill: float = 0.0,
         inverse: bool = True,
     ) -> None:
@@ -1343,9 +1394,30 @@ class ResampleToReference(Resample):
         if dataset is not None and str(dataset).strip():
             filename, _flag, file_format = split_path_spec(str(dataset), default_format="mha")
             self.reference_dataset = Dataset(Path(filename), file_format)
+        # The transform argument, in SimpleITK's sense: absent, this resamples onto the grid and
+        # nothing more. Its field lookup, its bound and its refusals are Warp's, shared. Either
+        # spelling declares one -- a store of its own, or a group beside the cases -- and a bound
+        # declared without a field is refused rather than quietly doing nothing.
+        declared = (field is not None and str(field).strip()) or field_group is not None
+        if not declared and _is_declared_displacement(max_displacement):
+            raise TransformError(
+                f"'ResampleToReference' was given a max_displacement of {max_displacement!r} and no field to apply.",
+                "Name the field the displacement belongs to — field: ./DVF:omezarr, or field_group:"
+                " DVF for fields stored beside the cases — or drop max_displacement: without a field"
+                " this stage resamples onto the grid and nothing more.",
+            )
+        self.displacement: _DisplacementSource | None = (
+            _DisplacementSource("ResampleToReference", field, field_group, max_displacement) if declared else None
+        )
         self._grid: tuple[list[int], np.ndarray, np.ndarray, np.ndarray] | None = None
         # Each case's map, kept from where its own header was in hand. See _recorded().
-        self._maps: dict[str, tuple[list[int], list[float], list[float]]] = {}
+        self._maps: dict[str, _ReferenceMap] = {}
+
+    def set_datasets(self, datasets: list[Dataset]) -> None:
+        super().set_datasets(datasets)
+        # A field declared by group alone lives beside the cases, so it looks in the same roots.
+        if self.displacement is not None:
+            self.displacement.roots = list(datasets)
 
     # ------------------------------------------------------------------ the reference
 
@@ -1427,16 +1499,32 @@ class ResampleToReference(Resample):
 
     # ------------------------------------------------------------------ the map
 
-    def grid_map(
-        self, name: str, shape: list[int], cache_attribute: Attribute
-    ) -> tuple[list[int], list[float], list[float]]:
-        """``(target extent, scales, offsets)`` in array order — where each target voxel reads from.
+    @staticmethod
+    def _affine_between(
+        from_origin: np.ndarray,
+        from_spacing: np.ndarray,
+        onto_origin: np.ndarray,
+        onto_spacing: np.ndarray,
+        direction: np.ndarray,
+    ) -> tuple[list[float], list[float]]:
+        """``(scales, offsets)`` in array order taking an index of the FROM grid to one of the ONTO grid.
 
-        A target voxel ``o`` is the physical point ``O_ref + D (S_ref * o)``; the source index of
-        that point is ``(D^-1 (p - O_src)) / S_src``. With one shared ``D`` the two compose to
-        ``scale * o + offset`` per axis, which is the whole map -- and the reason a differing
-        ``D`` is refused rather than approximated: it would make the map a rotation, whose source
-        region for a target box is a rotated box no per-axis window can describe.
+        An index ``o`` of the from-grid is the physical point ``O_from + D (S_from * o)``; the index
+        of that point on the onto-grid is ``(D^-1 (p - O_onto)) / S_onto``. With one shared ``D``
+        those compose to ``scale * o + offset`` per axis, which is the whole map. Used twice per
+        case -- target to source, and target to the field's own grid -- because it is the same
+        question asked of two grids.
+        """
+        scale_xyz = from_spacing / onto_spacing
+        offset_xyz = (direction.T @ (from_origin - onto_origin)) / onto_spacing
+        return [float(value) for value in scale_xyz[::-1]], [float(value) for value in offset_xyz[::-1]]
+
+    def grid_map(self, name: str, shape: list[int], cache_attribute: Attribute) -> _ReferenceMap:
+        """Where each target voxel reads from — and, with a field, where it reads the displacement.
+
+        The reason a differing ``Direction`` is refused rather than approximated: it would make the
+        map a rotation, whose source region for a target box is a rotated box no per-axis window can
+        describe.
         """
         target, ref_origin, ref_spacing, ref_direction = self.reference_grid()
         where = f"case '{name}'" if name else "the case"
@@ -1446,27 +1534,57 @@ class ResampleToReference(Resample):
                 f" axis/axes, onto reference '{self.entry}', which has {len(target)}.",
             )
         origin, spacing, direction = self._geometry(cache_attribute, len(shape), where)
-        if not np.allclose(direction, ref_direction, rtol=0.0, atol=1e-6):
-            raise TransformError(
-                f"'ResampleToReference' will not resample {where} onto reference '{self.entry}':"
-                f" their Direction cosines differ ({direction.ravel().tolist()} against"
-                f" {ref_direction.ravel().tolist()}).",
-                "The two grids' axes do not line up, so the map between them is a rotation rather"
-                " than a scale and a shift per axis. Bring them to a common orientation first"
-                " (Canonical), or make the reference one of the cases as they are stored.",
-            )
-        # (x, y, z) throughout, then reversed once at the end: Origin/Spacing are physical order and
-        # the scales/offsets a region window is cut with are array order.
-        scale_xyz = ref_spacing / spacing
-        offset_xyz = (direction.T @ (ref_origin - origin)) / spacing
-        scales = [float(value) for value in scale_xyz[::-1]]
-        offsets = [float(value) for value in offset_xyz[::-1]]
+        self._refuse_differing_direction(direction, ref_direction, where, f"reference '{self.entry}'")
+        scales, offsets = self._affine_between(ref_origin, ref_spacing, origin, spacing, direction)
         self._refuse_if_disjoint(name, shape, target, scales, offsets)
+        field_scales, field_offsets, field_shape = self._field_map(name, direction, ref_origin, ref_spacing, where)
+        recorded = _ReferenceMap(
+            target=target,
+            scales=scales,
+            offsets=offsets,
+            source_spacing=[float(value) for value in spacing],
+            direction=direction,
+            field_scales=field_scales,
+            field_offsets=field_offsets,
+            field_shape=field_shape,
+        )
         if name:
-            self._maps[name] = (target, scales, offsets)
-        return target, scales, offsets
+            self._maps[name] = recorded
+        return recorded
 
-    def _recorded(self, name: str) -> tuple[list[int], list[float], list[float]]:
+    @staticmethod
+    def _refuse_differing_direction(direction: np.ndarray, other: np.ndarray, where: str, what: str) -> None:
+        if np.allclose(direction, other, rtol=0.0, atol=1e-6):
+            return
+        raise TransformError(
+            f"'ResampleToReference' will not resample {where} through {what}: their Direction"
+            f" cosines differ ({direction.ravel().tolist()} against {other.ravel().tolist()}).",
+            "The grids' axes do not line up, so the map between them is a rotation rather than a"
+            " scale and a shift per axis. Bring them to a common orientation first (Canonical), or"
+            " use grids as they were stored.",
+        )
+
+    def _field_map(
+        self, name: str, direction: np.ndarray, ref_origin: np.ndarray, ref_spacing: np.ndarray, where: str
+    ) -> tuple[list[float] | None, list[float] | None, list[int] | None]:
+        """The affine map from the TARGET grid onto the field's own grid, from headers alone.
+
+        The field is a second image with a geometry of its own, so asking "where on the field does
+        this target voxel land" is the same question as "where on the source", asked of another
+        grid -- and separable for the same reason. That is what lets the field be interpolated onto
+        the target region with the ordinary sampler, filled with zero where it does not reach, which
+        is precisely what ``DisplacementFieldTransform`` does outside its own extent.
+        """
+        if self.displacement is None or not name:
+            return None, None, None
+        shape, attribute = self.displacement.infos(name)
+        spatial = [int(extent) for extent in shape[1:]]
+        field_origin, field_spacing, field_direction = self._geometry(attribute, len(spatial), f"the field for {where}")
+        self._refuse_differing_direction(direction, field_direction, where, f"the field for {where}")
+        scales, offsets = self._affine_between(ref_origin, ref_spacing, field_origin, field_spacing, direction)
+        return scales, offsets, spatial
+
+    def _recorded(self, name: str) -> _ReferenceMap:
         """The map computed for this case back when its own header was in hand.
 
         A REGION read hands back the REGION's ``Origin`` — honest about what it read, and not the
@@ -1530,8 +1648,8 @@ class ResampleToReference(Resample):
 
     def plan_note(self, group_dest: str, name: str, shape: list[int], cache_attribute: Attribute) -> str | None:
         del group_dest
-        target, scales, offsets = self.grid_map(name, shape, cache_attribute)
-        covered = self.coverage(shape, target, scales, offsets)
+        recorded = self.grid_map(name, shape, cache_attribute)
+        covered = self.coverage(shape, recorded.target, recorded.scales, recorded.offsets)
         if covered >= self._WORTH_SAYING:
             return None
         return (
@@ -1542,20 +1660,54 @@ class ResampleToReference(Resample):
     # ------------------------------------------------------------------ the contract
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        return self.grid_map(name, shape, cache_attribute)[0]
+        return self.grid_map(name, shape, cache_attribute).target
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Not RESCALE: that kind's map is a size ratio, computed by the dispatcher from the two
         # extents, and this stage's target grid has an origin of its own. REGRID hands the map back
         # to the stage -- stream_region_source below -- which is the only place it is known.
+        if self.displacement is None:
+            return PatchLocality(LocalityKind.REGRID)
+        # Through a field, the source region is the affine box GROWN by the displacement, so the
+        # same missing bound that makes Warp whole-volume makes this one whole-volume too -- and for
+        # the same reason: what it reaches is unknown, not unbounded-in-principle.
+        if self.displacement.component_bound() is None:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=self.displacement.undeclared_reason())
+        if _array_order_spacing(cache_attribute) is None:
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason=(
+                    "the case carries no 'Spacing', so a displacement in world units cannot be"
+                    " turned into a halo in voxels"
+                ),
+            )
         return PatchLocality(LocalityKind.REGRID)
+
+    def _displacement_halo(self, source_spacing: list[float]) -> int:
+        """How far past the affine box a target region reaches, in SOURCE voxels.
+
+        One number rather than one per axis, because ``source_window`` grows every axis by the same
+        margin; the largest per-axis halo is the only safe collapse of a per-component bound.
+        """
+        if self.displacement is None:
+            return 1
+        bound = self.displacement.component_bound()
+        if bound is None:
+            return 1
+        return 1 + max(_halo_from_bound(bound, list(reversed(source_spacing))))
 
     def stream_region_source(
         self, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
     ) -> list[slice]:
         shape = [int(extent) for extent in source_spatial_shape]
-        _target, scales, offsets = self.grid_map("", shape, cache_attribute)
-        return Resample.source_window(target_slices, scales, shape, offsets=offsets)
+        recorded = self.grid_map("", shape, cache_attribute)
+        return Resample.source_window(
+            target_slices,
+            recorded.scales,
+            shape,
+            halo=self._displacement_halo(recorded.source_spacing),
+            offsets=recorded.offsets,
+        )
 
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
@@ -1563,26 +1715,155 @@ class ResampleToReference(Resample):
         # The recorded map, not one read off `cache_attribute`: what arrives here describes the
         # REGION, down to an Origin of its own. See _recorded().
         del cache_attribute
-        _target, scales, offsets = self._recorded(name)
-        return self.resample_region(
+        return self._sample_target_region(
+            name,
             tensor,
+            self._recorded(name),
             tuple(context.target),
             [sl.start for sl in context.source],
-            scales,
             [int(extent) for extent in context.source_shape],
-            offsets,
         )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         shape = [int(extent) for extent in tensor.shape[1:]]
-        target, scales, offsets = self.grid_map(name, shape, cache_attribute)
-        # The same sampler the streamed path runs, over one region that happens to be the whole
-        # grid: equality between the two paths is then a property of the code, not a claim about it.
-        result = self.resample_region(
-            tensor, tuple(slice(0, extent) for extent in target), [0] * len(shape), scales, shape, offsets
+        recorded = self.grid_map(name, shape, cache_attribute)
+        # The same call the streamed path makes, over one region that happens to be the whole grid:
+        # equality between the two paths is then a property of the code, not a claim about it.
+        result = self._sample_target_region(
+            name, tensor, recorded, tuple(slice(0, extent) for extent in recorded.target), [0] * len(shape), shape
         )
         self.write_stream_cache_attribute(cache_attribute, shape)
         return result
+
+    # ------------------------------------------------------------------ the sampling
+
+    def _sample_target_region(
+        self,
+        name: str,
+        sub_tensor: torch.Tensor,
+        recorded: _ReferenceMap,
+        target_slices: tuple[slice, ...],
+        region_starts: list[int],
+        n_in: list[int],
+    ) -> torch.Tensor:
+        """One region of the target grid, read from the source in a SINGLE interpolation.
+
+        Without a field this is the separable map and the ordinary sampler. With one, the
+        displacement is added to the target voxel's source coordinate BEFORE anything is sampled --
+        so the source is read once, at the displaced point, and never resampled onto an intermediate
+        grid first. Resampling then warping is two interpolations of the same voxels, and the second
+        cannot restore what the first smoothed away.
+        """
+        if self.displacement is None:
+            return self.resample_region(
+                sub_tensor, target_slices, region_starts, recorded.scales, n_in, recorded.offsets
+            )
+        displacement = self._displacement_in_source_voxels(name, recorded, target_slices, sub_tensor.device)
+        coordinates = [
+            recorded.scales[axis]
+            * torch.arange(sl.start, sl.stop, device=sub_tensor.device, dtype=torch.float32).reshape(
+                [-1 if other == axis else 1 for other in range(len(target_slices))]
+            )
+            + recorded.offsets[axis]
+            + displacement[axis]
+            for axis, sl in enumerate(target_slices)
+        ]
+        return self._sample_at(sub_tensor, coordinates, region_starts, n_in)
+
+    def _displacement_in_source_voxels(
+        self, name: str, recorded: _ReferenceMap, target_slices: tuple[slice, ...], device: torch.device
+    ) -> list[torch.Tensor]:
+        """The field over this target region, per ARRAY axis, in source voxels.
+
+        Three conversions meet here, and getting any of them wrong gives a warp that looks entirely
+        plausible and moves the anatomy somewhere else:
+
+        - the field is read on ITS grid and interpolated onto the TARGET grid (a separable map, so
+          the ordinary sampler does it), filled with ZERO outside — a displacement field says
+          nothing outside its own extent, and SimpleITK reads that as the identity;
+        - its components are physical (x, y, z) and the axes here are array order (z, y, x);
+        - and they are world units, which become source voxels through ``D^-1`` and the source
+          spacing — not through the reference's, which is a different grid.
+
+        One place this and ITK can legitimately differ: a target voxel landing EXACTLY on the
+        field's last half-voxel (index ``n - 0.5``, the open end of the domain). The map here is
+        computed exactly, while ITK reaches the same index through world coordinates and loses the
+        last bits against a large origin, so the two can disagree about which side of the boundary
+        it falls on. It takes a field grid that is an exact multiple of the target's AND shares its
+        origin to arrange — which a solved field is not — and it costs one boundary column.
+        """
+        source = self.displacement
+        if source is None:  # unreachable: only a declared field reaches this
+            raise TransformError(f"'ResampleToReference' has no field to read for case '{name}'.")
+        window = Resample.source_window(
+            target_slices,
+            cast("list[float]", recorded.field_scales),
+            cast("list[int]", recorded.field_shape),
+            offsets=cast("list[float]", recorded.field_offsets),
+        )
+        rank = len(target_slices)
+        field = source.read(name, tuple(window), rank).to(device)
+        source.check_bound(field, name)
+        # Zero outside: the transform is the identity where the field does not reach.
+        on_target = self._resample_offset_region(
+            field,
+            target_slices,
+            [sl.start for sl in window],
+            cast("list[float]", recorded.field_scales),
+            cast("list[int]", recorded.field_shape),
+            cast("list[float]", recorded.field_offsets),
+            fill=0.0,
+        )
+        # (x, y, z) world -> (x, y, z) source index, then reversed to array order.
+        rotated = torch.from_numpy(np.ascontiguousarray(recorded.direction.T)).to(device=device, dtype=on_target.dtype)
+        spacing = torch.tensor(recorded.source_spacing, device=device, dtype=on_target.dtype).reshape(-1, 1)
+        flat = (rotated @ on_target.reshape(rank, -1)) / spacing
+        return list(reversed(list(flat.reshape(on_target.shape))))
+
+    def _sample_at(
+        self,
+        sub_tensor: torch.Tensor,
+        coordinates: list[torch.Tensor],
+        region_starts: list[int],
+        n_in: list[int],
+    ) -> torch.Tensor:
+        """Trilinear gather at an ARBITRARY coordinate per voxel — ITK's rules, non-separably.
+
+        The sibling of :meth:`Resample._resample_offset_region`, and deliberately not a
+        generalisation of it: there the coordinate is a product of per-axis maps, so no coordinate
+        volume is ever built and one ``index_select`` per axis does the work. A displacement is not
+        separable, so here a coordinate exists per voxel and the eight corners are gathered flat.
+        Both obey the same convention -- inside is ``[-0.5, n - 0.5)``, taps clamp to the buffer,
+        outside takes ``fill_value`` -- which is what makes them interchangeable at the seam.
+        """
+        rank = len(coordinates)
+        window = [int(extent) for extent in sub_tensor.shape[1:]]
+        extent = list(torch.broadcast_shapes(*[axis.shape for axis in coordinates]))
+        inside = torch.ones(extent, dtype=torch.bool, device=sub_tensor.device)
+        bases: list[torch.Tensor] = []
+        weights: list[torch.Tensor] = []
+        for axis, coordinate in enumerate(coordinates):
+            inside &= (coordinate >= -0.5) & (coordinate < n_in[axis] - 0.5)
+            base = torch.floor(coordinate)
+            bases.append(base.to(torch.int32).expand(extent))
+            weights.append((coordinate - base).expand(extent))
+        out_shape = [int(sub_tensor.shape[0]), *extent]
+        if not bool(inside.any()):
+            return torch.full(out_shape, self.fill_value, device=sub_tensor.device, dtype=torch.float32).type(
+                sub_tensor.dtype
+            )
+        work = sub_tensor if sub_tensor.is_floating_point() else sub_tensor.type(torch.float32)
+        flat_source = work.reshape(int(work.shape[0]), -1)
+        out = torch.zeros(out_shape, device=sub_tensor.device, dtype=work.dtype)
+        for corner in itertools.product((0, 1), repeat=rank):
+            flat_index = torch.zeros(extent, dtype=torch.long, device=sub_tensor.device)
+            weight = torch.ones(extent, device=sub_tensor.device, dtype=work.dtype)
+            for axis, step in enumerate(corner):
+                index = torch.clamp(bases[axis].to(torch.long) + step, 0, n_in[axis] - 1) - region_starts[axis]
+                flat_index = flat_index * window[axis] + torch.clamp(index, 0, window[axis] - 1)
+                weight = weight * (weights[axis] if step else 1 - weights[axis]).to(work.dtype)
+            out += flat_source.index_select(1, flat_index.reshape(-1)).reshape(out_shape) * weight
+        return out.masked_fill(~inside.unsqueeze(0), self.fill_value).type(sub_tensor.dtype)
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
         target, origin, spacing, direction = self.reference_grid()
@@ -1619,10 +1900,12 @@ class ResampleToReference(Resample):
         shape = [int(extent) for extent in tensor.shape[1:]]
         target = self._inverse_geometry(cache_attribute)
         # _inverse_geometry restored the case's own geometry, so this is the forward map again --
-        # read off the same headers -- and the inverse is that map solved for the other index.
-        _spatial, scales, offsets = self.grid_map(name, target, cache_attribute)
-        back_scales = [1.0 / scale for scale in scales]
-        back_offsets = [-offset / scale for offset, scale in zip(offsets, scales, strict=True)]
+        # read off the same headers -- and the inverse is that map solved for the other index. The
+        # displacement is NOT undone: inverting a field is a solve, not an algebraic step, so a
+        # warped forward inverts to the grid change alone and says so below.
+        recorded = self.grid_map(name, target, cache_attribute)
+        back_scales = [1.0 / scale for scale in recorded.scales]
+        back_offsets = [-offset / scale for offset, scale in zip(recorded.offsets, recorded.scales, strict=True)]
         return self.resample_region(
             tensor, tuple(slice(0, extent) for extent in target), [0] * len(shape), back_scales, shape, back_offsets
         )
@@ -2030,6 +2313,200 @@ class Write(Save):
         super().__init__(dataset, group, scale_factors, downsample_method)
 
 
+class _DisplacementSource:
+    """A displacement field on disk: where it is, how far it reaches, and how to read a region of it.
+
+    Shared by the two stages that resample THROUGH one. What they do with the displacement differs
+    entirely — :class:`Warp` adds it on the case's own grid, :class:`ResampleToReference` composes it
+    with a change of grid — but where the field comes from, what bounds it, and the refusal when it
+    exceeds that bound are the same questions, and were answered twice before this existed.
+
+    ``owner`` is the stage's name, so a refusal reads as coming from the stage the user declared and
+    not from a helper they have never heard of.
+    """
+
+    def __init__(self, owner: str, field: str | None, group: str | None, max_displacement: float | str) -> None:
+        self.owner = owner
+        # A root of its own, or none: with no ``field`` path the fields are a GROUP of the run's own
+        # dataset_filenames, one entry per case — which is how a cohort registered in place stores
+        # them, beside the volumes they were solved on.
+        self.dataset: Dataset | None = None
+        if field is not None and str(field).strip():
+            filename, _flag, file_format = split_path_spec(str(field), default_format="mha")
+            self.dataset = Dataset(Path(filename), file_format)
+        elif group is None:
+            raise TransformError(
+                f"'{owner}' has neither a 'field' path nor a group to find the fields in.",
+                f"Name the store — {owner}: {{field: ./DVF:omezarr}} — or, for fields stored beside"
+                f" the cases, the group they are in: {owner}: {{field_group: DVF}}.",
+            )
+        self.group = group
+        #: The run's own roots, handed over by the owner; only consulted when there is no path.
+        self.roots: list[Dataset] = []
+        self.auto = isinstance(max_displacement, str) and max_displacement.strip().lower() == "auto"
+        if isinstance(max_displacement, str) and not self.auto:
+            try:
+                max_displacement = float(max_displacement)
+            except ValueError:
+                raise TransformError(
+                    f"'{owner}' has a max_displacement of '{max_displacement}', which is neither a number nor 'auto'.",
+                    "Give a distance in the case's world units (max_displacement: 250.0), or 'auto'"
+                    " to read the bound the fields recorded when they were written.",
+                ) from None
+        # Per component, in the field's own (x, y, z) order. A scalar bound broadcasts to all three;
+        # `auto` fills this from the headers on first use. Per component and not one number, because
+        # these grids are anisotropic: one collapsed maximum over-reads the fine axes.
+        self.max_displacement = 0.0 if self.auto else float(max_displacement)
+        self._auto_bound: list[float] | None = None
+        self._auto_resolved = False
+
+    def component_bound(self) -> list[float] | None:
+        """The per-component bound this stage warps within, or ``None`` when it has none.
+
+        For ``auto``, the largest bound any field in the group recorded, read from headers alone and
+        memoized. If a single entry carries no bound the answer is ``None``: a maximum over the
+        others would be a bound for them and a guess for that one, and this number is what sizes the
+        region every read depends on.
+        """
+        if not self.auto:
+            return [self.max_displacement] * 3 if self.max_displacement > 0.0 else None
+        if self._auto_resolved:
+            return self._auto_bound
+        self._auto_resolved = True
+        from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE
+
+        bound: list[float] = []
+        try:
+            group = self.group_for(None)
+            root = self._root_for(None)
+            # The header reads belong inside: a directory store lists its entries from the filesystem
+            # alone, so an unreadable field can only surface here, one entry at a time.
+            for entry in root.get_names(group):
+                _shape, attribute = root.get_infos(group, entry)
+                if DISPLACEMENT_BOUND_ATTRIBUTE not in attribute:
+                    return self._auto_bound
+                recorded = [float(value) for value in attribute.get_np_array(DISPLACEMENT_BOUND_ATTRIBUTE).ravel()]
+                bound = recorded if not bound else [max(a, b) for a, b in zip(bound, recorded, strict=False)]
+        except Exception:  # an unreadable field dataset is a whole-volume answer, not a crash
+            return self._auto_bound
+        if bound and max(bound) > 0.0:
+            self._auto_bound = bound
+        return self._auto_bound
+
+    def undeclared_reason(self) -> str:
+        """Why there is no bound, in the words the plan prints."""
+        return (
+            "max_displacement is 'auto' and the fields carry no recorded bound to read"
+            " (KonfAI records one on an OME-Zarr field it writes; other formats and other"
+            " producers do not)"
+            if self.auto
+            else "no 'max_displacement' is declared"
+        ) + (
+            " -- how far this reaches into its source is unknown and the region it must read is"
+            " unbounded. Declare it in the case's world units (e.g. max_displacement: 250.0) to"
+            " stream with a halo"
+        )
+
+    def group_for(self, name: str | None) -> str:
+        if self.group is not None:
+            return self.group
+        if self.dataset is None:  # unreachable: a source with no path was given a group to use
+            raise TransformError(
+                f"'{self.owner}' has no field store of its own and no group to look for one in.",
+                f"Name the group the fields are in: {self.owner}: {{field_group: DVF}}.",
+            )
+        groups = [str(group) for group in self.dataset.get_group()]
+        if len(groups) == 1:
+            return groups[0]
+        where = f"the field for case '{name}'" if name is not None else "the fields"
+        raise TransformError(
+            f"'{self.owner}' cannot tell which group of '{self.dataset.filename}' holds {where}: it has {len(groups)}.",
+            f"Name it: {self.owner}: {{field: ./DVF:omezarr, group: DVF}}.",
+        )
+
+    def _root_for(self, name: str | None) -> Dataset:
+        """The store this case's field is in: the declared one, or whichever run root holds it."""
+        if self.dataset is not None:
+            return self.dataset
+        group = self.group_for(name)
+        for root in self.roots:
+            if name is None or root.is_dataset_exist(group, name):
+                return root
+        raise TransformError(
+            f"'{self.owner}' cannot find a field for case '{name}' in group '{group}' of"
+            f" {', '.join(str(root.filename) for root in self.roots) or 'any dataset'}.",
+            "A field declared by group alone is looked up beside the cases, one entry per case."
+            f" Give the store a path of its own instead: {self.owner}: {{field: ./DVF:omezarr}}.",
+        )
+
+    def infos(self, name: str) -> tuple[list[int], Attribute]:
+        """The field entry's shape and header, without reading a voxel of it."""
+        return self._root_for(name).get_infos(self.group_for(name), name)
+
+    def read(self, name: str, region: tuple[slice, ...] | None, channels: int) -> torch.Tensor:
+        group = self.group_for(name)
+        root = self._root_for(name)
+        if region is None:
+            data, _attributes = root.read_data(group, name)
+        else:
+            data, _attributes = root.read_data_slice(group, name, (slice(None), *region))
+        field = torch.from_numpy(np.ascontiguousarray(data)).float()
+        if field.shape[0] != channels:
+            raise TransformError(
+                f"The field for case '{name}' has {field.shape[0]} component(s) where the case has"
+                f" {channels} spatial axis/axes.",
+                "A displacement field carries one component per spatial axis, component-first.",
+            )
+        return field
+
+    def check_bound(self, field: torch.Tensor, name: str) -> None:
+        """The declaration is a promise about the region that was read; check it against the samples.
+
+        Per component, matching how the halo was derived: a field that stays under the collapsed
+        maximum can still exceed the bound on one axis, which is the axis whose halo was too small.
+        """
+        bound = self.component_bound()
+        if bound is None or not field.numel():
+            return
+        for component in range(field.shape[0]):
+            declared = bound[component] if component < len(bound) else max(bound)
+            largest = float(field[component].abs().max())
+            if largest > declared:
+                raise TransformError(
+                    f"The field for case '{name}' displaces up to {largest:.3f} on component"
+                    f" {component}, beyond the {declared:.3f} '{self.owner}' sized its region from.",
+                    "Raise max_displacement to at least the field's true maximum, or use"
+                    " max_displacement: auto: the region read is sized from that number, so a larger"
+                    " displacement samples outside what was read.",
+                )
+
+
+def _halo_from_bound(bound: list[float], spacing: list[float]) -> tuple[int, ...]:
+    """A world-unit displacement bound as a per-axis halo in voxels.
+
+    ``bound`` is per component in (x, y, z); ``spacing`` is per array axis in (z, y, x). Reversing
+    one of them is the whole of this function, and the reason it is one.
+    """
+    per_axis = list(reversed(bound))[-len(spacing) :] if len(bound) >= len(spacing) else [max(bound)] * len(spacing)
+    return tuple(
+        int(np.ceil(value / extent)) if extent > 0 else 0 for value, extent in zip(per_axis, spacing, strict=False)
+    )
+
+
+def _is_declared_displacement(max_displacement: float | str) -> bool:
+    """Whether a ``max_displacement`` was actually asked for, rather than left at its default."""
+    if isinstance(max_displacement, str):
+        return bool(max_displacement.strip())
+    return float(max_displacement) != 0.0
+
+
+def _array_order_spacing(cache_attribute: Attribute) -> list[float] | None:
+    """A case's spacing in array order (z, y, x); ``Spacing`` is stored (x, y, z)."""
+    if "Spacing" not in cache_attribute:
+        return None
+    return list(reversed([float(value) for value in np.asarray(cache_attribute.get_np_array("Spacing")).ravel()]))
+
+
 class Warp(Transform):
     """Resample a case through a displacement field defined on the same grid.
 
@@ -2066,6 +2543,8 @@ class Warp(Transform):
     ) -> None:
         super().__init__()
         if not field or not str(field).strip():
+            # Required here and not merely by the shared source: a Warp's field is on the case's own
+            # grid, so there is no group-beside-the-cases shorthand for it to fall back to.
             raise TransformError(
                 "'Warp' needs a 'field': the displacement field to resample through.",
                 "Declare it, e.g. Warp: {field: ./DVF:omezarr, max_displacement: 250.0}.",
@@ -2075,83 +2554,14 @@ class Warp(Transform):
                 f"'Warp' has an unknown interpolation '{interpolation}'.",
                 "Use 'linear' for an image or 'nearest' for a label map.",
             )
-        filename, _flag, file_format = split_path_spec(str(field), default_format="mha")
-        self.field_dataset = Dataset(Path(filename), file_format)
-        self.field_group = group
-        self.auto_displacement = isinstance(max_displacement, str) and max_displacement.strip().lower() == "auto"
-        if isinstance(max_displacement, str) and not self.auto_displacement:
-            try:
-                max_displacement = float(max_displacement)
-            except ValueError:
-                raise TransformError(
-                    f"'Warp' has a max_displacement of '{max_displacement}', which is neither a number nor 'auto'.",
-                    "Give a distance in the case's world units (max_displacement: 250.0), or 'auto'"
-                    " to read the bound the fields recorded when they were written.",
-                ) from None
-        # Per component, in the field's own (x, y, z) order. A scalar bound broadcasts to all three;
-        # `auto` fills this from the headers on first use. Per component and not one number, because
-        # these grids are anisotropic: one collapsed maximum over-reads the fine axes.
-        self.max_displacement = 0.0 if self.auto_displacement else float(max_displacement)
-        self._auto_bound: list[float] | None = None
-        self._auto_resolved = False
+        self.displacement = _DisplacementSource("Warp", field, group, max_displacement)
         self.interpolation = interpolation
 
-    def _component_bound(self) -> list[float] | None:
-        """The per-component bound this stage warps within, or ``None`` when it has none.
-
-        For ``auto``, the largest bound any field in the group recorded, read from headers alone and
-        memoized. If a single entry carries no bound the answer is ``None``: a maximum over the
-        others would be a bound for them and a guess for that one, and this number is what sizes the
-        region every read depends on.
-        """
-        if not self.auto_displacement:
-            return [self.max_displacement] * 3 if self.max_displacement > 0.0 else None
-        if self._auto_resolved:
-            return self._auto_bound
-        self._auto_resolved = True
-        from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE
-
-        bound: list[float] = []
-        try:
-            group = self._group_for(None)
-            # The header reads belong inside: a directory store lists its entries from the filesystem
-            # alone, so an unreadable field can only surface here, one entry at a time.
-            for entry in self.field_dataset.get_names(group):
-                _shape, attribute = self.field_dataset.get_infos(group, entry)
-                if DISPLACEMENT_BOUND_ATTRIBUTE not in attribute:
-                    return self._auto_bound
-                recorded = [float(value) for value in attribute.get_np_array(DISPLACEMENT_BOUND_ATTRIBUTE).ravel()]
-                bound = recorded if not bound else [max(a, b) for a, b in zip(bound, recorded, strict=False)]
-        except Exception:  # an unreadable field dataset is a whole-volume answer, not a crash
-            return self._auto_bound
-        if bound and max(bound) > 0.0:
-            self._auto_bound = bound
-        return self._auto_bound
-
-    def _spacing(self, cache_attribute: Attribute) -> list[float] | None:
-        """The case's spacing in array order (z, y, x); ``Spacing`` is stored (x, y, z)."""
-        if "Spacing" not in cache_attribute:
-            return None
-        spacing = [float(value) for value in np.asarray(cache_attribute.get_np_array("Spacing")).ravel()]
-        return list(reversed(spacing))
-
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        bound = self._component_bound()
+        bound = self.displacement.component_bound()
         if bound is None:
-            return PatchLocality(
-                LocalityKind.WHOLE_VOLUME,
-                reason=(
-                    "max_displacement is 'auto' and the fields carry no recorded bound to read"
-                    " (KonfAI records one on an OME-Zarr field it writes; other formats and other"
-                    " producers do not)"
-                    if self.auto_displacement
-                    else "no 'max_displacement' is declared"
-                )
-                + " -- how far this warp reaches into its source is unknown and the region it must"
-                " read is unbounded. Declare it in the case's world units (e.g."
-                " max_displacement: 250.0) to stream with a halo",
-            )
-        spacing = self._spacing(cache_attribute)
+            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=self.displacement.undeclared_reason())
+        spacing = _array_order_spacing(cache_attribute)
         if spacing is None:
             return PatchLocality(
                 LocalityKind.WHOLE_VOLUME,
@@ -2160,39 +2570,7 @@ class Warp(Transform):
                     " turned into a halo in voxels"
                 ),
             )
-        # The bound is per component in (x, y, z); a halo is per array axis in (z, y, x).
-        per_axis = list(reversed(bound))[-len(spacing) :] if len(bound) >= len(spacing) else [max(bound)] * len(spacing)
-        halo = tuple(
-            int(np.ceil(value / extent)) if extent > 0 else 0 for value, extent in zip(per_axis, spacing, strict=False)
-        )
-        return PatchLocality(LocalityKind.HALO, halo=halo)
-
-    def _group_for(self, name: str | None) -> str:
-        if self.field_group is not None:
-            return self.field_group
-        groups = [str(group) for group in self.field_dataset.get_group()]
-        if len(groups) == 1:
-            return groups[0]
-        where = f"the field for case '{name}'" if name is not None else "the fields"
-        raise TransformError(
-            f"'Warp' cannot tell which group of '{self.field_dataset.filename}' holds {where}: it has {len(groups)}.",
-            "Name it: Warp: {field: ./DVF:omezarr, group: DVF}.",
-        )
-
-    def _read_field(self, name: str, region: tuple[slice, ...] | None, channels: int) -> torch.Tensor:
-        group = self._group_for(name)
-        if region is None:
-            data, _attributes = self.field_dataset.read_data(group, name)
-        else:
-            data, _attributes = self.field_dataset.read_data_slice(group, name, (slice(None), *region))
-        field = torch.from_numpy(np.ascontiguousarray(data)).float()
-        if field.shape[0] != channels:
-            raise TransformError(
-                f"The field for case '{name}' has {field.shape[0]} component(s) where the case has"
-                f" {channels} spatial axis/axes.",
-                "A displacement field carries one component per spatial axis, component-first.",
-            )
-        return field
+        return PatchLocality(LocalityKind.HALO, halo=_halo_from_bound(bound, spacing))
 
     def _sample(self, tensor: torch.Tensor, field: torch.Tensor, spacing: list[float]) -> torch.Tensor:
         """``output(p) = input(p + d(p))`` over the block handed in, sampled with grid_sample.
@@ -2221,46 +2599,25 @@ class Warp(Transform):
         )
         return moved.squeeze(0).to(tensor.dtype)
 
-    def _check_declared_bound(self, field: torch.Tensor, name: str) -> None:
-        """The declaration is a promise about the region that was read; check it against the samples.
-
-        Per component, matching how the halo was derived: a field that stays under the collapsed
-        maximum can still exceed the bound on one axis, which is the axis whose halo was too small.
-        """
-        bound = self._component_bound()
-        if bound is None or not field.numel():
-            return
-        for component in range(field.shape[0]):
-            declared = bound[component] if component < len(bound) else max(bound)
-            largest = float(field[component].abs().max())
-            if largest > declared:
-                raise TransformError(
-                    f"The field for case '{name}' displaces up to {largest:.3f} on component"
-                    f" {component}, beyond the {declared:.3f} this stage sized its region from.",
-                    "Raise max_displacement to at least the field's true maximum, or use"
-                    " max_displacement: auto: the region read is sized from that number, so a larger"
-                    " displacement samples outside what was read.",
-                )
-
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
     ) -> torch.Tensor:
-        spacing = self._spacing(cache_attribute)
+        spacing = _array_order_spacing(cache_attribute)
         if spacing is None:
             return self(name, tensor, cache_attribute)
-        field = self._read_field(name, context.source, len(tensor.shape) - 1)
-        self._check_declared_bound(field, name)
+        field = self.displacement.read(name, context.source, len(tensor.shape) - 1)
+        self.displacement.check_bound(field, name)
         return self._sample(tensor, field, spacing)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        spacing = self._spacing(cache_attribute)
+        spacing = _array_order_spacing(cache_attribute)
         if spacing is None:
             raise TransformError(
                 f"'Warp' needs the case's Spacing to turn a world displacement into voxels, and"
                 f" case '{name}' declares none.",
                 "Use a source whose geometry is readable (mha, nii, h5 or omezarr written by KonfAI).",
             )
-        field = self._read_field(name, None, len(tensor.shape) - 1)
+        field = self.displacement.read(name, None, len(tensor.shape) - 1)
         return self._sample(tensor, field, spacing)
 
 
@@ -2334,49 +2691,6 @@ class Reduce(Transform):
             "A chain containing Reduce is run by the reduction engine of the TRANSFORM workflow; it"
             " has no meaning as an ordinary per-case transform.",
         )
-
-
-class ShapeUpdate(Transform):
-    """Pull a template toward the mean SHAPE a displacement field carries, leaving its pose alone.
-
-    ``output = -step * (field - t)``, where ``t`` is the field's per-component spatial mean in world
-    units. Resampling a template through the result moves it along the cohort's shape residual at
-    ANTs' gradient step — the shape update of an atlas build.
-
-    WHY ``t`` IS STRIPPED RATHER THAN APPLIED. A total field maps template coordinates into each
-    specimen's OWN world frame, so its spatial mean is dominated by the frame-to-frame offset, not by
-    any pose error of the template. Applying it translates the template out of its own grid and clips
-    the anatomy; stripping it is what keeps the template anchored.
-
-    Per-component on purpose: a translation has as many parts as the field has components, and the
-    pooled mean of all of them describes nothing. That is why this declares ``MeanPerChannel`` — the
-    statistic is read once from the stored volume, and the stage is then a value map, so a field of
-    any size runs region by region.
-    """
-
-    def __init__(self, step: float = 0.25) -> None:
-        super().__init__()
-        self.step = float(step)
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"MeanPerChannel"}))
-
-    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        if "MeanPerChannel" not in cache_attribute:
-            # Whole volume in hand: the statistic IS this tensor's, so take it rather than demand a
-            # seed. Recorded on the case, as the streamed path records its own, so both leave the
-            # same state behind and an inverse finds it where it expects.
-            cache_attribute["MeanPerChannel"] = tensor.reshape(int(tensor.shape[0]), -1).to(torch.float32).mean(dim=1)
-        mean = torch.as_tensor(cache_attribute.get_np_array("MeanPerChannel"), dtype=torch.float32)
-        if mean.numel() != tensor.shape[0]:
-            raise TransformError(
-                f"'ShapeUpdate' was handed {mean.numel()} component mean(s) for a"
-                f" {tensor.shape[0]}-component field on '{name}'.",
-                "The statistic is read per channel from the stored entry: check that the entry is the"
-                " displacement field itself and not a derived volume.",
-            )
-        centred = tensor.to(torch.float32) - mean.reshape(-1, *([1] * (tensor.dim() - 1)))
-        return -self.step * centred
 
 
 class Expand(Transform):

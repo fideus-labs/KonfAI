@@ -121,6 +121,26 @@ def _write_dataset(root: Path, groups: list[str], cases: int = 2, shape=(8, 12, 
             sitk.WriteImage(image, str(case / f"{group}.mha"))
 
 
+def _write_fields(root: Path, cases: int = 2, shape=(4, 6, 6)) -> None:
+    """One displacement field per case, in a store of its own, on a grid COARSER than the images.
+
+    A page that documents resampling THROUGH a field has to be able to show one, and an example is
+    only runnable if the fixture holds what it names. Coarse on purpose: a field is read where it is
+    asked rather than resampled to match first, so the example exercises that and not a same-grid
+    special case.
+    """
+    for index in range(cases):
+        case = root / f"case_{index}"
+        case.mkdir(parents=True, exist_ok=True)
+        # KonfAI stores a field component-first; SimpleITK wants the components last.
+        field = np.zeros((3, *shape), dtype=np.float32)
+        field[0], field[1], field[2] = 0.5, -0.25, 0.75
+        image = sitk.GetImageFromArray(np.moveaxis(field, 0, -1), isVector=True)
+        image.SetSpacing((1.0, 1.0, 4.0))
+        image.SetOrigin((1.0, 2.0, 3.0))
+        sitk.WriteImage(image, str(case / "DVF.mha"))
+
+
 def _doc_examples() -> list[tuple[int, str]]:
     if not DOC.is_file():
         return []
@@ -134,6 +154,7 @@ def test_a_documented_example_plans_and_runs(line: int, config: str, tmp_path: P
     workdir = tmp_path / f"block_{line}"
     workdir.mkdir()
     _write_dataset(workdir / "Raw", _source_groups(config))
+    _write_fields(workdir / "Fields")
     (workdir / "Transform.yml").write_text(config, encoding="utf-8")
     for filename, source in _python_modules(DOC.read_text(encoding="utf-8")).items():
         (workdir / filename).write_text(source, encoding="utf-8")
