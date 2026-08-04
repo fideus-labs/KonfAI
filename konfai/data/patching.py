@@ -1640,12 +1640,24 @@ class DatasetManager:
             "Max": stats["max"],
             "Mean": stats["mean"],
             "Std": stats["std"],
+            # The same figures per channel: what a vector-valued quantity needs, where pooling the
+            # components into one number describes nothing (the mean of a displacement field is a
+            # translation, and it has three parts).
+            "MinPerChannel": stats.get("min_per_channel"),
+            "MaxPerChannel": stats.get("max_per_channel"),
+            "MeanPerChannel": stats.get("mean_per_channel"),
+            "StdPerChannel": stats.get("std_per_channel"),
         }
         for key in missing_stats:
-            if key in {"Mean", "Std"}:
-                cache_attribute[key] = np.asarray([stats_mapping[key]], dtype=np.float32)
+            value = stats_mapping.get(key)
+            if value is None:
+                continue
+            if key.endswith("PerChannel"):
+                cache_attribute[key] = np.asarray(value, dtype=np.float32)
+            elif key in {"Mean", "Std"}:
+                cache_attribute[key] = np.asarray([value], dtype=np.float32)
             else:
-                cache_attribute[key] = stats_mapping[key]
+                cache_attribute[key] = value
         return all(key in cache_attribute for key in required_stats)
 
     def _affords_halo(self, a: int, halo: tuple[int, ...]) -> bool:

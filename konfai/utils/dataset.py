@@ -292,20 +292,47 @@ def _statistics_chunk_length(shape: list[int] | tuple[int, ...], axis: int) -> i
 
 
 def _update_running_statistics(
-    state: dict[str, float] | None,
+    state: dict[str, Any] | None,
     array: np.ndarray,
-) -> dict[str, float]:
-    """Update running min/max/mean/std statistics from a NumPy chunk."""
-    values = np.asarray(array, dtype=np.float64).reshape(-1)
-    if values.size == 0:
-        return state or {"count": 0.0, "mean": 0.0, "m2": 0.0, "min": np.inf, "max": -np.inf}
+) -> dict[str, Any]:
+    """Update running min/max/mean/std from a NumPy chunk, over the volume AND per channel.
+
+    Both grains come from one pass because they come from the same samples: a chunk arrives as
+    ``(C, ...)``, so the per-channel figures are the same Welford recurrence applied along axis 0,
+    and the whole-volume ones are that recurrence pooled. Computing them separately would mean
+    scanning the volume once per channel -- three passes over a displacement field to learn three
+    numbers.
+    """
+    values = np.asarray(array, dtype=np.float64)
+    per_channel = values.reshape(values.shape[0], -1) if values.ndim > 1 else values.reshape(1, -1)
+    flat = per_channel.reshape(-1)
+    channels = per_channel.shape[0]
+    if flat.size == 0:
+        return state or _empty_statistics_state(channels)
 
     if state is None:
-        state = {"count": 0.0, "mean": 0.0, "m2": 0.0, "min": np.inf, "max": -np.inf}
+        state = _empty_statistics_state(channels)
 
-    chunk_count = float(values.size)
-    chunk_mean = float(values.mean())
-    chunk_m2 = float(np.square(values - chunk_mean).sum())
+    chunk_count = float(flat.size)
+    chunk_mean = float(flat.mean())
+    chunk_m2 = float(np.square(flat - chunk_mean).sum())
+
+    # Per channel, the same recurrence on vectors -- one entry per channel, updated together.
+    channel_count = float(per_channel.shape[1])
+    channel_mean = per_channel.mean(axis=1)
+    channel_m2 = np.square(per_channel - channel_mean[:, None]).sum(axis=1)
+    channel_total = state["channel_count"] + channel_count
+    if channel_total > 0:
+        channel_delta = channel_mean - state["channel_mean"]
+        state["channel_mean"] = state["channel_mean"] + channel_delta * channel_count / channel_total
+        state["channel_m2"] = (
+            state["channel_m2"]
+            + channel_m2
+            + channel_delta * channel_delta * state["channel_count"] * channel_count / channel_total
+        )
+        state["channel_count"] = channel_total
+        state["channel_min"] = np.minimum(state["channel_min"], per_channel.min(axis=1))
+        state["channel_max"] = np.maximum(state["channel_max"], per_channel.max(axis=1))
 
     total_count = state["count"] + chunk_count
     delta = chunk_mean - state["mean"]
@@ -313,21 +340,48 @@ def _update_running_statistics(
         state["mean"] += delta * chunk_count / total_count
         state["m2"] += chunk_m2 + delta * delta * state["count"] * chunk_count / total_count
         state["count"] = total_count
-        state["min"] = min(state["min"], float(values.min()))
-        state["max"] = max(state["max"], float(values.max()))
+        state["min"] = min(state["min"], float(flat.min()))
+        state["max"] = max(state["max"], float(flat.max()))
     return state
 
 
-def _finalize_running_statistics(state: dict[str, float] | None) -> dict[str, float]:
-    """Convert a running-statistics state into the public stats dictionary."""
+def _empty_statistics_state(channels: int) -> dict[str, Any]:
+    return {
+        "count": 0.0,
+        "mean": 0.0,
+        "m2": 0.0,
+        "min": np.inf,
+        "max": -np.inf,
+        "channel_count": 0.0,
+        "channel_mean": np.zeros(channels, dtype=np.float64),
+        "channel_m2": np.zeros(channels, dtype=np.float64),
+        "channel_min": np.full(channels, np.inf),
+        "channel_max": np.full(channels, -np.inf),
+    }
+
+
+def _finalize_running_statistics(state: dict[str, Any] | None) -> dict[str, Any]:
+    """Convert a running-statistics state into the public stats dictionary.
+
+    The four scalars are the volume's; the four ``*_per_channel`` lists are the same figures per
+    channel, which is what a vector-valued quantity needs -- the mean of a displacement field is
+    three numbers, and pooling them into one describes nothing.
+    """
     if state is None or state["count"] == 0:
-        return {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0}
+        return {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0} | {
+            f"{key}_per_channel": [0.0] for key in ("min", "max", "mean", "std")
+        }
     variance = state["m2"] / (state["count"] - 1) if state["count"] > 1 else 0.0
+    channel_variance = state["channel_m2"] / max(1.0, state["channel_count"] - 1)
     return {
         "min": state["min"],
         "max": state["max"],
         "mean": state["mean"],
         "std": math.sqrt(max(variance, 0.0)),
+        "min_per_channel": state["channel_min"].tolist(),
+        "max_per_channel": state["channel_max"].tolist(),
+        "mean_per_channel": state["channel_mean"].tolist(),
+        "std_per_channel": np.sqrt(np.maximum(channel_variance, 0.0)).tolist(),
     }
 
 
@@ -808,7 +862,7 @@ class Dataset:
             group: str,
             name: str,
             channels: list[int] | None = None,
-        ) -> dict[str, float]:
+        ) -> dict[str, Any]:
             pass
 
         @abstractmethod
@@ -920,14 +974,14 @@ class Dataset:
             groups: str,
             name: str,
             channels: list[int] | None = None,
-        ) -> dict[str, float]:
+        ) -> dict[str, Any]:
             dataset = self._get_dataset(groups, name)
             if dataset is None:
                 raise NameError(f"Dataset '{groups}/{name}' not found in '{self.filename}'.")
 
             axis = 1 if dataset.ndim > 1 else 0
             chunk_length = _statistics_chunk_length(dataset.shape, axis)
-            state: dict[str, float] | None = None
+            state: dict[str, Any] | None = None
 
             for start in range(0, dataset.shape[axis], chunk_length):
                 slices = [slice(None)] * dataset.ndim
@@ -1157,7 +1211,7 @@ class Dataset:
             data_shape = [reader.GetNumberOfComponents(), *reversed(reader.GetSize())]
 
             slab_length = _statistics_chunk_length(data_shape, 1)
-            state: dict[str, float] | None = None
+            state: dict[str, Any] | None = None
 
             for start in range(0, data_shape[1], slab_length):
                 slices: list[slice] = [slice(None)] * len(data_shape)
@@ -1246,7 +1300,7 @@ class Dataset:
             group: str,
             name: str,
             channels: list[int] | None = None,
-        ) -> dict[str, float]:
+        ) -> dict[str, Any]:
             path = self._resolve_data_path(name)
             if path is None:
                 raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
@@ -1497,10 +1551,10 @@ class Dataset:
             group: str,
             name: str,
             channels: list[int] | None = None,
-        ) -> dict[str, float]:
+        ) -> dict[str, Any]:
             shape, _ = self.get_infos(group, name)
             chunk_length = _statistics_chunk_length(shape, 1)
-            state: dict[str, float] | None = None
+            state: dict[str, Any] | None = None
             for start in range(0, shape[1], chunk_length):
                 slices = [slice(None)] * len(shape)
                 slices[1] = slice(start, min(shape[1], start + chunk_length))
@@ -1674,13 +1728,13 @@ class Dataset:
             group: str,
             name: str,
             channels: list[int] | None = None,
-        ) -> dict[str, float]:
+        ) -> dict[str, Any]:
             from konfai.utils.dicom import get_dicom_info, read_dicom_series_slice
 
             path = self._path(name)
             info = get_dicom_info(path)
             shape = info["shape"]
-            state: dict[str, float] | None = None
+            state: dict[str, Any] | None = None
             for index in range(shape[1]):
                 chunk, _, _, _ = read_dicom_series_slice(
                     path,
@@ -2016,7 +2070,7 @@ class Dataset:
         groups: str,
         name: str,
         channels: list[int] | None = None,
-    ) -> dict[str, float]:
+    ) -> dict[str, Any]:
         if not self._exists_on_disk():
             raise NameError(f"Dataset {self.filename} not found")
         if self.is_directory:
