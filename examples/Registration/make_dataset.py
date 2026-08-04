@@ -14,17 +14,18 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generate a tiny synthetic 2D registration dataset for the KonfAI example.
+"""Build the FIXED/MOVING dataset for the KonfAI registration example.
 
-Each case is a ``FIXED``/``MOVING`` pair. ``MOVING`` is ``FIXED`` translated by a
-**known** integer shift, so the task has a ground-truth answer and the moved image
-produced by the network can be checked against the fixed image numerically.
+Each case is one **real** axial slice from the public pelvis CT demo subset
+(``VBoussot/konfai-demo``). ``FIXED`` is the slice as acquired; ``MOVING`` is the same slice
+pushed through a smooth displacement field that this script chooses, so the deformation the
+network has to recover is known exactly and the registered output can be checked numerically.
 
-All data is procedurally generated (Gaussian blobs) - there is no patient data.
-Shapes are tiny (single 64x64 slice per case) so the whole train/predict/evaluate
-loop finishes on CPU in a couple of minutes.
+Real anatomy, known answer. Inter-patient registration — where the deformation is a genuine
+anatomical difference and there is no ground-truth field at all — is what ``examples/ImpactReg``
+does, scored on the reference segmentations.
 
-Run from this directory with the KonfAI env, for example:
+Run from this directory with the KonfAI env:
 
     python make_dataset.py
 """
@@ -35,68 +36,94 @@ from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
+from huggingface_hub import snapshot_download
+from scipy.ndimage import map_coordinates
 
-# Spatial size of a single slice (Y, X). Kept small so CPU training is fast.
-SHAPE: tuple[int, int] = (64, 64)
-# Known translation applied to FIXED to build MOVING, expressed in voxels (Y, X).
-# The network has to recover this shift to align MOVING back onto FIXED.
-KNOWN_SHIFT_YX: tuple[int, int] = (5, 4)
-# Number of synthetic cases.
-N_CASES: int = 8
+# Axial slices taken per patient, spread over the volume.
+SLICES_PER_CASE: int = 6
+# Peak amplitude of the displacement field used to build MOVING, in voxels.
+AMPLITUDE: float = 8.0
+# Hounsfield window the slices are normalised through, so intensities are comparable across cases.
+WINDOW: tuple[float, float] = (-160.0, 240.0)
+# Every slice is cropped to this size around the body, so one patch covers a case whole and no
+# sample is mostly padding. It is also the `shape` VoxelMorph is built with in Config.yml.
+CROP: tuple[int, int] = (256, 256)
+
+
+def _source_cases() -> list[Path]:
+    """Fetch the public pelvis CT subset (cached by the Hub) and return one directory per patient."""
+    root = Path(snapshot_download("VBoussot/konfai-demo", repo_type="dataset", allow_patterns="Segmentation/**"))
+    return sorted(path for path in (root / "Segmentation").iterdir() if path.is_dir())
+
+
+def _displacement(shape: tuple[int, int], seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """A smooth, low-frequency (dy, dx) field of peak amplitude ``AMPLITUDE``.
+
+    Built from a handful of sine terms rather than filtered noise so it is reproducible from the
+    seed alone, and smooth enough for a diffeomorphic model to represent.
+    """
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0 : shape[0], 0 : shape[1]].astype(np.float32)
+    field = []
+    for _ in range(2):
+        wave = np.zeros(shape, dtype=np.float32)
+        for _ in range(3):
+            wavelength = rng.uniform(60.0, 140.0)
+            phase = rng.uniform(0.0, 2.0 * np.pi)
+            direction = rng.uniform(0.0, np.pi)
+            wave += np.sin(2 * np.pi * (np.cos(direction) * xx + np.sin(direction) * yy) / wavelength + phase)
+        field.append(AMPLITUDE * wave / np.abs(wave).max())
+    return field[0], field[1]
+
+
+def _slice_indices(volume: np.ndarray) -> list[int]:
+    """Pick slices spread over the part of the volume that actually contains a body."""
+    occupied = np.flatnonzero((volume > WINDOW[0]).sum(axis=(1, 2)) > 0.05 * volume[0].size)
+    return [int(i) for i in np.linspace(occupied[0], occupied[-1], SLICES_PER_CASE + 2)[1:-1]]
+
+
+def _crop(image: np.ndarray) -> np.ndarray:
+    """Crop to ``CROP`` around the centre of mass of the body, padding if the slice is smaller."""
+    padded = np.pad(image, [(max(0, c - s), max(0, c - s)) for s, c in zip(image.shape, CROP, strict=True)])
+    weights = padded > 0.05
+    centre = [
+        int(np.clip(np.average(np.flatnonzero(weights.any(axis=1 - axis))), c // 2, padded.shape[axis] - c // 2))
+        for axis, c in enumerate(CROP)
+    ]
+    return padded[
+        centre[0] - CROP[0] // 2 : centre[0] + CROP[0] // 2, centre[1] - CROP[1] // 2 : centre[1] + CROP[1] // 2
+    ]
 
 
 def _write(array: np.ndarray, path: Path) -> None:
-    """Write a channel-first ``[Z, Y, X]`` array as an .mha volume with unit geometry."""
+    """Write a ``[Z, Y, X]`` array as an .mha volume with unit geometry."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    image = sitk.GetImageFromArray(array)  # array is (z, y, x)
+    image = sitk.GetImageFromArray(array)
     image.SetSpacing((1.0, 1.0, 1.0))
     image.SetOrigin((0.0, 0.0, 0.0))
     sitk.WriteImage(image, str(path))
 
 
-def _blobs(rng: np.random.Generator, n_blobs: int = 4) -> np.ndarray:
-    """Build a smooth [0, 1] intensity image made of a few Gaussian blobs.
-
-    Blob centers stay away from the borders so that shifting by ``KNOWN_SHIFT_YX``
-    only brings zero-filled background into view, keeping the translation cleanly recoverable.
-    """
-    height, width = SHAPE
-    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
-    image = np.zeros(SHAPE, dtype=np.float32)
-    margin = 18
-    for _ in range(n_blobs):
-        cy = rng.uniform(margin, height - margin)
-        cx = rng.uniform(margin, width - margin)
-        sigma = rng.uniform(4.0, 7.0)
-        amplitude = rng.uniform(0.5, 1.0)
-        image += amplitude * np.exp(-(((yy - cy) ** 2 + (xx - cx) ** 2) / (2.0 * sigma**2)))
-    # Normalize to [0, 1] so intensities are comparable across cases (no transform needed).
-    image -= image.min()
-    peak = float(image.max())
-    if peak > 0:
-        image /= peak
-    return image
-
-
-def make_dataset(base: Path) -> Path:
-    """Write ``Dataset/CASE_xxx/{FIXED.mha, MOVING.mha}`` and return the dataset root."""
-    rng = np.random.default_rng(0)
-    for i in range(N_CASES):
-        fixed = _blobs(rng)
-        # MOVING is FIXED shifted by the known (positive) translation (axis 0 = Y, axis 1 = X). A
-        # zero-filled shift (not np.roll, which would wrap the opposite edge in) keeps MOVING an exact
-        # translate of FIXED, so the advertised ground-truth shift is truly recoverable.
-        dy, dx = KNOWN_SHIFT_YX
-        moving = np.zeros_like(fixed)
-        moving[dy:, dx:] = fixed[:-dy, :-dx]
-        case = base / f"CASE_{i:03d}"
-        # Store as a single-slice volume [Z=1, Y, X] so the [1, 64, 64] patch covers it whole.
-        _write(fixed[np.newaxis, ...], case / "FIXED.mha")
-        _write(moving[np.newaxis, ...], case / "MOVING.mha")
-    return base
+def make_dataset(base: Path) -> int:
+    """Write ``Dataset/<patient>_z<slice>/{FIXED.mha, MOVING.mha}`` and return the number of pairs."""
+    written = 0
+    for case in _source_cases():
+        volume = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "CT.mha"))).astype(np.float32)
+        for index in _slice_indices(volume):
+            fixed = _crop(np.clip((volume[index] - WINDOW[0]) / (WINDOW[1] - WINDOW[0]), 0.0, 1.0))
+            dy, dx = _displacement(fixed.shape, seed=written)
+            grid = np.mgrid[0 : fixed.shape[0], 0 : fixed.shape[1]].astype(np.float32)
+            moving = map_coordinates(fixed, [grid[0] + dy, grid[1] + dx], order=1, mode="nearest")
+            target = base / f"{case.name}_z{index:03d}"
+            # One slice per case, stored as [Z=1, Y, X].
+            _write(fixed[np.newaxis, ...], target / "FIXED.mha")
+            _write(moving.astype(np.float32)[np.newaxis, ...], target / "MOVING.mha")
+            written += 1
+    return written
 
 
 if __name__ == "__main__":
-    root = make_dataset(Path(__file__).resolve().parent / "Dataset")
-    print(f"Wrote {N_CASES} FIXED/MOVING pairs under {root}")
-    print(f"Known translation (Y, X) applied to build MOVING: {KNOWN_SHIFT_YX} voxels")
+    root = Path(__file__).resolve().parent / "Dataset"
+    count = make_dataset(root)
+    print(f"Wrote {count} FIXED/MOVING pairs of real CT slices under {root}")
+    print(f"MOVING is FIXED pushed through a known smooth field of up to {AMPLITUDE:.0f} voxels")

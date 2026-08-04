@@ -52,4 +52,5 @@ Evaluator:
     pin_memory: false
     prefetch_factor: None
     persistent_workers: None
+    memory_budget: None
   train_name: REG_BASELINE

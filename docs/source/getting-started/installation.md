@@ -46,9 +46,10 @@ covers all four).
 | `lpips` | `lpips` | the `LPIPS` perceptual metric |
 | `ssim` | `scikit-image` | the `SSIM` metric |
 | `fid` | `scipy`, `torchvision` | the `FID` metric |
+| `smp` | `segmentation-models-pytorch` | the `SMP` model bridge — **required by `examples/Synthesis`** |
 | `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export (experimental; see {doc}`../reference/python-api`) |
 | `cluster` | `submitit` | `konfai-cluster` job submission |
-| `all` | all of the above | install every optional extra at once |
+| `all` | every extra above **except `smp`** | install the optional extras at once; add `konfai[smp]` separately if you need the smp bridge |
 | `dev` | pytest, ruff, mypy, sphinx, … | local development, tests, docs, and linting |
 
 ```{tip}
@@ -63,6 +64,22 @@ execution:
 ```bash
 python -m pip install konfai-apps
 ```
+
+:::{important}
+Installing one of the bundled apps (`apps/impact_seg`, `apps/impact_synth`,
+`apps/impact_reg`, `apps/mrsegmentator`, `apps/totalsegmentator`) **from a checkout**
+needs `konfai-apps` from that same checkout:
+
+```bash
+python -m pip install -e konfai-apps -e apps/impact_seg
+```
+
+Each bundle pins `konfai-apps==` its own `setuptools_scm` version, and between release
+tags that version exists nowhere on PyPI — so installing the app alone fails to resolve
+with *"Could not find a version that satisfies the requirement konfai-apps==..."*.
+Installing from PyPI (`pip install impact-seg-konfai`) is unaffected, because a released
+bundle pins a released `konfai-apps`.
+:::
 
 This provides:
 

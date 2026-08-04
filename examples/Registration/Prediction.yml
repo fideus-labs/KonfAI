@@ -8,9 +8,9 @@ Predictor:
       - 8
       - 16
       - 16
-      shape:
-      - 64
-      - 64
+      shape:  # Must match the training patch and the checkpoint
+      - 256
+      - 256
       int_steps: 7
       int_downsize: 2
       outputs_criterions: None  # No losses at prediction time; metrics are computed in Evaluation.yml
@@ -43,10 +43,10 @@ Predictor:
             is_input: true
     augmentations: None
     Patch:
-      patch_size:
+      patch_size:  # One patch covers a whole 256x256 slice
       - 1
-      - 64
-      - 64
+      - 256
+      - 256
       overlap: None
       mask: None
       pad_value: 0
@@ -60,6 +60,7 @@ Predictor:
     pin_memory: false
     prefetch_factor: None
     persistent_workers: None
+    memory_budget: None
   outputs_dataset:
     MovingImageResample:  # Model output = MOVING warped into FIXED space
       OutputDataset:
@@ -76,6 +77,7 @@ Predictor:
         patch_combine: None
         reduction: Mean
         Mean: {}
+        attributes: None
   train_name: REG_BASELINE
   manual_seed: 32
   gpu_checkpoints: None

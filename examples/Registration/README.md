@@ -2,6 +2,11 @@
 
 This example provides a **simple deformable image registration baseline** for KonfAI.
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/Registration/Registration_demo.ipynb)
+
+**Fastest way to run it:** open `Registration_demo.ipynb` and run every cell. It builds the dataset,
+trains, predicts, evaluates and plots the before/after — about 3 minutes on a GPU.
+
 It is intentionally small and self-contained, and is meant to be:
 
 - easy to read
@@ -15,10 +20,16 @@ The current baseline uses:
 - patch-based training
 - an `MSE` image-similarity loss during training
 - `MAE` / `MSE` evaluation, comparing the registered image against the fixed image
-- a fully synthetic dataset generated locally by `make_dataset.py`
+- **real pelvis CT slices**, prepared by `make_dataset.py` from the public demo subset
 
-The task is deliberately transparent: each `MOVING` image is the `FIXED` image translated by a
-**known** shift, so the registered `MOVED` image can be checked numerically against `FIXED`.
+The task is deliberately transparent: each `MOVING` image is its `FIXED` slice pushed through a
+**known** smooth displacement field, so the registered `MOVED` image can be checked numerically
+against `FIXED`. The anatomy is real; the deformation is the part we choose, which is what makes the
+check exact.
+
+> For registration between **two different patients** — a genuine anatomical difference, with no
+> ground-truth field at all, scored by propagating one patient's reference labels — see
+> [`examples/ImpactReg`](../ImpactReg/).
 
 ## What you will find in this folder
 
@@ -28,10 +39,12 @@ examples/Registration/
 ├── Config.yml
 ├── Prediction.yml
 ├── Evaluation.yml
+├── Registration_demo.ipynb
 └── README.md
 ```
 
-- `make_dataset.py`: builds the synthetic `FIXED` / `MOVING` dataset (no download needed)
+- `Registration_demo.ipynb`: the whole workflow as a runnable notebook
+- `make_dataset.py`: builds the `FIXED` / `MOVING` pairs from the public pelvis CT subset
 - `Config.yml`: training workflow
 - `Prediction.yml`: inference workflow (produces the registered image `MOVED`)
 - `Evaluation.yml`: evaluation workflow (before/after registration error)
@@ -64,34 +77,39 @@ adversarial loops — stay in Python; standard feed-forward graphs can be YAML.
 
 ## Dataset
 
-This example does **not** need any external download. The dataset is generated procedurally
-(Gaussian blobs, no patient data). Run all commands from this directory:
+`make_dataset.py` takes six axial slices from each of the five public pelvis CT cases
+(`VBoussot/konfai-demo`, cached by the Hub after the first run), windows them to `[0, 1]`, and crops
+each to `256x256` around the body. Run all commands from this directory:
 
 ```bash
 cd examples/Registration
 python make_dataset.py
 ```
 
-This writes:
+This writes 30 pairs:
 
 ```text
 examples/Registration/
 └── Dataset/
-    ├── CASE_000/
+    ├── 1PC006_z014/
     │   ├── FIXED.mha
     │   └── MOVING.mha
-    ├── CASE_001/
+    ├── 1PC006_z029/
     │   ├── FIXED.mha
     │   └── MOVING.mha
     └── ...
 ```
 
-- `FIXED`: reference image
-- `MOVING`: `FIXED` translated by a known shift (default `(5, 4)` voxels in `(Y, X)`)
+- `FIXED`: the CT slice as acquired
+- `MOVING`: the same slice pushed through a known smooth field of up to `AMPLITUDE` voxels (default 8)
+
+The crop size is also the `shape` `VoxelMorph` is built with and the training patch size — change one
+and you change all three.
 
 ## Quick start
 
-Run all commands from this directory. Everything is CPU-friendly and finishes in a few minutes.
+`Registration_demo.ipynb` runs all three steps below and plots the result. To do it by hand instead,
+run every command from this directory:
 
 ### 1. Train
 
@@ -132,15 +150,17 @@ JSON file:
 - `MOVING:FIXED:MAE` / `MOVING:FIXED:MSE` — the error **before** registration (baseline)
 - `MOVED:FIXED:MAE` / `MOVED:FIXED:MSE` — the error **after** registration
 
-A successful run shows the `MOVED` error clearly below the `MOVING` error. On the shipped
-synthetic dataset (60 epochs, CPU) a typical result is:
+A successful run shows the `MOVED` error clearly below the `MOVING` error. On the 30 shipped CT slices
+(400 epochs) a typical result is:
 
 | Metric | Before (`MOVING` vs `FIXED`) | After (`MOVED` vs `FIXED`) |
 |--------|------------------------------|----------------------------|
-| MAE    | ~0.078                       | ~0.017                     |
-| MSE    | ~0.021                       | ~0.0008                    |
+| MAE    | ~0.069                       | ~0.031                     |
+| MSE    | ~0.017                       | ~0.0038                    |
 
-The registered image is several times closer to the fixed image than the moving image was.
+So a little over 2x on MAE and 4x on MSE. Real anatomy is a much harder target than a synthetic
+phantom, and 400 epochs over 22 training slices is a demo, not a trained model — raise `epochs` and
+add cases before reading anything into the numbers.
 
 ## Why training uses MSE here
 
@@ -159,7 +179,7 @@ For a real project, you will usually want to update:
 1. `dataset_filenames`
 2. `train_name`
 3. the input groups (`FIXED` / `MOVING`) and their order
-4. patch size and `shape` (keep them aligned)
+4. patch size, `shape`, and `CROP` in `make_dataset.py` (all three must agree)
 5. batch size
 6. preprocessing transforms (normalization for real intensities)
 7. the similarity loss and, ideally, a deformation-field regularizer

@@ -188,8 +188,10 @@ Trainer:
 - The keys in `outputs_criterions` must match the actual model output path,
   built from `add_module(...)` names.
 - The output path is a graph name, not a dataset name. For example, in the
-  shipped `examples/Segmentation/Config.yml` the loss is attached to
-  `UNetBlock_0:Head:Conv` (the pre-softmax logits).
+  shipped `examples/Segmentation/Config.yml` the cross-entropy loss is attached to
+  `UNetBlock_0:Head:Conv` (the pre-softmax logits) while a Dice loss is attached to
+  `UNetBlock_0:Head:Softmax` on the same head — each criterion reads the output whose
+  form it expects.
 
 KonfAI can wrap a simpler module internally in some situations, but if you want
 reliable custom behavior, inheriting from `Network` is the supported path.

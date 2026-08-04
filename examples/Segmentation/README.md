@@ -4,6 +4,10 @@ This example provides a **simple multiclass segmentation baseline** for KonfAI.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/Segmentation/Segmentation_demo.ipynb)
 
+**Fastest way to run it:** open `Segmentation_demo.ipynb` and run every cell. It downloads the demo
+data, trains, predicts, evaluates and plots the prediction next to the reference — about 7 minutes
+on a GPU.
+
 It is intentionally conservative and is meant to be:
 
 - easy to read
@@ -15,7 +19,7 @@ The current baseline uses:
 - the routed KonfAI model graph declared in `UNet.yml`
 - a 2D slice-wise setup
 - patch-based training
-- `CrossEntropyLoss` during training
+- `CrossEntropyLoss` + `Dice` during training
 - Dice evaluation after prediction
 - `41` classes in total (`0` for background, `1..40` for labels)
 
@@ -112,15 +116,12 @@ After that, your local `Dataset/` folder should already match the structure expe
 
 ## Quick start
 
-Run all commands from this directory:
+`Segmentation_demo.ipynb` runs all three steps below and plots the result. To do it by hand instead,
+run every command from this directory, with `Dataset/` in place:
 
 ```bash
 cd examples/Segmentation
 ```
-
-Once your `Dataset/` folder is ready:
-
-For the smoothest first run on a fresh machine or in Colab, start with `Segmentation_demo.ipynb`.
 
 ### 1. Train
 
@@ -165,14 +166,31 @@ For multiclass segmentation:
 - update `Dice.labels`
 - review the label encoding in your dataset
 
-## Why training uses CrossEntropyLoss here
+## Why training combines CrossEntropy and Dice
 
-This example uses `CrossEntropyLoss` during training and Dice during evaluation on purpose:
+The 40 foreground labels each cover well under 3% of a volume, so `CrossEntropyLoss` on its own is
+minimised by predicting background nearly everywhere: after 10 epochs it scores a mean Dice of
+**0.05** and finds only four structures.
 
-- training stays simple and stable
-- the final segmentation quality is still measured with Dice
+Adding a `Dice` loss on the `Softmax` output fixes that — the overlap term is scale-free, so a small
+organ counts as much as a large one. Five epochs of the two losses together reach a mean Dice of
+**0.19** across ten structures, in half the training time.
 
-This makes the example easier to understand and monitor before moving to more advanced losses.
+The two losses read different outputs of the same head, which is why `Config.yml` lists them under
+two keys: `UNetBlock_0:Head:Conv` (raw logits, what CrossEntropy expects) and
+`UNetBlock_0:Head:Softmax` (class probabilities, what Dice expects).
+
+## How good is the demo result?
+
+`epochs: 5` is sized so the notebook finishes; it is not a trained model. Expect a mean Dice around
+`0.19`, with the large structures (bone, muscle, bowel) clearly recognisable and the small ones
+missing. Raise `epochs` to 100+ for anything you intend to use.
+
+Two things keep that number optimistic, and both are deliberate for a demo: the five cases are also
+the training set except for the one held out by `validation: 0.2`, and `Dice.labels: None` averages
+over every label the reference contains — including the eighteen that never appear in a pelvis scan
+and therefore score zero. Set `Dice.labels` in `Evaluation.yml` to the labels you actually care about
+before reading anything into the score.
 
 ## Recommended usage
 
@@ -181,7 +199,3 @@ Use this example when you want to:
 - bootstrap a new segmentation experiment quickly
 - understand the minimal KonfAI structure for segmentation
 - create your own YAML template before moving to stronger architectures or 3D workflows
-
-If you want the easiest first run, start with:
-
-- `Segmentation_demo.ipynb`

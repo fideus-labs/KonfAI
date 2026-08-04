@@ -38,7 +38,7 @@ KonfAI
      <span class="k">Dataset:</span>
        <span class="k">dataset_filenames:</span> <span class="s">[ ./Dataset:mha ]</span>
        <span class="k">groups_src:</span> <span class="s">{ CT: {...}, SEG: {...} }</span>
-     <span class="k">epochs:</span> <span class="s">100</span></pre>
+     <span class="k">epochs:</span> <span class="s">5</span>   <span class="c"># demo-sized</span></pre>
            </div>
            <div class="kf-flowdown"><span>reflection builds the object graph</span></div>
            <div class="kf-codecard">

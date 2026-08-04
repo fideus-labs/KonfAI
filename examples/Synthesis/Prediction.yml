@@ -19,15 +19,16 @@ Predictor:
                 save_clip_min: false
                 save_clip_max: false
                 mask: MASK
-              Standardize: # Standardization using mean/std computed inside the mask
+              # Every preprocessing step here must mirror Config.yml exactly: the network was trained
+              # on whole-volume statistics, so standardizing inside the mask instead -- or masking the
+              # input, which training never did -- feeds it a scale it has never seen. That single
+              # mismatch cost 4x on MAE (409 HU instead of 98) with the same checkpoint.
+              Standardize:
                 lazy: false
                 mean: None
                 std: None
-                mask: MASK # Mean and std are computed only within this mask
+                mask: None
                 inverse: false
-              Mask:
-                path: MASK
-                value_outside: -2
             patch_transforms: None
             is_input: true  # MR images are the model input
       MASK: # Mask the input outside the body region
@@ -45,6 +46,7 @@ Predictor:
             - 0
             - 1
             prob: 1
+            vector_field: false
         nb: 1
       DataAugmentation_1:
         data_augmentations:
@@ -54,6 +56,7 @@ Predictor:
             - 1
             - 0
             prob: 1
+            vector_field: false
         nb: 1
     Patch: # Patch extraction used during inference
       patch_size:  # Size of patches processed by the network
@@ -68,7 +71,12 @@ Predictor:
     filter: None # Optional dataset filtering
     dataset_filenames: # Dataset sources (format: folder_path:mode:image_format)
     - ./Dataset:a:mha
-    batch_size: 32 # Number of patches processed per batch during inference
+    batch_size: 8 # Number of patches per inference batch; 32 needs about 17 GB of VRAM, 8 fits a 16 GB card
+    memory_budget: None
+    num_workers: None
+    pin_memory: false
+    prefetch_factor: None
+    persistent_workers: None
   outputs_dataset:
     Head:Tanh:  # Model output used to generate the predicted dataset
       OutputDataset: # Output dataset built using the same spatial structure as the input group
@@ -90,6 +98,7 @@ Predictor:
         inverse_transform: false # If true, apply the inverse of transforms marked with inverse=true from the reference group
         reduction: Mean # Combine predictions from TTA using the Mean or Median
         Mean: {}
+        attributes: None
   train_name: TRAIN_01  # Name of the experiment to predict; set this to the training folder you want to reuse (for example TRAIN_01 or TRAIN_GAN_01)
   manual_seed: 32
   gpu_checkpoints: None  # VRAM optimization option

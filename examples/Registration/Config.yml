@@ -9,8 +9,8 @@ Trainer:
       - 16
       - 16
       shape:  # Spatial size of the warped grid; must match the (Y, X) of the training patch
-      - 64
-      - 64
+      - 256
+      - 256
       int_steps: 7  # Scaling-and-squaring steps for the diffeomorphic velocity field integration
       int_downsize: 2  # Integrate the flow at half resolution, then upsample (VoxelMorph default)
       outputs_criterions:
@@ -45,7 +45,7 @@ Trainer:
         fused: None
       schedulers:  # Learning rate scheduler: multiply LR by gamma every step_size epochs
         StepLR:
-          step_size: 20
+          step_size: 150
           gamma: 0.5
           nb_step: 0
           last_epoch: -1
@@ -68,7 +68,7 @@ Trainer:
       FIXED:  # Reference image (branch 0) and target of the similarity loss
         groups_dest:
           FIXED:
-            transforms: None  # Data is already generated in [0, 1], no normalization needed
+            transforms: None  # make_dataset.py already windowed the CT into [0, 1]
             patch_transforms: None
             is_input: true
       MOVING:  # Image to warp onto FIXED (branch 1)
@@ -79,10 +79,10 @@ Trainer:
             is_input: true
     augmentations: None  # Keep the example deterministic; the task is a pure translation
     Patch:  # Patch extraction parameters used during training
-      patch_size:  # [slice, height, width]; one 64x64 slice per case
+      patch_size:  # [slice, height, width]; one patch covers a whole 256x256 slice
       - 1
-      - 64
-      - 64
+      - 256
+      - 256
       overlap: None
       mask: None
       pad_value: 0
@@ -100,9 +100,11 @@ Trainer:
     pin_memory: false
     prefetch_factor: None
     persistent_workers: None
+    shuffle_window: None
+    memory_budget: None
   train_name: REG_BASELINE  # Training name; drives the output folder structure
   manual_seed: 32
-  epochs: 60
+  epochs: 400
   it_validation: None  # Validate once per epoch
   autocast: false
   gradient_checkpoints: None

@@ -156,10 +156,14 @@ CONFIG_AUTHORING_QUESTIONS = [
 
 
 def available_templates(examples_root: Path) -> list[str]:
-    """List example directories that can seed MCP experiments."""
+    """List example directories that can seed MCP experiments.
+
+    Names starting with '_' or '.' are skipped: importing the shared notebook helper leaves a
+    `__pycache__` beside the examples, and it is not a template.
+    """
     if not examples_root.exists():
         return []
-    return sorted(entry.name for entry in examples_root.iterdir() if entry.is_dir())
+    return sorted(entry.name for entry in examples_root.iterdir() if entry.is_dir() and entry.name[0] not in "_.")
 
 
 def template_dir(examples_root: Path, name: str) -> Path:

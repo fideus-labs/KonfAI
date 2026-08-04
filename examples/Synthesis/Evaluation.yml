@@ -42,4 +42,9 @@ Evaluator:
     dataset_filenames: # Dataset sources (ground truth CT + predicted sCT)
     - ./Dataset:a:mha
     - ./Predictions/TRAIN_01/Dataset:i:mha # Update TRAIN_01 to the experiment you want to evaluate when reusing this file with another checkpoint
+    memory_budget: None
+    num_workers: None
+    pin_memory: false
+    prefetch_factor: None
+    persistent_workers: None
   train_name: TRAIN_01 # Name of the experiment to evaluate; keep it aligned with the prediction folder above

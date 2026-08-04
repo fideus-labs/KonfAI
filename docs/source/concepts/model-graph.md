@@ -38,17 +38,28 @@ Model:
 Losses and metrics are attached through `outputs_criterions`. Keys in this
 mapping correspond to named modules or outputs in the model graph.
 
-Example from the segmentation baseline:
+Example from the segmentation baseline, which attaches two losses to two different
+outputs of the same head — cross entropy wants logits, Dice wants probabilities:
 
 ```yaml
 outputs_criterions:
-  UNetBlock_0:Head:Conv:
+  UNetBlock_0:Head:Conv:          # raw logits
     targets_criterions:
       SEG:
         criterions_loader:
-          torch:nn:CrossEntropyLoss:
+          CrossEntropyLoss:
             is_loss: true
+  UNetBlock_0:Head:Softmax:       # class probabilities
+    targets_criterions:
+      SEG:
+        criterions_loader:
+          Dice:
+            is_loss: true
+            labels: None          # every label present in the patch
 ```
+
+A bare name (`CrossEntropyLoss`, `Dice`) resolves inside the criterion package;
+`torch:nn:CrossEntropyLoss` would import the torch class directly instead.
 
 ```{note}
 An `outputs_criterions` or `outputs_dataset` key must match a module's dotted

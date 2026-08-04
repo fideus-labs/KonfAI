@@ -28,11 +28,20 @@ Runtime expectations
 --------------------
 
 The maintained example is a real 41-class workflow, not a synthetic unit test.
-Its checked-in config runs 100 epochs, so total runtime depends on the downloaded
-subset, CPU/GPU, and storage. For a first smoke run, copy the config and change
-``epochs: 100`` to ``epochs: 1``. This should validate the end-to-end training
-path without implying that the resulting checkpoint is useful. KonfAI does not
-currently expose an ``--epochs`` CLI override.
+Its checked-in config is already sized for a first run: ``epochs: 5``, about seven
+minutes on a GPU for the whole train → predict → evaluate sequence. That validates
+the end-to-end path without implying the resulting checkpoint is useful — expect a
+mean Dice around ``0.19``, with the large structures recognisable and the small
+ones missing. Raise ``epochs`` to 100 or more for anything you intend to use;
+KonfAI does not currently expose an ``--epochs`` CLI override, so edit the config.
+
+Training optimises ``CrossEntropyLoss`` **and** ``Dice`` together. The overlap term
+matters: each of the 40 foreground labels covers under 3% of a volume, so cross
+entropy on its own is minimised by predicting background nearly everywhere.
+
+``examples/Segmentation/Segmentation_demo.ipynb`` runs this entire page — download,
+train, predict, evaluate, and a plot of the prediction against the reference. Run
+every cell; nothing is gated behind a flag.
 
 Install KonfAI
 --------------
@@ -127,24 +136,20 @@ Train a baseline
 At this stage, KonfAI reads ``Config.yml`` and builds a ``Trainer`` object from
 it.
 
-For the short smoke run, preserve the maintained template and edit a copy:
-
-.. code-block:: bash
-
-   cp Config.yml Config.smoke.yml
-
-Change the final ``epochs: 100`` entry in ``Config.smoke.yml`` to
-``epochs: 1``, then run:
-
-.. code-block:: bash
-
-   konfai TRAIN -y --gpu 0 --config Config.smoke.yml
-
-For the complete baseline, use the checked-in configuration:
+Run the checked-in configuration:
 
 .. code-block:: bash
 
    konfai TRAIN -y --gpu 0 --config Config.yml
+
+Reading a config rewrites it with the defaults KonfAI materialised, which is
+expected and is what makes a run reproducible. If you would rather keep the
+template pristine while you experiment, work on a copy:
+
+.. code-block:: bash
+
+   cp Config.yml Config.mine.yml
+   konfai TRAIN -y --gpu 0 --config Config.mine.yml
 
 If you do not have a GPU available, use ``--cpu 1`` instead of ``--gpu 0``.
 
