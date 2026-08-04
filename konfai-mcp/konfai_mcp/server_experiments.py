@@ -115,6 +115,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             "prediction_requires_models": statuses.get("prediction", {}).get("config_present", False)
             and bool(statuses.get("prediction", {}).get("missing_models")),
             "evaluation": statuses.get("evaluation", {}).get("ready", False),
+            "transform": statuses.get("transform", {}).get("ready", False),
             "configs_present": {
                 workflow: statuses.get(workflow, {}).get("config_present", False)
                 for workflow in self.ordered_workflows()
@@ -142,6 +143,10 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             next_actions.append("run_prediction")
         if readiness.get("evaluation"):
             next_actions.append("run_evaluation")
+        if readiness.get("transform"):
+            # The plan first, always: run_transform writes a dataset, and the plan is what says how
+            # much and how -- including whether the run would refuse before writing a byte.
+            next_actions.extend(["plan_transform", "run_transform"])
         if not all(configs_present.values()):
             next_actions.append("write_workflow_config")
         if any(readiness["blocked"][workflow]["missing_paths"] for workflow in self.ordered_workflows()):

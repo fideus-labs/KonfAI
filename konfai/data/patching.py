@@ -25,7 +25,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
-from typing import Protocol, TypeGuard, cast
+from typing import Any, Protocol, TypeGuard, cast
 
 import numpy as np
 import torch
@@ -104,6 +104,17 @@ class Stage(Protocol):
     ) -> torch.Tensor: ...
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor: ...
+
+
+def _spatial(shape: object) -> list[int]:
+    """A folded shape as plain Python ints, whatever the stage returned it as.
+
+    ``transform_shape`` is user-facing: a stage that computes its target grid with torch or numpy
+    hands back that library's scalars, and they travel unnoticed until something outside Python asks
+    for a real int -- a zarr store refusing "Expected an iterable of integers", a header holding
+    ``tensor(128)``. Normalising at the fold makes ``shapes`` hold what it is typed as.
+    """
+    return [int(extent) for extent in cast("Sequence[Any]", shape)]
 
 
 def _is_draw(stage: object) -> TypeGuard[DataAugmentation]:
@@ -1320,7 +1331,7 @@ class DatasetManager:
         # the split is (everything, None, []) and every fold below reduces to what it always was.
         self._expand_pre, self._expand, self._expand_post = split_expand(transforms)
         for transform_function in self._expand_pre:
-            _shape = transform_function.transform_shape(self.group_src, self.name, _shape, cache_attribute)
+            _shape = _spatial(transform_function.transform_shape(self.group_src, self.name, _shape, cache_attribute))
         # The grid and case state at the Expand point: what the first per-copy stage is handed.
         # Snapshots (Attribute copies deeply) -- the live attribute keeps evolving through post.
         self._shape_at_expand = list(_shape)
@@ -1330,7 +1341,7 @@ class DatasetManager:
         for transform_function in self._expand_post:
             if _is_draw(transform_function):
                 continue
-            _shape = transform_function.transform_shape(self.group_src, self.name, _shape, cache_attribute)
+            _shape = _spatial(transform_function.transform_shape(self.group_src, self.name, _shape, cache_attribute))
 
         self.patch = (
             DatasetPatch(
@@ -2423,7 +2434,12 @@ class DatasetManager:
                             if key not in keys_before and key not in attributes:
                                 attributes[key] = scope[key]
                         stream = sweep.destination.open_data_stream(
-                            sweep.group, sweep.entry, [int(block.shape[0]), *spatial], block.dtype, attributes
+                            sweep.group,
+                            sweep.entry,
+                            [int(block.shape[0]), *spatial],
+                            block.dtype,
+                            attributes,
+                            region_shape=[int(block.shape[0]), rows, *spatial[1:]],
                         )
                         if stream is None:
                             raise PatchError(
@@ -2562,7 +2578,12 @@ class DatasetManager:
                         if key not in keys_before and key not in attributes:
                             attributes[key] = slab_attribute[key]
                     stream = sweep.destination.open_data_stream(
-                        sweep.group, sweep.entry, [int(block.shape[0]), *spatial], block.dtype, attributes
+                        sweep.group,
+                        sweep.entry,
+                        [int(block.shape[0]), *spatial],
+                        block.dtype,
+                        attributes,
+                        region_shape=[int(block.shape[0]), rows, *spatial[1:]],
                     )
                     if stream is None:
                         return self._sweep_failed_because(

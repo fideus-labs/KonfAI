@@ -428,7 +428,12 @@ class CaseReduction:
 
     def _open_stream(self, spatial: list[int], array: np.ndarray, attribute: Attribute) -> DataStream:
         stream = self.destination.open_data_stream(
-            self.group, self.reduce.output, [int(array.shape[0]), *spatial], array.dtype, attribute
+            self.group,
+            self.reduce.output,
+            [int(array.shape[0]), *spatial],
+            array.dtype,
+            attribute,
+            region_shape=[int(array.shape[0]), self.slab_rows, *spatial[1:]],
         )
         if stream is None:
             raise ReductionError(

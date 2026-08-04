@@ -85,7 +85,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "describe_konfai_capabilities": (
         "Use at the start, or whenever you need to orient, to learn what KonfAI can do and which tool to reach for. "
-        "This returns a capability overview: the three workflows, the component kinds (+ list_components), the "
+        "This returns a capability overview: the four workflows, the component kinds (+ list_components), the "
         "extension model (+ describe_extension_points, including external-library classpaths), modeling modes, "
         "advanced capabilities, and which actions are safe vs should prefer human confirmation. "
         "It is a router to other tools and to AGENTS.md (the canonical reference), not a workflow to execute. "
@@ -93,7 +93,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "describe_config_schema": (
         "Use before authoring a config to learn the top-level schema of a workflow. "
-        "This is GENERATED from the Trainer/Predictor/Evaluator constructor via KonfAI's reflection engine, so it "
+        "This is GENERATED from the Trainer/Predictor/Evaluator/Transformer constructor via KonfAI's reflection engine, so it "
         "never drifts: it returns each top-level field with its type, default, whether it is required, and -- for "
         "nested config objects -- a classpath to drill into with inspect_object_signature. "
         "It does not return a full ready-to-run config; combine it with the example templates. "
@@ -395,7 +395,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "delete_run": (
         "Use to remove ONE run's outputs from the current session, leaving the rest of the workspace intact. "
         "This deletes the run's directory under the kind's output root (train removes Statistics/<run_name> and "
-        "Checkpoints/<run_name>; prediction, evaluation, uncertainty remove their <run_name> folder), jailed to the "
+        "Checkpoints/<run_name>; prediction, evaluation, uncertainty remove their <run_name> folder; transform removes "
+        "Transforms/<run_name>, its log and plan only -- never the transformed data), jailed to the "
         "session workspace. It refuses a run_name containing a path separator, and never touches configs or the dataset. "
         "Outputs: the deleted paths (relative to the workspace). "
         "Next: summarize_session, or leaderboard to compare the remaining runs."
