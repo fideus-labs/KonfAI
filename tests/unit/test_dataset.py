@@ -96,6 +96,14 @@ def test_attribute_assigned_a_plain_list_round_trips_as_an_array() -> None:
     np.testing.assert_allclose(attribute.get_np_array("Origin"), [1.0, 2.0, 3.0])
 
 
+def test_attribute_holding_a_long_array_round_trips_past_numpys_print_threshold() -> None:
+    """An attribute is a record, not a display: an elided value is one no reader can parse back."""
+    attribute = Attribute()
+    attribute["Long"] = np.arange(2000, dtype=float)
+
+    np.testing.assert_allclose(attribute.get_np_array("Long"), np.arange(2000, dtype=float))
+
+
 # --------------------------------------------------------------------------------------
 # HDF5 backend — directories, modes, and per-file locking
 # --------------------------------------------------------------------------------------

@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The write side of the data surface: a declared pyramid, and a field that records its own bound.
 
 Both are properties a CONSUMER depends on and cannot re-derive cheaply. A pyramid is indexed by
@@ -19,6 +35,7 @@ from konfai.utils.errors import DatasetManagerError
 from konfai.utils.ome_zarr import (
     DISPLACEMENT_BOUND_ATTRIBUTE,
     _read_konfai_attributes,
+    _zarr_v3_available,
     get_ome_zarr_info,
     is_displacement_field,
     write_ome_zarr,
@@ -97,6 +114,15 @@ def test_a_scale_factor_below_two_is_refused():
         Write(dataset="./Out:omezarr", scale_factors=[1])
 
 
+# An RFC-5 field is a zarr v3 store (NGFF >= 0.5), which zarr 2.x -- the newest release for Python
+# 3.10 -- cannot write. The pyramid tests above need no such store and run everywhere.
+_needs_rfc5 = pytest.mark.skipif(
+    not _zarr_v3_available(),
+    reason="a displacement field's bound is recorded in a zarr v3 store (zarr>=3, Python>=3.11)",
+)
+
+
+@_needs_rfc5
 def test_a_field_records_its_own_bound_on_both_write_paths(tmp_path):
     """The largest displacement per component, in world units, written by whoever holds the samples.
 
@@ -136,6 +162,7 @@ def test_a_field_records_its_own_bound_on_both_write_paths(tmp_path):
     assert DISPLACEMENT_BOUND_ATTRIBUTE in Dataset(tmp_path / "streamed", "omezarr").get_infos("DVF", "case")[1]
 
 
+@_needs_rfc5
 def test_the_bound_turns_into_a_per_axis_halo_under_anisotropy(tmp_path):
     """What the bound is FOR, asserted once so the axis order cannot drift.
 
