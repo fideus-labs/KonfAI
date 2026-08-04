@@ -83,6 +83,7 @@ Trainer:
             - 0.5
             - 0.5
             prob: 1
+            vector_field: false
         nb: 1
     Patch:
       patch_size:
@@ -102,6 +103,12 @@ Trainer:
     batch_size: 8
     validation: 0.2
     validation_augmentations: true
+    shuffle_window: None
+    memory_budget: None
+    num_workers: None
+    pin_memory: false
+    prefetch_factor: None
+    persistent_workers: None
   train_name: SEG_BASELINE
   manual_seed: 32
   epochs: 100
@@ -113,3 +120,4 @@ Trainer:
   data_log: None
   save_checkpoint_mode: BEST
   EarlyStopping: None
+  it_lr_update: None

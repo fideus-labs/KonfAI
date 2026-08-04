@@ -228,6 +228,24 @@ def test_budget_is_per_rank_so_world_size_flips_the_decision() -> None:
     assert sharded.use_cache is True
 
 
+def test_an_auto_budget_is_split_across_one_node_not_the_whole_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Four nodes of four GPUs each: a rank shares its RAM with three others, not fifteen.
+
+    Dividing the node by the global world size makes every rank believe it has a sixteenth of one
+    node, and the chooser then declines a cache that fits four times over.
+    """
+    # A node that offers half the dataset: a rank's sixteenth fits its quarter of that four times
+    # over, while a sixteenth of it would be half of what the rank has to hold.
+    node = _DATASET_BYTES / (2 * _AUTO_MEMORY_SAFETY_FRACTION)
+    monkeypatch.setattr(data_manager, "available_memory_bytes", lambda: (node, "host"))
+    monkeypatch.setenv("KONFAI_LOCAL_RANKS", "4")
+
+    data = _make_train(None)
+    data._resolve_cache_regime(world_size=16)
+
+    assert data.use_cache is True
+
+
 # --------------------------------------------------------------------------------------
 # The evaluation auto-patch -- an AUTO budget is a NODE budget, split across the local ranks
 # --------------------------------------------------------------------------------------
