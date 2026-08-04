@@ -457,19 +457,6 @@ not. `Clip` then `Normalize` therefore takes the whole-volume path, and the plan
 says so. Reorder the chain, or cut it with a `Save`.
 ```
 
-### Statistics a stage may ask for
-
-A stage that needs a figure over the WHOLE volume does not have to assemble it.
-Declaring the statistic in `PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=…)`
-tells the planner to read it once from the stored volume; the stage is then a
-value map, and a volume of any size runs region by region.
-
-Alongside the pooled `Mean`, `Min`, `Max` and `Std`, a **per-component** mean is
-available as `MeanPerChannel`. It exists because a per-channel quantity has as
-many parts as the volume has components, and the pooled mean of all of them
-describes none of them — a three-component displacement field centred by one
-number is centred on no axis.
-
 Handed the whole volume anyway — a chain that fell back for another reason — a
 stage should take the statistic from the tensor in hand and record it, so both
 paths leave the same state behind.

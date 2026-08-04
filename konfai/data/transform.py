@@ -2378,15 +2378,18 @@ class _DisplacementSource:
         bound: list[float] = []
         try:
             group = self.group_for(None)
-            root = self._root_for(None)
+            # Every root, not the first that answers: this is the COHORT's bound, and a field declared
+            # by group alone is looked up beside the cases, which a run may spread over several stores.
+            roots = [self.dataset] if self.dataset is not None else list(self.roots)
             # The header reads belong inside: a directory store lists its entries from the filesystem
             # alone, so an unreadable field can only surface here, one entry at a time.
-            for entry in root.get_names(group):
-                _shape, attribute = root.get_infos(group, entry)
-                if DISPLACEMENT_BOUND_ATTRIBUTE not in attribute:
-                    return self._auto_bound
-                recorded = [float(value) for value in attribute.get_np_array(DISPLACEMENT_BOUND_ATTRIBUTE).ravel()]
-                bound = recorded if not bound else [max(a, b) for a, b in zip(bound, recorded, strict=False)]
+            for root in roots:
+                for entry in root.get_names(group):
+                    _shape, attribute = root.get_infos(group, entry)
+                    if DISPLACEMENT_BOUND_ATTRIBUTE not in attribute:
+                        return self._auto_bound
+                    recorded = [float(value) for value in attribute.get_np_array(DISPLACEMENT_BOUND_ATTRIBUTE).ravel()]
+                    bound = recorded if not bound else [max(a, b) for a, b in zip(bound, recorded, strict=False)]
         except Exception:  # an unreadable field dataset is a whole-volume answer, not a crash
             return self._auto_bound
         if bound and max(bound) > 0.0:

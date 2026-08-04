@@ -36,6 +36,7 @@ from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import LocalityKind, Reduce, Resample, ResampleToReference, Write
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformError
+from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE
 
 pytest.importorskip("SimpleITK")
 import SimpleITK as sitk
@@ -777,6 +778,27 @@ def test_fields_can_live_beside_the_cases(warped: tuple[Dataset, Dataset, np.nda
         _CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
     )
     np.testing.assert_array_equal(got.numpy(), want.numpy())
+
+
+def test_auto_reads_the_bound_from_every_root_not_the_first(tmp_path: Path) -> None:
+    """The bound is the cohort's, and a cohort declared by group alone can span the run's roots.
+
+    Stopping at the first root that answers gives a halo sized for part of the cohort: the cases
+    living in the other stores are then read through a region too small for their own displacement.
+    """
+    first, second = Dataset(tmp_path / "first", "mha"), Dataset(tmp_path / "second", "mha")
+    for root, shift in ((first, 1.0), (second, 9.0)):
+        field = np.zeros((3, 4, 4, 4), dtype=np.float32)
+        field[:] = shift
+        attributes = _attributes(_FIELD_ORIGIN, _FIELD_SPACING)
+        attributes[DISPLACEMENT_BOUND_ATTRIBUTE] = np.array([shift, shift, shift])
+        root.write("DVF", f"CASE_{int(shift)}", field, attributes)
+
+    stage = ResampleToReference(entry="CASE_1", group="Reference", field_group="DVF", max_displacement="auto")
+    stage.set_datasets([first, second])
+
+    # 9.0 from the second root, not 1.0 from the first.
+    assert stage.displacement.component_bound() == [9.0, 9.0, 9.0]
 
 
 def test_a_bound_with_no_field_is_refused() -> None:
