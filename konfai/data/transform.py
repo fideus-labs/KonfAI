@@ -549,14 +549,21 @@ class Clip(Transform):
         # both force a whole-volume load. A 'min'/'max' bound needs a global disk statistic
         # (GLOBAL_STAT); fixed float bounds clip each voxel independently (POINTWISE).
         if self.mask is not None:
-            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason=f"the bounds are read under mask '{self.mask}', a second whole volume; drop the mask to stream",
+            )
         stat_keys: set[str] = set()
         for bound, key in ((self.min_value, "Min"), (self.max_value, "Max")):
             if isinstance(bound, str):
                 if bound.lower() == key.lower():
                     stat_keys.add(key)
                 else:
-                    return PatchLocality(LocalityKind.WHOLE_VOLUME)
+                    return PatchLocality(
+                        LocalityKind.WHOLE_VOLUME,
+                        reason=f"a '{bound}' bound needs the whole histogram; fixed values or"
+                        " 'min'/'max' (a seeded statistic) stream",
+                    )
         if not stat_keys:
             return PatchLocality(LocalityKind.POINTWISE)
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
@@ -760,7 +767,11 @@ class Standardize(TransformInverse):
         # a volume-global disk statistic (GLOBAL_STAT); when both are given, the standardization is a
         # per-voxel affine map with constant coefficients (POINTWISE).
         if self.mask is not None:
-            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason=f"the statistics are taken under mask '{self.mask}', a second whole volume;"
+                " drop the mask to stream",
+            )
         stat_keys: set[str] = set()
         if self.mean is None:
             stat_keys.add("Mean")
@@ -2031,7 +2042,11 @@ class Sum(Transform):
         # the whole extent, so it falls back to the whole volume.
         if self.dim == 0:
             return PatchLocality(LocalityKind.POINTWISE)
-        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(
+            LocalityKind.WHOLE_VOLUME,
+            reason=f"dim {self.dim} reduces a spatial axis, which spans the whole extent; dim: 0"
+            " reduces the channels and streams",
+        )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "number_of_channels_per_model" in cache_attribute:
@@ -2135,7 +2150,11 @@ class Argmax(Transform):
         # the whole extent, so a per-patch argmax would diverge -- fall back to the whole volume.
         if self.dim == 0:
             return PatchLocality(LocalityKind.POINTWISE)
-        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(
+            LocalityKind.WHOLE_VOLUME,
+            reason=f"dim {self.dim} reduces a spatial axis, which spans the whole extent; dim: 0"
+            " reduces the channels and streams",
+        )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.argmax(tensor, dim=self.dim).unsqueeze(self.dim)
@@ -2151,7 +2170,11 @@ class Softmax(Transform):
         # across the whole extent, so a per-patch softmax would diverge -- fall back to the whole volume.
         if self.dim == 0:
             return PatchLocality(LocalityKind.POINTWISE)
-        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(
+            LocalityKind.WHOLE_VOLUME,
+            reason=f"dim {self.dim} reduces a spatial axis, which spans the whole extent; dim: 0"
+            " reduces the channels and streams",
+        )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.softmax(tensor, dim=self.dim)
@@ -2879,7 +2902,11 @@ class Canonical(TransformInverse):
         # one -- mirroring or permuting -- remaps indices, which is what ORIENTATION streams; an oblique
         # one is resampled from the whole volume.
         if self._orthogonal_remap(cache_attribute) is None:
-            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason="the case's direction cosines are oblique (or unreadable), so the"
+                " reorientation is a resample of the whole volume rather than an index remap",
+            )
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def stream_region_source(
@@ -2942,7 +2969,11 @@ class Canonical(TransformInverse):
 
     def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         if self._inverse_remap(cache_attribute) is None:
-            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason="the direction this inverse restores is oblique (or not on the attribute),"
+                " so the reorientation back is a resample of the whole volume",
+            )
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
@@ -3395,14 +3426,33 @@ class StandardDeviation(Transform):
 
 
 class Statistics(Transform):
+    """Record the volume's Min/Max/Mean/Std on the case, under ``Image*`` keys.
+
+    Streams: the four numbers are exactly what the disk-statistics scan already computes, so a
+    streamed chain seeds them (``GLOBAL_STAT``) and each region restates the case's answer instead
+    of a region's own.
+    """
+
+    _KEYS = (("Min", "ImageMin"), ("Max", "ImageMax"), ("Mean", "ImageMean"), ("Std", "ImageStd"))
+
     def __init__(self) -> None:
         super().__init__()
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"Min", "Max", "Mean", "Std"}))
+
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        cache_attribute["ImageMin"] = tensors.float().min()
-        cache_attribute["ImageMax"] = tensors.float().max()
-        cache_attribute["ImageMean"] = tensors.float().mean()
-        cache_attribute["ImageStd"] = tensors.float().std()
+        for seeded, recorded in self._KEYS:
+            if seeded not in cache_attribute:
+                cache_attribute[recorded] = getattr(tensors.float(), seeded.lower())()
+                continue
+            # A seeded statistic arrives as a bare scalar or a one-element array, depending on who
+            # seeded it; float() reads the first form and get_tensor the second.
+            raw = cache_attribute[seeded]
+            try:
+                cache_attribute[recorded] = float(raw)
+            except (TypeError, ValueError):
+                cache_attribute[recorded] = float(cache_attribute.get_tensor(seeded).reshape(-1)[0])
         return tensors
 
 
@@ -3423,7 +3473,11 @@ class Crop(TransformInverse):
         # declaration, but a group carries only what its writer stored, and without it there is no
         # translation to make -- only the read that would find one.
         if "box" not in cache_attribute:
-            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason="the case carries no 'box' yet; the foreground box is computed and recorded"
+                " as the chain is planned, and only a read can find it",
+            )
         return PatchLocality(LocalityKind.CROP)
 
     def stream_region_source(

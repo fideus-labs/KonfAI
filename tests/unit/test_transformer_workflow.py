@@ -957,3 +957,40 @@ def test_two_ranks_partition_the_cases_and_every_output_is_written_once(tmp_path
     out = Dataset(f"{tmp_path / 'out_dir'}/", "omezarr")
     for index in range(3):
         assert out.is_dataset_exist("CT_out", f"CASE_{index:03d}")
+
+
+def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(tmp_path: Path) -> None:
+    """The route is chosen from predicted cost against the budget — never the answer.
+
+    A gzipped NIfTI cannot serve bounded region reads, so streaming decodes the whole source once
+    per slab; a case whose working set fits the budget is then LOADED — one read — and the plan
+    says so with the factor. LOAD is a choice, not a fallback: on_fallback=error must not refuse
+    it, and the bytes match the streamed route of the same chain.
+    """
+    rng = np.random.default_rng(3)
+    source = Dataset(tmp_path / "source", "nii.gz")
+    volume = (rng.random((1, 8, 32, 32)) * 100).astype(np.float32)
+    source.write("CT", "CASE_000", volume, _image_attributes())
+    out = tmp_path / "out"
+    transforms = f"""\
+              Clip:
+                min_value: 0.0
+                max_value: 50.0
+              Write:
+                dataset: {out}:h5
+"""
+    config_path = _write_config(tmp_path, transforms, header="  on_fallback: error\n")
+    # 3x the case: fits (working set = 2x), while the sweep rows drop below the case's extent.
+    budget = 3 * 8 * 32 * 32 * 4
+    config_path.write_text(config_path.read_text().replace("memory_budget: auto", f"memory_budget: {budget}b"))
+    workflow = _build(tmp_path)
+    plan = workflow.compute_plan()
+    entry = next(entry for entry in plan.entries if entry.case == "CASE_000")
+    assert entry.verdict == "LOAD"
+    assert "x the source" in (entry.reason or "")
+    assert not plan.fallback_entries  # a choice, not a fallback: on_fallback has nothing to refuse
+
+    workflow.setup(1)
+    workflow.run_process(1, 0, 0, None)
+    loaded, _ = Dataset(out, "h5").read_data("CT_out", "CASE_000")
+    np.testing.assert_array_equal(loaded, np.clip(volume, 0.0, 50.0))

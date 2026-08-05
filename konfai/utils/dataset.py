@@ -887,6 +887,17 @@ class Dataset:
         def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
             pass
 
+        def bounded_region_reads(self, name: str) -> bool:
+            """Whether a region read decodes only the region, or the whole volume behind the scenes.
+
+            The base answers ``False``: getting this wrong only ever costs speed, never correctness,
+            and an unknown backend is priced pessimistically. What it prices is the ROUTE — a store
+            that decodes the whole volume once per slab makes streaming read the source many times
+            over, where loading reads it once.
+            """
+            del name
+            return False
+
         @abstractmethod
         def file_to_data_statistics(
             self,
@@ -995,6 +1006,10 @@ class Dataset:
             data = np.zeros(dataset.shape, dataset.dtype)
             dataset.read_direct(data)
             return data, Attribute(dict(dataset.attrs))
+
+        def bounded_region_reads(self, name: str) -> bool:
+            del name
+            return True  # h5 is chunked: a slice reads its chunks and nothing else
 
         def file_to_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
             dataset = self._get_dataset(groups, name)
@@ -1328,6 +1343,14 @@ class Dataset:
 
             return self._file_to_image_slice(name, path, slices)
 
+        def bounded_region_reads(self, name: str) -> bool:
+            path = self._resolve_data_path(name)
+            if path is None:
+                return False
+            if path.endswith(".npy"):
+                return True  # np.load(mmap) reads the slice off the map
+            return not path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")) and self._supports_region_read(path)
+
         def file_to_data_statistics(
             self,
             group: str,
@@ -1577,6 +1600,10 @@ class Dataset:
             attributes["Origin"] = attributes.get_np_array("Origin") + direction @ (start_xyz * spacing)
             attributes["Spacing"] = spacing * step_xyz
             return data, attributes
+
+        def bounded_region_reads(self, name: str) -> bool:
+            del name
+            return True  # zarr is chunked: a slice reads its chunks and nothing else
 
         def file_to_data_statistics(
             self,
@@ -2107,6 +2134,28 @@ class Dataset:
                 return file.file_to_data_slice(groups, name, slices)
 
         raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
+
+    def bounded_region_reads(self, groups: str, name: str) -> bool:
+        """Whether a region read of this entry decodes only the region, or the whole volume.
+
+        What it prices is the ROUTE, never the answer: a store that decodes the whole volume once
+        per slab (compressed MetaImage, NRRD, gzipped NIfTI) makes streaming read the source many
+        times over, where loading reads it once. ``False`` for a missing entry — pessimistic, and
+        only ever costing speed.
+        """
+        if not self._exists_on_disk():
+            return False
+        if self.is_directory:
+            for sub_directory in self._get_sub_directories(groups):
+                group = groups.split("/")[-1]
+                if os.path.exists(f"{self.filename}{sub_directory}{name}{'.h5' if self.file_format == 'h5' else ''}"):
+                    with Dataset.File(
+                        f"{self.filename}{sub_directory}{name}", True, self.file_format, self.level
+                    ) as file:
+                        return file.bounded_region_reads(group)
+            return False
+        with Dataset.File(self.filename, True, self.file_format, self.level) as file:
+            return file.bounded_region_reads(name)
 
     def read_data_statistics(
         self,

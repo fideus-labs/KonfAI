@@ -61,7 +61,7 @@ from konfai import (
     statistics_directory,
     transforms_directory,
 )
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIError
 from konfai.utils.utils import env_flag
 
 
@@ -598,6 +598,7 @@ class Log(MinimalLog):
         # Append, never truncate: this file is opened BEFORE the overwrite prompt runs, so a "w" mode
         # destroyed the previous run's log even when the user declined the overwrite.
         self.file = open(self.log_path / f"log_{rank}.txt", "a", buffering=1)
+        self._last_logged: str | None = None
 
     def __enter__(self):
         super().__enter__()
@@ -610,7 +611,12 @@ class Log(MinimalLog):
 
     def write(self, msg: str):
         super().write(msg)
-        if self._buffered_line:
+        # Consecutive identical lines are one fact said twice: a progress bar arrives as several
+        # write() calls per frame and a case line rides beside its own counter frame, which used to
+        # multiply the file by ~4x against the console. Only CONSECUTIVE repeats fold -- a fact that
+        # genuinely recurs later still lands.
+        if self._buffered_line and self._buffered_line != self._last_logged:
+            self._last_logged = self._buffered_line
             self.file.write(self._buffered_line + "\n")
             self.file.flush()
 
@@ -798,6 +804,14 @@ def run_distributed_app(
             )
         except KeyboardInterrupt:
             print("\n[KonfAI] Manual interruption (Ctrl+C)")
+        except KonfAIError as error:
+            # A designed refusal: the message says what is wrong and the remedy what to change.
+            # The traceback under it is framework internals -- 28 lines burying the 3 that matter --
+            # so it is shown only to a reader who asked (KONFAI_DEBUG=1).
+            if env_flag("KONFAI_DEBUG", False):
+                raise
+            print(str(error).strip(), file=sys.stderr)
+            sys.exit(1)
         finally:
             if previous_local_ranks is None:
                 os.environ.pop("KONFAI_LOCAL_RANKS", None)

@@ -2157,6 +2157,7 @@ class DatasetManager:
         rewrite: bool = False,
         fallback_budget_bytes: float | None = None,
         allow_fallback: bool = True,
+        prefer_whole: bool = False,
     ) -> bool:
         """Write this case's chain to disk by the cheapest path that can, and say which one it took.
 
@@ -2183,6 +2184,14 @@ class DatasetManager:
         # A chain with an Expand materializes a COPY, whose draw must be part of the plan; without
         # one it materializes the case itself, and augmentations have nothing to do with writing.
         apply_augmentations = self._expand is not None and a > 0
+        if prefer_whole:
+            # The plan chose to LOAD: the case fits its budget and streaming would re-read the
+            # source (:meth:`predicted_stream_read_factor`). A choice, not a fallback -- nothing
+            # failed -- so ``allow_fallback`` is not consulted; the budget check stays as the belt.
+            self._enforce_fallback_budget(fallback_budget_bytes)
+            self._assemble_and_write(a)
+            self.unload()
+            return False
         if self._stream_ready(a, apply_augmentations=apply_augmentations):
             return True
         if not allow_fallback:
@@ -2242,6 +2251,64 @@ class DatasetManager:
             spatial = self._fold_case_state(stage, list(spatial), attributes)
             peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
         return peak * CASE_ELEMENT_BYTES
+
+    def predicted_stream_read_factor(self, a: int = 0, apply_augmentations: bool = False) -> float | None:
+        """~How many times the streamed route reads the source, priced from the plan alone.
+
+        Streaming is a memory strategy, not a speed strategy: splitting re-reads — a halo re-reads
+        its overlap, a regrid pulls each slab's window through its map, and a store that cannot
+        serve bounded region reads decodes the whole volume once per slab — where loading reads the
+        source once. This is the number the route is CHOSEN with, never the answer: headers only,
+        one representative slab priced through the plan's own pull maps. ``None`` when the chain
+        cannot stream (there is no route to price). A chain reading through unmaterialized Save
+        caches is priced on its top-level plans — a proxy, close enough to route by.
+        """
+        source = self._resolve_patch_stream_source(a, apply_augmentations)
+        if source is None:
+            return None
+        # Each unsatisfied Save sweeps ITS source; past the last boundary the chain reads the
+        # materialized cache. The route is priced by the dominant segment: a max, not a sum --
+        # the segments read different stores, and one that re-reads is the cost either way.
+        factors = [
+            self._segment_read_factor(
+                sweep.source_dataset,
+                sweep.source_group,
+                sweep.source_entry,
+                [int(extent) for extent in sweep.source_shape],
+                list(sweep.out_spatial),
+                sweep.stage_plans,
+            )
+            for sweep in source.pending_sweeps
+        ]
+        spatial = [int(extent) for extent in source.shape[1:]]
+        landed = list(source.stage_plans[-1].out_shape) if source.stage_plans else list(spatial)
+        factors.append(
+            self._segment_read_factor(
+                source.dataset, source.group, source.entry, list(source.shape), landed, source.stage_plans
+            )
+        )
+        return max(factors)
+
+    def _segment_read_factor(
+        self,
+        dataset: Dataset,
+        group: str,
+        entry: str,
+        source_shape: list[int],
+        landed: list[int],
+        plans: tuple[_ReadStagePlan, ...],
+    ) -> float:
+        """One segment's reads over its source's voxels, slab by slab through the plan's own pulls."""
+        rows = self._sweep_rows(list(landed), int(source_shape[0]))
+        if not dataset.bounded_region_reads(group, entry):
+            return float(max(1, -(-landed[0] // rows)))  # every slab decodes the whole store
+        read = 0
+        for start in range(0, landed[0], rows):
+            span = [slice(start, min(start + rows, landed[0])), *(slice(0, extent) for extent in landed[1:])]
+            for plan in reversed(plans):
+                span = list(plan.pull(tuple(span))) if plan.pull is not None else span
+            read += int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
+        return float(read) / float(max(1, int(np.prod(source_shape[1:], dtype=np.int64))))
 
     def _enforce_fallback_budget(self, fallback_budget_bytes: float | None) -> None:
         if fallback_budget_bytes is None:
