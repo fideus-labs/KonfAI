@@ -429,7 +429,9 @@ def gather(
     if not bool(inside.any()):
         return torch.full(out_shape, fill, device=device, dtype=torch.float32).type(source.dtype)
 
-    work = source.type(sampling_dtype(source))
+    # A nearest pick copies voxels: no blend, no working dtype -- and no float trip for a label,
+    # whose values above 2**24 a float32 cannot carry back (gather_separable holds the same rule).
+    work = source if mode == "nearest" else source.type(sampling_dtype(source))
     if mode == "nearest":
         # One gather, on exact index arithmetic: a nearest pick is discontinuous, so the last bit of
         # a coordinate decides which voxel it lands on. Measured over 300 random grid pairs, a

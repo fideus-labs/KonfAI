@@ -33,6 +33,7 @@ from typing import cast
 import numpy as np
 import pytest
 import torch
+from konfai.data import patching
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.augmentation import Flip as FlipAugmentation
 from konfai.data.patching import DatasetManager, DatasetPatch
@@ -642,6 +643,9 @@ def test_the_read_factor_grows_as_the_budget_cuts_finer_slabs(streaming_dataset_
     for budget in (None, 64_000.0, 16_000.0, 8_000.0):
         manager.set_memory_budget(budget)
         factors.append(manager.predicted_stream_read_factor(0))
+    # The ~1.0 first factor holds only while the no-budget sweep covers the volume in ONE slab;
+    # a smaller default cap would split it and re-read the Dilate halo at each boundary.
+    assert patching._SWEEP_SLAB_ROWS >= volume.shape[1], "the first factor's premise moved"
     assert factors[0] == pytest.approx(1.0, abs=0.2)  # one slab: the whole source, once
     assert factors == sorted(factors), f"the factor must be monotone in fineness, got {factors}"
     assert factors[-1] > 2.0

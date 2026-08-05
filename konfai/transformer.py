@@ -142,7 +142,9 @@ class TransformPlan:
     def report(self, verbose: bool = True) -> str:
         """The plan as text. ``verbose`` is the plan.txt form; the console gets the same facts with
         the estimator caveat only where an estimate actually gates something."""
-        estimated = bool(self.fallback_entries or any(entry.reduced for entry in self.entries))
+        estimated = bool(
+            self.fallback_entries or any(entry.reduced or entry.verdict == "LOAD" for entry in self.entries)
+        )
         header = (
             f"[Transformer] plan over {self.world_size} rank(s) | per-rank budget"
             f" {_format_gib(self.budget_bytes)} ({self.budget_desc})"
@@ -841,7 +843,10 @@ class Transformer(DistributedObject):
                 progress.update(1)
         totals = dict(counts)
         if dist.is_available() and dist.is_initialized():
-            gathered = torch.tensor([counts[key] for key in sorted(counts)], dtype=torch.long)
+            # NCCL reduces only device tensors; gloo takes CPU ones. Follow the backend, or every
+            # --gpu run dies on this bookkeeping reduce after all its cases were written.
+            device = torch.device("cuda") if dist.get_backend() == "nccl" else torch.device("cpu")
+            gathered = torch.tensor([counts[key] for key in sorted(counts)], dtype=torch.long, device=device)
             dist.all_reduce(gathered)
             totals = {key: int(value) for key, value in zip(sorted(counts), gathered, strict=True)}
         if global_rank == 0:

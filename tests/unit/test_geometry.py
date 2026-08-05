@@ -65,16 +65,21 @@ class TestGridAgainstSimpleITK:
             got = grid.index_to_world.apply(np.asarray(index_xyz))
             np.testing.assert_allclose(got, want, rtol=0.0, atol=1e-12)
 
-    def test_sub_grid_origin_is_the_slab_origin_bit_for_bit(self):
-        # The load-bearing line: same product, same association as ITK, on an oblique grid with
-        # anisotropic spacing and a non-round origin.
+    def test_sub_grid_origin_is_the_slab_origin(self):
+        # The load-bearing identity is internal, and bit-for-bit: the slab origin IS the parent
+        # map applied to the slab's first index -- a recomputation that associated differently
+        # would shear a streamed regrid at its seams. Agreement with ITK itself holds only to
+        # tolerance: numpy does not reproduce ITK's product bit-for-bit on every ISA (arm64
+        # contracts with FMA where x86-64 does not), so that half shares the neighbouring
+        # test's 1e-12.
         grid = _grid(_oblique_direction())
         image = _image(grid)
         region = (slice(11, 21), slice(0, 33), slice(5, 48))
-        want = np.array(image.TransformIndexToPhysicalPoint([5, 0, 11]))
         sub = grid.sub_grid(region)
         assert sub.size_zyx == (10, 33, 43)
-        np.testing.assert_array_equal(sub.origin_xyz, want)
+        np.testing.assert_array_equal(sub.origin_xyz, grid.index_to_world.apply(np.array([5.0, 0.0, 11.0])))
+        want = np.array(image.TransformIndexToPhysicalPoint([5, 0, 11]))
+        np.testing.assert_allclose(sub.origin_xyz, want, rtol=0.0, atol=1e-12)
 
     def test_world_to_index_round_trips(self):
         grid = _grid(_oblique_direction())

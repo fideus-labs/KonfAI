@@ -72,7 +72,9 @@ The codebase also references internal variables such as:
 - `KONFAI_CONFIG_MODE`, `KONFAI_CONFIG_PATH` — the config binder's mode machine
 - `KONFAI_APPS_CONFIG`
 - `KONFAI_DEBUG` — `1` re-attaches the framework traceback to a designed refusal (a
-  `KonfAIError`), which otherwise prints its message and remedy alone; `KONFAI_DEBUG_LAST_LAYER`
+  `KonfAIError`), which otherwise prints its message and remedy alone
+- `KONFAI_DEBUG_LAST_LAYER` — set it (empty) before a run and the network appends each module
+  it enters, so after a crash it names the last layer reached
 - `KONFAI_MASTER_PORT` — distributed rendezvous bookkeeping
 - `KONFAI_LOCAL_RANKS` — how many ranks share one node's RAM, published by the
   launcher so a node-scoped `memory_budget` is divided before the spawn. It changes

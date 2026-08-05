@@ -52,11 +52,11 @@ konfai = "konfai.main:main"
 konfai-cluster = "konfai.main:cluster"
 
 [project.optional-dependencies]
-itk = ["SimpleITK"]
+itk = ["SimpleITK>=2.0"]
 hdf5 = ["h5py"]
 monitoring = ["nvidia-ml-py"]
 tensorboard = ["tensorboard"]
-imaging = ["SimpleITK", "h5py", "pydicom", "zarr", "ngff-zarr>=0.38", "dask"]
+imaging = ["SimpleITK>=2.0", "h5py", "pydicom", "zarr", "ngff-zarr>=0.38", "dask"]
 vtk = ["vtk"]
 lpips = ["lpips"]
 smp = ["segmentation-models-pytorch"]
@@ -82,7 +82,7 @@ all = [
   "konfai[smp]"
 ]
 dev = [
-  "SimpleITK",
+  "SimpleITK>=2.0",
   "h5py",
   "pydicom",
   "zarr",
@@ -159,7 +159,7 @@ twine = "*"
 mypy = "*"
 types-requests = "*"
 submitit = "*"
-SimpleITK = "*"
+SimpleITK = ">=2.0"
 h5py = "*"
 tensorboard = "*"
 nvidia-ml-py = "*"

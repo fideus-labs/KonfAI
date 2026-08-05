@@ -1985,11 +1985,11 @@ packages:
   - lxml
   - requests
   - huggingface-hub
-  - simpleitk ; extra == 'itk'
+  - simpleitk>=2.0 ; extra == 'itk'
   - h5py ; extra == 'hdf5'
   - nvidia-ml-py ; extra == 'monitoring'
   - tensorboard ; extra == 'tensorboard'
-  - simpleitk ; extra == 'imaging'
+  - simpleitk>=2.0 ; extra == 'imaging'
   - h5py ; extra == 'imaging'
   - pydicom ; extra == 'imaging'
   - zarr ; extra == 'imaging'
@@ -2022,7 +2022,7 @@ packages:
   - konfai[omezarr] ; extra == 'all'
   - konfai[export] ; extra == 'all'
   - konfai[smp] ; extra == 'all'
-  - simpleitk ; extra == 'dev'
+  - simpleitk>=2.0 ; extra == 'dev'
   - h5py ; extra == 'dev'
   - pydicom ; extra == 'dev'
   - zarr ; extra == 'dev'

@@ -157,6 +157,7 @@ class _RunningStatistics:
         if self._state is None or not self._state["count"]:
             raise ReductionError("Statistics were requested over an empty volume.", "Check the output extent.")
         statistics = _finalize_running_statistics(self._state)
+        attribute["StatisticsSeeded"] = np.float32(1.0)
         attribute["Min"] = np.float32(statistics["min"])
         attribute["Max"] = np.float32(statistics["max"])
         attribute["Mean"] = np.asarray([statistics["mean"]], dtype=np.float32)

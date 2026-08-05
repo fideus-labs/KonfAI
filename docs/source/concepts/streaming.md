@@ -98,6 +98,7 @@ which region of the file a patch needs.
 | `HALO` | a bounded neighbourhood of radius `halo` | the patch enlarged by `halo`, cropped after |
 | `ORIENTATION` | flip or permute | the index-remapped region |
 | `CROP` | the source region is the target translated | the region — reading it *is* the answer |
+| `REGRID` | a change of grid: the source region is the target mapped through it | the mapped region, plus the interpolation taps |
 | `GLOBAL_STAT` | needs whole-volume `Min`/`Max`/`Mean`/`Std` | the statistic once from disk, then the exact patch |
 | `SLAB` | a per-voxel value map plus a side effect that needs the slab's place in the volume | nothing on the read path — the dispatcher treats it as `WHOLE_VOLUME`; it streams on the write side (`Mask`, `InferenceStack`) |
 | `WHOLE_VOLUME` | genuinely needs everything | the volume — the fallback |
@@ -113,7 +114,7 @@ is the group's `transforms` followed by the copy's own augmentation draw — one
 list, so a region transform and a region augmentation compose exactly like two
 region transforms.
 
-Seven conditions reject streaming:
+Six conditions reject streaming:
 
 1. any `WHOLE_VOLUME` **or `SLAB`** declaration — the read dispatcher has no slab
    context, so it treats `SLAB` as a whole load;
@@ -266,10 +267,10 @@ To opt in, override `patch_locality` under three rules:
 - **Total.** Answer for any case, including one with no metadata. A missing key
   returns `WHOLE_VOLUME`; it never raises.
 
-`ORIENTATION` and `CROP` must also implement `stream_region_source`, mapping a
+`ORIENTATION`, `CROP` and `REGRID` must also implement `stream_region_source`, mapping a
 target patch to the source region. Declaring a region kind without it raises a
 `TransformError` on the first patch read. `HALO` needs no remap; the
-dispatcher derives their regions.
+dispatcher derives its regions.
 
 ## Equivalence
 
