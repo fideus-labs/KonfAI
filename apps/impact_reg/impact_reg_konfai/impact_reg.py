@@ -38,7 +38,6 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import SimpleITK as sitk
@@ -52,6 +51,10 @@ from konfai_apps.app_repository import get_available_apps_on_hf_repo
 IMPACT_REG_KONFAI_REPO = os.environ.get("KONFAI_IMPACTREG_REPO", "VBoussot/ImpactReg")
 
 _ENSEMBLE_DIR = "Ensemble"
+
+# Writing needs a format named -- nothing is on disk yet to detect one from. Only the store spellings
+# need translating; every other suffix is already the token Dataset normalises (".mha" -> "mha").
+_FORMATS = {".ome.zarr": "omezarr", ".zarr": "omezarr"}
 
 
 def _app_id(preset: str) -> str:
@@ -190,44 +193,44 @@ def _write_displacement_field(field: sitk.Image, dest: Path) -> None:
         sitk.WriteImage(field, str(dest))
 
 
-def _dataset_entry(path: Path) -> tuple[Any, str, str]:
-    """Address one file or store as a konfai ``Dataset`` entry: ``(dataset, group, name)``.
+def _read_image(path: Path, work: Path) -> sitk.Image:
+    """A volume, read through ``Dataset`` — after building the dataset it needs.
 
-    Dataset is the layer that already knows every format konfai supports -- h5, DICOM, OME-Zarr, and
-    every ITK extension through SitkFile, which probes them itself. Going through it is what makes
-    this orchestrator format-agnostic without owning a dispatch of its own: a hand-written
-    ``if path.is_dir()`` knows exactly the two formats whoever wrote it thought of.
+    A dataset is a root of CASES holding GROUPS. A path on the command line is neither, so it is linked
+    into that layout first, exactly as konfai-apps stages its own inputs. Pretending instead that the
+    parent directory is a root and the file a group -- what this used to do -- makes detection probe one
+    level too deep inside a store, and is simply wrong for a single-store backend like h5, where the
+    file IS the dataset rather than an entry in one.
 
-    A dataset addresses ``{root}/{name}/{group}.{ext}``. An orchestrator input is a bare path, so the
-    case is empty: the parent directory is the root and the stem is the entry. The extension only
-    seeds the format token -- Dataset normalises it (``.ome.zarr`` / ``.zarr`` -> ``omezarr``) and
-    re-detects a directory store from disk regardless of what the token said.
+    Built properly, no format is named: konfai has a case to probe and detects the backend itself, which
+    is why this reads an ITK file, an OME-Zarr store or anything else konfai supports without a branch
+    here enumerating them.
     """
     from konfai.utils.dataset import Dataset
 
-    suffixes = "".join(path.suffixes)
-    stem = path.name[: len(path.name) - len(suffixes)] if suffixes else path.name
-    file_format = "omezarr" if suffixes.lower().endswith((".ome.zarr", ".zarr")) else suffixes.lstrip(".")
-    return Dataset(path.parent, file_format or "mha"), stem, ""
+    root = Path(tempfile.mkdtemp(prefix="entry_", dir=str(work)))
+    case = root / "P000"
+    case.mkdir()
+    (case / f"Entry{''.join(path.suffixes)}").symlink_to(path.resolve())
+    return Dataset(root, "").read_image("Entry", "P000")
 
 
-def _read_image(path: Path) -> sitk.Image:
-    """An image, in whatever format it is stored — read through konfai's Dataset."""
-    dataset, group, name = _dataset_entry(path)
-    return dataset.read_image(group, name)
+def _write_case_entry(image: sitk.Image, case_out: Path, group: str, file_format: str) -> None:
+    """Write one group of one case, through ``Dataset``.
 
-
-def _write_image(image: sitk.Image, dest: Path) -> None:
-    """Write an image in the form ``dest`` names — through the same layer that read it.
-
-    So the format out is the format in, for every format konfai writes, and not only for the two an
-    ``if`` here would have enumerated.
+    THIS side really is a dataset, and always was: ``<output>/<case>/<group>.<ext>`` is a root of cases
+    holding groups, which is why konfai can read it back without being told a format. So the write goes
+    through the layer that owns that layout instead of composing the path by hand -- and writing, unlike
+    reading, does need a format named, because there is nothing on disk yet to detect one from.
     """
-    dataset, group, name = _dataset_entry(dest)
-    dataset.write(group, name, image)
+    from konfai.utils.dataset import Dataset
+
+    Dataset(case_out.parent, file_format).write(group, case_out.name, image)
 
 
-def _derive_moved(moving_image: Path, dvf_path: Path, dest_dir: Path, field: sitk.Image | None = None) -> Path:
+def _derive_moved(
+    moving_image: Path, dvf_path: Path, dest_dir: Path, work: Path, field: sitk.Image | None = None
+) -> Path:
     """The moved image, resampled from the moving through the displacement field.
 
     A preset that emits only a field is complete: the moved image IS that field applied to the moving,
@@ -252,12 +255,13 @@ def _derive_moved(moving_image: Path, dvf_path: Path, dest_dir: Path, field: sit
     size, origin = field.GetSize(), field.GetOrigin()
     spacing, direction = field.GetSpacing(), field.GetDirection()
     transform = sitk.DisplacementFieldTransform(field)
-    moving = _read_image(moving_image)
+    moving = _read_image(moving_image, work)
     moved = sitk.Resample(
         moving, size, transform, sitk.sitkLinear, origin, spacing, direction, 0.0, moving.GetPixelID()
     )
-    dest = _output_path(dest_dir, "Moved", "".join(dvf_path.suffixes))
-    _write_image(moved, dest)
+    suffixes = "".join(dvf_path.suffixes)
+    dest = _output_path(dest_dir, "Moved", suffixes)
+    _write_case_entry(moved, dest_dir, "Moved", _FORMATS.get(suffixes.lower(), suffixes.lstrip(".")))
     return dest
 
 
@@ -441,7 +445,7 @@ class ImpactRegKonfAIApp:
 
                 if len(presets) == 1:
                     dvf_out = _copy_output(dvf_paths[0], case_out, "DVF")
-                    _derive_moved(moving_image, dvf_out, case_out)
+                    _derive_moved(moving_image, dvf_out, case_out, work)
                 else:
                     # Ensemble: average the presets' displacement fields (all on the fixed grid) and warp the
                     # moving image once with that averaged field — the one output no single preset produced.
@@ -451,7 +455,9 @@ class ImpactRegKonfAIApp:
                     # Through the same derivation as the single-preset path, which reads the moving in
                     # either form: the sitk.ReadImage this replaces cannot open a store at all, so an
                     # ensemble of OME-Zarr inputs failed here and nowhere else.
-                    _derive_moved(moving_image, dvf_out, case_out, field=sitk.Cast(avg_dvf, sitk.sitkVectorFloat64))
+                    _derive_moved(
+                        moving_image, dvf_out, case_out, work, field=sitk.Cast(avg_dvf, sitk.sitkVectorFloat64)
+                    )
 
                 # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid displacement
                 # field as a SimpleITK transform.
@@ -516,10 +522,10 @@ class ImpactRegKonfAIApp:
             try:
                 # Image: moving resampled onto the fixed grid vs fixed (MAE). Mask is optional.
                 if index < len(fixed_images) and index < len(moving_images):
-                    fixed = _read_image(fixed_images[index])
+                    fixed = _read_image(fixed_images[index], work)
                     moved = work / "moved_image.nii.gz"
                     sitk.WriteImage(
-                        sitk.Resample(_read_image(moving_images[index]), fixed, transform), str(moved)
+                        sitk.Resample(_read_image(moving_images[index], work), fixed, transform), str(moved)
                     )
                     app.evaluate(
                         inputs=[[fixed_images[index]]],
@@ -535,11 +541,11 @@ class ImpactRegKonfAIApp:
 
                 # Segmentation: moving seg warped onto fixed vs fixed seg (Dice).
                 if index < len(gt_fixed_seg) and index < len(gt_moving_seg):
-                    fixed_seg = _read_image(gt_fixed_seg[index])
+                    fixed_seg = _read_image(gt_fixed_seg[index], work)
                     moved_seg = work / "moved_seg.nii.gz"
                     sitk.WriteImage(
                         sitk.Resample(
-                            _read_image(gt_moving_seg[index]), fixed_seg, transform, sitk.sitkNearestNeighbor
+                            _read_image(gt_moving_seg[index], work), fixed_seg, transform, sitk.sitkNearestNeighbor
                         ),
                         str(moved_seg),
                     )
