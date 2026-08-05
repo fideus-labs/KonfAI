@@ -53,7 +53,7 @@ from konfai.data.sampling import (
     source_index,
     source_window,
 )
-from konfai.utils.config import _escape_key_component, apply_config
+from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset, DataStream, data_to_image, image_to_data
 from konfai.utils.errors import TransformError
 from konfai.utils.ITK import _require_simpleitk, box_with_mask, crop_with_mask
@@ -165,6 +165,12 @@ class Transform(NeedDevice, ABC):
     """Base class for transforms operating on tensors and cached attributes."""
 
     supports_dataloader_workers = True
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        # Every stage records its constructor arguments as given, so konfai.api can write the
+        # config tree back from live objects -- the binder's mirror, declared once, on the base.
+        super().__init_subclass__(**kwargs)
+        record_given_arguments(cls)
 
     def __init__(self) -> None:
         NeedDevice.__init__(self)

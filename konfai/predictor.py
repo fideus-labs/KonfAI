@@ -2251,7 +2251,7 @@ class Predictor(DistributedObject):
 
 def build_predict(
     models: list[Path],
-    prediction_file: Path | str = Path("./Prediction.yml").resolve(),
+    prediction_file: Path | str | dict = Path("./Prediction.yml").resolve(),
     predictions_dir: Path | str = Path("./Predictions").resolve(),
 ) -> DistributedObject:
     """
@@ -2291,7 +2291,7 @@ def predict(
     cpu: int = 1,
     quiet: bool = False,
     tensorboard: bool = False,
-    prediction_file: Path | str = Path("./Prediction.yml").resolve(),
+    prediction_file: Path | str | dict = Path("./Prediction.yml").resolve(),
     predictions_dir: Path | str = Path("./Predictions").resolve(),
 ) -> DistributedObject:
     """

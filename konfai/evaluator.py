@@ -648,7 +648,7 @@ class Evaluator(DistributedObject):
 
 
 def build_evaluate(
-    evaluations_file: Path | str = Path("./Evaluation.yml").resolve(),
+    evaluations_file: Path | str | dict = Path("./Evaluation.yml").resolve(),
     evaluations_dir: Path | str = Path("./Evaluations").resolve(),
 ) -> DistributedObject:
     """
@@ -683,7 +683,7 @@ def evaluate(
     cpu: int = 1,
     quiet: bool = False,
     tensorboard: bool = False,
-    evaluations_file: Path | str = Path("./Evaluation.yml").resolve(),
+    evaluations_file: Path | str | dict = Path("./Evaluation.yml").resolve(),
     evaluations_dir: Path | str = Path("./Evaluations").resolve(),
 ) -> DistributedObject:
     """

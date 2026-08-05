@@ -34,7 +34,7 @@ from tqdm import tqdm
 from konfai.data.patching import ModelPatch
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import ModelLoader, Network
-from konfai.utils.config import apply_config
+from konfai.utils.config import apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import MeasureError
 from konfai.utils.utils import get_module
@@ -74,6 +74,12 @@ class Criterion(torch.nn.Module, ABC):
     # the reported value, so only a metric whose ``partial_metric``/``combine_metric`` reproduce
     # ``forward`` exactly may set it.
     reducible: bool = False
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        # A metric is config-built like a stage: record its constructor arguments as given, so
+        # konfai.api can write the config tree back from live objects (see Transform).
+        super().__init_subclass__(**kwargs)
+        record_given_arguments(cls)
 
     def __init__(self) -> None:
         super().__init__()

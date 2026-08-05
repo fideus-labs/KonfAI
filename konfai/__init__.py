@@ -387,3 +387,28 @@ def assert_konfai_install() -> None:
                 lines.append(f"  - {p}: {e}")
 
         raise KonfAIPackagesError("\n".join(lines))
+
+
+#: The Python workflow API (:mod:`konfai.api`), re-exported lazily: ``konfai.transform(...)``
+#: works, and ``import konfai`` stays light -- torch and the engines load on first use only.
+_API_EXPORTS = (
+    "transform",
+    "plan_transform",
+    "evaluate",
+    "predict",
+    "train",
+    "TransformResult",
+    "EvaluationResult",
+)
+
+
+def __getattr__(name: str):
+    if name in _API_EXPORTS:
+        from konfai import api
+
+        return getattr(api, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(list(globals()) + list(_API_EXPORTS))

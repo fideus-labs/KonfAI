@@ -16,6 +16,7 @@
 
 """Runtime state, logging, and distributed execution helpers for KonfAI."""
 
+import atexit
 import builtins
 import inspect
 import os
@@ -25,6 +26,7 @@ import shutil
 import socket
 import subprocess  # nosec B404
 import sys
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -180,9 +182,35 @@ def available_memory_bytes() -> tuple[int, str]:
     return host_available, "host available RAM"
 
 
+def _materialized_config(tree: dict, root: str) -> Path:
+    """A config TREE written where a workflow expects a file — the Python front door.
+
+    The caller hands the same tree the YAML file would hold — ``{root: {...}}``, the very kwargs
+    the binder feeds each ``__init__`` — and never touches YAML: it is written once here, under a
+    scratch directory of its own, and everything downstream (reflection binding, resolution
+    write-back, the workspace copy, resume) sees an ordinary config file. The workspace keeps the
+    resolved copy, as it does for every run.
+    """
+    if list(tree) != [root]:
+        raise ConfigError(
+            f"A config tree for this workflow must hold exactly the '{root}' root"
+            f" (found: {sorted(str(key) for key in tree)}).",
+            f"Pass the same tree the YAML file would hold: {{'{root}': {{...}}}}.",
+        )
+    from ruamel.yaml import YAML
+
+    scratch = Path(tempfile.mkdtemp(prefix=f"konfai_{root.lower()}_"))
+    # The file must outlive the run (spawned ranks re-read it), not the process.
+    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+    path = scratch / f"{root}.yml"
+    with path.open("w", encoding="utf-8") as file:
+        YAML().dump(tree, file)
+    return path
+
+
 def configure_workflow_environment(
     *,
-    config_path: Path | str,
+    config_path: Path | str | dict,
     root: str,
     state: "State | str",
     path_env: dict[str, Path | str] | None = None,
@@ -192,8 +220,10 @@ def configure_workflow_environment(
 
     Parameters
     ----------
-    config_path : Path | str
-        YAML configuration file used by the workflow.
+    config_path : Path | str | dict
+        YAML configuration file used by the workflow — or the config TREE itself, as a dict, for
+        a Python caller that writes no YAML (see :func:`_materialized_config`). Every workflow
+        entry point accepts either, since they all pass through here.
     root : str
         Root configuration section, for example ``Trainer`` or ``Predictor``.
     state : State | str
@@ -202,6 +232,8 @@ def configure_workflow_environment(
         Additional environment variables whose values should be normalized as
         absolute filesystem paths before export.
     """
+    if isinstance(config_path, dict):
+        config_path = _materialized_config(config_path, root)
     os.environ["KONFAI_config_file"] = str(Path(config_path).resolve())
     os.environ["KONFAI_ROOT"] = root
     os.environ["KONFAI_STATE"] = str(state)
