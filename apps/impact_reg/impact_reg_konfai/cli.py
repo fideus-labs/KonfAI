@@ -24,9 +24,17 @@ Three composable sub-commands, mirroring ``konfai-apps`` (infer/eval/uncertainty
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 from impact_reg_konfai.impact_reg import ImpactRegKonfAIApp, get_available_presets
+
+
+def _max_displacement(value: str) -> float | str:
+    """``auto`` or a distance in world units — the window bound a streamed field read needs."""
+    if value.strip().lower() == "auto":
+        return "auto"
+    return float(value)
 
 
 def _paths(value: str) -> Path:
@@ -134,6 +142,16 @@ def main() -> None:
         help="Write the displacement fields only: skip the moved image and Transform.h5, both derived "
         "from the field. For a caller that composes the field itself and would delete them.",
     )
+    reg.add_argument(
+        "--max-displacement",
+        "--max_displacement",
+        dest="max_displacement",
+        type=_max_displacement,
+        default="auto",
+        help="Bound (world units) on the field, sizing what a streamed moved-image slab reads. 'auto' "
+        "reads the bound the field recorded (OME-Zarr fields carry one) and falls back to whole-volume "
+        "-- with the reason in the plan -- when none is recorded.",
+    )
     _add_device(reg)
     _add_tmp_dir(reg)
 
@@ -201,6 +219,18 @@ def main() -> None:
         download=getattr(args, "download", False), force_update=getattr(args, "force_update", False)
     )
 
+    # konfai's Python API raises designed refusals (message + remedy); the CLI's job is to print
+    # them and exit 1 -- the same contract the konfai CLI itself offers.
+    from konfai.utils.errors import KonfAIError
+
+    try:
+        _dispatch(args, app, ev)
+    except KonfAIError as error:
+        print(str(error).strip(), file=sys.stderr)
+        sys.exit(1)
+
+
+def _dispatch(args: argparse.Namespace, app: ImpactRegKonfAIApp, ev: argparse.ArgumentParser) -> None:
     if args.command == "register":
         gpu = [] if args.cpu is not None else args.gpu
         app.register(
@@ -218,6 +248,7 @@ def main() -> None:
             config_overrides=args.config_overrides,
             tmp_dir=args.tmp_dir,
             fields_only=args.fields_only,
+            max_displacement=args.max_displacement,
         )
 
     elif args.command == "eval":
