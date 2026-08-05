@@ -157,6 +157,10 @@ written replaces it.
   gets its own field, moved image and transform. Previously the cases were counted from the command-line
   arguments while konfai-apps counted them from the expanded units, so a directory input produced N
   results and only the first was collected, silently
+- **impact-reg**: `register --fields-only` writes the displacement fields and stops there. The moved
+  image and `Transform.h5` are both derived from the field, at the cost of a full-size resample and a
+  full-size rewrite, so a caller that composes the field with its own and derives its own moved — the
+  ExaSPIM tiled refinement does exactly that — no longer pays for two outputs it deletes
 - **impact-reg**: a registration preset now owes exactly one output, its displacement field, in whatever
   format it declares — `register` derives the moved image from it instead of expecting a second output.
   A preset can drop `MovedImage` entirely, which for a tiled one also drops blending a full-size moved

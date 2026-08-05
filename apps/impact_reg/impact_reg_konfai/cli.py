@@ -126,6 +126,14 @@ def main() -> None:
         help="Tune a preset parameter, forwarded to 'konfai-apps infer --set' (applies to every preset), "
         "e.g. --set iterations=300 (repeatable).",
     )
+    reg.add_argument(
+        "--fields-only",
+        "--fields_only",
+        dest="fields_only",
+        action="store_true",
+        help="Write the displacement fields only: skip the moved image and Transform.h5, both derived "
+        "from the field. For a caller that composes the field itself and would delete them.",
+    )
     _add_device(reg)
     _add_tmp_dir(reg)
 
@@ -209,6 +217,7 @@ def main() -> None:
             keep_dvf=args.uncertainty,
             config_overrides=args.config_overrides,
             tmp_dir=args.tmp_dir,
+            fields_only=args.fields_only,
         )
 
     elif args.command == "eval":

@@ -179,3 +179,26 @@ def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Pat
     moved = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "Moved.mha")))
     np.testing.assert_allclose(moved[0, 0, 0], 2.0, atol=1e-6)
     np.testing.assert_allclose(moved[1, 1, 0], 74.0, atol=1e-6)
+
+
+def test_register_fields_only_writes_nothing_derived(tmp_path: Path) -> None:
+    """A caller that composes the field itself pays for the field, and nothing else.
+
+    Both the moved image and Transform.h5 are derived FROM the field -- a full-size resample and a
+    full-size rewrite of the same voxels. The tiled refinement reads the field, composes it with its
+    global pass and derives its own moved, so producing them for it is pure waste.
+    """
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    app = reg.ImpactRegKonfAIApp()
+    _stub_infer(app, moving, {"FireANTs_SyN": (2.0, 0.0, 0.0)})
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out, fields_only=True)
+
+    case = out / "P000"
+    assert (case / "DVF.mha").is_file()
+    assert not (case / "Moved.mha").exists()
+    assert not (case / "Transform.h5").exists()
