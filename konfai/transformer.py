@@ -640,7 +640,7 @@ class Transformer(DistributedObject):
                         int(extent)
                         for extent in stage.transform_shape(manager.group_src, manager.name, source, attributes)
                     ]
-                    stage.write_stream_cache_attribute(attributes, source)
+                    stage.write_stream_cache_attribute(attributes, source, manager.name)
         return notes
 
     def setup(self, world_size: int):

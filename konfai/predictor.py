@@ -977,7 +977,7 @@ class OutSameAsGroupDataset(OutputDataset):
                     else:
                         pull_fns.append(_RemapPull(transform.stream_region_source, shape, snapshot, name))
                         out = transform.transform_shape(self.group_src, name, list(shape), Attribute(walking))
-                        transform.write_stream_cache_attribute(walking, shape)
+                        transform.write_stream_cache_attribute(walking, shape, name)
                     shapes.append([int(extent) for extent in out])
                 elif locality.kind in _REGION_KINDS:
                     if stage.inverted:
@@ -1056,14 +1056,14 @@ class OutSameAsGroupDataset(OutputDataset):
                 remapper.inverse_stream_cache_attribute(attribute, in_shape)
             else:
                 result = stage.transform.stream_region(name, block, context, Attribute(attribute))
-                stage.transform.write_stream_cache_attribute(attribute, in_shape)
+                stage.transform.write_stream_cache_attribute(attribute, in_shape, name)
             return result
         if kind is LocalityKind.ORIENTATION and not stage.inverted:
             # A forward orientation writes the case origin/direction from the extent it is handed; run
             # the tensor action on a throwaway scope so it does not record the SLAB's extent, then write
             # the case geometry from the full ``in_shape`` (its documented contract) -- as REGRID does.
             result = stage(name, block, Attribute(attribute))
-            cast(TransformInverse, stage.transform).write_stream_cache_attribute(attribute, in_shape)
+            cast(TransformInverse, stage.transform).write_stream_cache_attribute(attribute, in_shape, name)
             return result
         result = stage(name, block, attribute)
         if kind is LocalityKind.HALO:

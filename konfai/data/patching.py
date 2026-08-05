@@ -107,7 +107,9 @@ class Stage(Protocol):
         cache_attribute: Attribute,
     ) -> list[slice]: ...
 
-    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None: ...
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None: ...
 
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
@@ -216,7 +218,9 @@ class AugmentedStage:
         del context
         return self(name, tensor, cache_attribute)
 
-    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
         """An augmentation draws a copy of the case rather than restating its geometry: nothing to record."""
 
     def stream_shape(self, shape: list[int]) -> list[int]:
@@ -1825,7 +1829,7 @@ class DatasetManager:
         # ORIENTATION / CROP / REGRID: the stage's own remap, on the state the stages before it left.
         pull = _RemapPull(stage.stream_region_source, list(shape), Attribute(evolved), self.name)
         out = self._stage_out_shape(stage, shape, Attribute(evolved))
-        stage.write_stream_cache_attribute(evolved, list(shape))
+        stage.write_stream_cache_attribute(evolved, list(shape), self.name)
         return _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull)
 
     def _stage_out_shape(self, stage: Stage, shape: list[int], attribute: Attribute) -> list[int]:
@@ -1849,7 +1853,7 @@ class DatasetManager:
         """
         out = self._stage_out_shape(stage, shape, attribute)
         if isinstance(stage, Transform):
-            stage.write_stream_cache_attribute(attribute, list(shape))
+            stage.write_stream_cache_attribute(attribute, list(shape), self.name)
         return out
 
     @staticmethod
@@ -2961,7 +2965,7 @@ class DatasetManager:
                     crop = [slice(t.start - s.start, t.stop - s.start) for t, s in zip(target, source, strict=False)]
                     tensor = tensor[(*[slice(None)] * lead, *crop)]
             if case_attribute is not None:
-                stage.write_stream_cache_attribute(case_attribute, list(plan.in_shape))
+                stage.write_stream_cache_attribute(case_attribute, list(plan.in_shape), self.name)
                 self._check_region_geometry_reaches_the_case(stage, scoped, cache_attribute)
 
         return tensor, cache_attribute, keys_before
