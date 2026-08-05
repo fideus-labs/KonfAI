@@ -633,13 +633,15 @@ def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_p
     assert list(streamed.shape) == list(volume.shape)
 
 
-def test_the_stream_worth_gate_prices_the_config_budget_not_the_machine() -> None:
+def test_the_stream_worth_gate_prices_the_config_budget_not_the_machine(monkeypatch) -> None:
     """The streamed-vs-assembled route is a function of configuration and data.
 
     Same accumulators, two budgets: the verdict must flip with the budget — and with none pushed,
     the gate prices the auto-budget's own fraction of the machine, never raw free memory.
     """
     from types import SimpleNamespace
+
+    monkeypatch.delenv("KONFAI_STREAM_WORTH_THRESHOLD", raising=False)
 
     from konfai.predictor import OutSameAsGroupDataset
 

@@ -75,6 +75,81 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
     return sitk.Cast(field, sitk.sitkVectorFloat64)
 
 
+def _invert_via_displacement_field(transform: sitk.Transform, image: sitk.Image) -> sitk.DisplacementFieldTransform:
+    if image is None:
+        raise TransformError(
+            "Inverting a non-linear transform requires a reference image to sample the displacement field, "
+            "but none was provided."
+        )
+    displacement_field_filter = sitk.TransformToDisplacementFieldFilter()
+    displacement_field_filter.SetReferenceImage(image)
+    displacement_field = displacement_field_filter.Execute(transform)
+    iterative_inverse = sitk.IterativeInverseDisplacementFieldImageFilter()
+    iterative_inverse.SetNumberOfIterations(20)
+    return sitk.DisplacementFieldTransform(iterative_inverse.Execute(displacement_field))
+
+
+def _copy_transform(transform_cls: type[sitk.Transform], transform: sitk.Transform, invert: bool) -> sitk.Transform:
+    transform = transform_cls(transform)
+    if invert:
+        transform = transform_cls(transform.GetInverse())
+    return transform
+
+
+def _image_like(array: np.ndarray, reference: sitk.Image) -> sitk.Image:
+    result = sitk.GetImageFromArray(array)
+    result.CopyInformation(reference)
+    return result
+
+
+def _open_transform(
+    transform_files: dict[str | sitk.Transform, bool], image: sitk.Image = None
+) -> list[sitk.Transform]:
+    _require_simpleitk()
+    transforms: list[sitk.Transform] = []
+
+    for transform_file, invert in transform_files.items():
+        if isinstance(transform_file, str):
+            transform = sitk.ReadTransform(transform_file + ".itk.txt")
+        else:
+            transform = transform_file
+        if transform.GetName() == "TranslationTransform":
+            transform = _copy_transform(sitk.TranslationTransform, transform, invert)
+        elif transform.GetName() == "Euler3DTransform":
+            transform = _copy_transform(sitk.Euler3DTransform, transform, invert)
+        elif transform.GetName() == "VersorRigid3DTransform":
+            transform = _copy_transform(sitk.VersorRigid3DTransform, transform, invert)
+        elif transform.GetName() == "AffineTransform":
+            transform = _copy_transform(sitk.AffineTransform, transform, invert)
+        elif transform.GetName() == "DisplacementFieldTransform":
+            if invert:
+                transform = _invert_via_displacement_field(transform, image)
+        else:
+            transform = sitk.BSplineTransform(transform)
+            if invert:
+                transform = _invert_via_displacement_field(transform, image)
+        transforms.append(transform)
+    if len(transforms) == 0:
+        transforms.append(sitk.Euler3DTransform())
+    return transforms
+
+
+def compose_transform(
+    transform_files: dict[str | sitk.Transform, bool], image: sitk.Image = None
+) -> sitk.CompositeTransform:
+    transforms = _open_transform(transform_files, image)
+    result = sitk.CompositeTransform(transforms)
+    return result
+
+
+def apply_to_data_transform(data: np.ndarray, transform_files: dict[str | sitk.Transform, bool]) -> np.ndarray:
+    transforms = compose_transform(transform_files)
+    result = np.copy(data)
+    for i in range(data.shape[0]):
+        result[i, :] = transforms.TransformPoint(np.asarray(data[i, :], dtype=np.double))
+    return result
+
+
 def box_with_mask(mask: sitk.Image, label: list[int], dilatations: list[int]) -> np.ndarray:
     _require_simpleitk()
 
@@ -176,7 +251,9 @@ def decode_transform_stages(transform: sitk.Transform) -> SpatialStages:
     if isinstance(transform, sitk.CompositeTransform):
         stages: list[AffineStage | DisplacementStage] = []
         for index in reversed(range(transform.GetNumberOfTransforms())):
-            stages.extend(decode_transform_stages(transform.GetNthTransform(index)))
+            # Downcast restores the member's concrete type where GetNthTransform hands back the
+            # generic wrapper, which the isinstance dispatch below cannot read.
+            stages.extend(decode_transform_stages(transform.GetNthTransform(index).Downcast()))
         return tuple(stages)
     from konfai.data.geometry import AffineStage
 

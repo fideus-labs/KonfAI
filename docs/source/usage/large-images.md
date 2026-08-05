@@ -198,8 +198,9 @@ the tensor being resampled; streaming bounds both. An axis-aligned change of
 density reads one axis at a time on global coordinates and is **bit-identical**
 streamed or whole; only a map that does not factorise (a rotation, a stored
 transform, a field) goes through the fused blend, where a streamed region and
-the whole volume agree to ~1e-5 of the data's range rather than bit for bit —
-`argmax`'d labels absorb it. `KONFAI_STREAMED_WRITES=0` remains the global
+the whole volume agree to ~1e-5 of the data's range rather than bit for bit;
+an `argmax` over blended logits usually lands on the same label, though
+near-tied logits can flip. `KONFAI_STREAMED_WRITES=0` remains the global
 whole-volume reference path; resampling the `argmax`'d labels (a `nearest`,
 streaming resample, exact by construction) or collapsing members with
 `combine: Mean`/`Median` first also avoids the peak.

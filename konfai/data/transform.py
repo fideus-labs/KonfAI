@@ -523,6 +523,17 @@ class Foreign(Transform):
         return result
 
 
+def _seeded_scalar(cache_attribute: Attribute, key: str) -> float:
+    """A seeded statistic, as whoever seeded it wrote it: a bare scalar or a one-element array.
+
+    ``float()`` reads the first form and ``get_tensor`` the second.
+    """
+    try:
+        return float(cache_attribute[key])
+    except (TypeError, ValueError):
+        return float(cache_attribute.get_tensor(key).reshape(-1)[0])
+
+
 class Clip(Transform):
     """Clip tensor intensities to a fixed or data-dependent value range."""
 
@@ -557,7 +568,7 @@ class Clip(Transform):
         stat_keys: set[str] = set()
         for bound, key in ((self.min_value, "Min"), (self.max_value, "Max")):
             if isinstance(bound, str):
-                if bound.lower() == key.lower():
+                if bound == key.lower():  # exactly as __call__ matches it; "MIN" is refused there
                     stat_keys.add(key)
                 else:
                     return PatchLocality(
@@ -591,8 +602,8 @@ class Clip(Transform):
                 # Seeded-first, as Normalize reads it: on a streamed path the dispatcher has read
                 # the CASE's statistic from disk and the tensor in hand is one region of it --
                 # computed here, the bound (and what save_clip_min records) would be the region's.
-                if self.mask is None and "Min" in cache_attribute:
-                    min_value = float(cache_attribute["Min"])
+                if self.mask is None and "StatisticsSeeded" in cache_attribute and "Min" in cache_attribute:
+                    min_value = _seeded_scalar(cache_attribute, "Min")
                 else:
                     min_value = torch.min(tensor_masked)
             elif self.min_value.startswith("percentile:"):
@@ -615,8 +626,8 @@ class Clip(Transform):
 
         if isinstance(self.max_value, str):
             if self.max_value == "max":
-                if self.mask is None and "Max" in cache_attribute:
-                    max_value = float(cache_attribute["Max"])
+                if self.mask is None and "StatisticsSeeded" in cache_attribute and "Max" in cache_attribute:
+                    max_value = _seeded_scalar(cache_attribute, "Max")
                 else:
                     max_value = torch.max(tensor_masked)
             elif self.max_value.startswith("percentile:"):
@@ -1000,6 +1011,8 @@ class _DerivedGrid(_TargetGrid):
     """The case's own grid at another density — a spacing, or a count, and where it sits."""
 
     def __init__(self, spacing: list[float] | None, shape: list[int] | None, align: str) -> None:
+        # A value <= 0 is the KEEP-THIS-AXIS sentinel, normalised to 0 here: that axis takes the
+        # source's own density/extent in `of`, so a request rescales only the axes it names.
         self.spacing = None if spacing is None else np.asarray([max(0.0, float(value)) for value in spacing])
         self.shape = None if shape is None else tuple(max(0, int(value)) for value in shape)
         self.align = align
@@ -3366,17 +3379,12 @@ class Statistics(Transform):
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"Min", "Max", "Mean", "Std"}))
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        trusted = "StatisticsSeeded" in cache_attribute
         for seeded, recorded in self._KEYS:
-            if seeded not in cache_attribute:
+            if not trusted or seeded not in cache_attribute:
                 cache_attribute[recorded] = getattr(tensors.float(), seeded.lower())()
                 continue
-            # A seeded statistic arrives as a bare scalar or a one-element array, depending on who
-            # seeded it; float() reads the first form and get_tensor the second.
-            raw = cache_attribute[seeded]
-            try:
-                cache_attribute[recorded] = float(raw)
-            except (TypeError, ValueError):
-                cache_attribute[recorded] = float(cache_attribute.get_tensor(seeded).reshape(-1)[0])
+            cache_attribute[recorded] = _seeded_scalar(cache_attribute, seeded)
         return tensors
 
 
