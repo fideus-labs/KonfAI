@@ -141,6 +141,23 @@ def _write_fields(root: Path, cases: int = 2, shape=(4, 6, 6)) -> None:
         sitk.WriteImage(image, str(case / "DVF.mha"))
 
 
+def _write_transforms(root: Path, cases: int = 2) -> None:
+    """One stored transform per case, beside the images, as a group of its own.
+
+    A page that documents applying a registration solved elsewhere has to be able to show one, and
+    an example is only runnable if the fixture holds what it names. KonfAI reads a stored transform
+    from ``<group>/<case>.itk.txt``, which is what SimpleITK writes.
+    """
+    for index in range(cases):
+        case = root / f"case_{index}"
+        case.mkdir(parents=True, exist_ok=True)
+        transform = sitk.Euler3DTransform()
+        transform.SetCenter((3.0, 5.0, 11.0))
+        transform.SetRotation(0.05, -0.03, 0.08)
+        transform.SetTranslation((0.4, -0.6, 1.1))
+        sitk.WriteTransform(transform, str(case / "reg.itk.txt"))
+
+
 def _doc_examples() -> list[tuple[int, str]]:
     # Asserted, not skipped: an empty parametrize set is a pass, so a page that moved would retire
     # this whole guard without a single red test.
@@ -156,6 +173,7 @@ def test_a_documented_example_plans_and_runs(line: int, config: str, tmp_path: P
     workdir.mkdir()
     _write_dataset(workdir / "Raw", _source_groups(config))
     _write_fields(workdir / "Fields")
+    _write_transforms(workdir / "Raw")
     (workdir / "Transform.yml").write_text(config, encoding="utf-8")
     for filename, source in _python_modules(DOC.read_text(encoding="utf-8")).items():
         (workdir / filename).write_text(source, encoding="utf-8")

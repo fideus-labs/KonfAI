@@ -99,7 +99,6 @@ which region of the file a patch needs.
 | `ORIENTATION` | flip or permute | the index-remapped region |
 | `CROP` | the source region is the target translated | the region — reading it *is* the answer |
 | `GLOBAL_STAT` | needs whole-volume `Min`/`Max`/`Mean`/`Std` | the statistic once from disk, then the exact patch |
-| `RESCALE` | resample | the region through the scale mapping, plus an interpolation halo |
 | `SLAB` | a per-voxel value map plus a side effect that needs the slab's place in the volume | nothing on the read path — the dispatcher treats it as `WHOLE_VOLUME`; it streams on the write side (`Mask`, `InferenceStack`) |
 | `WHOLE_VOLUME` | genuinely needs everything | the volume — the fallback |
 
@@ -107,7 +106,7 @@ which region of the file a patch needs.
 volume and is correct.
 
 A chain streams when every stage is pointwise or a region kind — `HALO`,
-`ORIENTATION`, `CROP`, `RESCALE` — where `GLOBAL_STAT` counts as pointwise.
+`ORIENTATION`, `CROP`, `REGRID` — where `GLOBAL_STAT` counts as pointwise.
 Region stages **compose** in any number: each stage's region pulls through the
 one before it, down to one bounded read of the stored volume. The chain planned
 is the group's `transforms` followed by the copy's own augmentation draw — one
@@ -121,9 +120,8 @@ Seven conditions reject streaming:
 2. a halo wider than half the read extent on any axis;
 3. a `GLOBAL_STAT` preceded by a stage that does not preserve statistics;
 4. a `GLOBAL_STAT` whose statistic cannot be read from disk;
-5. a `RESCALE` declared by a stage that is not a `Resample` subclass;
-6. a `RESCALE` on a case with no `Spacing`;
-7. a chain whose folded shapes do not land on the target grid.
+5. a `REGRID` whose stage cannot size the region it reads (no geometry, no bound);
+6. a chain whose folded shapes do not land on the target grid.
 
 ### Why `[Clip(-200, 400), Standardize()]` does not stream
 
@@ -185,7 +183,7 @@ streams and `Dilate(5)` does not.
 | `HALO` | `Dilate(n>0)`, `Gradient` |
 | `ORIENTATION` | `Flip`, `Permute`, `Canonical` (only on axis-aligned direction cosines) |
 | `CROP` | `Crop` (only once its box is on the case) |
-| `RESCALE` | `ResampleToResolution`, `ResampleToShape` |
+| `REGRID` | `Resample` — and its spellings `ResampleToResolution`, `ResampleToShape`, `ResampleToReference`, `ResampleTransform`, `Warp` |
 
 Augmentations declare per **(case, draw)** — two copies of the same case can
 answer differently. `Permute`, `Flip` (when `vector_field: false`), and `Rotate`
@@ -270,7 +268,7 @@ To opt in, override `patch_locality` under three rules:
 
 `ORIENTATION` and `CROP` must also implement `stream_region_source`, mapping a
 target patch to the source region. Declaring a region kind without it raises a
-`TransformError` on the first patch read. `HALO` and `RESCALE` need no remap; the
+`TransformError` on the first patch read. `HALO` needs no remap; the
 dispatcher derives their regions.
 
 ## Equivalence
@@ -287,12 +285,12 @@ land a few float32 ulp away. A stage seeded from `Min`/`Max` — `Normalize`,
 `Clip('min', 'max')` — is byte-identical: a min and a max have no summation
 order to disagree on.
 
-A streamed `RESCALE` computes interpolation weights in the sub-region's
+A streamed `REGRID` computes interpolation weights in the sub-region's
 coordinate frame, so the deviation scales with the local gradient rather than
 with the voxel's own value: within a few ulp of the volume's peak on float
 volumes, within 1 LSB on integer ones. A nearest-neighbour resample — what a
 `uint8` label volume gets — uses no weights and stays exact. The `Translate`
-augmentation interpolates on the same terms as `RESCALE`.
+augmentation interpolates on the same terms as `REGRID`.
 
 ## Next steps
 

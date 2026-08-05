@@ -53,7 +53,6 @@ from konfai.data.patching import (
     _halo_radii,
     _HaloPull,
     _RemapPull,
-    _ScalePull,
     blend_overlap,
 )
 
@@ -64,7 +63,7 @@ from konfai.data.reduction import Concat, Mean, Median, Reduction
 from konfai.data.transform import (
     LocalityKind,
     PatchLocality,
-    Resample,
+    RegionContext,
     Transform,
     TransformInverse,
     TransformLoader,
@@ -418,7 +417,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
 
 # The write-side region kinds: what SlabRegionStream can carry inside a streamed finalize chain (the
 # same set the read dispatcher accepts as its region stages; on both sides they compose).
-_REGION_KINDS = (LocalityKind.HALO, LocalityKind.ORIENTATION, LocalityKind.CROP, LocalityKind.RESCALE)
+_REGION_KINDS = (LocalityKind.HALO, LocalityKind.ORIENTATION, LocalityKind.CROP, LocalityKind.REGRID)
 
 # Streaming pays per-slab work (the pipe traversal, region writes, the TTA aligner); when the
 # assembled accumulators of all copies are below this fraction of allocatable memory (a 2.5D case),
@@ -862,8 +861,7 @@ class OutSameAsGroupDataset(OutputDataset):
     ) -> None:
         """Run each jointly finalized slab through the plan: prefix per slab, then sink, region
         stream, or buffer. The first slab fixes the case's state (post-prefix attribute, region
-        scheduler or buffer) and may demote a RESCALE region to the buffered tail (see
-        ``_init_stream_state``)."""
+        scheduler or buffer; see ``_init_stream_state``)."""
         plan = cast(_StreamPlan, self._stream_plans[index])
         for region, copies in slabs:
             block, attribute = self._finalize_slab(index, copies, number_of_channels_per_model, plan, dataset, region)
@@ -887,11 +885,9 @@ class OutSameAsGroupDataset(OutputDataset):
     ) -> _StreamPlan:
         """Fix the case's streaming state at its first slab, when the prefix output is known.
 
-        A RESCALE stage streams through ``resample_region``, which matches ``F.interpolate`` bit for
-        bit in nearest mode (uint8) and to ~float-rounding in linear mode, so a rescale streams by
-        default and bounds a large float resample to a window. ``KONFAI_STREAM_LINEAR_RESAMPLE=0``
-        demotes a float rescale here to the buffered whole-volume tail for a run that needs exactness;
-        the demotion leaves the prefix untouched (the pipe was never part of it).
+        A ``REGRID`` stage streams through the very code its whole-volume call runs, over a region
+        that happens to be smaller, so the streamed and whole-volume answers are equal by
+        construction rather than by agreement and a large resample never has to be held whole.
         """
         self._post_prefix_attributes[index] = Attribute(attribute)
         spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
@@ -925,9 +921,7 @@ class OutSameAsGroupDataset(OutputDataset):
         The fold is planned by walking a one-voxel corner of the real first slab through the pipe
         with one evolving attribute: each stage declares against, and remaps from, the state the
         stages before it left — a second resample pops the Size stack the first one already popped,
-        a reorientation after a permute reads the moved axes — and the walk carries the dtype, so a
-        float RESCALE (``resample_region`` matches ``F.interpolate`` only to ~float-rounding) answers
-        ``None`` — demoting to the whole-volume tail — only under ``KONFAI_STREAM_LINEAR_RESAMPLE=0``.
+        a reorientation after a permute reads the moved axes — and the walk carries the dtype.
         ``produce`` then replays the same transitions on a fresh copy per emission (the same
         slab-local scoping as the prefix).
         """
@@ -950,38 +944,28 @@ class OutSameAsGroupDataset(OutputDataset):
                     pull_fns.append(_HaloPull(_halo_radii(locality.halo, len(shape)), shape))
                     shapes.append(list(shape))
                     probe = stage(name, probe, walking)
-                elif locality.kind is LocalityKind.RESCALE:
-                    # A float rescale streams within a window: resample_region computes the same linear
-                    # taps the read side already streams, matching the whole-volume F.interpolate to
-                    # ~float-rounding (a boundary voxel or two flips after argmax; a raw float output
-                    # differs by ~1 ULP) -- which bounds a large float resample (a probability volume
-                    # sent back to native) instead of holding it whole. KONFAI_STREAM_LINEAR_RESAMPLE=0
-                    # forces the exact whole-volume resample for a run that needs bit-identity. Nearest
-                    # (uint8) is byte-identical either way.
-                    if probe.dtype is not torch.uint8 and not env_flag("KONFAI_STREAM_LINEAR_RESAMPLE", True):
-                        return None
-                    resample = cast(Resample, stage.transform)
+                elif locality.kind is LocalityKind.REGRID:
+                    # A regrid states its transition instead of performing it: its inverse restores a
+                    # whole volume from a region, which is not something the one-voxel probe can be
+                    # run through, and its forward answer here would be one voxel's target grid.
+                    transform = stage.transform
                     if stage.inverted:
-                        pull_fns.append(_RemapPull(resample.stream_region_target, shape, snapshot))
-                        out = resample._inverse_geometry(walking)
+                        remapper = cast(TransformInverse, transform)
+                        pull_fns.append(_RemapPull(remapper.stream_region_target, shape, snapshot, name))
+                        out = remapper.inverse_transform_shape(list(shape), Attribute(walking))
+                        remapper.inverse_stream_cache_attribute(walking, shape)
                     else:
-                        out = [
-                            int(extent)
-                            for extent in resample.transform_shape(
-                                self.group_src, name, list(shape), Attribute(walking)
-                            )
-                        ]
-                        scales = [shape[k] / out[k] for k in range(len(shape))]
-                        pull_fns.append(_ScalePull(scales, shape))
-                        resample.write_stream_cache_attribute(walking, shape)
+                        pull_fns.append(_RemapPull(transform.stream_region_source, shape, snapshot, name))
+                        out = transform.transform_shape(self.group_src, name, list(shape), Attribute(walking))
+                        transform.write_stream_cache_attribute(walking, shape)
                     shapes.append([int(extent) for extent in out])
                 elif locality.kind in _REGION_KINDS:
                     if stage.inverted:
                         remapper = cast(TransformInverse, stage.transform)
-                        pull_fns.append(_RemapPull(remapper.stream_region_target, shape, snapshot))
+                        pull_fns.append(_RemapPull(remapper.stream_region_target, shape, snapshot, name))
                         out = remapper.inverse_transform_shape(list(shape), Attribute(walking))
                     else:
-                        pull_fns.append(_RemapPull(stage.transform.stream_region_source, shape, snapshot))
+                        pull_fns.append(_RemapPull(stage.transform.stream_region_source, shape, snapshot, name))
                         out = stage.transform.transform_shape(self.group_src, name, list(shape), Attribute(walking))
                     shapes.append([int(extent) for extent in out])
                     # The stage's attribute transition, on a one-voxel corner: a crop's tensor answer
@@ -1042,19 +1026,22 @@ class OutSameAsGroupDataset(OutputDataset):
             # is one window's, dropped.
             stage(name, block, attribute)
             return block
-        if kind is LocalityKind.RESCALE:
-            resample = cast(Resample, stage.transform)
-            scales = [in_shape[k] / out_shape[k] for k in range(len(in_shape))]
-            result = resample.resample_region(block, target, [s.start for s in source], scales, in_shape)
+        if kind is LocalityKind.REGRID:
+            # Region-aware on both sides, and the geometry written from the FULL shape: what the
+            # stage records on the way is one region's, and the case's answer is the whole grid's.
+            context = RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape))
             if stage.inverted:
-                resample._inverse_geometry(attribute)
+                remapper = cast(TransformInverse, stage.transform)
+                result = remapper.stream_region_inverse(name, block, context, Attribute(attribute))
+                remapper.inverse_stream_cache_attribute(attribute, in_shape)
             else:
-                resample.write_stream_cache_attribute(attribute, in_shape)
+                result = stage.transform.stream_region(name, block, context, Attribute(attribute))
+                stage.transform.write_stream_cache_attribute(attribute, in_shape)
             return result
         if kind is LocalityKind.ORIENTATION and not stage.inverted:
             # A forward orientation writes the case origin/direction from the extent it is handed; run
             # the tensor action on a throwaway scope so it does not record the SLAB's extent, then write
-            # the case geometry from the full ``in_shape`` (its documented contract) -- as RESCALE does.
+            # the case geometry from the full ``in_shape`` (its documented contract) -- as REGRID does.
             result = stage(name, block, Attribute(attribute))
             cast(TransformInverse, stage.transform).write_stream_cache_attribute(attribute, in_shape)
             return result

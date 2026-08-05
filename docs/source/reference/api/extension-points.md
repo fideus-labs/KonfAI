@@ -125,7 +125,6 @@ halo of a geometric draw is that draw's own.
 | `ORIENTATION` | flip or permute | `stream_region_source` |
 | `CROP` | source region is the target region translated | `stream_region_source` |
 | `GLOBAL_STAT` | needs whole-volume statistics, `stat_keys` a subset of Min/Max/Mean/Std (or their `…PerChannel` forms) | nothing — the dispatcher seeds the statistic from disk |
-| `RESCALE` | resample by a ratio | subclass `Resample` |
 | `REGRID` | resample onto a grid declared elsewhere — a stored reference, not a ratio — so the source region is computed from the two geometries | subclass `Resample`; declare a halo when a displacement field is composed in |
 | `SLAB` | a per-voxel value map plus a side effect that needs the slab's place in the volume | `stream_slab(name, tensor, region, spatial_shape, cache_attribute)`, and optionally `stream_abort`. The **read** dispatcher has no slab context and treats it as `WHOLE_VOLUME`; the gain is on the write side |
 | `WHOLE_VOLUME` | needs the whole volume | nothing — this is the default |

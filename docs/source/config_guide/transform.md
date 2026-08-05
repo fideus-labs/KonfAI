@@ -19,7 +19,7 @@ Transformer:
         groups_dest:
           CT_iso:
             transforms:
-              ResampleToResolution:
+              Resample:
                 spacing: [1.0, 1.0, 1.0]
               Write:
                 dataset: ./Out:omezarr
@@ -95,7 +95,7 @@ few percent of the budget can still exceed it.
 | --- | --- |
 | `allow` | Take the whole-volume path silently — but the plan still names it. |
 | `warn` (default) | Same, plus a warning line after the plan. |
-| `error` | Refuse the run. Nothing is written. A fallback only discovered mid-run (a failed sweep, a `Warp` bound exceeded) stops at that case — earlier cases stay written, and the per-case resume covers the rerun. |
+| `error` | Refuse the run. Nothing is written. A fallback only discovered mid-run (a failed sweep, a `Resample` field bound exceeded) stops at that case — earlier cases stay written, and the per-case resume covers the rerun. |
 
 Independently of `on_fallback`, a case that **cannot stream and does not fit
 `memory_budget`** always refuses the whole run, before the first byte. Writing
@@ -258,7 +258,7 @@ case's chain *lands* on (a `Resample` before the `Reduce` counts):
 Nothing can verify that the members truly live in a common space — only that
 they claim to. `shape_only` and `reference:` will happily average misaligned
 volumes; the result still looks like a volume and is an artefact. Put the
-cohort on one grid first — `ResampleToReference`, below.
+cohort on one grid first — `Resample: {reference: …}`, below.
 ```
 
 **A reduction has no whole-volume fallback.** Folding every case in memory is
@@ -268,33 +268,66 @@ voxel-local stages (and statistics, seeded by an extra pass of the engine's
 own) may follow the `Reduce` in the same chain: anything reading across space
 belongs in a second chain that reads the written output back.
 
-### `ResampleToReference`: making `strict` true rather than waived
+### `Resample`: one stage, two questions
+
+Every resample in KonfAI is one stage, `Resample`, and it asks two independent
+questions:
+
+| | key | meaning |
+| --- | --- | --- |
+| **which grid to write on** | *(nothing)* | the case's own — the map moves the anatomy, the voxels stay put |
+| | `spacing` | the same field of view at another density |
+| | `shape` | the same field of view at a given count |
+| | `reference` | the grid of a stored image, adopted whole |
+| **what map to write it through** | *(nothing)* | the identity — a change of grid and nothing else |
+| | `field` | a displacement field, on its own grid, in world units |
+| | `transforms` | transforms stored beside the cases (rigid, affine, BSpline, field, composite) |
+
+Any combination is legal, and asked for together they compose into **one
+interpolation**: the source is read once, at the displaced point. Doing it as
+two stages resamples twice, and a volume interpolated twice has lost detail the
+second pass invented no more of.
+
+`align` places a `spacing` or `shape` grid, and it is the one choice the family
+used to make silently: `extent` (the default) keeps the field of view — the
+outer faces coincide — while `origin` keeps voxel zero's centre where it is. A
+quarter of a voxel of anatomy separates them, and a `reference` states its own
+placement and ignores this.
+
+```{note}
+`ResampleToResolution`, `ResampleToShape`, `ResampleToReference`,
+`ResampleTransform` and `Warp` are still accepted, and are now thin spellings of
+this one stage: `Resample: {spacing: …}`, `{shape: …}`, `{reference: …}`,
+`{transforms: …}` and `{field: …}` respectively.
+```
+
+### `Resample: {reference: …}`: making `strict` true rather than waived
 
 A cohort as acquired rarely passes `strict`: extents differ, and origins can
 differ by more than the volumes are wide, because an acquisition's stage
-coordinates are not an anatomical frame. `ResampleToReference` is what makes
+coordinates are not an anatomical frame. A `reference` grid is what makes
 `strict` true rather than waived — it resamples each case onto the grid of a
 **declared reference**, adopting its extent, spacing, origin and direction:
 
 ```yaml
 transforms:
-  ResampleToReference: {entry: case_0, group: CT, fill: 0.0}
+  Resample: {reference: case_0, reference_group: CT, fill: 0.0}
   Reduce: {operator: Median, output: template, grid: strict}
   Write: {dataset: ./Template:mha}
 ```
 
-The reference is a stored image, named by `entry` — and by `group` when the
-store holds more than one. It is looked up by entry, not by the case being
+The reference is a stored image, named by `reference` — and by
+`reference_group` when the store holds more than one. It is looked up by entry, not by the case being
 processed, because one grid serves the whole cohort: in the run's own
 `dataset_filenames`, or in a store of its own.
 
 ```yaml
 transforms:
-  ResampleToReference: {entry: case_1, group: CT, dataset: ./Raw:mha}
+  Resample: {reference: case_1, reference_group: CT, reference_dataset: ./Raw:mha}
   Write: {dataset: ./OnTemplate:mha}
 ```
 
-`dataset:` takes the same `path[:format]` spec as everywhere else, so the
+`reference_dataset:` takes the same `path[:format]` spec as everywhere else, so the
 reference can live anywhere — which is the atlas loop: point round N+1 at the
 store round N wrote its template into.
 
@@ -307,9 +340,9 @@ position, added, and the source sampled **once** at the displaced point:
 
 ```yaml
 transforms:
-  ResampleToReference:
-    entry: case_0
-    group: CT
+  Resample:
+    reference: case_0
+    reference_group: CT
     field: ./Fields:mha
     field_group: DVF
     max_displacement: 4.0
@@ -319,7 +352,7 @@ transforms:
 Fields stored *beside* the cases — one entry per case, in the same roots — need
 no path at all: `field_group: DVF` on its own finds them.
 
-Doing this as two stages instead (resample onto the grid, then `Warp`) costs
+Doing this as two stages instead (resample onto the grid, then warp) costs
 **two** interpolations, and the second cannot restore the detail the first
 smoothed away. That is not a small effect: on a high-frequency volume the
 second pass moves voxels by a large fraction of the range, which is exactly why
@@ -337,13 +370,22 @@ identity where the field says nothing, as SimpleITK has it.
 what it declared raises rather than sampling zeros, which would show up as a
 dark rim around the moved anatomy and nothing else. It takes `auto`, reading
 the bound KonfAI records on a field it writes. With no bound at all the stage
-declares `WHOLE_VOLUME` and says so in the plan, exactly as `Warp` does.
+declares `WHOLE_VOLUME` and says so in the plan.
+
+Naming no target grid is the shape update of an atlas build — the field applied
+on the case's *own* grid — and is the same stage with `reference` left out:
+
+```yaml
+transforms:
+  Resample: {field: ./Fields:mha, field_group: DVF, max_displacement: 4.0}
+  Write: {dataset: ./Warped:mha}
+```
 
 ```{note}
-`Warp` still exists and is not this: it adds a displacement on the case's *own*
-grid, which is the shape update of an atlas build, and it neither changes the
-grid nor needs a reference. Use it when the field was solved on the very grid
-it is applied to.
+This was `Warp`, which required the field and the case to share a grid. They no
+longer have to: the field is read at each target voxel's world position on the
+field's own grid, so a field solved at 120 µm moves a volume stored at 30 µm
+without being upsampled first.
 ```
 
 Naming an image rather than fifteen numbers is deliberate. A grid is an extent
@@ -365,7 +407,7 @@ on its own — a CT is `int16` and so is nothing else about it — so a label ma
 stored as anything but `uint8` must say so:
 
 ```yaml
-ResampleToReference: {entry: case_0, group: Labels, interpolation: nearest}
+Resample: {reference: case_0, reference_group: Labels, interpolation: nearest}
 ```
 
 Getting it wrong is silent. Two labels blended give a third that was never in
@@ -385,6 +427,59 @@ the source, the dtype is unchanged, and the result is still a label map.
 Partial overlap is legal and ordinary: the rest of the output is `fill`, and the
 plan prints the fraction of the grid each case covers. "Most of this template is
 background" is then something read before the run rather than after it.
+
+### `Resample: {transforms: …}`: applying a registration that was already solved
+
+With no target grid named, `Resample` changes nothing about the grid and moves
+the anatomy through transforms **stored beside the cases** — the apply step of a
+registration solved elsewhere:
+
+```yaml
+transforms:
+  Resample: {transforms: {reg: false}}
+  Write: {dataset: ./Registered:mha}
+```
+
+Each key of `transforms:` is a group of the run's own datasets holding one
+transform per case; the value says whether to invert it. Rigid, affine, BSpline
+and displacement-field entries are all read the same way, and several groups
+compose — the **last declared is applied first**, which is SimpleITK's own
+composite order.
+
+**It streams**, and what makes that possible is that a stored transform can say
+how far it reaches. A rigid or affine map is an exact affine, so the source box
+of a target region is that region's box mapped through it. A BSpline and a dense
+field are values on a grid read through a kernel that is non-negative and sums
+to one, so the largest of those values bounds the displacement at *every* point
+— not at the points someone sampled. The region a slab must read is therefore
+known before a voxel is touched.
+
+```{warning}
+Bounded is not the same as cheap. A map **oblique to the storage axes** has an
+axis-aligned source box that covers most of the volume on two axes, and it gets
+worse the thinner the slabs: the same case that reads 1.0× its bytes in one
+piece reads several times that in slabs. The bound is exact either way — this is
+a property of the decomposition, not a defect — but it is why streaming such a
+map is not automatically worth it. Bring the case onto an axis-aligned grid
+first (`Canonical`) when the geometry allows it.
+```
+
+**What it refuses**, declaring `WHOLE_VOLUME` with the reason so the run
+proceeds on the whole-volume path rather than breaking:
+
+- a case whose header carries no `Origin` / `Spacing` / `Direction` — a stored
+  transform is applied in physical space, and without a geometry there is none;
+- a transform type that decomposes into no bounded map, naming the type;
+- `invert: true` on a spline or a displacement field. Inverting one is a dense
+  solve over the whole grid, and a field solved per region is not the
+  restriction of the field solved once — so store the inverse where the
+  transform is written, or set the group to `false`.
+
+`interpolation` and `fill` work the same wherever they appear: unset, `uint8`
+takes the nearest voxel and everything else is interpolated, and a label map
+stored as anything else must say `interpolation: nearest`. Nearest here is ITK's
+round-half-up on the physical index — the same coordinate the linear sampler
+reads, so a mask and the image beside it land on the same voxels.
 
 ### `Expand`: one case, N copies
 
@@ -413,7 +508,7 @@ Transformer:
                 pattern: "{name}_r{a:02d}"
               Rotate:                        # a draw, per copy
                 is_quarter: true
-              ResampleToResolution:          # a transform, per copy
+              Resample:                       # a transform, per copy
                 spacing: [2.0, 2.0, 2.0]
               Brightness:                    # another draw, per copy
                 b_std: 0.2
@@ -510,7 +605,7 @@ picks a regime per copy and the plan prints which:
 - **WHOLE-VOLUME** — the copy's chain cannot stream at all; the shared part is
   still assembled only once for the case.
 
-When the shared prefix is expensive (a `Warp`, a resample), put a `Save` before
+When the shared prefix is expensive (a resample, a warp), put a `Save` before
 the `Expand`: it is materialized once and every copy reads the cache.
 
 Resume is **per copy**: a copy whose entry exists is skipped, so an interrupted
@@ -613,8 +708,7 @@ refused (cheaper to load the volume), and the plan says so.
 | a bounded neighbourhood | `HALO`, with `halo=(r,)` | nothing |
 | the volume flipped/permuted | `ORIENTATION` | `stream_region_source()` |
 | a translated sub-box | `CROP` | `stream_region_source()` |
-| the same box, resampled | `RESCALE` | inherit from `Resample` |
-| another grid entirely | `REGRID` | `stream_region_source()` and `stream_region()` |
+| another grid, or the same one at another density | `REGRID` | `stream_region_source()` and `stream_region()` |
 | whole-volume Min/Max/Mean/Std | `GLOBAL_STAT`, with `stat_keys` | nothing |
 | the same, per component | `GLOBAL_STAT`, with `MinPerChannel`/`MaxPerChannel`/`MeanPerChannel`/`StdPerChannel` | nothing |
 | genuinely the whole volume | nothing (the default) | nothing |

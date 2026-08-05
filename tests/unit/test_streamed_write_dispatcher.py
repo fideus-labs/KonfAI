@@ -41,6 +41,7 @@ from konfai.data.transform import (
     Normalize,
     Padding,
     Permute,
+    RegionContext,
     ResampleToResolution,
     Softmax,
     Standardize,
@@ -93,7 +94,7 @@ def test_stream_orientation_mirrored_slab_axis_matches_whole_volume(seed: int) -
     flip = Flip("0")
     reference = flip.inverse("case", volume, Attribute())
     got = _run_stream(
-        lambda target: flip.stream_region_target(target, [Z, Y, X], Attribute()),
+        lambda target: flip.stream_region_target("case", target, [Z, Y, X], Attribute()),
         lambda window, target, source: flip.inverse("case", window, Attribute()),
         [Z, Y, X],
         [Z, Y, X],
@@ -116,7 +117,7 @@ def test_stream_orientation_permuted_slab_axis_matches_whole_volume(seed: int) -
     out_shape = permute.inverse_transform_shape(in_shape, Attribute())
     assert out_shape == [Z, Y, X]
     got = _run_stream(
-        lambda target: permute.stream_region_target(target, in_shape, Attribute()),
+        lambda target: permute.stream_region_target("case", target, in_shape, Attribute()),
         lambda window, target, source: permute.inverse("case", window, Attribute()),
         in_shape,
         out_shape,
@@ -141,7 +142,7 @@ def test_stream_orientation_canonical_inverse_matches_whole_volume(seed: int) ->
     assert canonical.inverse_patch_locality(attribute).kind is LocalityKind.ORIENTATION
     reference = canonical.inverse("case", canonical_volume.clone(), Attribute(attribute))
     got = _run_stream(
-        lambda target: canonical.stream_region_target(target, [Z, Y, X], Attribute(attribute)),
+        lambda target: canonical.stream_region_target("case", target, [Z, Y, X], Attribute(attribute)),
         lambda window, target, source: canonical.inverse("case", window, Attribute(attribute)),
         [Z, Y, X],
         canonical.inverse_transform_shape([Z, Y, X], attribute),
@@ -203,7 +204,7 @@ def test_stream_crop_padding_inverse_matches_whole_volume(seed: int) -> None:
     reference = padding.inverse("case", padded, Attribute())
     assert list(reference.shape[1:]) == out_shape
     got = _run_stream(
-        lambda target: padding.stream_region_target(target, in_shape, Attribute()),
+        lambda target: padding.stream_region_target("case", target, in_shape, Attribute()),
         lambda window, target, source: window,
         in_shape,
         out_shape,
@@ -215,8 +216,8 @@ def test_stream_crop_padding_inverse_matches_whole_volume(seed: int) -> None:
 
 @pytest.mark.parametrize("seed", range(4))
 def test_stream_rescale_nearest_is_byte_identical_to_the_whole_volume_inverse(seed: int) -> None:
-    # The streamed resample takes its index map from F.interpolate itself, so nearest (uint8) is
-    # byte-identical to the whole-volume inverse — the exactness the RESCALE gate relies on.
+    # The streamed inverse runs the code the whole-volume inverse runs, over a region that happens
+    # to be smaller: byte-identical by construction rather than by agreement.
     rng = np.random.default_rng(seed)
     volume = torch.from_numpy(rng.integers(0, 7, size=(C, Z, Y, X)).astype(np.uint8))
     resample = ResampleToResolution([1.0, 1.0, 1.0])
@@ -227,12 +228,14 @@ def test_stream_rescale_nearest_is_byte_identical_to_the_whole_volume_inverse(se
     in_shape = [Z, Y, X]
     out_shape = resample.inverse_transform_shape(in_shape, attribute)
     assert out_shape == [12, 9, 7]
-    scales = [in_shape[k] / out_shape[k] for k in range(3)]
     reference = resample.inverse("case", volume.clone(), Attribute(attribute))
     got = _run_stream(
-        lambda target: resample.stream_region_target(target, in_shape, Attribute(attribute)),
-        lambda window, target, source: resample.resample_region(
-            window, target, [s.start for s in source], scales, in_shape
+        lambda target: resample.stream_region_target("case", target, in_shape, Attribute(attribute)),
+        lambda window, target, source: resample.stream_region_inverse(
+            "case",
+            window,
+            RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape)),
+            Attribute(attribute),
         ),
         in_shape,
         out_shape,
@@ -244,9 +247,8 @@ def test_stream_rescale_nearest_is_byte_identical_to_the_whole_volume_inverse(se
 
 @pytest.mark.parametrize("seed", range(4))
 def test_stream_rescale_linear_matches_the_whole_volume_inverse_to_float_rounding(seed: int) -> None:
-    # A float (linear) rescale is not byte-identical to F.interpolate windowed, but resample_region
-    # computes the same linear taps, so the streamed inverse matches the whole-volume one to
-    # ~float-rounding (KONFAI_STREAM_LINEAR_RESAMPLE trades exactly this for a bounded window).
+    # And a float one too: coordinates are GLOBAL, so a region and the whole volume put the same
+    # sample in the same place. There is no tolerance to negotiate here any more.
     rng = np.random.default_rng(seed)
     volume = torch.from_numpy(rng.standard_normal((C, Z, Y, X)).astype(np.float32)) * 100.0
     resample = ResampleToResolution([1.0, 1.0, 1.0])
@@ -256,12 +258,14 @@ def test_stream_rescale_linear_matches_the_whole_volume_inverse_to_float_roundin
     attribute["Size"] = np.asarray([Z, Y, X])
     in_shape = [Z, Y, X]
     out_shape = resample.inverse_transform_shape(in_shape, attribute)
-    scales = [in_shape[k] / out_shape[k] for k in range(3)]
     reference = resample.inverse("case", volume.clone(), Attribute(attribute))
     got = _run_stream(
-        lambda target: resample.stream_region_target(target, in_shape, Attribute(attribute)),
-        lambda window, target, source: resample.resample_region(
-            window, target, [s.start for s in source], scales, in_shape
+        lambda target: resample.stream_region_target("case", target, in_shape, Attribute(attribute)),
+        lambda window, target, source: resample.stream_region_inverse(
+            "case",
+            window,
+            RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape)),
+            Attribute(attribute),
         ),
         in_shape,
         out_shape,
@@ -309,11 +313,13 @@ def test_stream_window_is_bounded_by_the_pull_span() -> None:
     attribute["Size"] = np.asarray([tall, Y, X])
     in_shape = [tall, Y, X]
     out_shape = [96, Y, X]
-    scales = [in_shape[k] / out_shape[k] for k in range(3)]
     stream = SlabRegionStream(
-        lambda target: resample.stream_region_target(target, in_shape, Attribute(attribute)),
-        lambda window, target, source: resample.resample_region(
-            window, target, [s.start for s in source], scales, in_shape
+        lambda target: resample.stream_region_target("case", target, in_shape, Attribute(attribute)),
+        lambda window, target, source: resample.stream_region_inverse(
+            "case",
+            window,
+            RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape)),
+            Attribute(attribute),
         ),
         in_shape,
         out_shape,
@@ -362,7 +368,7 @@ def test_inverse_locality_defaults_and_overrides() -> None:
     seeded = Attribute()
     seeded["Size"] = np.asarray([4, 4, 4])
     seeded["Size"] = np.asarray([2, 2, 2])
-    assert ResampleToResolution().inverse_patch_locality(seeded).kind is LocalityKind.RESCALE
+    assert ResampleToResolution().inverse_patch_locality(seeded).kind is LocalityKind.REGRID
     # Canonical judges the POPPED state: without a stacked direction there is nothing to invert onto.
     assert Canonical().inverse_patch_locality(empty).kind is LocalityKind.WHOLE_VOLUME
 
@@ -608,7 +614,7 @@ def test_add_layer_streams_a_forward_region_final_transform(tmp_path, monkeypatc
 
 def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_path, monkeypatch) -> None:
     # The general case the composition exists for: Canonical + ResampleToResolution + Padding forward,
-    # so the finalize chain carries CROP + RESCALE + ORIENTATION in sequence. With the labelmap cast
+    # so the finalize chain carries CROP + REGRID + ORIENTATION in sequence. With the labelmap cast
     # to uint8 before the reduction, the whole stack streams to the sink and must match the
     # whole-volume path bit for bit.
     volume = (torch.arange(1 * 6 * 4 * 3).reshape(1, 6, 4, 3) % 5).to(torch.float32)

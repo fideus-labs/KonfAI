@@ -189,14 +189,10 @@ def _check_patch_transform_locality(transform: Transform, group_src: str, group_
             " crops that patch about its own extent, and cuts the patch grid predictions are"
             " reassembled onto down to what is left."
         ),
-        LocalityKind.RESCALE: (
-            f"'{name}' resamples its input: applied to one patch it rescales that patch about its own"
-            " extent and changes the patch grid predictions are reassembled onto."
-        ),
         LocalityKind.REGRID: (
-            f"'{name}' resamples its input onto another grid: applied to one patch it would hand back"
-            " the whole reference extent, which is neither the patch nor the patch grid predictions"
-            " are reassembled onto."
+            f"'{name}' resamples its input onto another grid: applied to one patch it would rescale"
+            " that patch about its own extent, or hand back the whole target extent -- neither of"
+            " which is the patch grid predictions are reassembled onto."
         ),
         LocalityKind.WHOLE_VOLUME: f"'{name}' needs the whole volume.",
     }

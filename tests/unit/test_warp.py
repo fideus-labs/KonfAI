@@ -81,25 +81,55 @@ def _manager(source: Dataset, transforms: list) -> DatasetManager:
     )
 
 
-def test_declares_a_halo_sized_by_the_declared_displacement() -> None:
-    warp = Warp(field="./x:h5", group="DVF", max_displacement=4.0)
-    locality = warp.patch_locality(_attributes())
-    # Spacing is (x=2, y=1, z=1) so in array order (z, y, x) it is (1, 1, 2): 4 um is 4, 4 and 2 voxels.
-    assert locality.kind is LocalityKind.HALO
-    assert locality.halo == (4, 4, 2)
+def _recorded(warp: Warp, attribute: Attribute | None = None, shape: tuple[int, ...] = (10, 12, 14)) -> Warp:
+    """A stage that has met its case — which is when a region can be asked about at all."""
+    warp.transform_shape("CT", "CASE_000", list(shape), attribute if attribute is not None else _attributes())
+    return warp
 
 
-def test_without_a_declared_bound_it_refuses_to_stream() -> None:
-    """The safety net: an undeclared reach is an unbounded read, so the whole volume it is."""
-    undeclared = Warp(field="./x:h5", group="DVF").patch_locality(_attributes())
-    assert undeclared.kind is LocalityKind.WHOLE_VOLUME
-    # And it says which of the two is missing: a Warp that silently costs the whole volume still
-    # produces the right result, so the reason is the only thing that shows.
-    assert undeclared.reason is not None and "max_displacement" in undeclared.reason
+def test_the_source_region_is_the_target_grown_by_the_declared_displacement() -> None:
+    """A warp is a regrid onto the case's own grid, and its window is the bound in voxels.
 
-    no_geometry = Warp(field="./x:h5", group="DVF", max_displacement=4.0).patch_locality(Attribute())
-    assert no_geometry.kind is LocalityKind.WHOLE_VOLUME
-    assert no_geometry.reason is not None and "Spacing" in no_geometry.reason
+    Spacing is (x=2, y=1, z=1), so in array order (z, y, x) 4 um of displacement is 4, 4 and 2
+    voxels -- plus the one voxel the linear taps reach. Declared as REGRID and not HALO because the
+    window is derived from the case's GEOMETRY: see the oblique case below, which a per-axis halo
+    cannot express at all.
+    """
+    warp = _recorded(Warp(field="./x:h5", group="DVF", max_displacement=4.0))
+    assert warp.patch_locality(_attributes()).kind is LocalityKind.REGRID
+
+    target = (slice(4, 6), slice(4, 6), slice(4, 6))
+    window = warp.stream_region_source("CASE_000", target, [10, 12, 14], _attributes())
+
+    # The rule, written out: the region's OUTER faces (start - 0.5 .. stop - 0.5) in world units,
+    # grown by the declared 4 um, back to indices, floor/ceil, one voxel of margin for the taps.
+    extents, per_voxel = (10, 12, 14), (1.0, 1.0, 2.0)  # array order (z, y, x)
+    expected = []
+    for axis, extent in enumerate(extents):
+        reach = 4.0 / per_voxel[axis]
+        low, high = 4 - 0.5 - reach, 6 - 0.5 + reach
+        expected.append((max(0, int(np.floor(low)) - 1), min(extent, int(np.ceil(high)) + 2)))
+    assert [(part.start, part.stop) for part in window] == expected
+
+
+def test_an_oblique_case_grows_its_window_on_every_axis() -> None:
+    """The bug a per-axis halo hid: a displacement along x reaches into y and z when the axes turn.
+
+    ``Warp`` used to convert a world bound to a halo per ARRAY axis, which silently assumed the
+    direction cosines were the identity -- on a turned case the window was short on the axes the
+    displacement actually reached, and a short window returns the border value rather than raising.
+    """
+    turned = _attributes()
+    angle = np.deg2rad(35.0)
+    cos, sin = float(np.cos(angle)), float(np.sin(angle))
+    turned["Direction"] = np.asarray([[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]).reshape(-1)
+
+    warp = _recorded(Warp(field="./x:h5", group="DVF", max_displacement=4.0), turned)
+    target = (slice(5, 6), slice(5, 6), slice(5, 6))
+    window = warp.stream_region_source("CASE_000", target, [10, 12, 14], turned)
+
+    widths = [part.stop - part.start for part in window]
+    assert all(width > 1 for width in widths), f"a turned case reaches on every axis, got {widths}"
 
 
 @_needs_rfc5
@@ -122,9 +152,13 @@ def test_auto_reads_the_bound_the_fields_recorded_when_they_were_written(tmp_pat
     warp = Warp(field=f"{tmp_path / 'dvf'}:omezarr", group="DVF", max_displacement="auto")
     locality = warp.patch_locality(_attributes())
 
-    # The cohort's bound is (x=1.0, y=6.0, z=3.0); spacing in array order (z, y, x) is (1, 1, 2).
-    assert locality.kind is LocalityKind.HALO
-    assert locality.halo == (3, 6, 1)
+    # The cohort's bound is (x=1.0, y=6.0, z=3.0); spacing in array order (z, y, x) is (1, 1, 2), so
+    # the window grows by 3, 6 and 1 voxels (plus the linear taps' one) around its target.
+    assert locality.kind is LocalityKind.REGRID
+    window = _recorded(warp).stream_region_source("CASE_000", (slice(4, 6),) * 3, [10, 12, 14], _attributes())
+    reaches = (3.0, 6.0, 0.5)  # array order (z, y, x): the bound divided by that axis's spacing
+    starts = [max(0, int(np.floor(4 - 0.5 - reach)) - 1) for reach in reaches]
+    assert [part.start for part in window] == starts
 
 
 def test_auto_survives_an_unreadable_entry_in_the_field_group(tmp_path: Path) -> None:
@@ -200,6 +234,7 @@ def test_a_field_beyond_the_declared_bound_raises(tmp_path: Path) -> None:
     _source, _fields, volume = _fixture(tmp_path, shift_um=(0.0, 0.0, 9.0))
     warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement=1.0)
 
+    _recorded(warp)
     with pytest.raises(TransformError, match=r"on component 2, beyond the 1\.000"):
         whole = (slice(0, 10), slice(0, 12), slice(0, 14))
         warp.stream_region(

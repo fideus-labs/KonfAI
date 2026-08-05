@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import torch
@@ -30,6 +31,9 @@ except ImportError:
 import torch.nn.functional as F
 
 from konfai.utils.errors import TransformError
+
+if TYPE_CHECKING:
+    from konfai.data.geometry import AffineMap, AffineStage, DisplacementStage, Grid, SpatialStages
 
 
 def _require_simpleitk() -> None:
@@ -444,3 +448,117 @@ def clip_and_cast(image: sitk.Image, min_value: float, max_value: float, dtype: 
     result = sitk.GetImageFromArray(data.astype(dtype))
     result.CopyInformation(image)
     return result
+
+
+# ------------------------------------------------------------------ decoding a stored transform
+# The bridge from a sitk.Transform to konfai.data.geometry's sitk-free stages: everything a
+# resample needs to sample and bound the map, as plain numpy, decoded once per case.
+
+
+def _linear_map(transform: sitk.Transform) -> AffineMap:
+    """The exact world map of a linear transform: ``T(p) = M p + T(0)``.
+
+    ``M`` comes from ``GetMatrix`` where the type has one -- the number ITK itself resamples with,
+    read past the centre/translation parameterisation that differs between Euler, Similarity,
+    Scale and Affine -- and from ``T(e_k) - T(0)`` otherwise. The offset is ``T(0)`` directly
+    rather than assembled from centre and translation: one call, no cancellation, and true for
+    every parameterisation at once.
+
+    Probing is sound HERE and nowhere else in this file: for an affine map the columns are the map,
+    exactly, by linearity. For a non-linear one the same arithmetic measures a local gradient and
+    extrapolates it, which under-bounds -- which is why a BSpline's affine part is the identity and
+    all of its reach lives in the residual.
+    """
+    from konfai.data.geometry import AffineMap
+
+    rank = int(transform.GetDimension())
+    offset = np.asarray(transform.TransformPoint((0.0,) * rank), dtype=np.float64)
+    if hasattr(transform, "GetMatrix"):
+        matrix = np.asarray(transform.GetMatrix(), dtype=np.float64).reshape(rank, rank)
+    else:
+        basis = np.eye(rank)
+        columns = [
+            np.asarray(transform.TransformPoint(tuple(basis[k])), dtype=np.float64) - offset for k in range(rank)
+        ]
+        matrix = np.stack(columns, axis=1)
+    return AffineMap(matrix, offset)
+
+
+def _grid_of_image(image: sitk.Image) -> Grid:
+    from konfai.data.geometry import Grid
+
+    rank = int(image.GetDimension())
+    return Grid(
+        tuple(int(extent) for extent in reversed(image.GetSize())),
+        np.asarray(image.GetOrigin(), dtype=np.float64),
+        np.asarray(image.GetSpacing(), dtype=np.float64),
+        np.asarray(image.GetDirection(), dtype=np.float64).reshape(rank, rank),
+    )
+
+
+def _displacement_stage(grid: Grid, per_component: list[np.ndarray], order: int, what: str) -> DisplacementStage:
+    from konfai.data.geometry import DisplacementStage
+
+    values = np.stack([component.astype(np.float64, copy=False) for component in per_component])
+    if not np.isfinite(values).all():
+        raise TransformError(
+            f"{what} carries a non-finite displacement value, so no bound on its reach exists.",
+            "A NaN or infinite coefficient means the transform was written from a failed solve;"
+            " re-export it, or drop it from 'transforms:'.",
+        )
+    return DisplacementStage(grid, values, order)
+
+
+def decode_transform_stages(transform: sitk.Transform) -> SpatialStages:
+    """A stored transform as geometry stages in APPLICATION order, or a refusal naming the type.
+
+    ``CompositeTransform`` applies its member list in REVERSE (the last added runs first — verified
+    against SimpleITK, where ``GetNthTransform(0)`` is nonetheless the first added); the reversal is
+    normalized here, once, so every consumer reads stages first-applied-first.
+    """
+    _require_simpleitk()
+    if isinstance(transform, sitk.CompositeTransform):
+        stages: list[AffineStage | DisplacementStage] = []
+        for index in reversed(range(transform.GetNumberOfTransforms())):
+            stages.extend(decode_transform_stages(transform.GetNthTransform(index)))
+        return tuple(stages)
+    from konfai.data.geometry import AffineStage
+
+    if isinstance(transform, sitk.BSplineTransform):
+        coefficients = transform.GetCoefficientImages()
+        arrays = [sitk.GetArrayFromImage(component) for component in coefficients]
+        return (
+            _displacement_stage(
+                _grid_of_image(coefficients[0]), arrays, int(transform.GetOrder()), "this BSpline transform"
+            ),
+        )
+    if isinstance(transform, sitk.DisplacementFieldTransform):
+        field = transform.GetDisplacementField()
+        array = sitk.GetArrayFromImage(field)  # (Z, Y, X, rank), components (x, y, z)
+        components = [np.ascontiguousarray(array[..., k]) for k in range(array.shape[-1])]
+        return (_displacement_stage(_grid_of_image(field), components, 1, "this displacement field"),)
+    if transform.IsLinear():
+        return (AffineStage(_linear_map(transform)),)
+    raise TransformError(
+        f"A stored '{transform.GetName()}' decomposes into no bounded map: how far a target region"
+        " reaches into its source is unknown, so the region it must read is unbounded.",
+        "Convert it to a displacement field when it is written, or use a rigid/affine/BSpline"
+        " transform, which all decompose.",
+    )
+
+
+def invert_stages(stages: SpatialStages, rank: int) -> SpatialStages | None:
+    """The exact inverse of an all-affine decoded map, or ``None`` when one is not algebraic.
+
+    A BSpline or a field inverts by an iterative dense solve, not an algebraic step, and a field
+    solved per region is not the restriction of the field solved once — so a non-affine inverse is
+    ``None`` here and the caller refuses with the remedy, rather than resampling through a guess.
+    """
+    from konfai.data.geometry import AffineMap, AffineStage
+
+    if not all(isinstance(stage, AffineStage) for stage in stages):
+        return None
+    folded = AffineMap.identity(rank)
+    for stage in stages:
+        folded = folded.then(cast("AffineStage", stage).map)
+    return (AffineStage(folded.inverted()),)

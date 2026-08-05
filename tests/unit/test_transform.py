@@ -292,15 +292,21 @@ def test_padding_after_the_data_keeps_origin(image_attributes):
 
 
 def test_resample_to_resolution_transform_shape_missing_spacing_raises():
-    """A tensor without 'Spacing' metadata must surface a TransformError, not fall through."""
+    """A density change is meaningless without the density it starts from, so it refuses."""
     with pytest.raises(TransformError):
         ResampleToResolution().transform_shape("group", "case", [10, 10, 10], Attribute())
 
 
-def test_resample_to_shape_transform_shape_missing_spacing_raises():
-    """ResampleToShape must also raise when 'Spacing' metadata is absent."""
-    with pytest.raises(TransformError):
-        ResampleToShape().transform_shape("group", "case", [10, 10, 10], Attribute())
+def test_resample_to_shape_needs_no_spacing_at_all():
+    """A count is a count. Only a DENSITY change needs the density it starts from.
+
+    This used to refuse alongside ``ResampleToResolution``, which cost nothing but told the user to
+    go and find a geometry for an operation that is a pure resize. With no header the grid is the
+    identity, and the map degenerates to the size ratio it always was.
+    """
+    assert ResampleToShape(shape=[4, 5, 6]).transform_shape("group", "case", [10, 10, 10], Attribute()) == [4, 5, 6]
+    resized = ResampleToShape(shape=[4, 5, 6])("case", torch.zeros(1, 10, 10, 10), Attribute())
+    assert list(resized.shape[1:]) == [4, 5, 6]
 
 
 def test_resample_to_resolution_transform_shape_dimension_mismatch_message():
@@ -309,7 +315,8 @@ def test_resample_to_resolution_transform_shape_dimension_mismatch_message():
     attributes["Spacing"] = np.asarray([1.0, 1.0], dtype=np.float64)
     with pytest.raises(TransformError) as excinfo:
         ResampleToResolution(spacing=[1.0, 1.0]).transform_shape("group", "case", [10, 10, 10], attributes)
-    assert "shape=[10, 10, 10]" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "case 'case'" in message and "3-dimensional grid" in message
 
 
 def test_resample_to_shape_transform_shape_dimension_mismatch_message():
@@ -319,19 +326,21 @@ def test_resample_to_shape_transform_shape_dimension_mismatch_message():
     with pytest.raises(TransformError) as excinfo:
         ResampleToShape(shape=[4, 4]).transform_shape("group", "case", [10, 10, 10], attributes)
     message = str(excinfo.value)
-    assert "shape=[10, 10, 10]" in message
-    assert "target_shape" in message
+    assert "shape of 2 value(s)" in message
+    assert "3 spatial axis/axes" in message
 
 
 def test_resample_to_shape_does_not_mutate_config():
     """#9 transform_shape must not write resolved dims back into the shared instance config."""
     resampler = ResampleToShape(shape=[0, 16, 16])
-    before = resampler.shape.clone()
     attributes = Attribute()
     attributes["Spacing"] = np.asarray([1.0, 1.0, 1.0], dtype=np.float64)
-    out = resampler.transform_shape("CT", "case", [8, 16, 16], attributes)
-    assert out[0] == 8  # sentinel 0 resolved to the input dim for this call
-    assert torch.equal(resampler.shape, before), "self.shape must stay [0, 16, 16] for the next case"
+
+    first = resampler.transform_shape("CT", "case_a", [8, 16, 16], Attribute(attributes))
+    assert first[0] == 8  # sentinel 0 resolved to the input dim for this call
+    # The sentinel has to survive it: the next case is a different volume, and a stage is shared.
+    second = resampler.transform_shape("CT", "case_b", [11, 16, 16], Attribute(attributes))
+    assert second[0] == 11
 
 
 def test_resample_to_shape_inverse_without_spacing_metadata():

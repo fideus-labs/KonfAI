@@ -16,6 +16,68 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
+## Unreleased
+
+### ✨ Features
+
+- **transform**: one `Resample`. `ResampleToResolution`, `ResampleToShape`, `ResampleToReference`,
+  `ResampleTransform` and `Warp` were five stages answering two questions between them, each with a
+  sampler of its own. They are now five spellings of one stage that asks the questions separately:
+  **which grid to write on** (nothing, `spacing`, `shape`, or `reference` — a stored image's grid
+  adopted whole) and **what map to write it through** (`field`, `transforms`, or neither). Every
+  combination is legal, and asked for together they compose into **one interpolation** instead of
+  two. The old names still work and are thin argument translations.
+- **transform**: `align` says where a `spacing` or `shape` grid sits — `extent` (the default) keeps
+  the field of view, `origin` keeps voxel zero's centre. This was decided silently before, and
+  differently by the data and by the header.
+- **transform**: a resample streams whatever it is asked for, and on the volume's device. Applying a
+  stored registration used to hold a whole volume — not because a warp needs one, but because
+  nothing on a `sitk.Transform` said how far it reached. A rigid or affine map now bounds exactly; a
+  BSpline and a displacement field bound by the largest of their values, which holds at every point
+  rather than at the sampled ones. Everything is evaluated in torch, so nothing marshals a
+  GPU-resident case out to numpy and back.
+- **transform**: a resample no longer requires the grids to share a direction. A rotated reference,
+  or a field stored on turned axes, used to be refused with an instruction to run `Canonical` first
+  — a second interpolation of the same voxels. Both now work directly.
+- **transform**: a field is read on its own grid. `Warp` required the field and the case to share
+  one; a field solved at 120 µm now moves a volume stored at 30 µm without being upsampled first.
+- **transform**: `ResampleToShape` needs no geometry at all. A count is a count; only a change of
+  density needs the density it starts from.
+
+### 🐛 Fixes
+
+- **transform**: a resampled label map no longer comes out shifted against the image beside it.
+  `F.interpolate`'s nearest reads `floor(o * scale)` where its linear reads `scale * (o + 0.5) - 0.5`,
+  so a mask resampled by the same stage as its CT lagged it by `(scale - 1) / 2` source voxels —
+  2.5 voxels, 1.25 mm of anatomy, resampling 0.5 mm to 3 mm. Both volumes were entirely plausible on
+  their own. Nearest is now ITK's round-half-up on the same physical index the linear sampler reads.
+- **transform**: the header a resample records now describes the grid it actually sampled.
+  `ResampleToResolution` wrote the spacing that was *asked for* while sampling at `n_in/n_out` times
+  the source's (up to a millimetre of drift across a volume) and left the `Origin` alone while
+  sampling half a spacing-change away from it. Nothing downstream could see either: the voxels are
+  all real, and the header was the only witness.
+- **transform**: a voxel count no longer loses a slice to floating point. 90 voxels of 0.7 mm re-cut
+  at 1.5 mm is 42, and the count went through float32 to get there — landing on 41 or 42 depending
+  on the numbers.
+- **transform**: a warp on an oblique case reads the neighbourhood it needs. The halo was derived
+  per array axis from a world displacement, which assumes the direction cosines are the identity; on
+  a turned case the window was short on the axes the displacement actually reached, and a short
+  window returns the border value rather than raising.
+- **transform**: a resample refuses what it used to do quietly — resampling in a physical space the
+  case does not have, applying a transform type nothing bounds, inverting a spline or a field by
+  building a whole-grid displacement field and iterating on it per case, and warping through a field
+  with no declared bound. Each declares `WHOLE_VOLUME` with the sentence saying what to change, and
+  the run proceeds on the whole-volume path.
+- **transform**: `ResampleTransform`'s `inverse` defaults to `false`. It always raised
+  `NotImplementedError`, so a prediction finalize through this stage failed at the end of the run
+  rather than at its configuration.
+
+### 🔧 Internals
+
+- **data**: `LocalityKind.RESCALE` is gone. It was the dispatcher's own resample map — a size ratio,
+  which says nothing once a target grid has an origin — and with one resample stage there is one
+  regime, `REGRID`, that the stage owns both halves of.
+
 ## v1.8.0 (2026-08-04)
 
 ### ✨ Features
