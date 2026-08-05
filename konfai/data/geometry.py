@@ -206,24 +206,15 @@ class Grid:
     @classmethod
     def of(cls, spatial_shape: list[int], attribute: Attribute, what: str) -> Grid:
         """The grid a header describes, or a refusal naming ``what`` and the missing key."""
-        missing = [key for key in _GEOMETRY_KEYS if key not in attribute]
+        grid, missing = cls.from_header(spatial_shape, attribute, what)
         if missing:
             raise TransformError(
-                f"The geometry of {what} is needed and its header carries no {', '.join(missing)}.",
+                f"The geometry of {what} is needed and its header carries no {', '.join(sorted(missing))}.",
                 "Resampling onto another grid happens in physical space: without an origin, a"
                 " spacing and a direction there is no space to do it in. Use a source whose"
                 " geometry is readable (mha, nii, h5, or an OME-Zarr written by KonfAI).",
             )
-        rank = len(spatial_shape)
-        origin = _as_float(attribute.get_np_array("Origin"), rank, f"the Origin of {what}", rank)
-        spacing = _as_float(attribute.get_np_array("Spacing"), rank, f"the Spacing of {what}", rank)
-        direction = _as_float(attribute.get_np_array("Direction"), rank, f"the Direction of {what}", rank * rank)
-        if not np.all(spacing > 0.0):
-            raise TransformError(
-                f"The Spacing of {what} is {spacing.tolist()}.",
-                "A spacing is a physical extent per voxel and must be positive on every axis.",
-            )
-        return cls(tuple(int(extent) for extent in spatial_shape), origin, spacing, direction.reshape(rank, rank))
+        return grid
 
     @staticmethod
     def readable(attribute: Attribute) -> bool:

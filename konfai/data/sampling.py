@@ -53,6 +53,49 @@ from konfai.data.geometry import (
 _COORDINATE_DTYPE = torch.float64
 
 
+# --------------------------------------------------------------------------------------------------
+# The rules every sampler below obeys. There are two gather strategies for one arithmetic -- per-axis
+# maps where the coordinate is separable, eight flat corners where a displacement makes it not -- and
+# the strategies differ for a measured reason. The RULES must not: written out at each site they
+# drift, and the drift is silent because a resampled volume looks right either way.
+
+
+def sampling_dtype(tensor: torch.Tensor) -> torch.dtype:
+    """The dtype to accumulate a weighted sum of ``tensor``'s voxels in.
+
+    An integer input has no arithmetic of its own to interpolate with. A CPU half does, and it should
+    not be used: torch's CPU Half kernels are missing from older releases and lossy over a sum of
+    eight terms, at values a scanner actually produces. A CUDA half keeps its own -- every mode has a
+    Half kernel there, and upcasting a whole multi-class volume would double its memory for nothing.
+    """
+    if not tensor.is_floating_point():
+        return torch.float32
+    if tensor.device.type == "cpu" and tensor.dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    return tensor.dtype
+
+
+def nearest_index(coordinate: torch.Tensor) -> torch.Tensor:
+    """ITK's nearest: round half UP on the continuous source index.
+
+    ``torch.round`` breaks a tie to the even index, and ``F.interpolate``'s nearest is
+    ``floor(o * scale)`` -- a statement about a size RATIO, which says nothing once the target grid
+    carries an origin of its own. On a label map either wrong rule still yields a label map.
+    """
+    return torch.floor(coordinate + 0.5).to(torch.long)
+
+
+def window_index(index: torch.Tensor, n_in: int, region_start: int, window: int) -> torch.Tensor:
+    """A global source index as an offset into the sub-region that was actually read.
+
+    Clamped twice, and both matter: to the SOURCE first, so a tap past the volume reproduces the
+    border value rather than wrapping, and to the WINDOW second, so it stays inside the buffer on
+    hand. The second clamp is only ever load-bearing where the first already put the sample outside,
+    which the caller masks to fill -- or, for a halo'd read, where the declared bound was checked.
+    """
+    return torch.clamp(torch.clamp(index, 0, n_in - 1) - region_start, 0, window - 1)
+
+
 def _kernel_weights(offset: torch.Tensor, order: int) -> torch.Tensor:
     """The 1-D B-spline weight at distance ``offset`` — ITK's own kernels.
 
@@ -287,8 +330,6 @@ def gather_separable(
     streamed region against the whole volume, and it is: the per-axis coordinates are global, so a
     region takes a sub-range of the very numbers the whole volume takes.
     """
-    from konfai.data.transform import nearest_index, sampling_dtype, window_index
-
     rank = len(axes)
     window_zyx = [int(extent) for extent in source.shape[1:]]
     extent_zyx = [int(axis.numel()) for axis in axes]
@@ -388,8 +429,6 @@ def gather(
     if not bool(inside.any()):
         return torch.full(out_shape, fill, device=device, dtype=torch.float32).type(source.dtype)
 
-    from konfai.data.transform import nearest_index, sampling_dtype, window_index
-
     work = source.type(sampling_dtype(source))
     if mode == "nearest":
         # One gather, on exact index arithmetic: a nearest pick is discontinuous, so the last bit of
@@ -452,23 +491,3 @@ def source_window(
     grown by the residual), read back as a clamped index window on the source.
     """
     return source_grid.index_window(bound.map_box(target_grid.world_box()), margin)
-
-
-def read_amplification(
-    target_grid: Grid,
-    source_grid: Grid,
-    bound: TransformBound,
-    regions: list[tuple[slice, ...]],
-    margin: int = 1,
-) -> float:
-    """How many times the source's voxels this decomposition reads, in total.
-
-    The honest name for what streaming costs: every region's source window is read whole, the
-    windows overlap, and the finer the decomposition the more they overlap. Monotone in fineness,
-    so it is a property of the decomposition and not of the transform alone.
-    """
-    total = 0
-    for region in regions:
-        window = source_window(target_grid.sub_grid(region), source_grid, bound, margin)
-        total += int(np.prod([part.stop - part.start for part in window], dtype=np.int64))
-    return float(total) / float(np.prod(source_grid.size_zyx, dtype=np.int64))

@@ -41,7 +41,7 @@ not an anatomical frame — and it is why `Reduce` refuses it as stored:
 case 'CASE_001' lands on extent [44, 60, 52] where 'CASE_000' lands on [48, 56, 56]
 ```
 
-`ResampleToReference` is what makes the agreement true rather than waived. It
+`Resample: {reference: ...}` is what makes the agreement true rather than waived. It
 puts every member on one named member's grid — extent, spacing, origin and
 direction — so `grid: strict` passes because the cohort really is on one grid,
 not because the check was relaxed.
@@ -85,7 +85,7 @@ below it runs once, on the folded result:
 
 ```yaml
 Clip: {min_value: 0.0, max_value: 400.0}      # per case
-ResampleToReference: {entry: CASE_000, ...}   # per case
+Resample: {reference: CASE_000, ...}          # per case
 Reduce: {operator: Median, output: template}  # <- N becomes 1 here
 Write: {dataset: ./Template:mha}              # once
 ```

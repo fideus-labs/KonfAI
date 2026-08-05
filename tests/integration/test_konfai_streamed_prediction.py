@@ -21,8 +21,8 @@ when the gate refuses.
 
 The geometry variants exercise the write dispatcher end to end, one per region kind and then in
 composition: a ``Canonical`` inverse (ORIENTATION — in-slab mirrors), a ``Padding`` inverse (CROP), a
-``ResampleToResolution`` inverse on a uint8 chain (RESCALE, streamed in nearest mode, byte-exact) and on
-a float chain (RESCALE, streamed in linear mode, matching the reference to float-rounding), a
+``ResampleToResolution`` inverse on a uint8 chain (REGRID, streamed in nearest mode, byte-exact) and on
+a float chain (REGRID, streamed in linear mode, matching the reference to float-rounding), a
 two-inverse pipe, and the full three-inverse stack (crop + rescale + reorient composed, streamed
 end to end). The TTA variants exercise the slab-synchronized cross-copy reduce: an in-plane flip
 streams (each copy's window reduced slab by slab), while a slab-axis flip must refuse and complete
@@ -117,7 +117,7 @@ _VARIANT_TRANSFORMS = {
                 padding: [0, 0, 0, 0, 2, 1]
                 mode: constant
                 inverse: true""",
-    # RESCALE: the inverse resamples back to the stored grid.
+    # REGRID: the inverse resamples back to the stored grid.
     "ResampleLabel": """            transforms:
               ResampleToResolution:
                 spacing: [0.5, 0.5, -1.0]
@@ -136,7 +136,7 @@ _VARIANT_TRANSFORMS = {
                 dims: '0'
                 inverse: true""",
     # The full stack the composition exists for — reorient + resample + pad forward, so the finalize
-    # chain carries CROP + RESCALE + ORIENTATION in sequence on a uint8 labelmap, streamed end to end.
+    # chain carries CROP + REGRID + ORIENTATION in sequence on a uint8 labelmap, streamed end to end.
     "GeometryStack": """            transforms:
               Canonical:
                 inverse: true
@@ -149,7 +149,7 @@ _VARIANT_TRANSFORMS = {
                 inverse: true""",
 }
 
-# ResampleLabel/GeometryStack cast to uint8 before the reduction, so the tensor reaching the RESCALE
+# ResampleLabel/GeometryStack cast to uint8 before the reduction, so the tensor reaching the REGRID
 # stage resamples in nearest mode (byte-exact). ResampleFloat keeps the float chain, so it resamples in
 # linear mode and matches the reference to float-rounding.
 _UINT8_BEFORE_REDUCTION = """        before_reduction_transforms:

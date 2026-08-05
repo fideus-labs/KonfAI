@@ -44,6 +44,26 @@ written replaces it.
 - **transform**: `ResampleToShape` needs no geometry at all. A count is a count; only a change of
   density needs the density it starts from.
 
+- **transform**: the plan chooses the route from predicted cost against the memory budget.
+  Streaming is a memory strategy — splitting re-reads, loading whole reads once — so a case that
+  fits the budget is now `LOAD`ed when streaming would re-read the source (a halo re-reads its
+  overlap, a regrid pulls each slab's window through its map, a compressed store decodes the whole
+  volume per slab — measured up to 9.7x on an oblique map). The plan prints the predicted factor;
+  `on_fallback` has nothing to say about a choice. The predictor's streamed-vs-assembled route now
+  prices the config's budget instead of the machine's free memory at that moment, so the same case
+  takes the same route on a loaded machine and an idle one.
+- **transform**: a console that says what changes a decision. A healthy 6-output run is 7 lines —
+  the plan's chain lines now carry the stages and the terminal `Write` destination, and one final
+  line states what was written, how, in how long, and where `outputs.json` is. The run itself only
+  speaks when it deviates from the printed plan. A designed refusal (`on_fallback: error`, a budget
+  overrun) prints its message and remedy and exits 1 — 34 lines of framework traceback down to 6;
+  `KONFAI_DEBUG=1` re-attaches the traceback. Logs stop amplifying progress frames (~4x smaller),
+  and every byte figure prints at the unit that carries digits instead of `0.00 GiB`.
+- **transform**: every configuration-dependent fallback says what to change — a masked `Clip` or
+  `Standardize`, a percentile bound, a spatial `Sum`/`Argmax`/`Softmax`, an oblique `Canonical`, a
+  free-angle `Rotate` draw, a vector-field `Flip` — and `Statistics` streams: its four numbers are
+  the disk scan's own, seeded instead of recomputed per region.
+
 ### 🐛 Fixes
 
 - **transform**: a resampled label map no longer comes out shifted against the image beside it.
@@ -63,20 +83,55 @@ written replaces it.
   per array axis from a world displacement, which assumes the direction cosines are the identity; on
   a turned case the window was short on the axes the displacement actually reached, and a short
   window returns the border value rather than raising.
-- **transform**: a resample refuses what it used to do quietly — resampling in a physical space the
-  case does not have, applying a transform type nothing bounds, inverting a spline or a field by
-  building a whole-grid displacement field and iterating on it per case, and warping through a field
-  with no declared bound. Each declares `WHOLE_VOLUME` with the sentence saying what to change, and
-  the run proceeds on the whole-volume path.
+- **transform**: a resample refuses what it used to do quietly. A refusal the whole-volume path can
+  serve — an undeclared field bound, a case with no geometry — declares `WHOLE_VOLUME` with the
+  sentence saying what to change, and the run proceeds assembled. A map neither route can apply —
+  an unsupported spline order, a missing entry, `invert: true` on a spline or a field — refuses as
+  the plan is built, before a byte is written; it used to print a fallback the run then contradicted
+  by dying per case.
 - **transform**: `ResampleTransform`'s `inverse` defaults to `false`. It always raised
   `NotImplementedError`, so a prediction finalize through this stage failed at the end of the run
   rather than at its configuration.
+
+- **data**: a stage is judged on the state the stages before it left, on every landing fold. A
+  `Resample` behind a `Canonical` recorded the pre-reorientation grid and resampled the wrong axis
+  — silently, every voxel real, on the exact chain the published TotalSegmentator bundle ships —
+  and a second `Resample` saw the original spacing and handed its input through as a no-op. Both
+  now stream, bit-identical to the whole-volume pass.
+- **data**: the end plane of a BSpline's valid region is warped as ITK warps it. A grid
+  commensurate with the coefficient mesh — what a fitted transform domain produces — hit that
+  plane whole planes at a time, every voxel silently unmoved (2.66 mm of displacement dropped,
+  against 1e-14 agreement everywhere else).
+- **data**: coverage is judged through the declared map before a case is refused as disjoint. An MR
+  and a CT 1000 mm apart in stage coordinates with a stored rigid bridging them — the situation the
+  apply step exists to serve — were refused as writing nothing but fill.
+- **data**: a half-precision volume on CUDA blends through float32 coordinates. The fused blend
+  built its sampling grid in the payload's dtype, quantizing a coordinate at ~2^-11 of the window —
+  0.06 voxel on a 512 axis, tens of units at a sharp edge (measured 60.0 on a 1000-range fixture,
+  0.022 after).
+- **data**: interleaved patch reads of two `Expand` copies each keep their own grids; re-reading a
+  copy after another was planned handed it the other copy's sampling.
+- **transform**: `Clip('min'/'max')` clips to the case's seeded statistic, not the region's own —
+  what `save_clip_min`/`save_clip_max` recorded used to depend on which patch happened to run.
+
+### ⚡ Performance
+
+- **data**: a map that factorises is read one axis at a time on global coordinates — most
+  resamples, bit-identical streamed or whole (CT-sized case: CPU 2269 -> 160 ms, GPU 46.5 -> 2.1 ms,
+  peak 1.09 -> 0.35 GiB) — and the axis that shrinks most is blended first (9.1x on a thick-slice CT
+  brought to isotropic). A map that does not factorise (a warp, a rotation, a stored field) goes
+  through one fused `grid_sample` kernel (4x on a warp); on that path a streamed region and the
+  whole volume agree to ~1e-5 of the data's range rather than bit for bit, which the plan notes
+  when a budget shrinks the slabs.
 
 ### 🔧 Internals
 
 - **data**: `LocalityKind.RESCALE` is gone. It was the dispatcher's own resample map — a size ratio,
   which says nothing once a target grid has an origin — and with one resample stage there is one
   regime, `REGRID`, that the stage owns both halves of.
+- **data**: the sampler owns its rules (`nearest_index`, `window_index`, `sampling_dtype` live in
+  `sampling.py`), `utils/ITK.py` keeps only its live decoders (~340 orphaned pre-unification lines
+  deleted), and `KONFAI_STREAM_LINEAR_RESAMPLE` — documented, read by nothing — is out of the docs.
 
 ## v1.8.0 (2026-08-04)
 

@@ -24,7 +24,7 @@ Transformer:
               # The cohort as acquired fails `strict`: extents, spacings and origins all differ.
               # This puts every member on CASE_000's grid, which makes the agreement true rather
               # than waived. Any member would do -- what matters is that one is named.
-              ResampleToReference: {entry: CASE_000, group: CT, fill: 0.0}
+              Resample: {reference: CASE_000, reference_group: CT, fill: 0.0}
               # The cardinality changes here. Everything above ran once per case; everything below
               # runs once, on the folded result.
               Reduce:

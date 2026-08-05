@@ -473,6 +473,8 @@ class Transformer(DistributedObject):
         probed: set[tuple[str, str]] = set()
         planned_dtypes: set[str] = set()
         chain_labels: dict[tuple[str, str], str] = {}
+        # A plan is computed from scratch: a note set by an earlier plan of this process must not stick.
+        self._sub_cap_sweeps = False
         for group_dest, managers in self._managers().items():
             group_src = self._group_src_of(group_dest)
             if managers:

@@ -959,7 +959,9 @@ def test_two_ranks_partition_the_cases_and_every_output_is_written_once(tmp_path
         assert out.is_dataset_exist("CT_out", f"CASE_{index:03d}")
 
 
-def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(tmp_path: Path) -> None:
+def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The route is chosen from predicted cost against the budget — never the answer.
 
     A gzipped NIfTI cannot serve bounded region reads, so streaming decodes the whole source once
@@ -991,6 +993,19 @@ def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(tmp_p
     assert not plan.fallback_entries  # a choice, not a fallback: on_fallback has nothing to refuse
 
     workflow.setup(1)
+    # The bytes of a pointwise chain cannot tell the routes apart, so the ROUTE itself is spied:
+    # the run must hand materialize the plan's choice, not re-derive its own.
+    from konfai.data.patching import DatasetManager
+
+    routes: list[bool] = []
+    original = DatasetManager.materialize
+
+    def spy(self: DatasetManager, a: int = 0, **kwargs) -> bool:
+        routes.append(bool(kwargs.get("prefer_whole", False)))
+        return original(self, a, **kwargs)
+
+    monkeypatch.setattr(DatasetManager, "materialize", spy)
     workflow.run_process(1, 0, 0, None)
+    assert routes == [True], "the plan said LOAD and the run must execute it"
     loaded, _ = Dataset(out, "h5").read_data("CT_out", "CASE_000")
     np.testing.assert_array_equal(loaded, np.clip(volume, 0.0, 50.0))

@@ -134,7 +134,7 @@ def test_itk_helper_requires_simpleitk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(itk_module, "sitk", None)
 
     with pytest.raises(TransformError, match="SimpleITK"):
-        itk_module.resample_resize(None)
+        itk_module.read_displacement_field("missing.mha")
 
 
 def test_main_module_importable() -> None:

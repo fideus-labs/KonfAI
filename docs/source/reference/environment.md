@@ -35,8 +35,7 @@ path or to tune the gate.
 | Variable | Effect |
 | --- | --- |
 | `KONFAI_STREAMED_WRITES` | `0` disables streamed writes entirely (whole-volume reference path). |
-| `KONFAI_STREAM_LINEAR_RESAMPLE` | `0` restores bit-exact (non-streamed) linear resample inverses. |
-| `KONFAI_STREAM_WORTH_THRESHOLD` | Overrides the "worth streaming" accumulator-size threshold (fraction of allocatable memory). |
+| `KONFAI_STREAM_WORTH_THRESHOLD` | Overrides the "worth streaming" accumulator-size threshold (fraction of the per-rank memory budget). Test harnesses set `0` to force the streamed machinery on toy volumes. |
 | `KONFAI_ASYNC_WRITES` | Controls the background writer for disjoint-file sinks. |
 | `KONFAI_INLINE_SINGLE_RANK` | Default on. `0` forces a single rank through the spawn path instead of running it in-process — useful when a host process must keep its own CUDA context. |
 
@@ -72,7 +71,8 @@ The codebase also references internal variables such as:
 
 - `KONFAI_CONFIG_MODE`, `KONFAI_CONFIG_PATH` — the config binder's mode machine
 - `KONFAI_APPS_CONFIG`
-- `KONFAI_DEBUG`, `KONFAI_DEBUG_LAST_LAYER`
+- `KONFAI_DEBUG` — `1` re-attaches the framework traceback to a designed refusal (a
+  `KonfAIError`), which otherwise prints its message and remedy alone; `KONFAI_DEBUG_LAST_LAYER`
 - `KONFAI_MASTER_PORT` — distributed rendezvous bookkeeping
 - `KONFAI_LOCAL_RANKS` — how many ranks share one node's RAM, published by the
   launcher so a node-scoped `memory_budget` is divided before the spawn. It changes

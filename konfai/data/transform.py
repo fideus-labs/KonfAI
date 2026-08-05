@@ -43,6 +43,7 @@ from konfai.data.geometry import (
     Grid,
     SpatialStages,
     TransformBound,
+    bound_of,
 )
 from konfai.data.sampling import (
     blend_order,
@@ -960,49 +961,6 @@ class Squeeze(TransformInverse):
         return tensor.unsqueeze(self.dim)
 
 
-# --------------------------------------------------------------------------------------------------
-# The rules every sampler below obeys. There are two gather strategies for one arithmetic -- per-axis
-# maps where the coordinate is separable, eight flat corners where a displacement makes it not -- and
-# the strategies differ for a measured reason. The RULES must not: written out at each site they
-# drift, and the drift is silent because a resampled volume looks right either way.
-
-
-def sampling_dtype(tensor: torch.Tensor) -> torch.dtype:
-    """The dtype to accumulate a weighted sum of ``tensor``'s voxels in.
-
-    An integer input has no arithmetic of its own to interpolate with. A CPU half does, and it should
-    not be used: torch's CPU Half kernels are missing from older releases and lossy over a sum of
-    eight terms, at values a scanner actually produces. A CUDA half keeps its own -- every mode has a
-    Half kernel there, and upcasting a whole multi-class volume would double its memory for nothing.
-    """
-    if not tensor.is_floating_point():
-        return torch.float32
-    if tensor.device.type == "cpu" and tensor.dtype in (torch.float16, torch.bfloat16):
-        return torch.float32
-    return tensor.dtype
-
-
-def nearest_index(coordinate: torch.Tensor) -> torch.Tensor:
-    """ITK's nearest: round half UP on the continuous source index.
-
-    ``torch.round`` breaks a tie to the even index, and ``F.interpolate``'s nearest is
-    ``floor(o * scale)`` -- a statement about a size RATIO, which says nothing once the target grid
-    carries an origin of its own. On a label map either wrong rule still yields a label map.
-    """
-    return torch.floor(coordinate + 0.5).to(torch.long)
-
-
-def window_index(index: torch.Tensor, n_in: int, region_start: int, window: int) -> torch.Tensor:
-    """A global source index as an offset into the sub-region that was actually read.
-
-    Clamped twice, and both matter: to the SOURCE first, so a tap past the volume reproduces the
-    border value rather than wrapping, and to the WINDOW second, so it stays inside the buffer on
-    hand. The second clamp is only ever load-bearing where the first already put the sample outside,
-    which the caller masks to fill -- or, for a halo'd read, where the declared bound was checked.
-    """
-    return torch.clamp(torch.clamp(index, 0, n_in - 1) - region_start, 0, window - 1)
-
-
 # ---------------------------------------------------------------------------------------------
 # One resample. Two questions: which grid to write on, and what map to write it through.
 # ---------------------------------------------------------------------------------------------
@@ -1267,9 +1225,7 @@ class Resample(TransformInverse):
                 " region a field is read from and means nothing without one.",
             )
         self.displacement: _DisplacementSource | None = (
-            _DisplacementSource("Resample", field, field_group, max_displacement, group_keyword="field_group")
-            if declared
-            else None
+            _DisplacementSource(field, field_group, max_displacement) if declared else None
         )
         #: Per case: the grid its own header describes. Recorded where that header is in hand --
         #: transform_shape, called for every case as the manager is built. A region read hands back
@@ -1469,8 +1425,7 @@ class Resample(TransformInverse):
                 raise TransformError(self.displacement.undeclared_reason())
             folded = TransformBound.shift(np.asarray(declared[:rank], dtype=np.float64)).after(folded)
         if self.transforms is not None:
-            for stage in self._stored_stages(name):
-                folded = stage.bound().after(folded)
+            folded = bound_of(self._stored_stages(name), rank).after(folded)
         return folded
 
     # ------------------------------------------------------------------ the contract
@@ -2270,28 +2225,16 @@ class Write(Save):
 class _DisplacementSource:
     """A displacement field on disk: where it is, how far it reaches, and how to read a region of it.
 
-    Shared by the two stages that resample THROUGH one. What they do with the displacement differs
-    entirely — :class:`Warp` adds it on the case's own grid, :class:`ResampleToReference` composes it
-    with a change of grid — but where the field comes from, what bounds it, and the refusal when it
-    exceeds that bound are the same questions, and were answered twice before this existed.
-
-    ``owner`` is the stage's name, so a refusal reads as coming from the stage the user declared and
-    not from a helper they have never heard of. ``group_keyword`` goes with it: the two owners spell
-    the field's group differently -- ``Warp`` calls it ``group`` because it has no other, and
-    ``ResampleToReference`` calls it ``field_group`` because ``group`` is already the reference's. A
-    remedy naming the wrong one sends the user to change the wrong argument.
+    :class:`Resample` is its one owner — the family's spellings all resolve to it — so every refusal
+    speaks as ``Resample`` and names ``field_group``, the argument the user declared.
     """
 
     def __init__(
         self,
-        owner: str,
         field: str | None,
         group: str | None,
         max_displacement: float | str,
-        group_keyword: str = "group",
     ) -> None:
-        self.owner = owner
-        self.group_keyword = group_keyword
         # A root of its own, or none: with no ``field`` path the fields are a GROUP of the run's own
         # dataset_filenames, one entry per case — which is how a cohort registered in place stores
         # them, beside the volumes they were solved on.
@@ -2301,9 +2244,9 @@ class _DisplacementSource:
             self.dataset = Dataset(Path(filename), file_format)
         elif group is None:
             raise TransformError(
-                f"'{owner}' has neither a 'field' path nor a group to find the fields in.",
-                f"Name the store — {owner}: {{field: ./DVF:omezarr}} — or, for fields stored beside"
-                f" the cases, the group they are in: {owner}: {{{group_keyword}: DVF}}.",
+                "'Resample' has neither a 'field' path nor a group to find the fields in.",
+                "Name the store — Resample: {field: ./DVF:omezarr} — or, for fields stored beside"
+                " the cases, the group they are in: Resample: {field_group: DVF}.",
             )
         self.group = group
         #: The run's own roots, handed over by the owner; only consulted when there is no path.
@@ -2314,7 +2257,7 @@ class _DisplacementSource:
                 max_displacement = float(max_displacement)
             except ValueError:
                 raise TransformError(
-                    f"'{owner}' has a max_displacement of '{max_displacement}', which is neither a number nor 'auto'.",
+                    f"'Resample' has a max_displacement of '{max_displacement}', which is neither a number nor 'auto'.",
                     "Give a distance in the case's world units (max_displacement: 250.0), or 'auto'"
                     " to read the bound the fields recorded when they were written.",
                 ) from None
@@ -2380,16 +2323,16 @@ class _DisplacementSource:
             return self.group
         if self.dataset is None:  # unreachable: a source with no path was given a group to use
             raise TransformError(
-                f"'{self.owner}' has no field store of its own and no group to look for one in.",
-                f"Name the group the fields are in: {self.owner}: {{{self.group_keyword}: DVF}}.",
+                "'Resample' has no field store of its own and no group to look for one in.",
+                "Name the group the fields are in: Resample: {field_group: DVF}.",
             )
         groups = [str(group) for group in self.dataset.get_group()]
         if len(groups) == 1:
             return groups[0]
         where = f"the field for case '{name}'" if name is not None else "the fields"
         raise TransformError(
-            f"'{self.owner}' cannot tell which group of '{self.dataset.filename}' holds {where}: it has {len(groups)}.",
-            f"Name it: {self.owner}: {{field: ./DVF:omezarr, {self.group_keyword}: DVF}}.",
+            f"'Resample' cannot tell which group of '{self.dataset.filename}' holds {where}: it has {len(groups)}.",
+            "Name it: Resample: {field: ./DVF:omezarr, field_group: DVF}.",
         )
 
     def _root_for(self, name: str | None) -> Dataset:
@@ -2401,10 +2344,10 @@ class _DisplacementSource:
             if name is None or root.is_dataset_exist(group, name):
                 return root
         raise TransformError(
-            f"'{self.owner}' cannot find a field for case '{name}' in group '{group}' of"
+            f"'Resample' cannot find a field for case '{name}' in group '{group}' of"
             f" {', '.join(str(root.filename) for root in self.roots) or 'any dataset'}.",
             "A field declared by group alone is looked up beside the cases, one entry per case."
-            f" Give the store a path of its own instead: {self.owner}: {{field: ./DVF:omezarr}}.",
+            " Give the store a path of its own instead: Resample: {field: ./DVF:omezarr}.",
         )
 
     def infos(self, name: str) -> tuple[list[int], Attribute]:
@@ -2442,23 +2385,11 @@ class _DisplacementSource:
             if largest > declared:
                 raise TransformError(
                     f"The field for case '{name}' displaces up to {largest:.3f} on component"
-                    f" {component}, beyond the {declared:.3f} '{self.owner}' sized its region from.",
+                    f" {component}, beyond the {declared:.3f} 'Resample' sized its region from.",
                     "Raise max_displacement to at least the field's true maximum, or use"
                     " max_displacement: auto: the region read is sized from that number, so a larger"
                     " displacement samples outside what was read.",
                 )
-
-
-def _halo_from_bound(bound: list[float], spacing: list[float]) -> tuple[int, ...]:
-    """A world-unit displacement bound as a per-axis halo in voxels.
-
-    ``bound`` is per component in (x, y, z); ``spacing`` is per array axis in (z, y, x). Reversing
-    one of them is the whole of this function, and the reason it is one.
-    """
-    per_axis = list(reversed(bound))[-len(spacing) :] if len(bound) >= len(spacing) else [max(bound)] * len(spacing)
-    return tuple(
-        int(np.ceil(value / extent)) if extent > 0 else 0 for value, extent in zip(per_axis, spacing, strict=False)
-    )
 
 
 def _is_declared_displacement(max_displacement: float | str) -> bool:
@@ -2466,13 +2397,6 @@ def _is_declared_displacement(max_displacement: float | str) -> bool:
     if isinstance(max_displacement, str):
         return bool(max_displacement.strip())
     return float(max_displacement) != 0.0
-
-
-def _array_order_spacing(cache_attribute: Attribute) -> list[float] | None:
-    """A case's spacing in array order (z, y, x); ``Spacing`` is stored (x, y, z)."""
-    if "Spacing" not in cache_attribute:
-        return None
-    return list(reversed([float(value) for value in np.asarray(cache_attribute.get_np_array("Spacing")).ravel()]))
 
 
 class Warp(Resample):

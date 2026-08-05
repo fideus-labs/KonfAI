@@ -618,3 +618,30 @@ def test_statistics_streams_off_the_seeded_case_numbers(streaming_dataset_stub) 
     assert float(attribute["ImageMean"]) == pytest.approx(float(volume.mean()), rel=1e-6)
     assert float(attribute["ImageStd"]) == pytest.approx(float(volume.std(ddof=1)), rel=1e-6)
     assert stub.full_reads == 0 and stub.stats_reads == 1
+
+
+def test_the_read_factor_grows_as_the_budget_cuts_finer_slabs(streaming_dataset_stub) -> None:
+    """Streaming finer never reads less — the monotonicity the route's pricing rests on.
+
+    A halo chain re-reads its overlap at every slab boundary, so the factor sits near 1 when one
+    slab covers the volume and grows as the budget shrinks the slabs. This restates, on the
+    estimator the verdict actually uses, the property the deleted ``read_amplification`` pinned.
+    """
+    volume = np.zeros((1, 32, 16, 16), dtype=np.float32)
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, streaming_dataset_stub(volume)),
+        patch=DatasetPatch([8, 16, 16]),
+        transforms=[Dilate(2)],
+        data_augmentations_list=[],
+    )
+    factors = []
+    for budget in (None, 64_000.0, 16_000.0, 8_000.0):
+        manager.set_memory_budget(budget)
+        factors.append(manager.predicted_stream_read_factor(0))
+    assert factors[0] == pytest.approx(1.0, abs=0.2)  # one slab: the whole source, once
+    assert factors == sorted(factors), f"the factor must be monotone in fineness, got {factors}"
+    assert factors[-1] > 2.0
