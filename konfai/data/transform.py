@@ -1197,12 +1197,16 @@ class Resample(TransformInverse):
     stages resamples twice, and a volume interpolated twice has lost detail the second pass invented
     no more of -- which is the whole reason an atlas's appearance is rebuilt from native volumes.
 
-    IT STREAMS, and what a region reads is known before a voxel is touched. A rigid or affine map is
-    an exact affine, so the source box of a target region is that region's box mapped through it. A
-    BSpline and a dense field are values on a grid read through a non-negative kernel that sums to
-    one, so the sup-norm of those values bounds the displacement at EVERY point -- a theorem, not a
-    sample of the boundary. A field on disk is bounded by ``max_displacement`` instead, which is then
-    CHECKED against every region actually read.
+    IT STREAMS, and what a region reads is known before a voxel of the SOURCE is touched. A rigid
+    or affine map is an exact affine, so the source box of a target region is that region's box
+    mapped through it. A BSpline and a dense field are values on a grid read through a non-negative
+    kernel that sums to one, so the sup-norm of those values bounds the displacement at EVERY point
+    -- a theorem, not a sample of the boundary. A field on disk is read region by region, and the
+    window a region samples is its own box: the sup of the values just read bounds that region's
+    pull, so each slab pays exactly the halo ITS displacements require -- measured at run, from a
+    read the sampler needs regardless. ``max_displacement`` is optional: declared (or recorded by
+    the store at write time) it prices the plan exactly and is CHECKED against every region read;
+    absent, the plan prices the reads as if the field were zero and says so.
 
     ``align`` decides where a ``spacing`` or a ``shape`` grid SITS, and it is the one silent choice
     in the family -- a quarter of a voxel of anatomy, made differently by every library that offers
@@ -1218,7 +1222,6 @@ class Resample(TransformInverse):
     - ``invert: true`` on anything but a rigid or affine map: inverting a spline or a field is a
       dense solve over the whole grid, and a field solved per region is not the restriction of the
       field solved once. Store the inverse, or invert it where it is written;
-    - a field with no ``max_displacement`` to size its region from;
     - a case that does not meet the target grid anywhere -- judged THROUGH the declared map, so a
       stored rigid bridging two scanner frames is not mistaken for disjointness. The output would
       be ``fill`` from edge to edge, and an all-background member is a plausible, wrong
@@ -1285,6 +1288,9 @@ class Resample(TransformInverse):
         #: Per case: the geometry keys its header did not carry (see :meth:`Grid.from_header`).
         self._assumed: dict[str, frozenset[str]] = {}
         self._stored: dict[str, SpatialStages] = {}
+        #: The last field window read, kept for the sampler: sizing a region's source window reads
+        #: the very field slab the sampler needs next, so one slot makes the two one read.
+        self._field_window: tuple[str, object, DisplacementStage] | None = None
         self._refusal: str | None = None
         self._probed = False
 
@@ -1440,12 +1446,17 @@ class Resample(TransformInverse):
         return self._stored[name]
 
     def _field_stage(self, name: str, region: Grid) -> DisplacementStage:
-        """The declared field over ``region``, read on its own grid and no wider.
+        """The declared field over ``region``, read on its own grid and no wider — once.
 
         The field is evaluated at the TARGET's world points, so the window it needs is that region's
         own world box -- no halo, whatever the displacement is. What the halo sizes is the SOURCE
-        read, which is a different question answered by the bound.
+        read, which is a different question, answered from these very values
+        (:meth:`measured_region_source`) -- memoized here so sizing and sampling share one read.
         """
+        key = (tuple(int(extent) for extent in region.size_zyx), tuple(float(v) for v in np.ravel(region.origin_xyz)))
+        cached = self._field_window
+        if cached is not None and cached[0] == name and cached[1] == key:
+            return cached[2]
         source = cast("_DisplacementSource", self.displacement)
         shape, attribute = source.infos(name)
         spatial = [int(extent) for extent in shape[1:]]
@@ -1453,7 +1464,13 @@ class Resample(TransformInverse):
         window = grid.index_window(region.world_box(), margin=1)
         values = source.read(name, window, len(spatial))
         source.check_bound(values, name)
-        return DisplacementStage(grid.sub_grid(window), values.numpy(), order=1)
+        stage = DisplacementStage(grid.sub_grid(window), values.numpy(), order=1)
+        self._field_window = (name, key, stage)
+        return stage
+
+    def stream_abort(self, name: str) -> None:
+        if self._field_window is not None and self._field_window[0] == name:
+            self._field_window = None
 
     def _stages(self, name: str, region: Grid) -> SpatialStages:
         """The whole map over one target region, in application order."""
@@ -1473,6 +1490,22 @@ class Resample(TransformInverse):
             if declared is None:
                 raise TransformError(self.displacement.undeclared_reason())
             folded = TransformBound.shift(np.asarray(declared[:rank], dtype=np.float64)).after(folded)
+        if self.transforms is not None:
+            folded = bound_of(self._stored_stages(name), rank).after(folded)
+        return folded
+
+    def _pricing_bound(self, name: str) -> TransformBound:
+        """The map's bound as the PLAN prices it — headers and declarations, never a voxel.
+
+        A field with no declared or recorded bound prices as zero displacement. The run never
+        trusts this window: a declared field's regions are sized from the values it reads for
+        sampling anyway (:meth:`measured_region_source`), so the optimism here costs estimate
+        accuracy, not bytes.
+        """
+        if self.displacement is None or self.displacement.component_bound() is not None:
+            return self._bound(name)
+        rank = self._source_grid(name).rank
+        folded = TransformBound.exact(AffineMap.identity(rank))
         if self.transforms is not None:
             folded = bound_of(self._stored_stages(name), rank).after(folded)
         return folded
@@ -1548,13 +1581,20 @@ class Resample(TransformInverse):
                 "SimpleITK is not installed, and a stored transform is applied in physical space by"
                 " it. Install it (pip install konfai[itk]) to stream this stage"
             )
-        # The field's bound is the COHORT's, read from declarations and headers, so it is answered
-        # before any case has been seen -- and it is what a config-time probe is really asking.
-        if self.displacement is not None and self.displacement.component_bound() is None:
-            return self.displacement.undeclared_reason()
+        # The field group's HEADERS are the cohort's business here -- an unreadable entry anywhere
+        # under it fails both routes on whichever case reaches it. A field that merely records no
+        # bound streams: its windows are sized from the values the run reads (measured_region_source).
+        if self.displacement is not None:
+            self.displacement.component_bound()
+            if self.displacement.scan_failed:
+                return (
+                    "an entry in the field group could not be header-read, so what any region of it"
+                    " must pull is unknown. Check the field store: one unreadable entry anywhere"
+                    " under it falls the whole group back"
+                )
         for name in self._grids:
             try:
-                self._bound(name)
+                self._pricing_bound(name)
             except TransformError as error:
                 # Both halves of the refusal: the first says what is wrong, the second what to
                 # change. A plan line carrying only the first tells the reader nothing to do.
@@ -1572,7 +1612,34 @@ class Resample(TransformInverse):
     ) -> list[slice]:
         del source_spatial_shape, cache_attribute
         source, target = self._grids_of(name)
-        return list(source_window(target.sub_grid(tuple(target_slices)), source, self._bound(name)))
+        return list(source_window(target.sub_grid(tuple(target_slices)), source, self._pricing_bound(name)))
+
+    @property
+    def measures_at_run(self) -> bool:
+        """Whether the run sizes this stage's windows from the data it reads.
+
+        Only a field with NO declared or recorded bound: a bounded field keeps the declared
+        window, whose streamed result is bit-identical to the whole-volume path on a separable
+        map — measuring would tighten its windows at the price of that identity. Measuring is the
+        route for the field that could not stream at all before.
+        """
+        return self.displacement is not None and self.displacement.component_bound() is None
+
+    def measured_region_source(
+        self, name: str, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
+    ) -> list[slice]:
+        """The region's source window, sized from the field itself — the read that samples also bounds.
+
+        The field window a region needs is its own box, read for sampling regardless; the sup of
+        the values just read bounds every interpolated displacement in the region (a convex
+        combination cannot exceed the lattice values it blends), so the window is exact per region
+        — a quiet slab pays a quiet halo. ``max_displacement``, when declared, stays the cap those
+        values are checked against.
+        """
+        del source_spatial_shape, cache_attribute
+        source, target = self._grids_of(name)
+        region = target.sub_grid(tuple(target_slices))
+        return list(source_window(region, source, bound_of(self._stages(name, region), source.rank)))
 
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
@@ -1740,19 +1807,27 @@ class Resample(TransformInverse):
         the mirror reason -- a question must not move the state a region read depends on.
         """
         del group_dest
+        notes: list[str] = []
+        if self.displacement is not None and self.displacement.component_bound() is None:
+            # Case-independent on purpose: the plan prints identical notes once, so this is one line
+            # for the stage rather than one per case.
+            notes.append(
+                "the field carries no bound, so each region's source window is sized from the field"
+                " values read at run; the read estimate prices the field as zero. Declare"
+                " max_displacement, or use a field with a recorded bound, to price exactly"
+            )
         try:
             source, missing = Grid.from_header([int(extent) for extent in shape], cache_attribute, f"case '{name}'")
-            if missing & self._target.needs:
-                return None
-            covered = self._coverage(source, self._target.of(source, name), self._map_bound(name))
+            if not missing & self._target.needs:
+                covered = self._coverage(source, self._target.of(source, name), self._map_bound(name))
+                if covered < self._WORTH_SAYING:
+                    notes.append(
+                        f"case '{name}' covers {covered * 100:.1f}% of {self._target.describe()};"
+                        f" the rest of what it writes is fill ({self.fill_value:g})"
+                    )
         except TransformError:
-            return None
-        if covered >= self._WORTH_SAYING:
-            return None
-        return (
-            f"case '{name}' covers {covered * 100:.1f}% of {self._target.describe()};"
-            f" the rest of what it writes is fill ({self.fill_value:g})"
-        )
+            pass
+        return "; ".join(notes) if notes else None
 
     # ------------------------------------------------------------------ the inverse
 
@@ -2302,6 +2377,9 @@ class _DisplacementSource:
         self.group = group
         #: The run's own roots, handed over by the owner; only consulted when there is no path.
         self.roots: list[Dataset] = []
+        #: Whether the ``auto`` header scan DIED, as opposed to finding no bound: an unreadable
+        #: entry fails both routes at run, where a merely bound-less field streams (measured).
+        self.scan_failed = False
         self.auto = isinstance(max_displacement, str) and max_displacement.strip().lower() == "auto"
         if isinstance(max_displacement, str) and not self.auto:
             try:
@@ -2350,6 +2428,7 @@ class _DisplacementSource:
                     recorded = [float(value) for value in attribute.get_np_array(DISPLACEMENT_BOUND_ATTRIBUTE).ravel()]
                     bound = recorded if not bound else [max(a, b) for a, b in zip(bound, recorded, strict=False)]
         except Exception:  # an unreadable field dataset is a whole-volume answer, not a crash
+            self.scan_failed = True
             return self._auto_bound
         if bound and max(bound) > 0.0:
             self._auto_bound = bound

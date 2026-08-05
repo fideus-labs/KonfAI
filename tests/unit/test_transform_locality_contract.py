@@ -140,6 +140,9 @@ class _Case:
     transform: Transform
     group: str = "Intensity"
     atol: float = 0.0
+    #: In the equivalence sweep. False for a case whose inputs this registry cannot build (a field
+    #: on disk): its streamed-equals-whole proof lives in its own test file, against real inputs.
+    sweep: bool = True
 
 
 # Only the transforms whose defaults are not a meaningful streaming case: a channel reduction needs a
@@ -201,10 +204,10 @@ _CASES: dict[str, list[_Case]] = {
     # A stored map never factorises, so this is the grid_sample path (see _REGRID_ATOL).
     "ResampleTransform": [_Case(ResampleTransform({"transform": True}), atol=_REGRID_ATOL)],
     "Save": [_Case(Save("Dataset"))],
-    # Warp needs a field on disk to run, which this registry cannot build: with no declared
-    # displacement it declares WHOLE_VOLUME, so it stays out of the equivalence sweep below. Its
-    # streamed-equals-whole-volume proof lives in test_warp.py, where a field exists.
-    "Warp": [_Case(Warp(field="Dataset:h5", group="DVF"))],
+    # Warp needs a field on disk to run, which this registry cannot build. Its
+    # streamed-equals-whole-volume proof lives in test_warp.py, where a field exists — including
+    # the bound-less case, whose windows are measured from the field at run.
+    "Warp": [_Case(Warp(field="Dataset:h5", group="DVF"), sweep=False)],
     # Reduce is a cardinality marker the cohort engine splits out of the chain, never a per-case
     # stage: it declares WHOLE_VOLUME so a chain reaching the ordinary planner refuses rather than
     # streams, which is what puts it out of the equivalence sweep below.
@@ -364,7 +367,10 @@ _READ_REFUSED_KINDS = (LocalityKind.WHOLE_VOLUME, LocalityKind.SLAB)
 
 def _streamable_cases() -> list[_Case]:
     return [
-        case for cls in _builtin_transforms() for case in _cases_of(cls) if _kind_of(case) not in _READ_REFUSED_KINDS
+        case
+        for cls in _builtin_transforms()
+        for case in _cases_of(cls)
+        if case.sweep and _kind_of(case) not in _READ_REFUSED_KINDS
     ]
 
 

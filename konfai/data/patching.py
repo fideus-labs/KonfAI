@@ -283,12 +283,17 @@ class _RemapPull:
 class _ReadStagePlan:
     """One chain stage as the composed streamed read runs it: its declared kind, the spatial shapes
     on either side, and — for a region stage — the pull map from a region of its output to the region
-    of its input it is computed from, bound to the case state the stages before it left."""
+    of its input it is computed from, bound to the case state the stages before it left.
+
+    ``run_pull``, when set, is the pull the RUN walks instead: a stage that sizes its windows from
+    the data it reads (a declared field) measures there, while ``pull`` stays headers-only for the
+    plan's pricing — the estimator must never read a voxel."""
 
     kind: LocalityKind
     in_shape: tuple[int, ...]
     out_shape: tuple[int, ...]
     pull: Callable[[tuple[slice, ...]], list[slice]] | None
+    run_pull: Callable[[tuple[slice, ...]], list[slice]] | None = None
 
 
 def save_destination(save: Save, default_dataset: Dataset, default_group: str) -> tuple[Dataset, str]:
@@ -1828,9 +1833,15 @@ class DatasetManager:
             )
         # ORIENTATION / CROP / REGRID: the stage's own remap, on the state the stages before it left.
         pull = _RemapPull(stage.stream_region_source, list(shape), Attribute(evolved), self.name)
+        measured = getattr(stage, "measured_region_source", None)
+        run_pull = (
+            _RemapPull(measured, list(shape), Attribute(evolved), self.name)
+            if measured is not None and getattr(stage, "measures_at_run", False)
+            else None
+        )
         out = self._stage_out_shape(stage, shape, Attribute(evolved))
         stage.write_stream_cache_attribute(evolved, list(shape), self.name)
-        return _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull)
+        return _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull, run_pull)
 
     def _stage_out_shape(self, stage: Stage, shape: list[int], attribute: Attribute) -> list[int]:
         """The spatial shape one stage folds ``shape`` to — a transform's map or a draw's own.
@@ -2924,7 +2935,8 @@ class DatasetManager:
 
         spans: list[list[slice]] = [list(target_slices)]
         for plan in reversed(plans):
-            spans.append(plan.pull(tuple(spans[-1])) if plan.pull is not None else list(spans[-1]))
+            pull = plan.run_pull or plan.pull
+            spans.append(pull(tuple(spans[-1])) if pull is not None else list(spans[-1]))
         spans.reverse()
 
         data_slices = tuple([slice(None)] * n_prefix + spans[0])

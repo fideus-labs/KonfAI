@@ -373,12 +373,16 @@ field solved at 120 µm moves a volume stored at 30 µm without being upsampled
 first. Outside its own extent the displacement is zero: the transform is the
 identity where the field says nothing, as SimpleITK has it.
 
-`max_displacement` sizes the source region each target region must read, and is
-**checked against every field region actually read** — a field that exceeds
+`max_displacement` is **optional**. The field window a region samples is its
+own box, read for sampling regardless — and the sup of the values just read
+bounds that region's source pull, so each slab pays exactly the halo *its*
+displacements require, measured at run from a read the sampler needed anyway.
+A declared bound (or `auto`, reading the one KonfAI records on a field it
+writes) does two things: it lets the plan **price** the reads exactly — with
+no bound the estimate assumes a zero field, and the plan says so — and it is
+**checked against every field region actually read**: a field that exceeds
 what it declared raises rather than sampling zeros, which would show up as a
-dark rim around the moved anatomy and nothing else. It takes `auto`, reading
-the bound KonfAI records on a field it writes. With no bound at all the stage
-declares `WHOLE_VOLUME` and says so in the plan.
+dark rim around the moved anatomy and nothing else.
 
 Naming no target grid is the shape update of an atlas build — the field applied
 on the case's *own* grid — and is the same stage with `reference` left out:
