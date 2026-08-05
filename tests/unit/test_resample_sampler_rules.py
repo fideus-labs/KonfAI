@@ -14,17 +14,15 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""The rules every sampler in this package obeys, pinned separately from any one sampler.
+"""The rules the one gather obeys, pinned apart from any stage that uses it.
 
-There are two gather strategies for one arithmetic. ``Resample._resample_offset_region`` maps each
-axis independently, so no coordinate volume is built and one ``index_select`` per axis does the work;
-``ResampleToReference._sample_at`` cannot, because a displacement is not separable, so it holds a
-coordinate per voxel and gathers eight corners flat. Same rules, different loops, and the loops are
-different for a measured reason.
+There is a single sampler in KonfAI — ``konfai.data.sampling.gather`` — and every resample, warp and
+regrid reaches its voxels through it. That is recent: the rules used to be restated by a separable
+sampler and a non-separable one, which is how two of them came to disagree about a half-voxel rim.
 
-Rules kept apart from loops is only true while something checks it. These tests are that: they assert
-the RULES -- the inside interval, the tap clamp, round-half-up, the working dtype, the fill -- against
-SimpleITK and against each other, so a change to one gather cannot quietly stop matching the other.
+One implementation does not make the rules self-evident, it only makes them checkable in one place.
+These tests are that place: the inside interval, the tap clamp, round-half-up, the working dtype and
+the fill, asserted against SimpleITK and against hand arithmetic.
 """
 
 from __future__ import annotations
@@ -32,55 +30,46 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from konfai.data.transform import Resample
-
-
-class _Sampler(Resample):
-    """A bare handle on the sampler: these rules belong to `Resample`, not to any stage using it."""
-
-    def __call__(self, name, tensor, cache_attribute):  # pragma: no cover - not the surface tested
-        raise NotImplementedError
-
-    def write_stream_cache_attribute(self, cache_attribute, source_spatial_shape) -> None:
-        raise NotImplementedError
-
-    def transform_shape(self, shape, cache_attribute):  # pragma: no cover
-        raise NotImplementedError
-
-    def inverse(self, name, tensor, cache_attribute):  # pragma: no cover
-        raise NotImplementedError
-
-    def patch_locality(self, cache_attribute):  # pragma: no cover
-        raise NotImplementedError
-
+from konfai.data.sampling import gather
 
 _SOURCE = (12, 14, 16)
 _SCALES = [1.31, 1.17, 1.23]
 _OFFSETS = [0.4, -0.3, 0.2]
-_TARGET = (slice(0, 8), slice(0, 9), slice(0, 10))
+_TARGET = (8, 9, 10)
 
 
-def _sampler(fill: float = 0.0) -> _Sampler:
-    sampler = _Sampler(inverse=False)
-    sampler.fill_value = fill
-    return sampler
+def _coordinates(
+    target_shape: tuple[int, ...] = _TARGET,
+    scales: list[float] | None = None,
+    offsets: list[float] | None = None,
+) -> torch.Tensor:
+    """One source index per target voxel for the separable map ``scale * o + offset``, per ARRAY axis.
+
+    Separable is the easy case to write by hand, not a second code path: what the gather receives is
+    always a coordinate per voxel, and how it was produced is none of its business.
+    """
+    scales = _SCALES if scales is None else scales
+    offsets = _OFFSETS if offsets is None else offsets
+    axes = [
+        scales[axis] * torch.arange(extent, dtype=torch.float64) + offsets[axis]
+        for axis, extent in enumerate(target_shape)
+    ]
+    grids = torch.meshgrid(*axes, indexing="ij")
+    # The gather wants the physical components last, in (x, y, z) — the mirror of the array axes.
+    return torch.stack(list(reversed(grids)), dim=-1)
+
+
+def _sample(tensor: torch.Tensor, fill: float = 0.0, mode: str | None = None, **overrides) -> torch.Tensor:
+    source_shape = list(overrides.pop("source_shape", _SOURCE))
+    coordinates = _coordinates(**overrides)
+    if mode is None:
+        mode = "nearest" if tensor.dtype == torch.uint8 else "linear"
+    return gather(tensor, coordinates, [0] * len(source_shape), source_shape, mode, fill)
 
 
 def _volume(offset: float = 0.0) -> np.ndarray:
     rng = np.random.default_rng(3)
     return (rng.random((1, *_SOURCE)) * 400 + offset).astype(np.float32)
-
-
-def _offset_region(tensor: torch.Tensor, fill: float = 0.0, **overrides) -> torch.Tensor:
-    arguments = {
-        "target_slices": _TARGET,
-        "region_starts": [0, 0, 0],
-        "scales": _SCALES,
-        "n_in": list(_SOURCE),
-        "offsets": _OFFSETS,
-    }
-    arguments.update(overrides)
-    return _sampler(fill)._resample_offset_region(tensor, **arguments)  # type: ignore[arg-type]
 
 
 def test_the_working_dtype_rule_holds_for_a_cpu_half_volume() -> None:
@@ -91,8 +80,8 @@ def test_the_working_dtype_rule_holds_for_a_cpu_half_volume() -> None:
     the two: accumulating in half drifts more than twice as far from the float32 answer.
     """
     volume = _volume(offset=2050.0)  # 2050..2450, entirely above 2048, where float16 spacing is 2
-    guarded = _offset_region(torch.from_numpy(volume).half()).float()
-    reference = _offset_region(torch.from_numpy(volume))
+    guarded = _sample(torch.from_numpy(volume).half()).float()
+    reference = _sample(torch.from_numpy(volume))
 
     assert guarded.dtype is torch.float32
     drift = float((guarded - reference).abs().max())
@@ -103,18 +92,20 @@ def test_the_working_dtype_rule_holds_for_a_cpu_half_volume() -> None:
 def test_a_volume_comes_back_as_the_dtype_it_went_in_as(dtype: torch.dtype) -> None:
     """The sampler computes in whatever it must and casts back once. A store's dtype is the store's."""
     volume = torch.from_numpy((_volume() % 120).astype(np.float32)).to(dtype)
-    assert _offset_region(volume).dtype is dtype
+    assert _sample(volume, mode="linear").dtype is dtype
+    assert _sample(volume, mode="nearest").dtype is dtype
 
 
 def test_nearest_is_itk_round_half_up_and_not_a_size_ratio() -> None:
     """``floor(c + 0.5)``, which is a statement about a coordinate.
 
     ``F.interpolate``'s nearest is ``floor(o * scale)``, a statement about a size RATIO -- it says
-    nothing once the target grid carries an origin of its own, which is the whole point of an offset
-    map. A label map is still a label map under either rule, so only this catches it.
+    nothing once the target grid carries an origin of its own, and it lags the LINEAR map of the same
+    stage by ``(scale - 1) / 2`` source voxels, so an image and its label map resampled together come
+    out shifted against each other. A label map is still a label map under either rule.
     """
     labels = torch.arange(int(np.prod(_SOURCE)), dtype=torch.uint8).reshape(1, *_SOURCE) % 7
-    got = _offset_region(labels).numpy()[0]
+    got = _sample(labels).numpy()[0]
 
     expected = np.empty_like(got)
     source = labels.numpy()[0]
@@ -138,11 +129,14 @@ def test_inside_is_the_half_open_half_voxel_rim() -> None:
     volume = torch.full((1, 4, 4, 4), 5.0)
     fill = -99.0
 
-    # A target of one voxel per axis, placed by the offset alone.
     def at(offset: float) -> float:
-        one = (slice(0, 1), slice(0, 1), slice(0, 1))
-        got = _offset_region(
-            volume, fill=fill, target_slices=one, scales=[1.0, 1.0, 1.0], n_in=[4, 4, 4], offsets=[offset] * 3
+        got = _sample(
+            volume,
+            fill=fill,
+            target_shape=(1, 1, 1),
+            scales=[1.0, 1.0, 1.0],
+            offsets=[offset] * 3,
+            source_shape=(4, 4, 4),
         )
         return float(got.flatten()[0])
 
@@ -152,7 +146,7 @@ def test_inside_is_the_half_open_half_voxel_rim() -> None:
     assert at(3.5) == fill, "n - 0.5 itself is outside: the interval is half open"
 
 
-def test_the_separable_sampler_matches_simpleitk() -> None:
+def test_the_gather_matches_simpleitk() -> None:
     """The independent check. Written against SimpleITK because that is what the arithmetic claims.
 
     The oracle is skipped here and not at module scope: the rules above -- the working dtype, the
@@ -161,15 +155,38 @@ def test_the_separable_sampler_matches_simpleitk() -> None:
     """
     sitk = pytest.importorskip("SimpleITK")
     volume = _volume()
-    got = _offset_region(torch.from_numpy(volume)).numpy()[0]
+    got = _sample(torch.from_numpy(volume)).numpy()[0]
 
     image = sitk.GetImageFromArray(volume[0])
     image.SetSpacing((1.0, 1.0, 1.0))
     image.SetOrigin((0.0, 0.0, 0.0))
-    grid = sitk.Image(*reversed([sl.stop - sl.start for sl in _TARGET]), sitk.sitkFloat32)
+    grid = sitk.Image(*reversed(list(_TARGET)), sitk.sitkFloat32)
     # sitk takes geometry in (x, y, z) where the arrays above are (z, y, x).
     grid.SetSpacing(tuple(reversed(_SCALES)))
     grid.SetOrigin(tuple(reversed(_OFFSETS)))
     want = sitk.GetArrayFromImage(sitk.Resample(image, grid, sitk.Transform(), sitk.sitkLinear, 0.0))
 
     np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-4)
+
+
+def test_a_region_reads_the_same_voxels_as_the_whole_volume() -> None:
+    """Coordinates are GLOBAL, so handing the gather a window changes almost nothing.
+
+    Almost, and the exception is named: a blend goes to ``grid_sample``, which takes NORMALISED
+    coordinates and therefore divides by the extent of the tensor it is handed -- a window, here.
+    That is the one region-local number in the path, and it is what a fused kernel costs. Every
+    other part of the arithmetic is global, which is why the disagreement stays at rounding rather
+    than moving a sample.
+    """
+    volume = torch.from_numpy(_volume())
+    whole = gather(volume, _coordinates(), [0, 0, 0], list(_SOURCE), "linear", 0.0)
+
+    start = [2, 3, 4]
+    window = volume[:, start[0] :, start[1] :, start[2] :]
+    partial = gather(window, _coordinates(), start, list(_SOURCE), "linear", 0.0)
+
+    # Only where the whole-volume answer read from inside the window can the two agree; elsewhere the
+    # window simply does not hold the voxels, which is the caller's contract to respect.
+    reach = (slice(None), slice(3, None), slice(4, None), slice(5, None))
+    span = float(whole.max() - whole.min())
+    torch.testing.assert_close(partial[reach], whole[reach], rtol=0, atol=1e-5 * span)

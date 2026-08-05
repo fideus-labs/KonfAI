@@ -45,6 +45,7 @@ from konfai.data.transform import (
     Normalize,
     PatchLocality,
     Permute,
+    RegionContext,
     ResampleToShape,
     Softmax,
     TensorCast,
@@ -163,7 +164,7 @@ def test_stream_composed_rescale_and_orientation_matches_whole_volume(assert_str
         volume, [ResampleToShape(shape=[12, 12]), Flip("0")], [4, 4], atol=1e-3
     )
     plans = manager._resolve_patch_stream_source(0, True).stage_plans
-    assert [plan.kind.value for plan in plans] == ["rescale", "orientation"]
+    assert [plan.kind.value for plan in plans] == ["regrid", "orientation"]
     assert tuple(plans[1].in_shape) == (12, 12)
 
 
@@ -175,7 +176,7 @@ def test_stream_composed_triple_region_chain_matches_whole_volume(assert_stream_
         volume, [Flip("0"), ResampleToShape(shape=[12, 9]), Permute("1|0")], [4, 4], atol=1e-3
     )
     plans = manager._resolve_patch_stream_source(0, True).stage_plans
-    assert [plan.kind.value for plan in plans] == ["orientation", "rescale", "orientation"]
+    assert [plan.kind.value for plan in plans] == ["orientation", "regrid", "orientation"]
     assert tuple(plans[2].out_shape) == (9, 12)
 
 
@@ -312,14 +313,15 @@ def test_streamed_nearest_resample_matches_whole_volume_at_any_ratio(n_in: int, 
     expected = resample("case", volume.clone(), Attribute(attribute))
 
     target = tuple(slice(0, n_out) for _ in range(3))
-    slices, starts, scales, n_in_list, _ = resample.resample_source_region(target, [n_in] * 3, Attribute(attribute))
-    got = resample.resample_region(volume[(slice(None), *slices)], target, starts, scales, n_in_list)
+    window = resample.stream_region_source("case", target, [n_in] * 3, Attribute(attribute))
+    context = RegionContext(tuple(window), target, (n_in,) * 3, (n_out,) * 3)
+    got = resample.stream_region("case", volume[(slice(None), *window)], context, Attribute(attribute))
     torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
 def test_streamed_resample_handles_2d(dtype: torch.dtype) -> None:
-    """resample_region must not assume three spatial axes."""
+    """The gather must not assume three spatial axes."""
     volume = (torch.arange(1 * 9 * 11, dtype=torch.float32).reshape(1, 9, 11) % 17).to(dtype)
     resample = ResampleToShape(shape=[5, 6], inverse=False)
     attribute = Attribute()
@@ -327,9 +329,10 @@ def test_streamed_resample_handles_2d(dtype: torch.dtype) -> None:
     expected = resample("case", volume.clone(), Attribute(attribute))
 
     target = (slice(0, 5), slice(0, 6))
-    slices, starts, scales, n_in_list, _ = resample.resample_source_region(target, [9, 11], Attribute(attribute))
-    got = resample.resample_region(volume[(slice(None), *slices)], target, starts, scales, n_in_list)
-    torch.testing.assert_close(got, expected, rtol=0, atol=1e-5)
+    window = resample.stream_region_source("case", target, [9, 11], Attribute(attribute))
+    context = RegionContext(tuple(window), target, (9, 11), (5, 6))
+    got = resample.stream_region("case", volume[(slice(None), *window)], context, Attribute(attribute))
+    torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
 
 # --------------------------------------------------------------------------------------
@@ -398,7 +401,7 @@ class _RecordsOnlyInCall(Transform):
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def stream_region_source(
-        self, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
+        self, name: str, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
     ) -> list[slice]:
         return [
             slice(extent - t.stop, extent - t.start)

@@ -38,6 +38,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pytest
+import SimpleITK as sitk
 import torch
 from konfai.data import augmentation as augmentation_module
 from konfai.data import transform as transform_module
@@ -116,14 +117,16 @@ _PEAK = 450.0
 #   float32 ulps away. Data-dependent: this fixture happens to agree exactly, a smooth field showed
 #   1.5e-8 (0.13 ulp), so the bound is stated rather than observed.
 _STAT_ATOL = 8 * float(np.finfo(np.float32).eps)
-# - the streamed resample (trilinear only): it gathers the same source samples, but computes the
-#   interpolation weights from coordinates expressed in the read sub-region's frame rather than the
-#   whole volume's. Both round to float32, so a weight lands ~ulp(coordinate) off and the interpolated
-#   voxel lands `neighbour gap * ulp(coordinate)` off -- the deviation scales with the local GRADIENT,
-#   not with the voxel's own magnitude. The fixture's gap is its 2*_PEAK bone/air step, which puts the
-#   bound at ulps of _PEAK; 64 of them is ~8x the measured max (2.3e-4, i.e. 7.5 ulp) and stays far
-#   below one part per million of the range. Nearest (uint8) uses no weights and stays exact.
-_RESCALE_ATOL = 64 * float(np.spacing(np.float32(_PEAK)))
+# - a streamed regrid through a map that does NOT factorise (a field, a rotation): its blend goes to
+#   grid_sample, which takes normalised coordinates and so expresses them in the read sub-region's
+#   frame rather than the whole volume's. Both round to float32, so a weight lands ~ulp(coordinate)
+#   off and the interpolated voxel lands `neighbour gap * ulp(coordinate)` off -- the deviation
+#   scales with the local GRADIENT, not with the voxel's own magnitude. The fixture's gap is its
+#   2*_PEAK bone/air step, which puts the bound at ulps of _PEAK; 64 of them is ~8x the measured max
+#   and stays far below one part per million of the range. A map that DOES factorise is read one axis
+#   at a time on global coordinates and stays bit-identical, which is why those cases carry no atol
+#   at all; nearest uses no weights and is exact either way.
+_REGRID_ATOL = 64 * float(np.spacing(np.float32(_PEAK)))
 # An integer volume truncates the interpolation, so a sub-ulp disagreement that straddles an integer
 # boundary becomes a whole least-significant bit. 1 LSB is the tightest bound that can hold: the
 # alternative would be bit-exact agreement between two different float coordinate frames.
@@ -168,12 +171,12 @@ _CASES: dict[str, list[_Case]] = {
     "Percentage": [_Case(Percentage(100.0))],
     # The defaults ([1, 1, 1] mm / [100, 256, 256]) would be a no-op resample and a 6.5M-voxel upsample.
     "ResampleToResolution": [
-        _Case(ResampleToResolution([2.0, 1.0, 3.0]), atol=_RESCALE_ATOL),
+        _Case(ResampleToResolution([2.0, 1.0, 3.0])),  # factorises: bit-identical
         _Case(ResampleToResolution([2.0, 1.0, 3.0]), group="Int16", atol=_LSB_ATOL),
         # uint8 resamples by nearest neighbour: no interpolation weights, so no rounding to disagree on.
         _Case(ResampleToResolution([2.0, 1.0, 3.0]), group="Labels"),
     ],
-    "ResampleToShape": [_Case(ResampleToShape([12, 8, 14]), atol=_RESCALE_ATOL)],
+    "ResampleToShape": [_Case(ResampleToShape([12, 8, 14]))],  # factorises: bit-identical
     # Onto a grid of its own, so part of the target reads from outside the case and takes the fill.
     # atol is 0: unlike the scale-only resamples -- whose whole-volume path is F.interpolate and whose
     # streamed path is resample_region, two implementations that agree to a rounding -- both paths of
@@ -185,11 +188,18 @@ _CASES: dict[str, list[_Case]] = {
         # region a target region pulls is the affine box grown by the declared displacement, and the
         # sampling is no longer separable. Same contract, and the same atol: one sampler, global
         # coordinates.
+        # Through a field the map does not factorise, so the blend goes to grid_sample -- which
+        # normalises by the extent it is handed, and a patch is handed a window. That is the one
+        # place a streamed answer is not bit-identical to the whole-volume one, and the atol says so.
         _Case(
-            ResampleToReference(entry=_CASE_NAME, group="Reference", field_group="Field", max_displacement=_FIELD_BOUND)
+            ResampleToReference(
+                entry=_CASE_NAME, group="Reference", field_group="Field", max_displacement=_FIELD_BOUND
+            ),
+            atol=_REGRID_ATOL,
         ),
     ],
-    "ResampleTransform": [_Case(ResampleTransform({"transform": True}))],
+    # A stored map never factorises, so this is the grid_sample path (see _REGRID_ATOL).
+    "ResampleTransform": [_Case(ResampleTransform({"transform": True}), atol=_REGRID_ATOL)],
     "Save": [_Case(Save("Dataset"))],
     # Warp needs a field on disk to run, which this registry cannot build: with no declared
     # displacement it declares WHOLE_VOLUME, so it stays out of the equivalence sweep below. Its
@@ -295,9 +305,19 @@ def _attributes(group: str) -> Attribute:
 @pytest.fixture(scope="session")
 def dataset(tmp_path_factory: pytest.TempPathFactory) -> Dataset:
     """A real on-disk dataset, in the same format (mha) and channel-first layout a run reads."""
-    dataset = Dataset(tmp_path_factory.mktemp("workspace") / "Dataset", "mha")
+    root = tmp_path_factory.mktemp("workspace") / "Dataset"
+    dataset = Dataset(root, "mha")
     for group, volume in _volumes().items():
         dataset.write(group, _CASE_NAME, volume, _attributes(group))
+    # A stored transform, as a group of its own: KonfAI reads one from `<case>/<group>.itk.txt`,
+    # which is what SimpleITK writes. Without it the resample-through-a-stored-map case has nothing
+    # to apply and drops out of the sweep, which is the one kind of hole a registry cannot show.
+    stored = sitk.Euler3DTransform()
+    stored.SetCenter((3.0, 5.0, 11.0))
+    stored.SetRotation(0.05, -0.03, 0.08)
+    stored.SetTranslation((0.4, -0.6, 1.1))
+    (root / _CASE_NAME).mkdir(parents=True, exist_ok=True)
+    sitk.WriteTransform(stored, str(root / _CASE_NAME / "transform.itk.txt"))
     return dataset
 
 
@@ -501,9 +521,9 @@ def test_a_streamed_region_records_the_whole_volume_geometry(dataset: Dataset, g
 
 # A HALO draw is sampled by grid_sample from coordinates expressed in the halo'd read extent's frame
 # rather than the whole volume's: the same disagreement, for the same reason and with the same
-# gradient- and coordinate-scaling, that _RESCALE_ATOL bounds for the streamed resample. It is bitwise
+# gradient- and coordinate-scaling, that _REGRID_ATOL bounds for the streamed resample. It is bitwise
 # on neither, and grows with the extent -- a 160^3 case at patch 64 lands at 2e-5 of its range.
-_AUGMENTATION_ATOL = _RESCALE_ATOL
+_AUGMENTATION_ATOL = _REGRID_ATOL
 
 
 @dataclass(frozen=True)

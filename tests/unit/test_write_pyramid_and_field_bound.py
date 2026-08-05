@@ -191,27 +191,51 @@ def test_a_field_records_its_own_bound_on_both_write_paths(tmp_path):
 
 
 @_needs_rfc5
-def test_the_recorded_bound_turns_into_a_per_axis_halo_under_anisotropy(tmp_path) -> None:
+def tmp_field_store(field: np.ndarray) -> Path:
+    import tempfile
+
+    root = Path(tempfile.mkdtemp())
+    store = root / "fields" / "case" / "DVF.ome.zarr"
+    store.parent.mkdir(parents=True)
+    write_ome_zarr(store, field, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), displacement_field=True)
+    return root / "fields"
+
+
+def test_the_recorded_bound_reaches_each_axis_by_its_own_spacing_under_anisotropy() -> None:
     """What the bound is FOR, read by the stage that consumes it.
 
     Component ``i`` of a displacement field is world axis (x, y, z)[i], while array axes are
-    (z, y, x). So a halo in array order reads the components reversed, each against its own spacing.
-    Getting the pairing wrong is a warp that raises nothing and reads the wrong neighbourhood.
+    (z, y, x). So the reach of a region on each array axis reads the components reversed, each
+    against its own spacing. Getting the pairing wrong is a warp that raises nothing and reads the
+    wrong neighbourhood -- and under this anisotropy the three numbers are far enough apart (3, 22
+    and 31 voxels) that any permutation of them is visible.
     """
     from konfai.data.transform import LocalityKind, Warp
 
     field = np.zeros((3, 8, 8, 8), dtype=np.float32)
     field[0, 4, 4, 4], field[1, 2, 2, 2], field[2, 1, 1, 1] = 917.5, -640.25, 96.0
-    store = tmp_path / "fields" / "case" / "DVF.ome.zarr"
-    store.parent.mkdir(parents=True)
-    write_ome_zarr(store, field, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), displacement_field=True)
+    store = tmp_field_store(field)
 
-    warp = Warp(field=f"{tmp_path / 'fields'}:omezarr", group="DVF", max_displacement="auto")
+    warp = Warp(field=f"{store}:omezarr", group="DVF", max_displacement="auto")
     attribute = Attribute()
     attribute["Spacing"] = np.array([30.08, 30.08, 40.0])  # stored (x, y, z)
+    attribute["Origin"] = np.zeros(3)
+    attribute["Direction"] = np.eye(3).reshape(-1)
 
-    locality = warp.patch_locality(attribute)
+    assert warp.patch_locality(attribute).kind is LocalityKind.REGRID
+
+    shape = [64, 128, 128]
+    warp.transform_shape("CT", "CASE_000", shape, attribute)
+    target = tuple(slice(30, 32) for _ in shape)
+    window = warp.stream_region_source("CASE_000", target, shape, attribute)
 
     # z takes the z component (96 um over a 40 um voxel), x the x component (917.5 over 30.08).
-    assert locality.kind is LocalityKind.HALO
-    assert locality.halo == (3, 22, 31)
+    per_axis = [(96.0, 40.0), (640.25, 30.08), (917.5, 30.08)]  # array order (z, y, x)
+    expected = [
+        (
+            max(0, int(np.floor(30 - 0.5 - reach / spacing)) - 1),
+            min(extent, int(np.ceil(32 - 0.5 + reach / spacing)) + 2),
+        )
+        for (reach, spacing), extent in zip(per_axis, shape, strict=True)
+    ]
+    assert [(part.start, part.stop) for part in window] == expected

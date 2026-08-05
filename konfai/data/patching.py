@@ -37,7 +37,6 @@ from konfai.data.transform import (
     LocalityKind,
     PatchLocality,
     RegionContext,
-    Resample,
     Save,
     Transform,
     split_expand,
@@ -102,6 +101,7 @@ class Stage(Protocol):
 
     def stream_region_source(
         self,
+        name: str,
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
@@ -198,10 +198,14 @@ class AugmentedStage:
 
     def stream_region_source(
         self,
+        name: str,
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
+        # A draw is bound to (case index, copy), not to the case's NAME: the name a region stage
+        # needs to find its own per-case map means nothing to an augmentation.
+        del name
         return self.augmentation.stream_region_source(self.index, self.a, target_slices, source_spatial_shape)
 
     def stream_region(
@@ -228,7 +232,6 @@ _REGION_KINDS = (
     LocalityKind.HALO,
     LocalityKind.ORIENTATION,
     LocalityKind.CROP,
-    LocalityKind.RESCALE,
     LocalityKind.REGRID,
 )
 
@@ -254,25 +257,22 @@ class _HaloPull:
 
 @dataclass(frozen=True)
 class _RemapPull:
-    """An index-remap stage's pull map, bound to the case state the stages before it left."""
+    """An index-remap stage's pull map, bound to the case and the state the stages before it left.
 
-    remap: Callable[[tuple[slice, ...], list[int], Attribute], list[slice]]
+    The case NAME is bound here because a stage instance is shared by every case of a manager
+    (``DatasetManager`` hands the same transforms list to each), while a map read from a stored
+    transform or a reference header is per case. A pull that could not say which case it was for
+    would build one case's window from another case's map -- and a window that is short does not
+    raise, it returns the fill.
+    """
+
+    remap: Callable[[str, tuple[slice, ...], list[int], Attribute], list[slice]]
     shape: list[int]
     attribute: Attribute
+    name: str = ""
 
     def __call__(self, target: tuple[slice, ...]) -> list[slice]:
-        return self.remap(target, list(self.shape), Attribute(self.attribute))
-
-
-@dataclass(frozen=True)
-class _ScalePull:
-    """A rescale stage's pull map: the source window of the scale mapping plus its interpolation halo."""
-
-    scales: list[float]
-    shape: list[int]
-
-    def __call__(self, target: tuple[slice, ...]) -> list[slice]:
-        return Resample.source_window(target, self.scales, self.shape)
+        return self.remap(self.name, target, list(self.shape), Attribute(self.attribute))
 
 
 @dataclass(frozen=True)
@@ -1736,13 +1736,13 @@ class DatasetManager:
         in hand at the moment each check fails, so the reason is built here -- dropping it would
         leave every fallback silent. ``evolved`` is the case state the plan
         leaves, which a :class:`Save` sweep writes as its cache header. The chain streams when every
-        stage is pointwise, a region kind (``HALO``/``ORIENTATION``/``CROP``/``RESCALE`` — any
+        stage is pointwise, a region kind (``HALO``/``ORIENTATION``/``CROP``/``REGRID`` — any
         number, each pulling through the one before it), or a ``GLOBAL_STAT`` with a pre-populated
         statistic. The plan walks the chain once with one evolving case state, so each stage declares
         against — and remaps from — the geometry the stages before it left, and folds the spatial
         shapes stage by stage; a fold that does not land on ``landing_shape`` (the copy's own grid by
         default) refuses (the safety net for a stage whose shape map is not declared). Any
-        ``WHOLE_VOLUME`` declaration, an unreadable ``GLOBAL_STAT``, a ``RESCALE`` without a known
+        ``WHOLE_VOLUME`` declaration, an unreadable ``GLOBAL_STAT``, a ``REGRID`` without a known
         ``Spacing`` (or that is not a :class:`Resample`), or a halo too wide to be worth reading
         rejects streaming. ``seed_statistics=False`` accepts a missing statistic instead of reading
         it — for a chain fed by a cache that is not materialized yet, whose re-resolution seeds it
@@ -1793,17 +1793,6 @@ class DatasetManager:
                     f"{label} declares a halo of {loc.halo} that is too wide for this grid to be worth"
                     " reading (over half the patch extent per axis)."
                 )
-            if loc.kind is LocalityKind.RESCALE and (not isinstance(stage, Resample) or "Spacing" not in evolved):
-                # A resample is patch-native only when the source geometry is known: the scale is read
-                # from the evolving 'Spacing' (a free geometry stat, no read_data_statistics).
-                return refuse(
-                    f"{label} declares RESCALE but "
-                    + (
-                        "does not inherit from Resample."
-                        if not isinstance(stage, Resample)
-                        else "the source carries no 'Spacing' to scale from."
-                    )
-                )
             plan = self._plan_read_stage(stage, loc, shape, evolved)
             plans.append(plan)
             shape = list(plan.out_shape)
@@ -1826,14 +1815,8 @@ class DatasetManager:
             return _ReadStagePlan(
                 loc.kind, tuple(shape), tuple(shape), _HaloPull(_halo_radii(loc.halo, len(shape)), list(shape))
             )
-        if loc.kind is LocalityKind.RESCALE:
-            resample = cast(Resample, stage)
-            out = [int(e) for e in resample.transform_shape(self.group_src, self.name, list(shape), Attribute(evolved))]
-            scales = [shape[k] / out[k] for k in range(len(shape))]
-            resample.write_stream_cache_attribute(evolved, list(shape))
-            return _ReadStagePlan(loc.kind, tuple(shape), tuple(out), _ScalePull(scales, list(shape)))
-        # ORIENTATION / CROP: the stage's own remap, evaluated on the state the stages before it left.
-        pull = _RemapPull(stage.stream_region_source, list(shape), Attribute(evolved))
+        # ORIENTATION / CROP / REGRID: the stage's own remap, on the state the stages before it left.
+        pull = _RemapPull(stage.stream_region_source, list(shape), Attribute(evolved), self.name)
         out = self._stage_out_shape(stage, shape, Attribute(evolved))
         stage.write_stream_cache_attribute(evolved, list(shape))
         return _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull)
@@ -2744,7 +2727,7 @@ class DatasetManager:
     def _finalize_stream_patch(self, tensor: torch.Tensor, index: int, a: int, is_input: bool) -> torch.Tensor:
         """Pad/format a target-extent streamed patch to ``patch_size`` like the whole-volume path.
 
-        The region and RESCALE streamed paths produce a patch at the raw target-slice extent, but the
+        The region streamed paths produce a patch at the raw target-slice extent, but the
         overlap tiling can leave the last patch narrower than ``patch_size`` (integer-floor stride).
         The whole-volume ``Patch.get_data`` pads that border patch up to ``patch_size`` via
         ``apply_read_plan``; running the streamed patch through the SAME read plan makes border patches
@@ -2808,7 +2791,7 @@ class DatasetManager:
         volume) and crops it back after the stage — the stage's own edge padding reproduces the
         whole-volume border once the clamp reaches the true border, so seams agree. ORIENTATION
         applies the index remap to what its region read; a CROP's remap IS its action, so the stage is
-        not re-applied; RESCALE interpolates the sub-region to its target extent. Only the composed
+        not re-applied; REGRID interpolates the sub-region to its target extent. Only the composed
         region is requested; whether that avoids decoding the whole volume depends on the storage
         format -- compressed MetaImage and NRRD decode the full volume per read
         (see ``_supports_region_read``).
@@ -2849,15 +2832,7 @@ class DatasetManager:
             # a throwaway scope, and write the case-level answer once from the FULL shape below
             # (write_stream_cache_attribute).
             scoped = Attribute(cache_attribute)
-            if plan.kind is LocalityKind.RESCALE:
-                tensor = cast(Resample, stage).resample_region(
-                    tensor,
-                    tuple(target),
-                    [s.start for s in source],
-                    [plan.in_shape[k] / plan.out_shape[k] for k in range(len(plan.in_shape))],
-                    list(plan.in_shape),
-                )
-            elif plan.kind is not LocalityKind.CROP:
+            if plan.kind is not LocalityKind.CROP:
                 # A HALO stage is handed the ENLARGED region it asked for, and told so: what it
                 # returns is cropped back to the target just below.
                 tensor = stage.stream_region(

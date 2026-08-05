@@ -396,8 +396,9 @@ def test_the_plan_reports_the_dtype_it_probed_the_destinations_with(
 
 
 _RESAMPLED_THEN_REFERENCED = """\
-              ResampleToResolution:
+              Resample:
                 spacing: [2.0, 2.0, 2.0]
+                align: origin
               ResampleToReference:
                 entry: CASE_000
                 group: CT
@@ -409,9 +410,14 @@ _RESAMPLED_THEN_REFERENCED = """\
 def test_a_stage_is_asked_about_its_own_input_not_the_case_as_stored(tmp_path: Path) -> None:
     """The note a stage declares describes the grid it MEETS, which the stages before it decide.
 
-    Here the resample takes 12x10x8 down to 12x7x2, so the case covers 67.5% of the reference. Asked
-    about the case as stored it covers all of it and says nothing -- the plan stays silent about the
-    remaining third of the output, which will be fill.
+    The resample takes 12x10x8 down to 12x7x2 and keeps voxel zero where it is, so the case's far
+    edge falls short of the reference's and part of the output will be fill. Asked about the case as
+    STORED it covers all of it and says nothing -- and the plan would stay silent about that fill.
+
+    (With ``align: extent``, the default, the box is preserved and the answer is honestly 100%.
+    67.5% is also exactly what the old ``ResampleToResolution`` recorded here -- because its header
+    said origin-aligned while its data was extent-aligned, which is the mismatch this stage no
+    longer has.)
     """
     _write_source(tmp_path)
     _write_config(tmp_path, _RESAMPLED_THEN_REFERENCED.format(out=tmp_path / "out"))
