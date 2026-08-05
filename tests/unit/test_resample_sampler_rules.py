@@ -190,3 +190,23 @@ def test_a_region_reads_the_same_voxels_as_the_whole_volume() -> None:
     reach = (slice(None), slice(3, None), slice(4, None), slice(5, None))
     span = float(whole.max() - whole.min())
     torch.testing.assert_close(partial[reach], whole[reach], rtol=0, atol=1e-5 * span)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the CPU path upcasts half before sampling")
+def test_a_cuda_half_volume_is_blended_through_float32_coordinates() -> None:
+    """The blend's grid counts voxels in float32 whatever the payload.
+
+    A half grid quantizes a coordinate at ~2^-11 of the window extent — 0.06 voxel on a 512 axis,
+    far past the ~1e-5 streamed-vs-whole band this path claims — so a half CUDA volume must land
+    each sample where the float32 volume lands it, to half's own value precision.
+    """
+    extent = 512
+    # The steepest gradient a volume has: adjacent voxels 1000 apart, so a mis-landed coordinate
+    # shows as tens of units (measured: 60.0 through a half grid, 0.022 through a float32 one).
+    x = torch.arange(extent, dtype=torch.float32)
+    row = torch.where(x % 2 == 0, torch.zeros_like(x), torch.full_like(x, 1000.0))
+    volume = row.expand(1, 4, 6, extent).contiguous()
+    coordinates = _coordinates((4, 6, extent), scales=[0.9, 0.8, 0.97], offsets=[0.1, 0.2, 0.3]).cuda()
+    exact = gather(volume.cuda(), coordinates, [0, 0, 0], [4, 6, extent], "linear", 0.0)
+    half = gather(volume.half().cuda(), coordinates, [0, 0, 0], [4, 6, extent], "linear", 0.0)
+    torch.testing.assert_close(half.float(), exact, rtol=0.0, atol=1.0)

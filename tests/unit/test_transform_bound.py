@@ -253,3 +253,27 @@ class TestDisplacementStage:
         stages = decode_transform_stages(_euler(_image()))
         assert isinstance(stages[0], AffineStage)
         np.testing.assert_array_equal(stages[0].bound().residual_xyz, np.zeros(3))
+
+    def test_the_end_plane_of_a_bsplines_valid_region_is_warped_as_itk_warps_it(self):
+        """ITK admits a continuous index ON the valid-region end (``InsideValidRegion`` nudges it
+        back inside), so identity there is wrong bytes. The support slides one control point down,
+        which changes no value — the outermost tap's weight is exactly zero at an integer offset.
+        The regression this pins: that plane used to fail the inside test, and a grid commensurate
+        with its coefficient mesh hits it in whole planes at a time, every voxel silently unmoved.
+        """
+        import torch
+        from konfai.data.sampling import _displacement_at
+
+        transform = _bspline(_image(oblique=False), mesh=5)
+        stage = decode_transform_stages(transform)[0]
+        assert isinstance(stage, DisplacementStage)
+        extent = np.asarray(list(reversed(stage.grid.size_zyx)), dtype=np.float64)  # (x, y, z)
+        rng = np.random.RandomState(2)
+        index = rng.uniform(1.0, extent - 2.0 - 1e-6, size=(60, 3))
+        for axis in range(3):  # each axis in turn pinned exactly on its end plane
+            index[axis::3, axis] = extent[axis] - 2.0
+        world = stage.grid.index_to_world.apply(index)
+        got = _displacement_at(stage, torch.from_numpy(world), torch.device("cpu")).numpy()
+        truth = np.array([np.asarray(transform.TransformPoint(tuple(point))) - point for point in world])
+        np.testing.assert_allclose(got, truth, rtol=0, atol=1e-12)
+        assert np.abs(truth).max() > 0.1, "the fixture must displace the end planes, or this pins nothing"

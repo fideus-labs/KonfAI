@@ -220,22 +220,25 @@ class TestLocality:
         assert locality.kind is LocalityKind.WHOLE_VOLUME
         assert "physical space" in (locality.reason or "")
 
-    def test_a_missing_transform_falls_back_and_says_which_group(self):
+    def test_a_missing_transform_refuses_at_plan_time_and_says_which_group(self):
+        """A map no route can apply refuses as the plan is built, not per case after bytes.
+
+        Declaring WHOLE_VOLUME instead would print a fallback the run then contradicts by dying:
+        the whole-volume path needs the same decode this refusal comes from.
+        """
         image = _image()
         stage = ResampleTransform(transforms={"absent": False})
         stage.set_datasets([_StoredTransform("reg", _euler(image))])
-        stage.transform_shape("", CASE, list(SIZE), _attribute(image))
-        locality = stage.patch_locality(_attribute(image))
-        assert locality.kind is LocalityKind.WHOLE_VOLUME
-        assert "absent" in (locality.reason or "")
+        with pytest.raises(TransformError, match="absent"):
+            stage.transform_shape("", CASE, list(SIZE), _attribute(image))
 
-    def test_a_spline_order_with_no_kernel_falls_back_instead_of_crashing_mid_run(self):
+    def test_a_spline_order_with_no_kernel_refuses_at_plan_time(self):
         """ITK writes orders 0 and 2 as readily as 3, and neither has a kernel here.
 
-        The refusal has to happen where the value is BUILT, not where it is finally sampled: a stage
-        that decodes such a spline without complaint declares REGRID, passes the plan, and raises on
-        the first region -- which is halfway through a run, per case, after bytes are already
-        written. Refused at decode, it is one more whole-volume line in the plan.
+        The refusal has to happen where the plan is built, not where the value is finally sampled:
+        a stage that decodes such a spline without complaint passes the plan and raises on the
+        first region -- halfway through a run, per case, after bytes are already written -- and the
+        whole-volume path raises the identical error, so there is no fallback to declare.
         """
         image = _image()
         quadratic = sitk.BSplineTransformInitializer(image, [5] * 3, 2)
@@ -244,20 +247,15 @@ class TestLocality:
 
         stage = ResampleTransform(transforms={"reg": False})
         stage.set_datasets([_StoredTransform("reg", quadratic)])
-        stage.transform_shape("", CASE, list(SIZE), _attribute(image))
+        with pytest.raises(TransformError, match="order 2"):
+            stage.transform_shape("", CASE, list(SIZE), _attribute(image))
 
-        locality = stage.patch_locality(_attribute(image))
-        assert locality.kind is LocalityKind.WHOLE_VOLUME
-        assert "order 2" in (locality.reason or "")
-
-    def test_inverting_a_spline_falls_back_with_the_remedy(self):
+    def test_inverting_a_spline_refuses_at_plan_time_with_the_remedy(self):
         image = _image()
         stage = ResampleTransform(transforms={"reg": True})
         stage.set_datasets([_StoredTransform("reg", _bspline(image))])
-        stage.transform_shape("", CASE, list(SIZE), _attribute(image))
-        locality = stage.patch_locality(_attribute(image))
-        assert locality.kind is LocalityKind.WHOLE_VOLUME
-        assert "Store the inverse" in (locality.reason or "")
+        with pytest.raises(TransformError, match="Store the inverse"):
+            stage.transform_shape("", CASE, list(SIZE), _attribute(image))
 
     def test_inverting_a_rigid_map_is_exact_and_still_streams(self):
         image = _image()
@@ -338,3 +336,51 @@ class TestCompositeOrder:
             sitk.Resample(image, image, sitk.CompositeTransform([first, second]), sitk.sitkLinear, 0.0)
         )
         assert float(np.abs(want - got).max()) <= 1e-3 * float(np.abs(want).max())
+
+
+class _CrossFrameStore:
+    """One root answering both lookups a cross-frame resample makes: the reference's header and the
+    stored transform bridging the frames."""
+
+    def __init__(self, reference: "sitk.Image", transform: "sitk.Transform") -> None:
+        self.reference = reference
+        self.transform = transform
+
+    def is_dataset_exist(self, group: str, name: str) -> bool:
+        del name
+        return group in ("Reference", "reg")
+
+    def get_infos(self, group: str, name: str):
+        del group, name
+        return [1, *list(self.reference.GetSize())[::-1]], _attribute(self.reference)
+
+    def read_transform(self, group: str, name: str) -> "sitk.Transform":
+        del group, name
+        return self.transform
+
+
+def test_a_stored_map_bridging_disjoint_frames_is_not_refused_as_disjoint():
+    """An MR and a CT can sit 1000 mm apart in stage coordinates with a rigid bridging them.
+
+    The all-fill refusal gates on coverage, and coverage must be judged THROUGH the declared map:
+    judged before applying it, every cross-frame registration apply — the situation the stage
+    exists to serve — is refused as disjoint. The counter-assert keeps the gate alive: a map that
+    leads nowhere still refuses.
+    """
+    from konfai.data.transform import Resample
+
+    case = _image(oblique=False)
+    case.SetOrigin((1000.0, 0.0, 0.0))
+    reference = _image(oblique=False)  # origin (10, -5, 2): ~1000 mm from the case in x
+    bridge = sitk.TranslationTransform(3, (990.0, 5.0, -2.0))  # target world -> case world
+
+    stage = Resample(reference="ref", reference_group="Reference", transforms={"reg": False})
+    stage.set_datasets([_CrossFrameStore(reference, bridge)])
+    assert stage.transform_shape("", CASE, list(SIZE), _attribute(case)) == list(SIZE)
+    assert stage.coverage(CASE) > 0.9
+
+    astray = sitk.TranslationTransform(3, (500000.0, 0.0, 0.0))
+    refused = Resample(reference="ref", reference_group="Reference", transforms={"reg": False})
+    refused.set_datasets([_CrossFrameStore(reference, astray)])
+    with pytest.raises(TransformError, match="nothing but 'fill'"):
+        refused.transform_shape("", CASE, list(SIZE), _attribute(case))

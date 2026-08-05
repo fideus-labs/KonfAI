@@ -46,6 +46,7 @@ from konfai.data.transform import (
     PatchLocality,
     Permute,
     RegionContext,
+    Resample,
     ResampleToShape,
     Softmax,
     TensorCast,
@@ -194,6 +195,108 @@ def test_stream_composed_orientations_with_pointwise_between_match_whole_volume(
     assert tuple(plans[2].out_shape) == (6, 8)
 
 
+def _geometry_manager(
+    stub_class,
+    volume: np.ndarray,
+    transforms: list[Transform],
+    patch: DatasetPatch | None,
+    spacing: np.ndarray,
+    direction: np.ndarray,
+) -> DatasetManager:
+    """A manager over the streaming stub with a REAL header — the identity geometry the stub answers
+    would make every landing fold below trivially right."""
+
+    class _WithGeometry(stub_class):
+        def _attributes(self) -> Attribute:
+            attribute = Attribute()
+            attribute["Origin"] = np.zeros(volume.ndim - 1)
+            attribute["Spacing"] = np.asarray(spacing, dtype=np.float64)
+            attribute["Direction"] = np.asarray(direction, dtype=np.float64).flatten()
+            return attribute
+
+    return DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, _WithGeometry(volume)),
+        patch=patch,
+        transforms=list(transforms),
+        data_augmentations_list=[],
+    )
+
+
+def _fresh_chain_reference(volume: np.ndarray, transforms: list[Transform], attribute: Attribute) -> torch.Tensor:
+    """The chain run stage by stage on the live header — the semantics every route must reproduce."""
+    reference = torch.from_numpy(volume.copy())
+    for stage in transforms:
+        reference = stage("CASE_000", reference, attribute)
+    return reference
+
+
+def test_a_resample_behind_a_canonical_lands_on_the_reoriented_grid(streaming_dataset_stub) -> None:
+    """The landing fold evolves the case state, so a Resample is judged on what Canonical left.
+
+    The regression this pins: the fold used to hand every stage the STORED header, so the Resample
+    recorded the pre-Canonical grid — the whole-volume path then resampled the wrong axis (silently:
+    every voxel real, the anatomy at the wrong density), and the patched routes crashed or refused
+    with the blame on the stage. The chain is the shipped TotalSegmentator prediction prefix.
+    """
+    rng = np.random.default_rng(3)
+    volume = (rng.standard_normal((1, 9, 10, 11)).astype(np.float32)) * 100.0
+    # Direction = canonical @ (x<->z swap): Canonical reorients by a signed permutation, after which
+    # the 2.0 mm axis is x. Resampling to 1.5 iso must therefore widen x: (11, 10, 9*2/1.5=12).
+    direction = np.diag([-1.0, -1.0, 1.0]) @ np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    spacing = np.asarray([1.5, 1.5, 2.0])
+
+    def chain() -> list[Transform]:
+        return [Canonical(), Resample(spacing=[1.5, 1.5, 1.5])]
+
+    whole = _geometry_manager(streaming_dataset_stub, volume, chain(), None, spacing, direction)
+    assert whole.shapes[0] == [11, 10, 12]
+    whole.load(whole.transforms, [])
+    reference = _fresh_chain_reference(volume, chain(), whole.dataset._attributes())
+    assert list(reference.shape) == [1, 11, 10, 12]
+    assert torch.equal(whole.data[0], reference)
+
+    patched = _geometry_manager(streaming_dataset_stub, volume, chain(), DatasetPatch([4, 4, 4]), spacing, direction)
+    assert patched.can_stream_patch(0), patched.stream_refusal(0)
+    size = patched.patch.get_size(0)
+    for index in range(size):
+        streamed = patched._get_streamed_data(index, 0, True)[0]
+        # Canonical is an index remap and an axis-aligned spacing change reads one axis at a time on
+        # global coordinates: both routes are bit-identical to the whole volume, so no tolerance.
+        assert torch.equal(streamed, patched.patch.get_data(reference, index, 0, True))
+
+
+def test_a_second_resample_reads_the_first_ones_grid(streaming_dataset_stub) -> None:
+    """[Resample(3), Resample(1.5)] downsamples then upsamples — the second stage is not a no-op.
+
+    The regression this pins: both stages used to record their grid from the stored header, so the
+    second saw the ORIGINAL spacing, concluded nothing changes, and handed its input through — the
+    run then wrote a volume at half the asked density with a header claiming otherwise.
+    """
+    rng = np.random.default_rng(5)
+    volume = (rng.standard_normal((1, 8, 10, 10)).astype(np.float32)) * 100.0
+
+    def chain() -> list[Transform]:
+        return [Resample(spacing=[3.0, 3.0, 3.0]), Resample(spacing=[1.5, 1.5, 1.5])]
+
+    manager = _geometry_manager(streaming_dataset_stub, volume, chain(), None, np.asarray([1.5] * 3), np.eye(3))
+    assert manager.shapes[0] == [8, 10, 10]
+    manager.load(manager.transforms, [])
+    reference = _fresh_chain_reference(volume, chain(), manager.dataset._attributes())
+    assert torch.equal(manager.data[0], reference)
+
+    patched = _geometry_manager(
+        streaming_dataset_stub, volume, chain(), DatasetPatch([4, 4, 4]), np.asarray([1.5] * 3), np.eye(3)
+    )
+    assert patched.can_stream_patch(0), patched.stream_refusal(0)
+    for index in range(patched.patch.get_size(0)):
+        streamed = patched._get_streamed_data(index, 0, True)[0]
+        assert torch.equal(streamed, patched.patch.get_data(reference, index, 0, True))
+
+
 def test_softmax_channel_axis_is_pointwise_but_spatial_axis_falls_back(build_streaming_manager) -> None:
     # A channel-axis softmax (dim 0) is spatially pointwise (streamed equality: locality contract). A
     # softmax over a SPATIAL axis normalises across the whole extent, so a per-patch softmax would
@@ -246,6 +349,36 @@ def test_stream_clip_min_max_is_global_stat_and_matches_whole_volume(streaming_d
 
     assert stub.stats_reads == 1  # global stat seeded once from disk, never a full-volume load
     assert stub.full_reads == 0
+
+
+def test_a_saved_clip_bound_is_the_cases_statistic_not_the_regions(streaming_dataset_stub) -> None:
+    """``save_clip_min``/``save_clip_max`` record the bound that was applied — the CASE's.
+
+    On a streamed path the dispatcher seeds the case statistic and the tensor in hand is one
+    region of it: a bound computed from that region records the region's own extremum on the
+    attribute, and whatever reads it downstream (an inverse, a Normalize) then works off a number
+    that depends on which patch happened to run.
+    """
+    rng = np.random.default_rng(4)
+    volume = (rng.standard_normal((1, 8, 8)).astype(np.float32)) * 100.0
+    stage = Clip(min_value="min", max_value="max", save_clip_min=True, save_clip_max=True)
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, streaming_dataset_stub(volume)),
+        patch=DatasetPatch([4, 4]),
+        transforms=[stage],
+        data_augmentations_list=[],
+    )
+    assert manager.can_stream_patch(0)
+    # The fixture only pins something if patch 0's extrema differ from the case's.
+    patch0 = volume[:, :4, :4]
+    assert float(patch0.min()) != float(volume.min()) or float(patch0.max()) != float(volume.max())
+    _tensor, attribute = manager._get_streamed_data(0, 0, True)
+    assert float(attribute["Min"]) == float(volume.min())
+    assert float(attribute["Max"]) == float(volume.max())
 
 
 def test_global_stat_after_float_cast_still_streams_and_matches(build_streaming_manager) -> None:

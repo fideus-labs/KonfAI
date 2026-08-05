@@ -456,3 +456,38 @@ def test_a_shared_cache_before_the_marker_is_swept_once_for_every_copy(tmp_path:
     out = Dataset(tmp_path / "out", "h5")
     for a in (1, 2, 3):
         assert out.is_dataset_exist("CT", f"CASE_000_r{a:02d}")
+
+
+def test_interleaved_patch_reads_of_two_copies_each_keep_their_own_grid(tmp_path: Path) -> None:
+    """Reading copy 1, copy 2, then copy 1 again returns the same bytes every time.
+
+    A stage keys its per-case records by the CASE name — a stored transform is looked up by it —
+    so the copies of an Expand share one key and the last planned copy's grids would win: with
+    per-copy Permute draws, ``Resample(shape=[6,6,6])`` folds a DIFFERENT index map per copy, and
+    a re-read of copy 1 after copy 2's plan silently returned copy 2's sampling of copy 1's data.
+    """
+    from konfai.data.patching import DatasetPatch
+    from konfai.data.transform import Resample
+
+    source = _source(tmp_path)
+    permute = _draw(Permute(prob_permute=[0.5, 0.5]))
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=source,
+        patch=DatasetPatch(patch_size=[4, 6, 6]),
+        transforms=[Expand(nb=2, pattern="{name}_r{a:02d}", seed=0), permute, Resample(shape=[6, 6, 6])],
+        data_augmentations_list=[],
+    )
+    base = torch.from_numpy(source.read_data("CT", "CASE_000")[0].copy())
+
+    def truth(a: int) -> torch.Tensor:
+        drawn = permute.compute("CASE_000", 0, a - 1, base.clone())
+        return Resample(shape=[6, 6, 6])(f"GT_{a}", drawn, _image_attributes())
+
+    for index, a in [(0, 1), (0, 2), (0, 1), (1, 2), (1, 1)]:
+        got = manager.get_data(index, a, [], True)
+        expected = manager.patch.get_data(truth(a), index, a, True)
+        assert torch.equal(got, expected), f"patch {index} of copy {a} returned another copy's sampling"
