@@ -57,22 +57,16 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
     work = tmp_path / "work"
     work.mkdir()
     app = ImpactRegKonfAIApp()
-    app._infer_preset(
-        "FireANTs_SyN", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], 1, work, [], None, True
-    )
+    app._infer_preset("FireANTs_SyN", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], 1, work, [], None, True)
 
     assert len(captured) == 1
     assert _tmp_dir_value(captured[0]) == str(work / "FireANTs_SyN")
 
 
-def test_uncertainty_forwards_the_workspace(tmp_path: Path, monkeypatch, write_preset_output) -> None:
-    """``konfai-apps uncertainty`` stages inside the caller's tmp_dir, not under the system TMPDIR."""
-    captured: list[list[str]] = []
-    monkeypatch.setattr(
-        "impact_reg_konfai.impact_reg.subprocess.run",
-        lambda command, **kwargs: captured.append(list(command)),
-    )
-
+def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_preset_output) -> None:
+    """The staging and the run workspaces live in a private directory INSIDE the caller's tmp_dir --
+    never under the system TMPDIR -- and the caller's directory is left standing, emptied, when the
+    run is done. The spread map is the one deliverable, under <output>/uncertainty/."""
     _, first = write_preset_output(tmp_path / "a")
     _, second = write_preset_output(tmp_path / "b")
     staging = tmp_path / "staging"
@@ -85,9 +79,7 @@ def test_uncertainty_forwards_the_workspace(tmp_path: Path, monkeypatch, write_p
         tmp_dir=staging,
     )
 
-    assert len(captured) == 1
-    # The workspace is the private directory _work_dir made INSIDE the caller's tmp_dir -- never the
-    # caller's own directory, which the command must leave standing.
-    forwarded = Path(_tmp_dir_value(captured[0]))
-    assert forwarded.parent == staging
-    assert forwarded != staging
+    assert staging.is_dir()
+    assert list(staging.iterdir()) == []
+    spread = sorted((tmp_path / "out" / "uncertainty").iterdir())
+    assert [path.name for path in spread] == ["Uncertainty.mha"]

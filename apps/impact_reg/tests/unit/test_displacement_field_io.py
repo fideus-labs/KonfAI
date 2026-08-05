@@ -31,16 +31,33 @@ pytest.importorskip("zarr")
 pytest.importorskip("ngff_zarr")
 
 from impact_reg_konfai.impact_reg import (  # noqa: E402
+    ImpactRegKonfAIApp,
     _copy_output,
-    _displacement_transform,
     _find_outputs,
     _output_path,
-    _read_image,
-    _write_displacement_field,
 )
 from konfai.utils.errors import TransformError  # noqa: E402
 from konfai.utils.ITK import read_displacement_field  # noqa: E402
 from konfai.utils.ome_zarr import _zarr_v3_available, is_displacement_field, write_ome_zarr  # noqa: E402
+
+
+def _write_displacement_field(field: "sitk.Image", dest: Path) -> None:
+    """Fixture-builder: a field in either form, as a preset app would have produced it."""
+    if "".join(dest.suffixes).endswith(".ome.zarr"):
+        from konfai.utils.dataset import image_to_data
+
+        data, attributes = image_to_data(field)
+        write_ome_zarr(
+            dest,
+            data,
+            spacing=field.GetSpacing(),
+            origin=field.GetOrigin(),
+            attributes=dict(attributes),
+            displacement_field=True,
+        )
+    else:
+        sitk.WriteImage(field, str(dest))
+
 
 # The OME-Zarr side of these tests writes an RFC-5 field, a zarr v3 store that zarr 2.x
 # (Python 3.10) cannot write.
@@ -203,10 +220,26 @@ def test_rerunning_in_the_other_form_leaves_one_output(tmp_path: Path) -> None:
     assert _find_outputs(destination, "DVF")[destination.name].name == "DVF.ome.zarr"
 
 
-def test_store_written_by_the_orchestrator_is_a_declared_field(tmp_path: Path) -> None:
-    """An averaged ensemble field is written in the members' form, and stays a declared field."""
-    store = _write_store(tmp_path / "DVF.ome.zarr", _field())
-    assert is_displacement_field(store)
+def test_ensemble_field_written_by_the_orchestrator_is_a_declared_field(tmp_path: Path) -> None:
+    """The averaged DVF is folded by Reduce(Mean) and written through konfai's Write, in the
+    members' form — and must stay a DECLARED field: ``read_displacement_field`` refuses an
+    undeclared 3-channel store, so dropping the declaration would break Transform.h5 and
+    ``evaluate`` right after a successful register. The values are the voxel-wise mean, on the
+    members' geometry."""
+    members = []
+    for index in (1, 2):
+        (tmp_path / f"m{index}").mkdir()
+        members.append(_write_store(tmp_path / f"m{index}" / "DVF.ome.zarr", _field(index)))
+    output, work = tmp_path / "out", tmp_path / "work"
+    work.mkdir()
+
+    ImpactRegKonfAIApp()._ensemble_mean("P000", ["a", "b"], members, output, work, [], 1, True)
+
+    out = output / "P000" / "DVF.ome.zarr"
+    assert is_displacement_field(out)
+    averaged = sitk.GetArrayFromImage(read_displacement_field(out))
+    expected = (sitk.GetArrayFromImage(_field(1)) + sitk.GetArrayFromImage(_field(2))) / 2
+    np.testing.assert_allclose(averaged, expected, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("suffix", [".mha", ".ome.zarr"])
@@ -219,42 +252,9 @@ def test_transform_reads_back_identically_from_either_form(tmp_path: Path, suffi
     original = _field()
     _write_displacement_field(original, tmp_path / f"DVF{suffix}")
 
-    restored = _displacement_transform(tmp_path / f"DVF{suffix}")
+    restored = sitk.DisplacementFieldTransform(read_displacement_field(tmp_path / f"DVF{suffix}"))
 
     assert isinstance(restored, sitk.DisplacementFieldTransform)
     reference = sitk.DisplacementFieldTransform(sitk.Image(original))
     for point in ((9.0, -1.0, 12.0), (7.5, -2.5, 11.0)):
         assert restored.TransformPoint(point) == pytest.approx(reference.TransformPoint(point))
-
-
-@pytest.mark.skipif(not _zarr_v3_available(), reason="writing an OME-Zarr store needs zarr 3")
-def test_read_image_opens_an_ome_zarr_store(tmp_path) -> None:
-    """An ordinary image reads back from a store, not only from an ITK file.
-
-    Read through ``Dataset`` with no format named: the path is staged into a real case/group layout
-    first, so konfai detects the backend itself. ``sitk.ReadImage`` cannot open a directory, which is
-    what made the ensemble path unusable with OME-Zarr inputs while the single-preset path — which
-    reuses the model's output and never re-reads — worked fine.
-    """
-    volume = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
-    store = tmp_path / "moving.ome.zarr"
-    write_ome_zarr(store, volume[np.newaxis], spacing=(1.5, 2.0, 2.5), origin=(3.0, -1.0, 0.5))
-
-    work = tmp_path / "work"
-    work.mkdir()
-    image = _read_image(store, work)
-
-    assert image.GetSpacing() == pytest.approx((1.5, 2.0, 2.5))
-    assert image.GetOrigin() == pytest.approx((3.0, -1.0, 0.5))
-    np.testing.assert_allclose(sitk.GetArrayFromImage(image), volume)
-
-
-def test_read_image_still_opens_an_itk_file(tmp_path) -> None:
-    """The same call, on a plain ITK file: one reader, no branch on the form."""
-    volume = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
-    path = tmp_path / "moving.mha"
-    sitk.WriteImage(sitk.GetImageFromArray(volume), str(path))
-
-    work = tmp_path / "work"
-    work.mkdir()
-    np.testing.assert_allclose(sitk.GetArrayFromImage(_read_image(path, work)), volume)

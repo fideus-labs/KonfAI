@@ -79,7 +79,9 @@ def _write_dvf(path: Path, vector, reference: sitk.Image) -> Path:
     return path
 
 
-def test_average_displacement_is_the_voxelwise_mean_with_reference_geometry(tmp_path: Path) -> None:
+def test_ensemble_mean_is_the_voxelwise_mean_with_reference_geometry(tmp_path: Path) -> None:
+    """Reduce(Mean) over members-as-cases: the averaged DVF lands at <output>/<case>/DVF, on the
+    members' shared grid — which ``grid: strict`` verified rather than assumed."""
     reference = sitk.GetImageFromArray(np.zeros((6, 6, 6), dtype=np.float32))
     reference.SetSpacing((1.5, 1.5, 1.5))
     reference.SetOrigin((3.0, -2.0, 1.0))
@@ -87,7 +89,12 @@ def test_average_displacement_is_the_voxelwise_mean_with_reference_geometry(tmp_
         _write_dvf(tmp_path / "a.mha", (1.0, 0.0, 0.0), reference),
         _write_dvf(tmp_path / "b.mha", (3.0, 2.0, -4.0), reference),
     ]
-    avg = reg.ImpactRegKonfAIApp()._average_displacement(paths)
+    output, work = tmp_path / "out", tmp_path / "work"
+    work.mkdir()
+
+    reg.ImpactRegKonfAIApp()._ensemble_mean("P000", ["a", "b"], paths, output, work, [], 1, True)
+
+    avg = sitk.ReadImage(str(output / "P000" / "DVF.mha"))
     field = sitk.GetArrayFromImage(avg)
     np.testing.assert_allclose(field[0, 0, 0], (2.0, 1.0, -2.0), atol=1e-6)
     assert avg.GetSpacing() == pytest.approx((1.5, 1.5, 1.5))

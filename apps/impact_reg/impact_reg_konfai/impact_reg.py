@@ -111,6 +111,7 @@ def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
     ``DVF.ome.zarr`` behind, and discovery is by stem: ``_find_output`` takes the first match, which
     sorts to the stale one. Only the current run's output is left standing.
     """
+    dest_dir.mkdir(parents=True, exist_ok=True)
     for stale in [p for p in dest_dir.iterdir() if p.name.startswith(f"{stem}.")]:
         shutil.rmtree(stale) if stale.is_dir() else stale.unlink()
     return dest_dir / (stem + suffixes)
@@ -172,102 +173,53 @@ def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
     return dest
 
 
-def _write_displacement_field(field: sitk.Image, dest: Path) -> None:
-    """Write a field in the form ``dest`` names, so a derived field matches the ones it came from."""
-    if "".join(dest.suffixes).endswith(".ome.zarr"):
-        from konfai.utils.dataset import image_to_data
-        from konfai.utils.ome_zarr import write_ome_zarr
+def _stage(root: Path, case: str, group: str, source: Path) -> None:
+    """Link one cohort entry — ``root/<case>/<group><suffixes>`` → ``source``. No bytes move.
 
-        # image_to_data yields the channel-first array and the Origin/Spacing/Direction the store must
-        # carry -- the same encoding the Dataset backend writes, so the field round-trips through either.
-        data, attributes = image_to_data(field)
-        write_ome_zarr(
-            dest,
-            data,
-            spacing=field.GetSpacing(),
-            origin=field.GetOrigin(),
-            attributes=dict(attributes),
-            displacement_field=True,
-        )
-    else:
-        sitk.WriteImage(field, str(dest))
-
-
-def _read_image(path: Path, work: Path) -> sitk.Image:
-    """A volume, read through ``Dataset`` — after building the dataset it needs.
-
-    A dataset is a root of CASES holding GROUPS. A path on the command line is neither, so it is linked
-    into that layout first, exactly as konfai-apps stages its own inputs. Pretending instead that the
-    parent directory is a root and the file a group -- what this used to do -- makes detection probe one
-    level too deep inside a store, and is simply wrong for a single-store backend like h5, where the
-    file IS the dataset rather than an entry in one.
-
-    Built properly, no format is named: konfai has a case to probe and detects the backend itself, which
-    is why this reads an ITK file, an OME-Zarr store or anything else konfai supports without a branch
-    here enumerating them.
+    A dataset is a root of CASES holding GROUPS; paths from the command line (or another run's
+    output tree) become one by symlink, exactly as konfai-apps stages its own inputs. Entries
+    resolve by name whatever their form — an ITK file, an OME-Zarr store, a stored transform.
     """
-    from konfai.utils.dataset import Dataset
-
-    root = Path(tempfile.mkdtemp(prefix="entry_", dir=str(work)))
-    case = root / "P000"
-    case.mkdir()
-    (case / f"Entry{''.join(path.suffixes)}").symlink_to(path.resolve())
-    return Dataset(root, "").read_image("Entry", "P000")
+    case_dir = root / case
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / (group + "".join(source.suffixes))).symlink_to(source.resolve())
 
 
-def _write_case_entry(image: sitk.Image, case_out: Path, group: str, file_format: str) -> None:
-    """Write one group of one case, through ``Dataset``.
+def _the_output(dest_dir: Path, stem: str) -> Path:
+    """The single output named ``stem`` in ``dest_dir`` — one, exactly."""
+    matches = sorted(dest_dir.glob(f"{stem}.*"))
+    if len(matches) != 1:
+        raise FileNotFoundError(f"Expected exactly one '{stem}' under {dest_dir}, found {len(matches)}.")
+    return matches[0]
 
-    THIS side really is a dataset, and always was: ``<output>/<case>/<group>.<ext>`` is a root of cases
-    holding groups, which is why konfai can read it back without being told a format. So the write goes
-    through the layer that owns that layout instead of composing the path by hand -- and writing, unlike
-    reading, does need a format named, because there is nothing on disk yet to detect one from.
+
+def _run_transform(
+    name: str,
+    root: Path,
+    chains: dict,
+    work: Path,
+    gpu: list[int],
+    cpu: int | None,
+    quiet: bool,
+) -> None:
+    """One streamed TRANSFORM through konfai's Python API, its workspace under ``work``.
+
+    Every derivation runs here: the plan prices each case and routes it (stream, load,
+    whole-volume — with the reason), so the orchestrator never holds a volume in RAM and never
+    resamples by hand. A designed refusal raises ``KonfAIError``; the CLI prints it.
     """
-    from konfai.utils.dataset import Dataset
+    from konfai import api
 
-    Dataset(case_out.parent, file_format).write(group, case_out.name, image)
-
-
-def _derive_moved(
-    moving_image: Path, dvf_path: Path, dest_dir: Path, work: Path, field: sitk.Image | None = None
-) -> Path:
-    """The moved image, resampled from the moving through the displacement field.
-
-    A preset that emits only a field is complete: the moved image IS that field applied to the moving,
-    so deriving it belongs to the orchestrator rather than being a second output every preset has to
-    remember to declare.
-
-    THE FORMAT FOLLOWS THE FIELD, not the moving. Measured: a preset fed ``.mha`` inputs writes its
-    field as ``.ome.zarr`` when that is what it declares, so the input's form says nothing about the
-    output's -- the field is the only thing the preset committed to, so the derived moved matches it.
-    The moving is read through the dataset layer either way; ``sitk.ReadImage``, what this replaces,
-    cannot open a store at all, which is why the ensemble path failed on OME-Zarr inputs.
-
-    Resampled through SimpleITK for the reason konfai's own ``ResampleTransform`` gives: the stored
-    displacement is in world (x, y, z) units, and adding it onto a (z, y, x) voxel grid by hand
-    transposes the axes and reads millimetres as voxels. The output grid is the field's own -- a
-    displacement field is defined ON the fixed grid, so that is where the moved image belongs.
-    """
-    if field is None:
-        field = read_displacement_field(dvf_path)
-    # Read the grid off the field BEFORE the transform takes it: DisplacementFieldTransform assumes
-    # ownership of the image it is given and leaves it empty behind.
-    size, origin = field.GetSize(), field.GetOrigin()
-    spacing, direction = field.GetSpacing(), field.GetDirection()
-    transform = sitk.DisplacementFieldTransform(field)
-    moving = _read_image(moving_image, work)
-    moved = sitk.Resample(
-        moving, size, transform, sitk.sitkLinear, origin, spacing, direction, 0.0, moving.GetPixelID()
+    api.transform(
+        name,
+        f"{root}:mha",  # the format token is only the FIRST read candidate; entries resolve by name
+        chains,
+        gpu=list(gpu),
+        cpu=cpu or 1,
+        quiet=quiet,
+        overwrite=True,
+        transforms_dir=work / "Workspaces",
     )
-    suffixes = "".join(dvf_path.suffixes)
-    dest = _output_path(dest_dir, "Moved", suffixes)
-    _write_case_entry(moved, dest_dir, "Moved", _FORMATS.get(suffixes.lower(), suffixes.lstrip(".")))
-    return dest
-
-
-def _displacement_transform(dvf_path: Path) -> sitk.Transform:
-    """Read a displacement field (3-component, fixed grid) as a SimpleITK transform."""
-    return sitk.DisplacementFieldTransform(read_displacement_field(dvf_path))
 
 
 def _neutral_mask(out_path: Path) -> Path:
@@ -376,6 +328,7 @@ class ImpactRegKonfAIApp:
         config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
         fields_only: bool = False,
+        max_displacement: float | str = "auto",
     ) -> None:
         """Register every case with the selected presets and ensemble their DVFs.
 
@@ -393,6 +346,11 @@ class ImpactRegKonfAIApp:
         full-size rewrite -- worth it for a caller that wants a registration to look at, waste for one
         that composes the field with another and derives its own. A caller that reads only the fields
         should be able to say so rather than pay for outputs it deletes.
+
+        ``max_displacement`` bounds the window the field is read from when the moved image streams:
+        ``auto`` reads the bound a field recorded (OME-Zarr fields carry one) and falls back to the
+        whole volume -- with the reason in the plan -- when none is recorded; a distance in world
+        units declares it outright and is checked against every region actually read.
         """
         # The cases are konfai-apps' to define, not ours to count. It expands each input GROUP into
         # units -- a file, a store, a DICOM series, or every volume inside a plain directory -- and pairs
@@ -433,7 +391,7 @@ class ImpactRegKonfAIApp:
                     "the moved image is derived per case and needs the two to line up."
                 )
 
-            for case, moving_image in zip(cases, moving_units, strict=True):
+            for case in cases:
                 # konfai-apps already named the cases; reusing its names keeps the two layers' notion of
                 # a case identical instead of renumbering from the command line and hoping they agree.
                 case_out = output / case
@@ -451,44 +409,118 @@ class ImpactRegKonfAIApp:
                     dvf_paths.append(dvf)
 
                 if len(presets) == 1:
-                    dvf_out = _copy_output(dvf_paths[0], case_out, "DVF")
-                    if not fields_only:
-                        _derive_moved(moving_image, dvf_out, case_out, work)
+                    _copy_output(dvf_paths[0], case_out, "DVF")
                 else:
-                    # Ensemble: average the presets' displacement fields (all on the fixed grid) and warp the
-                    # moving image once with that averaged field — the one output no single preset produced.
-                    avg_dvf = self._average_displacement(dvf_paths)
-                    dvf_out = _output_path(case_out, "DVF", "".join(dvf_paths[0].suffixes))
-                    _write_displacement_field(avg_dvf, dvf_out)
-                    if not fields_only:
-                        # Through the same derivation as the single-preset path, which reads the moving
-                        # in either form: the sitk.ReadImage this replaces cannot open a store at all,
-                        # so an ensemble of OME-Zarr inputs failed here and nowhere else.
-                        _derive_moved(
-                            moving_image, dvf_out, case_out, work, field=sitk.Cast(avg_dvf, sitk.sitkVectorFloat64)
-                        )
+                    # Ensemble: fold the presets' fields (all on the fixed grid -- and Reduce VERIFIES
+                    # the claim) into the averaged DVF, the one output no single preset produced.
+                    # Streamed: the fold is incremental, so the peak is one accumulator plus the
+                    # member being read, whatever the size of the ensemble.
+                    self._ensemble_mean(case, presets, dvf_paths, output, work, gpu, cpu, quiet)
 
-                if not fields_only:
-                    # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid
-                    # displacement field as a SimpleITK transform. Another full-size write of the same
-                    # voxels, which is why it goes with the moved image rather than being unconditional.
-                    sitk.WriteTransform(_displacement_transform(dvf_out), str(case_out / "Transform.h5"))
+            if not fields_only:
+                # Every moved image in ONE streamed run: Resample adopts, per case, the grid of that
+                # case's own DVF (a field is defined ON the fixed grid) and reads the field as the
+                # map -- one interpolation, slab by slab, the whole cohort under one plan.
+                self._derive_moved(
+                    dict(zip(cases, moving_units, strict=True)), output, work, gpu, cpu, quiet, max_displacement
+                )
+                for case in cases:
+                    # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid field
+                    # as a SimpleITK transform. Inherently whole -- the .h5 format carries the full
+                    # field -- which is why it goes with the moved image rather than being
+                    # unconditional.
+                    transform = sitk.DisplacementFieldTransform(
+                        read_displacement_field(_the_output(output / case, "DVF"))
+                    )
+                    sitk.WriteTransform(transform, str(output / case / "Transform.h5"))
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    def _average_displacement(self, dvf_paths: list[Path]) -> sitk.Image:
-        """Average several presets' displacement fields (all on the same fixed grid) into one field.
+    def _ensemble_mean(
+        self,
+        case: str,
+        presets: list[str],
+        dvf_paths: list[Path],
+        output: Path,
+        work: Path,
+        gpu: list[int],
+        cpu: int | None,
+        quiet: bool,
+    ) -> None:
+        """Average one case's preset fields into ``<output>/<case>/DVF`` — Reduce(Mean), streamed."""
+        from konfai.data.transform import Reduce, Write
 
-        A running sum keeps memory flat in the number of members: a few field-sized buffers are live
-        at any instant, whatever the size of the ensemble.
+        root = work / f"ensemble_{case}"
+        for preset, dvf in zip(presets, dvf_paths, strict=True):
+            _stage(root, preset, "DVF", dvf)
+        suffixes = "".join(dvf_paths[0].suffixes)
+        _output_path(output / case, "DVF", suffixes)  # drop a stale other-form DVF before writing
+        _run_transform(
+            f"impact_reg_ensemble_{case}",
+            root,
+            {
+                "DVF": {
+                    "DVF": [
+                        Reduce(operator="Mean", output=case, grid="strict"),
+                        Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
+                    ]
+                }
+            },
+            work,
+            gpu,
+            cpu,
+            quiet,
+        )
+
+    def _derive_moved(
+        self,
+        cases: dict[str, Path],
+        output: Path,
+        work: Path,
+        gpu: list[int],
+        cpu: int | None,
+        quiet: bool,
+        max_displacement: float | str,
+    ) -> None:
+        """The moved images, resampled from each moving through ITS displacement field — one run.
+
+        A preset that emits only a field is complete: the moved image IS that field applied to the
+        moving, so deriving it belongs to this layer. THE GRID AND THE FORMAT FOLLOW THE FIELD, not
+        the moving: a displacement field is defined ON the fixed grid, so ``reference: '{case}'``
+        adopts each case's own DVF grid, and the field is the map (``field_group``) — one
+        interpolation, streamed when the field's bound allows, whole-volume with the reason when not.
         """
-        reference = read_displacement_field(dvf_paths[0])
-        total = sitk.GetArrayFromImage(reference)
-        for path in dvf_paths[1:]:
-            total += sitk.GetArrayFromImage(read_displacement_field(path))
-        avg = sitk.GetImageFromArray(total / len(dvf_paths), isVector=True)
-        avg.CopyInformation(reference)
-        return avg
+        from konfai.data.transform import Resample, Write
+
+        root = work / "moved_stage"
+        suffixes = ""
+        for case, moving in cases.items():
+            dvf = _the_output(output / case, "DVF")
+            _stage(root, case, "Moving", moving)
+            _stage(root, case, "DVF", dvf)
+            suffixes = "".join(dvf.suffixes)
+            _output_path(output / case, "Moved", suffixes)  # drop a stale other-form Moved
+        _run_transform(
+            "impact_reg_moved",
+            root,
+            {
+                "Moving": {
+                    "Moved": [
+                        Resample(
+                            reference="{case}",
+                            reference_group="DVF",
+                            field_group="DVF",
+                            max_displacement=max_displacement,
+                        ),
+                        Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
+                    ]
+                }
+            },
+            work,
+            gpu,
+            cpu,
+            quiet,
+        )
 
     # ------------------------------------------------------------------ evaluate
 
@@ -527,16 +559,13 @@ class ImpactRegKonfAIApp:
         n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid))
         for index in range(n_cases):
             transform_path = transforms[index] if index < len(transforms) else None
-            transform = sitk.ReadTransform(str(transform_path)) if transform_path else sitk.Transform()
             eval_out = output / f"P{index:03d}" / "Evaluation"
             work = _work_dir(tmp_dir, "impact_reg_eval_")
             try:
                 # Image: moving resampled onto the fixed grid vs fixed (MAE). Mask is optional.
                 if index < len(fixed_images) and index < len(moving_images):
-                    fixed = _read_image(fixed_images[index], work)
-                    moved = work / "moved_image.nii.gz"
-                    sitk.WriteImage(
-                        sitk.Resample(_read_image(moving_images[index], work), fixed, transform), str(moved)
+                    moved = self._warp_onto_fixed(
+                        work, "img", fixed_images[index], moving_images[index], transform_path, gpu, cpu, quiet
                     )
                     app.evaluate(
                         inputs=[[fixed_images[index]]],
@@ -550,15 +579,10 @@ class ImpactRegKonfAIApp:
                         tmp_dir=work,
                     )
 
-                # Segmentation: moving seg warped onto fixed vs fixed seg (Dice).
+                # Segmentation: moving seg warped onto fixed vs fixed seg (Dice), nearest-neighbour.
                 if index < len(gt_fixed_seg) and index < len(gt_moving_seg):
-                    fixed_seg = _read_image(gt_fixed_seg[index], work)
-                    moved_seg = work / "moved_seg.nii.gz"
-                    sitk.WriteImage(
-                        sitk.Resample(
-                            _read_image(gt_moving_seg[index], work), fixed_seg, transform, sitk.sitkNearestNeighbor
-                        ),
-                        str(moved_seg),
+                    moved_seg = self._warp_onto_fixed(
+                        work, "seg", gt_fixed_seg[index], gt_moving_seg[index], transform_path, gpu, cpu, quiet
                     )
                     app.evaluate(
                         inputs=[[gt_fixed_seg[index]]],
@@ -574,10 +598,12 @@ class ImpactRegKonfAIApp:
                 # Landmarks (TRE): the transform is defined on the fixed grid and maps fixed->moving, so the
                 # fixed fiducials are displaced by it into moving space and compared against the moving fiducials
                 # there (the standard warped-keypoints convention; no field inversion needed). With no transform
-                # the raw fiducials are compared, measuring the initial misalignment.
+                # the raw fiducials are compared, measuring the initial misalignment. Landmarks are a few
+                # points, so this is the one place the transform is opened in this process.
                 if index < len(gt_fixed_fid) and index < len(gt_moving_fid):
                     fixed_points = read_landmarks(gt_fixed_fid[index])
                     if transform_path is not None:
+                        transform = sitk.ReadTransform(str(transform_path))
                         fixed_points = apply_to_data_transform(fixed_points, {transform: False})
                     moved_fid = work / "moved_fid.fcsv"
                     write_landmarks(fixed_points, moved_fid)
@@ -594,6 +620,47 @@ class ImpactRegKonfAIApp:
             finally:
                 shutil.rmtree(work, ignore_errors=True)
 
+    def _warp_onto_fixed(
+        self,
+        work: Path,
+        kind: str,
+        fixed: Path,
+        moving: Path,
+        transform_path: Path | None,
+        gpu: list[int],
+        cpu: int | None,
+        quiet: bool,
+    ) -> Path:
+        """The moving warped onto the fixed grid — one streamed Resample; nearest for a ``seg``.
+
+        ``reference: '{case}'`` adopts the fixed grid; the transform, when given, is staged as a
+        stored-transform group konfai decodes itself (rigid, affine, spline, field or composite) —
+        with its exact affine box or its coefficient-derived bound sizing what each slab reads.
+        With no transform the map is the identity and this is a change of grid alone.
+        """
+        from konfai.data.transform import Resample, Write
+
+        root = work / f"warp_{kind}"
+        _stage(root, "P000", "Fixed", fixed)
+        _stage(root, "P000", "Moving", moving)
+        resample: dict[str, object] = {"reference": "{case}", "reference_group": "Fixed"}
+        if kind == "seg":
+            resample["interpolation"] = "nearest"
+        if transform_path is not None:
+            _stage(root, "P000", "Reg", transform_path)
+            resample["transforms"] = {"Reg": False}
+        out_root = work / f"moved_{kind}"
+        _run_transform(
+            f"impact_reg_eval_{kind}",
+            root,
+            {"Moving": {"Moved": [Resample(**resample), Write(dataset=f"{out_root}:mha")]}},
+            work,
+            gpu,
+            cpu,
+            quiet,
+        )
+        return out_root / "P000" / "Moved.mha"
+
     # --------------------------------------------------------------- uncertainty
 
     def uncertainty(
@@ -608,45 +675,39 @@ class ImpactRegKonfAIApp:
     ) -> None:
         """Estimate registration uncertainty as the voxel-wise spread of an ensemble of displacement fields.
 
-        The per-preset displacement fields are stacked into one multi-component volume (samples as
-        components, vector components as the leading image axis) and handed to the preset's generic
-        ``Uncertainty.yml`` workflow (``konfai-apps uncertainty``: ``Norm`` magnitude then
-        ``StandardDeviation`` over the ensemble).
+        Each member's magnitude, then the standard deviation across members: ``Magnitude`` is
+        pointwise and ``Reduce(Std)`` folds with running moments, so no member is ever whole in RAM
+        whatever the size of the ensemble. ``preset`` is accepted for CLI compatibility and unused —
+        measuring a spread needs no preset app. Writes ``<output>/uncertainty/Uncertainty.<ext>``.
         """
+        del preset
         if len(dvfs) < 2:
             raise ValueError("Uncertainty needs at least two ensemble displacement fields.")
         work = _work_dir(tmp_dir, "impact_reg_unc_")
         try:
-            reference = read_displacement_field(dvfs[0])
-            rank = reference.GetDimension()
-            stack = sitk.GetImageFromArray(
-                np.stack([sitk.GetArrayFromImage(read_displacement_field(p)) for p in dvfs], axis=-1),
-                isVector=True,
-            )
-            # The extra leading image axis holds the vector components (dropped by ``Norm``); the real
-            # fixed-grid geometry lives on the remaining axes so the uncertainty map stays aligned.
-            stack.SetOrigin((0.0, *reference.GetOrigin()))
-            stack.SetSpacing((1.0, *reference.GetSpacing()))
-            direction = np.eye(rank + 1)
-            direction[1:, 1:] = np.asarray(reference.GetDirection()).reshape(rank, rank)
-            stack.SetDirection(direction.flatten())
-            sitk.WriteImage(stack, str(work / "DVFs.mha"))
+            from konfai.data.transform import Magnitude, Reduce, Write
 
-            # Same workspace hand-off as _infer_preset: without it konfai-apps auto-creates one under
-            # TMPDIR and stages Uncertainties there before copying it into -o, which is the staging
-            # this option exists to place. `work` is ours and already sits wherever tmp_dir asked for.
-            command = ["konfai-apps", "uncertainty", _app_id(preset), "-i", str(work / "DVFs.mha"),
-                       "-o", str(output), "--tmp-dir", str(work)]
-            if gpu:
-                command += ["--gpu", *(str(g) for g in gpu)]
-            elif cpu is not None:
-                command += ["--cpu", str(cpu)]
-            if quiet:
-                command.append("--quiet")
-            if self._download:
-                command.append("--download")
-            if self._force_update:
-                command.append("--force_update")
-            subprocess.run(command, check=True)  # nosec B603
+            root = work / "members"
+            members = _units(list(dvfs))
+            for index, dvf in enumerate(members):
+                _stage(root, f"M{index:03d}", "DVF", dvf)
+            suffixes = "".join(members[0].suffixes)
+            _run_transform(
+                "impact_reg_uncertainty",
+                root,
+                {
+                    "DVF": {
+                        "Uncertainty": [
+                            Magnitude(),
+                            Reduce(operator="Std", output="uncertainty", grid="strict"),
+                            Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
+                        ]
+                    }
+                },
+                work,
+                gpu,
+                cpu,
+                quiet,
+            )
         finally:
             shutil.rmtree(work, ignore_errors=True)
