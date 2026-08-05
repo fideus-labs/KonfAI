@@ -1093,7 +1093,7 @@ class Trainer(DistributedObject):
 def build_train(
     command: State = State.TRAIN,
     model: Path | str | None = None,
-    config: Path | str = Path("./Config.yml"),
+    config: Path | str | dict = Path("./Config.yml"),
     checkpoints_dir: Path | str = Path("./Checkpoints/"),
     statistics_dir: Path | str = Path("./Statistics/"),
     lr: float | None = None,
@@ -1151,7 +1151,7 @@ def train(
     cpu: int | None = None,
     quiet: bool = False,
     tensorboard: bool = False,
-    config: Path | str = Path("./Config.yml"),
+    config: Path | str | dict = Path("./Config.yml"),
     checkpoints_dir: Path | str = Path("./Checkpoints/"),
     statistics_dir: Path | str = Path("./Statistics/"),
     lr: float | None = None,

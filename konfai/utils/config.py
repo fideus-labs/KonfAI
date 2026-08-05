@@ -17,6 +17,7 @@
 """Configuration helpers that map YAML trees to KonfAI Python objects."""
 
 import collections
+import functools
 import inspect
 import logging
 import os
@@ -667,3 +668,52 @@ def apply_config(konfai_args: str | None = None):
         return new_function
 
     return decorator
+
+
+def record_given_arguments(cls: type) -> None:
+    """Make ``cls`` record, on each instance, the constructor arguments AS GIVEN — the binder's mirror.
+
+    The binder builds an object from a config subtree; this makes the reverse spelling possible: an
+    object built in Python remembers what the caller said (``_konfai_given``), so :mod:`konfai.api`
+    can write a workflow tree from live objects with no second grammar — the recorded kwargs go
+    back through the binder, which stays the one place that validates and resolves defaults.
+
+    Only the OUTERMOST constructor records: a subclass delegating to ``super().__init__`` keeps its
+    own spelling, which is what the caller wrote. Applied by the extension bases'
+    ``__init_subclass__``, so a subclass that defines no ``__init__`` inherits a recording one. An
+    ``__init__`` taking ``*args`` cannot be spelled as a config subtree; such an instance records
+    nothing and :mod:`konfai.api` refuses it by name.
+    """
+    # A subclass with no __init__ of its own wraps the inherited one here: the extension bases are
+    # never passed through this function, so their raw constructors record nothing by themselves.
+    original = cls.__dict__.get("__init__") or cls.__init__  # type: ignore[misc]
+    if getattr(original, "_konfai_records", False):
+        return
+    signature = inspect.signature(original)
+
+    @functools.wraps(original)
+    def recording(self: object, *args: object, **kwargs: object) -> None:
+        if not hasattr(self, "_konfai_given"):
+            arguments: dict[str, object] | None = {}
+            try:
+                bound = signature.bind(self, *args, **kwargs)
+            except TypeError:
+                arguments = None  # the original call raises its own, better error just below
+            if arguments is not None:
+                for name, value in list(bound.arguments.items())[1:]:
+                    kind = signature.parameters[name].kind
+                    if kind is inspect.Parameter.VAR_POSITIONAL:
+                        arguments = None
+                        break
+                    if kind is inspect.Parameter.VAR_KEYWORD:
+                        arguments.update(dict(value))  # type: ignore[call-overload]
+                    else:
+                        arguments[name] = value
+            # None is recorded too: it marks the instance as spoken for, so a delegating
+            # super().__init__ cannot record the INNER spelling under the outer class's name --
+            # kwargs the outer constructor does not accept.
+            self._konfai_given = arguments  # type: ignore[attr-defined]
+        original(self, *args, **kwargs)
+
+    recording._konfai_records = True  # type: ignore[attr-defined]
+    cls.__init__ = recording  # type: ignore[method-assign, misc]

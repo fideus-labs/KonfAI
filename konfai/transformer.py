@@ -57,6 +57,7 @@ from konfai.utils.errors import ConfigError, TransformerError
 from konfai.utils.runtime import (
     DistributedObject,
     State,
+    _materialized_config,
     configure_workflow_environment,
     run_distributed_app,
 )
@@ -988,7 +989,7 @@ def _reject_unknown_keys(config_path: Path) -> None:
 
 
 def build_transform(
-    transform_file: Path | str = Path("./Transform.yml").resolve(),
+    transform_file: Path | str | dict = Path("./Transform.yml").resolve(),
     transforms_dir: Path | str = Path("./Transforms").resolve(),
 ) -> DistributedObject:
     """Build and return the configured transform workflow without executing it.
@@ -996,7 +997,13 @@ def build_transform(
     The returned object carries the plan: ``compute_plan()`` is the programmatic dry-run, and
     ``setup()`` prints and enforces it. This is the in-process surface — ``transform()`` stays
     ``None``-returning like every workflow entrypoint.
+
+    ``transform_file`` may be the config TREE itself, as a dict, instead of a path: the Python
+    caller writes no YAML. Materialized here rather than in ``configure_workflow_environment``
+    so the strict-grammar check below reads the same file every other reader will.
     """
+    if isinstance(transform_file, dict):
+        transform_file = _materialized_config(transform_file, "Transformer")
     configure_workflow_environment(
         config_path=transform_file,
         root="Transformer",
@@ -1011,7 +1018,7 @@ def build_transform(
 def plan_transform(
     overwrite: bool = False,
     cpu: int = 1,
-    transform_file: Path | str = Path("./Transform.yml").resolve(),
+    transform_file: Path | str | dict = Path("./Transform.yml").resolve(),
     transforms_dir: Path | str = Path("./Transforms").resolve(),
     **_ignored: object,
 ) -> TransformPlan:
@@ -1033,9 +1040,13 @@ def transform(
     gpu: list[int] | None = None,
     cpu: int = 1,
     quiet: bool = False,
-    transform_file: Path | str = Path("./Transform.yml").resolve(),
+    transform_file: Path | str | dict = Path("./Transform.yml").resolve(),
     transforms_dir: Path | str = Path("./Transforms").resolve(),
 ) -> DistributedObject:
-    """Build and execute the configured transform workflow."""
+    """Build and execute the configured transform workflow.
+
+    ``transform_file`` accepts the config tree as a dict — the pure-Python spelling of the same
+    run; the resolved YAML still lands in the workspace as the run's record.
+    """
     del overwrite, gpu, cpu, quiet
     return build_transform(transform_file=transform_file, transforms_dir=transforms_dir)

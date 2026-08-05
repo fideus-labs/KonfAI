@@ -33,7 +33,7 @@ except ImportError:
 
 from konfai import konfai_root
 from konfai.data.transform import LocalityKind, PatchLocality
-from konfai.utils.config import _escape_key_component, apply_config
+from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset, data_to_image
 from konfai.utils.errors import AugmentationError
 from konfai.utils.runtime import NeedDevice
@@ -213,6 +213,12 @@ class DataAugmentationsList:
 
 
 class DataAugmentation(NeedDevice, ABC):
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        # A draw is a chain stage too: record its constructor arguments as given, so konfai.api can
+        # write the config tree back from live objects (see Transform.__init_subclass__).
+        super().__init_subclass__(**kwargs)
+        record_given_arguments(cls)
+
     def __init__(self, groups: list[str] | None = None) -> None:
         self.who_index: dict[int, list[int]] = {}
         self.shape_index: dict[int, list[list[int]]] = {}
