@@ -192,14 +192,16 @@ bit-for-bit. `KONFAI_STREAMED_WRITES=0` forces the whole-volume path globally.
 A **float (linear) resample inverse** — resampling probabilities/logits back to
 the native grid before an `argmax` — streams within the sliding window by
 default like the other geometry inverses. On a large multi-class output the
-whole-volume `F.interpolate` is otherwise the memory peak (tens of GB), and a
+whole-volume resample is otherwise the memory peak (tens of GB), and a
 `combine: Concat` ensemble makes it worse by keeping every member's channels in
-the tensor being resampled; streaming bounds both. It matches the whole-volume
-`F.interpolate` to float rounding, not bit-for-bit — `argmax`'d labels absorb it
-(a boundary voxel or two may flip; a raw float output differs by ~float-rounding).
-Set `KONFAI_STREAM_LINEAR_RESAMPLE=0` to force the exact whole-volume linear
-resample when you need bit-identity or the per-member stack; resampling the
-`argmax`'d labels (a `nearest`, streaming resample) or collapsing members with
+the tensor being resampled; streaming bounds both. An axis-aligned change of
+density reads one axis at a time on global coordinates and is **bit-identical**
+streamed or whole; only a map that does not factorise (a rotation, a stored
+transform, a field) goes through the fused blend, where a streamed region and
+the whole volume agree to ~1e-5 of the data's range rather than bit for bit —
+`argmax`'d labels absorb it. `KONFAI_STREAMED_WRITES=0` remains the global
+whole-volume reference path; resampling the `argmax`'d labels (a `nearest`,
+streaming resample, exact by construction) or collapsing members with
 `combine: Mean`/`Median` first also avoids the peak.
 
 ## Verify the behaviour you care about

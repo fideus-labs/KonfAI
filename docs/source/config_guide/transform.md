@@ -67,8 +67,16 @@ The verdicts, and each one is a fact about *your* run:
 
 - **STREAM** — the case is read and written region by region. Memory is one
   slab, whatever the volume's size.
-- **WHOLE-VOLUME** — the case is assembled in memory, then written. Always
-  correct, never bounded. The line says which stage refused and why.
+- **LOAD** — the case *could* stream, fits the budget, and streaming would
+  re-read the source (a halo re-reads its overlap, a regrid pulls each slab's
+  window through its map, a compressed store decodes the whole volume per
+  slab). Loading reads it once; the line prints the predicted factor. A choice,
+  not a fallback — `on_fallback` has nothing to say about it. Streaming is a
+  memory strategy: it is chosen when the case does not fit, or when it costs
+  nothing.
+- **WHOLE-VOLUME** — the case cannot stream and is assembled in memory, then
+  written. Always correct, never bounded. The line says which stage refused and
+  why.
 - **SKIP** — the output already exists; nothing is recomputed.
 - **REDUCE** / **REFUSED** — a chain that folds the cohort into one entry
   ({doc}`Reduce <../reference/components/transforms>`)

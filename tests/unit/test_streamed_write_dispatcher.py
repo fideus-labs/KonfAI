@@ -631,3 +631,26 @@ def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_p
     assert streamed.dtype == reference.dtype
     assert torch.equal(streamed, reference)
     assert list(streamed.shape) == list(volume.shape)
+
+
+def test_the_stream_worth_gate_prices_the_config_budget_not_the_machine() -> None:
+    """The streamed-vs-assembled route is a function of configuration and data.
+
+    Same accumulators, two budgets: the verdict must flip with the budget — and with none pushed,
+    the gate prices the auto-budget's own fraction of the machine, never raw free memory.
+    """
+    from types import SimpleNamespace
+
+    from konfai.predictor import OutSameAsGroupDataset
+
+    writer = OutSameAsGroupDataset.__new__(OutSameAsGroupDataset)
+    writer.group_dest = "CT"
+    writer.nb_data_augmentation = 1
+    layer = torch.zeros(2, 1, dtype=torch.float32)
+    dataset = SimpleNamespace(get_dataset_from_index=lambda group, index: SimpleNamespace(shapes=[[64, 64, 64]]))
+    assembled = 2 * 64 * 64 * 64 * layer.element_size()
+
+    writer.set_memory_budget(assembled)  # accumulators are 100% of the budget: worth streaming
+    assert writer._worth_streaming(dataset, 0, layer)
+    writer.set_memory_budget(assembled * 1000.0)  # a sliver of the budget: assembling costs nothing
+    assert not writer._worth_streaming(dataset, 0, layer)

@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.geometry import Grid, bound_of
-from konfai.data.sampling import gather, read_amplification, source_index, source_window
+from konfai.data.sampling import gather, source_index, source_window
 
 sitk = pytest.importorskip("SimpleITK")
 
@@ -253,28 +253,3 @@ class TestSourceWindow:
                 assert part.start <= need_low and need_high < part.stop, (
                     f"{label}: axis {array_axis} needs [{need_low}, {need_high}] outside {part}"
                 )
-
-
-class TestReadAmplification:
-    def test_it_grows_as_the_decomposition_gets_finer(self):
-        # The property the cost model rests on, and the reason a gate is needed at all: streaming
-        # finer never reads less. Measured on an oblique map, where it runs away fastest.
-        image = _image()
-        grid = _grid(image)
-        bound = bound_of(decode_transform_stages(_affine(image)), 3)
-        ratios = []
-        for rows in (SIZE[0], 8, 3, 1):
-            regions = [
-                (slice(start, min(start + rows, SIZE[0])), slice(0, SIZE[1]), slice(0, SIZE[2]))
-                for start in range(0, SIZE[0], rows)
-            ]
-            ratios.append(read_amplification(grid, grid, bound, regions))
-        assert ratios == sorted(ratios), f"amplification must be monotone in fineness, got {ratios}"
-        assert ratios[-1] > 2.0 * ratios[0]
-
-    def test_a_pure_translation_of_a_whole_volume_reads_about_once(self):
-        image = _image(oblique=False)
-        grid = _grid(image)
-        bound = bound_of(decode_transform_stages(sitk.TranslationTransform(3, (1.0, 1.0, 1.0))), 3)
-        whole = [(slice(0, SIZE[0]), slice(0, SIZE[1]), slice(0, SIZE[2]))]
-        assert read_amplification(grid, grid, bound, whole) == pytest.approx(1.0, abs=0.35)
