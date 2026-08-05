@@ -867,14 +867,15 @@ def test_a_field_beyond_its_declared_bound_is_refused(warped: tuple[Dataset, Dat
         stage(_CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
 
 
-def test_a_field_with_no_bound_declares_the_whole_volume(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
-    """Warp's rule, and for the same reason: an unbounded reach cannot size a region."""
+def test_a_field_with_no_bound_still_streams(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
+    """Warp's rule, and for the same reason: the run sizes each region's pull from the field
+    values it reads for sampling, so an undeclared bound is a pricing gap, not a fallback."""
     images, fields, _volume = warped
-    locality = _warping(images, fields, max_displacement=0.0).patch_locality(
-        _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
-    )
-    assert locality.kind is LocalityKind.WHOLE_VOLUME
-    assert locality.reason is not None and "max_displacement" in locality.reason
+    stage = _warping(images, fields, max_displacement=0.0)
+    assert stage.patch_locality(_attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)).kind is LocalityKind.REGRID
+    assert stage.measures_at_run
+    # A declared bound keeps the declared windows: their streamed result is pinned bit-identical.
+    assert not _warping(images, fields).measures_at_run
     # And without a field it is a region stage whatever the bound says.
     assert _stage_regrid_kind(images) is LocalityKind.REGRID
 

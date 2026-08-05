@@ -148,9 +148,9 @@ def main() -> None:
         dest="max_displacement",
         type=_max_displacement,
         default="auto",
-        help="Bound (world units) on the field, sizing what a streamed moved-image slab reads. 'auto' "
-        "reads the bound the field recorded (OME-Zarr fields carry one) and falls back to whole-volume "
-        "-- with the reason in the plan -- when none is recorded.",
+        help="Optional bound (world units) on the field: the moved image streams either way, each slab "
+        "sized from the field values it reads. A bound ('auto' reads the one OME-Zarr fields record) "
+        "lets the plan price the reads exactly, and a declared one is checked against every region read.",
     )
     _add_device(reg)
     _add_tmp_dir(reg)

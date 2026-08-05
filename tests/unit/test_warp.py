@@ -181,14 +181,62 @@ def test_auto_survives_an_unreadable_entry_in_the_field_group(tmp_path: Path) ->
     assert locality.kind is LocalityKind.WHOLE_VOLUME
 
 
-def test_auto_falls_back_to_the_whole_volume_when_no_field_recorded_a_bound(tmp_path: Path) -> None:
-    """Only an OME-Zarr field KonfAI wrote carries the bound, so `auto` must answer for the rest."""
-    _source, _fields, _volume = _fixture(tmp_path)  # an h5 field: no bound recorded
+def test_a_field_with_no_bound_still_streams_with_windows_measured_at_run(tmp_path: Path) -> None:
+    """A bound-less field is not a whole-volume answer: the field window a region samples is read
+    for sampling regardless, and the sup of those very values sizes that region's source pull —
+    per region, so a quiet slab pays a quiet halo where the shifted one pays its shift."""
+    _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 0.0, 0.0))  # 4 um along x alone
+    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement="auto"))
 
-    locality = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement="auto").patch_locality(_attributes())
+    assert warp.patch_locality(_attributes()).kind is LocalityKind.REGRID
 
-    assert locality.kind is LocalityKind.WHOLE_VOLUME
-    assert locality.reason is not None and "no recorded bound" in locality.reason
+    target = (slice(4, 6), slice(4, 6), slice(4, 6))
+    priced = warp.stream_region_source("CASE_000", target, [10, 12, 14], _attributes())
+    measured = warp.measured_region_source("CASE_000", target, [10, 12, 14], _attributes())
+
+    # The plan prices as if the field were zero: the target's outer faces plus the taps' voxel.
+    assert [(part.start, part.stop) for part in priced] == [(2, 8), (2, 8), (2, 8)]
+    # The run pays the shift the values actually hold: 4 um at spacing 2 is 2 voxels, on x alone.
+    assert [(part.start, part.stop) for part in measured] == [(2, 8), (2, 8), (0, 10)]
+
+
+def test_sizing_and_sampling_share_one_field_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The window that sizes a region's pull is the window the sampler needs next: one read."""
+    _source, _fields, _volume = _fixture(tmp_path)
+    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement="auto"))
+    displacement = warp.displacement
+    assert displacement is not None
+    reads: list[int] = []
+    original = type(displacement).read
+    monkeypatch.setattr(
+        type(displacement), "read", lambda self, *args, **kwargs: (reads.append(1), original(self, *args, **kwargs))[1]
+    )
+
+    target = (slice(2, 5), slice(0, 12), slice(0, 14))
+    warp.measured_region_source("CASE_000", target, [10, 12, 14], _attributes())
+    _source_grid, target_grid = warp._grids_of("CASE_000")
+    warp._stages("CASE_000", target_grid.sub_grid(target))
+
+    assert len(reads) == 1
+
+
+def test_streamed_equals_whole_volume_with_no_declared_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The measured windows carry the same claim as the declared ones: the same answer, region by
+    region, with several regions — and nothing was declared to make it true."""
+    from konfai.data import patching as patching_module
+
+    monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 3)
+    source, _fields, volume = _fixture(tmp_path, shift_um=(1.0, 2.0, 3.0))
+    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement="auto")
+
+    reference = warp("CASE_000", torch.from_numpy(volume), _attributes()).numpy()
+
+    manager = _manager(source, [warp, Save(f"{tmp_path / 'out'}:h5")])
+    assert manager.can_stream_patch(0, apply_augmentations=False)
+    assert manager.materialize() is True
+    streamed, _ = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")
+
+    np.testing.assert_allclose(streamed, reference, rtol=1e-5, atol=1e-4)
 
 
 def test_a_max_displacement_that_is_neither_a_number_nor_auto_is_refused() -> None:

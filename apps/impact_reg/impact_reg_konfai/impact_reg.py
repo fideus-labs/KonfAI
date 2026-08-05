@@ -347,10 +347,10 @@ class ImpactRegKonfAIApp:
         that composes the field with another and derives its own. A caller that reads only the fields
         should be able to say so rather than pay for outputs it deletes.
 
-        ``max_displacement`` bounds the window the field is read from when the moved image streams:
-        ``auto`` reads the bound a field recorded (OME-Zarr fields carry one) and falls back to the
-        whole volume -- with the reason in the plan -- when none is recorded; a distance in world
-        units declares it outright and is checked against every region actually read.
+        ``max_displacement`` is optional: the moved image streams either way, each slab's source
+        window sized from the field values read for sampling. ``auto`` reads the bound a field
+        recorded (OME-Zarr fields carry one) so the plan prices the reads exactly; a distance in
+        world units declares that bound outright and is checked against every region actually read.
         """
         # The cases are konfai-apps' to define, not ours to count. It expands each input GROUP into
         # units -- a file, a store, a DICOM series, or every volume inside a plain directory -- and pairs
