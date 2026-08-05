@@ -113,6 +113,18 @@ def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
     return dest_dir / (stem + suffixes)
 
 
+def _units(paths: list[Path]) -> list[Path]:
+    """What an input group expands to, in konfai-apps' own order.
+
+    A file, an OME-Zarr store or a DICOM series is one unit; a plain directory is walked so every
+    supported file inside becomes one, sorted so groups pair consistently. Asking konfai-apps rather
+    than counting the command line is what keeps this layer's notion of a case identical to the one the
+    ``Dataset/P{i:03d}`` staging is built with -- counting arguments instead is how a directory input
+    came to register N volumes and report one.
+    """
+    return [source for source, _ in KonfAIApp._list_input_units(list(paths))] if paths else []
+
+
 def _neutral_masks(work: Path, side: str, count: int) -> list[Path]:
     """``count`` all-ones sentinels, one per case, standing in for a mask group the caller left out.
 
@@ -376,7 +388,7 @@ class ImpactRegKonfAIApp:
         # the groups by position. Asking it for the moving group's units is what tells this layer which
         # volume belongs to which case, in the same order it will use, so a dataset in and a single pair
         # in go down one path.
-        moving_units = [source for source, _ in KonfAIApp._list_input_units(list(moving_images))]
+        moving_units = _units(moving_images)
 
         work = _work_dir(tmp_dir, "impact_reg_")
         try:
@@ -487,6 +499,14 @@ class ImpactRegKonfAIApp:
         already registered and only resampled onto the fixed grid (identity).
         """
         app = KonfAIApp(_app_id(preset), self._download, self._force_update)
+        # Every group is expanded the same way ``register`` expands its inputs, so a directory of
+        # volumes evaluates case by case instead of collapsing to its first entry. Transforms and
+        # landmark files expand too: .h5, .fcsv and .itk.txt are all supported extensions.
+        fixed_images, moving_images = _units(fixed_images), _units(moving_images)
+        gt_fixed_seg, gt_moving_seg = _units(gt_fixed_seg), _units(gt_moving_seg)
+        gt_fixed_fid, gt_moving_fid = _units(gt_fixed_fid), _units(gt_moving_fid)
+        transforms = _units(transforms)
+        mask = _units(mask) if mask else mask
         n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid))
         for index in range(n_cases):
             transform_path = transforms[index] if index < len(transforms) else None
