@@ -190,7 +190,6 @@ def test_a_field_records_its_own_bound_on_both_write_paths(tmp_path):
     assert DISPLACEMENT_BOUND_ATTRIBUTE in Dataset(tmp_path / "streamed", "omezarr").get_infos("DVF", "case")[1]
 
 
-@_needs_rfc5
 def tmp_field_store(field: np.ndarray) -> Path:
     import tempfile
 
@@ -201,6 +200,7 @@ def tmp_field_store(field: np.ndarray) -> Path:
     return root / "fields"
 
 
+@_needs_rfc5
 def test_the_recorded_bound_reaches_each_axis_by_its_own_spacing_under_anisotropy() -> None:
     """What the bound is FOR, read by the stage that consumes it.
 

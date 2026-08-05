@@ -1479,11 +1479,14 @@ class DatasetManager:
                 # One draw, every copy at once: state_init IS the per-copy sampler, and it wants the
                 # copies' current grids -- which the stages before it just folded.
                 with _drawn_from(expand.draw_seed, self.index, kind, occurrence):
-                    shapes = stage.state_init(self.index, shapes, attributes)
+                    shapes = stage.state_init(self.index, shapes, foldings)
                 continue
             for index in range(expand.nb):
                 shapes[index] = self._fold_case_state(stage, shapes[index], foldings[index])
         for index in range(expand.nb):
+            # As at the case-level folds: the box a per-copy Crop computed is a case fact, and
+            # losing it re-reads the volume once per later fold of that copy.
+            self._adopt_case_facts(foldings[index], attributes[index])
             self.cache_attributes.append(attributes[index])
             self.shapes.append(list(shapes[index]))
             self.patch.load(list(shapes[index]), index + 1)
@@ -2800,6 +2803,10 @@ class DatasetManager:
             tensor = torch.from_numpy(data)
             cache_attribute = Attribute(self.cache_attributes_bak[a])
             cache_attribute.update(attributes)
+            # Says the Min/Max/Mean/Std here are the planner's DISK seeds, not a mid-chain stage's
+            # own bookkeeping (a Normalize pushes 'Min' for its inverse). Set before keys_before,
+            # so it never persists past this read.
+            cache_attribute["StatisticsSeeded"] = 1.0
             persist = a not in self._stream_attributes_persisted
             keys_before = set(cache_attribute.keys()) if persist else set()
             for stage in stream_source.stages:
@@ -2921,6 +2928,7 @@ class DatasetManager:
         tensor = torch.from_numpy(data)
 
         cache_attribute.update(attributes)
+        cache_attribute["StatisticsSeeded"] = 1.0  # same contract as the pointwise route above
         keys_before = set(cache_attribute.keys())
 
         for stage, plan, source, target in zip(stages, plans, spans[:-1], spans[1:], strict=True):

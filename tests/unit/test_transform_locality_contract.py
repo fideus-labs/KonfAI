@@ -34,11 +34,11 @@ are checked too, and a declaration that only the image can make is exercised end
 """
 
 import inspect
+import types
 from dataclasses import dataclass
 
 import numpy as np
 import pytest
-import SimpleITK as sitk
 import torch
 from konfai.data import augmentation as augmentation_module
 from konfai.data import transform as transform_module
@@ -82,7 +82,7 @@ from konfai.data.transform import (
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 
-pytest.importorskip("SimpleITK")
+sitk = pytest.importorskip("SimpleITK")
 
 _CASE_NAME = "CASE_000"
 _SPATIAL = (9, 10, 11)
@@ -325,8 +325,13 @@ def _builtin_transforms() -> list[type[Transform]]:
     """Every concrete transform class KonfAI ships."""
     return [
         cls
+        # A subscripted builtin generic (SpatialStages) passes isclass on Python 3.10 but is not a
+        # class there, and issubclass refuses it.
         for _, cls in inspect.getmembers(transform_module, inspect.isclass)
-        if issubclass(cls, Transform) and cls.__module__ == transform_module.__name__ and not inspect.isabstract(cls)
+        if not isinstance(cls, types.GenericAlias)
+        and issubclass(cls, Transform)
+        and cls.__module__ == transform_module.__name__
+        and not inspect.isabstract(cls)
     ]
 
 
@@ -598,7 +603,8 @@ def _builtin_augmentations() -> list[type[DataAugmentation]]:
     return [
         cls
         for _, cls in inspect.getmembers(augmentation_module, inspect.isclass)
-        if issubclass(cls, DataAugmentation)
+        if not isinstance(cls, types.GenericAlias)
+        and issubclass(cls, DataAugmentation)
         and cls.__module__ == augmentation_module.__name__
         and not inspect.isabstract(cls)
     ]

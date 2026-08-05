@@ -339,8 +339,8 @@ class Grid:
 
         The load-bearing line of every streamed regrid: a region left at the volume's origin
         replays the volume's first slab wherever it lands, and the output still looks like an
-        image. The origin is ``index_to_world`` of the region's start — the same association of
-        the same product ITK uses in ``TransformIndexToPhysicalPoint``.
+        image. The origin is ``index_to_world`` of the region's start — one application of the
+        parent's own map, never a second association that could land a slab origin apart from it.
         """
         start_xyz = np.array([float(part.start) for part in reversed(region_zyx)])
         return Grid(
