@@ -116,6 +116,18 @@ def _displacement_at(stage: DisplacementStage, world_xyz: torch.Tensor, device: 
     values = torch.tensor(stage.values, dtype=_COORDINATE_DTYPE, device=device)
     extent_xyz = [int(stage.grid.size_zyx[rank - 1 - axis]) for axis in range(rank)]
 
+    if stage.order != 1:
+        # ITK admits a continuous index within ~4 ulps of the spline's valid-region END by nudging
+        # it JUST inside (``InsideValidRegion``): the support then fits and the value is the
+        # continuous limit, the outermost tap's weight vanishing at the boundary. Without the nudge
+        # the whole last plane of a grid commensurate with the coefficient mesh is silently the
+        # identity -- and a commensurate grid is exactly what a fitted transform domain produces.
+        for axis in range(rank):
+            end = float(extent_xyz[axis] - 2)
+            ulp = float(np.spacing(np.float64(max(1.0, end))))
+            at_end = (index[..., axis] - end).abs() <= 4.0 * ulp
+            index[..., axis] = index[..., axis].masked_fill(at_end, end - ulp)
+
     base = torch.floor(index) - (stage.order - 1) // 2
     taps = stage.order + 1
     # The two domains ITK actually implements, and they differ. A BSpline is the identity unless its
@@ -411,10 +423,18 @@ def gather(
         shifted = coordinates_xyz[..., axis] - float(source_starts_zyx[array_axis])
         local_axes.append((2.0 * shifted + 1.0) / extent - 1.0)
     # grid_sample orders the last dimension (x, y, z) -- the mirror of the array axes, which is the
-    # order the coordinates already arrive in.
-    sampling = torch.stack([local_axes[rank - 1 - axis] for axis in range(rank)], dim=-1).to(work.dtype)
+    # order the coordinates already arrive in. The grid counts voxels in float32 WHATEVER the
+    # payload: a half grid quantizes a coordinate at ~2^-11 of the window extent -- 0.06 voxel on a
+    # 512 axis, far past the ~1e-5 band above -- and the window is upcast with it because
+    # grid_sample takes one dtype. sampling_dtype's keep-half trade was measured for the values.
+    blend_dtype = torch.float32 if work.dtype in (torch.float16, torch.bfloat16) else work.dtype
+    sampling = torch.stack([local_axes[rank - 1 - axis] for axis in range(rank)], dim=-1).to(blend_dtype)
     out = torch.nn.functional.grid_sample(
-        work.unsqueeze(0), sampling.unsqueeze(0), mode="bilinear", padding_mode="border", align_corners=False
+        work.to(blend_dtype).unsqueeze(0),
+        sampling.unsqueeze(0),
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=False,
     ).squeeze(0)
     return out.masked_fill(~inside.unsqueeze(0), fill).type(source.dtype)
 

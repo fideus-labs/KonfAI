@@ -1356,10 +1356,13 @@ class DatasetManager:
         # The chain around its Expand: pre runs once per case, post once per copy. Without a marker
         # the split is (everything, None, []) and every fold below reduces to the plain per-case chain.
         self._expand_pre, self._expand, self._expand_post = split_expand(transforms)
+        # The landing fold, on a working state: the run re-makes every transition itself, so the
+        # case baseline the walks and replays start from must not carry them twice.
+        folding = Attribute(cache_attribute)
         for transform_function in self._expand_pre:
-            _shape = _spatial(transform_function.transform_shape(self.group_src, self.name, _shape, cache_attribute))
+            _shape = self._fold_case_state(transform_function, _shape, folding)
+        self._adopt_case_facts(folding, cache_attribute)
         # The grid and case state at the Expand point: what the first per-copy stage is handed.
-        # Snapshots (Attribute copies deeply) -- the live attribute keeps evolving through post.
         self._shape_at_expand = list(_shape)
         self._attributes_at_expand = Attribute(cache_attribute)
         # The un-augmented landing of the per-copy tail. A draw is the identity here, because copy 0
@@ -1367,7 +1370,8 @@ class DatasetManager:
         for transform_function in self._expand_post:
             if _is_draw(transform_function):
                 continue
-            _shape = _spatial(transform_function.transform_shape(self.group_src, self.name, _shape, cache_attribute))
+            _shape = self._fold_case_state(transform_function, _shape, folding)
+        self._adopt_case_facts(folding, cache_attribute)
 
         self.patch = (
             DatasetPatch(
@@ -1461,6 +1465,9 @@ class DatasetManager:
         assert expand is not None  # nosec B101 - the caller checked
         shapes = [list(self._shape_at_expand) for _ in range(expand.nb)]
         attributes = [copy.deepcopy(self._attributes_at_expand) for _ in range(expand.nb)]
+        # The copies' walk states, apart from the baselines above: the landing fold evolves the
+        # geometry, and a streamed replay must start from the case as stored.
+        foldings = [Attribute(attribute) for attribute in attributes]
         drawn: dict[str, int] = {}
         for stage in self._expand_post:
             if _is_draw(stage):
@@ -1475,10 +1482,7 @@ class DatasetManager:
                     shapes = stage.state_init(self.index, shapes, attributes)
                 continue
             for index in range(expand.nb):
-                shapes[index] = [
-                    int(extent)
-                    for extent in stage.transform_shape(self.group_src, self.name, shapes[index], attributes[index])
-                ]
+                shapes[index] = self._fold_case_state(stage, shapes[index], foldings[index])
         for index in range(expand.nb):
             self.cache_attributes.append(attributes[index])
             self.shapes.append(list(shapes[index]))
@@ -1826,13 +1830,33 @@ class DatasetManager:
 
         The one dispatch between the two Stage species' shape vocabularies: a ``Transform`` restates
         its fold as ``transform_shape``, an :class:`AugmentedStage` as its draw's ``stream_shape``.
-        ``attribute`` is used as handed over: a caller that wants the geometry rewrites a transform
-        makes along the way (the write probe) passes the live state, one that must not be touched
-        (the planner) passes a copy.
+        Shape only — the geometry transition is :meth:`_fold_case_state`'s half.
         """
         if isinstance(stage, Transform):
             return [int(e) for e in stage.transform_shape(self.group_src, self.name, list(shape), attribute)]
         return [int(e) for e in cast(AugmentedStage, stage).stream_shape(list(shape))]
+
+    def _fold_case_state(self, stage: Stage, shape: list[int], attribute: Attribute) -> list[int]:
+        """Fold one stage over the evolving case state: the shape through its map, the geometry
+        through its stated transition — the idiom :meth:`_plan_read_stage` runs per region stage.
+
+        Every landing fold goes through here, so a stage is judged on the state the stages before it
+        left rather than on the stored header — a ``Resample`` behind a ``Canonical`` records the
+        reoriented grid, and a second ``Resample`` sees the first one's spacing.
+        """
+        out = self._stage_out_shape(stage, shape, attribute)
+        if isinstance(stage, Transform):
+            stage.write_stream_cache_attribute(attribute, list(shape))
+        return out
+
+    @staticmethod
+    def _adopt_case_facts(folding: Attribute, case: Attribute) -> None:
+        """Keep what a landing fold computed about the CASE — Crop's content-derived box — off its
+        walk state. The geometry the fold evolved is the walk's own (the run re-makes those
+        transitions); the box is expensive, immutable per case, and read by every later fold, the
+        streamed replays and the run itself."""
+        if "box" in folding and "box" not in case:
+            case["box"] = folding["box"]
 
     def chain_stages(self, a: int = 0) -> list[Stage]:
         """The ordered stages copy ``a`` is made of — the one definition of what a copy IS.
@@ -1856,7 +1880,7 @@ class DatasetManager:
         attributes = Attribute(self.cache_attributes_bak[0])
         targets: list[tuple[Save, list[int], Attribute]] = []
         for stage in self.chain_stages(a):
-            spatial = self._stage_out_shape(stage, spatial, attributes)
+            spatial = self._fold_case_state(stage, spatial, attributes)
             if isinstance(stage, Save):
                 targets.append((stage, list(spatial), Attribute(attributes)))
         return targets
@@ -2019,7 +2043,7 @@ class DatasetManager:
         landing = [int(extent) for extent in source_shape[1:]]
         probe = Attribute(base_attributes)
         for stage in segment:
-            landing = self._stage_out_shape(stage, landing, probe)
+            landing = self._fold_case_state(stage, landing, probe)
         planning = Attribute(base_attributes)
         streamable, stage_plans, evolved, refusal = self._plan_stream_region(
             0,
@@ -2215,9 +2239,7 @@ class DatasetManager:
         for stage in self.transforms:
             if not isinstance(stage, Transform):
                 continue
-            source = list(spatial)
-            spatial = [int(extent) for extent in stage.transform_shape(self.group_src, self.name, source, attributes)]
-            stage.write_stream_cache_attribute(attributes, source)
+            spatial = self._fold_case_state(stage, list(spatial), attributes)
             peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
         return peak * CASE_ELEMENT_BYTES
 
@@ -2759,6 +2781,8 @@ class DatasetManager:
         """Patch-native region chain: one target patch replayed through the composed region plans,
         padded back to ``patch_size`` like the whole-volume path (see ``_replay_streamed_region``,
         which a Save sweep drives with slab targets instead of patch targets)."""
+        if self._expand is not None:
+            self._refold_copy_records(a, stream_source)
         target_slices = tuple(self.patch.get_patch_slices(a)[index])
         # Each patch re-runs the chain from the state the whole-volume pass started from: the case as
         # stored (plus planned stats), never the live attribute -- that one carries the chain's own
@@ -2774,6 +2798,22 @@ class DatasetManager:
         if persist:
             self._persist_stream_attributes(a, cache_attribute, keys_before)
         return tensor, cache_attribute
+
+    def _refold_copy_records(self, a: int, stream_source: _PatchStreamSource) -> None:
+        """Re-fold copy ``a``'s chain state before replaying a region of it.
+
+        A stage keys its per-case records by the CASE name — a stored transform is looked up by
+        it — so the copies of an Expand share one key and the last WALK's records win. The write
+        sweeps re-plan before sweeping and the whole-volume path re-records at call time; the
+        patch replay is the consumer left over, and reading two copies interleaved would otherwise
+        hand one copy the other's grids. Headers only — no voxel is read.
+        """
+        if not stream_source.stages:
+            return
+        shape = list(stream_source.stage_plans[0].in_shape)
+        state = Attribute(self.cache_attributes_bak[a])
+        for stage in stream_source.stages:
+            shape = self._fold_case_state(stage, shape, state)
 
     def _replay_streamed_region(
         self,

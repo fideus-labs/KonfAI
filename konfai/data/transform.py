@@ -580,7 +580,13 @@ class Clip(Transform):
 
         if isinstance(self.min_value, str):
             if self.min_value == "min":
-                min_value = torch.min(tensor_masked)
+                # Seeded-first, as Normalize reads it: on a streamed path the dispatcher has read
+                # the CASE's statistic from disk and the tensor in hand is one region of it --
+                # computed here, the bound (and what save_clip_min records) would be the region's.
+                if self.mask is None and "Min" in cache_attribute:
+                    min_value = float(cache_attribute["Min"])
+                else:
+                    min_value = torch.min(tensor_masked)
             elif self.min_value.startswith("percentile:"):
                 try:
                     percentile = float(self.min_value.split(":")[1])
@@ -601,7 +607,10 @@ class Clip(Transform):
 
         if isinstance(self.max_value, str):
             if self.max_value == "max":
-                max_value = torch.max(tensor_masked)
+                if self.mask is None and "Max" in cache_attribute:
+                    max_value = float(cache_attribute["Max"])
+                else:
+                    max_value = torch.max(tensor_masked)
             elif self.max_value.startswith("percentile:"):
                 try:
                     percentile = float(self.max_value.split(":")[1])
@@ -1192,13 +1201,17 @@ class Resample(TransformInverse):
       dense solve over the whole grid, and a field solved per region is not the restriction of the
       field solved once. Store the inverse, or invert it where it is written;
     - a field with no ``max_displacement`` to size its region from;
-    - a case that does not meet the target grid anywhere -- the output would be ``fill`` from edge to
-      edge, and an all-background member is a plausible, wrong contribution to a median.
+    - a case that does not meet the target grid anywhere -- judged THROUGH the declared map, so a
+      stored rigid bridging two scanner frames is not mistaken for disjointness. The output would
+      be ``fill`` from edge to edge, and an all-background member is a plausible, wrong
+      contribution to a median.
 
-    Every refusal but the last declares ``WHOLE_VOLUME`` with its reason and the run proceeds on the
-    whole-volume path, so a chain never breaks over one: it only stops being bounded, and says so in
-    the plan. A case reaching only PART of the target grid is legal and common -- the rest takes
-    ``fill`` -- and the plan prints how much of the grid it covers.
+    A refusal the whole-volume path can serve -- an undeclared field bound, a case with no
+    geometry -- declares ``WHOLE_VOLUME`` with its reason and the run proceeds assembled: the chain
+    only stops being bounded, and says so in the plan. One that no route can serve -- a map that
+    cannot be decoded, read or inverted, or a disjoint case -- refuses as the plan is built,
+    before a byte is written. A case reaching only PART of the target grid is legal and common --
+    the rest takes ``fill`` -- and the plan prints how much of the grid it covers.
     """
 
     def __init__(
@@ -1456,8 +1469,32 @@ class Resample(TransformInverse):
         self._record(name, [int(extent) for extent in shape], cache_attribute)
         _source, target = self._target_of(name)
         if name:
+            self._require_runnable(name)
             self._refuse_if_disjoint(name)
         return [int(extent) for extent in target.size_zyx]
+
+    def _require_runnable(self, name: str) -> None:
+        """Refuse AT PLAN TIME a map neither route can apply.
+
+        A refusal the whole-volume path can serve — an undeclared field bound — stays a locality
+        answer, and the run proceeds assembled. A stored transform that cannot be decoded, read or
+        inverted fails the streamed path and the whole-volume one at the same line, so declaring
+        WHOLE_VOLUME for it would print a plan the run then contradicts by dying per case, after
+        bytes are written. ``transform_shape`` runs for every case as the plan is built, which is
+        the earliest the failure is knowable and the only place it costs nothing.
+        """
+        if self.transforms is None:
+            return
+        try:
+            self._stored_stages(name)
+        except TransformError:
+            raise
+        except Exception as error:  # a corrupt store fails both routes; name the case and the cure
+            raise TransformError(
+                f"'Resample' cannot read the map for case '{name}', so no route can apply it:"
+                f" {type(error).__name__}: {error}.",
+                "Check the group names under 'transforms:' and that every case has an entry in each.",
+            ) from error
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # The geometry is judged on the attribute in hand -- the case's own header, as the base
@@ -1532,8 +1569,10 @@ class Resample(TransformInverse):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         shape = [int(extent) for extent in tensor.shape[1:]]
-        if name not in self._grids:
-            self._record(name, shape, cache_attribute)
+        # Re-recorded on every call: the whole-volume path is handed the case's own evolved header,
+        # never a region's, and a grid recorded by an earlier walk may describe the stored volume
+        # rather than this stage's true input (a Canonical upstream, a Resample before this one).
+        self._record(name, shape, cache_attribute)
         source, target = self._grids_of(name)
         # The same call the streamed path makes, over one region that happens to be the whole grid:
         # equality between the two paths is then a property of the code, not a claim about it.
@@ -1609,26 +1648,51 @@ class Resample(TransformInverse):
 
     def coverage(self, name: str) -> float:
         """The fraction of the target grid that reads from inside the recorded case."""
-        return self._coverage(*self._target_of(name))
+        source, target = self._target_of(name)
+        return self._coverage(source, target, self._map_bound(name))
+
+    def _map_bound(self, name: str) -> TransformBound | None:
+        """The declared map's bound, for a coverage judged where the samples actually land.
+
+        ``None`` when there is no map — or when nothing bounds it: a coverage that cannot be judged
+        must not refuse, and the unboundable configurations carry a fallback reason of their own.
+        """
+        if self.transforms is None and self.displacement is None:
+            return None
+        try:
+            return self._bound(name)
+        except Exception:  # an unreadable or unbounded map answers None, never a crash
+            return None
 
     @classmethod
-    def _coverage(cls, source: Grid, target: Grid) -> float:
+    def _coverage(cls, source: Grid, target: Grid, bound: TransformBound | None = None) -> float:
         """The fraction of ``target`` that reads from inside ``source``, from geometry alone.
 
-        The GRID CHANGE only, never the map: a stored transform is what makes the two meet, and
-        counting the target as uncovered because a registration has not been applied yet would call
-        every warp disjoint. Counted on a capped lattice rather than solved, because the sampled set
-        is a box only while the grids are axis-aligned and a rotation makes it a polytope.
+        Judged THROUGH the declared map's affine part: a stored transform is what makes a
+        cross-frame pair meet — an MR and a CT in different scanner frames with a rigid bridging
+        them — and a coverage judged before applying it would call every such registration
+        disjoint. The residual (a spline's or a field's sup-norm) only ever moves a sample by a
+        bounded amount, so it widens the inside band rather than moving the lattice. Counted on a
+        capped lattice rather than solved, because the sampled set is a box only while the grids
+        are axis-aligned and a rotation makes it a polytope.
         """
         axes = [
             np.linspace(0.0, float(extent) - 1.0, min(cls._COVERAGE_PROBES, int(extent)))
             for extent in reversed(target.size_zyx)
         ]
         lattice = np.stack([axis.ravel() for axis in np.meshgrid(*axes, indexing="ij")], axis=-1)
-        index = target.index_to_world.then(source.world_to_index).apply(lattice)
+        to_world = target.index_to_world if bound is None else target.index_to_world.then(bound.affine)
+        index = to_world.then(source.world_to_index).apply(lattice)
+        margin_xyz = (
+            np.zeros(source.rank)
+            if bound is None
+            # A world-space residual box reaches |W2I| @ r in index space, component-wise.
+            else np.abs(source.world_to_index.matrix) @ np.asarray(bound.residual_xyz, dtype=np.float64)
+        )
         inside = np.ones(index.shape[0], dtype=bool)
         for axis in range(source.rank):
-            inside &= (index[:, axis] >= -0.5) & (index[:, axis] < source.size_zyx[source.rank - 1 - axis] - 0.5)
+            extent = float(source.size_zyx[source.rank - 1 - axis])
+            inside &= (index[:, axis] >= -0.5 - margin_xyz[axis]) & (index[:, axis] < extent - 0.5 + margin_xyz[axis])
         return float(np.count_nonzero(inside)) / float(inside.size)
 
     def _refuse_if_disjoint(self, name: str) -> None:
@@ -1663,7 +1727,7 @@ class Resample(TransformInverse):
             source, missing = Grid.from_header([int(extent) for extent in shape], cache_attribute, f"case '{name}'")
             if missing & self._target.needs:
                 return None
-            covered = self._coverage(source, self._target.of(source, name))
+            covered = self._coverage(source, self._target.of(source, name), self._map_bound(name))
         except TransformError:
             return None
         if covered >= self._WORTH_SAYING:
@@ -2844,6 +2908,10 @@ class Canonical(TransformInverse):
         return source_slices
 
     def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        # Nothing to state for a case this cannot reorient: no geometry, or a direction that is not
+        # 3-D. Its __call__ fails loudly before reaching here; a landing fold must not fail for it.
+        if not Grid.readable(cache_attribute) or cache_attribute.get_np_array("Direction").size != 9:
+            return
         initial_matrix = cache_attribute.get_tensor("Direction").reshape(3, 3).to(torch.double)
         initial_origin = cache_attribute.get_tensor("Origin")
         spacing = cache_attribute.get_tensor("Spacing").to(torch.double)
