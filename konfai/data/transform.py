@@ -3284,6 +3284,25 @@ class InferenceStack(Transform):
             sink.abort()
 
 
+class Magnitude(Transform):
+    """Vector magnitude over the CHANNEL axis: ``[C, ...]`` becomes ``[1, ...]``.
+
+    :class:`Norm`'s channel-first sibling. ``Norm`` folds the trailing axis of a stacked ensemble
+    and is whole-volume by construction (a rank change past the streamed write); a stored vector
+    volume — a displacement field read as a case — is channel-first, and its magnitude at a voxel
+    reads that voxel alone: POINTWISE, so it streams.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.POINTWISE)
+
+    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return torch.linalg.norm(tensors.float(), dim=0, keepdim=True)
+
+
 class Norm(Transform):
     """Vector magnitude over the trailing component axis.
 
