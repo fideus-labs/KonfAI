@@ -231,15 +231,18 @@ def test_transform_reads_back_identically_from_either_form(tmp_path: Path, suffi
 def test_read_image_opens_an_ome_zarr_store(tmp_path) -> None:
     """An ordinary image reads back from a store, not only from an ITK file.
 
-    ``sitk.ReadImage`` cannot open a directory, so every place that re-read an input was silently
-    ITK-only. That is what made the ensemble path unusable with OME-Zarr inputs while the
-    single-preset path — which reuses the model's output and never re-reads — worked fine.
+    Read through ``Dataset`` with no format named: the path is staged into a real case/group layout
+    first, so konfai detects the backend itself. ``sitk.ReadImage`` cannot open a directory, which is
+    what made the ensemble path unusable with OME-Zarr inputs while the single-preset path — which
+    reuses the model's output and never re-reads — worked fine.
     """
     volume = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
     store = tmp_path / "moving.ome.zarr"
     write_ome_zarr(store, volume[np.newaxis], spacing=(1.5, 2.0, 2.5), origin=(3.0, -1.0, 0.5))
 
-    image = _read_image(store)
+    work = tmp_path / "work"
+    work.mkdir()
+    image = _read_image(store, work)
 
     assert image.GetSpacing() == pytest.approx((1.5, 2.0, 2.5))
     assert image.GetOrigin() == pytest.approx((3.0, -1.0, 0.5))
@@ -247,9 +250,11 @@ def test_read_image_opens_an_ome_zarr_store(tmp_path) -> None:
 
 
 def test_read_image_still_opens_an_itk_file(tmp_path) -> None:
-    """The other half of the dispatch: a plain file goes straight through SimpleITK."""
+    """The same call, on a plain ITK file: one reader, no branch on the form."""
     volume = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
     path = tmp_path / "moving.mha"
     sitk.WriteImage(sitk.GetImageFromArray(volume), str(path))
 
-    np.testing.assert_allclose(sitk.GetArrayFromImage(_read_image(path)), volume)
+    work = tmp_path / "work"
+    work.mkdir()
+    np.testing.assert_allclose(sitk.GetArrayFromImage(_read_image(path, work)), volume)
