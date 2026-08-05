@@ -277,7 +277,9 @@ class Transform(NeedDevice, ABC):
         region sink or buffer does not outlive the case. The base holds nothing.
         """
 
-    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
         """Record the geometry a whole-volume ``__call__`` would, given the FULL source shape.
 
         Called once per case, on the persistent attribute, for the stage that owns a streamed region.
@@ -286,6 +288,9 @@ class Transform(NeedDevice, ABC):
         ``__call__`` is handed while streaming: it writes the case-level answer here instead, and the
         patch-local one it wrote on the way is dropped rather than persisted. The base is a no-op --
         a transform that leaves geometry alone has nothing to record.
+
+        ``name`` is the case the fold walks — what a per-case answer (a ``Resample`` whose
+        reference follows the case) resolves against; a stage whose answer is case-blind ignores it.
         """
 
     def stream_region(
@@ -1054,6 +1059,12 @@ class _ReferenceGrid(_TargetGrid):
     silently, because a transposed grid resamples perfectly well onto the wrong place. Naming an
     image cannot make it: the header IS the declaration. It is also what an atlas loop needs, where
     round N+1's reference is round N's own output.
+
+    An entry containing ``{case}`` FOLLOWS THE CASE: each case adopts the grid of its own entry --
+    ``reference: '{case}', reference_group: DVF`` puts every moved image on its own field's grid,
+    which is the registration idiom (a displacement field is defined ON the fixed grid). The
+    literal spelling stays one lookup for the whole cohort; a per-case one is one per case,
+    headers only either way.
     """
 
     needs = frozenset(_GEOMETRY_KEYS)
@@ -1068,7 +1079,7 @@ class _ReferenceGrid(_TargetGrid):
             filename, _flag, file_format = split_path_spec(str(dataset), default_format="mha")
             self.dataset = Dataset(Path(filename), file_format)
         self.roots: list[Dataset] = []
-        self._grid: Grid | None = None
+        self._grids: dict[str, Grid] = {}
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
         self.roots = list(datasets)
@@ -1089,49 +1100,65 @@ class _ReferenceGrid(_TargetGrid):
             "Name it: Resample: {reference: " + self.entry + ", reference_group: <group>}.",
         )
 
-    def grid(self) -> Grid:
-        """The reference's grid, read from its header once.
+    def _entry_for(self, name: str) -> str:
+        """The entry to adopt for ``name`` — literal, or the case's own when it says ``{case}``."""
+        if "{case}" not in self.entry:
+            return self.entry
+        if not name:
+            raise TransformError(
+                f"'Resample' has a per-case reference ('{self.entry}') and no case to resolve it for.",
+                "A per-case reference adopts, for each case, the grid of that case's own entry in"
+                " reference_group; it has no single grid to answer a caseless probe with.",
+            )
+        return self.entry.replace("{case}", name)
 
-        Headers only, and memoized: a grid is declared once for the stage while a case is one of
-        many, so re-reading it per case would be the same answer bought again.
+    def grid(self, name: str = "") -> Grid:
+        """The reference's grid, read from its header once per distinct entry.
+
+        Headers only, and memoized by ENTRY: a literal reference is one lookup for the whole
+        cohort, a per-case one is one per case -- never the same answer bought again.
         """
-        if self._grid is not None:
-            return self._grid
+        entry = self._entry_for(name)
+        cached = self._grids.get(entry)
+        if cached is not None:
+            return cached
         roots = self._roots()
         if not roots:
             raise TransformError(
-                f"'Resample' has no dataset to look reference '{self.entry}' up in.",
+                f"'Resample' has no dataset to look reference '{entry}' up in.",
                 "Give the stage a root of its own -- Resample: {reference: "
-                + self.entry
+                + entry
                 + ", reference_dataset: ./Reference:omezarr} -- or run it in a workflow, which hands"
                 " its dataset_filenames to every stage.",
             )
         for dataset in roots:
             group = self._group_in(dataset)
-            if dataset.is_dataset_exist(group, self.entry):
-                shape, attribute = dataset.get_infos(group, self.entry)
-                self._grid = Grid.of([int(extent) for extent in shape[1:]], attribute, f"reference '{self.entry}'")
-                return self._grid
+            if dataset.is_dataset_exist(group, entry):
+                shape, attribute = dataset.get_infos(group, entry)
+                grid = Grid.of([int(extent) for extent in shape[1:]], attribute, f"reference '{entry}'")
+                self._grids[entry] = grid
+                return grid
         raise TransformError(
-            f"'Resample' cannot find reference '{self.entry}'"
+            f"'Resample' cannot find reference '{entry}'"
             + (f" in group '{self.group}'" if self.group is not None else "")
             + f" in {', '.join(str(dataset.filename) for dataset in roots)}.",
-            "Check the entry name and its group; the reference is looked up by entry, not by the"
-            " case being processed, because one grid serves the whole cohort.",
+            "Check the entry name and its group. A literal reference is looked up by entry -- one"
+            " grid serves the whole cohort; a '{case}' reference expects every case to have its own"
+            " entry in that group.",
         )
 
     def of(self, source: Grid, name: str) -> Grid:
-        grid = self.grid()
+        grid = self.grid(name)
         if grid.rank != source.rank:
             where = f"case '{name}'" if name else "the case"
             raise TransformError(
                 f"'Resample' cannot resample {where}, which has {source.rank} spatial axis/axes,"
-                f" onto reference '{self.entry}', which has {grid.rank}."
+                f" onto reference '{self._entry_for(name)}', which has {grid.rank}."
             )
         return grid
 
     def describe(self) -> str:
-        return f"reference '{self.entry}'"
+        return f"reference '{self.entry}'" + (" (per case)" if "{case}" in self.entry else "")
 
 
 class Resample(TransformInverse):
@@ -1145,6 +1172,9 @@ class Resample(TransformInverse):
     - ``spacing``: the same field of view at another density. A component left at ``0`` keeps its axis.
     - ``shape``: the same field of view at a given count. A component left at ``0`` keeps its axis.
     - ``reference``: the grid of a stored image, adopted whole — extent, spacing, origin, direction.
+      ``'{case}'`` in the entry follows the case: each case adopts the grid of its OWN entry in
+      ``reference_group`` — ``reference: '{case}', reference_group: DVF`` lands every moved image
+      on its own field's grid, which is where a displacement field is defined.
 
     **What map to write it through** — any of, composed in this order:
 
@@ -1557,7 +1587,7 @@ class Resample(TransformInverse):
         # equality between the two paths is then a property of the code, not a claim about it.
         whole = tuple(slice(0, extent) for extent in target.size_zyx)
         result = self._sample(name, tensor, whole, [0] * source.rank)
-        self.write_stream_cache_attribute(cache_attribute, shape)
+        self.write_stream_cache_attribute(cache_attribute, shape, name)
         return result
 
     def _sample(
@@ -1589,15 +1619,17 @@ class Resample(TransformInverse):
         declared = self.interpolation or ("nearest" if tensor.dtype == torch.uint8 else "linear")
         return "nearest" if declared == "nearest" else "linear"
 
-    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
         """Push the target grid over the source's, so the case now IS the grid it was written on.
 
         Pushed and not replaced: the source geometry stays underneath for :meth:`inverse` to pop back
         to, which is the whole of the stack this and ``_inverse_geometry`` share.
         """
         shape = [int(extent) for extent in source_spatial_shape]
-        source, missing = Grid.from_header(shape, cache_attribute, "the case")
-        target = self._target.of(source, "")
+        source, missing = Grid.from_header(shape, cache_attribute, f"case '{name}'" if name else "the case")
+        target = self._target.of(source, name)
         written = {
             "Spacing": target.spacing_xyz,
             "Origin": target.origin_xyz,
@@ -2871,9 +2903,12 @@ class Canonical(TransformInverse):
             )
         return source_slices
 
-    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
         # Nothing to state for a case this cannot reorient: no geometry, or a direction that is not
         # 3-D. Its __call__ fails loudly before reaching here; a landing fold must not fail for it.
+        del name
         if not Grid.readable(cache_attribute) or cache_attribute.get_np_array("Direction").size != 9:
             return
         initial_matrix = cache_attribute.get_tensor("Direction").reshape(3, 3).to(torch.double)
@@ -2969,7 +3004,7 @@ class Canonical(TransformInverse):
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Read the source geometry before recording the canonical one over it: the attribute stacks.
         reorientation = self._reorientation(cache_attribute)
-        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]))
+        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
         return self._reorient(tensor, reorientation)
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -3427,7 +3462,10 @@ class Crop(TransformInverse):
             for target, (start, _) in zip(target_slices, box, strict=False)
         ]
 
-    def write_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
+        del name
         if "box" not in cache_attribute:
             return
         if not {"Origin", "Spacing", "Direction"} <= set(cache_attribute.keys()):
@@ -3478,7 +3516,7 @@ class Crop(TransformInverse):
         if "box" not in cache_attribute:
             return tensor
         box = self._parse_box(cache_attribute["box"])
-        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]))
+        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
         # The box carries the FAR margin, so the stop it crops at is the one the extent in hand decides.
         for i, ((_, b), s) in enumerate(zip(box, tensor.shape[1:], strict=False)):
             box[i][1] = s - b
