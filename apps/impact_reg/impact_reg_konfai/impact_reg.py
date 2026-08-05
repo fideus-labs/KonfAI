@@ -375,6 +375,7 @@ class ImpactRegKonfAIApp:
         keep_dvf: bool = False,
         config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
+        fields_only: bool = False,
     ) -> None:
         """Register every case with the selected presets and ensemble their DVFs.
 
@@ -386,6 +387,12 @@ class ImpactRegKonfAIApp:
         so every preset app always receives the four inputs (fixed, moving, fixed mask, moving mask) it declares.
 
         ``tmp_dir`` names where the intermediates are staged; see :func:`_work_dir`.
+
+        ``fields_only`` writes the displacement fields and stops there. The moved image and
+        ``Transform.h5`` are both derived FROM the field, at the cost of a full-size resample and a
+        full-size rewrite -- worth it for a caller that wants a registration to look at, waste for one
+        that composes the field with another and derives its own. A caller that reads only the fields
+        should be able to say so rather than pay for outputs it deletes.
         """
         # The cases are konfai-apps' to define, not ours to count. It expands each input GROUP into
         # units -- a file, a store, a DICOM series, or every volume inside a plain directory -- and pairs
@@ -445,23 +452,27 @@ class ImpactRegKonfAIApp:
 
                 if len(presets) == 1:
                     dvf_out = _copy_output(dvf_paths[0], case_out, "DVF")
-                    _derive_moved(moving_image, dvf_out, case_out, work)
+                    if not fields_only:
+                        _derive_moved(moving_image, dvf_out, case_out, work)
                 else:
                     # Ensemble: average the presets' displacement fields (all on the fixed grid) and warp the
                     # moving image once with that averaged field — the one output no single preset produced.
                     avg_dvf = self._average_displacement(dvf_paths)
                     dvf_out = _output_path(case_out, "DVF", "".join(dvf_paths[0].suffixes))
                     _write_displacement_field(avg_dvf, dvf_out)
-                    # Through the same derivation as the single-preset path, which reads the moving in
-                    # either form: the sitk.ReadImage this replaces cannot open a store at all, so an
-                    # ensemble of OME-Zarr inputs failed here and nowhere else.
-                    _derive_moved(
-                        moving_image, dvf_out, case_out, work, field=sitk.Cast(avg_dvf, sitk.sitkVectorFloat64)
-                    )
+                    if not fields_only:
+                        # Through the same derivation as the single-preset path, which reads the moving
+                        # in either form: the sitk.ReadImage this replaces cannot open a store at all,
+                        # so an ensemble of OME-Zarr inputs failed here and nowhere else.
+                        _derive_moved(
+                            moving_image, dvf_out, case_out, work, field=sitk.Cast(avg_dvf, sitk.sitkVectorFloat64)
+                        )
 
-                # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid displacement
-                # field as a SimpleITK transform.
-                sitk.WriteTransform(_displacement_transform(dvf_out), str(case_out / "Transform.h5"))
+                if not fields_only:
+                    # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid
+                    # displacement field as a SimpleITK transform. Another full-size write of the same
+                    # voxels, which is why it goes with the moved image rather than being unconditional.
+                    sitk.WriteTransform(_displacement_transform(dvf_out), str(case_out / "Transform.h5"))
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
