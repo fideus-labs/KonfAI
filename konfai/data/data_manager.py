@@ -84,7 +84,11 @@ _MEMORY_UNIT_BYTES: dict[str, int] = {
 
 
 def _format_gib(num_bytes: float) -> str:
-    return f"{num_bytes / 2**30:.2f} GiB"
+    """Human bytes at the unit that carries digits — a 0.3 MB refusal must not read '0.00 GiB'."""
+    for shift, unit in ((40, "TiB"), (30, "GiB"), (20, "MiB"), (10, "KiB")):
+        if abs(num_bytes) >= 2**shift:
+            return f"{num_bytes / 2**shift:.2f} {unit}"
+    return f"{num_bytes:.0f} B"
 
 
 @dataclass(frozen=True)

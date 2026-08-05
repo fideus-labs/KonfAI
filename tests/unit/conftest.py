@@ -71,6 +71,10 @@ class StreamingDatasetStub:
             "std": float(data.std(ddof=1)),
         }
 
+    def bounded_region_reads(self, group_src: str, name: str) -> bool:
+        del group_src, name
+        return True  # in-memory: a slice reads the slice
+
 
 @pytest.fixture
 def streaming_dataset_stub() -> type[StreamingDatasetStub]:

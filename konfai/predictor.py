@@ -43,7 +43,13 @@ except ImportError:
 
 from konfai import config_file, cuda_visible_devices, konfai_root, predictions_directory
 from konfai.data.augmentation import DataAugmentation
-from konfai.data.data_manager import BatchSample, DataPrediction, DatasetIter
+from konfai.data.data_manager import (
+    _AUTO_MEMORY_SAFETY_FRACTION,
+    BatchSample,
+    DataPrediction,
+    DatasetIter,
+    _node_local_ranks,
+)
 from konfai.data.patching import (
     Accumulator,
     PathCombine,
@@ -173,6 +179,10 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self._attributes = dict(entry.split("=", 1) for entry in attributes or [])
         self.reduction_classpath = reduction
         self.reduction: Reduction
+        #: The per-rank budget the streamed-vs-assembled route is priced against — the config's
+        #: number, pushed by the predictor, so the route is a function of configuration and data
+        #: rather than of the machine's free memory at the moment a case finalizes.
+        self._per_rank_budget_bytes: float | None = None
 
         self.before_reduction_transforms: list[Transform] = []
         self.after_reduction_transforms: list[Transform] = []
@@ -212,6 +222,10 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         else:
             self._async_writes = None  # decided at the first write, once the device is placed
         self._writer: _AsyncWriter | None = None
+
+    def set_memory_budget(self, budget_bytes: float | None) -> None:
+        """The per-rank budget the streamed-vs-assembled route is priced against."""
+        self._per_rank_budget_bytes = budget_bytes
 
     def _torch_device(self) -> torch.device:
         """The placed device as ``torch.device`` (``NeedDevice`` may hold a bare CUDA ordinal)."""
@@ -710,7 +724,13 @@ class OutSameAsGroupDataset(OutputDataset):
                 stacklevel=2,
             )
             fraction = _STREAM_WORTH_MIN_FRACTION
-        return assembled >= fraction * available_memory_bytes()[0]
+        # The config's budget, never the machine's mood: the same case takes the same route on a
+        # loaded machine and an idle one. A writer no predictor configured (a bare test) prices
+        # against the auto-budget's own rule.
+        budget = self._per_rank_budget_bytes
+        if budget is None:
+            budget = _AUTO_MEMORY_SAFETY_FRACTION * available_memory_bytes()[0]
+        return assembled >= fraction * budget
 
     def _plan_stream(
         self,
@@ -1906,7 +1926,9 @@ class Predictor(DistributedObject):
 
         self.datasets_filename = []
         self.predict_path = predictions_directory() / self.name
+        per_rank_budget = self.dataset.resolved_budget().per_rank_bytes(_node_local_ranks())
         for output_dataset in self.outputs_dataset.values():
+            output_dataset.set_memory_budget(per_rank_budget)
             self.datasets_filename.append(output_dataset.filename)
             # Rebase under the run directory, re-deriving is_directory: a bare string + "/" would flag an
             # h5 output as a directory and write the hidden dotfile Predictions/<run>/Dataset/.h5.

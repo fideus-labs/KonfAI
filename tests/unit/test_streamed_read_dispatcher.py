@@ -381,6 +381,39 @@ def test_a_saved_clip_bound_is_the_cases_statistic_not_the_regions(streaming_dat
     assert float(attribute["Max"]) == float(volume.max())
 
 
+def test_the_predicted_read_factor_prices_the_route_not_the_answer(streaming_dataset_stub) -> None:
+    """A pointwise chain reads the source once; a store without bounded reads decodes it per slab.
+
+    The factor is what the TRANSFORM verdict routes with: streaming is a memory strategy, and a
+    case that fits its budget is loaded whole when streaming would read the source many times over.
+    """
+    volume = np.zeros((1, 8, 32, 32), dtype=np.float32)
+
+    def manager(stub) -> DatasetManager:
+        return DatasetManager(
+            index=0,
+            group_src="CT",
+            group_dest="CT",
+            name="CASE_000",
+            dataset=cast(Dataset, stub),
+            patch=DatasetPatch([4, 8, 8]),
+            transforms=[Clip(min_value=-10.0, max_value=10.0)],
+            data_augmentations_list=[],
+        )
+
+    bounded = manager(streaming_dataset_stub(volume))
+    assert bounded.predicted_stream_read_factor(0) == pytest.approx(1.0)
+
+    class _Unbounded(streaming_dataset_stub):
+        def bounded_region_reads(self, group_src: str, name: str) -> bool:
+            return False
+
+    # A tiny budget cuts the sweep into 8 one-row slabs, each decoding the whole store.
+    unbounded = manager(_Unbounded(volume))
+    unbounded.set_memory_budget(1024.0)
+    assert unbounded.predicted_stream_read_factor(0) == pytest.approx(8.0)
+
+
 def test_global_stat_after_float_cast_still_streams_and_matches(build_streaming_manager) -> None:
     """A value-preserving cast ahead of a GLOBAL_STAT stage must not block streaming.
 
@@ -555,3 +588,33 @@ def test_a_region_stage_recording_geometry_nowhere_the_case_reads_is_refused(bui
     with pytest.raises(PatchError) as error:
         manager.get_data(0, 0, [], True)
     assert "write_stream_cache_attribute" in str(error.value)
+
+
+def test_statistics_streams_off_the_seeded_case_numbers(streaming_dataset_stub) -> None:
+    """``Statistics`` records the CASE's four numbers — the disk scan already computes them.
+
+    Whole-volume was the default it never needed: seeded, each region restates the case's answer,
+    and the recorded ``Image*`` keys equal the volume's own statistics rather than a region's.
+    """
+    from konfai.data.transform import Statistics
+
+    rng = np.random.default_rng(6)
+    volume = (rng.standard_normal((1, 8, 8)).astype(np.float32)) * 100.0
+    stub = streaming_dataset_stub(volume)
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, stub),
+        patch=DatasetPatch([4, 4]),
+        transforms=[Statistics()],
+        data_augmentations_list=[],
+    )
+    assert manager.can_stream_patch(0), manager.stream_refusal(0)
+    _tensor, attribute = manager._get_streamed_data(0, 0, True)
+    assert float(attribute["ImageMin"]) == pytest.approx(float(volume.min()))
+    assert float(attribute["ImageMax"]) == pytest.approx(float(volume.max()))
+    assert float(attribute["ImageMean"]) == pytest.approx(float(volume.mean()), rel=1e-6)
+    assert float(attribute["ImageStd"]) == pytest.approx(float(volume.std(ddof=1)), rel=1e-6)
+    assert stub.full_reads == 0 and stub.stats_reads == 1

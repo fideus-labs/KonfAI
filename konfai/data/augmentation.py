@@ -514,7 +514,11 @@ class Rotate(EulerTransform):
         # what LocalityKind.preserves_statistics lets a later stage trust. Only the draw can say whether
         # this one is that, and the draw is a property of the copy rather than of the case.
         if Rotate._index_remap(self.matrix[index][a]) is None:
-            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason="this copy's draw is not a quarter-turn, so it resamples the whole volume;"
+                " is_quarter: true keeps every draw an index remap",
+            )
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
@@ -685,7 +689,11 @@ class Flip(DataAugmentation):
         # maps values, so a later GLOBAL_STAT could no longer seed from the stored volume -- and only
         # the tensor's channel count says whether it fires, which a header-time declaration cannot see.
         if self.vector_field:
-            return PatchLocality(LocalityKind.WHOLE_VOLUME)
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME,
+                reason="vector_field: true negates the mirrored component channel, so the stored"
+                " volume's statistics are not this stage's output's",
+            )
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def _stream_region_source(
