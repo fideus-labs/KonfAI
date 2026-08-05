@@ -154,6 +154,46 @@ class Mean(Reduction):
         return result
 
 
+class Std(Reduction):
+    """The element-wise standard deviation across cases — the ensemble-spread map.
+
+    Welford's running moments, so the peak is two float32 accumulators plus the case being read,
+    whatever N is. Unbiased (N-1), matching ``torch.std``; a single case has no spread and
+    finalizes to zeros.
+    """
+
+    voxel_local = True
+    incremental = True
+
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        self.start()
+        for tensor in tensors:
+            self.accumulate(tensor)
+        return self.finalize()
+
+    def start(self) -> None:
+        self._count = 0
+        self._mean: torch.Tensor | None = None
+        self._m2: torch.Tensor | None = None
+
+    def accumulate(self, tensor: torch.Tensor) -> None:
+        value = tensor.float()
+        self._count += 1
+        if self._mean is None or self._m2 is None:
+            self._mean, self._m2 = value.clone(), torch.zeros_like(value)
+            return
+        delta = value - self._mean
+        self._mean.add_(delta / self._count)
+        self._m2.addcmul_(delta, value - self._mean)
+
+    def finalize(self) -> torch.Tensor:
+        if self._mean is None or self._m2 is None:
+            raise ReductionError("Std.finalize() with no case accumulated.", "Accumulate at least one case.")
+        result = torch.zeros_like(self._mean) if self._count < 2 else (self._m2 / (self._count - 1)).sqrt_()
+        self._mean, self._m2, self._count = None, None, 0
+        return result
+
+
 class Median(Reduction):
     """The element-wise median across cases.
 
