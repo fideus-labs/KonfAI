@@ -1950,9 +1950,37 @@ class Dataset:
                 attributes,
             )
 
+        def bounded_region_reads(self, name: str) -> bool:
+            try:
+                import h5py  # noqa: F401
+            except ImportError:
+                return False
+            shape, _attributes = self.get_infos("", name)
+            return len(shape) == 4 and shape[0] == 3
+
         def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
-            data, attributes = self.file_to_data(group, name)
-            return data[slices], attributes
+            """A region of a displacement entry, decoded from the parameters it maps to alone.
+
+            The buffer is ``[z][y][x]`` with the component fastest, so a span of leading-axis rows
+            is one contiguous span of the parameters: read, reshaped, and sliced down to the exact
+            region — the peak is the row span, never the field.
+            """
+            try:
+                import h5py
+            except ImportError:
+                data, attributes = self.file_to_data(group, name)
+                return data[slices], attributes
+            shape, attributes = self.get_infos(group, name)
+            if len(shape) != 4 or shape[0] != 3 or DISPLACEMENT_FIELD_ATTRIBUTE not in attributes:
+                data, attributes = self.file_to_data(group, name)
+                return data[slices], attributes
+            spatial = shape[1:]
+            leading = slices[1].indices(spatial[0])
+            row = 3 * int(np.prod(spatial[1:], dtype=np.int64))
+            with h5py.File(self._path(name), "r") as file:
+                span = file["TransformGroup/0/TransformParameters"][leading[0] * row : leading[1] * row]
+            block = np.moveaxis(span.reshape(leading[1] - leading[0], *spatial[1:], 3), -1, 0)
+            return np.asarray(block[(slices[0], slice(None), *slices[2:])], dtype=np.float32), attributes
 
         def file_to_data_statistics(
             self,
