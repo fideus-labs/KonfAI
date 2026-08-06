@@ -17,7 +17,7 @@
 """ConvexAdam (itk-impact) registration as a self-contained KonfAI model.
 
 Same idiomatic ``add_module`` graph and the same output contract as the elastix preset
-(``MovedImage`` + ``DisplacementField`` on the FIXED grid, split by two ``ChannelSelect``),
+(``DisplacementField`` on the FIXED grid),
 so the orchestrator / app.json / ensemble / uncertainty are unchanged. The engine here is
 the native, in-memory itk-impact ConvexAdam pipeline (``pip install itk-impact``) instead of
 the elastix binary:
@@ -202,7 +202,7 @@ def _itk_affine_to_sitk(affine: "itk.AffineTransform") -> sitk.AffineTransform:
 
 
 class ConvexAdamEngine:
-    """Register a fixed/moving pair with the itk-impact ConvexAdam pipeline; return (moved, dvf) on the fixed grid.
+    """Register a fixed/moving pair with the itk-impact ConvexAdam pipeline; return the displacement field on the fixed grid.
 
     The IMPACT feature models are downloaded once (``repo:filename`` on Hugging Face) and reused across cases.
     Masks are accepted for signature compatibility with the elastix engine but ignored: the ConvexAdam
@@ -427,8 +427,8 @@ class ConvexAdamEngine:
         device_index: int,
         fixed_mask: sitk.Image | None = None,
         moving_mask: sitk.Image | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Register ``moving`` onto ``fixed``; return (moved, dvf) as channel-first arrays on the fixed grid."""
+    ) -> np.ndarray:
+        """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid."""
         device = f"cuda:{device_index}" if device_index >= 0 else "cpu"
         fixed_itk = _sitk_to_itk(fixed)
         moving_itk = _sitk_to_itk(moving)
@@ -452,7 +452,6 @@ class ConvexAdamEngine:
         if field is not None:
             chain.append(_itk_field_to_sitk_transform(field, fixed))
         composite = sitk.CompositeTransform(chain)
-        moved = sitk.Resample(moving, fixed, composite, sitk.sitkLinear, 0.0, moving.GetPixelID())
         dvf = sitk.TransformToDisplacementField(
             composite,
             sitk.sitkVectorFloat64,
@@ -461,9 +460,8 @@ class ConvexAdamEngine:
             fixed.GetSpacing(),
             fixed.GetDirection(),
         )
-        moved_np, _ = image_to_data(moved)
         dvf_np, _ = image_to_data(dvf)
-        return moved_np, dvf_np
+        return dvf_np
 
 
 class ConvexAdamRegistration(torch.nn.Module):
@@ -500,8 +498,8 @@ class ConvexAdamRegistration(torch.nn.Module):
             for b in range(fixed.shape[0]):
                 fixed_img = data_to_image(fixed[b].detach().cpu().numpy(), fixed_attrs[b])
                 moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
-                moved_np, dvf_np = self._engine.register(fixed_img, moving_img, device_index)
-                combined.append(torch.from_numpy(np.concatenate([moved_np, dvf_np], axis=0)))
+                dvf_np = self._engine.register(fixed_img, moving_img, device_index)
+                combined.append(torch.from_numpy(dvf_np))
         return torch.stack(combined, dim=0).to(fixed.device)
 
 
@@ -521,7 +519,7 @@ class RegistrationNet(network.Network):
     """Pairwise ConvexAdam registration as an ``add_module`` graph (fixed = branch 0, moving = branch 1;
     the mask branches 2/3 are accepted but unused by this engine).
 
-    Outputs on the fixed grid: ``MovedImage`` (moving resampled onto fixed) and ``DisplacementField`` (the
+    Output on the fixed grid: ``DisplacementField`` (the
     DIM-component displacement field, in mm). Geometry is attached by the predictor via
     ``same_as_group: Volume_0:Fixed``.
     """
@@ -629,5 +627,4 @@ class RegistrationNet(network.Network):
         self.add_module(
             "Registration", ConvexAdamRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"]
         )
-        self.add_module("MovedImage", ChannelSelect(0, 1), in_branch=["registration"], out_branch=["moved"])
-        self.add_module("DisplacementField", ChannelSelect(1, 4), in_branch=["registration"], out_branch=["dvf"])
+        self.add_module("DisplacementField", ChannelSelect(0, 3), in_branch=["registration"], out_branch=["dvf"])

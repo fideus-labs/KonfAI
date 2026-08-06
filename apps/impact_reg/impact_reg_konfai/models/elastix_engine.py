@@ -56,7 +56,7 @@ def _is_partial_mask(mask: "sitk.Image | None") -> bool:
 
 
 class ElastixEngine:
-    """Run the elastix-IMPACT binary on a fixed/moving pair; return (moved, dvf) on the fixed grid.
+    """Run the elastix-IMPACT binary on a fixed/moving pair; return the displacement field on the fixed grid.
 
     NOTE: the elastix-IMPACT metric lives only in the custom ``elastix-impact`` binary (SimpleElastix does
     NOT ship it), so registration is a subprocess call, not ``sitk.ElastixImageFilter``.
@@ -253,8 +253,8 @@ class ElastixEngine:
         device_index: int,
         fixed_mask: sitk.Image | None = None,
         moving_mask: sitk.Image | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Register ``moving`` onto ``fixed``; return (moved, dvf) as channel-first arrays on the fixed grid.
+    ) -> np.ndarray:
+        """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid.
 
         Optional ``fixed_mask`` / ``moving_mask`` restrict the similarity metric to a region (elastix
         ``-fMask`` / ``-mMask``); a mask covering the whole image is equivalent to passing none.
@@ -353,7 +353,6 @@ class ElastixEngine:
                 raise FileNotFoundError("elastix produced no composite transform file.")
             transform = sitk.ReadTransform(str(transforms[-1]))
 
-            moved = sitk.Resample(moving, fixed, transform, sitk.sitkLinear, 0.0, moving.GetPixelID())
             dvf = sitk.TransformToDisplacementField(
                 transform,
                 sitk.sitkVectorFloat64,
@@ -362,9 +361,8 @@ class ElastixEngine:
                 fixed.GetSpacing(),
                 fixed.GetDirection(),
             )
-            moved_np, _ = image_to_data(moved)
             dvf_np, _ = image_to_data(dvf)
-            return moved_np, dvf_np
+            return dvf_np
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -424,8 +422,8 @@ class ElastixRegistration(torch.nn.Module):
             moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
             fixed_mask_img = data_to_image(fixed_mask[b].detach().cpu().numpy(), fmask_attrs[b])
             moving_mask_img = data_to_image(moving_mask[b].detach().cpu().numpy(), mmask_attrs[b])
-            moved_np, dvf_np = self._engine.register(
+            dvf_np = self._engine.register(
                 fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img
             )
-            combined.append(torch.from_numpy(np.concatenate([moved_np, dvf_np], axis=0)))
+            combined.append(torch.from_numpy(dvf_np))
         return torch.stack(combined, dim=0).to(fixed.device)

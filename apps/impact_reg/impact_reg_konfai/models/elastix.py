@@ -17,7 +17,7 @@
 """Registration as a KonfAI model: the config -> elastix parameter-map mapping + the ``add_module`` graph.
 
 ``RegistrationNet`` wires ``ElastixRegistration`` (fixed = branch 0, moving = branch 1, fixed/moving masks =
-2/3) and splits its output into ``MovedImage`` / ``DisplacementField`` on the fixed grid. This module owns
+2/3) and emits its ``DisplacementField`` on the fixed grid. This module owns
 the MAPPING — the per-resolution model matrix (``resolutions``) turned into IMPACT parameter-map lines, and
 the config schema (``ModelSpec`` / ``ResolutionSpec``). The elastix RUNTIME (binary install, model download,
 subprocess, progress) lives in ``elastix_engine.py`` and is imported only when the graph is built.
@@ -279,9 +279,8 @@ class RegistrationNet(network.Network):
     """Pairwise registration as an ``add_module`` graph (fixed = branch 0, moving = branch 1, fixed mask = 2,
     moving mask = 3; masks restrict the metric, whole-image = no restriction).
 
-    Outputs (both on the fixed grid): ``MovedImage`` (moving resampled onto fixed) and ``DisplacementField``
-    (the dim-component displacement field, mm). ``ElastixRegistration`` produces both channel-stacked; two
-    ``ChannelSelect`` modules split them. Output geometry is attached by the predictor via
+    Output, on the fixed grid: ``DisplacementField``
+    (the dim-component displacement field, mm). Output geometry is attached by the predictor via
     ``same_as_group: Volume_0:Fixed``.
     """
 
@@ -366,5 +365,4 @@ class RegistrationNet(network.Network):
             in_branch=[0, 1, 2, 3],
             out_branch=["registration"],
         )
-        self.add_module("MovedImage", ChannelSelect(0, 1), in_branch=["registration"], out_branch=["moved"])
-        self.add_module("DisplacementField", ChannelSelect(1, 4), in_branch=["registration"], out_branch=["dvf"])
+        self.add_module("DisplacementField", ChannelSelect(0, 3), in_branch=["registration"], out_branch=["dvf"])
