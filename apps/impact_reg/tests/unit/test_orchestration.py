@@ -209,3 +209,50 @@ def test_register_fields_only_writes_nothing_derived(tmp_path: Path) -> None:
     assert (case / "DVF.mha").is_file()
     assert not (case / "Moved.mha").exists()
     assert not (case / "Transform.h5").exists()
+
+
+def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> None:
+    """One store entry beside an ``.mha`` flips a mixed root's backend — the staging keeps one root
+    per group, so a caller's OME-Zarr moving registers against the ``.mha`` field every published
+    preset declares."""
+    ome_zarr = pytest.importorskip("konfai.utils.ome_zarr")
+    if not ome_zarr._zarr_v3_available():
+        pytest.skip("writing an OME-Zarr moving needs zarr 3")
+
+    volume = np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)
+    moving = tmp_path / "moving.ome.zarr"
+    ome_zarr.write_ome_zarr(moving, volume[None], spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    reference = sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32))  # the moving's grid
+    app = reg.ImpactRegKonfAIApp()
+
+    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
+        return {"P000": out / "DVF.mha"}
+
+    app._infer_preset = field_only  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+
+    # moved(p) = moving(p + d), d = +2 along x on a unit grid: moving is z*64 + y*8 + x.
+    moved = sitk.GetArrayFromImage(sitk.ReadImage(str(out / "P000" / "Moved.mha")))
+    np.testing.assert_allclose(moved[0, 0, 0], 2.0, atol=1e-6)
+    np.testing.assert_allclose(moved[1, 1, 0], 74.0, atol=1e-6)
+    assert (out / "P000" / "Transform.h5").is_file()
+
+
+def test_stage_group_replaces_an_existing_link(tmp_path: Path) -> None:
+    """Re-staging the same case points the link at the new source instead of raising."""
+    first, second = tmp_path / "a.mha", tmp_path / "b.mha"
+    for path in (first, second):
+        sitk.WriteImage(sitk.GetImageFromArray(np.zeros((2, 2, 2), dtype=np.float32)), str(path))
+
+    reg._stage_group(tmp_path / "stage", "DVF", {"P000": first})
+    spec = reg._stage_group(tmp_path / "stage", "DVF", {"P000": second})
+
+    root = Path(spec.rpartition(":")[0])
+    assert (root / "P000" / "DVF.mha").resolve() == second.resolve()
