@@ -70,6 +70,12 @@ def _as_transform(path: Path) -> "sitk.Transform":
     return sitk.DisplacementFieldTransform(sitk.Cast(read_displacement_field(path), sitk.sitkVectorFloat64))
 
 
+def _case_key(name: str) -> tuple[int, str]:
+    """konfai-apps numbers cases ``P000``..: zero-padded to three digits, longer past ``P999`` --
+    so length-then-lexicographic IS its numeric order, without parsing a preset's own naming."""
+    return (len(name), name)
+
+
 def _app_id(preset: str) -> str:
     """Resolve a preset to a KonfAIApp id: a local ``<dir>/<preset>`` path, or ``<repo>:<preset>`` on HF."""
     if Path(IMPACT_REG_KONFAI_REPO).is_dir():
@@ -443,10 +449,16 @@ class ImpactRegKonfAIApp:
                     " ensemble folds one group, so every member must declare the same one."
                 )
             group = groups.pop()
+            if group == "Moved" and not fields_only:
+                raise RuntimeError(
+                    "the preset names its output 'Moved', the name this pipeline writes the derived"
+                    " image under; the two would collide in the case directory. Rename the preset's"
+                    " output, or pass fields_only."
+                )
             fields_by_preset = {preset: fields for preset, (_, fields) in fields_by_preset.items()}
-            cases = sorted(fields_by_preset[presets[0]])
+            cases = sorted(fields_by_preset[presets[0]], key=_case_key)
             for preset, fields in fields_by_preset.items():
-                if sorted(fields) != cases:
+                if sorted(fields, key=_case_key) != cases:
                     raise RuntimeError(
                         f"preset '{preset}' produced cases {sorted(fields)} where '{presets[0]}' produced "
                         f"{cases}; an ensemble can only be averaged case by case."
@@ -507,7 +519,7 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Reduce, Write
 
         members = _stage_group(
-            work / f"ensemble_{case}", "DVF", {preset: dvf for preset, dvf in zip(presets, dvf_paths, strict=True)}
+            work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True))
         )
         suffixes = "".join(dvf_paths[0].suffixes)
         _output_path(output / case, group, suffixes)  # drop a stale other-form output before writing
