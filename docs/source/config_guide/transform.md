@@ -353,7 +353,6 @@ transforms:
     reference_group: CT
     field: ./Fields:mha
     field_group: DVF
-    max_displacement: 4.0
   Write: {dataset: ./Registered:mha}
 ```
 
@@ -373,23 +372,24 @@ field solved at 120 µm moves a volume stored at 30 µm without being upsampled
 first. Outside its own extent the displacement is zero: the transform is the
 identity where the field says nothing, as SimpleITK has it.
 
-`max_displacement` is **optional**. The field window a region samples is its
-own box, read for sampling regardless — and the sup of the values just read
-bounds that region's source pull, so each slab pays exactly the halo *its*
-displacements require, measured at run from a read the sampler needed anyway.
-A declared bound (or `auto`, reading the one KonfAI records on a field it
-writes) does two things: it lets the plan **price** the reads exactly — with
-no bound the estimate assumes a zero field, and the plan says so — and it is
-**checked against every field region actually read**: a field that exceeds
-what it declared raises rather than sampling zeros, which would show up as a
-dark rim around the moved anatomy and nothing else.
+Nothing is declared about how far the field reaches. The field window a
+region samples is its own box, read for sampling regardless — and the sup of
+the values just read bounds that region's source pull, so each slab pays
+exactly the halo *its* displacements require, measured at run from a read the
+sampler needed anyway. A bound the **store recorded at write time** (KonfAI
+records one on the OME-Zarr fields it writes) does two things without anyone
+asking: it lets the plan **price** the reads exactly — without one the
+estimate assumes a zero field, and the plan says so — and it is **checked
+against every field region actually read**: a store whose data exceed its own
+metadata raises rather than sampling zeros, which would show up as a dark rim
+around the moved anatomy and nothing else.
 
 Naming no target grid is the shape update of an atlas build — the field applied
 on the case's *own* grid — and is the same stage with `reference` left out:
 
 ```yaml
 transforms:
-  Resample: {field: ./Fields:mha, field_group: DVF, max_displacement: 4.0}
+  Resample: {field: ./Fields:mha, field_group: DVF}
   Write: {dataset: ./Warped:mha}
 ```
 

@@ -111,9 +111,7 @@ class ModelSpec:
 class ResolutionSpec:
     """One elastix resolution level: its iteration budget and the (self-configured) models compared there."""
 
-    max_iterations: Annotated[
-        int, Range(1, 100000), "Optimiser iterations spent at this resolution level."
-    ]
+    max_iterations: Annotated[int, Range(1, 100000), "Optimiser iterations spent at this resolution level."]
     models: dict[str, ModelSpec]
 
 

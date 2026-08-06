@@ -17,7 +17,8 @@
 """``Warp`` resamples a case through a displacement field, region by region.
 
 The claim under test is the one that matters for a volume larger than memory: the streamed result
-equals the whole-volume one, and the declared displacement bound is verified rather than trusted."""
+equals the whole-volume one, each region's window is sized from the field values it reads, and a
+bound the store recorded is verified rather than trusted."""
 
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from konfai.data.patching import DatasetManager
 from konfai.data.transform import LocalityKind, RegionContext, Save, Warp
 from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset
 from konfai.utils.errors import TransformError
-from konfai.utils.ome_zarr import _zarr_v3_available
+from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE, _zarr_v3_available
 
 pytest.importorskip("SimpleITK")
 
@@ -87,22 +88,23 @@ def _recorded(warp: Warp, attribute: Attribute | None = None, shape: tuple[int, 
     return warp
 
 
-def test_the_source_region_is_the_target_grown_by_the_declared_displacement() -> None:
-    """A warp is a regrid onto the case's own grid, and its window is the bound in voxels.
+def test_the_source_region_is_the_target_grown_by_the_field_reach(tmp_path: Path) -> None:
+    """A warp is a regrid onto the case's own grid, and its window is the field's reach in voxels.
 
     Spacing is (x=2, y=1, z=1), so in array order (z, y, x) 4 um of displacement is 4, 4 and 2
     voxels -- plus the one voxel the linear taps reach. Declared as REGRID and not HALO because the
     window is derived from the case's GEOMETRY: see the oblique case below, which a per-axis halo
     cannot express at all.
     """
-    warp = _recorded(Warp(field="./x:h5", group="DVF", max_displacement=4.0))
+    _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 4.0, 4.0))
+    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF"))
     assert warp.patch_locality(_attributes()).kind is LocalityKind.REGRID
 
     target = (slice(4, 6), slice(4, 6), slice(4, 6))
-    window = warp.stream_region_source("CASE_000", target, [10, 12, 14], _attributes())
+    window = warp.measured_region_source("CASE_000", target, [10, 12, 14], _attributes())
 
     # The rule, written out: the region's OUTER faces (start - 0.5 .. stop - 0.5) in world units,
-    # grown by the declared 4 um, back to indices, floor/ceil, one voxel of margin for the taps.
+    # grown by the field's 4 um, back to indices, floor/ceil, one voxel of margin for the taps.
     extents, per_voxel = (10, 12, 14), (1.0, 1.0, 2.0)  # array order (z, y, x)
     expected = []
     for axis, extent in enumerate(extents):
@@ -112,7 +114,7 @@ def test_the_source_region_is_the_target_grown_by_the_declared_displacement() ->
     assert [(part.start, part.stop) for part in window] == expected
 
 
-def test_an_oblique_case_grows_its_window_on_every_axis() -> None:
+def test_an_oblique_case_grows_its_window_on_every_axis(tmp_path: Path) -> None:
     """The bug a per-axis halo hid: a displacement along x reaches into y and z when the axes turn.
 
     ``Warp`` used to convert a world bound to a halo per ARRAY axis, which silently assumed the
@@ -124,22 +126,20 @@ def test_an_oblique_case_grows_its_window_on_every_axis() -> None:
     cos, sin = float(np.cos(angle)), float(np.sin(angle))
     turned["Direction"] = np.asarray([[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]).reshape(-1)
 
-    warp = _recorded(Warp(field="./x:h5", group="DVF", max_displacement=4.0), turned)
+    _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 0.0, 0.0))
+    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF"), turned)
     target = (slice(5, 6), slice(5, 6), slice(5, 6))
-    window = warp.stream_region_source("CASE_000", target, [10, 12, 14], turned)
+    window = warp.measured_region_source("CASE_000", target, [10, 12, 14], turned)
 
     widths = [part.stop - part.start for part in window]
     assert all(width > 1 for width in widths), f"a turned case reaches on every axis, got {widths}"
 
 
 @_needs_rfc5
-def test_auto_reads_the_bound_the_fields_recorded_when_they_were_written(tmp_path: Path) -> None:
-    """``max_displacement: auto`` is the number the producer already knew.
-
-    A field records its own per-component bound at write time, so asking the user to measure it is
-    asking for something the store can answer from a header. Per component and not one collapsed
-    maximum: these grids are anisotropic, and one number over-reads the fine axes.
-    """
+def test_the_bound_the_fields_recorded_prices_the_plan(tmp_path: Path) -> None:
+    """The recorded bound is the number the producer already knew — read from headers, declared by
+    nobody. It sizes the plan's (headers-only) windows; per component and not one collapsed
+    maximum, because these grids are anisotropic and one number over-reads the fine axes."""
     fields = Dataset(tmp_path / "dvf", "omezarr")
     for case, shift in (("CASE_000", (1.0, 2.0, 3.0)), ("CASE_001", (0.5, 6.0, 1.0))):
         field = np.zeros((3, 4, 5, 6), dtype=np.float32)
@@ -149,7 +149,7 @@ def test_auto_reads_the_bound_the_fields_recorded_when_they_were_written(tmp_pat
         attribute[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
         fields.write("DVF", case, field, attribute)
 
-    warp = Warp(field=f"{tmp_path / 'dvf'}:omezarr", group="DVF", max_displacement="auto")
+    warp = Warp(field=f"{tmp_path / 'dvf'}:omezarr", group="DVF")
     locality = warp.patch_locality(_attributes())
 
     # The cohort's bound is (x=1.0, y=6.0, z=3.0); spacing in array order (z, y, x) is (1, 1, 2), so
@@ -161,7 +161,7 @@ def test_auto_reads_the_bound_the_fields_recorded_when_they_were_written(tmp_pat
     assert [part.start for part in window] == starts
 
 
-def test_auto_survives_an_unreadable_entry_in_the_field_group(tmp_path: Path) -> None:
+def test_the_header_scan_survives_an_unreadable_entry_in_the_field_group(tmp_path: Path) -> None:
     """The whole group is header-read, including entries this run never warps.
 
     A directory store lists its entries from the filesystem alone, so a corrupt one is only met at
@@ -176,7 +176,7 @@ def test_auto_survives_an_unreadable_entry_in_the_field_group(tmp_path: Path) ->
     # The first entry the scan meets, so the read reaches it before any bound-less entry ends the scan.
     (tmp_path / "dvf" / "CASE_000" / "DVF.mha").write_bytes(b"not an image")
 
-    locality = Warp(field=f"{tmp_path / 'dvf'}:mha", group="DVF", max_displacement="auto").patch_locality(_attributes())
+    locality = Warp(field=f"{tmp_path / 'dvf'}:mha", group="DVF").patch_locality(_attributes())
 
     assert locality.kind is LocalityKind.WHOLE_VOLUME
 
@@ -186,7 +186,7 @@ def test_a_field_with_no_bound_still_streams_with_windows_measured_at_run(tmp_pa
     for sampling regardless, and the sup of those very values sizes that region's source pull —
     per region, so a quiet slab pays a quiet halo where the shifted one pays its shift."""
     _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 0.0, 0.0))  # 4 um along x alone
-    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement="auto"))
+    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF"))
 
     assert warp.patch_locality(_attributes()).kind is LocalityKind.REGRID
 
@@ -203,7 +203,7 @@ def test_a_field_with_no_bound_still_streams_with_windows_measured_at_run(tmp_pa
 def test_sizing_and_sampling_share_one_field_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The window that sizes a region's pull is the window the sampler needs next: one read."""
     _source, _fields, _volume = _fixture(tmp_path)
-    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement="auto"))
+    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF"))
     displacement = warp.displacement
     assert displacement is not None
     reads: list[int] = []
@@ -220,33 +220,9 @@ def test_sizing_and_sampling_share_one_field_read(tmp_path: Path, monkeypatch: p
     assert len(reads) == 1
 
 
-def test_streamed_equals_whole_volume_with_no_declared_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The measured windows carry the same claim as the declared ones: the same answer, region by
-    region, with several regions — and nothing was declared to make it true."""
-    from konfai.data import patching as patching_module
-
-    monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 3)
-    source, _fields, volume = _fixture(tmp_path, shift_um=(1.0, 2.0, 3.0))
-    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement="auto")
-
-    reference = warp("CASE_000", torch.from_numpy(volume), _attributes()).numpy()
-
-    manager = _manager(source, [warp, Save(f"{tmp_path / 'out'}:h5")])
-    assert manager.can_stream_patch(0, apply_augmentations=False)
-    assert manager.materialize() is True
-    streamed, _ = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")
-
-    np.testing.assert_allclose(streamed, reference, rtol=1e-5, atol=1e-4)
-
-
-def test_a_max_displacement_that_is_neither_a_number_nor_auto_is_refused() -> None:
-    with pytest.raises(TransformError, match="neither a number nor 'auto'"):
-        Warp(field="./x:h5", group="DVF", max_displacement="lots")
-
-
 def test_a_constant_shift_moves_the_volume_by_that_many_voxels(tmp_path: Path) -> None:
     _source, _fields, volume = _fixture(tmp_path, shift_um=(0.0, 0.0, 3.0))
-    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement=3.0)
+    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF")
 
     moved = warp("CASE_000", torch.from_numpy(volume), _attributes()).numpy()
 
@@ -255,12 +231,13 @@ def test_a_constant_shift_moves_the_volume_by_that_many_voxels(tmp_path: Path) -
 
 
 def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The claim that matters: the same answer, region by region, with several regions."""
+    """The claim that matters: the same answer, region by region, with several regions — and
+    nothing was declared to make it true, the windows being measured from the field itself."""
     from konfai.data import patching as patching_module
 
     monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 3)
     source, _fields, volume = _fixture(tmp_path, shift_um=(1.0, 2.0, 3.0))
-    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement=4.0)
+    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF")
 
     reference = warp("CASE_000", torch.from_numpy(volume), _attributes()).numpy()
 
@@ -272,15 +249,20 @@ def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.Monkey
     np.testing.assert_allclose(streamed, reference, rtol=1e-5, atol=1e-4)
 
 
-def test_a_field_beyond_the_declared_bound_raises(tmp_path: Path) -> None:
-    """Declared, then verified: sampling outside what was read would show as a dark rim and nothing
-    else, so the mismatch is raised instead.
+def test_a_field_beyond_its_recorded_bound_raises(tmp_path: Path) -> None:
+    """The store's metadata is a promise about what was read; a store whose data break it must not
+    sample zeros — a dark rim around the moved anatomy and nothing else to see.
 
     Checked per component, the way the halo is derived: a field under the collapsed maximum can
     still exceed the bound on one axis, and that axis is the one whose halo was too small.
     """
     _source, _fields, volume = _fixture(tmp_path, shift_um=(0.0, 0.0, 9.0))
-    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement=1.0)
+    attributes = _attributes()
+    attributes[DISPLACEMENT_BOUND_ATTRIBUTE] = np.asarray([1.0, 1.0, 1.0])
+    field = np.zeros((3, 10, 12, 14), dtype=np.float32)
+    field[2] = 9.0
+    Dataset(tmp_path / "lying", "mha").write("DVF", "CASE_000", field, attributes)
+    warp = Warp(field=f"{tmp_path / 'lying'}:mha", group="DVF")
 
     _recorded(warp)
     with pytest.raises(TransformError, match=r"on component 2, beyond the 1\.000"):
@@ -297,7 +279,7 @@ def test_a_field_with_the_wrong_component_count_is_named(tmp_path: Path) -> None
     rng = np.random.default_rng(1)
     Dataset(tmp_path / "src", "h5").write("CT", "CASE_000", rng.random((1, 4, 4, 4)).astype(np.float32), _attributes())
     Dataset(tmp_path / "dvf", "h5").write("DVF", "CASE_000", np.zeros((2, 4, 4, 4), np.float32), _attributes())
-    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF", max_displacement=1.0)
+    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF")
 
     with pytest.raises(TransformError, match="component"):
         warp("CASE_000", torch.zeros(1, 4, 4, 4), _attributes())

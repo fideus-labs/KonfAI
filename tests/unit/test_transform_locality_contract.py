@@ -195,9 +195,7 @@ _CASES: dict[str, list[_Case]] = {
         # normalises by the extent it is handed, and a patch is handed a window. That is the one
         # place a streamed answer is not bit-identical to the whole-volume one, and the atol says so.
         _Case(
-            ResampleToReference(
-                entry=_CASE_NAME, group="Reference", field_group="Field", max_displacement=_FIELD_BOUND
-            ),
+            ResampleToReference(entry=_CASE_NAME, group="Reference", field_group="Field"),
             atol=_REGRID_ATOL,
         ),
     ],

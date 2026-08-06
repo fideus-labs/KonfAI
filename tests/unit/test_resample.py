@@ -287,11 +287,6 @@ def test_a_change_of_grid_and_a_warp_are_one_interpolation(tmp_path) -> None:
     np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-3)
 
 
-def test_a_bound_declared_without_a_field_is_refused() -> None:
-    with pytest.raises(TransformError, match="no field to apply"):
-        Resample(spacing=[1.0, 1.0, 1.0], max_displacement=10.0)
-
-
 # ------------------------------------------------------------------ which loop runs
 
 

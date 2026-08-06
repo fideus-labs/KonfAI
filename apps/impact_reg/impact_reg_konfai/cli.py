@@ -30,13 +30,6 @@ from pathlib import Path
 from impact_reg_konfai.impact_reg import ImpactRegKonfAIApp, get_available_presets
 
 
-def _max_displacement(value: str) -> float | str:
-    """``auto`` or a distance in world units — the window bound a streamed field read needs."""
-    if value.strip().lower() == "auto":
-        return "auto"
-    return float(value)
-
-
 def _paths(value: str) -> Path:
     return Path(value).resolve()
 
@@ -142,16 +135,6 @@ def main() -> None:
         help="Write the displacement fields only: skip the moved image and Transform.h5, both derived "
         "from the field. For a caller that composes the field itself and would delete them.",
     )
-    reg.add_argument(
-        "--max-displacement",
-        "--max_displacement",
-        dest="max_displacement",
-        type=_max_displacement,
-        default="auto",
-        help="Optional bound (world units) on the field: the moved image streams either way, each slab "
-        "sized from the field values it reads. A bound ('auto' reads the one OME-Zarr fields record) "
-        "lets the plan price the reads exactly, and a declared one is checked against every region read.",
-    )
     _add_device(reg)
     _add_tmp_dir(reg)
 
@@ -248,7 +231,6 @@ def _dispatch(args: argparse.Namespace, app: ImpactRegKonfAIApp, ev: argparse.Ar
             config_overrides=args.config_overrides,
             tmp_dir=args.tmp_dir,
             fields_only=args.fields_only,
-            max_displacement=args.max_displacement,
         )
 
     elif args.command == "eval":

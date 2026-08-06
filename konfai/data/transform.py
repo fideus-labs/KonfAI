@@ -1204,9 +1204,9 @@ class Resample(TransformInverse):
     -- a theorem, not a sample of the boundary. A field on disk is read region by region, and the
     window a region samples is its own box: the sup of the values just read bounds that region's
     pull, so each slab pays exactly the halo ITS displacements require -- measured at run, from a
-    read the sampler needs regardless. ``max_displacement`` is optional: declared (or recorded by
-    the store at write time) it prices the plan exactly and is CHECKED against every region read;
-    absent, the plan prices the reads as if the field were zero and says so.
+    read the sampler needs regardless. Nothing is declared: a bound the STORE recorded at write
+    time (KonfAI's OME-Zarr fields carry one) prices the plan exactly and is CHECKED against every
+    region read; without one the plan prices the reads as if the field were zero, and says so.
 
     ``align`` decides where a ``spacing`` or a ``shape`` grid SITS, and it is the one silent choice
     in the family -- a quarter of a voxel of anatomy, made differently by every library that offers
@@ -1227,12 +1227,12 @@ class Resample(TransformInverse):
       be ``fill`` from edge to edge, and an all-background member is a plausible, wrong
       contribution to a median.
 
-    A refusal the whole-volume path can serve -- an undeclared field bound, a case with no
-    geometry -- declares ``WHOLE_VOLUME`` with its reason and the run proceeds assembled: the chain
-    only stops being bounded, and says so in the plan. One that no route can serve -- a map that
-    cannot be decoded, read or inverted, or a disjoint case -- refuses as the plan is built,
-    before a byte is written. A case reaching only PART of the target grid is legal and common --
-    the rest takes ``fill`` -- and the plan prints how much of the grid it covers.
+    A refusal the whole-volume path can serve -- a case with no geometry, an unreadable entry in
+    the field group -- declares ``WHOLE_VOLUME`` with its reason and the run proceeds assembled:
+    the chain only stops being bounded, and says so in the plan. One that no route can serve -- a
+    map that cannot be decoded, read or inverted, or a disjoint case -- refuses as the plan is
+    built, before a byte is written. A case reaching only PART of the target grid is legal and
+    common -- the rest takes ``fill`` -- and the plan prints how much of the grid it covers.
     """
 
     def __init__(
@@ -1245,7 +1245,6 @@ class Resample(TransformInverse):
         transforms: dict[str, bool] | None = None,
         field: str | None = None,
         field_group: str | None = None,
-        max_displacement: float | str = 0.0,
         align: str = "extent",
         interpolation: str | None = None,
         fill: float = 0.0,
@@ -1269,16 +1268,7 @@ class Resample(TransformInverse):
             )
         self.transforms = transforms
         declared = (field is not None and str(field).strip()) or field_group is not None
-        if not declared and _is_declared_displacement(max_displacement):
-            raise TransformError(
-                f"'Resample' was given a max_displacement of {max_displacement!r} and no field to apply.",
-                "Name the field the displacement belongs to -- field: ./DVF:omezarr, or field_group:"
-                " DVF for fields stored beside the cases -- or drop max_displacement: it sizes the"
-                " region a field is read from and means nothing without one.",
-            )
-        self.displacement: _DisplacementSource | None = (
-            _DisplacementSource(field, field_group, max_displacement) if declared else None
-        )
+        self.displacement: _DisplacementSource | None = _DisplacementSource(field, field_group) if declared else None
         #: Per case: the grid its own header describes. Recorded where that header is in hand --
         #: transform_shape, called for every case as the manager is built. A region read hands back
         #: the REGION's Origin, so a grid rebuilt from what a streamed region arrives with would
@@ -1482,14 +1472,17 @@ class Resample(TransformInverse):
         return tuple(stages)
 
     def _bound(self, name: str) -> TransformBound:
-        """What the map is guaranteed to do — from declarations and coefficients, no voxel read."""
+        """What the map is guaranteed to do — from recorded bounds and coefficients, no voxel read."""
         rank = self._source_grid(name).rank
         folded = TransformBound.exact(AffineMap.identity(rank))
         if self.displacement is not None:
-            declared = self.displacement.component_bound()
-            if declared is None:
-                raise TransformError(self.displacement.undeclared_reason())
-            folded = TransformBound.shift(np.asarray(declared[:rank], dtype=np.float64)).after(folded)
+            recorded = self.displacement.component_bound()
+            if recorded is None:
+                raise TransformError(
+                    "the field carries no recorded bound, so what it is guaranteed to do is unknown"
+                    " before its values are read."
+                )
+            folded = TransformBound.shift(np.asarray(recorded[:rank], dtype=np.float64)).after(folded)
         if self.transforms is not None:
             folded = bound_of(self._stored_stages(name), rank).after(folded)
         return folded
@@ -1524,7 +1517,7 @@ class Resample(TransformInverse):
     def _require_runnable(self, name: str) -> None:
         """Refuse AT PLAN TIME a map neither route can apply.
 
-        A refusal the whole-volume path can serve — an undeclared field bound — stays a locality
+        A refusal the whole-volume path can serve — a case with no geometry — stays a locality
         answer, and the run proceeds assembled. A stored transform that cannot be decoded, read or
         inverted fails the streamed path and the whole-volume one at the same line, so declaring
         WHOLE_VOLUME for it would print a plan the run then contradicts by dying per case, after
@@ -1633,8 +1626,8 @@ class Resample(TransformInverse):
         The field window a region needs is its own box, read for sampling regardless; the sup of
         the values just read bounds every interpolated displacement in the region (a convex
         combination cannot exceed the lattice values it blends), so the window is exact per region
-        — a quiet slab pays a quiet halo. ``max_displacement``, when declared, stays the cap those
-        values are checked against.
+        — a quiet slab pays a quiet halo. A bound the store recorded stays the cap those values
+        are checked against.
         """
         del source_spatial_shape, cache_attribute
         source, target = self._grids_of(name)
@@ -1813,8 +1806,8 @@ class Resample(TransformInverse):
             # for the stage rather than one per case.
             notes.append(
                 "the field carries no bound, so each region's source window is sized from the field"
-                " values read at run; the read estimate prices the field as zero. Declare"
-                " max_displacement, or use a field with a recorded bound, to price exactly"
+                " values read at run; the read estimate prices the field as zero. A field with a"
+                " recorded bound (KonfAI records one on the OME-Zarr fields it writes) prices exactly"
             )
         try:
             source, missing = Grid.from_header([int(extent) for extent in shape], cache_attribute, f"case '{name}'")
@@ -1967,7 +1960,6 @@ class ResampleToReference(Resample):
         dataset: str | None = None,
         field: str | None = None,
         field_group: str | None = None,
-        max_displacement: float | str = 0.0,
         fill: float = 0.0,
         interpolation: str | None = None,
         inverse: bool = True,
@@ -1983,7 +1975,6 @@ class ResampleToReference(Resample):
             reference_dataset=dataset,
             field=field,
             field_group=field_group,
-            max_displacement=max_displacement,
             fill=fill,
             interpolation=interpolation,
             inverse=inverse,
@@ -2355,12 +2346,7 @@ class _DisplacementSource:
     speaks as ``Resample`` and names ``field_group``, the argument the user declared.
     """
 
-    def __init__(
-        self,
-        field: str | None,
-        group: str | None,
-        max_displacement: float | str,
-    ) -> None:
+    def __init__(self, field: str | None, group: str | None) -> None:
         # A root of its own, or none: with no ``field`` path the fields are a GROUP of the run's own
         # dataset_filenames, one entry per case — which is how a cohort registered in place stores
         # them, beside the volumes they were solved on.
@@ -2377,39 +2363,24 @@ class _DisplacementSource:
         self.group = group
         #: The run's own roots, handed over by the owner; only consulted when there is no path.
         self.roots: list[Dataset] = []
-        #: Whether the ``auto`` header scan DIED, as opposed to finding no bound: an unreadable
+        #: Whether the header scan DIED, as opposed to finding no recorded bound: an unreadable
         #: entry fails both routes at run, where a merely bound-less field streams (measured).
         self.scan_failed = False
-        self.auto = isinstance(max_displacement, str) and max_displacement.strip().lower() == "auto"
-        if isinstance(max_displacement, str) and not self.auto:
-            try:
-                max_displacement = float(max_displacement)
-            except ValueError:
-                raise TransformError(
-                    f"'Resample' has a max_displacement of '{max_displacement}', which is neither a number nor 'auto'.",
-                    "Give a distance in the case's world units (max_displacement: 250.0), or 'auto'"
-                    " to read the bound the fields recorded when they were written.",
-                ) from None
-        # Per component, in the field's own (x, y, z) order. A scalar bound broadcasts to all three;
-        # `auto` fills this from the headers on first use. Per component and not one number, because
-        # these grids are anisotropic: one collapsed maximum over-reads the fine axes.
-        self.max_displacement = 0.0 if self.auto else float(max_displacement)
-        self._auto_bound: list[float] | None = None
-        self._auto_resolved = False
+        self._recorded_bound: list[float] | None = None
+        self._scan_resolved = False
 
     def component_bound(self) -> list[float] | None:
-        """The per-component bound this stage warps within, or ``None`` when it has none.
+        """The per-component bound the STORE recorded, or ``None`` when it recorded none.
 
-        For ``auto``, the largest bound any field in the group recorded, read from headers alone and
-        memoized. If a single entry carries no bound the answer is ``None``: a maximum over the
-        others would be a bound for them and a guess for that one, and this number is what sizes the
-        region every read depends on.
+        The largest bound any field in the group recorded at write time, read from headers alone
+        and memoized — nobody declares anything. If a single entry carries no bound the answer is
+        ``None``: a maximum over the others would be a bound for them and a guess for that one.
+        Per component, in the field's own (x, y, z) order, because these grids are anisotropic:
+        one collapsed maximum over-reads the fine axes.
         """
-        if not self.auto:
-            return [self.max_displacement] * 3 if self.max_displacement > 0.0 else None
-        if self._auto_resolved:
-            return self._auto_bound
-        self._auto_resolved = True
+        if self._scan_resolved:
+            return self._recorded_bound
+        self._scan_resolved = True
         from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE
 
         bound: list[float] = []
@@ -2424,29 +2395,15 @@ class _DisplacementSource:
                 for entry in root.get_names(group):
                     _shape, attribute = root.get_infos(group, entry)
                     if DISPLACEMENT_BOUND_ATTRIBUTE not in attribute:
-                        return self._auto_bound
+                        return self._recorded_bound
                     recorded = [float(value) for value in attribute.get_np_array(DISPLACEMENT_BOUND_ATTRIBUTE).ravel()]
                     bound = recorded if not bound else [max(a, b) for a, b in zip(bound, recorded, strict=False)]
         except Exception:  # an unreadable field dataset is a whole-volume answer, not a crash
             self.scan_failed = True
-            return self._auto_bound
+            return self._recorded_bound
         if bound and max(bound) > 0.0:
-            self._auto_bound = bound
-        return self._auto_bound
-
-    def undeclared_reason(self) -> str:
-        """Why there is no bound, in the words the plan prints."""
-        return (
-            "max_displacement is 'auto' and the fields carry no recorded bound to read"
-            " (KonfAI records one on an OME-Zarr field it writes; other formats and other"
-            " producers do not)"
-            if self.auto
-            else "no 'max_displacement' is declared"
-        ) + (
-            " -- how far this reaches into its source is unknown and the region it must read is"
-            " unbounded. Declare it in the case's world units (e.g. max_displacement: 250.0) to"
-            " stream with a halo"
-        )
+            self._recorded_bound = bound
+        return self._recorded_bound
 
     def group_for(self, name: str | None) -> str:
         if self.group is not None:
@@ -2501,7 +2458,7 @@ class _DisplacementSource:
         return field
 
     def check_bound(self, field: torch.Tensor, name: str) -> None:
-        """The declaration is a promise about the region that was read; check it against the samples.
+        """The store's recorded bound is a promise about the region read; check it against the samples.
 
         Per component, matching how the halo was derived: a field that stays under the collapsed
         maximum can still exceed the bound on one axis, which is the axis whose halo was too small.
@@ -2510,47 +2467,28 @@ class _DisplacementSource:
         if bound is None or not field.numel():
             return
         for component in range(field.shape[0]):
-            declared = bound[component] if component < len(bound) else max(bound)
+            recorded = bound[component] if component < len(bound) else max(bound)
             largest = float(field[component].abs().max())
-            if largest > declared:
+            if largest > recorded:
                 raise TransformError(
                     f"The field for case '{name}' displaces up to {largest:.3f} on component"
-                    f" {component}, beyond the {declared:.3f} 'Resample' sized its region from.",
-                    "Raise max_displacement to at least the field's true maximum, or use"
-                    " max_displacement: auto: the region read is sized from that number, so a larger"
-                    " displacement samples outside what was read.",
+                    f" {component}, beyond the {recorded:.3f} its store recorded — the bound"
+                    " 'Resample' sized its region from.",
+                    "The store's metadata contradicts its data: rewrite the field so the recorded"
+                    " bound holds, or strip the stale bound so the windows are measured instead.",
                 )
-
-
-def _is_declared_displacement(max_displacement: float | str) -> bool:
-    """Whether a ``max_displacement`` was actually asked for, rather than left at its default."""
-    if isinstance(max_displacement, str):
-        return bool(max_displacement.strip())
-    return float(max_displacement) != 0.0
 
 
 class Warp(Resample):
     """Deprecated spelling of ``Resample: {field: ...}`` — a warp on the case's own grid."""
 
-    def __init__(
-        self,
-        field: str,
-        group: str | None = None,
-        max_displacement: float | str = 0.0,
-        interpolation: str = "linear",
-    ) -> None:
+    def __init__(self, field: str, group: str | None = None, interpolation: str = "linear") -> None:
         if not field or not str(field).strip():
             raise TransformError(
                 "'Warp' needs a 'field': the displacement field to resample through.",
-                "Declare it, e.g. Resample: {field: ./DVF:omezarr, max_displacement: 250.0}.",
+                "Declare it, e.g. Resample: {field: ./DVF:omezarr}.",
             )
-        super().__init__(
-            field=field,
-            field_group=group,
-            max_displacement=max_displacement,
-            interpolation=interpolation,
-            inverse=False,
-        )
+        super().__init__(field=field, field_group=group, interpolation=interpolation, inverse=False)
 
 
 class Reduce(Transform):

@@ -370,9 +370,7 @@ class ConvexAdamEngine:
         # auto-hides it when stderr is not a TTY (e.g. under KonfAI/Slicer, where the outer "Prediction" bar
         # already reports progress), so captured logs stay clean; ``leave=False`` avoids stacking one bar per
         # patch. The observer is best-effort — if the filter emits no IterationEvent the bar just fills at the end.
-        progress = tqdm.tqdm(
-            total=self._iterations or None, desc="Registration", ncols=0, leave=False, disable=None
-        )
+        progress = tqdm.tqdm(total=self._iterations or None, desc="Registration", ncols=0, leave=False, disable=None)
 
         def _update(*_: object) -> None:
             values = list(fine.GetMetricValuesPerIteration())

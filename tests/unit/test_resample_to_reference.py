@@ -546,7 +546,6 @@ def test_the_inverse_says_why_when_the_forward_left_no_stack(dataset: Dataset) -
 # is defined in world units and read where it is asked.
 _FIELD_SPATIAL = (5, 6, 7)
 _FIELD_ORIGIN, _FIELD_SPACING = [-4.0, 3.0, 9.0], [4.0, 4.5, 5.0]
-_BOUND = 20.0
 
 
 def _displacement(shape: tuple[int, ...] = _FIELD_SPATIAL) -> np.ndarray:
@@ -584,7 +583,6 @@ def _warping(images: Dataset, fields: Dataset, **kwargs: object) -> ResampleToRe
         "group": "Reference",
         "field": f"{fields.filename}:h5",
         "field_group": "DVF",
-        "max_displacement": _BOUND,
         "fill": _FILL,
         **kwargs,
     }
@@ -741,7 +739,6 @@ def test_the_field_components_are_not_reversed(tmp_path: Path) -> None:
         group="Reference",
         field=f"{fields.filename}:h5",
         field_group="DVF",
-        max_displacement=4.0,
         fill=0.0,
     )
     stage.set_datasets([images])
@@ -797,7 +794,13 @@ def test_it_interpolates_once_not_twice(warped: tuple[Dataset, Dataset, np.ndarr
 
 
 def test_the_streamed_warp_equals_the_whole_volume(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
-    """Region by region through a field, against the same chain run whole."""
+    """Region by region through a field, against the same chain run whole.
+
+    Within the accepted band for a map that does not factorise, not bit-for-bit: the blend goes
+    through ``grid_sample``, whose float arithmetic depends on the window extent, and the measured
+    windows are the region's own rather than the whole volume. The bit-exact claims live on the
+    separable path, which is window-independent by construction.
+    """
     images, fields, volume = warped
 
     def manager() -> DatasetManager:
@@ -824,7 +827,7 @@ def test_the_streamed_warp_equals_the_whole_volume(warped: tuple[Dataset, Datase
         got[:, start:stop] = streaming.read_region(
             (slice(start, stop), slice(0, extent[1]), slice(0, extent[2]))
         ).numpy()
-    np.testing.assert_array_equal(got, whole)
+    np.testing.assert_allclose(got, whole, rtol=1e-5, atol=1e-4)
 
 
 def test_the_warped_run_never_assembles_the_volume(warped: tuple[Dataset, Dataset, np.ndarray], tmp_path: Path) -> None:
@@ -855,28 +858,35 @@ def test_the_warped_run_never_assembles_the_volume(warped: tuple[Dataset, Datase
     assert list(written.shape[1:]) == list(_REFERENCE_SPATIAL)
 
 
-def test_a_field_beyond_its_declared_bound_is_refused(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
-    """The halo is a promise about what was read; a field that breaks it must not sample zeros.
+def test_a_field_beyond_its_recorded_bound_is_refused(
+    warped: tuple[Dataset, Dataset, np.ndarray], tmp_path: Path
+) -> None:
+    """The store's bound is a promise about what was read; data that break it must not sample zeros.
 
     Sampling past the region that was read gives a dark rim around the moved anatomy and nothing
     else to see, which is the shape of a mistake nobody finds.
     """
-    images, fields, volume = warped
-    stage = _warping(images, fields, max_displacement=0.5)
+    images, _fields, volume = warped
+    attributes = _attributes(_FIELD_ORIGIN, _FIELD_SPACING)
+    attributes[DISPLACEMENT_BOUND_ATTRIBUTE] = np.asarray([0.5, 0.5, 0.5])
+    lying = Dataset(tmp_path / "lying", "mha")
+    lying.write("DVF", _CASE, _displacement(), attributes)
+    stage = ResampleToReference(
+        entry=_CASE, group="Reference", field=f"{tmp_path / 'lying'}:mha", field_group="DVF", fill=_FILL
+    )
+    stage.set_datasets([images])
     with pytest.raises(TransformError, match="displaces up to"):
         stage(_CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
 
 
 def test_a_field_with_no_bound_still_streams(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
     """Warp's rule, and for the same reason: the run sizes each region's pull from the field
-    values it reads for sampling, so an undeclared bound is a pricing gap, not a fallback."""
+    values it reads for sampling, so a missing recorded bound is a pricing gap, not a fallback."""
     images, fields, _volume = warped
-    stage = _warping(images, fields, max_displacement=0.0)
+    stage = _warping(images, fields)
     assert stage.patch_locality(_attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)).kind is LocalityKind.REGRID
     assert stage.measures_at_run
-    # A declared bound keeps the declared windows: their streamed result is pinned bit-identical.
-    assert not _warping(images, fields).measures_at_run
-    # And without a field it is a region stage whatever the bound says.
+    # And without a field it is a region stage, and nothing is measured.
     assert _stage_regrid_kind(images) is LocalityKind.REGRID
 
 
@@ -918,7 +928,7 @@ def test_fields_can_live_beside_the_cases(warped: tuple[Dataset, Dataset, np.nda
     """
     images, fields, volume = warped
     images.write("DVF", _CASE, _displacement(), _attributes(_FIELD_ORIGIN, _FIELD_SPACING))
-    beside = ResampleToReference(entry=_CASE, group="Reference", field_group="DVF", max_displacement=_BOUND, fill=_FILL)
+    beside = ResampleToReference(entry=_CASE, group="Reference", field_group="DVF", fill=_FILL)
     beside.set_datasets([images])
 
     got = beside(_CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
@@ -928,7 +938,7 @@ def test_fields_can_live_beside_the_cases(warped: tuple[Dataset, Dataset, np.nda
     np.testing.assert_array_equal(got.numpy(), want.numpy())
 
 
-def test_auto_reads_the_bound_from_every_root_not_the_first(tmp_path: Path) -> None:
+def test_the_recorded_bound_is_read_from_every_root_not_the_first(tmp_path: Path) -> None:
     """The bound is the cohort's, and a cohort declared by group alone can span the run's roots.
 
     Stopping at the first root that answers gives a halo sized for part of the cohort: the cases
@@ -942,21 +952,11 @@ def test_auto_reads_the_bound_from_every_root_not_the_first(tmp_path: Path) -> N
         attributes[DISPLACEMENT_BOUND_ATTRIBUTE] = np.array([shift, shift, shift])
         root.write("DVF", f"CASE_{int(shift)}", field, attributes)
 
-    stage = ResampleToReference(entry="CASE_1", group="Reference", field_group="DVF", max_displacement="auto")
+    stage = ResampleToReference(entry="CASE_1", group="Reference", field_group="DVF")
     stage.set_datasets([first, second])
 
     # 9.0 from the second root, not 1.0 from the first.
     assert stage.displacement.component_bound() == [9.0, 9.0, 9.0]
-
-
-def test_a_bound_with_no_field_is_refused() -> None:
-    """A max_displacement and nothing to apply it to is a chain that silently does not warp.
-
-    The stage would resample onto the grid perfectly well and the declaration would simply have no
-    effect — which is the failure that leaves a plausible volume and no error.
-    """
-    with pytest.raises(TransformError, match="no field to apply"):
-        ResampleToReference(entry=_CASE, group="Reference", max_displacement=1.0)
 
 
 def test_the_two_gathers_obey_the_same_rules_through_an_identity_field(tmp_path: Path) -> None:
