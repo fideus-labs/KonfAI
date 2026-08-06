@@ -302,6 +302,33 @@ def test_register_refuses_presets_that_name_their_output_differently(tmp_path: P
         app.register(["A", "B"], [fixed], [moving], output=tmp_path / "Output")
 
 
+def test_case_order_is_numeric_past_p999() -> None:
+    """`sorted` alone puts P1000 before P101 and pairs the wrong moving unit."""
+    assert sorted(["P101", "P1000", "P099"], key=reg._case_key) == ["P099", "P101", "P1000"]
+
+
+def test_register_refuses_a_preset_output_named_moved(tmp_path: Path) -> None:
+    """The derived image is written under 'Moved'; a preset using that name would be deleted by
+    its own derivation's stale-output purge."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    reference = sitk.ReadImage(str(moving))
+    app = reg.ImpactRegKonfAIApp()
+
+    def named_moved(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / "Moved.mha", (2.0, 0.0, 0.0), reference)
+        return "Moved", {"P000": out / "Moved.mha"}
+
+    app._infer_preset = named_moved  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="Moved"):
+        app.register(["FireANTs_SyN"], [fixed], [moving], output=tmp_path / "Output")
+
+
 def test_find_output_group_discovers_the_one_group(tmp_path: Path) -> None:
     """konfai-apps writes ``<run>/<group>/<case>/…``; the group is the one directory holding cases."""
     (tmp_path / "reg" / "Transform" / "P000").mkdir(parents=True)
