@@ -58,6 +58,18 @@ _ENSEMBLE_DIR = "Ensemble"
 _FORMATS = {".ome.zarr": "omezarr", ".zarr": "omezarr", ".h5": "itktransform", ".tfm": "itktransform"}
 
 
+def _is_transform_file(path: Path) -> bool:
+    """An ITK transform file, as opposed to a displacement field stored as an image or a store."""
+    return path.suffix in {".h5", ".tfm"} or path.name.endswith(".itk.txt")
+
+
+def _as_transform(path: Path) -> "sitk.Transform":
+    """The stored registration as one ``sitk.Transform``, whatever form the preset wrote it in."""
+    if _is_transform_file(path):
+        return sitk.ReadTransform(str(path))
+    return sitk.DisplacementFieldTransform(sitk.Cast(read_displacement_field(path), sitk.sitkVectorFloat64))
+
+
 def _app_id(preset: str) -> str:
     """Resolve a preset to a KonfAIApp id: a local ``<dir>/<preset>`` path, or ``<repo>:<preset>`` on HF."""
     if Path(IMPACT_REG_KONFAI_REPO).is_dir():
@@ -84,6 +96,26 @@ def get_available_presets(force_update: bool = False) -> list[str]:
                 continue
         return presets
     return list(get_available_apps_on_hf_repo(IMPACT_REG_KONFAI_REPO, force_update))
+
+
+def _find_output_group(root: Path) -> str:
+    """The name of the single output group a preset produced under ``root``.
+
+    A preset declares ONE output — its transform, in whatever form and under whatever name it chose.
+    konfai writes one dataset per output group (``<run>/<group>/<case>/<group>.<ext>``), so the group
+    is the directory holding the cases. Discovering it rather than assuming ``DVF`` is what lets an
+    official preset name its output ``Transform`` — where Slicer looks for it — while this pipeline's
+    own name theirs ``DVF``, with no branch here.
+    """
+    runs = [child for child in sorted(root.iterdir()) if child.is_dir()] if root.is_dir() else []
+    groups = [group for run in runs for group in sorted(run.iterdir()) if group.is_dir()]
+    if len(groups) != 1:
+        found = ", ".join(group.name for group in groups) or "none"
+        raise FileNotFoundError(
+            f"Expected the preset to produce exactly one output group under {root}, found {found}."
+            " A registration preset declares one output: its transform."
+        )
+    return groups[0].name
 
 
 def _find_outputs(root: Path, stem: str) -> dict[str, Path]:
@@ -282,8 +314,8 @@ class ImpactRegKonfAIApp:
         quiet: bool,
         tta: int = 0,
         config_overrides: list[str] | None = None,
-    ) -> dict[str, Path]:
-        """Run one preset app on every case at once; return its displacement field per case.
+    ) -> tuple[str, dict[str, Path]]:
+        """Run one preset app on every case at once; return its output group and its transform per case.
 
         ONE RUN, NOT ONE PER CASE. Each ``-i`` is an input GROUP, and konfai-apps expands each group's
         paths into units -- a file is one, a store or DICOM series is one, a plain directory is walked
@@ -334,7 +366,8 @@ class ImpactRegKonfAIApp:
         # be computed from it -- the moved image above all -- is this layer's job. Looking for a Moved
         # here would make every preset carry an output it does not owe, and a tiled one blend it across
         # every patch seam for a caller that has the field.
-        return _find_outputs(out, "DVF")
+        group = _find_output_group(out)
+        return group, _find_outputs(out, group)
 
     def register(
         self,
@@ -364,11 +397,11 @@ class ImpactRegKonfAIApp:
 
         ``tmp_dir`` names where the intermediates are staged; see :func:`_work_dir`.
 
-        ``fields_only`` writes the displacement fields and stops there. The moved image and
-        ``Transform.h5`` are both derived FROM the field, at the cost of a full-size resample and a
-        full-size rewrite -- worth it for a caller that wants a registration to look at, waste for one
-        that composes the field with another and derives its own. A caller that reads only the fields
-        should be able to say so rather than pay for outputs it deletes.
+        ``fields_only`` writes the transforms and stops there. The moved image is derived FROM the
+        transform, at the cost of a full-size resample and a full-size rewrite -- worth it for a
+        caller that wants a registration to look at, waste for one that composes the field with
+        another and derives its own. A caller that reads only the fields should be able to say so
+        rather than pay for an output it deletes.
         """
         # The cases are konfai-apps' to define, not ours to count. It expands each input GROUP into
         # units -- a file, a store, a DICOM series, or every volume inside a plain directory -- and pairs
@@ -403,6 +436,14 @@ class ImpactRegKonfAIApp:
                 )
                 for preset in presets
             }
+            groups = {group for group, _ in fields_by_preset.values()}
+            if len(groups) != 1:
+                raise RuntimeError(
+                    f"the presets named their output differently ({', '.join(sorted(groups))}); an"
+                    " ensemble folds one group, so every member must declare the same one."
+                )
+            group = groups.pop()
+            fields_by_preset = {preset: fields for preset, (_, fields) in fields_by_preset.items()}
             cases = sorted(fields_by_preset[presets[0]])
             for preset, fields in fields_by_preset.items():
                 if sorted(fields) != cases:
@@ -434,27 +475,26 @@ class ImpactRegKonfAIApp:
                     dvf_paths.append(dvf)
 
                 if len(presets) == 1:
-                    _copy_output(dvf_paths[0], case_out, "DVF")
+                    _copy_output(dvf_paths[0], case_out, group)
                 else:
                     # Ensemble: fold the presets' fields (all on the fixed grid -- and Reduce VERIFIES
                     # the claim) into the averaged DVF, the one output no single preset produced.
                     # Streamed: the fold is incremental, so the peak is one accumulator plus the
                     # member being read, whatever the size of the ensemble.
-                    self._ensemble_mean(case, presets, dvf_paths, output, work, gpu, cpu, quiet)
+                    self._ensemble_mean(case, group, presets, dvf_paths, output, work, gpu, cpu, quiet)
 
             if not fields_only:
-                # The moved images AND Transform.h5 in ONE streamed run: Resample adopts, per case,
-                # the grid of that case's own DVF (a field is defined ON the fixed grid) and reads
-                # the field as the map; the second chain writes the same field as an ITK transform
-                # file (the ':itktransform' backend fills it region by region) -- one plan, both
-                # deliverables, resumable.
-                self._derive_moved(dict(zip(cases, moving_units, strict=True)), output, work, gpu, cpu, quiet)
+                # The moved images in ONE streamed run over the cohort: Resample adopts, per case,
+                # the grid of that case's own field (a field is defined ON the fixed grid) and reads
+                # the field as the map.
+                self._derive_moved(dict(zip(cases, moving_units, strict=True)), group, output, work, gpu, cpu, quiet)
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
     def _ensemble_mean(
         self,
         case: str,
+        group: str,
         presets: list[str],
         dvf_paths: list[Path],
         output: Path,
@@ -463,20 +503,20 @@ class ImpactRegKonfAIApp:
         cpu: int | None,
         quiet: bool,
     ) -> None:
-        """Average one case's preset fields into ``<output>/<case>/DVF`` — Reduce(Mean), streamed."""
+        """Average one case's preset fields into ``<output>/<case>/<group>`` — Reduce(Mean), streamed."""
         from konfai.data.transform import Reduce, Write
 
         members = _stage_group(
             work / f"ensemble_{case}", "DVF", {preset: dvf for preset, dvf in zip(presets, dvf_paths, strict=True)}
         )
         suffixes = "".join(dvf_paths[0].suffixes)
-        _output_path(output / case, "DVF", suffixes)  # drop a stale other-form DVF before writing
+        _output_path(output / case, group, suffixes)  # drop a stale other-form output before writing
         _run_transform(
             f"impact_reg_ensemble_{case}",
             [members],
             {
                 "DVF": {
-                    "DVF": [
+                    group: [
                         Reduce(operator="Mean", output=case, grid="strict"),
                         Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
                     ]
@@ -491,27 +531,32 @@ class ImpactRegKonfAIApp:
     def _derive_moved(
         self,
         cases: dict[str, Path],
+        group: str,
         output: Path,
         work: Path,
         gpu: list[int],
         cpu: int | None,
         quiet: bool,
     ) -> None:
-        """The moved images and ``Transform.h5``, both derived from the fields — one run, two chains.
+        """The moved images, derived from the transforms — one streamed run over the whole cohort.
 
         A preset that emits only a field is complete: everything else IS that field. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
         fixed grid) and the field is the map (``field_group``) — one interpolation, streamed, each
-        slab's source window sized from the field values it reads. ``Transform.h5``: the same field
-        written as an ITK transform file, a plain ``Write`` the ``:itktransform`` backend fills
-        region by region.
+        slab's source window sized from the field values it reads.
+
+        NOTHING ELSE IS DERIVED. A preset writes its transform in the form its consumer reads — an ITK
+        transform file where Slicer picks it up, an RFC-5 store where this pipeline streams it — so
+        there is no second copy of the same field to produce under another name.
         """
         from konfai.data.transform import Resample, Write
 
-        fields = {case: _the_output(output / case, "DVF") for case in cases}
-        suffixes = ""
-        for case, dvf in fields.items():
-            suffixes = "".join(dvf.suffixes)
+        fields = {case: _the_output(output / case, group) for case in cases}
+        # The moved image is written in the MOVING's own form: the fields' form may be an ITK
+        # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
+        # below, so the first case's form speaks for the cohort.
+        suffixes = "".join(next(iter(cases.values())).suffixes)
+        for case in fields:
             _output_path(output / case, "Moved", suffixes)  # drop a stale other-form Moved
         moving_root = _stage_group(work / "moved_stage", "Moving", cases)
         field_root = _stage_group(work / "moved_stage", "DVF", fields)
@@ -525,7 +570,6 @@ class ImpactRegKonfAIApp:
                         Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
                     ]
                 },
-                "DVF": {"Transform": [Write(dataset=f"{output}:itktransform")]},
             },
             work,
             gpu,
@@ -614,8 +658,7 @@ class ImpactRegKonfAIApp:
                 if index < len(gt_fixed_fid) and index < len(gt_moving_fid):
                     fixed_points = read_landmarks(gt_fixed_fid[index])
                     if transform_path is not None:
-                        transform = sitk.ReadTransform(str(transform_path))
-                        fixed_points = apply_to_data_transform(fixed_points, {transform: False})
+                        fixed_points = apply_to_data_transform(fixed_points, {_as_transform(transform_path): False})
                     moved_fid = work / "moved_fid.fcsv"
                     write_landmarks(fixed_points, moved_fid)
                     app.evaluate(
@@ -661,7 +704,10 @@ class ImpactRegKonfAIApp:
             resample["interpolation"] = "nearest"
         if transform_path is not None:
             datasets.append(_stage_group(base, "Reg", {"P000": transform_path}))
-            resample["transforms"] = {"Reg": False}
+            if _is_transform_file(transform_path):
+                resample["transforms"] = {"Reg": False}
+            else:
+                resample["field_group"] = "Reg"
         out_root = work / f"moved_{kind}"
         _run_transform(
             f"impact_reg_eval_{kind}",
@@ -702,7 +748,8 @@ class ImpactRegKonfAIApp:
 
             members = _units(list(dvfs))
             spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
-            suffixes = "".join(members[0].suffixes)
+            suffixes = ".mha" if _is_transform_file(members[0]) else "".join(members[0].suffixes)
+            _output_path(output / "uncertainty", "Uncertainty", suffixes)  # drop a stale other-form map
             _run_transform(
                 "impact_reg_uncertainty",
                 [spec],

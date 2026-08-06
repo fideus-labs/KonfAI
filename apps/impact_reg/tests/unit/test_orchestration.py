@@ -92,7 +92,7 @@ def test_ensemble_mean_is_the_voxelwise_mean_with_reference_geometry(tmp_path: P
     output, work = tmp_path / "out", tmp_path / "work"
     work.mkdir()
 
-    reg.ImpactRegKonfAIApp()._ensemble_mean("P000", ["a", "b"], paths, output, work, [], 1, True)
+    reg.ImpactRegKonfAIApp()._ensemble_mean("P000", "DVF", ["a", "b"], paths, output, work, [], 1, True)
 
     avg = sitk.ReadImage(str(output / "P000" / "DVF.mha"))
     field = sitk.GetArrayFromImage(avg)
@@ -105,14 +105,15 @@ def test_ensemble_mean_is_the_voxelwise_mean_with_reference_geometry(tmp_path: P
 
 
 def _stub_infer(app: reg.ImpactRegKonfAIApp, moving_image: Path, dvf_by_preset: dict[str, tuple]):
-    """Replace ``_infer_preset`` so it writes a constant DVF.mha per preset on the moving grid."""
+    """Replace ``_infer_preset`` so it writes a constant DVF.mha per preset on the moving grid,
+    reported under group ``DVF`` as the real one reports the group it discovered."""
     reference = sitk.ReadImage(str(moving_image))
 
     def fake(preset, fixed, moving, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", dvf_by_preset[preset], reference)
-        return {"P000": out / "DVF.mha"}
+        return "DVF", {"P000": out / "DVF.mha"}
 
     app._infer_preset = fake  # type: ignore[method-assign]
 
@@ -129,7 +130,9 @@ def test_register_single_preset_reuses_the_field_and_derives_the_moved(tmp_path:
     app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
 
     case = out / "P000"
-    assert (case / "Moved.mha").is_file() and (case / "DVF.mha").is_file() and (case / "Transform.h5").is_file()
+    assert (case / "Moved.mha").is_file() and (case / "DVF.mha").is_file()
+    # nothing else is derived: the transform exists only in the form the preset wrote it
+    assert not (case / "Transform.h5").exists()
     # single preset: the DVF is the model's own field, reused verbatim (no re-averaging)
     field = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "DVF.mha")))
     np.testing.assert_allclose(field[0, 0, 0], (2.0, 0.0, 0.0), atol=1e-6)
@@ -174,7 +177,7 @@ def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Pat
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
-        return {"P000": out / "DVF.mha"}
+        return "DVF", {"P000": out / "DVF.mha"}
 
     app._infer_preset = field_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
@@ -191,9 +194,9 @@ def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Pat
 def test_register_fields_only_writes_nothing_derived(tmp_path: Path) -> None:
     """A caller that composes the field itself pays for the field, and nothing else.
 
-    Both the moved image and Transform.h5 are derived FROM the field -- a full-size resample and a
-    full-size rewrite of the same voxels. The tiled refinement reads the field, composes it with its
-    global pass and derives its own moved, so producing them for it is pure waste.
+    The moved image is derived FROM the field -- a full-size resample of the same voxels. The tiled
+    refinement reads the field, composes it with its global pass and derives its own moved, so
+    producing one for it is pure waste.
     """
     moving = tmp_path / "moving.mha"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
@@ -232,17 +235,84 @@ def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> N
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
-        return {"P000": out / "DVF.mha"}
+        return "DVF", {"P000": out / "DVF.mha"}
 
     app._infer_preset = field_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
     app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
 
-    # moved(p) = moving(p + d), d = +2 along x on a unit grid: moving is z*64 + y*8 + x.
-    moved = sitk.GetArrayFromImage(sitk.ReadImage(str(out / "P000" / "Moved.mha")))
+    # The moved image takes the MOVING's form -- a store in, a store out -- while the field the
+    # preset wrote keeps its own. moved(p) = moving(p + d), d = +2 along x on a unit grid:
+    # moving is z*64 + y*8 + x.
+    store = out / "P000" / "Moved.ome.zarr"
+    assert store.is_dir(), "the moved image was not written in the moving's own form"
+    moved = ome_zarr.read_ome_zarr_data_slice(store, (slice(None),) * 4)[0][0]
     np.testing.assert_allclose(moved[0, 0, 0], 2.0, atol=1e-6)
     np.testing.assert_allclose(moved[1, 1, 0], 74.0, atol=1e-6)
-    assert (out / "P000" / "Transform.h5").is_file()
+    assert (out / "P000" / "DVF.mha").is_file()
+
+
+def test_register_adopts_the_presets_output_name(tmp_path: Path) -> None:
+    """A preset names its output; the pipeline follows. An official preset calls its transform
+    ``Transform`` — where Slicer looks for it — and ``register`` must not rename it ``DVF``."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    reference = sitk.ReadImage(str(moving))
+    app = reg.ImpactRegKonfAIApp()
+
+    def named_transform(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / "Transform.mha", (2.0, 0.0, 0.0), reference)
+        return "Transform", {"P000": out / "Transform.mha"}
+
+    app._infer_preset = named_transform  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+
+    case = out / "P000"
+    assert (case / "Transform.mha").is_file() and (case / "Moved.mha").is_file()
+    assert not (case / "DVF.mha").exists()
+
+
+def test_register_refuses_presets_that_name_their_output_differently(tmp_path: Path) -> None:
+    """An ensemble folds one group: members that disagree on its name are refused, not renamed."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    reference = sitk.ReadImage(str(moving))
+    app = reg.ImpactRegKonfAIApp()
+    group_by_preset = {"A": "DVF", "B": "Transform"}
+
+    def mixed(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+        group = group_by_preset[preset]
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / f"{group}.mha", (2.0, 0.0, 0.0), reference)
+        return group, {"P000": out / f"{group}.mha"}
+
+    app._infer_preset = mixed  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="named their output differently"):
+        app.register(["A", "B"], [fixed], [moving], output=tmp_path / "Output")
+
+
+def test_find_output_group_discovers_the_one_group(tmp_path: Path) -> None:
+    """konfai-apps writes ``<run>/<group>/<case>/…``; the group is the one directory holding cases."""
+    (tmp_path / "reg" / "Transform" / "P000").mkdir(parents=True)
+    assert reg._find_output_group(tmp_path) == "Transform"
+
+
+def test_find_output_group_refuses_more_than_one(tmp_path: Path) -> None:
+    (tmp_path / "reg" / "DVF" / "P000").mkdir(parents=True)
+    (tmp_path / "reg" / "Moved" / "P000").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="exactly one output group"):
+        reg._find_output_group(tmp_path)
 
 
 def test_stage_group_replaces_an_existing_link(tmp_path: Path) -> None:

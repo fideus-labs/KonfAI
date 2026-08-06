@@ -132,8 +132,8 @@ def main() -> None:
         "--fields_only",
         dest="fields_only",
         action="store_true",
-        help="Write the displacement fields only: skip the moved image and Transform.h5, both derived "
-        "from the field. For a caller that composes the field itself and would delete them.",
+        help="Write the transforms only: skip the moved image, which is derived from them. For a "
+        "caller that composes the transform itself and would delete it.",
     )
     _add_device(reg)
     _add_tmp_dir(reg)
