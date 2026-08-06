@@ -1204,9 +1204,8 @@ class Resample(TransformInverse):
     -- a theorem, not a sample of the boundary. A field on disk is read region by region, and the
     window a region samples is its own box: the sup of the values just read bounds that region's
     pull, so each slab pays exactly the halo ITS displacements require -- measured at run, from a
-    read the sampler needs regardless. Nothing is declared: a bound the STORE recorded at write
-    time (KonfAI's OME-Zarr fields carry one) prices the plan exactly and is CHECKED against every
-    region read; without one the plan prices the reads as if the field were zero, and says so.
+    read the sampler needs regardless. Nothing is declared and nothing is recorded: the plan
+    prices the reads as if the field were zero, and says so.
 
     ``align`` decides where a ``spacing`` or a ``shape`` grid SITS, and it is the one silent choice
     in the family -- a quarter of a voxel of anatomy, made differently by every library that offers
@@ -1458,7 +1457,6 @@ class Resample(TransformInverse):
         grid = Grid.of(spatial, attribute, f"the field for case '{name}'")
         window = grid.index_window(region.world_box(), margin=1)
         values = source.read(name, window, len(spatial))
-        source.check_bound(values, name)
         stage = DisplacementStage(grid.sub_grid(window), values.numpy(), order=1)
         self._field_window = (name, key, stage)
         return stage
@@ -1477,17 +1475,13 @@ class Resample(TransformInverse):
         return tuple(stages)
 
     def _bound(self, name: str) -> TransformBound:
-        """What the map is guaranteed to do — from recorded bounds and coefficients, no voxel read."""
+        """What the map is guaranteed to do — from stored coefficients alone, no voxel read."""
         rank = self._source_grid(name).rank
         folded = TransformBound.exact(AffineMap.identity(rank))
         if self.displacement is not None:
-            recorded = self.displacement.component_bound()
-            if recorded is None:
-                raise TransformError(
-                    "the field carries no recorded bound, so what it is guaranteed to do is unknown"
-                    " before its values are read."
-                )
-            folded = TransformBound.shift(np.asarray(recorded[:rank], dtype=np.float64)).after(folded)
+            raise TransformError(
+                "a field's reach is unknown before its values are read; nothing bounds it from headers."
+            )
         if self.transforms is not None:
             folded = bound_of(self._stored_stages(name), rank).after(folded)
         return folded
@@ -1495,12 +1489,11 @@ class Resample(TransformInverse):
     def _pricing_bound(self, name: str) -> TransformBound:
         """The map's bound as the PLAN prices it — headers and declarations, never a voxel.
 
-        A field with no declared or recorded bound prices as zero displacement. The run never
-        trusts this window: a declared field's regions are sized from the values it reads for
-        sampling anyway (:meth:`measured_region_source`), so the optimism here costs estimate
-        accuracy, not bytes.
+        A field prices as zero displacement. The run never trusts this window: a field's
+        regions are sized from the values it reads for sampling anyway
+        (:meth:`measured_region_source`), so the optimism here costs estimate accuracy, not bytes.
         """
-        if self.displacement is None or self.displacement.component_bound() is not None:
+        if self.displacement is None:
             return self._bound(name)
         rank = self._source_grid(name).rank
         folded = TransformBound.exact(AffineMap.identity(rank))
@@ -1529,6 +1522,8 @@ class Resample(TransformInverse):
         bytes are written. ``transform_shape`` runs for every case as the plan is built, which is
         the earliest the failure is knowable and the only place it costs nothing.
         """
+        if self.displacement is not None:
+            self.displacement.probe(name)
         if self.transforms is None:
             return
         try:
@@ -1583,8 +1578,7 @@ class Resample(TransformInverse):
         # under it fails both routes on whichever case reaches it. A field that merely records no
         # bound streams: its windows are sized from the values the run reads (measured_region_source).
         if self.displacement is not None:
-            self.displacement.component_bound()
-            if self.displacement.scan_failed:
+            if not self.displacement.headers_readable():
                 return (
                     "an entry in the field group could not be header-read, so what any region of it"
                     " must pull is unknown. Check the field store: one unreadable entry anywhere"
@@ -1614,14 +1608,8 @@ class Resample(TransformInverse):
 
     @property
     def measures_at_run(self) -> bool:
-        """Whether the run sizes this stage's windows from the data it reads.
-
-        Only a field with NO declared or recorded bound: a bounded field keeps the declared
-        window, whose streamed result is bit-identical to the whole-volume path on a separable
-        map — measuring would tighten its windows at the price of that identity. Measuring is the
-        route for the field that could not stream at all before.
-        """
-        return self.displacement is not None and self.displacement.component_bound() is None
+        """Whether the run sizes this stage's windows from the data it reads — any declared field."""
+        return self.displacement is not None
 
     def measured_region_source(
         self, name: str, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
@@ -1631,8 +1619,7 @@ class Resample(TransformInverse):
         The field window a region needs is its own box, read for sampling regardless; the sup of
         the values just read bounds every interpolated displacement in the region (a convex
         combination cannot exceed the lattice values it blends), so the window is exact per region
-        — a quiet slab pays a quiet halo. A bound the store recorded stays the cap those values
-        are checked against.
+        — a quiet slab pays a quiet halo.
         """
         del source_spatial_shape, cache_attribute
         source, target = self._grids_of(name)
@@ -1738,11 +1725,13 @@ class Resample(TransformInverse):
 
         ``None`` when there is no map — or when nothing bounds it: a coverage that cannot be judged
         must not refuse, and the unboundable configurations carry a fallback reason of their own.
+        A field prices as zero displacement here (:meth:`_pricing_bound`), so a stored affine
+        beside it still places the samples instead of the grids being judged bare.
         """
         if self.transforms is None and self.displacement is None:
             return None
         try:
-            return self._bound(name)
+            return self._pricing_bound(name)
         except Exception:  # an unreadable or unbounded map answers None, never a crash
             return None
 
@@ -1784,8 +1773,11 @@ class Resample(TransformInverse):
         find -- every voxel of it is exactly what was asked for -- so it is one nothing downstream
         would report: a median over the cohort would simply be pulled toward the background by a
         member that contributed no anatomy. Counted from the headers, before a byte is read.
+
+        Never with a field configured: its reach is unknown before its values are read, and
+        bridging two frames is precisely what a field may be for.
         """
-        if self._target_is_own or self.coverage(name) > 0.0:
+        if self._target_is_own or self.displacement is not None or self.coverage(name) > 0.0:
             return
         where = f"case '{name}'" if name else "the case"
         raise TransformError(
@@ -1806,13 +1798,12 @@ class Resample(TransformInverse):
         """
         del group_dest
         notes: list[str] = []
-        if self.displacement is not None and self.displacement.component_bound() is None:
+        if self.displacement is not None:
             # Case-independent on purpose: the plan prints identical notes once, so this is one line
             # for the stage rather than one per case.
             notes.append(
-                "the field carries no bound, so each region's source window is sized from the field"
-                " values read at run; the read estimate prices the field as zero. A field with a"
-                " recorded bound (KonfAI records one on the OME-Zarr fields it writes) prices exactly"
+                "each region's source window is sized from the field values read at run; the read"
+                " estimate prices the field as zero"
             )
         try:
             source, missing = Grid.from_header([int(extent) for extent in shape], cache_attribute, f"case '{name}'")
@@ -2305,47 +2296,29 @@ class _DisplacementSource:
         self.group = group
         #: The run's own roots, handed over by the owner; only consulted when there is no path.
         self.roots: list[Dataset] = []
-        #: Whether the header scan DIED, as opposed to finding no recorded bound: an unreadable
-        #: entry fails both routes at run, where a merely bound-less field streams (measured).
-        self.scan_failed = False
-        self._recorded_bound: list[float] | None = None
-        self._scan_resolved = False
+        self._scan_ok: bool | None = None
+        self._probed: set[str] = set()
 
-    def component_bound(self) -> list[float] | None:
-        """The per-component bound the STORE recorded, or ``None`` when it recorded none.
+    def headers_readable(self) -> bool:
+        """Whether every field entry's HEADER opens, memoized — the plan's one probe of the group.
 
-        The largest bound any field in the group recorded at write time, read from headers alone
-        and memoized — nobody declares anything. If a single entry carries no bound the answer is
-        ``None``: a maximum over the others would be a bound for them and a guess for that one.
-        Per component, in the field's own (x, y, z) order, because these grids are anisotropic:
-        one collapsed maximum over-reads the fine axes.
+        An unreadable entry fails both routes on whichever case reaches it, and a directory store
+        lists its entries from the filesystem alone, so a corrupt one only surfaces at its header:
+        scanned here, one entry at a time, before any case is chosen.
         """
-        if self._scan_resolved:
-            return self._recorded_bound
-        self._scan_resolved = True
-        from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE
-
-        bound: list[float] = []
+        if self._scan_ok is not None:
+            return self._scan_ok
         try:
             group = self.group_for(None)
-            # Every root, not the first that answers: this is the COHORT's bound, and a field declared
-            # by group alone is looked up beside the cases, which a run may spread over several stores.
             roots = [self.dataset] if self.dataset is not None else list(self.roots)
-            # The header reads belong inside: a directory store lists its entries from the filesystem
-            # alone, so an unreadable field can only surface here, one entry at a time.
             for root in roots:
                 for entry in root.get_names(group):
-                    _shape, attribute = root.get_infos(group, entry)
-                    if DISPLACEMENT_BOUND_ATTRIBUTE not in attribute:
-                        return self._recorded_bound
-                    recorded = [float(value) for value in attribute.get_np_array(DISPLACEMENT_BOUND_ATTRIBUTE).ravel()]
-                    bound = recorded if not bound else [max(a, b) for a, b in zip(bound, recorded, strict=False)]
+                    root.get_infos(group, entry)
         except Exception:  # an unreadable field dataset is a whole-volume answer, not a crash
-            self.scan_failed = True
-            return self._recorded_bound
-        if bound and max(bound) > 0.0:
-            self._recorded_bound = bound
-        return self._recorded_bound
+            self._scan_ok = False
+            return False
+        self._scan_ok = True
+        return True
 
     def group_for(self, name: str | None) -> str:
         if self.group is not None:
@@ -2383,6 +2356,26 @@ class _DisplacementSource:
         """The field entry's shape and header, without reading a voxel of it."""
         return self._root_for(name).get_infos(self.group_for(name), name)
 
+    def probe(self, name: str) -> None:
+        """The case's own entry, proven present and readable — the per-case half of the scan.
+
+        :meth:`headers_readable` walks what is on disk; it cannot know which cases the plan will
+        ask for, so a missing entry would otherwise surface mid-run, after bytes are written.
+        Memoized: one header read per case, at plan time.
+        """
+        if name in self._probed:
+            return
+        try:
+            self.infos(name)
+        except TransformError:
+            raise
+        except Exception as error:
+            raise TransformError(
+                f"'Resample' cannot read the field header for case '{name}': {type(error).__name__}: {error}.",
+                "Repair or re-write that entry, or drop the case with 'subset'.",
+            ) from error
+        self._probed.add(name)
+
     def read(self, name: str, region: tuple[slice, ...] | None, channels: int) -> torch.Tensor:
         group = self.group_for(name)
         root = self._root_for(name)
@@ -2398,27 +2391,6 @@ class _DisplacementSource:
                 "A displacement field carries one component per spatial axis, component-first.",
             )
         return field
-
-    def check_bound(self, field: torch.Tensor, name: str) -> None:
-        """The store's recorded bound is a promise about the region read; check it against the samples.
-
-        Per component, matching how the halo was derived: a field that stays under the collapsed
-        maximum can still exceed the bound on one axis, which is the axis whose halo was too small.
-        """
-        bound = self.component_bound()
-        if bound is None or not field.numel():
-            return
-        for component in range(field.shape[0]):
-            recorded = bound[component] if component < len(bound) else max(bound)
-            largest = float(field[component].abs().max())
-            if largest > recorded:
-                raise TransformError(
-                    f"The field for case '{name}' displaces up to {largest:.3f} on component"
-                    f" {component}, beyond the {recorded:.3f} its store recorded — the bound"
-                    " 'Resample' sized its region from.",
-                    "The store's metadata contradicts its data: rewrite the field so the recorded"
-                    " bound holds, or strip the stale bound so the windows are measured instead.",
-                )
 
 
 class Reduce(Transform):

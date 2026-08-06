@@ -88,10 +88,6 @@ def _native_byteorder(array: np.ndarray) -> np.ndarray:
 # everywhere else, being the version portable across the whole CI matrix.
 _DISPLACEMENT_AXIS_TYPE = "displacement"
 
-#: Largest absolute displacement per component, world units, recorded by the producer of a field.
-#: A consumer sizes the region it must read from this, and reading it costs a header where measuring
-#: it costs a scan of the whole field.
-DISPLACEMENT_BOUND_ATTRIBUTE = "MaxDisplacement"
 _RFC5_VERSION = "0.6"
 _DEFAULT_VERSION = "0.4"
 
@@ -400,35 +396,9 @@ def write_ome_zarr(
     ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=version)
 
     recorded = dict(attributes) if attributes else {}
-    if displacement_field:
-        # The producer holds the samples, so the bound is free here and a full scan anywhere else.
-        recorded[DISPLACEMENT_BOUND_ATTRIBUTE] = displacement_bound(data)
     if recorded:
         group = zarr.open_group(str(store_path), mode="r+")
         group.attrs[_KONFAI_ATTR_KEY] = {"attributes": recorded}
-
-
-def displacement_bound(data: np.ndarray) -> list[float]:
-    """The largest absolute displacement per component, in the field's own world units.
-
-    This is the number a consumer needs to size the region it must read before resampling through the
-    field, and it is a property of the DATA, not of any parameter -- so the only place it is free is
-    here, where the producer already holds the samples. Read back from the store's attributes it costs
-    a header; recomputed by the consumer it costs a full scan of a field that can be 13.6 GiB.
-
-    Per component, not one scalar: the component axis is (x, y, z) where the array axes are (z, y, x),
-    and a consumer turns each bound into voxels by its OWN axis spacing -- these grids are anisotropic
-    (40 um in z against 30.08 in x/y here), so a single collapsed maximum over-reads two axes.
-
-    Computed in float32, the dtype a field is stored in: a bound rounded up in float64 and then
-    compared against float32 samples is the one failure mode this is meant to remove.
-    """
-    field = np.asarray(data)
-    if field.ndim < 2:
-        return []
-    # Cast before the max, not after: ``initial=np.float32(0.0)`` does not downcast a float64 input.
-    flat = np.abs(field.reshape(field.shape[0], -1)).astype(np.float32, copy=False)
-    return [float(flat[component].max(initial=np.float32(0.0))) for component in range(flat.shape[0])]
 
 
 def update_konfai_attributes(store_path: str | Path, extra: dict[str, Any]) -> None:

@@ -17,8 +17,7 @@
 """``Resample`` through a displacement field alone: a warp on the case's own grid, region by region.
 
 The claim under test is the one that matters for a volume larger than memory: the streamed result
-equals the whole-volume one, each region's window is sized from the field values it reads, and a
-bound the store recorded is verified rather than trusted."""
+equals the whole-volume one, and each region's window is sized from the field values it reads."""
 
 from pathlib import Path
 
@@ -26,10 +25,10 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.patching import DatasetManager
-from konfai.data.transform import LocalityKind, RegionContext, Resample, Save
-from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset
+from konfai.data.transform import LocalityKind, Resample, Save
+from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
-from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE, _zarr_v3_available
+from konfai.utils.ome_zarr import _zarr_v3_available
 
 pytest.importorskip("SimpleITK")
 
@@ -135,32 +134,6 @@ def test_an_oblique_case_grows_its_window_on_every_axis(tmp_path: Path) -> None:
     assert all(width > 1 for width in widths), f"a turned case reaches on every axis, got {widths}"
 
 
-@_needs_rfc5
-def test_the_bound_the_fields_recorded_prices_the_plan(tmp_path: Path) -> None:
-    """The recorded bound is the number the producer already knew — read from headers, declared by
-    nobody. It sizes the plan's (headers-only) windows; per component and not one collapsed
-    maximum, because these grids are anisotropic and one number over-reads the fine axes."""
-    fields = Dataset(tmp_path / "dvf", "omezarr")
-    for case, shift in (("CASE_000", (1.0, 2.0, 3.0)), ("CASE_001", (0.5, 6.0, 1.0))):
-        field = np.zeros((3, 4, 5, 6), dtype=np.float32)
-        for component, value in enumerate(shift):
-            field[component] = value
-        attribute = _attributes()
-        attribute[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
-        fields.write("DVF", case, field, attribute)
-
-    warp = Resample(field=f"{tmp_path / 'dvf'}:omezarr", field_group="DVF")
-    locality = warp.patch_locality(_attributes())
-
-    # The cohort's bound is (x=1.0, y=6.0, z=3.0); spacing in array order (z, y, x) is (1, 1, 2), so
-    # the window grows by 3, 6 and 1 voxels (plus the linear taps' one) around its target.
-    assert locality.kind is LocalityKind.REGRID
-    window = _recorded(warp).stream_region_source("CASE_000", (slice(4, 6),) * 3, [10, 12, 14], _attributes())
-    reaches = (3.0, 6.0, 0.5)  # array order (z, y, x): the bound divided by that axis's spacing
-    starts = [max(0, int(np.floor(4 - 0.5 - reach)) - 1) for reach in reaches]
-    assert [part.start for part in window] == starts
-
-
 def test_the_header_scan_survives_an_unreadable_entry_in_the_field_group(tmp_path: Path) -> None:
     """The whole group is header-read, including entries this run never warps.
 
@@ -249,32 +222,6 @@ def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.Monkey
     np.testing.assert_allclose(streamed, reference, rtol=1e-5, atol=1e-4)
 
 
-def test_a_field_beyond_its_recorded_bound_raises(tmp_path: Path) -> None:
-    """The store's metadata is a promise about what was read; a store whose data break it must not
-    sample zeros — a dark rim around the moved anatomy and nothing else to see.
-
-    Checked per component, the way the halo is derived: a field under the collapsed maximum can
-    still exceed the bound on one axis, and that axis is the one whose halo was too small.
-    """
-    _source, _fields, volume = _fixture(tmp_path, shift_um=(0.0, 0.0, 9.0))
-    attributes = _attributes()
-    attributes[DISPLACEMENT_BOUND_ATTRIBUTE] = np.asarray([1.0, 1.0, 1.0])
-    field = np.zeros((3, 10, 12, 14), dtype=np.float32)
-    field[2] = 9.0
-    Dataset(tmp_path / "lying", "mha").write("DVF", "CASE_000", field, attributes)
-    warp = Resample(field=f"{tmp_path / 'lying'}:mha", field_group="DVF")
-
-    _recorded(warp)
-    with pytest.raises(TransformError, match=r"on component 2, beyond the 1\.000"):
-        whole = (slice(0, 10), slice(0, 12), slice(0, 14))
-        warp.stream_region(
-            "CASE_000",
-            torch.from_numpy(volume),
-            RegionContext(whole, whole, (10, 12, 14), (10, 12, 14)),
-            _attributes(),
-        )
-
-
 def test_a_field_with_the_wrong_component_count_is_named(tmp_path: Path) -> None:
     rng = np.random.default_rng(1)
     Dataset(tmp_path / "src", "h5").write("CT", "CASE_000", rng.random((1, 4, 4, 4)).astype(np.float32), _attributes())
@@ -283,6 +230,17 @@ def test_a_field_with_the_wrong_component_count_is_named(tmp_path: Path) -> None
 
     with pytest.raises(TransformError, match="component"):
         warp("CASE_000", torch.zeros(1, 4, 4, 4), _attributes())
+
+
+def test_a_case_with_no_field_entry_is_refused_at_plan_time(tmp_path: Path) -> None:
+    """The cohort scan proves what is on disk; only the per-case probe knows what the plan asks for.
+
+    Without it a missing entry surfaces mid-run, in the field read, after bytes are written.
+    """
+    _fixture(tmp_path)  # writes a field for CASE_000, and for no other case
+    warp = Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF")
+    with pytest.raises(TransformError, match="CASE_MISSING"):
+        warp.transform_shape("CT", "CASE_MISSING", [10, 12, 14], _attributes())
 
 
 def test_an_empty_field_path_declares_no_field() -> None:
