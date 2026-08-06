@@ -125,6 +125,36 @@ def test_a_foreign_affine_file_reads_back_too(tmp_path: Path) -> None:
     assert back.TransformPoint(point) == pytest.approx(affine.TransformPoint(point))
 
 
+def test_a_foreign_text_transform_serves_headers_without_crashing(tmp_path: Path) -> None:
+    """A legacy `.tfm` is TEXT (`#Insight Transform File V1.0`), not HDF5: the header fast path
+    must not open it with h5py."""
+    affine = sitk.AffineTransform(3)
+    affine.SetTranslation((2.0, -1.0, 3.0))
+    case = tmp_path / "out" / "P000"
+    case.mkdir(parents=True)
+    sitk.WriteTransform(affine, str(case / "Reg.tfm"))
+
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    shape, _attributes_back = dataset.get_infos("Reg", "P000")
+    assert len(shape) == 2  # parameter rows, not a field
+    assert not dataset.bounded_region_reads("Reg", "P000")
+    back = dataset.read_transform("Reg", "P000")
+    point = (1.0, 2.0, 3.0)
+    assert back.TransformPoint(point) == pytest.approx(affine.TransformPoint(point))
+
+
+def test_a_stepped_region_read_honours_the_leading_axis_step(tmp_path: Path) -> None:
+    """The row span is read whole and the step subsamples it — same values as slicing the whole."""
+    field = _field(5)
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Transform", "P000", field, _attributes())
+
+    whole, _ = dataset.read_data("Transform", "P000")
+    region, _ = dataset.read_data_slice("Transform", "P000", (slice(0, 3), slice(0, 4, 2), slice(2, 5), slice(0, 4)))
+
+    np.testing.assert_array_equal(np.asarray(region), np.asarray(whole)[:, 0:4:2, 2:5, 0:4])
+
+
 def test_a_region_read_decodes_only_its_rows_and_matches_the_whole(tmp_path: Path) -> None:
     """The parameters are HDF5, so a slab reads the span it maps to — same values as the whole."""
     field = _field(3)

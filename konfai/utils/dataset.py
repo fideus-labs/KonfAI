@@ -2055,16 +2055,27 @@ class Dataset:
             region — the peak is the row span, never the field.
             """
             shape, attributes = self.get_infos(group, name)
-            if len(shape) != 4 or shape[0] != 3 or DISPLACEMENT_FIELD_ATTRIBUTE not in attributes:
+            leading = slices[1].indices(shape[1]) if len(shape) == 4 else (0, 0, 1)
+            if (
+                len(shape) != 4
+                or shape[0] != 3
+                or DISPLACEMENT_FIELD_ATTRIBUTE not in attributes
+                or not h5py.is_hdf5(self._path(name))
+                or leading[2] < 0  # a reversed leading axis has no contiguous span to read
+            ):
                 data, attributes = self.file_to_data(group, name)
                 return data[slices], attributes
             spatial = shape[1:]
-            leading = slices[1].indices(spatial[0])
             row = 3 * int(np.prod(spatial[1:], dtype=np.int64))
             with h5py.File(self._path(name), "r") as file:
                 span = file["TransformGroup/0/TransformParameters"][leading[0] * row : leading[1] * row]
             block = np.moveaxis(span.reshape(leading[1] - leading[0], *spatial[1:], 3), -1, 0)
-            return np.asarray(block[(slices[0], slice(None), *slices[2:])], dtype=np.float32), attributes
+            # The span is the axis WITHOUT its step: rows start..stop were read whole, so the step
+            # subsamples here, on the reshaped block.
+            return (
+                np.asarray(block[(slices[0], slice(None, None, leading[2]), *slices[2:])], dtype=np.float32),
+                attributes,
+            )
 
         def file_to_data_statistics(
             self,
@@ -2133,6 +2144,11 @@ class Dataset:
             return os.path.exists(self._path(name if name else group))
 
         def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
+            # A legacy TEXT transform (`#Insight Transform File V1.0`) is served by the read side
+            # too; only a real HDF5 file has the parameter datasets this fast path opens.
+            if not h5py.is_hdf5(self._path(name)):
+                data, attributes = self.file_to_data(group, name)
+                return [int(extent) for extent in data.shape], attributes
             with h5py.File(self._path(name), "r") as file:
                 kind = bytes(file["TransformGroup/0/TransformType"][0])
                 fixed = np.asarray(file["TransformGroup/0/TransformFixedParameters"][()], dtype=np.float64)
