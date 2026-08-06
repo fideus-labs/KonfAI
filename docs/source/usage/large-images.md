@@ -83,8 +83,8 @@ requested output patch back to the source region on disk.
 | Halo | `Gradient`, `Dilate`, `Translate` | Enlarge the read and crop the result. |
 | Orientation | `Flip`, `Permute`, axis-aligned `Canonical` | Remap indices to the source. |
 | Crop | `Crop` once its box is known | Translate the target region. |
-| Rescale | `ResampleToShape`, `ResampleToResolution` | Map through scale and add interpolation context. |
-| Whole volume | masked transforms, histogram matching, arbitrary displacement | Use the bounded buffer. |
+| Rescale | `Resample` — to a grid, or through a stored transform or field | Map through the grid change and add interpolation context. |
+| Whole volume | masked transforms, histogram matching | Use the bounded buffer. |
 
 Region stages compose — any number of them, each pulling its read through the
 one before it — so a chain of remaps/halos/rescales still streams. An undeclared
@@ -174,7 +174,7 @@ automatically — there is no flag to set. Each output slab is finalized and
 written to disk as soon as its patches complete, so peak RAM is one patch window
 instead of the whole volume. Geometry inverses stream too, and they **compose**:
 a `Canonical`/`Flip`/`Permute` inverse remaps each slab to its written region, a
-`Padding` inverse crops it in flight, a `ResampleToResolution`/`ResampleToShape`
+`Padding` inverse crops it in flight, a `spacing`/`shape` `Resample`
 inverse resamples back through a sliding window — chained in any number, each
 pulling through the next — so a huge output at ORIGINAL resolution is written
 slab by slab without ever being held whole. A masked finalize (`Mask`) streams

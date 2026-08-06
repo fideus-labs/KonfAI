@@ -163,7 +163,7 @@ before it, and so on down to one region on disk. KonfAI reads that one region
 and runs the chain forward over it. `[Dilate(1), Gradient()]` is two halos that
 add, `[Canonical(), Permute('2|1|0')]` is two reorientations that pull through
 each other — both stream from a single bounded read. The reorient-resample-pad
-stack `[Canonical, ResampleToResolution, Padding]` streams on the **write** side but
+stack `[Canonical, Resample, Padding]` streams on the **write** side but
 not on the read side: `Padding` declares no forward locality, so it inherits
 `WHOLE_VOLUME` and the chain is refused at that stage. The
 one thing a region stage cannot do is read a statistic of its own input, because
@@ -184,7 +184,7 @@ streams and `Dilate(5)` does not.
 | `HALO` | `Dilate(n>0)`, `Gradient` |
 | `ORIENTATION` | `Flip`, `Permute`, `Canonical` (only on axis-aligned direction cosines) |
 | `CROP` | `Crop` (only once its box is on the case) |
-| `REGRID` | `Resample` — and its spellings `ResampleToResolution`, `ResampleToShape`, `ResampleToReference`, `ResampleTransform`, `Warp` |
+| `REGRID` | `Resample` — whichever grid and map it is given |
 
 Augmentations declare per **(case, draw)** — two copies of the same case can
 answer differently. `Permute`, `Flip` (when `vector_field: false`), and `Rotate`

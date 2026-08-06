@@ -35,7 +35,7 @@ from konfai.data.data_manager import _check_patch_transform_locality
 from konfai.data.geometry import AffineMap, Grid, TransformBound
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.sampling import source_window
-from konfai.data.transform import LocalityKind, Reduce, ResampleToReference, ResampleToShape, Write
+from konfai.data.transform import LocalityKind, Reduce, Resample, Write
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformError
 from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE
@@ -79,14 +79,14 @@ def dataset(tmp_path: Path) -> Dataset:
     return dataset
 
 
-def _stage(dataset: Dataset, **kwargs: object) -> ResampleToReference:
-    arguments: dict[str, object] = {"entry": _CASE, "group": "Reference", "fill": _FILL, **kwargs}
-    stage = ResampleToReference(**arguments)  # type: ignore[arg-type]
+def _stage(dataset: Dataset, **kwargs: object) -> Resample:
+    arguments: dict[str, object] = {"reference": _CASE, "reference_group": "Reference", "fill": _FILL, **kwargs}
+    stage = Resample(**arguments)  # type: ignore[arg-type]
     stage.set_datasets([dataset])
     return stage
 
 
-def _manager(dataset: Dataset, stage: ResampleToReference, group: str = "Case") -> DatasetManager:
+def _manager(dataset: Dataset, stage: Resample, group: str = "Case") -> DatasetManager:
     return DatasetManager(
         index=0,
         group_src=group,
@@ -273,7 +273,7 @@ def test_a_cohort_on_one_reference_passes_grid_strict(tmp_path: Path) -> None:
         for index in range(len(shapes)):
             stages: list[object] = []
             if with_stage:
-                stage = ResampleToReference(entry="GRID", group="Reference", fill=_FILL)
+                stage = Resample(reference="GRID", reference_group="Reference", fill=_FILL)
                 stage.set_datasets([dataset])
                 stages.append(stage)
             built.append(
@@ -388,7 +388,7 @@ def test_it_is_refused_as_a_patch_transform(dataset: Dataset, monkeypatch: pytes
 
     # A change of extent needs no geometry at all, so it reaches config time as what it is.
     with pytest.raises(ConfigError, match="onto another grid"):
-        _check_patch_transform_locality(ResampleToShape(shape=[4, 4, 4]), "CT", "CT")
+        _check_patch_transform_locality(Resample(shape=[4, 4, 4]), "CT", "CT")
 
 
 def test_a_differing_direction_is_resampled_and_not_refused(tmp_path: Path) -> None:
@@ -439,23 +439,23 @@ def test_a_case_that_never_meets_the_reference_is_refused(tmp_path: Path) -> Non
 
 
 def test_an_unknown_entry_is_refused(dataset: Dataset) -> None:
-    stage = ResampleToReference(entry="NOT_THERE", group="Reference")
+    stage = Resample(reference="NOT_THERE", reference_group="Reference")
     stage.set_datasets([dataset])
     with pytest.raises(TransformError, match="cannot find reference 'NOT_THERE'"):
         stage.transform_shape("Case", _CASE, list(_SOURCE_SPATIAL), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
 
 
 def test_an_unnamed_group_is_refused_when_the_store_has_several(dataset: Dataset) -> None:
-    """Warp's rule: guessing which group holds the reference is not a guess worth making."""
-    stage = ResampleToReference(entry=_CASE)
+    """Guessing which group holds the reference is not a guess worth making."""
+    stage = Resample(reference=_CASE)
     stage.set_datasets([dataset])
     with pytest.raises(TransformError, match="cannot tell which group"):
         stage.transform_shape("Case", _CASE, list(_SOURCE_SPATIAL), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
 
 
-def test_an_empty_entry_is_refused_at_construction() -> None:
-    with pytest.raises(TransformError, match="needs an 'entry'"):
-        ResampleToReference(entry="  ")
+def test_a_blank_reference_is_refused_at_construction() -> None:
+    with pytest.raises(TransformError, match="blank reference"):
+        Resample(reference="  ", reference_group="Reference")
 
 
 # --------------------------------------------------------------------- what it announces
@@ -482,7 +482,7 @@ def test_a_case_that_fills_the_grid_says_nothing(tmp_path: Path) -> None:
     dataset.write("Case", _CASE, _volume((20, 20, 20)), source)
     # A reference well inside the case: every voxel of it has data under it.
     dataset.write("Reference", _CASE, _volume((4, 4, 4), 1), _attributes([2.0, 9.0, 15.0], [1.0, 1.0, 1.0]))
-    inside = ResampleToReference(entry=_CASE, group="Reference")
+    inside = Resample(reference=_CASE, reference_group="Reference")
     inside.set_datasets([dataset])
 
     assert inside.plan_note("Case_out", _CASE, [20, 20, 20], source) is None
@@ -577,16 +577,16 @@ def warped(tmp_path: Path) -> tuple[Dataset, Dataset, np.ndarray]:
     return images, fields, volume
 
 
-def _warping(images: Dataset, fields: Dataset, **kwargs: object) -> ResampleToReference:
+def _warping(images: Dataset, fields: Dataset, **kwargs: object) -> Resample:
     arguments: dict[str, object] = {
-        "entry": _CASE,
-        "group": "Reference",
+        "reference": _CASE,
+        "reference_group": "Reference",
         "field": f"{fields.filename}:h5",
         "field_group": "DVF",
         "fill": _FILL,
         **kwargs,
     }
-    stage = ResampleToReference(**arguments)  # type: ignore[arg-type]
+    stage = Resample(**arguments)  # type: ignore[arg-type]
     stage.set_datasets([images])
     return stage
 
@@ -734,9 +734,9 @@ def test_the_field_components_are_not_reversed(tmp_path: Path) -> None:
     uniform[0] = 2.0
     fields.write("DVF", _CASE, uniform, geometry)
 
-    stage = ResampleToReference(
-        entry=_CASE,
-        group="Reference",
+    stage = Resample(
+        reference=_CASE,
+        reference_group="Reference",
         field=f"{fields.filename}:h5",
         field_group="DVF",
         fill=0.0,
@@ -871,8 +871,8 @@ def test_a_field_beyond_its_recorded_bound_is_refused(
     attributes[DISPLACEMENT_BOUND_ATTRIBUTE] = np.asarray([0.5, 0.5, 0.5])
     lying = Dataset(tmp_path / "lying", "mha")
     lying.write("DVF", _CASE, _displacement(), attributes)
-    stage = ResampleToReference(
-        entry=_CASE, group="Reference", field=f"{tmp_path / 'lying'}:mha", field_group="DVF", fill=_FILL
+    stage = Resample(
+        reference=_CASE, reference_group="Reference", field=f"{tmp_path / 'lying'}:mha", field_group="DVF", fill=_FILL
     )
     stage.set_datasets([images])
     with pytest.raises(TransformError, match="displaces up to"):
@@ -880,7 +880,7 @@ def test_a_field_beyond_its_recorded_bound_is_refused(
 
 
 def test_a_field_with_no_bound_still_streams(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
-    """Warp's rule, and for the same reason: the run sizes each region's pull from the field
+    """The run sizes each region's pull from the field
     values it reads for sampling, so a missing recorded bound is a pricing gap, not a fallback."""
     images, fields, _volume = warped
     stage = _warping(images, fields)
@@ -891,7 +891,7 @@ def test_a_field_with_no_bound_still_streams(warped: tuple[Dataset, Dataset, np.
 
 
 def _stage_regrid_kind(images: Dataset) -> LocalityKind:
-    stage = ResampleToReference(entry=_CASE, group="Reference")
+    stage = Resample(reference=_CASE, reference_group="Reference")
     stage.set_datasets([images])
     return stage.patch_locality(_attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)).kind
 
@@ -928,7 +928,7 @@ def test_fields_can_live_beside_the_cases(warped: tuple[Dataset, Dataset, np.nda
     """
     images, fields, volume = warped
     images.write("DVF", _CASE, _displacement(), _attributes(_FIELD_ORIGIN, _FIELD_SPACING))
-    beside = ResampleToReference(entry=_CASE, group="Reference", field_group="DVF", fill=_FILL)
+    beside = Resample(reference=_CASE, reference_group="Reference", field_group="DVF", fill=_FILL)
     beside.set_datasets([images])
 
     got = beside(_CASE, torch.from_numpy(volume.copy()), _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
@@ -952,7 +952,7 @@ def test_the_recorded_bound_is_read_from_every_root_not_the_first(tmp_path: Path
         attributes[DISPLACEMENT_BOUND_ATTRIBUTE] = np.array([shift, shift, shift])
         root.write("DVF", f"CASE_{int(shift)}", field, attributes)
 
-    stage = ResampleToReference(entry="CASE_1", group="Reference", field_group="DVF")
+    stage = Resample(reference="CASE_1", reference_group="Reference", field_group="DVF")
     stage.set_datasets([first, second])
 
     # 9.0 from the second root, not 1.0 from the first.

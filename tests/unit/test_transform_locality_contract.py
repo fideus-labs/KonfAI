@@ -63,10 +63,7 @@ from konfai.data.transform import (
     PatchLocality,
     Percentage,
     Reduce,
-    ResampleToReference,
-    ResampleToResolution,
-    ResampleToShape,
-    ResampleTransform,
+    Resample,
     Save,
     SegmentationDisagreement,
     SelectLabel,
@@ -76,7 +73,6 @@ from konfai.data.transform import (
     Sum,
     Transform,
     Variance,
-    Warp,
     Write,
 )
 from konfai.utils.dataset import Attribute, Dataset
@@ -172,40 +168,33 @@ _CASES: dict[str, list[_Case]] = {
     "MergeLabels": [_Case(MergeLabels(), group="Ensemble")],
     "OneHot": [_Case(OneHot(4), group="Labels")],
     "Percentage": [_Case(Percentage(100.0))],
-    # The defaults ([1, 1, 1] mm / [100, 256, 256]) would be a no-op resample and a 6.5M-voxel upsample.
-    "ResampleToResolution": [
-        _Case(ResampleToResolution([2.0, 1.0, 3.0])),  # factorises: bit-identical
-        _Case(ResampleToResolution([2.0, 1.0, 3.0]), group="Int16", atol=_LSB_ATOL),
+    # The default (the case's own grid, no map) would be a no-op resample; these are the family's
+    # meaningful configurations, one per way of naming the grid and the map.
+    "Resample": [
+        _Case(Resample(spacing=[2.0, 1.0, 3.0])),  # factorises: bit-identical
+        _Case(Resample(spacing=[2.0, 1.0, 3.0]), group="Int16", atol=_LSB_ATOL),
         # uint8 resamples by nearest neighbour: no interpolation weights, so no rounding to disagree on.
-        _Case(ResampleToResolution([2.0, 1.0, 3.0]), group="Labels"),
-    ],
-    "ResampleToShape": [_Case(ResampleToShape([12, 8, 14]))],  # factorises: bit-identical
-    # Onto a grid of its own, so part of the target reads from outside the case and takes the fill.
-    # atol is 0: unlike the scale-only resamples -- whose whole-volume path is F.interpolate and whose
-    # streamed path is resample_region, two implementations that agree to a rounding -- both paths of
-    # this one run the SAME sampler over global coordinates, so they agree bit for bit or not at all.
-    "ResampleToReference": [
-        _Case(ResampleToReference(entry=_CASE_NAME, group="Reference")),
-        _Case(ResampleToReference(entry=_CASE_NAME, group="Reference"), group="Labels"),
-        # Onto the same grid THROUGH a field, which is the whole operation in one stage: the source
-        # region a target region pulls is the affine box grown by the declared displacement, and the
-        # sampling is no longer separable. Same contract, and the same atol: one sampler, global
-        # coordinates.
+        _Case(Resample(spacing=[2.0, 1.0, 3.0]), group="Labels"),
+        _Case(Resample(shape=[12, 8, 14])),  # factorises: bit-identical
+        # Onto a grid of its own, so part of the target reads from outside the case and takes the
+        # fill. atol is 0: both paths run the SAME sampler over global coordinates, so they agree
+        # bit for bit or not at all.
+        _Case(Resample(reference=_CASE_NAME, reference_group="Reference")),
+        _Case(Resample(reference=_CASE_NAME, reference_group="Reference"), group="Labels"),
         # Through a field the map does not factorise, so the blend goes to grid_sample -- which
         # normalises by the extent it is handed, and a patch is handed a window. That is the one
         # place a streamed answer is not bit-identical to the whole-volume one, and the atol says so.
         _Case(
-            ResampleToReference(entry=_CASE_NAME, group="Reference", field_group="Field"),
+            Resample(reference=_CASE_NAME, reference_group="Reference", field_group="Field"),
             atol=_REGRID_ATOL,
         ),
+        # A stored map never factorises: the grid_sample path again.
+        _Case(Resample(transforms={"transform": True}), atol=_REGRID_ATOL),
+        # A field on disk this registry cannot build: the streamed-equals-whole proof lives in
+        # test_warp.py, where a field exists -- including the measured, bound-less windows.
+        _Case(Resample(field="Dataset:h5", field_group="DVF"), sweep=False),
     ],
-    # A stored map never factorises, so this is the grid_sample path (see _REGRID_ATOL).
-    "ResampleTransform": [_Case(ResampleTransform({"transform": True}), atol=_REGRID_ATOL)],
     "Save": [_Case(Save("Dataset"))],
-    # Warp needs a field on disk to run, which this registry cannot build. Its
-    # streamed-equals-whole-volume proof lives in test_warp.py, where a field exists — including
-    # the bound-less case, whose windows are measured from the field at run.
-    "Warp": [_Case(Warp(field="Dataset:h5", group="DVF"), sweep=False)],
     # Reduce is a cardinality marker the cohort engine splits out of the chain, never a per-case
     # stage: it declares WHOLE_VOLUME so a chain reaching the ordinary planner refuses rather than
     # streams, which is what puts it out of the equivalence sweep below.
@@ -720,7 +709,7 @@ def test_a_pointwise_augmentation_streams_the_whole_grid_after_a_transform(datas
             data_augmentations_list=[augmentations],
         )
 
-    resample = ResampleToResolution([2.0, 1.0, 3.0])
+    resample = Resample([2.0, 1.0, 3.0])
     assert manager(resample).can_stream_patch(1) is True
     # Two regions in one chain — the resample's, then the flip draw's — composed into one pull.
     flip = FlipAugmentation(f_prob=[1.0, 1.0, 1.0])

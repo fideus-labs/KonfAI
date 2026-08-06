@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""``Warp`` resamples a case through a displacement field, region by region.
+"""``Resample`` through a displacement field alone: a warp on the case's own grid, region by region.
 
 The claim under test is the one that matters for a volume larger than memory: the streamed result
 equals the whole-volume one, each region's window is sized from the field values it reads, and a
@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.patching import DatasetManager
-from konfai.data.transform import LocalityKind, RegionContext, Save, Warp
+from konfai.data.transform import LocalityKind, RegionContext, Resample, Save
 from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset
 from konfai.utils.errors import TransformError
 from konfai.utils.ome_zarr import DISPLACEMENT_BOUND_ATTRIBUTE, _zarr_v3_available
@@ -82,7 +82,7 @@ def _manager(source: Dataset, transforms: list) -> DatasetManager:
     )
 
 
-def _recorded(warp: Warp, attribute: Attribute | None = None, shape: tuple[int, ...] = (10, 12, 14)) -> Warp:
+def _recorded(warp: Resample, attribute: Attribute | None = None, shape: tuple[int, ...] = (10, 12, 14)) -> Resample:
     """A stage that has met its case — which is when a region can be asked about at all."""
     warp.transform_shape("CT", "CASE_000", list(shape), attribute if attribute is not None else _attributes())
     return warp
@@ -97,7 +97,7 @@ def test_the_source_region_is_the_target_grown_by_the_field_reach(tmp_path: Path
     cannot express at all.
     """
     _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 4.0, 4.0))
-    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF"))
+    warp = _recorded(Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF"))
     assert warp.patch_locality(_attributes()).kind is LocalityKind.REGRID
 
     target = (slice(4, 6), slice(4, 6), slice(4, 6))
@@ -117,9 +117,9 @@ def test_the_source_region_is_the_target_grown_by_the_field_reach(tmp_path: Path
 def test_an_oblique_case_grows_its_window_on_every_axis(tmp_path: Path) -> None:
     """The bug a per-axis halo hid: a displacement along x reaches into y and z when the axes turn.
 
-    ``Warp`` used to convert a world bound to a halo per ARRAY axis, which silently assumed the
-    direction cosines were the identity -- on a turned case the window was short on the axes the
-    displacement actually reached, and a short window returns the border value rather than raising.
+    A world bound converted to a halo per ARRAY axis silently assumes the direction cosines are
+    the identity -- on a turned case the window is short on the axes the displacement actually
+    reaches, and a short window returns the border value rather than raising.
     """
     turned = _attributes()
     angle = np.deg2rad(35.0)
@@ -127,7 +127,7 @@ def test_an_oblique_case_grows_its_window_on_every_axis(tmp_path: Path) -> None:
     turned["Direction"] = np.asarray([[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]).reshape(-1)
 
     _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 0.0, 0.0))
-    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF"), turned)
+    warp = _recorded(Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF"), turned)
     target = (slice(5, 6), slice(5, 6), slice(5, 6))
     window = warp.measured_region_source("CASE_000", target, [10, 12, 14], turned)
 
@@ -149,7 +149,7 @@ def test_the_bound_the_fields_recorded_prices_the_plan(tmp_path: Path) -> None:
         attribute[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
         fields.write("DVF", case, field, attribute)
 
-    warp = Warp(field=f"{tmp_path / 'dvf'}:omezarr", group="DVF")
+    warp = Resample(field=f"{tmp_path / 'dvf'}:omezarr", field_group="DVF")
     locality = warp.patch_locality(_attributes())
 
     # The cohort's bound is (x=1.0, y=6.0, z=3.0); spacing in array order (z, y, x) is (1, 1, 2), so
@@ -176,7 +176,7 @@ def test_the_header_scan_survives_an_unreadable_entry_in_the_field_group(tmp_pat
     # The first entry the scan meets, so the read reaches it before any bound-less entry ends the scan.
     (tmp_path / "dvf" / "CASE_000" / "DVF.mha").write_bytes(b"not an image")
 
-    locality = Warp(field=f"{tmp_path / 'dvf'}:mha", group="DVF").patch_locality(_attributes())
+    locality = Resample(field=f"{tmp_path / 'dvf'}:mha", field_group="DVF").patch_locality(_attributes())
 
     assert locality.kind is LocalityKind.WHOLE_VOLUME
 
@@ -186,7 +186,7 @@ def test_a_field_with_no_bound_still_streams_with_windows_measured_at_run(tmp_pa
     for sampling regardless, and the sup of those very values sizes that region's source pull —
     per region, so a quiet slab pays a quiet halo where the shifted one pays its shift."""
     _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 0.0, 0.0))  # 4 um along x alone
-    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF"))
+    warp = _recorded(Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF"))
 
     assert warp.patch_locality(_attributes()).kind is LocalityKind.REGRID
 
@@ -203,7 +203,7 @@ def test_a_field_with_no_bound_still_streams_with_windows_measured_at_run(tmp_pa
 def test_sizing_and_sampling_share_one_field_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The window that sizes a region's pull is the window the sampler needs next: one read."""
     _source, _fields, _volume = _fixture(tmp_path)
-    warp = _recorded(Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF"))
+    warp = _recorded(Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF"))
     displacement = warp.displacement
     assert displacement is not None
     reads: list[int] = []
@@ -222,7 +222,7 @@ def test_sizing_and_sampling_share_one_field_read(tmp_path: Path, monkeypatch: p
 
 def test_a_constant_shift_moves_the_volume_by_that_many_voxels(tmp_path: Path) -> None:
     _source, _fields, volume = _fixture(tmp_path, shift_um=(0.0, 0.0, 3.0))
-    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF")
+    warp = Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF")
 
     moved = warp("CASE_000", torch.from_numpy(volume), _attributes()).numpy()
 
@@ -237,7 +237,7 @@ def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 3)
     source, _fields, volume = _fixture(tmp_path, shift_um=(1.0, 2.0, 3.0))
-    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF")
+    warp = Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF")
 
     reference = warp("CASE_000", torch.from_numpy(volume), _attributes()).numpy()
 
@@ -262,7 +262,7 @@ def test_a_field_beyond_its_recorded_bound_raises(tmp_path: Path) -> None:
     field = np.zeros((3, 10, 12, 14), dtype=np.float32)
     field[2] = 9.0
     Dataset(tmp_path / "lying", "mha").write("DVF", "CASE_000", field, attributes)
-    warp = Warp(field=f"{tmp_path / 'lying'}:mha", group="DVF")
+    warp = Resample(field=f"{tmp_path / 'lying'}:mha", field_group="DVF")
 
     _recorded(warp)
     with pytest.raises(TransformError, match=r"on component 2, beyond the 1\.000"):
@@ -279,17 +279,17 @@ def test_a_field_with_the_wrong_component_count_is_named(tmp_path: Path) -> None
     rng = np.random.default_rng(1)
     Dataset(tmp_path / "src", "h5").write("CT", "CASE_000", rng.random((1, 4, 4, 4)).astype(np.float32), _attributes())
     Dataset(tmp_path / "dvf", "h5").write("DVF", "CASE_000", np.zeros((2, 4, 4, 4), np.float32), _attributes())
-    warp = Warp(field=f"{tmp_path / 'dvf'}:h5", group="DVF")
+    warp = Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF")
 
     with pytest.raises(TransformError, match="component"):
         warp("CASE_000", torch.zeros(1, 4, 4, 4), _attributes())
 
 
-def test_warp_without_a_field_is_refused_at_construction() -> None:
-    with pytest.raises(TransformError, match="needs a 'field'"):
-        Warp(field="")
+def test_an_empty_field_path_declares_no_field() -> None:
+    """An empty ``field`` with no group is the identity map, not a broken declaration."""
+    assert Resample(field="").displacement is None
 
 
 def test_unknown_interpolation_is_refused_at_construction() -> None:
     with pytest.raises(TransformError, match="unknown interpolation"):
-        Warp(field="./x:h5", interpolation="cubic")
+        Resample(field="./x:h5", interpolation="cubic")

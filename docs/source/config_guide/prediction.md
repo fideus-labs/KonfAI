@@ -162,7 +162,7 @@ the exported output name stays consistent.
 identically to the assembled volume (a single augmentation, a voxel-local reduction, and an
 `mha`/`h5`/`omezarr` destination), each slab is written to disk as its patches complete, bounding RAM at
 one patch window instead of the whole volume. Geometry inverses stream too, composed in any number
-(`Canonical`/`Flip`/`Permute`, `Padding`, nearest-mode `ResampleToResolution`/`ResampleToShape`):
+(`Canonical`/`Flip`/`Permute`, `Padding`, a nearest-mode `Resample`):
 each slab is remapped, cropped, or resampled through a sliding window straight to its written region.
 A chain streaming cannot honour streams its pointwise prefix into a light post-reduction buffer and
 runs the rest whole-volume on it. Streamed outputs match the assembled path voxel for voxel on a given

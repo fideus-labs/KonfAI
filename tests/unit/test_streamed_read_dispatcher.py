@@ -48,7 +48,6 @@ from konfai.data.transform import (
     Permute,
     RegionContext,
     Resample,
-    ResampleToShape,
     Softmax,
     TensorCast,
     Transform,
@@ -162,9 +161,7 @@ def test_stream_composed_rescale_and_orientation_matches_whole_volume(assert_str
     # window, on the RESAMPLED grid the fold computed between them.
     rng = np.random.default_rng(7)
     volume = (rng.standard_normal((1, 8, 8)).astype(np.float32)) * 100.0
-    manager = assert_stream_matches_whole_volume(
-        volume, [ResampleToShape(shape=[12, 12]), Flip("0")], [4, 4], atol=1e-3
-    )
+    manager = assert_stream_matches_whole_volume(volume, [Resample(shape=[12, 12]), Flip("0")], [4, 4], atol=1e-3)
     plans = manager._resolve_patch_stream_source(0, True).stage_plans
     assert [plan.kind.value for plan in plans] == ["regrid", "orientation"]
     assert tuple(plans[1].in_shape) == (12, 12)
@@ -175,7 +172,7 @@ def test_stream_composed_triple_region_chain_matches_whole_volume(assert_stream_
     rng = np.random.default_rng(11)
     volume = (rng.standard_normal((1, 8, 6)).astype(np.float32)) * 100.0
     manager = assert_stream_matches_whole_volume(
-        volume, [Flip("0"), ResampleToShape(shape=[12, 9]), Permute("1|0")], [4, 4], atol=1e-3
+        volume, [Flip("0"), Resample(shape=[12, 9]), Permute("1|0")], [4, 4], atol=1e-3
     )
     plans = manager._resolve_patch_stream_source(0, True).stage_plans
     assert [plan.kind.value for plan in plans] == ["orientation", "regrid", "orientation"]
@@ -456,10 +453,10 @@ def test_stream_resample_nearest_strong_downsampling_matches_whole_volume(build_
     volume = (np.arange(1 * 40 * 40).reshape(1, 40, 40) % 7).astype(np.uint8)
     shape = [6, 6]
     patch = [3, 3]
-    stream_manager = build_streaming_manager(volume, [ResampleToShape(shape=shape)], patch)
+    stream_manager = build_streaming_manager(volume, [Resample(shape=shape)], patch)
     assert stream_manager.can_stream_patch(0)
 
-    reference_manager = build_streaming_manager(volume, [ResampleToShape(shape=shape)], patch)
+    reference_manager = build_streaming_manager(volume, [Resample(shape=shape)], patch)
     reference_manager.load(reference_manager.transforms, [], load_augmentations=False)
 
     size = stream_manager.patch.get_size(0)
@@ -474,7 +471,7 @@ def test_stream_resample_nearest_strong_downsampling_matches_whole_volume(build_
 def test_streamed_nearest_resample_matches_whole_volume_at_any_ratio(n_in: int, n_out: int) -> None:
     """The streamed nearest gather must pick the same source voxel as F.interpolate, per axis."""
     volume = (torch.arange(n_in**3, dtype=torch.int32) % 251).to(torch.uint8).reshape(1, n_in, n_in, n_in)
-    resample = ResampleToShape(shape=[n_out, n_out, n_out], inverse=False)
+    resample = Resample(shape=[n_out, n_out, n_out], inverse=False)
     attribute = Attribute()
     attribute["Spacing"] = np.ones(3)
     expected = resample("case", volume.clone(), Attribute(attribute))
@@ -490,7 +487,7 @@ def test_streamed_nearest_resample_matches_whole_volume_at_any_ratio(n_in: int, 
 def test_streamed_resample_handles_2d(dtype: torch.dtype) -> None:
     """The gather must not assume three spatial axes."""
     volume = (torch.arange(1 * 9 * 11, dtype=torch.float32).reshape(1, 9, 11) % 17).to(dtype)
-    resample = ResampleToShape(shape=[5, 6], inverse=False)
+    resample = Resample(shape=[5, 6], inverse=False)
     attribute = Attribute()
     attribute["Spacing"] = np.ones(2)
     expected = resample("case", volume.clone(), Attribute(attribute))
@@ -539,7 +536,7 @@ def test_replanning_after_epoch_redraw_keeps_the_stored_geometry(build_streaming
     reorienting from the second epoch on, while the geometry keys stack once more per epoch.
     """
     volume = np.arange(1 * 8 * 8 * 8, dtype=np.float32).reshape(1, 8, 8, 8)
-    transform = ResampleToShape(shape=[16, 16, 16]) if transform_case == "resample" else Canonical()
+    transform = Resample(shape=[16, 16, 16]) if transform_case == "resample" else Canonical()
     streamed = build_streaming_manager(volume, [transform], [4, 4, 4], _flip_augmentations())
 
     assert streamed.can_stream_patch(0)

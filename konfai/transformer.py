@@ -767,7 +767,7 @@ class Transformer(DistributedObject):
         shard = self._shards[global_rank]
         counts = {"STREAM": 0, "LOAD": 0, "WHOLE-VOLUME": 0, "SKIP": 0, "REDUCE": 0}
         # 'error' holds at run time too: a fallback the plan could not see (a sweep that fails, a
-        # Warp bound exceeded) raises at that case instead of quietly costing a volume.
+        # field bound exceeded) raises at that case instead of quietly costing a volume.
         allow_fallback = self.on_fallback != "error"
 
         def description() -> str:

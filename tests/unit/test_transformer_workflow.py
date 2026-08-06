@@ -128,7 +128,7 @@ def test_streamable_chain_plans_streams_and_writes(tmp_path: Path) -> None:
 
 
 _REGION_CHAIN = """\
-              ResampleToResolution:
+              Resample:
                 spacing: [1.0, 1.0, 1.0]
               Write:
                 dataset: {out}:h5
@@ -399,9 +399,9 @@ _RESAMPLED_THEN_REFERENCED = """\
               Resample:
                 spacing: [2.0, 2.0, 2.0]
                 align: origin
-              ResampleToReference:
-                entry: CASE_000
-                group: CT
+              konfai.data.transform:Resample:
+                reference: CASE_000
+                reference_group: CT
               Write:
                 dataset: {out}:h5
 """
@@ -414,10 +414,7 @@ def test_a_stage_is_asked_about_its_own_input_not_the_case_as_stored(tmp_path: P
     edge falls short of the reference's and part of the output will be fill. Asked about the case as
     STORED it covers all of it and says nothing -- and the plan would stay silent about that fill.
 
-    (With ``align: extent``, the default, the box is preserved and the answer is honestly 100%.
-    67.5% is also exactly what the old ``ResampleToResolution`` recorded here -- because its header
-    said origin-aligned while its data was extent-aligned, which is the mismatch this stage no
-    longer has.)
+    (With ``align: extent``, the default, the box is preserved and the answer is honestly 100%.)
     """
     _write_source(tmp_path)
     _write_config(tmp_path, _RESAMPLED_THEN_REFERENCED.format(out=tmp_path / "out"))
@@ -493,7 +490,7 @@ def test_overwrite_rewrites_a_geometry_changing_chain_correctly(tmp_path: Path) 
     _write_source(tmp_path)
     _write_config(
         tmp_path,
-        "              ResampleToResolution:\n"
+        "              Resample:\n"
         "                spacing: [1.0, 3.0, 4.0]\n"
         "              Write:\n"
         f"                dataset: {tmp_path / 'out'}:h5\n",

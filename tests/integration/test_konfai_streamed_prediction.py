@@ -21,7 +21,7 @@ when the gate refuses.
 
 The geometry variants exercise the write dispatcher end to end, one per region kind and then in
 composition: a ``Canonical`` inverse (ORIENTATION — in-slab mirrors), a ``Padding`` inverse (CROP), a
-``ResampleToResolution`` inverse on a uint8 chain (REGRID, streamed in nearest mode, byte-exact) and on
+a spacing ``Resample`` inverse on a uint8 chain (REGRID, streamed in nearest mode, byte-exact) and on
 a float chain (REGRID, streamed in linear mode, matching the reference to float-rounding), a
 two-inverse pipe, and the full three-inverse stack (crop + rescale + reorient composed, streamed
 end to end). The TTA variants exercise the slab-synchronized cross-copy reduce: an in-plane flip
@@ -119,11 +119,11 @@ _VARIANT_TRANSFORMS = {
                 inverse: true""",
     # REGRID: the inverse resamples back to the stored grid.
     "ResampleLabel": """            transforms:
-              ResampleToResolution:
+              Resample:
                 spacing: [0.5, 0.5, -1.0]
                 inverse: true""",
     "ResampleFloat": """            transforms:
-              ResampleToResolution:
+              Resample:
                 spacing: [0.5, 0.5, -1.0]
                 inverse: true""",
     # Several region stages compose into one streamed pipe: crop, then flip, straight to the sink.
@@ -140,7 +140,7 @@ _VARIANT_TRANSFORMS = {
     "GeometryStack": """            transforms:
               Canonical:
                 inverse: true
-              ResampleToResolution:
+              Resample:
                 spacing: [0.5, 0.5, -1.0]
                 inverse: true
               Padding:
