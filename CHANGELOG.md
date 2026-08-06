@@ -26,7 +26,9 @@ written replaces it.
   **which grid to write on** (nothing, `spacing`, `shape`, or `reference` — a stored image's grid
   adopted whole) and **what map to write it through** (`field`, `transforms`, or neither). Every
   combination is legal, and asked for together they compose into **one interpolation** instead of
-  two. The old names still work and are thin argument translations.
+  two. **The old names are gone**, so a config naming one must be migrated: the class becomes
+  `Resample`, and `ResampleToReference`'s `entry` / `group` / `dataset` become `reference` /
+  `reference_group` / `reference_dataset`. Every other argument carries over unchanged.
 - **transform**: `align` says where a `spacing` or `shape` grid sits — `extent` (the default) keeps
   the field of view, `origin` keeps voxel zero's centre. This was decided silently before, and
   differently by the data and by the header.

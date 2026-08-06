@@ -31,8 +31,7 @@ from konfai.data.transform import (
     Normalize,
     Padding,
     Permute,
-    ResampleToResolution,
-    ResampleToShape,
+    Resample,
     Standardize,
 )
 from konfai.utils.dataset import Attribute
@@ -142,12 +141,12 @@ def main() -> None:
     target_shape = [220, 220]
     shape_attribute = Attribute()
     shape_attribute["Spacing"] = np.asarray([0.8, 0.8])
-    resampled_shape = ResampleToShape(shape=target_shape)("IMAGE", normalized.clone(), shape_attribute)
+    resampled_shape = Resample(shape=target_shape)("IMAGE", normalized.clone(), shape_attribute)
 
     resolution_attribute = Attribute()
     resolution_attribute["Spacing"] = np.asarray([0.8, 0.8])
     target_spacing = [1.25, 0.55]
-    resampled_resolution = ResampleToResolution(spacing=target_spacing, inverse=True)(
+    resampled_resolution = Resample(spacing=target_spacing, inverse=True)(
         "IMAGE", normalized.clone(), resolution_attribute
     )
 
