@@ -164,6 +164,9 @@ class Std(Reduction):
 
     voxel_local = True
     incremental = True
+    # Two persistent accumulators (mean, m2) plus, per accumulate: the float copy of the case,
+    # ``delta``, and ``value - mean`` again after the mean moved -- five buffers beside the region.
+    working_multiple = 5.0
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         self.start()

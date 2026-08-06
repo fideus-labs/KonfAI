@@ -2095,26 +2095,31 @@ class Dataset:
             attributes: Attribute | None = None,
         ) -> None:
             os.makedirs(self.filename, exist_ok=True)
-            final = self._path(name)
+            # Always the `.h5` name: the content is HDF5 and ITK selects its transform IO from the
+            # extension, so renaming it onto a resolved existing `.tfm` would corrupt that entry.
+            final = os.path.join(self.filename, f"{name}.h5")
             staging = f"{self.filename}.{name}.{os.getpid()}.tmp.h5"
             if isinstance(data, sitk.Transform):
                 sitk.WriteTransform(data, staging)
-                os.replace(staging, final)
-                return
-            if isinstance(data, sitk.Image):
-                data, attributes = image_to_data(data)
-            array = np.asarray(data)
-            if attributes is None or array.ndim != 4 or array.shape[0] != 3:
-                raise DatasetManagerError(
-                    f"An ':itktransform' entry is a 3-component 3-D displacement field; '{name}' has"
-                    f" shape {list(array.shape)}.",
-                    "Write the field itself (channel-first, with its geometry), or a sitk.Transform.",
-                )
-            spatial = [int(extent) for extent in array.shape[1:]]
-            file, parameters = _create_itk_transform_file(staging, spatial, attributes)
-            with file:
-                parameters[:] = np.moveaxis(array.astype(np.float64), 0, -1).ravel()
+            else:
+                if isinstance(data, sitk.Image):
+                    data, attributes = image_to_data(data)
+                array = np.asarray(data)
+                if attributes is None or array.ndim != 4 or array.shape[0] != 3:
+                    raise DatasetManagerError(
+                        f"An ':itktransform' entry is a 3-component 3-D displacement field; '{name}' has"
+                        f" shape {list(array.shape)}.",
+                        "Write the field itself (channel-first, with its geometry), or a sitk.Transform.",
+                    )
+                spatial = [int(extent) for extent in array.shape[1:]]
+                file, parameters = _create_itk_transform_file(staging, spatial, attributes)
+                with file:
+                    parameters[:] = np.moveaxis(array.astype(np.float64), 0, -1).ravel()
             os.replace(staging, final)
+            try:  # one entry per name: a `.tfm` left under the same stem would double it
+                os.remove(os.path.join(self.filename, f"{name}.tfm"))
+            except FileNotFoundError:
+                pass
 
         def open_data_stream(
             self,

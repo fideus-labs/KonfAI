@@ -143,6 +143,21 @@ def test_a_foreign_text_transform_serves_headers_without_crashing(tmp_path: Path
     assert back.TransformPoint(point) == pytest.approx(affine.TransformPoint(point))
 
 
+def test_rewriting_a_tfm_entry_lands_on_the_h5_name(tmp_path: Path) -> None:
+    """The write is HDF5; renamed onto a resolved `.tfm` it would corrupt that entry, since ITK
+    selects its transform IO from the extension. One entry per name survives the rewrite."""
+    affine = sitk.AffineTransform(3)
+    case = tmp_path / "out" / "P000"
+    case.mkdir(parents=True)
+    sitk.WriteTransform(affine, str(case / "Reg.tfm"))
+
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Reg", "P000", _field(7), _attributes())
+
+    assert (case / "Reg.h5").is_file()
+    assert not (case / "Reg.tfm").exists()
+
+
 def test_a_stepped_region_read_honours_the_leading_axis_step(tmp_path: Path) -> None:
     """The row span is read whole and the step subsamples it — same values as slicing the whole."""
     field = _field(5)
