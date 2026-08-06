@@ -9,20 +9,40 @@ serve; the DICOM and OME-Zarr reader APIs are detailed below.
 
 ## Backends
 
-| Backend | Format token(s) | Kind | Optional extra |
-| --- | --- | --- | --- |
-| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | `konfai[itk]` (`SimpleITK`) |
-| `Dataset.H5File` | `h5` | Single monolithic HDF5 file | `konfai[hdf5]` (`h5py`) |
-| `Dataset.OmeZarrFile` | `omezarr, ome-zarr, ome_zarr, zarr` (+ `@level`) | OME-Zarr pyramid directory | `konfai[omezarr]` (`zarr` + `ngff-zarr`) |
-| `Dataset.DicomFile` (DICOM series; scalar-array writes) | `dicom` | DICOM series directory | `konfai[dicom]` (`pydicom`) |
+The two streaming columns are what the planner prices: **region reads** says
+whether a region decodes only itself (a backend that answers "no" decodes the
+whole volume behind every region, which only ever costs speed, never
+correctness), and **streamed writes** says whether `open_data_stream` can build
+the entry region by region (otherwise the volume is assembled and written
+whole).
+
+| Backend | Format token(s) | Kind | Region reads | Streamed writes | Optional extra |
+| --- | --- | --- | --- | --- | --- |
+| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | **uncompressed MetaImage and NIfTI only** — compressed streams are not seekable, and NRRD never streams in ITK | **`.mha` only** (memmap over the raw pixel block; needs image geometry) | `konfai[itk]` (`SimpleITK`) |
+| `Dataset.H5File` | `h5` | Single monolithic HDF5 file | yes (chunked) | yes | `konfai[hdf5]` (`h5py`) |
+| `Dataset.OmeZarrFile` | `omezarr, ome-zarr, ome_zarr, zarr` (+ `@level`) | OME-Zarr pyramid directory | yes (chunked) | yes, `scale_factors` pyramids included | `konfai[omezarr]` (`zarr` + `ngff-zarr`) |
+| `Dataset.DicomFile` (DICOM series; scalar-array writes) | `dicom` | DICOM series directory | per slice | no (whole series) | `konfai[dicom]` (`pydicom`) |
+| `Dataset.ItkTransformFile` | `itktransform` | ITK transform files (`.h5`, `.tfm`), one per case/group | yes for a displacement entry (the parameters are HDF5; a row span is one contiguous read) | yes — the parameters fill region by region, and the file is what `sitk.WriteTransform` would have written | `konfai[itk]`; `h5py` for the region paths (whole-file sitk fallback without it) |
 
 ```{tip}
-`pip install "konfai[imaging]"` installs **all four** backends at once
+`pip install "konfai[imaging]"` installs every backend at once
 (`SimpleITK, h5py, pydicom, zarr, ngff-zarr`).
 ```
 
 The extras column above is the summary; {doc}`../../getting-started/installation`
 is the canonical home for the optional-extras table.
+
+## ITK transform files as a dataset
+
+`:itktransform` stores one ITK transform per entry (`<case>/<group>.h5`). The
+write side is the point: a displacement field streams into the exact file
+`sitk.WriteTransform` would produce — pinned identical through ITK's own reader
+— without ever holding the field whole in float64. The read side hands back what
+`Dataset.read_transform` decodes: a displacement entry as its field (region
+reads included), any other stored transform (affine, composite, `.tfm`) as its
+parameters. This is how a run's `Transform.h5` deliverable is a plain `Write:`
+like any other, and how a staged transform file resolves through the same
+`Dataset` surface as an image.
 
 ## The `SitkFile` default backend also handles sidecars
 
