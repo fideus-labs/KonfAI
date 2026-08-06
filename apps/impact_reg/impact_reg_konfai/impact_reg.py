@@ -52,9 +52,10 @@ IMPACT_REG_KONFAI_REPO = os.environ.get("KONFAI_IMPACTREG_REPO", "VBoussot/Impac
 
 _ENSEMBLE_DIR = "Ensemble"
 
-# Writing needs a format named -- nothing is on disk yet to detect one from. Only the store spellings
-# need translating; every other suffix is already the token Dataset normalises (".mha" -> "mha").
-_FORMATS = {".ome.zarr": "omezarr", ".zarr": "omezarr"}
+# Writing needs a format named -- nothing is on disk yet to detect one from. The store spellings and
+# the ITK transform files need translating; every other suffix is already the token Dataset
+# normalises (".mha" -> "mha").
+_FORMATS = {".ome.zarr": "omezarr", ".zarr": "omezarr", ".h5": "itktransform", ".tfm": "itktransform"}
 
 
 def _app_id(preset: str) -> str:
@@ -214,66 +215,6 @@ def _the_output(dest_dir: Path, stem: str) -> Path:
             " which clears the stem before writing."
         )
     return matches[0]
-
-
-def _write_displacement_transform(dvf: Path, dest: Path, work: Path) -> None:
-    """``dest`` as ITK's HDF5 transform writer lays it out — parameters filled region by region.
-
-    ``sitk.WriteTransform`` needs the whole field resident, in float64; the FORMAT does not: an
-    ITK transform file is three HDF5 datasets (the type; the fixed parameters — size, origin,
-    spacing, direction; the parameters — the field buffer, component fastest), and HDF5 writes by
-    regions. The field is read in slabs through ``Dataset``, so the peak is one slab in float64
-    instead of the field twice over. Read-back equality with sitk's own writer is pinned by the
-    app tests. Without ``h5py`` the sitk path serves, whole.
-    """
-    try:
-        import h5py
-    except ImportError:
-        sitk.WriteTransform(sitk.DisplacementFieldTransform(read_displacement_field(dvf)), str(dest))
-        return
-    from konfai.utils.dataset import Dataset
-
-    spec = _stage_group(work / "transform_h5", "DVF", {"P000": dvf})
-    filename, _colon, file_format = spec.rpartition(":")
-    dataset = Dataset(Path(filename), file_format)
-    shape, attribute = dataset.get_infos("DVF", "P000")
-    channels, spatial = int(shape[0]), [int(extent) for extent in shape[1:]]
-    if channels != 3 or len(spatial) != 3:
-        raise RuntimeError(f"Transform.h5 needs a 3-component 3-D field; '{dvf}' has shape {list(shape)}.")
-    fixed = np.concatenate(
-        [
-            np.asarray(spatial[::-1], dtype=np.float64),  # size, in (x, y, z)
-            attribute.get_np_array("Origin").astype(np.float64),
-            attribute.get_np_array("Spacing").astype(np.float64),
-            attribute.get_np_array("Direction").astype(np.float64).reshape(-1),
-        ]
-    )
-    rows, offset = 16, 0
-    streamed = dataset.bounded_region_reads("DVF", "P000")
-    resident = None if streamed else np.asarray(dataset.read_data("DVF", "P000")[0])
-    staging = dest.with_name(dest.name + ".tmp")
-    with h5py.File(staging, "w") as file:
-        file.create_dataset(
-            "TransformGroup/0/TransformType",
-            data=[b"DisplacementFieldTransform_double_3_3"],
-            dtype=h5py.string_dtype(encoding="ascii"),  # ITK reads a variable-length ASCII string
-        )
-        file.create_dataset("TransformGroup/0/TransformFixedParameters", data=fixed)
-        parameters = file.create_dataset(
-            "TransformGroup/0/TransformParameters", shape=(3 * int(np.prod(spatial)),), dtype=np.float64
-        )
-        for start in range(0, spatial[0], rows):
-            stop = min(start + rows, spatial[0])
-            if resident is None:
-                block, _ = dataset.read_data_slice(
-                    "DVF", "P000", (slice(None), slice(start, stop), slice(None), slice(None))
-                )
-            else:
-                block = resident[:, start:stop]
-            slab = np.moveaxis(np.asarray(block, dtype=np.float64), 0, -1).ravel()
-            parameters[offset : offset + slab.size] = slab
-            offset += slab.size
-    os.replace(staging, dest)
 
 
 def _run_transform(
@@ -502,16 +443,12 @@ class ImpactRegKonfAIApp:
                     self._ensemble_mean(case, presets, dvf_paths, output, work, gpu, cpu, quiet)
 
             if not fields_only:
-                # Every moved image in ONE streamed run: Resample adopts, per case, the grid of that
-                # case's own DVF (a field is defined ON the fixed grid) and reads the field as the
-                # map -- one interpolation, slab by slab, the whole cohort under one plan.
+                # The moved images AND Transform.h5 in ONE streamed run: Resample adopts, per case,
+                # the grid of that case's own DVF (a field is defined ON the fixed grid) and reads
+                # the field as the map; the second chain writes the same field as an ITK transform
+                # file (the ':itktransform' backend fills it region by region) -- one plan, both
+                # deliverables, resumable.
                 self._derive_moved(dict(zip(cases, moving_units, strict=True)), output, work, gpu, cpu, quiet)
-                for case in cases:
-                    # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid
-                    # field as an ITK transform file, filled region by region from the DVF.
-                    _write_displacement_transform(
-                        _the_output(output / case, "DVF"), output / case / "Transform.h5", work
-                    )
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -560,13 +497,14 @@ class ImpactRegKonfAIApp:
         cpu: int | None,
         quiet: bool,
     ) -> None:
-        """The moved images, resampled from each moving through ITS displacement field — one run.
+        """The moved images and ``Transform.h5``, both derived from the fields — one run, two chains.
 
-        A preset that emits only a field is complete: the moved image IS that field applied to the
-        moving, so deriving it belongs to this layer. THE GRID AND THE FORMAT FOLLOW THE FIELD, not
-        the moving: a displacement field is defined ON the fixed grid, so ``reference: '{case}'``
-        adopts each case's own DVF grid, and the field is the map (``field_group``) — one
-        interpolation, streamed, each slab's source window sized from the field values it reads.
+        A preset that emits only a field is complete: everything else IS that field. The moved
+        image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
+        fixed grid) and the field is the map (``field_group``) — one interpolation, streamed, each
+        slab's source window sized from the field values it reads. ``Transform.h5``: the same field
+        written as an ITK transform file, a plain ``Write`` the ``:itktransform`` backend fills
+        region by region.
         """
         from konfai.data.transform import Resample, Write
 
@@ -586,7 +524,8 @@ class ImpactRegKonfAIApp:
                         Resample(reference="{case}", reference_group="DVF", field_group="DVF"),
                         Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
                     ]
-                }
+                },
+                "DVF": {"Transform": [Write(dataset=f"{output}:itktransform")]},
             },
             work,
             gpu,

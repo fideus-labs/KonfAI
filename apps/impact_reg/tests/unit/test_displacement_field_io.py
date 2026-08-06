@@ -258,22 +258,3 @@ def test_transform_reads_back_identically_from_either_form(tmp_path: Path, suffi
     reference = sitk.DisplacementFieldTransform(sitk.Image(original))
     for point in ((9.0, -1.0, 12.0), (7.5, -2.5, 11.0)):
         assert restored.TransformPoint(point) == pytest.approx(reference.TransformPoint(point))
-
-
-@pytest.mark.parametrize("suffix", [".mha", ".ome.zarr"])
-def test_transform_h5_reads_back_as_sitk_would_have_written_it(tmp_path: Path, suffix: str) -> None:
-    """The streamed writer and ``sitk.WriteTransform`` must be the same file to ITK's reader:
-    same type, same fixed parameters (size, origin, spacing, direction), same parameters — exactly."""
-    from impact_reg_konfai.impact_reg import _write_displacement_transform
-
-    original = _field()
-    _write_displacement_field(original, tmp_path / f"DVF{suffix}")
-    work = tmp_path / "work"
-    work.mkdir()
-
-    _write_displacement_transform(tmp_path / f"DVF{suffix}", tmp_path / "Transform.h5", work)
-
-    got = sitk.ReadTransform(str(tmp_path / "Transform.h5"))
-    want = sitk.DisplacementFieldTransform(read_displacement_field(tmp_path / f"DVF{suffix}"))
-    assert got.GetFixedParameters() == want.GetFixedParameters()
-    assert got.GetParameters() == want.GetParameters()
