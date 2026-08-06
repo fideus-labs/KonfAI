@@ -20,6 +20,7 @@ navigation: :doc:`apps` and :doc:`mcp`.
    :maxdepth: 1
 
    adopting-konfai
+   python-workflows
    large-images
    custom-models
    docker
