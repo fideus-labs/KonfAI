@@ -31,7 +31,10 @@ Dataset/
 ```
 
 The concrete file extension is not restricted to `.mha`. KonfAI supports the
-extensions listed in `konfai.utils.utils.SUPPORTED_EXTENSIONS`.
+extensions listed in `konfai.utils.utils.SUPPORTED_EXTENSIONS`. A spec may also
+name a format that is a **backend rather than a suffix** (`:itktransform`, whose
+entries are `<group>.h5`): those live in `SUPPORTED_BACKEND_FORMATS`, and
+`SUPPORTED_FORMATS` is the union a `path[:flag]:format` spec is checked against.
 
 Directory-backed formats use the same case/group model:
 

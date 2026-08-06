@@ -33,4 +33,6 @@ def _release_version() -> str:
 
 _version = _release_version()
 
-setup(install_requires=[f"konfai=={_version}", f"konfai-apps=={_version}"])
+# h5py: every preset writes its transform through konfai's ':itktransform' backend, which fills the
+# parameters region by region rather than holding the field in float64. The backend requires it.
+setup(install_requires=[f"konfai=={_version}", f"konfai-apps=={_version}", "h5py"])
