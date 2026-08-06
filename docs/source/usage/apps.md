@@ -261,8 +261,8 @@ voxel values remain exactly identical, verified one plane at a time. This
 creates a known, reproducible offset without inventing anatomy or interpolating
 an input image.
 
-The App writes `Moved.mha`, a three-component `DVF.mha` in millimetres, and a
-reusable `Transform.h5` on the fixed CT grid. Compared with the unshifted MR,
+The App writes the transform the preset declared — here a three-component
+`DVF.mha` in millimetres — and `Moved.mha`, both on the fixed CT grid. Compared with the unshifted MR,
 foreground NCC improves from `0.129` to `0.937` and MAE from `106.11` to
 `21.09`. The field has a mean magnitude of `23.06 mm` and a 95th percentile of
 `25.55 mm`. These validation values were accumulated one axial plane at a time.

@@ -223,9 +223,8 @@ def test_rerunning_in_the_other_form_leaves_one_output(tmp_path: Path) -> None:
 def test_ensemble_field_written_by_the_orchestrator_is_a_declared_field(tmp_path: Path) -> None:
     """The averaged DVF is folded by Reduce(Mean) and written through konfai's Write, in the
     members' form — and must stay a DECLARED field: ``read_displacement_field`` refuses an
-    undeclared 3-channel store, so dropping the declaration would break Transform.h5 and
-    ``evaluate`` right after a successful register. The values are the voxel-wise mean, on the
-    members' geometry."""
+    undeclared 3-channel store, so dropping the declaration would break ``evaluate`` right after
+    a successful register. The values are the voxel-wise mean, on the members' geometry."""
     members = []
     for index in (1, 2):
         (tmp_path / f"m{index}").mkdir()
@@ -233,7 +232,7 @@ def test_ensemble_field_written_by_the_orchestrator_is_a_declared_field(tmp_path
     output, work = tmp_path / "out", tmp_path / "work"
     work.mkdir()
 
-    ImpactRegKonfAIApp()._ensemble_mean("P000", ["a", "b"], members, output, work, [], 1, True)
+    ImpactRegKonfAIApp()._ensemble_mean("P000", "DVF", ["a", "b"], members, output, work, [], 1, True)
 
     out = output / "P000" / "DVF.ome.zarr"
     assert is_displacement_field(out)

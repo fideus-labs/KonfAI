@@ -48,8 +48,9 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
 
     def fake_run(command, **kwargs):
         captured.append(list(command))
-        # Stand in for the preset run: konfai-apps leaves one case directory per unit under -o.
-        write_preset_output(Path(command[command.index("-o") + 1]) / "P000")
+        # Stand in for the preset run: konfai-apps leaves one dataset per output group under -o,
+        # laid out <run>/<group>/<case> -- the shape _find_output_group discovers the group from.
+        write_preset_output(Path(command[command.index("-o") + 1]) / "reg" / "DVF" / "P000")
         return None
 
     monkeypatch.setattr("impact_reg_konfai.impact_reg.subprocess.run", fake_run)

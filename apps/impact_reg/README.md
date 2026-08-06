@@ -84,7 +84,7 @@ The CLI is organised into sub-commands, matching the registration workflow:
 
 | Sub-command | Purpose |
 |---|---|
-| `register` | Register a moving image onto a fixed image with one or more presets. Several presets are ensembled (their displacement fields are averaged). Writes the moved image, the displacement field (`DVF`), the transform, and the per-preset fields (kept for `uncertainty`). |
+| `register` | Register a moving image onto a fixed image with one or more presets. Several presets are ensembled (their displacement fields are averaged). Writes the transform under the name and in the form the preset declared, the moved image derived from it, and — with `--keep_dvf` — the per-preset fields (kept for `uncertainty`). |
 | `eval` | Evaluate a registration on any subset of modalities — image (MAE), segmentation (Dice), landmarks (TRE). At least one modality is required. |
 | `uncertainty` | Voxel-wise spread map from an ensemble of displacement fields. |
 
@@ -98,7 +98,7 @@ Evaluate a registration — any subset of modalities; the transform comes from a
 
 ```bash
 impact-reg-konfai eval \
-  --transform ./Output/P000/Transform.h5 \
+  --transform ./Output/P000/DVF.mha \
   -f fixed.nii.gz -m moving.nii.gz --mask roi.nii.gz \
   --gt-fixed-seg fixed_seg.nii.gz --gt-moving-seg moving_seg.nii.gz \
   --gt-fixed-fid fixed.fcsv --gt-moving-fid moving.fcsv \
