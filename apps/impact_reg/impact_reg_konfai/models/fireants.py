@@ -22,7 +22,7 @@
 """FireANTs registration as a self-contained KonfAI model (shared by the FireANTs presets).
 
 Same idiomatic ``add_module`` graph and the same output contract as the ConvexAdam preset
-(``MovedImage`` + ``DisplacementField`` on the FIXED grid, split by two ``ChannelSelect``), so the
+(``DisplacementField`` on the FIXED grid), so the
 orchestrator / app.json / ensemble / uncertainty are unchanged. The engine chains FireANTs' own
 composable stages (GPU, Riemannian Adam), each seeding the next like ANTs' ``-t`` stages:
 
@@ -53,7 +53,7 @@ unchanged (an absent optional mask arrives as a whole-image default and is treat
 
 The deformable stages produce the single TOTAL displacement field on the fixed grid (the linear
 pre-align is baked in via ``init_affine``, ANTs convention); ``none`` uses the affine matrix directly.
-``MovedImage`` and the emitted ``DisplacementField`` are rebuilt from that transform with SimpleITK —
+the emitted ``DisplacementField`` is rebuilt from that transform with SimpleITK —
 the same output path as the ConvexAdam engine — so all presets/engines are interchangeable in an
 ensemble. FireANTs' output-transform writer only serialises to a file, so the deformable field is
 round-tripped through a temporary NIfTI (no FireANTs internals are reimplemented here).
@@ -437,7 +437,7 @@ class ImpactFeatureLoss(torch.nn.Module):
 
 class FireANTsEngine:
     """Register a fixed/moving pair with FireANTs (Rigid -> Affine -> [SyN | Greedy | none]); return
-    (moved, dvf) on the fixed grid.
+    the displacement field on the fixed grid.
 
     ``fireants`` is imported lazily inside :meth:`register` so this module can be imported for config
     /signature introspection (SlicerImpactReg reads the tuning knobs off the ``RegistrationNet``
@@ -583,8 +583,8 @@ class FireANTsEngine:
         device_index: int,
         fixed_mask: sitk.Image | None = None,
         moving_mask: sitk.Image | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Register ``moving`` onto ``fixed``; return (moved, dvf) as channel-first arrays on the fixed grid."""
+    ) -> np.ndarray:
+        """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid."""
         ensure_fireants_runtime()
         from fireants.io import BatchedImages, Image
         from fireants.io.imagemask import apply_mask_to_image, generate_image_mask_allones
@@ -714,9 +714,8 @@ class FireANTsEngine:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        # Rebuild moved + DVF from the single transform on the fixed grid — the ConvexAdam output path,
+        # The DVF is rebuilt from the single transform on the fixed grid — the ConvexAdam output path,
         # so every FireANTs preset emits identical-shaped results.
-        moved = sitk.Resample(moving, fixed, transform, sitk.sitkLinear, 0.0, moving.GetPixelID())
         dvf = sitk.TransformToDisplacementField(
             transform,
             sitk.sitkVectorFloat64,
@@ -725,9 +724,8 @@ class FireANTsEngine:
             fixed.GetSpacing(),
             fixed.GetDirection(),
         )
-        moved_np, _ = image_to_data(moved)
         dvf_np, _ = image_to_data(dvf)
-        return moved_np, dvf_np
+        return dvf_np
 
 
 class FireANTsRegistration(torch.nn.Module):
@@ -768,10 +766,10 @@ class FireANTsRegistration(torch.nn.Module):
                 moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
                 fixed_mask_img = data_to_image(fixed_mask[b].detach().cpu().numpy(), fmask_attrs[b])
                 moving_mask_img = data_to_image(moving_mask[b].detach().cpu().numpy(), mmask_attrs[b])
-                moved_np, dvf_np = self._engine.register(
+                dvf_np = self._engine.register(
                     fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img
                 )
-                combined.append(torch.from_numpy(np.concatenate([moved_np, dvf_np], axis=0)))
+                combined.append(torch.from_numpy(dvf_np))
         return torch.stack(combined, dim=0).to(fixed.device)
 
 
@@ -791,7 +789,7 @@ class RegistrationNet(network.Network):
     """Pairwise FireANTs registration as an ``add_module`` graph (fixed = branch 0, moving = branch 1,
     fixed mask = 2, moving mask = 3; masks restrict the metric, whole-image = no restriction).
 
-    Outputs on the fixed grid: ``MovedImage`` (moving resampled onto fixed) and ``DisplacementField``
+    Output on the fixed grid: ``DisplacementField``
     (the DIM-component displacement field, in mm). Geometry is attached by the predictor via
     ``same_as_group: Volume_0:Fixed``. The knobs below are read straight from these annotations by the
     UI: ``Annotated[.., Range]`` gives numeric spin bounds; ``Literal`` a dropdown. ``deformable_method``
@@ -908,5 +906,4 @@ class RegistrationNet(network.Network):
         self.add_module(
             "Registration", FireANTsRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"]
         )
-        self.add_module("MovedImage", ChannelSelect(0, 1), in_branch=["registration"], out_branch=["moved"])
-        self.add_module("DisplacementField", ChannelSelect(1, 4), in_branch=["registration"], out_branch=["dvf"])
+        self.add_module("DisplacementField", ChannelSelect(0, 3), in_branch=["registration"], out_branch=["dvf"])
