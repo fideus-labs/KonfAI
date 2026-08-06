@@ -328,7 +328,6 @@ class ImpactRegKonfAIApp:
         config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
         fields_only: bool = False,
-        max_displacement: float | str = "auto",
     ) -> None:
         """Register every case with the selected presets and ensemble their DVFs.
 
@@ -346,11 +345,6 @@ class ImpactRegKonfAIApp:
         full-size rewrite -- worth it for a caller that wants a registration to look at, waste for one
         that composes the field with another and derives its own. A caller that reads only the fields
         should be able to say so rather than pay for outputs it deletes.
-
-        ``max_displacement`` is optional: the moved image streams either way, each slab's source
-        window sized from the field values read for sampling. ``auto`` reads the bound a field
-        recorded (OME-Zarr fields carry one) so the plan prices the reads exactly; a distance in
-        world units declares that bound outright and is checked against every region actually read.
         """
         # The cases are konfai-apps' to define, not ours to count. It expands each input GROUP into
         # units -- a file, a store, a DICOM series, or every volume inside a plain directory -- and pairs
@@ -421,9 +415,7 @@ class ImpactRegKonfAIApp:
                 # Every moved image in ONE streamed run: Resample adopts, per case, the grid of that
                 # case's own DVF (a field is defined ON the fixed grid) and reads the field as the
                 # map -- one interpolation, slab by slab, the whole cohort under one plan.
-                self._derive_moved(
-                    dict(zip(cases, moving_units, strict=True)), output, work, gpu, cpu, quiet, max_displacement
-                )
+                self._derive_moved(dict(zip(cases, moving_units, strict=True)), output, work, gpu, cpu, quiet)
                 for case in cases:
                     # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid field
                     # as a SimpleITK transform. Inherently whole -- the .h5 format carries the full
@@ -480,7 +472,6 @@ class ImpactRegKonfAIApp:
         gpu: list[int],
         cpu: int | None,
         quiet: bool,
-        max_displacement: float | str,
     ) -> None:
         """The moved images, resampled from each moving through ITS displacement field — one run.
 
@@ -488,7 +479,7 @@ class ImpactRegKonfAIApp:
         moving, so deriving it belongs to this layer. THE GRID AND THE FORMAT FOLLOW THE FIELD, not
         the moving: a displacement field is defined ON the fixed grid, so ``reference: '{case}'``
         adopts each case's own DVF grid, and the field is the map (``field_group``) — one
-        interpolation, streamed when the field's bound allows, whole-volume with the reason when not.
+        interpolation, streamed, each slab's source window sized from the field values it reads.
         """
         from konfai.data.transform import Resample, Write
 
@@ -506,12 +497,7 @@ class ImpactRegKonfAIApp:
             {
                 "Moving": {
                     "Moved": [
-                        Resample(
-                            reference="{case}",
-                            reference_group="DVF",
-                            field_group="DVF",
-                            max_displacement=max_displacement,
-                        ),
+                        Resample(reference="{case}", reference_group="DVF", field_group="DVF"),
                         Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
                     ]
                 }

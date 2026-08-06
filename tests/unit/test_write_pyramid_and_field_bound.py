@@ -216,7 +216,7 @@ def test_the_recorded_bound_reaches_each_axis_by_its_own_spacing_under_anisotrop
     field[0, 4, 4, 4], field[1, 2, 2, 2], field[2, 1, 1, 1] = 917.5, -640.25, 96.0
     store = tmp_field_store(field)
 
-    warp = Warp(field=f"{store}:omezarr", group="DVF", max_displacement="auto")
+    warp = Warp(field=f"{store}:omezarr", group="DVF")
     attribute = Attribute()
     attribute["Spacing"] = np.array([30.08, 30.08, 40.0])  # stored (x, y, z)
     attribute["Origin"] = np.zeros(3)

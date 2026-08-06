@@ -278,7 +278,10 @@ class ElastixEngine:
                     dst.symlink_to(model_path)
 
             args = [str(self._elastix_bin), "-f", str(fixed_path), "-m", str(moving_path)]
-            for flag, mask, name in (("-fMask", fixed_mask, "FixedMask.mha"), ("-mMask", moving_mask, "MovingMask.mha")):
+            for flag, mask, name in (
+                ("-fMask", fixed_mask, "FixedMask.mha"),
+                ("-mMask", moving_mask, "MovingMask.mha"),
+            ):
                 if _is_partial_mask(mask):
                     mask_path = work / name
                     sitk.WriteImage(sitk.Cast(mask, sitk.sitkUInt8), str(mask_path))

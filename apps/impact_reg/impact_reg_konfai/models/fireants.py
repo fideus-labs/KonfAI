@@ -485,9 +485,7 @@ class FireANTsEngine:
             # Left to run this optimises nothing and returns the identity: a Moved equal to the moving
             # image and a zero field, which no downstream check tells apart from a pair that needed no
             # moving.
-            raise ValueError(
-                "linear_method='none' with deformable_method='none' leaves nothing to optimise."
-            )
+            raise ValueError("linear_method='none' with deformable_method='none' leaves nothing to optimise.")
         self._deformable_metric = deformable_metric
         self._deformable_lr = float(deformable_lr)
         self._integrator_n = int(integrator_n)
@@ -532,9 +530,7 @@ class FireANTsEngine:
                 # An all-zero (or all-negative) subject has no centre of mass to speak of; the frame
                 # centre is the only defensible answer and matches what "cof" would have done.
                 size = img.GetSize()
-                return np.asarray(
-                    img.TransformContinuousIndexToPhysicalPoint([(extent - 1) / 2.0 for extent in size])
-                )
+                return np.asarray(img.TransformContinuousIndexToPhysicalPoint([(extent - 1) / 2.0 for extent in size]))
             index = np.array(np.nonzero(positive))  # (3, N) in z, y, x
             weight = array[positive]
             centre_voxel = (index * weight).sum(axis=1) / weight.sum()  # z, y, x
@@ -830,7 +826,9 @@ class RegistrationNet(network.Network):
             Literal["mi", "cc", "mse"], "Similarity metric optimised during the affine (global) stage."
         ] = "mi",
         affine_lr: Annotated[
-            float, Range(0.0, 10.0), "Gradient step size of the affine optimisation; higher converges faster but risks overshoot."
+            float,
+            Range(0.0, 10.0),
+            "Gradient step size of the affine optimisation; higher converges faster but risks overshoot.",
         ] = 0.003,
         moments_init: Annotated[
             Literal["cof", "com"],
@@ -855,9 +853,7 @@ class RegistrationNet(network.Network):
             Literal["cc", "mi", "mse", "impact"],
             "Similarity metric for the deformable stage; 'impact' uses the IMPACT feature models under 'models'.",
         ] = "cc",
-        deformable_lr: Annotated[
-            float, Range(0.0, 10.0), "Gradient step size of the deformable optimisation."
-        ] = 0.25,
+        deformable_lr: Annotated[float, Range(0.0, 10.0), "Gradient step size of the deformable optimisation."] = 0.25,
         integrator_n: Annotated[
             int,
             Range(1, 100),

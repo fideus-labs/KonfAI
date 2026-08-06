@@ -66,8 +66,8 @@ def test_a_repeated_mapping_stage_is_qualified_by_resolution() -> None:
 def test_a_subclass_delegating_to_super_keeps_its_own_spelling() -> None:
     """``Warp(field=...)`` expands into ``Resample`` arguments internally; the recorded spelling is
     the caller's, so the tree references ``Warp`` with the caller's kwargs and rebinds identically."""
-    stage = Warp(field="./DVF:omezarr", max_displacement=120.0)
-    assert stage._konfai_given == {"field": "./DVF:omezarr", "max_displacement": 120.0}
+    stage = Warp(field="./DVF:omezarr", group="DVF")
+    assert stage._konfai_given == {"field": "./DVF:omezarr", "group": "DVF"}
 
 
 def test_the_chain_tree_is_the_yaml_subtree() -> None:
