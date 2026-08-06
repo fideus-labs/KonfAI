@@ -56,7 +56,7 @@ def _skip_unavailable(file_format: str) -> None:
         pytest.importorskip("h5py")
 
 
-FORMATS = ["mha", "h5", "omezarr"]
+FORMATS = ["mha", "nii", "h5", "omezarr"]
 
 
 @pytest.mark.parametrize("file_format", FORMATS)
@@ -295,3 +295,48 @@ def test_can_stream_data_matches_open_support(tmp_path: Path) -> None:
     assert not Dataset(tmp_path / "b", "nii.gz").can_stream_data(geometry)
     assert Dataset(tmp_path / "c", "h5").can_stream_data(Attribute())
     assert Dataset(tmp_path / "d", "omezarr").can_stream_data(Attribute())
+
+
+def test_nii_stream_is_the_file_sitk_would_have_written(tmp_path: Path) -> None:
+    """The one convention the NIfTI stream owns is the RAS sform; sitk's own writer is the oracle.
+
+    Compared through sitk's reader on an OBLIQUE grid: a dropped or half-applied LPS-to-RAS flip
+    reads back as a different Origin/Direction, not as an error.
+    """
+    import SimpleITK as sitk
+
+    volume = _volume(channels=1)
+    attributes = _image_attributes()
+    angle = np.deg2rad(30.0)
+    cos, sin = float(np.cos(angle)), float(np.sin(angle))
+    attributes["Direction"] = np.asarray([[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]).reshape(-1)
+
+    dataset = Dataset(tmp_path / "streamed", "nii")
+    _write_by_slabs(dataset, volume, attributes)
+
+    reference = sitk.GetImageFromArray(volume[0])
+    reference.SetOrigin(attributes.get_np_array("Origin").tolist())
+    reference.SetSpacing(attributes.get_np_array("Spacing").tolist())
+    reference.SetDirection(attributes.get_np_array("Direction").tolist())
+    sitk.WriteImage(reference, str(tmp_path / "reference.nii"))
+
+    got = sitk.ReadImage(str(tmp_path / "streamed" / "CASE_001" / "CT.nii"))
+    want = sitk.ReadImage(str(tmp_path / "reference.nii"))
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(got), sitk.GetArrayFromImage(want))
+    np.testing.assert_allclose(got.GetOrigin(), want.GetOrigin(), atol=1e-5)
+    np.testing.assert_allclose(got.GetSpacing(), want.GetSpacing(), atol=1e-6)
+    np.testing.assert_allclose(got.GetDirection(), want.GetDirection(), atol=1e-6)
+
+
+def test_nii_stream_multi_channel_reads_back_as_vector_image(tmp_path: Path) -> None:
+    """The vector dimension is NIfTI's slowest, so channel-first slabs land without a transpose."""
+    import SimpleITK as sitk
+
+    volume = _volume(channels=3)
+    dataset = Dataset(tmp_path / "streamed", "nii")
+    _write_by_slabs(dataset, volume, _image_attributes())
+
+    image = sitk.ReadImage(str(tmp_path / "streamed" / "CASE_001" / "CT.nii"))
+    assert image.GetNumberOfComponentsPerPixel() == 3
+    back, _ = dataset.read_data("CT", "CASE_001")
+    np.testing.assert_array_equal(np.asarray(back), volume)

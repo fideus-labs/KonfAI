@@ -116,7 +116,7 @@ The usual reasons a chain refuses to stream, and what to do:
 | --- | --- |
 | a stage declares `WHOLE_VOLUME` | Some transforms genuinely need the volume (`Squeeze`, `Norm` change the tensor's rank). Nothing to fix — check it fits the budget. |
 | a statistic after a value-changing stage | Insert a `Save:` before the statistic; the cache becomes the source the statistic reads. See below. |
-| the destination cannot serve region writes | Write to `:h5` or `:omezarr` (or `:mha` for an image with geometry). |
+| the destination cannot serve region writes | Write to `:h5` or `:omezarr` (or `:mha`/`:nii` for an image with geometry). |
 | a halo too wide for the grid | The transform's neighbourhood is over half the slab extent; it is cheaper to load the volume. |
 
 ### `Save:` unlocks chains that would otherwise refuse
