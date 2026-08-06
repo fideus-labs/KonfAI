@@ -721,6 +721,75 @@ class _H5DataStream(DataStream):
         parent.move(temporary_name, self._final_name)
 
 
+def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attribute) -> tuple[Any, Any]:
+    """An ITK displacement-transform HDF5 file with its parameters dataset still to fill.
+
+    Three datasets, as ITK's own writer lays them out: the type (a variable-length ASCII string,
+    which is what ITK's reader accepts), the fixed parameters — size, origin, spacing, direction —
+    and the parameters, the field buffer with the component fastest, float64. Returns the open file
+    and the parameters dataset.
+    """
+    import h5py
+
+    fixed = np.concatenate(
+        [
+            np.asarray(spatial[::-1], dtype=np.float64),  # size, in (x, y, z)
+            attributes.get_np_array("Origin").astype(np.float64),
+            attributes.get_np_array("Spacing").astype(np.float64),
+            attributes.get_np_array("Direction").astype(np.float64).reshape(-1),
+        ]
+    )
+    file = h5py.File(path, "w")
+    file.create_dataset(
+        "TransformGroup/0/TransformType",
+        data=[b"DisplacementFieldTransform_double_3_3"],
+        dtype=h5py.string_dtype(encoding="ascii"),
+    )
+    file.create_dataset("TransformGroup/0/TransformFixedParameters", data=fixed)
+    parameters = file.create_dataset(
+        "TransformGroup/0/TransformParameters", shape=(3 * int(np.prod(spatial)),), dtype=np.float64
+    )
+    return file, parameters
+
+
+class _ItkTransformDataStream(DataStream):
+    """An ITK displacement-transform file written region by region.
+
+    A slab of the field maps to one contiguous span of the parameters (the buffer is ``[z][y][x]``
+    with the component fastest), so full-width leading-axis slabs — what the streamed write
+    dispatcher emits — land with plain offset writes. Under a temporary name until the clean exit,
+    like every stream.
+    """
+
+    def __init__(self, file: Any, parameters: Any, temporary_path: str, final_path: str, spatial: list[int]) -> None:
+        self._h5 = file
+        self._parameters = parameters
+        self._temporary_path = temporary_path
+        self._final_path = final_path
+        self._spatial = [int(extent) for extent in spatial]
+
+    def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
+        channels, leading, *rest = slices
+        full = (channels.start or 0) == 0 and channels.stop in (None, 3)
+        for axis, part in enumerate(rest, start=2):
+            full = full and (part.start or 0) == 0 and part.stop in (None, self._spatial[axis])
+        if not full:
+            raise DatasetManagerError(
+                "A transform file writes full-width leading-axis slabs, and this region is not one.",
+                "This is a bug if it was reached: the streamed write dispatcher finalizes full rows.",
+            )
+        block = np.moveaxis(np.asarray(data, dtype=np.float64), 0, -1).ravel()
+        offset = 3 * int(leading.start or 0) * int(np.prod(self._spatial[2:], dtype=np.int64))
+        self._parameters[offset : offset + block.size] = block
+
+    def _close(self, success: bool) -> None:
+        self._h5.close()
+        if success:
+            os.replace(self._temporary_path, self._final_path)
+        else:
+            Path(self._temporary_path).unlink(missing_ok=True)
+
+
 # MetaImage ElementType for each NumPy dtype a streamed .mha can hold.
 _MHA_ELEMENT_TYPES = {
     "int8": "MET_CHAR",
@@ -1866,6 +1935,150 @@ class Dataset:
             info = get_dicom_info(self._path(name))
             return info["shape"], self._attributes(info)
 
+    class ItkTransformFile(AbstractFile):
+        """ITK transform files, one ``<case>/<group>.h5`` per entry.
+
+        The write side is the point: ``sitk.WriteTransform`` needs the whole field resident in
+        float64, where the FILE is three HDF5 datasets that write by regions — so a displacement
+        field streams into a transform any ITK consumer (Slicer first) loads. The read side hands
+        back what ``Dataset.read_transform`` decodes: a displacement entry carries its field and
+        the displacement marker; any other stored transform, the parameter rows and type keys of
+        ``_encode_transform_leaves``.
+        """
+
+        def __init__(self, filename: str, read: bool) -> None:
+            self.filename = filename
+            self.read = read
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, value, traceback):
+            pass
+
+        def _path(self, name: str) -> str:
+            for extension in ("h5", "tfm"):
+                candidate = f"{self.filename}{name}.{extension}"
+                if os.path.exists(candidate):
+                    return candidate
+            return f"{self.filename}{name}.h5"
+
+        def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
+            transform = sitk.ReadTransform(self._path(name))
+            attributes = Attribute()
+            if "DisplacementFieldTransform" in transform.GetName():
+                field = sitk.DisplacementFieldTransform(transform).GetDisplacementField()
+                data, attributes = image_to_data(field)
+                attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+                return data, attributes
+            leaves = _encode_transform_leaves(transform, name, attributes)
+            longest = max(len(leaf) for leaf in leaves)
+            return (
+                np.asarray([np.pad(leaf, (0, longest - len(leaf)), constant_values=np.nan) for leaf in leaves]),
+                attributes,
+            )
+
+        def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+            data, attributes = self.file_to_data(group, name)
+            return data[slices], attributes
+
+        def file_to_data_statistics(
+            self,
+            group: str,
+            name: str,
+            channels: list[int] | None = None,
+        ) -> dict[str, Any]:
+            data, _attributes = self.file_to_data(group, name)
+            if channels is not None:
+                data = data[channels]
+            return _finalize_running_statistics(_update_running_statistics(None, data))
+
+        def data_to_file(
+            self,
+            name: str,
+            data: sitk.Image | sitk.Transform | np.ndarray,
+            attributes: Attribute | None = None,
+        ) -> None:
+            os.makedirs(self.filename, exist_ok=True)
+            final = self._path(name)
+            staging = f"{self.filename}.{name}.{os.getpid()}.tmp.h5"
+            if isinstance(data, sitk.Transform):
+                sitk.WriteTransform(data, staging)
+                os.replace(staging, final)
+                return
+            if isinstance(data, sitk.Image):
+                data, attributes = image_to_data(data)
+            array = np.asarray(data)
+            if attributes is None or array.ndim != 4 or array.shape[0] != 3:
+                raise DatasetManagerError(
+                    f"An ':itktransform' entry is a 3-component 3-D displacement field; '{name}' has"
+                    f" shape {list(array.shape)}.",
+                    "Write the field itself (channel-first, with its geometry), or a sitk.Transform.",
+                )
+            try:
+                import h5py  # noqa: F401
+            except ImportError:
+                field = sitk.Cast(data_to_image(array, attributes), sitk.sitkVectorFloat64)
+                sitk.WriteTransform(sitk.DisplacementFieldTransform(field), staging)
+                os.replace(staging, final)
+                return
+            spatial = [int(extent) for extent in array.shape[1:]]
+            file, parameters = _create_itk_transform_file(staging, spatial, attributes)
+            with file:
+                parameters[:] = np.moveaxis(array.astype(np.float64), 0, -1).ravel()
+            os.replace(staging, final)
+
+        def open_data_stream(
+            self,
+            name: str,
+            shape: list[int],
+            dtype: np.dtype,
+            attributes: Attribute,
+            region_shape: list[int] | None = None,
+        ) -> DataStream | None:
+            del dtype, region_shape  # the parameters are float64 whatever arrives, converted per slab
+            try:
+                import h5py  # noqa: F401
+            except ImportError:
+                return None
+            if len(shape) != 4 or shape[0] != 3 or not is_an_image(attributes):
+                return None
+            os.makedirs(self.filename, exist_ok=True)
+            spatial = [int(extent) for extent in shape[1:]]
+            staging = f"{self.filename}.{name}.{os.getpid()}.tmp.h5"
+            file, parameters = _create_itk_transform_file(staging, spatial, attributes)
+            return _ItkTransformDataStream(file, parameters, staging, self._path(name), [3, *spatial])
+
+        def get_names(self, group: str) -> list[str]:
+            del group
+            return sorted({path.stem for pattern in ("*.h5", "*.tfm") for path in Path(self.filename).glob(pattern)})
+
+        def get_group(self) -> list[str]:
+            return sorted({path.stem for pattern in ("*.h5", "*.tfm") for path in Path(self.filename).glob(pattern)})
+
+        def is_exist(self, group: str, name: str | None = None) -> bool:
+            return os.path.exists(self._path(name if name else group))
+
+        def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
+            try:
+                import h5py
+            except ImportError:
+                data, attributes = self.file_to_data(group, name)
+                return [int(extent) for extent in data.shape], attributes
+            with h5py.File(self._path(name), "r") as file:
+                kind = bytes(file["TransformGroup/0/TransformType"][0])
+                fixed = np.asarray(file["TransformGroup/0/TransformFixedParameters"][()], dtype=np.float64)
+            if not kind.startswith(b"DisplacementFieldTransform"):
+                data, attributes = self.file_to_data(group, name)
+                return [int(extent) for extent in data.shape], attributes
+            attributes = Attribute()
+            attributes["Origin"] = fixed[3:6]
+            attributes["Spacing"] = fixed[6:9]
+            attributes["Direction"] = fixed[9:18]
+            attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+            size_xyz = [int(extent) for extent in fixed[0:3]]
+            return [3, *size_xyz[::-1]], attributes
+
     class File:
         def __init__(
             self,
@@ -1893,6 +2106,8 @@ class Dataset:
                 )
             elif self.file_format == "dicom":
                 self.file = Dataset.DicomFile(self.filename, self.read)
+            elif self.file_format == "itktransform":
+                self.file = Dataset.ItkTransformFile(self.filename + "/", self.read)
             else:
                 self.file = Dataset.SitkFile(self.filename + "/", self.read, self.file_format)
             self.file.__enter__()
@@ -2058,6 +2273,8 @@ class Dataset:
         """
         if self.file_format in ("h5", "omezarr"):
             return True
+        if self.file_format == "itktransform":
+            return is_an_image(attributes)
         return self.file_format == "mha" and is_an_image(attributes)
 
     def open_data_stream(
