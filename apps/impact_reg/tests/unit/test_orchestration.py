@@ -54,8 +54,8 @@ def test_get_available_presets_keeps_only_registration_apps(tmp_path: Path, monk
 
 
 def test_find_outputs_raises_when_missing(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match=r"Moved\.mha"):
-        reg._find_outputs(tmp_path, "Moved.mha")
+    with pytest.raises(FileNotFoundError, match="Moved"):
+        reg._find_outputs(tmp_path, "Moved")
 
 
 # --------------------------------------------------------------------------- mask sentinel

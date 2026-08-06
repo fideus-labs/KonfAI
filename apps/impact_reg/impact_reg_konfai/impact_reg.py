@@ -173,29 +173,112 @@ def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
     return dest
 
 
-def _stage(root: Path, case: str, group: str, source: Path) -> None:
-    """Link one cohort entry — ``root/<case>/<group><suffixes>`` → ``source``. No bytes move.
+def _stage_group(base: Path, group: str, entries: dict[str, Path]) -> str:
+    """One dataset ROOT holding one GROUP — ``base/<group>/<case>/<group><suffixes>`` symlinks —
+    returned as the ``path:format`` spec a run consumes. No bytes move.
 
-    A dataset is a root of CASES holding GROUPS; paths from the command line (or another run's
-    output tree) become one by symlink, exactly as konfai-apps stages its own inputs. Entries
-    resolve by name whatever their form — an ITK file, an OME-Zarr store, a stored transform.
+    One root per group, not one mixed cohort: a directory dataset's backend is detected from its
+    first case, and a single store entry flips the whole root to the store backend — the ``.mha``
+    beside it stops resolving. A homogeneous root keeps every entry readable whatever mix of forms
+    the caller and the presets produced; the run reads all its roots side by side.
     """
-    case_dir = root / case
-    case_dir.mkdir(parents=True, exist_ok=True)
-    (case_dir / (group + "".join(source.suffixes))).symlink_to(source.resolve())
+    forms = {"".join(source.suffixes).lower() for source in entries.values()}
+    if len(forms) > 1:
+        raise RuntimeError(
+            f"group '{group}' mixes storage forms ({', '.join(sorted(forms))}); a directory dataset"
+            " has one backend, so a mixed group cannot be staged. Re-run the producers to one form."
+        )
+    root = base / group
+    suffixes = ""
+    for case, source in entries.items():
+        case_dir = root / case
+        case_dir.mkdir(parents=True, exist_ok=True)
+        suffixes = "".join(source.suffixes)
+        # Clear every form of the entry, not only the current one: a re-stage that switched forms
+        # would otherwise leave two links and discovery by stem finds both.
+        for stale in case_dir.glob(f"{group}.*"):
+            stale.unlink() if stale.is_symlink() or stale.is_file() else shutil.rmtree(stale)
+        link = case_dir / (group + suffixes)
+        link.symlink_to(source.resolve())
+    return f"{root}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.') or 'mha')}"
 
 
 def _the_output(dest_dir: Path, stem: str) -> Path:
     """The single output named ``stem`` in ``dest_dir`` — one, exactly."""
     matches = sorted(dest_dir.glob(f"{stem}.*"))
     if len(matches) != 1:
-        raise FileNotFoundError(f"Expected exactly one '{stem}' under {dest_dir}, found {len(matches)}.")
+        found = ", ".join(path.name for path in matches) or "none"
+        raise FileNotFoundError(
+            f"Expected exactly one '{stem}' under {dest_dir}, found {found}. More than one is a"
+            " stale other-form output left beside the current one: remove it, or re-run register,"
+            " which clears the stem before writing."
+        )
     return matches[0]
+
+
+def _write_displacement_transform(dvf: Path, dest: Path, work: Path) -> None:
+    """``dest`` as ITK's HDF5 transform writer lays it out — parameters filled region by region.
+
+    ``sitk.WriteTransform`` needs the whole field resident, in float64; the FORMAT does not: an
+    ITK transform file is three HDF5 datasets (the type; the fixed parameters — size, origin,
+    spacing, direction; the parameters — the field buffer, component fastest), and HDF5 writes by
+    regions. The field is read in slabs through ``Dataset``, so the peak is one slab in float64
+    instead of the field twice over. Read-back equality with sitk's own writer is pinned by the
+    app tests. Without ``h5py`` the sitk path serves, whole.
+    """
+    try:
+        import h5py
+    except ImportError:
+        sitk.WriteTransform(sitk.DisplacementFieldTransform(read_displacement_field(dvf)), str(dest))
+        return
+    from konfai.utils.dataset import Dataset
+
+    spec = _stage_group(work / "transform_h5", "DVF", {"P000": dvf})
+    filename, _colon, file_format = spec.rpartition(":")
+    dataset = Dataset(Path(filename), file_format)
+    shape, attribute = dataset.get_infos("DVF", "P000")
+    channels, spatial = int(shape[0]), [int(extent) for extent in shape[1:]]
+    if channels != 3 or len(spatial) != 3:
+        raise RuntimeError(f"Transform.h5 needs a 3-component 3-D field; '{dvf}' has shape {list(shape)}.")
+    fixed = np.concatenate(
+        [
+            np.asarray(spatial[::-1], dtype=np.float64),  # size, in (x, y, z)
+            attribute.get_np_array("Origin").astype(np.float64),
+            attribute.get_np_array("Spacing").astype(np.float64),
+            attribute.get_np_array("Direction").astype(np.float64).reshape(-1),
+        ]
+    )
+    rows, offset = 16, 0
+    streamed = dataset.bounded_region_reads("DVF", "P000")
+    resident = None if streamed else np.asarray(dataset.read_data("DVF", "P000")[0])
+    staging = dest.with_name(dest.name + ".tmp")
+    with h5py.File(staging, "w") as file:
+        file.create_dataset(
+            "TransformGroup/0/TransformType",
+            data=[b"DisplacementFieldTransform_double_3_3"],
+            dtype=h5py.string_dtype(encoding="ascii"),  # ITK reads a variable-length ASCII string
+        )
+        file.create_dataset("TransformGroup/0/TransformFixedParameters", data=fixed)
+        parameters = file.create_dataset(
+            "TransformGroup/0/TransformParameters", shape=(3 * int(np.prod(spatial)),), dtype=np.float64
+        )
+        for start in range(0, spatial[0], rows):
+            stop = min(start + rows, spatial[0])
+            if resident is None:
+                block, _ = dataset.read_data_slice(
+                    "DVF", "P000", (slice(None), slice(start, stop), slice(None), slice(None))
+                )
+            else:
+                block = resident[:, start:stop]
+            slab = np.moveaxis(np.asarray(block, dtype=np.float64), 0, -1).ravel()
+            parameters[offset : offset + slab.size] = slab
+            offset += slab.size
+    os.replace(staging, dest)
 
 
 def _run_transform(
     name: str,
-    root: Path,
+    datasets: list[str],
     chains: dict,
     work: Path,
     gpu: list[int],
@@ -352,6 +435,13 @@ class ImpactRegKonfAIApp:
         # volume belongs to which case, in the same order it will use, so a dataset in and a single pair
         # in go down one path.
         moving_units = _units(moving_images)
+        for side, masks in (("fixed", fixed_masks), ("moving", moving_masks)):
+            mask_units = _units(list(masks)) if masks else []
+            if masks and len(mask_units) != len(moving_units):
+                raise RuntimeError(
+                    f"the {side} masks expand to {len(mask_units)} unit(s) for {len(moving_units)}"
+                    " case(s); masks pair with cases by position, so the counts must match."
+                )
 
         work = _work_dir(tmp_dir, "impact_reg_")
         try:
@@ -417,14 +507,11 @@ class ImpactRegKonfAIApp:
                 # map -- one interpolation, slab by slab, the whole cohort under one plan.
                 self._derive_moved(dict(zip(cases, moving_units, strict=True)), output, work, gpu, cpu, quiet)
                 for case in cases:
-                    # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid field
-                    # as a SimpleITK transform. Inherently whole -- the .h5 format carries the full
-                    # field -- which is why it goes with the moved image rather than being
-                    # unconditional.
-                    transform = sitk.DisplacementFieldTransform(
-                        read_displacement_field(_the_output(output / case, "DVF"))
+                    # Transform.h5 (consumed by `evaluate` and SlicerImpactReg): the fixed-grid
+                    # field as an ITK transform file, filled region by region from the DVF.
+                    _write_displacement_transform(
+                        _the_output(output / case, "DVF"), output / case / "Transform.h5", work
                     )
-                    sitk.WriteTransform(transform, str(output / case / "Transform.h5"))
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
