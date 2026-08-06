@@ -30,7 +30,7 @@ sitk = pytest.importorskip("SimpleITK")
 
 from konfai import api  # noqa: E402
 from konfai.data.reduction import Std  # noqa: E402
-from konfai.data.transform import Clip, Magnitude, Resample, Warp, Write  # noqa: E402
+from konfai.data.transform import Clip, Magnitude, Resample, Write  # noqa: E402
 from konfai.metric.measure import Dice  # noqa: E402
 from konfai.utils.errors import ConfigError, KonfAIError  # noqa: E402
 
@@ -64,10 +64,15 @@ def test_a_repeated_mapping_stage_is_qualified_by_resolution() -> None:
 
 
 def test_a_subclass_delegating_to_super_keeps_its_own_spelling() -> None:
-    """``Warp(field=...)`` expands into ``Resample`` arguments internally; the recorded spelling is
-    the caller's, so the tree references ``Warp`` with the caller's kwargs and rebinds identically."""
-    stage = Warp(field="./DVF:omezarr", group="DVF")
-    assert stage._konfai_given == {"field": "./DVF:omezarr", "group": "DVF"}
+    """The recorded spelling is the caller's: a subclass expanding into ``Resample`` arguments
+    inside ``super().__init__`` records its OWN kwargs, so the tree references the subclass with
+    what the caller wrote and rebinds identically."""
+
+    class FieldBeside(Resample):
+        def __init__(self, group: str) -> None:
+            super().__init__(field_group=group)
+
+    assert FieldBeside(group="DVF")._konfai_given == {"group": "DVF"}
 
 
 def test_the_chain_tree_is_the_yaml_subtree() -> None:

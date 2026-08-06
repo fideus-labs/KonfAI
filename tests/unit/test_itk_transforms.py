@@ -56,11 +56,11 @@ def test_apply_to_data_transform_returns_ndarray() -> None:
 
 
 def test_resample_transform_applies_displacement_in_physical_space() -> None:
-    # ResampleTransform must not add the physical (dx, dy, dz) displacement straight onto a (z, y, x)
+    # A stored-transform Resample must not add the physical (dx, dy, dz) displacement straight onto a (z, y, x)
     # voxel-index grid: that transposes x/z and treats millimetres as voxels. A +6 mm translation along
     # X on a 2 mm-X grid must move content 3 voxels along X (not 6 voxels along Z).
     import torch
-    from konfai.data.transform import ResampleTransform
+    from konfai.data.transform import Resample
     from konfai.utils.dataset import Attribute
 
     volume = torch.zeros(1, 8, 8, 8, dtype=torch.uint8)
@@ -79,7 +79,7 @@ def test_resample_transform_applies_displacement_in_physical_space() -> None:
         def read_transform(self, group: str, name: str) -> "sitk.Transform":
             return translation
 
-    transform = ResampleTransform({"reg": False})
+    transform = Resample(transforms={"reg": False})
     transform.datasets = [_TransformStore()]
 
     out = transform("case", volume, attribute)

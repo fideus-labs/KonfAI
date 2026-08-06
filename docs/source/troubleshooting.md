@@ -103,7 +103,7 @@ depends on its arguments: pointwise covers `TensorCast`, `Clip` with **fixed** b
 and `Standardize` given **both** `mean` and `std`; `Normalize` and an automatic
 `Standardize` are global-statistic (still streamable, one statistics pass first); and
 the region kinds are `Flip`, `Permute`, **axis-aligned** `Canonical`,
-`ResampleToShape`/`ResampleToResolution`, `Dilate` and `Gradient`. A `Clip` with a
+`Resample` (to a grid, or through a stored transform or field), `Dilate` and `Gradient`. A `Clip` with a
 percentile bound needs the whole histogram, and `Padding` streams on the **write**
 side only — on the read side it loads the case whole. See the transform reference for
 the per-transform answer.

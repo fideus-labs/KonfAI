@@ -210,13 +210,13 @@ def test_the_recorded_bound_reaches_each_axis_by_its_own_spacing_under_anisotrop
     wrong neighbourhood -- and under this anisotropy the three numbers are far enough apart (3, 22
     and 31 voxels) that any permutation of them is visible.
     """
-    from konfai.data.transform import LocalityKind, Warp
+    from konfai.data.transform import LocalityKind, Resample
 
     field = np.zeros((3, 8, 8, 8), dtype=np.float32)
     field[0, 4, 4, 4], field[1, 2, 2, 2], field[2, 1, 1, 1] = 917.5, -640.25, 96.0
     store = tmp_field_store(field)
 
-    warp = Warp(field=f"{store}:omezarr", group="DVF")
+    warp = Resample(field=f"{store}:omezarr", field_group="DVF")
     attribute = Attribute()
     attribute["Spacing"] = np.array([30.08, 30.08, 40.0])  # stored (x, y, z)
     attribute["Origin"] = np.zeros(3)

@@ -56,7 +56,7 @@ def cohort(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.mark.integration
 def test_the_template_example_folds_the_cohort_into_one_entry(cohort: Path) -> None:
-    """N to 1. The README's headline claim, and the reason ResampleToReference is in the chain:
+    """N to 1. The README's headline claim, and the reason a reference Resample is in the chain:
     the cases do not share a grid, so ``grid: strict`` would refuse them as stored."""
     planned = _run([*konfai_cli_command(), "TRANSFORM", "--config", "Transform.yml", "--plan"], cohort)
     assert planned.returncode == 0, f"the template example does not plan:\n{planned.stdout}{planned.stderr}"

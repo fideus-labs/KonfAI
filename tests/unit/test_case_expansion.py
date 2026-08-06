@@ -30,7 +30,7 @@ import pytest
 import torch
 from konfai.data.augmentation import Brightness, Flip, Permute, Scale
 from konfai.data.patching import DatasetManager
-from konfai.data.transform import Clip, Expand, Save, TensorCast, Transform, Write, split_expand
+from konfai.data.transform import Clip, Expand, Resample, Save, TensorCast, Transform, Write, split_expand
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PatchError, TransformError
 
@@ -467,7 +467,6 @@ def test_interleaved_patch_reads_of_two_copies_each_keep_their_own_grid(tmp_path
     a re-read of copy 1 after copy 2's plan silently returned copy 2's sampling of copy 1's data.
     """
     from konfai.data.patching import DatasetPatch
-    from konfai.data.transform import Resample
 
     source = _source(tmp_path)
     permute = _draw(Permute(prob_permute=[0.5, 0.5]))

@@ -42,7 +42,7 @@ from konfai.data.transform import (
     Padding,
     Permute,
     RegionContext,
-    ResampleToResolution,
+    Resample,
     Softmax,
     Standardize,
     TensorCast,
@@ -220,7 +220,7 @@ def test_stream_rescale_nearest_is_byte_identical_to_the_whole_volume_inverse(se
     # to be smaller: byte-identical by construction rather than by agreement.
     rng = np.random.default_rng(seed)
     volume = torch.from_numpy(rng.integers(0, 7, size=(C, Z, Y, X)).astype(np.uint8))
-    resample = ResampleToResolution([1.0, 1.0, 1.0])
+    resample = Resample([1.0, 1.0, 1.0])
     attribute = Attribute()
     attribute["Spacing"] = torch.tensor([1.0, 1.0, 1.0])
     attribute["Size"] = np.asarray([12, 9, 7])  # the size the inverse restores
@@ -251,7 +251,7 @@ def test_stream_rescale_linear_matches_the_whole_volume_inverse_to_float_roundin
     # sample in the same place. There is no tolerance to negotiate here any more.
     rng = np.random.default_rng(seed)
     volume = torch.from_numpy(rng.standard_normal((C, Z, Y, X)).astype(np.float32)) * 100.0
-    resample = ResampleToResolution([1.0, 1.0, 1.0])
+    resample = Resample([1.0, 1.0, 1.0])
     attribute = Attribute()
     attribute["Spacing"] = torch.tensor([1.0, 1.0, 1.0])
     attribute["Size"] = np.asarray([12, 9, 7])
@@ -306,7 +306,7 @@ def test_stream_window_is_bounded_by_the_pull_span() -> None:
     # The whole point: the buffer holds the pull span of the pending output rows, never the volume.
     tall = 64
     volume = (torch.arange(1 * tall * Y * X).reshape(1, tall, Y, X) % 5).to(torch.uint8)
-    resample = ResampleToResolution([1.0, 1.0, 1.0])
+    resample = Resample([1.0, 1.0, 1.0])
     attribute = Attribute()
     attribute["Spacing"] = torch.tensor([1.0, 1.0, 1.0])
     attribute["Size"] = np.asarray([96, Y, X])
@@ -364,11 +364,11 @@ def test_inverse_locality_defaults_and_overrides() -> None:
     # Geometry inverses declare their own kind.
     assert Padding().inverse_patch_locality(empty).kind is LocalityKind.CROP
     # A resample inverse is patch-native only when the Size stack it pops is on the case.
-    assert ResampleToResolution().inverse_patch_locality(empty).kind is LocalityKind.WHOLE_VOLUME
+    assert Resample().inverse_patch_locality(empty).kind is LocalityKind.WHOLE_VOLUME
     seeded = Attribute()
     seeded["Size"] = np.asarray([4, 4, 4])
     seeded["Size"] = np.asarray([2, 2, 2])
-    assert ResampleToResolution().inverse_patch_locality(seeded).kind is LocalityKind.REGRID
+    assert Resample().inverse_patch_locality(seeded).kind is LocalityKind.REGRID
     # Canonical judges the POPPED state: without a stacked direction there is nothing to invert onto.
     assert Canonical().inverse_patch_locality(empty).kind is LocalityKind.WHOLE_VOLUME
 
@@ -613,14 +613,14 @@ def test_add_layer_streams_a_forward_region_final_transform(tmp_path, monkeypatc
 
 
 def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_path, monkeypatch) -> None:
-    # The general case the composition exists for: Canonical + ResampleToResolution + Padding forward,
+    # The general case the composition exists for: Canonical + Resample + Padding forward,
     # so the finalize chain carries CROP + REGRID + ORIENTATION in sequence. With the labelmap cast
     # to uint8 before the reduction, the whole stack streams to the sink and must match the
     # whole-volume path bit for bit.
     volume = (torch.arange(1 * 6 * 4 * 3).reshape(1, 6, 4, 3) % 5).to(torch.float32)
     transforms = [
         Canonical(inverse=True),
-        ResampleToResolution([0.5, 0.5, -1.0], inverse=True),
+        Resample([0.5, 0.5, -1.0], inverse=True),
         Padding([0, 0, 0, 0, 2, 1], inverse=True),
     ]
     before = [TensorCast("uint8", inverse=False)]

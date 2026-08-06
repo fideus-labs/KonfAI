@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""``ResampleTransform`` streaming: against SimpleITK, and against its own whole-volume path.
+"""``Resample`` through stored transforms: against SimpleITK, and against its own whole-volume path.
 
 The fixture is high-frequency and its direction cosines are oblique, because a smooth phantom on
 an axis-aligned grid passes a map that is wrong in exactly the ways this stage can be wrong.
@@ -23,7 +23,7 @@ an axis-aligned grid passes a map that is wrong in exactly the ways this stage c
 import numpy as np
 import pytest
 import torch
-from konfai.data.transform import LocalityKind, RegionContext, ResampleTransform
+from konfai.data.transform import LocalityKind, RegionContext, Resample
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
 
@@ -59,7 +59,7 @@ def _attribute(image: "sitk.Image") -> Attribute:
 
 
 class _StoredTransform:
-    """The smallest thing that answers what ``ResampleTransform`` asks of a ``Dataset``."""
+    """The smallest thing that answers what a stored-transform ``Resample`` asks of a ``Dataset``."""
 
     def __init__(self, group: str, transform: "sitk.Transform") -> None:
         self.group = group
@@ -112,8 +112,8 @@ def _families(image) -> list[tuple[str, "sitk.Transform"]]:
     ]
 
 
-def _stage(image, transform, **kwargs) -> ResampleTransform:
-    stage = ResampleTransform(transforms={"reg": False}, **kwargs)
+def _stage(image, transform, **kwargs) -> Resample:
+    stage = Resample(transforms={"reg": False}, **kwargs)
     stage.set_datasets([_StoredTransform("reg", transform)])
     stage.transform_shape("", CASE, list(SIZE), _attribute(image))
     return stage
@@ -168,7 +168,7 @@ def test_the_streamed_slabs_agree_with_the_whole_volume(device: torch.device, ro
         torch.testing.assert_close(streamed, reference, rtol=0.0, atol=1e-5 * span, msg=label)
 
 
-def _slab_reads(stage: ResampleTransform, attribute: Attribute, rows: int) -> list[int]:
+def _slab_reads(stage: Resample, attribute: Attribute, rows: int) -> list[int]:
     reads = []
     for start in range(0, SIZE[0], rows):
         target = (slice(start, min(start + rows, SIZE[0])), slice(0, SIZE[1]), slice(0, SIZE[2]))
@@ -213,7 +213,7 @@ class TestLocality:
 
     def test_a_case_without_geometry_falls_back_and_says_why(self):
         image = _image()
-        stage = ResampleTransform(transforms={"reg": False})
+        stage = Resample(transforms={"reg": False})
         stage.set_datasets([_StoredTransform("reg", _euler(image))])
         stage.transform_shape("", CASE, list(SIZE), Attribute())  # no Origin/Spacing/Direction
         locality = stage.patch_locality(Attribute())  # judged on the header handed over
@@ -227,7 +227,7 @@ class TestLocality:
         the whole-volume path needs the same decode this refusal comes from.
         """
         image = _image()
-        stage = ResampleTransform(transforms={"absent": False})
+        stage = Resample(transforms={"absent": False})
         stage.set_datasets([_StoredTransform("reg", _euler(image))])
         with pytest.raises(TransformError, match="absent"):
             stage.transform_shape("", CASE, list(SIZE), _attribute(image))
@@ -245,14 +245,14 @@ class TestLocality:
         size = np.asarray(quadratic.GetParameters()).size
         quadratic.SetParameters(list(np.random.RandomState(3).uniform(-5.0, 5.0, size)))
 
-        stage = ResampleTransform(transforms={"reg": False})
+        stage = Resample(transforms={"reg": False})
         stage.set_datasets([_StoredTransform("reg", quadratic)])
         with pytest.raises(TransformError, match="order 2"):
             stage.transform_shape("", CASE, list(SIZE), _attribute(image))
 
     def test_inverting_a_spline_refuses_at_plan_time_with_the_remedy(self):
         image = _image()
-        stage = ResampleTransform(transforms={"reg": True})
+        stage = Resample(transforms={"reg": True})
         stage.set_datasets([_StoredTransform("reg", _bspline(image))])
         with pytest.raises(TransformError, match="Store the inverse"):
             stage.transform_shape("", CASE, list(SIZE), _attribute(image))
@@ -260,7 +260,7 @@ class TestLocality:
     def test_inverting_a_rigid_map_is_exact_and_still_streams(self):
         image = _image()
         transform = _euler(image)
-        stage = ResampleTransform(transforms={"reg": True})
+        stage = Resample(transforms={"reg": True})
         stage.set_datasets([_StoredTransform("reg", transform)])
         stage.transform_shape("", CASE, list(SIZE), _attribute(image))
         assert stage.patch_locality(_attribute(image)).kind is LocalityKind.REGRID
@@ -296,14 +296,14 @@ class TestSampling:
 class TestRefusals:
     def test_an_unknown_interpolation_is_refused_at_construction(self):
         with pytest.raises(TransformError, match="interpolation"):
-            ResampleTransform(transforms={"reg": False}, interpolation="bspline")
+            Resample(transforms={"reg": False}, interpolation="bspline")
 
     def test_no_transforms_is_refused_at_construction(self):
-        with pytest.raises(TransformError, match="at least one group"):
-            ResampleTransform(transforms={})
+        with pytest.raises(TransformError, match="empty 'transforms'"):
+            Resample(transforms={})
 
     def test_the_inverse_direction_says_what_to_do_instead(self):
-        stage = ResampleTransform(transforms={"reg": False})
+        stage = Resample(transforms={"reg": False})
         assert stage.inverse_patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
         with pytest.raises(TransformError, match="inverse: false"):
             stage.inverse(CASE, torch.zeros(1, 2, 2, 2), Attribute())
@@ -317,7 +317,7 @@ class TestCompositeOrder:
         image = _image(oblique=False)
         first = sitk.TranslationTransform(3, (4.0, 0.0, 0.0))
         second = sitk.ScaleTransform(3, (1.5, 1.5, 1.5))
-        stage = ResampleTransform(transforms={"a": False, "b": False})
+        stage = Resample(transforms={"a": False, "b": False})
 
         class _Two:
             def is_dataset_exist(self, group: str, name: str) -> bool:

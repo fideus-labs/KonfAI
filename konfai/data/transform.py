@@ -1300,6 +1300,11 @@ class Resample(TransformInverse):
                 "A resample writes on one grid: give its density (spacing), its extent (shape) or the"
                 " image whose grid to adopt (reference) -- and only one of them.",
             )
+        if reference and not str(reference).strip():
+            raise TransformError(
+                "'Resample' was given a blank reference.",
+                "Name the entry whose grid to adopt: Resample: {reference: 822174, reference_group: Volume}.",
+            )
         if align not in ("extent", "origin"):
             raise TransformError(
                 f"'Resample' has an unknown align '{align}'.",
@@ -1936,69 +1941,6 @@ class Resample(TransformInverse):
         return isinstance(self._target, _OwnGrid)
 
 
-class ResampleToResolution(Resample):
-    """Deprecated spelling of ``Resample: {spacing: ...}``."""
-
-    def __init__(self, spacing: list[float] = [1.0, 1.0, 1.0], inverse: bool = True) -> None:
-        super().__init__(spacing=spacing, inverse=inverse)
-
-
-class ResampleToShape(Resample):
-    """Deprecated spelling of ``Resample: {shape: ...}``."""
-
-    def __init__(self, shape: list[int] = [100, 256, 256], inverse: bool = True) -> None:
-        super().__init__(shape=shape, inverse=inverse)
-
-
-class ResampleToReference(Resample):
-    """Deprecated spelling of ``Resample: {reference: ...}``."""
-
-    def __init__(
-        self,
-        entry: str,
-        group: str | None = None,
-        dataset: str | None = None,
-        field: str | None = None,
-        field_group: str | None = None,
-        fill: float = 0.0,
-        interpolation: str | None = None,
-        inverse: bool = True,
-    ) -> None:
-        if not entry or not str(entry).strip():
-            raise TransformError(
-                "'ResampleToReference' needs an 'entry': the stored image whose grid to adopt.",
-                "Name it, e.g. Resample: {reference: 822174, reference_group: Volume}.",
-            )
-        super().__init__(
-            reference=entry,
-            reference_group=group,
-            reference_dataset=dataset,
-            field=field,
-            field_group=field_group,
-            fill=fill,
-            interpolation=interpolation,
-            inverse=inverse,
-        )
-
-
-class ResampleTransform(Resample):
-    """Deprecated spelling of ``Resample: {transforms: ...}``."""
-
-    def __init__(
-        self,
-        transforms: dict[str, bool],
-        interpolation: str | None = None,
-        fill: float = 0.0,
-        inverse: bool = False,
-    ) -> None:
-        if not transforms:
-            raise TransformError(
-                "'ResampleTransform' needs at least one group of stored transforms to apply.",
-                "Name it and say whether to invert it, e.g. Resample: {transforms: {reg: false}}.",
-            )
-        super().__init__(transforms=transforms, interpolation=interpolation, fill=fill, inverse=inverse)
-
-
 class Mask(Transform):
     """Set everything outside a mask to a constant.
 
@@ -2479,18 +2421,6 @@ class _DisplacementSource:
                 )
 
 
-class Warp(Resample):
-    """Deprecated spelling of ``Resample: {field: ...}`` — a warp on the case's own grid."""
-
-    def __init__(self, field: str, group: str | None = None, interpolation: str = "linear") -> None:
-        if not field or not str(field).strip():
-            raise TransformError(
-                "'Warp' needs a 'field': the displacement field to resample through.",
-                "Declare it, e.g. Resample: {field: ./DVF:omezarr}.",
-            )
-        super().__init__(field=field, field_group=group, interpolation=interpolation, inverse=False)
-
-
 class Reduce(Transform):
     """Fold every case of a group into one volume, at fixed voxel.
 
@@ -2577,7 +2507,7 @@ class Expand(Transform):
           Clip:   {min_value: 0.0, max_value: 400.0}   # once per case
           Expand: {nb: 8, pattern: "{name}_r{a:02d}"}
           Rotate: {a_min: -15, a_max: 15}              # a draw, per copy
-          ResampleToResolution: {spacing: [2, 2, 2]}   # a transform, per copy
+          Resample: {spacing: [2, 2, 2]}               # a transform, per copy
           Brightness: {b_std: 0.2}                     # another draw, per copy
           Write:  {dataset: ./Augmented:omezarr}
 

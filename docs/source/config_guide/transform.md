@@ -302,13 +302,6 @@ outer faces coincide — while `origin` keeps voxel zero's centre where it is. A
 quarter of a voxel of anatomy separates them, and a `reference` states its own
 placement and ignores this.
 
-```{note}
-`ResampleToResolution`, `ResampleToShape`, `ResampleToReference`,
-`ResampleTransform` and `Warp` are still accepted, and are now thin spellings of
-this one stage: `Resample: {spacing: …}`, `{shape: …}`, `{reference: …}`,
-`{transforms: …}` and `{field: …}` respectively.
-```
-
 ### `Resample: {reference: …}`: making `strict` true rather than waived
 
 A cohort as acquired rarely passes `strict`: extents differ, and origins can
@@ -394,10 +387,9 @@ transforms:
 ```
 
 ```{note}
-This was `Warp`, which required the field and the case to share a grid. They no
-longer have to: the field is read at each target voxel's world position on the
-field's own grid, so a field solved at 120 µm moves a volume stored at 30 µm
-without being upsampled first.
+The field and the case need not share a grid: the field is read at each target
+voxel's world position on the field's own grid, so a field solved at 120 µm
+moves a volume stored at 30 µm without being upsampled first.
 ```
 
 Naming an image rather than fifteen numbers is deliberate. A grid is an extent
