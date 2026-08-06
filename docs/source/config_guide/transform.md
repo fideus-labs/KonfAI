@@ -103,7 +103,7 @@ few percent of the budget can still exceed it.
 | --- | --- |
 | `allow` | Take the whole-volume path silently — but the plan still names it. |
 | `warn` (default) | Same, plus a warning line after the plan. |
-| `error` | Refuse the run. Nothing is written. A fallback only discovered mid-run (a failed sweep, a `Resample` field bound exceeded) stops at that case — earlier cases stay written, and the per-case resume covers the rerun. |
+| `error` | Refuse the run. Nothing is written. A fallback only discovered mid-run (a failed sweep) stops at that case — earlier cases stay written, and the per-case resume covers the rerun. |
 
 Independently of `on_fallback`, a case that **cannot stream and does not fit
 `memory_budget`** always refuses the whole run, before the first byte. Writing
@@ -365,17 +365,13 @@ field solved at 120 µm moves a volume stored at 30 µm without being upsampled
 first. Outside its own extent the displacement is zero: the transform is the
 identity where the field says nothing, as SimpleITK has it.
 
-Nothing is declared about how far the field reaches. The field window a
-region samples is its own box, read for sampling regardless — and the sup of
-the values just read bounds that region's source pull, so each slab pays
-exactly the halo *its* displacements require, measured at run from a read the
-sampler needed anyway. A bound the **store recorded at write time** (KonfAI
-records one on the OME-Zarr fields it writes) does two things without anyone
-asking: it lets the plan **price** the reads exactly — without one the
-estimate assumes a zero field, and the plan says so — and it is **checked
-against every field region actually read**: a store whose data exceed its own
-metadata raises rather than sampling zeros, which would show up as a dark rim
-around the moved anatomy and nothing else.
+Nothing is declared about how far the field reaches, and nothing is recorded.
+The field window a region samples is its own box, read for sampling regardless
+— and the sup of the values just read bounds that region's source pull, so
+each slab pays exactly the halo *its* displacements require, measured at run
+from a read the sampler needed anyway. The one thing the plan cannot know from
+headers is the cost of those reads: it prices them as if the field were zero,
+and says so.
 
 Naming no target grid is the shape update of an atlas build — the field applied
 on the case's *own* grid — and is the same stage with `reference` left out:

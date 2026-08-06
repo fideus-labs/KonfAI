@@ -861,46 +861,25 @@ class _OmeZarrDataStream(DataStream):
         final_path: Path,
         scale_factors: list[int] | None = None,
         downsample_method: str | None = None,
-        displacement_field: bool = False,
     ) -> None:
         self._array = array
         self._store_path = store_path
         self._final_path = final_path
         self._scale_factors = scale_factors
         self._downsample_method = downsample_method
-        self._displacement_field = displacement_field
-        # Running per-component bound of a streamed field. Accumulated from the regions as they are
-        # written -- the only place the samples are ever all seen, since the point of this path is
-        # that the field never exists whole.
-        self._bound: list[float] = []
 
     def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
         self._array[slices] = data
-        if self._displacement_field:
-            from konfai.utils.ome_zarr import displacement_bound
-
-            block = displacement_bound(data)
-            if len(self._bound) < len(block):
-                self._bound.extend([0.0] * (len(block) - len(self._bound)))
-            for component, value in enumerate(block):
-                self._bound[component] = max(self._bound[component], value)
 
     def _close(self, success: bool) -> None:
         from konfai.utils.ome_zarr import (
-            DISPLACEMENT_BOUND_ATTRIBUTE,
             append_ome_zarr_levels,
             clear_ome_zarr_cache,
-            update_konfai_attributes,
         )
 
         if not success:
             shutil.rmtree(self._store_path, ignore_errors=True)
             return
-        if self._displacement_field and self._bound:
-            # Recorded before the levels are derived and before the rename, so the store is published
-            # complete: a consumer that finds the entry finds its bound with it, or the entry is not
-            # there at all.
-            update_konfai_attributes(self._store_path, {DISPLACEMENT_BOUND_ATTRIBUTE: self._bound})
         if self._scale_factors:
             # On the temporary store, so the rename below publishes level 0 and its coarser levels in
             # one step. append_ome_zarr_levels REWRITES level 0 (ngff-zarr composes a multiscales as a
@@ -1761,14 +1740,7 @@ class Dataset:
             # so the stream derives it at finalize, on the TEMPORARY store, before the rename. That
             # order is what keeps publication atomic: a reader never sees a store whose level 0 is
             # complete but whose coarser levels are not.
-            return _OmeZarrDataStream(
-                array,
-                store_path,
-                final_path,
-                self.scale_factors,
-                self.downsample_method,
-                DISPLACEMENT_FIELD_ATTRIBUTE in attributes,
-            )
+            return _OmeZarrDataStream(array, store_path, final_path, self.scale_factors, self.downsample_method)
 
         def get_names(self, group: str) -> list[str]:
             return self.get_group()

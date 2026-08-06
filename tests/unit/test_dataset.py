@@ -74,17 +74,17 @@ def test_attribute_repeated_set_returns_latest_version() -> None:
 
 
 def test_attribute_built_from_a_store_sidecar_holds_text_a_writer_accepts() -> None:
-    """An OME-Zarr sidecar is JSON, so it hands back live lists -- ``MaxDisplacement`` is one.
+    """An OME-Zarr sidecar is JSON, so it hands back live lists, not their string form.
 
     Both doors normalize to text, construction included: a value deep-copied through construction
     untouched reaches ``Image.SetMetaData``, which accepts only ``std::string`` -- a field that
     can be written but never reopened.
     """
-    attribute = Attribute({"MaxDisplacement": [1.19, 2.39, 3.59], "Spacing": (1.5, 1.5, 2.0)})
+    attribute = Attribute({"WorldReach": [1.19, 2.39, 3.59], "Spacing": (1.5, 1.5, 2.0)})
 
     assert all(isinstance(value, str) for value in attribute.values())
     # And readable back: a list prints comma-separated, which np.fromstring alone could not read.
-    np.testing.assert_allclose(attribute.get_np_array("MaxDisplacement"), [1.19, 2.39, 3.59])
+    np.testing.assert_allclose(attribute.get_np_array("WorldReach"), [1.19, 2.39, 3.59])
     np.testing.assert_allclose(attribute.get_np_array("Spacing"), [1.5, 1.5, 2.0])
 
 
