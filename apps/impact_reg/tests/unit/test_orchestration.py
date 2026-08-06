@@ -278,6 +278,51 @@ def test_register_adopts_the_presets_output_name(tmp_path: Path) -> None:
     assert not (case / "DVF.mha").exists()
 
 
+@pytest.mark.parametrize(
+    ("name", "form"),
+    [
+        ("moving.mha", ".mha"),
+        ("patient.v2.mha", ".mha"),
+        ("CT.contrast.nii.gz", ".nii.gz"),
+        ("study.ome.zarr", ".ome.zarr"),
+    ],
+)
+def test_the_storage_form_is_the_extension_not_every_dot(name: str, form: str) -> None:
+    """A dot in the stem belongs to the NAME. Joining every suffix turned ``patient.v2.mha`` into a
+    ``v2.mha`` backend, so how a caller spelled a filename decided whether the run started."""
+    assert reg._form(Path(name)) == form
+    assert reg._format_token(reg._form(Path(name))) in {"mha", "nii.gz", "omezarr"}
+
+
+def test_register_reads_a_moving_whose_stem_carries_a_dot(tmp_path: Path) -> None:
+    """End to end on the name that used to kill the run before the first read."""
+    moving = tmp_path / "patient.v2.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    reference = sitk.ReadImage(str(moving))
+    app = reg.ImpactRegKonfAIApp()
+
+    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
+        return "DVF", {"P000": out / "DVF.mha"}
+
+    app._infer_preset = field_only  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+
+    case = out / "P000"
+    assert (case / "DVF.mha").is_file()
+    # The moved image takes the moving's FORM, not its whole tail of dots: moved(p) = moving(p + d),
+    # d = +2 along x on a unit grid, moving = z*64 + y*8 + x.
+    moved = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "Moved.mha")))
+    assert moved[0, 0, 0] == pytest.approx(2.0)
+    assert moved[1, 1, 0] == pytest.approx(74.0)
+
+
 def test_register_refuses_presets_that_name_their_output_differently(tmp_path: Path) -> None:
     """An ensemble folds one group: members that disagree on its name are refused, not renamed."""
     moving = tmp_path / "moving.mha"

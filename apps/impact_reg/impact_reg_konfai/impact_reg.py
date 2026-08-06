@@ -43,6 +43,7 @@ import numpy as np
 import SimpleITK as sitk
 from konfai.utils.dataset import read_landmarks, write_landmarks
 from konfai.utils.ITK import apply_to_data_transform, read_displacement_field
+from konfai.utils.utils import SUPPORTED_EXTENSIONS
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import get_available_apps_on_hf_repo
 
@@ -56,6 +57,32 @@ _ENSEMBLE_DIR = "Ensemble"
 # the ITK transform files need translating; every other suffix is already the token Dataset
 # normalises (".mha" -> "mha").
 _FORMATS = {".ome.zarr": "omezarr", ".zarr": "omezarr", ".h5": "itktransform", ".tfm": "itktransform"}
+
+# Longest first, so ".nii.gz" wins over ".gz" and ".ome.zarr" over ".zarr".
+_FORMS = sorted({f".{extension}" for extension in SUPPORTED_EXTENSIONS} | set(_FORMATS), key=len, reverse=True)
+
+
+def _form(path: Path) -> str:
+    """The storage form of ``path``: the longest extension konfai knows, spelled as the file spells it.
+
+    NOT ``"".join(path.suffixes)``. A dot in the STEM belongs to the name, not to the format:
+    ``patient.v2.mha`` is a MetaImage and ``CT.contrast.nii.gz`` a gzipped NIfTI, yet joining every
+    suffix asked konfai for a ``v2.mha`` backend and killed the run at the dataset spec — how a
+    caller names a file decided whether the run started. Matched from the right so a compound
+    extension wins over its tail. A name whose end matches nothing keeps its last suffix, and the
+    spec check — not this function — is what reports it.
+    """
+    name = path.name
+    lowered = name.lower()
+    for form in _FORMS:
+        if lowered.endswith(form):
+            return name[len(name) - len(form) :]
+    return path.suffix
+
+
+def _format_token(form: str) -> str:
+    """The konfai backend token a storage form is read and written through."""
+    return _FORMATS.get(form.lower(), form.lower().lstrip(".") or "mha")
 
 
 def _is_transform_file(path: Path) -> bool:
@@ -201,7 +228,7 @@ def _work_dir(tmp_dir: Path | None, prefix: str) -> Path:
 
 def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
     """Copy an output beside the results, keeping the form the preset produced (file or store)."""
-    dest = _output_path(dest_dir, stem, "".join(src.suffixes))
+    dest = _output_path(dest_dir, stem, _form(src))
     (shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
     if dest.is_dir():
         # A store put at a path already read is invisible to the reader's path-keyed memo, which
@@ -221,7 +248,7 @@ def _stage_group(base: Path, group: str, entries: dict[str, Path]) -> str:
     beside it stops resolving. A homogeneous root keeps every entry readable whatever mix of forms
     the caller and the presets produced; the run reads all its roots side by side.
     """
-    forms = {"".join(source.suffixes).lower() for source in entries.values()}
+    forms = {_form(source).lower() for source in entries.values()}
     if len(forms) > 1:
         raise RuntimeError(
             f"group '{group}' mixes storage forms ({', '.join(sorted(forms))}); a directory dataset"
@@ -232,14 +259,14 @@ def _stage_group(base: Path, group: str, entries: dict[str, Path]) -> str:
     for case, source in entries.items():
         case_dir = root / case
         case_dir.mkdir(parents=True, exist_ok=True)
-        suffixes = "".join(source.suffixes)
+        suffixes = _form(source)
         # Clear every form of the entry, not only the current one: a re-stage that switched forms
         # would otherwise leave two links and discovery by stem finds both.
         for stale in case_dir.glob(f"{group}.*"):
             stale.unlink() if stale.is_symlink() or stale.is_file() else shutil.rmtree(stale)
         link = case_dir / (group + suffixes)
         link.symlink_to(source.resolve())
-    return f"{root}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.') or 'mha')}"
+    return f"{root}:{_format_token(suffixes)}"
 
 
 def _the_output(dest_dir: Path, stem: str) -> Path:
@@ -518,10 +545,8 @@ class ImpactRegKonfAIApp:
         """Average one case's preset fields into ``<output>/<case>/<group>`` — Reduce(Mean), streamed."""
         from konfai.data.transform import Reduce, Write
 
-        members = _stage_group(
-            work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True))
-        )
-        suffixes = "".join(dvf_paths[0].suffixes)
+        members = _stage_group(work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True)))
+        suffixes = _form(dvf_paths[0])
         _output_path(output / case, group, suffixes)  # drop a stale other-form output before writing
         _run_transform(
             f"impact_reg_ensemble_{case}",
@@ -530,7 +555,7 @@ class ImpactRegKonfAIApp:
                 "DVF": {
                     group: [
                         Reduce(operator="Mean", output=case, grid="strict"),
-                        Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
+                        Write(dataset=f"{output}:{_format_token(suffixes)}"),
                     ]
                 }
             },
@@ -567,7 +592,7 @@ class ImpactRegKonfAIApp:
         # The moved image is written in the MOVING's own form: the fields' form may be an ITK
         # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
         # below, so the first case's form speaks for the cohort.
-        suffixes = "".join(next(iter(cases.values())).suffixes)
+        suffixes = _form(next(iter(cases.values())))
         for case in fields:
             _output_path(output / case, "Moved", suffixes)  # drop a stale other-form Moved
         moving_root = _stage_group(work / "moved_stage", "Moving", cases)
@@ -579,7 +604,7 @@ class ImpactRegKonfAIApp:
                 "Moving": {
                     "Moved": [
                         Resample(reference="{case}", reference_group="DVF", field_group="DVF"),
-                        Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
+                        Write(dataset=f"{output}:{_format_token(suffixes)}"),
                     ]
                 },
             },
@@ -760,7 +785,7 @@ class ImpactRegKonfAIApp:
 
             members = _units(list(dvfs))
             spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
-            suffixes = ".mha" if _is_transform_file(members[0]) else "".join(members[0].suffixes)
+            suffixes = ".mha" if _is_transform_file(members[0]) else _form(members[0])
             _output_path(output / "uncertainty", "Uncertainty", suffixes)  # drop a stale other-form map
             _run_transform(
                 "impact_reg_uncertainty",
@@ -770,7 +795,7 @@ class ImpactRegKonfAIApp:
                         "Uncertainty": [
                             Magnitude(),
                             Reduce(operator="Std", output="uncertainty", grid="strict"),
-                            Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
+                            Write(dataset=f"{output}:{_format_token(suffixes)}"),
                         ]
                     }
                 },
