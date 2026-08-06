@@ -304,6 +304,13 @@ placement and ignores this.
 
 ### `Resample: {reference: …}`: making `strict` true rather than waived
 
+A reference can also **follow the case**: `reference: '{case}'` adopts, for each case,
+the grid of that case's *own* entry in `reference_group`. That is the registration idiom —
+`reference: '{case}', reference_group: DVF` lands every moved image on its own field's grid,
+which is where a displacement field is defined. A literal reference stays one header lookup
+for the whole cohort; a per-case one is one per case, headers only either way.
+
+
 A cohort as acquired rarely passes `strict`: extents differ, and origins can
 differ by more than the volumes are wide, because an acquisition's stage
 coordinates are not an anatomical frame. A `reference` grid is what makes
