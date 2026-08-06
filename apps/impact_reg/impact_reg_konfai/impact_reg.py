@@ -212,7 +212,7 @@ def _run_transform(
 
     api.transform(
         name,
-        f"{root}:mha",  # the format token is only the FIRST read candidate; entries resolve by name
+        datasets,
         chains,
         gpu=list(gpu),
         cpu=cpu or 1,
@@ -442,14 +442,14 @@ class ImpactRegKonfAIApp:
         """Average one case's preset fields into ``<output>/<case>/DVF`` — Reduce(Mean), streamed."""
         from konfai.data.transform import Reduce, Write
 
-        root = work / f"ensemble_{case}"
-        for preset, dvf in zip(presets, dvf_paths, strict=True):
-            _stage(root, preset, "DVF", dvf)
+        members = _stage_group(
+            work / f"ensemble_{case}", "DVF", {preset: dvf for preset, dvf in zip(presets, dvf_paths, strict=True)}
+        )
         suffixes = "".join(dvf_paths[0].suffixes)
         _output_path(output / case, "DVF", suffixes)  # drop a stale other-form DVF before writing
         _run_transform(
             f"impact_reg_ensemble_{case}",
-            root,
+            [members],
             {
                 "DVF": {
                     "DVF": [
@@ -483,17 +483,16 @@ class ImpactRegKonfAIApp:
         """
         from konfai.data.transform import Resample, Write
 
-        root = work / "moved_stage"
+        fields = {case: _the_output(output / case, "DVF") for case in cases}
         suffixes = ""
-        for case, moving in cases.items():
-            dvf = _the_output(output / case, "DVF")
-            _stage(root, case, "Moving", moving)
-            _stage(root, case, "DVF", dvf)
+        for case, dvf in fields.items():
             suffixes = "".join(dvf.suffixes)
             _output_path(output / case, "Moved", suffixes)  # drop a stale other-form Moved
+        moving_root = _stage_group(work / "moved_stage", "Moving", cases)
+        field_root = _stage_group(work / "moved_stage", "DVF", fields)
         _run_transform(
             "impact_reg_moved",
-            root,
+            [moving_root, field_root],
             {
                 "Moving": {
                     "Moved": [
@@ -626,19 +625,21 @@ class ImpactRegKonfAIApp:
         """
         from konfai.data.transform import Resample, Write
 
-        root = work / f"warp_{kind}"
-        _stage(root, "P000", "Fixed", fixed)
-        _stage(root, "P000", "Moving", moving)
+        base = work / f"warp_{kind}"
+        datasets = [
+            _stage_group(base, "Fixed", {"P000": fixed}),
+            _stage_group(base, "Moving", {"P000": moving}),
+        ]
         resample: dict[str, object] = {"reference": "{case}", "reference_group": "Fixed"}
         if kind == "seg":
             resample["interpolation"] = "nearest"
         if transform_path is not None:
-            _stage(root, "P000", "Reg", transform_path)
+            datasets.append(_stage_group(base, "Reg", {"P000": transform_path}))
             resample["transforms"] = {"Reg": False}
         out_root = work / f"moved_{kind}"
         _run_transform(
             f"impact_reg_eval_{kind}",
-            root,
+            datasets,
             {"Moving": {"Moved": [Resample(**resample), Write(dataset=f"{out_root}:mha")]}},
             work,
             gpu,
@@ -673,14 +674,12 @@ class ImpactRegKonfAIApp:
         try:
             from konfai.data.transform import Magnitude, Reduce, Write
 
-            root = work / "members"
             members = _units(list(dvfs))
-            for index, dvf in enumerate(members):
-                _stage(root, f"M{index:03d}", "DVF", dvf)
+            spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
             suffixes = "".join(members[0].suffixes)
             _run_transform(
                 "impact_reg_uncertainty",
-                root,
+                [spec],
                 {
                     "DVF": {
                         "Uncertainty": [
