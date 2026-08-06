@@ -37,7 +37,7 @@ from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import AppRepositoryError, KonfAIAppClientError
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_format_level, split_path_spec
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, SUPPORTED_FORMATS, split_format_level, split_path_spec
 from ruamel.yaml import YAML
 
 from .app_repository import LocalAppRepository, get_app_repository_info
@@ -1062,7 +1062,7 @@ class KonfAIApp(AbstractKonfAIApp):
                 str(entry),
                 default_format="mha",
                 allowed_flags={"a", "i"},
-                supported_extensions=SUPPORTED_EXTENSIONS,
+                supported_formats=SUPPORTED_FORMATS,
             )
             if Path(filename).resolve() == target:
                 return split_format_level(file_format)[1]

@@ -45,7 +45,7 @@ from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, PatchError
 from konfai.utils.utils import (
-    SUPPORTED_EXTENSIONS,
+    SUPPORTED_FORMATS,
     OverlapSpec,
     best_sweep_axis,
     concretize_patch_size,
@@ -306,7 +306,7 @@ def save_destination(save: Save, default_dataset: Dataset, default_group: str) -
         filename, _, file_format = split_path_spec(
             save.dataset,
             default_format="mha",
-            supported_extensions=SUPPORTED_EXTENSIONS,
+            supported_formats=SUPPORTED_FORMATS,
         )
         dataset = Dataset(filename, file_format, save.scale_factors, save.downsample_method)
     else:

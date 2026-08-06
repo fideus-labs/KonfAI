@@ -61,7 +61,7 @@ from konfai.utils.runtime import (
     get_memory_info,
     memory_forecast,
 )
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, OverlapSpec, resolve_patch, split_path_spec
+from konfai.utils.utils import SUPPORTED_FORMATS, OverlapSpec, resolve_patch, split_path_spec
 
 # A cached case is a float32 tensor (torch's default dtype, and the default TensorCast's target), so
 # bytes are counted at 4/element from the header shape alone -- not the on-disk dtype, and without
@@ -1251,14 +1251,14 @@ class Data(ABC):
                 dataset_filename,
                 default_format="mha",
                 allowed_flags={"a", "i"},
-                supported_extensions=SUPPORTED_EXTENSIONS,
+                supported_formats=SUPPORTED_FORMATS,
             )
             append = flag != "i"
 
-            if file_format.split("@", 1)[0] not in SUPPORTED_EXTENSIONS:
+            if file_format.split("@", 1)[0] not in SUPPORTED_FORMATS:
                 raise DatasetManagerError(
                     f"Unsupported file format '{file_format}'.",
-                    f"Supported extensions are: {', '.join(SUPPORTED_EXTENSIONS)}",
+                    f"Supported formats are: {', '.join(SUPPORTED_FORMATS)}",
                 )
 
             dataset = Dataset(filename, file_format)
@@ -1984,7 +1984,7 @@ class DataTransform(Data):
                 for transform in group_transform.transforms:
                     if isinstance(transform, Save) and transform.dataset:
                         filename, _flag, _file_format = split_path_spec(
-                            transform.dataset, default_format="mha", supported_extensions=SUPPORTED_EXTENSIONS
+                            transform.dataset, default_format="mha", supported_formats=SUPPORTED_FORMATS
                         )
                         entries.append((str(Path(filename).resolve()), transform.group or group_dest))
                 destinations[(group_src, group_dest)] = entries

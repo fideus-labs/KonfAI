@@ -22,7 +22,7 @@ whole).
 | `Dataset.H5File` | `h5` | Single monolithic HDF5 file | yes (chunked) | yes | `konfai[hdf5]` (`h5py`) |
 | `Dataset.OmeZarrFile` | `omezarr, ome-zarr, ome_zarr, zarr` (+ `@level`) | OME-Zarr pyramid directory | yes (chunked) | yes, `scale_factors` pyramids included | `konfai[omezarr]` (`zarr` + `ngff-zarr`) |
 | `Dataset.DicomFile` (DICOM series; scalar-array writes) | `dicom` | DICOM series directory | per slice | no (whole series) | `konfai[dicom]` (`pydicom`) |
-| `Dataset.ItkTransformFile` | `itktransform` | ITK transform files (`.h5`, `.tfm`), one per case/group | yes for a displacement entry (the parameters are HDF5; a row span is one contiguous read) | yes — the parameters fill region by region, and the file is what `sitk.WriteTransform` would have written | `konfai[itk]`; `h5py` for the region paths (whole-file sitk fallback without it) |
+| `Dataset.ItkTransformFile` | `itktransform` | ITK transform files (`.h5`, `.tfm`), one per case/group | yes for a displacement entry (the parameters are HDF5; a row span is one contiguous read) | yes, **for a 3-component 3-D displacement field with image geometry** — the parameters fill region by region, and the file is what `sitk.WriteTransform` would have written; any other transform kind is whole-entry | `konfai[itk]` + `konfai[hdf5]` (the parameters are touched through `h5py`) |
 
 ```{tip}
 `pip install "konfai[imaging]"` installs every backend at once
@@ -40,9 +40,14 @@ write side is the point: a displacement field streams into the exact file
 — without ever holding the field whole in float64. The read side hands back what
 `Dataset.read_transform` decodes: a displacement entry as its field (region
 reads included), any other stored transform (affine, composite, `.tfm`) as its
-parameters. This is how a run's `Transform.h5` deliverable is a plain `Write:`
-like any other, and how a staged transform file resolves through the same
-`Dataset` surface as an image.
+parameters. This is how a registration preset's transform deliverable — under whatever
+name it declares — is a plain `Write:` like any other, and how a staged
+transform file resolves through the same `Dataset` surface as an image.
+
+`itktransform` is a **backend token, not an extension**: the file on disk is
+`<group>.h5` (or `.tfm`), and nothing is ever named `.itktransform`. That is the
+one thing `SUPPORTED_BACKEND_FORMATS` exists to say — a format may be declared in
+a dataset spec without being a suffix any path can carry.
 
 ## The `SitkFile` default backend also handles sidecars
 

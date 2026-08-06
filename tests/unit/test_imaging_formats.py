@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import DatasetManagerError
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_path_spec
+from konfai.utils.utils import SUPPORTED_FORMATS, split_path_spec
 
 
 def _image_attributes() -> Attribute:
@@ -363,13 +363,13 @@ class TestDatasetImagingBackends:
     def test_ome_zarr_format_aliases(self, tmp_path: Path, file_format: str) -> None:
         assert Dataset(tmp_path / file_format, file_format).file_format == "omezarr"
 
-    @pytest.mark.parametrize("file_format", ["dicom", "omezarr", "ome-zarr", "ome_zarr", "zarr"])
+    @pytest.mark.parametrize("file_format", ["dicom", "omezarr", "ome-zarr", "ome_zarr", "zarr", "itktransform"])
     def test_data_manager_path_parser_accepts_imaging_backend(self, file_format: str) -> None:
-        assert file_format in SUPPORTED_EXTENSIONS
+        assert file_format in SUPPORTED_FORMATS
         assert split_path_spec(
             f"./Dataset:a:{file_format}",
             allowed_flags={"a", "i"},
-            supported_extensions=SUPPORTED_EXTENSIONS,
+            supported_formats=SUPPORTED_FORMATS,
         ) == ("./Dataset", "a", file_format)
 
     @pytest.mark.parametrize("file_format", ["dicom", "omezarr"])

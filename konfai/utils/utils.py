@@ -364,6 +364,8 @@ def get_patch_slices_from_shape(
     return _sweep_first(slices, sweep_axis), nb_patch_per_dim
 
 
+# Suffixes an entry can carry on disk: probed next to a case to find an entry whatever it was
+# written as, and matched against a path to recognise an input file.
 SUPPORTED_EXTENSIONS = [
     "mha",
     "mhd",  # MetaImage
@@ -395,6 +397,16 @@ SUPPORTED_EXTENSIONS = [
     "npy",
 ]
 
+# Format tokens that name a backend rather than a suffix. An ':itktransform' entry is one ITK
+# transform file, written as `<group>.h5`, so nothing on disk ever ends in `.itktransform`: the
+# token is legal wherever a format is declared, and must never be probed as an extension.
+SUPPORTED_BACKEND_FORMATS = [
+    "itktransform",
+]
+
+# Everything a `path[:flag]:format` spec may name.
+SUPPORTED_FORMATS = [*SUPPORTED_EXTENSIONS, *SUPPORTED_BACKEND_FORMATS]
+
 
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
@@ -423,7 +435,7 @@ def split_path_spec(
     *,
     default_format: str = "mha",
     allowed_flags: set[str] | None = None,
-    supported_extensions: list[str] | None = None,
+    supported_formats: list[str] | None = None,
 ) -> tuple[str, str | None, str]:
     """Split a KonfAI ``path[:flag]:format`` spec without breaking Windows paths.
 
@@ -439,7 +451,7 @@ def split_path_spec(
     is preserved.
     """
 
-    extensions = SUPPORTED_EXTENSIONS if supported_extensions is None else supported_extensions
+    formats = SUPPORTED_FORMATS if supported_formats is None else supported_formats
     parts = value.rsplit(":", 2)
 
     if len(parts) == 1:
@@ -447,14 +459,14 @@ def split_path_spec(
 
     if len(parts) == 2:
         path, maybe_format = parts
-        if maybe_format in extensions:
+        if maybe_format in formats:
             return path, None, maybe_format
         if is_windows_absolute_path(value):
             return value, None, default_format
         return path, None, maybe_format
 
     path, middle, file_format = parts
-    if file_format in extensions:
+    if file_format in formats:
         if allowed_flags is not None and middle in allowed_flags:
             return path, middle, file_format
         return f"{path}:{middle}", None, file_format

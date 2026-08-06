@@ -729,8 +729,6 @@ def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attrib
     and the parameters, the field buffer with the component fastest, float64. Returns the open file
     and the parameters dataset.
     """
-    import h5py
-
     fixed = np.concatenate(
         [
             np.asarray(spatial[::-1], dtype=np.float64),  # size, in (x, y, z)
@@ -1075,6 +1073,11 @@ class Dataset:
         _READ_CHUNK_CACHE_SLOTS = 100003
 
         def __init__(self, filename: str, read: bool) -> None:
+            if h5py is None:
+                raise DatasetManagerError(
+                    "An ':h5' dataset needs h5py.",
+                    "Install it with: pip install konfai[hdf5]",
+                )
             self.h5: h5py.File | None = None
             self.filename = filename
             if not self.filename.endswith(".h5"):
@@ -1997,9 +2000,18 @@ class Dataset:
         back what ``Dataset.read_transform`` decodes: a displacement entry carries its field and
         the displacement marker; any other stored transform, the parameter rows and type keys of
         ``_encode_transform_leaves``.
+
+        Needs ``h5py``, as the ``h5`` backend does: the whole point is to touch the parameters
+        region by region, and a run whose peak memory turns on whether an optional import
+        succeeded is a run nobody can size.
         """
 
         def __init__(self, filename: str, read: bool) -> None:
+            if h5py is None:
+                raise DatasetManagerError(
+                    "An ':itktransform' dataset needs h5py.",
+                    "Install it with: pip install konfai[hdf5]",
+                )
             self.filename = filename
             self.read = read
 
@@ -2032,10 +2044,6 @@ class Dataset:
             )
 
         def bounded_region_reads(self, name: str) -> bool:
-            try:
-                import h5py  # noqa: F401
-            except ImportError:
-                return False
             shape, _attributes = self.get_infos("", name)
             return len(shape) == 4 and shape[0] == 3
 
@@ -2046,11 +2054,6 @@ class Dataset:
             is one contiguous span of the parameters: read, reshaped, and sliced down to the exact
             region — the peak is the row span, never the field.
             """
-            try:
-                import h5py
-            except ImportError:
-                data, attributes = self.file_to_data(group, name)
-                return data[slices], attributes
             shape, attributes = self.get_infos(group, name)
             if len(shape) != 4 or shape[0] != 3 or DISPLACEMENT_FIELD_ATTRIBUTE not in attributes:
                 data, attributes = self.file_to_data(group, name)
@@ -2096,13 +2099,6 @@ class Dataset:
                     f" shape {list(array.shape)}.",
                     "Write the field itself (channel-first, with its geometry), or a sitk.Transform.",
                 )
-            try:
-                import h5py  # noqa: F401
-            except ImportError:
-                field = sitk.Cast(data_to_image(array, attributes), sitk.sitkVectorFloat64)
-                sitk.WriteTransform(sitk.DisplacementFieldTransform(field), staging)
-                os.replace(staging, final)
-                return
             spatial = [int(extent) for extent in array.shape[1:]]
             file, parameters = _create_itk_transform_file(staging, spatial, attributes)
             with file:
@@ -2118,10 +2114,6 @@ class Dataset:
             region_shape: list[int] | None = None,
         ) -> DataStream | None:
             del dtype, region_shape  # the parameters are float64 whatever arrives, converted per slab
-            try:
-                import h5py  # noqa: F401
-            except ImportError:
-                return None
             if len(shape) != 4 or shape[0] != 3 or not is_an_image(attributes):
                 return None
             os.makedirs(self.filename, exist_ok=True)
@@ -2141,11 +2133,6 @@ class Dataset:
             return os.path.exists(self._path(name if name else group))
 
         def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
-            try:
-                import h5py
-            except ImportError:
-                data, attributes = self.file_to_data(group, name)
-                return [int(extent) for extent in data.shape], attributes
             with h5py.File(self._path(name), "r") as file:
                 kind = bytes(file["TransformGroup/0/TransformType"][0])
                 fixed = np.asarray(file["TransformGroup/0/TransformFixedParameters"][()], dtype=np.float64)

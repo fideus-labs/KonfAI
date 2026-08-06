@@ -30,6 +30,7 @@ sitk = pytest.importorskip("SimpleITK")
 pytest.importorskip("h5py")
 
 from konfai.utils.dataset import Attribute, Dataset  # noqa: E402
+from konfai.utils.errors import DatasetManagerError  # noqa: E402
 
 _ORIGIN, _SPACING = [7.0, -3.0, 10.0], [1.5, 1.5, 2.0]
 _DIRECTION = [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -135,3 +136,36 @@ def test_a_region_read_decodes_only_its_rows_and_matches_the_whole(tmp_path: Pat
     region, _ = dataset.read_data_slice("Transform", "P000", (slice(0, 3), slice(1, 3), slice(2, 5), slice(0, 4)))
 
     np.testing.assert_array_equal(np.asarray(region), np.asarray(whole)[:, 1:3, 2:5, 0:4])
+
+
+def test_a_transform_dataset_resolves_as_a_run_input(tmp_path: Path) -> None:
+    """What a run writes, a run can read back.
+
+    ``itktransform`` is a backend token, not a suffix — an entry is ``<group>.h5``, and no path is
+    ever named ``.itktransform``. Validating a spec against the extensions alone rejected the very
+    format the write side had just produced.
+    """
+    from konfai.data.data_manager import DataPrediction, Group, GroupTransform
+
+    root = tmp_path / "out"
+    Dataset(root, "itktransform").write("Transform", "P000", _field(4), _attributes())
+
+    prediction = DataPrediction(
+        augmentations=None,
+        dataset_filenames=[f"{root}:a:itktransform"],
+        groups_src={
+            "Transform": Group(groups_dest={"Transform": GroupTransform(transforms=None, patch_transforms=None)})
+        },
+    )
+
+    assert prediction._resolve_dataset_sources() == {"Transform": [(str(root), True)]}
+
+
+def test_without_h5py_the_backend_names_the_extra_to_install(tmp_path: Path, monkeypatch) -> None:
+    """The parameters are touched region by region through h5py, so it is a requirement, not a
+    preference: a peak memory that turns on whether an optional import succeeded is one nobody can
+    size. The ``h5`` backend has always demanded it — this says so out loud."""
+    monkeypatch.setattr("konfai.utils.dataset.h5py", None)
+
+    with pytest.raises(DatasetManagerError, match="h5py"):
+        Dataset(tmp_path / "out", "itktransform").write("Transform", "P000", _field(), _attributes())
