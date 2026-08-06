@@ -122,3 +122,16 @@ def test_a_foreign_affine_file_reads_back_too(tmp_path: Path) -> None:
     back = Dataset(tmp_path / "out", "itktransform").read_transform("Reg", "P000")
     point = (1.0, 2.0, 3.0)
     assert back.TransformPoint(point) == pytest.approx(affine.TransformPoint(point))
+
+
+def test_a_region_read_decodes_only_its_rows_and_matches_the_whole(tmp_path: Path) -> None:
+    """The parameters are HDF5, so a slab reads the span it maps to — same values as the whole."""
+    field = _field(3)
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Transform", "P000", field, _attributes())
+
+    assert dataset.bounded_region_reads("Transform", "P000")
+    whole, _ = dataset.read_data("Transform", "P000")
+    region, _ = dataset.read_data_slice("Transform", "P000", (slice(0, 3), slice(1, 3), slice(2, 5), slice(0, 4)))
+
+    np.testing.assert_array_equal(np.asarray(region), np.asarray(whole)[:, 1:3, 2:5, 0:4])
