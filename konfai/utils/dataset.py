@@ -790,6 +790,80 @@ class _ItkTransformDataStream(DataStream):
             Path(self._temporary_path).unlink(missing_ok=True)
 
 
+# NIfTI-1 datatype code for each NumPy dtype a streamed .nii can hold.
+_NIFTI_DATATYPES = {
+    "uint8": 2,
+    "int16": 4,
+    "int32": 8,
+    "float32": 16,
+    "float64": 64,
+    "int8": 256,
+    "uint16": 512,
+    "uint32": 768,
+    "int64": 1024,
+    "uint64": 1280,
+}
+
+
+class _NiftiDataStream(DataStream):
+    """Uncompressed NIfTI-1 written region by region: a hand-written 348-byte header, then a memmap
+    over the raw block. NIfTI's data order is x fastest with the vector dimension SLOWEST, which is
+    exactly the channel-first ``[C, Z, Y, X]`` layout in C order — the map is the block itself.
+    The sform carries the geometry, and NIfTI speaks RAS where the pipeline speaks LPS: the
+    affine's first two rows are negated on the way out, the one convention this class owns."""
+
+    def __init__(self, path: str, shape: list[int], dtype: np.dtype, attributes: Attribute) -> None:
+        import struct
+
+        self.path = path
+        self._temporary_path = f"{path}.{self.temporary_suffix()}"
+        channels, spatial = int(shape[0]), [int(extent) for extent in shape[1:]]
+        # The header is written little-endian, so the block must be too.
+        self._dtype = np.dtype(dtype).newbyteorder("<")
+        size_xyz = spatial[::-1]
+        spacing = attributes.get_np_array("Spacing").astype(np.float64)
+        origin = attributes.get_np_array("Origin").astype(np.float64)
+        direction = attributes.get_np_array("Direction").astype(np.float64).reshape(3, 3)
+        affine = np.concatenate([direction * spacing[np.newaxis, :], origin[:, np.newaxis]], axis=1)
+        affine[:2] *= -1.0  # LPS -> RAS
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3 if channels == 1 else 5, *size_xyz, 1, channels, 1, 1)
+        if channels > 1:
+            struct.pack_into("<h", header, 68, 1007)  # NIFTI_INTENT_VECTOR
+        struct.pack_into("<h", header, 70, _NIFTI_DATATYPES[self._dtype.name])
+        struct.pack_into("<h", header, 72, 8 * self._dtype.itemsize)
+        struct.pack_into("<8f", header, 76, 1.0, *(float(part) for part in spacing), 1.0, 1.0, 1.0, 1.0)
+        struct.pack_into("<f", header, 108, 352.0)  # vox_offset: the header plus the empty-extension flag
+        struct.pack_into("<2f", header, 112, 1.0, 0.0)  # scl_slope / scl_inter: identity
+        header[123] = 2  # xyzt_units: millimetres
+        struct.pack_into("<2h", header, 252, 0, 1)  # qform unused; the sform carries the geometry
+        struct.pack_into("<4f", header, 280, *(float(part) for part in affine[0]))
+        struct.pack_into("<4f", header, 296, *(float(part) for part in affine[1]))
+        struct.pack_into("<4f", header, 312, *(float(part) for part in affine[2]))
+        header[344:348] = b"n+1\x00"
+        total = int(np.prod([channels, *spatial], dtype=np.int64)) * self._dtype.itemsize
+        with open(self._temporary_path, "wb") as file:
+            file.write(bytes(header))
+            file.write(b"\x00\x00\x00\x00")  # no extensions
+            # Reserve the pixel block up front (sparse where the filesystem allows it).
+            file.truncate(352 + total)
+        self._memmap = np.memmap(
+            self._temporary_path, dtype=self._dtype, mode="r+", offset=352, shape=(channels, *spatial)
+        )
+
+    def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
+        self._memmap[slices] = data
+
+    def _close(self, success: bool) -> None:
+        self._memmap.flush()
+        del self._memmap
+        if success:
+            os.replace(self._temporary_path, self.path)
+        else:
+            os.remove(self._temporary_path)
+
+
 # MetaImage ElementType for each NumPy dtype a streamed .mha can hold.
 _MHA_ELEMENT_TYPES = {
     "int8": "MET_CHAR",
@@ -1522,20 +1596,27 @@ class Dataset:
             attributes: Attribute,
             region_shape: list[int] | None = None,
         ) -> DataStream | None:
-            # Only an uncompressed local-data MetaImage is region-writable (ASCII header + flat raw
-            # block); every other SimpleITK format writes the whole image in one WriteImage call.
-            if self.file_format != "mha" or not is_an_image(attributes) or len(shape) < 3:
+            # The region-writable SimpleITK formats are the region-READABLE ones, deliberately:
+            # uncompressed MetaImage and NIfTI are a fixed header plus a flat raw block, so the block
+            # is reserved and memmapped. Every other format writes whole in one WriteImage call --
+            # and streaming into a form the reader must then decode whole would only move the cost.
+            if self.file_format not in ("mha", "nii") or not is_an_image(attributes) or len(shape) < 3:
                 return None
             element_dtype = np.dtype(dtype)
             if element_dtype == np.float16:
-                # MetaImage has no half-float type; widen float16 to float32 (exact), as data_to_image
-                # does, so streamed and whole-volume writes hold identical bytes.
+                # Neither format has a half-float type; widen float16 to float32 (exact), as
+                # data_to_image does, so streamed and whole-volume writes hold identical bytes.
                 element_dtype = np.dtype(np.float32)
-            if element_dtype.name not in _MHA_ELEMENT_TYPES:
-                return None
             dimension = len(shape) - 1
             geometry = (("Origin", dimension), ("Spacing", dimension), ("Direction", dimension * dimension))
             if any(len(attributes.get_np_array(key)) != n for key, n in geometry):
+                return None
+            if self.file_format == "nii":
+                if dimension != 3 or element_dtype.name not in _NIFTI_DATATYPES:
+                    return None
+                os.makedirs(self.filename, exist_ok=True)
+                return _NiftiDataStream(f"{self.filename}{name}.{self.file_format}", shape, element_dtype, attributes)
+            if element_dtype.name not in _MHA_ELEMENT_TYPES:
                 return None
             os.makedirs(self.filename, exist_ok=True)
             return _MhaDataStream(f"{self.filename}{name}.{self.file_format}", shape, element_dtype, attributes)
@@ -2275,7 +2356,7 @@ class Dataset:
             return True
         if self.file_format == "itktransform":
             return is_an_image(attributes)
-        return self.file_format == "mha" and is_an_image(attributes)
+        return self.file_format in ("mha", "nii") and is_an_image(attributes)
 
     def open_data_stream(
         self,

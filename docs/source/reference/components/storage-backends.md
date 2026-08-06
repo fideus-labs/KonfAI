@@ -18,7 +18,7 @@ whole).
 
 | Backend | Format token(s) | Kind | Region reads | Streamed writes | Optional extra |
 | --- | --- | --- | --- | --- | --- |
-| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | **uncompressed MetaImage and NIfTI only** — compressed streams are not seekable, and NRRD never streams in ITK | **`.mha` only** (memmap over the raw pixel block; needs image geometry) | `konfai[itk]` (`SimpleITK`) |
+| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | **uncompressed MetaImage and NIfTI only** — compressed streams are not seekable, and NRRD never streams in ITK | **uncompressed `.mha` and `.nii`** (memmap over the raw pixel block; needs image geometry) — the region-writable set is the region-readable one, deliberately | `konfai[itk]` (`SimpleITK`) |
 | `Dataset.H5File` | `h5` | Single monolithic HDF5 file | yes (chunked) | yes | `konfai[hdf5]` (`h5py`) |
 | `Dataset.OmeZarrFile` | `omezarr, ome-zarr, ome_zarr, zarr` (+ `@level`) | OME-Zarr pyramid directory | yes (chunked) | yes, `scale_factors` pyramids included | `konfai[omezarr]` (`zarr` + `ngff-zarr`) |
 | `Dataset.DicomFile` (DICOM series; scalar-array writes) | `dicom` | DICOM series directory | per slice | no (whole series) | `konfai[dicom]` (`pydicom`) |
