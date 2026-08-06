@@ -153,12 +153,9 @@ class DatasetInspectionMixin:
     @staticmethod
     def _is_dicom_file(path: Path) -> bool:
         """True if the file carries the DICOM Part-10 ``DICM`` magic at offset 128 (extensionless slices)."""
-        try:
-            with path.open("rb") as handle:
-                handle.seek(128)
-                return handle.read(4) == b"DICM"
-        except OSError:
-            return False
+        from konfai.utils.utils import is_dicom_file
+
+        return is_dicom_file(path)
 
     def _scan_case_directory(
         self,

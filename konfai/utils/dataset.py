@@ -51,7 +51,7 @@ except ImportError:
 
 from konfai import current_date
 from konfai.utils.errors import DatasetManagerError
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_format_level
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, directory_volume_form, split_format_level
 
 _h5_file_locks: dict[str, threading.RLock] = {}
 _h5_file_locks_guard = threading.Lock()
@@ -2267,33 +2267,11 @@ class Dataset:
             if not case.is_dir():
                 continue
             for entry in sorted(case.iterdir()):
-                if entry.is_dir():
-                    name = entry.name.lower()
-                    if (
-                        name.endswith((".ome.zarr", ".zarr"))
-                        or (entry / ".zgroup").exists()
-                        or (entry / "zarr.json").exists()
-                    ):
-                        return "omezarr"
-                    files = [child for child in sorted(entry.iterdir()) if child.is_file()]
-                    if any(child.suffix.lower() in (".dcm", ".dicom") for child in files):
-                        return "dicom"
-                    # A DICOM series is commonly exported with no extension at all, so the suffixes
-                    # above miss it; the Part-10 magic at offset 128 is what identifies it then. A
-                    # non-DICOM file may sort first, so probe every file, not only files[0].
-                    if any(Dataset._is_dicom_file(file) for file in files):
-                        return "dicom"
+                volume = directory_volume_form(entry)
+                if volume is not None:
+                    return "dicom" if volume == "" else "omezarr"
             return None  # first case is representative of the whole dataset's layout
         return None
-
-    @staticmethod
-    def _is_dicom_file(path: Path) -> bool:
-        """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128."""
-        try:
-            with open(path, "rb") as file:
-                return file.read(132)[128:132] == b"DICM"
-        except OSError:
-            return False
 
     def _exists_on_disk(self) -> bool:
         if os.path.exists(self.filename):

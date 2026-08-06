@@ -37,7 +37,15 @@ from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import AppRepositoryError, KonfAIAppClientError
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, SUPPORTED_FORMATS, split_format_level, split_path_spec
+from konfai.utils.utils import (
+    SUPPORTED_EXTENSIONS,
+    SUPPORTED_FORMATS,
+    directory_volume_form,
+    is_dicom_file,
+    split_format_level,
+    split_path_spec,
+    storage_form,
+)
 from ruamel.yaml import YAML
 
 from .app_repository import LocalAppRepository, get_app_repository_info
@@ -811,11 +819,7 @@ class KonfAIApp(AbstractKonfAIApp):
         str
             The extension (dot-prefixed); falls back to `file.suffix` if nothing matches.
         """
-        lower = file.name.lower()
-        matches = [ext for ext in SUPPORTED_EXTENSIONS if lower.endswith("." + ext)]
-        if not matches:
-            return file.suffix
-        return "." + max(matches, key=len)
+        return storage_form(file)
 
     @staticmethod
     def _list_supported_files(paths: list[Path]) -> list[Path]:
@@ -868,38 +872,12 @@ class KonfAIApp(AbstractKonfAIApp):
         ``""`` for a DICOM series directory (read as a bare ``Volume_i`` directory) -- or ``None``
         for a plain directory that holds separate per-case files.
         """
-        if not path.is_dir():
-            return None
-        lower = path.name.lower()
-        if lower.endswith(".ome.zarr"):
-            return ".ome.zarr"
-        if lower.endswith(".zarr"):
-            return ".zarr"
-        entries = sorted(path.iterdir(), key=lambda entry: entry.name)
-        names = {entry.name for entry in entries}
-        if names & {".zgroup", ".zattrs", "zarr.json"}:
-            return ".ome.zarr"
-        if any(name.lower().endswith((".dcm", ".dicom")) for name in names):
-            return ""
-        # A DICOM series is commonly exported with no extension at all, so the suffixes above miss it;
-        # the Part-10 magic (``DICM`` at offset 128) in the first file is what identifies it then.
-        files = [entry for entry in entries if entry.is_file()]
-        if any(KonfAIApp._is_dicom_file(file) for file in files):
-            return ""
-        return None
+        return directory_volume_form(path)
 
     @staticmethod
     def _is_dicom_file(path: Path) -> bool:
-        """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128.
-
-        Reimplemented here (not imported from ``konfai``) to stay on KonfAI's public API rather than
-        reach into a private helper.
-        """
-        try:
-            with open(path, "rb") as file:
-                return file.read(132)[128:132] == b"DICM"
-        except OSError:
-            return False
+        """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128."""
+        return is_dicom_file(path)
 
     @staticmethod
     def _list_input_units(paths: list[Path]) -> list[tuple[Path, str]]:

@@ -21,6 +21,7 @@ import itertools
 import os
 import re
 from math import prod
+from pathlib import Path
 from types import ModuleType
 
 import numpy as np
@@ -406,6 +407,92 @@ SUPPORTED_BACKEND_FORMATS = [
 
 # Everything a `path[:flag]:format` spec may name.
 SUPPORTED_FORMATS = [*SUPPORTED_EXTENSIONS, *SUPPORTED_BACKEND_FORMATS]
+
+# Every spelling of an OME-Zarr store, plus the compound `.ome.zarr` no single token covers.
+_STORE_FORMS = {".ome.zarr", ".ome-zarr", ".ome_zarr", ".omezarr", ".zarr"}
+
+# Longest first, so a compound extension wins over its tail: `.ome.zarr` over `.zarr`, `.nii.gz`
+# over `.gz`.
+_STORAGE_FORMS = sorted({f".{extension}" for extension in SUPPORTED_EXTENSIONS} | _STORE_FORMS, key=len, reverse=True)
+
+
+def is_dicom_file(path: Path) -> bool:
+    """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128.
+
+    A series is commonly exported with no extension at all, so its name proves nothing and the magic
+    is what identifies it.
+    """
+    try:
+        with open(path, "rb") as file:
+            return file.read(132)[128:132] == b"DICM"
+    except OSError:
+        return False
+
+
+def storage_form(path: Path) -> str:
+    """The extension KonfAI resolves ``path`` under, spelled as the path spells it.
+
+    NOT ``"".join(path.suffixes)``: a dot in the STEM belongs to the name, not to the format --
+    ``patient.v2.mha`` is a MetaImage and ``CT.contrast.nii.gz`` a gzipped NIfTI, where joining every
+    suffix asks for a ``v2.mha`` backend and lets a caller's file naming decide whether a run starts.
+    Matched from the right, longest first. A file whose end matches nothing keeps its last suffix; a
+    directory that carries none -- a DICOM series -- has no form at all.
+    """
+    name = path.name
+    lowered = name.lower()
+    for form in _STORAGE_FORMS:
+        if lowered.endswith(form):
+            return name[len(name) - len(form) :]
+    return "" if path.is_dir() else path.suffix
+
+
+def directory_volume_form(path: Path) -> str | None:
+    """The form a directory that is ITSELF one volume is read under, or ``None`` for a plain one.
+
+    ``.ome.zarr``/``.zarr`` for an OME-Zarr store, ``""`` for a DICOM series, ``None`` for a
+    directory holding separate per-case files. A store and a series are directories, not files, so
+    anything that stages or detects them has to tell the two apart: one travels whole, the other is
+    walked into the volumes it holds.
+    """
+    if not path.is_dir():
+        return None
+    form = storage_form(path)
+    if form.lower() in _STORE_FORMS:
+        return form
+    entries = sorted(path.iterdir(), key=lambda entry: entry.name)
+    if {entry.name for entry in entries} & {".zgroup", ".zattrs", "zarr.json"}:
+        return ".ome.zarr"
+    files = [entry for entry in entries if entry.is_file()]
+    if any(file.suffix.lower() in (".dcm", ".dicom") for file in files):
+        return ""
+    # A non-DICOM file may sort first, so probe every file, not only the first one.
+    if any(is_dicom_file(file) for file in files):
+        return ""
+    return None
+
+
+def format_token(form: str, *, directory: bool = False) -> str:
+    """The dataset backend token a storage form is read and written through.
+
+    Writing needs one NAMED -- nothing is on disk yet to detect it from. ``directory`` says the entry
+    is a directory volume, where the absence of a form means a DICOM series rather than the default
+    file format.
+    """
+    lowered = form.lower()
+    if lowered in _STORE_FORMS:
+        return "omezarr"
+    if not lowered:
+        return "dicom" if directory else "mha"
+    return lowered.lstrip(".")
+
+
+def path_format_token(path: Path) -> str:
+    """The dataset backend token ``path`` is read and written through, as it sits on disk."""
+    if path.is_dir():
+        volume = directory_volume_form(path)
+        if volume is not None:
+            return format_token(volume, directory=True)
+    return format_token(storage_form(path))
 
 
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")

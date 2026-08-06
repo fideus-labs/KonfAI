@@ -279,19 +279,48 @@ def test_register_adopts_the_presets_output_name(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "form"),
-    [
-        ("moving.mha", ".mha"),
-        ("patient.v2.mha", ".mha"),
-        ("CT.contrast.nii.gz", ".nii.gz"),
-        ("study.ome.zarr", ".ome.zarr"),
-    ],
+    ("name", "token"),
+    [("moving.mha", "mha"), ("patient.v2.mha", "mha"), ("Transform.h5", "itktransform"), ("Reg.tfm", "itktransform")],
 )
-def test_the_storage_form_is_the_extension_not_every_dot(name: str, form: str) -> None:
-    """A dot in the stem belongs to the NAME. Joining every suffix turned ``patient.v2.mha`` into a
-    ``v2.mha`` backend, so how a caller spelled a filename decided whether the run started."""
-    assert reg._form(Path(name)) == form
-    assert reg._format_token(reg._form(Path(name))) in {"mha", "nii.gz", "omezarr"}
+def test_a_transform_file_is_a_transform_here(name: str, token: str) -> None:
+    """The one reading this layer does not share with konfai: an ``.h5`` HERE is the registration
+    every preset writes, not konfai's monolithic HDF5 dataset. The form itself is konfai's to say."""
+    assert reg._format_token(reg._form(Path(name))) == token
+
+
+def test_register_reads_a_dicom_series_as_the_moving(tmp_path: Path) -> None:
+    """A DICOM series is a DIRECTORY carrying no extension, so its backend cannot be read off a name.
+    Staged as ``mha`` — the default a formless name falls back to — konfai was handed a directory of
+    slices to read as one image."""
+    pytest.importorskip("pydicom")
+    from konfai.utils import dicom
+
+    series = tmp_path / "SERIES"
+    series.mkdir()
+    volume = np.arange(8**3, dtype=np.int16).reshape(8, 8, 8)
+    dicom.write_dicom_series(series, volume[None], origin=(0.0, 0.0, 0.0), spacing=(1.0, 1.0, 1.0))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    assert reg._backend(series) == "dicom"
+
+    reference = sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32))
+    app = reg.ImpactRegKonfAIApp()
+
+    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
+        return "DVF", {"P000": out / "DVF.mha"}
+
+    app._infer_preset = field_only  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [series], output=out)
+
+    case = out / "P000"
+    assert (case / "DVF.mha").is_file()
+    # The moved image takes the moving's form: a series in, a series out.
+    assert (case / "Moved").is_dir() and list((case / "Moved").glob("*.dcm"))
 
 
 def test_register_reads_a_moving_whose_stem_carries_a_dot(tmp_path: Path) -> None:

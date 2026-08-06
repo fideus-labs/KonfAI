@@ -43,7 +43,7 @@ import numpy as np
 import SimpleITK as sitk
 from konfai.utils.dataset import read_landmarks, write_landmarks
 from konfai.utils.ITK import apply_to_data_transform, read_displacement_field
-from konfai.utils.utils import SUPPORTED_EXTENSIONS
+from konfai.utils.utils import format_token, path_format_token, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import get_available_apps_on_hf_repo
 
@@ -53,36 +53,30 @@ IMPACT_REG_KONFAI_REPO = os.environ.get("KONFAI_IMPACTREG_REPO", "VBoussot/Impac
 
 _ENSEMBLE_DIR = "Ensemble"
 
-# Writing needs a format named -- nothing is on disk yet to detect one from. The store spellings and
-# the ITK transform files need translating; every other suffix is already the token Dataset
-# normalises (".mha" -> "mha").
-_FORMATS = {".ome.zarr": "omezarr", ".zarr": "omezarr", ".h5": "itktransform", ".tfm": "itktransform"}
-
-# Longest first, so ".nii.gz" wins over ".gz" and ".ome.zarr" over ".zarr".
-_FORMS = sorted({f".{extension}" for extension in SUPPORTED_EXTENSIONS} | set(_FORMATS), key=len, reverse=True)
+# The one place this layer disagrees with konfai's own reading of a suffix: an `.h5` or `.tfm` HERE
+# is a registration -- what every preset writes -- not konfai's monolithic HDF5 dataset. Everything
+# else (the store spellings, a DICOM series, plain extensions) is konfai's to resolve.
+_TRANSFORM_FORMS = {".h5", ".tfm"}
 
 
 def _form(path: Path) -> str:
-    """The storage form of ``path``: the longest extension konfai knows, spelled as the file spells it.
-
-    NOT ``"".join(path.suffixes)``. A dot in the STEM belongs to the name, not to the format:
-    ``patient.v2.mha`` is a MetaImage and ``CT.contrast.nii.gz`` a gzipped NIfTI, yet joining every
-    suffix asked konfai for a ``v2.mha`` backend and killed the run at the dataset spec — how a
-    caller names a file decided whether the run started. Matched from the right so a compound
-    extension wins over its tail. A name whose end matches nothing keeps its last suffix, and the
-    spec check — not this function — is what reports it.
-    """
-    name = path.name
-    lowered = name.lower()
-    for form in _FORMS:
-        if lowered.endswith(form):
-            return name[len(name) - len(form) :]
-    return path.suffix
+    """The storage form of ``path`` — konfai's, which knows a dot in a stem is part of the name."""
+    return storage_form(path)
 
 
 def _format_token(form: str) -> str:
-    """The konfai backend token a storage form is read and written through."""
-    return _FORMATS.get(form.lower(), form.lower().lstrip(".") or "mha")
+    """The konfai backend token a storage form is read and written through, transforms included."""
+    return "itktransform" if form.lower() in _TRANSFORM_FORMS else format_token(form)
+
+
+def _backend(path: Path) -> str:
+    """The backend token ``path`` is read and written through, as it sits on disk.
+
+    A DICOM series is a directory carrying no extension at all, so its token cannot be read off a
+    name: ``path_format_token`` looks inside. Without that, a series staged as one unit was handed
+    to konfai as the default ``mha`` and the run died reading a directory of slices as one image.
+    """
+    return "itktransform" if _form(path).lower() in _TRANSFORM_FORMS else path_format_token(path)
 
 
 def _is_transform_file(path: Path) -> bool:
@@ -170,6 +164,15 @@ def _find_outputs(root: Path, stem: str) -> dict[str, Path]:
     return {match.parent.name: match for match in matches}
 
 
+def _is_entry(path: Path, stem: str) -> bool:
+    """Whether ``path`` is an entry named ``stem``, in any form — extension, store, or bare name.
+
+    The bare name is a form of its own: a DICOM series is a directory carrying no extension at all,
+    so a rule written as ``startswith(f"{stem}.")`` looks straight past it.
+    """
+    return path.name == stem or path.name.startswith(f"{stem}.")
+
+
 def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
     """The path ``<stem><suffixes>`` in ``dest_dir``, with every earlier output of that stem removed.
 
@@ -178,7 +181,7 @@ def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
     sorts to the stale one. Only the current run's output is left standing.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    for stale in [p for p in dest_dir.iterdir() if p.name.startswith(f"{stem}.")]:
+    for stale in [p for p in dest_dir.iterdir() if _is_entry(p, stem)]:
         shutil.rmtree(stale) if stale.is_dir() else stale.unlink()
     return dest_dir / (stem + suffixes)
 
@@ -261,12 +264,13 @@ def _stage_group(base: Path, group: str, entries: dict[str, Path]) -> str:
         case_dir.mkdir(parents=True, exist_ok=True)
         suffixes = _form(source)
         # Clear every form of the entry, not only the current one: a re-stage that switched forms
-        # would otherwise leave two links and discovery by stem finds both.
-        for stale in case_dir.glob(f"{group}.*"):
+        # would otherwise leave two links and discovery by stem finds both. The bare name counts as
+        # a form -- that is how a DICOM series is stored, as a directory carrying no extension.
+        for stale in [entry for entry in case_dir.iterdir() if _is_entry(entry, group)]:
             stale.unlink() if stale.is_symlink() or stale.is_file() else shutil.rmtree(stale)
         link = case_dir / (group + suffixes)
         link.symlink_to(source.resolve())
-    return f"{root}:{_format_token(suffixes)}"
+    return f"{root}:{_backend(next(iter(entries.values())))}"
 
 
 def _the_output(dest_dir: Path, stem: str) -> Path:
@@ -546,7 +550,7 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Reduce, Write
 
         members = _stage_group(work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True)))
-        suffixes = _form(dvf_paths[0])
+        suffixes, backend = _form(dvf_paths[0]), _backend(dvf_paths[0])
         _output_path(output / case, group, suffixes)  # drop a stale other-form output before writing
         _run_transform(
             f"impact_reg_ensemble_{case}",
@@ -555,7 +559,7 @@ class ImpactRegKonfAIApp:
                 "DVF": {
                     group: [
                         Reduce(operator="Mean", output=case, grid="strict"),
-                        Write(dataset=f"{output}:{_format_token(suffixes)}"),
+                        Write(dataset=f"{output}:{backend}"),
                     ]
                 }
             },
@@ -592,7 +596,8 @@ class ImpactRegKonfAIApp:
         # The moved image is written in the MOVING's own form: the fields' form may be an ITK
         # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
         # below, so the first case's form speaks for the cohort.
-        suffixes = _form(next(iter(cases.values())))
+        moving = next(iter(cases.values()))
+        suffixes, backend = _form(moving), _backend(moving)
         for case in fields:
             _output_path(output / case, "Moved", suffixes)  # drop a stale other-form Moved
         moving_root = _stage_group(work / "moved_stage", "Moving", cases)
@@ -604,7 +609,7 @@ class ImpactRegKonfAIApp:
                 "Moving": {
                     "Moved": [
                         Resample(reference="{case}", reference_group="DVF", field_group="DVF"),
-                        Write(dataset=f"{output}:{_format_token(suffixes)}"),
+                        Write(dataset=f"{output}:{backend}"),
                     ]
                 },
             },
