@@ -63,6 +63,21 @@ def test_a_repeated_mapping_stage_is_qualified_by_resolution() -> None:
     assert list(tree) == ["Clip", "konfai.data.transform:Clip"]
 
 
+def test_a_numpy_scalar_is_spelled_as_a_plain_scalar() -> None:
+    """np.float64 IS a float subclass; unspelled, ruamel refuses it at dump time."""
+    spelled = api._yaml_safe(np.float64(1.5), "chains.CT.CT.Clip.min_value")
+    assert type(spelled) is float and spelled == 1.5
+
+
+def test_a_config_file_is_copied_not_rewritten(tmp_path: Path) -> None:
+    """Reading a config rewrites it; a caller's file is not this call's to rewrite."""
+    source = tmp_path / "Prediction.yml"
+    source.write_text("Predictor: {}\n", encoding="utf-8")
+    copy = api._config_copy(source)
+    assert copy != source
+    assert Path(copy).read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+
+
 def test_a_subclass_delegating_to_super_keeps_its_own_spelling() -> None:
     """The recorded spelling is the caller's: a subclass expanding into ``Resample`` arguments
     inside ``super().__init__`` records its OWN kwargs, so the tree references the subclass with

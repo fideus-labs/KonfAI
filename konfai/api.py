@@ -37,9 +37,12 @@ The contract, and how it differs from the CLI:
   rewrite.
 """
 
+import atexit
 import importlib
 import json
 import os
+import shutil
+import tempfile
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -90,12 +93,13 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
 
 def _yaml_safe(value: object, where: str) -> object:
     """``value`` as the config file could hold it — or a refusal that names the argument."""
+    # Before the Python scalars: np.float64 IS a float subclass, and ruamel refuses it.
+    if isinstance(value, np.generic):
+        return value.item()
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, Path):
         return str(value)
-    if isinstance(value, np.generic):
-        return value.item()
     if isinstance(value, Mapping):
         return {str(key): _yaml_safe(entry, f"{where}.{key}") for key, entry in value.items()}
     if isinstance(value, (list, tuple)):
@@ -373,6 +377,21 @@ def evaluate(
     return EvaluationResult(workspace=workspace, metrics=reports)
 
 
+def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, object] | Path":
+    """The caller's config, in a form this call may consume.
+
+    Reading a KonfAI config resolves and REWRITES it -- the record the workspace keeps. A tree is
+    passed through; a caller's FILE is not this call's to rewrite, so the write-back lands on a
+    scratch copy instead (removed at exit, like :func:`_materialized_config`'s).
+    """
+    if isinstance(config, Mapping):
+        return dict(config)
+    source = Path(config)
+    scratch = Path(tempfile.mkdtemp(prefix="konfai_config_"))
+    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+    return Path(shutil.copy2(source, scratch / source.name))
+
+
 # ------------------------------------------------------------------------- PREDICTION / TRAINING
 
 
@@ -397,7 +416,7 @@ def predict(
     with _one_workflow_at_a_time(len(gpu or []) or cpu):
         workflow = build_predict(
             models=[Path(model) for model in models],
-            prediction_file=config if isinstance(config, (Path, str)) else dict(config),
+            prediction_file=_config_copy(config),
             predictions_dir=predictions_dir,
         )
         execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
@@ -430,7 +449,7 @@ def train(
         workflow = build_train(
             command=State.RESUME if resume else State.TRAIN,
             model=model,
-            config=config if isinstance(config, (Path, str)) else dict(config),
+            config=_config_copy(config),
             checkpoints_dir=checkpoints_dir,
             statistics_dir=statistics_dir,
             lr=lr,
