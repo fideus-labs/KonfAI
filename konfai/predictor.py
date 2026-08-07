@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prediction workflow classes, reductions, and export helpers for KonfAI."""
+"""Prediction workflow classes and the streamed-write dispatcher."""
 
 import copy
 import importlib
@@ -305,11 +305,9 @@ class OutputDataset(Dataset, NeedDevice, ABC):
                     )
                     transform_type.append(transform)
 
-        # A patch grid overlaps whether or not a combine is declared, and an undeclared one used to
-        # leave the overlap to whichever patch wrote last: an arbitrary winner, possibly holding that
-        # voxel on its own border with no context behind it, which is what a seam is. Trim keeps each
-        # patch's central band instead: the bands tile the volume exactly, so the default is a seamless
-        # selection that still never averages (a label map survives it).
+        # A patch grid overlaps whether or not a combine is declared, so the overlap needs a
+        # deterministic owner. Trim keeps each patch's central band: the bands tile the volume
+        # exactly, a seamless selection that never averages (a label map survives it).
         module, name = get_module(self._patch_combine or "Trim", "konfai.data.patching")
         self.patch_combine = apply_config(f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset")(
             getattr(module, name)
@@ -428,10 +426,6 @@ class OutputDataset(Dataset, NeedDevice, ABC):
     def __repr__(self) -> str:
         return str(self)
 
-
-# The write-side region kinds: what SlabRegionStream can carry inside a streamed finalize chain (the
-# same set the read dispatcher accepts as its region stages; on both sides they compose).
-_REGION_KINDS = (LocalityKind.HALO, LocalityKind.ORIENTATION, LocalityKind.CROP, LocalityKind.REGRID)
 
 # Streaming pays per-slab work (the pipe traversal, region writes, the TTA aligner); when the
 # assembled accumulators of all copies are below this fraction of allocatable memory (a 2.5D case),
@@ -567,62 +561,9 @@ class OutSameAsGroupDataset(OutputDataset):
         attribute: Attribute | None = None,
         number_of_channels_per_model: list[int] | None = None,
     ):
-        if (
-            index_dataset not in self.output_layer_accumulator
-            or index_augmentation not in self.output_layer_accumulator[index_dataset]
-        ):
-            input_dataset = dataset.get_dataset_from_index(self.group_dest, index_dataset)
-            source_attribute = (
-                Attribute(attribute) if attribute is not None else Attribute(input_dataset.cache_attributes[0])
-            )
-            # What the output declares about itself, applied over what it inherited from its input.
-            # Inheritance carries the geometry, which is right, but it also carries whatever the source
-            # entry said it WAS, and that describes the source, not this. Declared last, so the
-            # config always wins; declare a key empty to drop an inherited one.
-            for key, value in self._attributes.items():
-                if value == "":
-                    source_attribute.pop(key, None)
-                else:
-                    source_attribute[key] = value
-            if index_dataset not in self.output_layer_accumulator:
-                self.output_layer_accumulator[index_dataset] = {}
-                self.attributes[index_dataset] = {}
-                self.names[index_dataset] = input_dataset.name
-                # The streamed consumers (sink target, region pipe, buffer) index their slabs on the
-                # first spatial axis, and the aligner needs every augmentation on the same footing:
-                # a grid swept along another axis takes the whole-volume path until they carry the
-                # axis too.
-                # max(1, ...): the count is set by load(); before it, augmentation 0 always exists.
-                sweeps_first_axis = all(
-                    input_dataset.patch.get_sweep_axis(a) == 0 for a in range(max(1, self.nb_data_augmentation))
-                )
-                plan = (
-                    self._plan_stream(dataset, index_dataset, source_attribute, layer, number_of_channels_per_model)
-                    if self._streaming_enabled and sweeps_first_axis
-                    else None
-                )
-                self._stream_plans[index_dataset] = plan
-                if self._streaming_enabled and (plan is None or not plan.to_sink):
-                    # The whole-volume fallback is a normal outcome, but a silent one hides that a
-                    # large case pays it: say so, once per distinct path.
-                    path = (
-                        "whole-volume" if plan is None else "buffered (the prefix streams, the tail runs whole-volume)"
-                    )
-                    self._report_once(path, f"streaming: case '{input_dataset.name}' takes the {path} path.")
-            self.attributes[index_dataset][index_augmentation] = {}
-
-            accumulator_type = StreamingAccumulator if self._stream_plans[index_dataset] else Accumulator
-            self.output_layer_accumulator[index_dataset][index_augmentation] = accumulator_type(
-                input_dataset.patch.get_patch_slices(index_augmentation),
-                input_dataset.patch.patch_size,
-                self.patch_combine,
-                batch=False,
-                sweep_axis=input_dataset.patch.get_sweep_axis(index_augmentation),
-            )
-
-            for i in range(len(input_dataset.patch.get_patch_slices(index_augmentation))):
-                self.attributes[index_dataset][index_augmentation][i] = Attribute(source_attribute)
-
+        self._ensure_case_state(
+            index_dataset, index_augmentation, layer, dataset, attribute, number_of_channels_per_model
+        )
         for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms):
             if isinstance(transform, TransformInverse) and transform.apply_inverse:
                 layer = transform.inverse(
@@ -631,6 +572,83 @@ class OutSameAsGroupDataset(OutputDataset):
                     self.attributes[index_dataset][index_augmentation][index_patch],
                 )
         accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
+        slabs = self._blend_patch(index_dataset, index_patch, layer, accumulator)
+        if not self._stream_plans.get(index_dataset):
+            return
+        self._advance_stream(
+            index_dataset, index_augmentation, accumulator, slabs, number_of_channels_per_model, dataset
+        )
+
+    def _ensure_case_state(
+        self,
+        index_dataset: int,
+        index_augmentation: int,
+        layer: torch.Tensor,
+        dataset: DatasetIter,
+        attribute: Attribute | None,
+        number_of_channels_per_model: list[int] | None,
+    ) -> None:
+        """First patch of a (case, augmentation): build the inherited-then-declared header, decide
+        the stream plan once per case, and open this augmentation's accumulator."""
+        if (
+            index_dataset in self.output_layer_accumulator
+            and index_augmentation in self.output_layer_accumulator[index_dataset]
+        ):
+            return
+        input_dataset = dataset.get_dataset_from_index(self.group_dest, index_dataset)
+        source_attribute = (
+            Attribute(attribute) if attribute is not None else Attribute(input_dataset.cache_attributes[0])
+        )
+        # What the output declares about itself, applied over what it inherited from its input.
+        # Inheritance carries the geometry, which is right, but it also carries whatever the source
+        # entry said it WAS, and that describes the source, not this. Declared last, so the
+        # config always wins; declare a key empty to drop an inherited one.
+        for key, value in self._attributes.items():
+            if value == "":
+                source_attribute.pop(key, None)
+            else:
+                source_attribute[key] = value
+        if index_dataset not in self.output_layer_accumulator:
+            self.output_layer_accumulator[index_dataset] = {}
+            self.attributes[index_dataset] = {}
+            self.names[index_dataset] = input_dataset.name
+            # The streamed consumers (sink target, region pipe, buffer) index their slabs on the
+            # first spatial axis, and the aligner needs every augmentation on the same footing:
+            # a grid swept along another axis takes the whole-volume path until they carry the
+            # axis too.
+            # max(1, ...): the count is set by load(); before it, augmentation 0 always exists.
+            sweeps_first_axis = all(
+                input_dataset.patch.get_sweep_axis(a) == 0 for a in range(max(1, self.nb_data_augmentation))
+            )
+            plan = (
+                self._plan_stream(dataset, index_dataset, source_attribute, layer, number_of_channels_per_model)
+                if self._streaming_enabled and sweeps_first_axis
+                else None
+            )
+            self._stream_plans[index_dataset] = plan
+            if self._streaming_enabled and (plan is None or not plan.to_sink):
+                # The whole-volume fallback is a normal outcome, but a silent one hides that a
+                # large case pays it: say so, once per distinct path.
+                path = "whole-volume" if plan is None else "buffered (the prefix streams, the tail runs whole-volume)"
+                self._report_once(path, f"streaming: case '{input_dataset.name}' takes the {path} path.")
+        self.attributes[index_dataset][index_augmentation] = {}
+
+        accumulator_type = StreamingAccumulator if self._stream_plans[index_dataset] else Accumulator
+        self.output_layer_accumulator[index_dataset][index_augmentation] = accumulator_type(
+            input_dataset.patch.get_patch_slices(index_augmentation),
+            input_dataset.patch.patch_size,
+            self.patch_combine,
+            batch=False,
+            sweep_axis=input_dataset.patch.get_sweep_axis(index_augmentation),
+        )
+
+        for i in range(len(input_dataset.patch.get_patch_slices(index_augmentation))):
+            self.attributes[index_dataset][index_augmentation][i] = Attribute(source_attribute)
+
+    def _blend_patch(
+        self, index_dataset: int, index_patch: int, layer: torch.Tensor, accumulator: Accumulator
+    ) -> list[tuple[slice, torch.Tensor]]:
+        """Blend one patch on the case's accumulate device and return the slabs it released."""
         if index_dataset not in self._accum_device:
             self._accum_device[index_dataset] = self._accumulate_device(layer, accumulator)
             if layer.device.type != "cpu" and self._accum_device[index_dataset].type == "cpu":
@@ -647,7 +665,7 @@ class OutSameAsGroupDataset(OutputDataset):
         elif str(layer.device) != str(target):
             layer = layer.to(target)
         try:
-            slabs = accumulator.add_layer(index_patch, layer) or []
+            return accumulator.add_layer(index_patch, layer) or []
         except torch.cuda.OutOfMemoryError:
             # The gate samples free VRAM once per case: another process can reclaim it before this
             # volume-sized first allocation lands. Nothing is blended yet, so fall back to the
@@ -657,9 +675,19 @@ class OutSameAsGroupDataset(OutputDataset):
                 raise
             self._accum_device[index_dataset] = torch.device("cpu")
             torch.cuda.empty_cache()
-            slabs = accumulator.add_layer(index_patch, self._offload_to_cpu(layer)) or []
-        if not self._stream_plans.get(index_dataset):
-            return
+            return accumulator.add_layer(index_patch, self._offload_to_cpu(layer)) or []
+
+    def _advance_stream(
+        self,
+        index_dataset: int,
+        index_augmentation: int,
+        accumulator: Accumulator,
+        slabs: list[tuple[slice, torch.Tensor]],
+        number_of_channels_per_model: list[int] | None,
+        dataset: DatasetIter,
+    ) -> None:
+        """Push the released slabs through the aligner and the finalize chain; on any error, abort
+        the sink and every slab stage before re-raising."""
         copy_finished = accumulator.is_full()
         if copy_finished:
             slabs = slabs + cast(StreamingAccumulator, accumulator).finalize()
@@ -791,7 +819,7 @@ class OutSameAsGroupDataset(OutputDataset):
                 # classic behaviour).
                 slab_stages.add(position)
                 continue
-            if locality.kind in _REGION_KINDS:
+            if locality.kind.is_region:
                 if pipe_start is None:
                     pipe_start = position
                 continue
@@ -979,7 +1007,7 @@ class OutSameAsGroupDataset(OutputDataset):
                         out = transform.transform_shape(self.group_src, name, list(shape), Attribute(walking))
                         transform.write_stream_cache_attribute(walking, shape, name)
                     shapes.append([int(extent) for extent in out])
-                elif locality.kind in _REGION_KINDS:
+                elif locality.kind.is_region:
                     if stage.inverted:
                         remapper = cast(TransformInverse, stage.transform)
                         pull_fns.append(_RemapPull(remapper.stream_region_target, shape, snapshot, name))

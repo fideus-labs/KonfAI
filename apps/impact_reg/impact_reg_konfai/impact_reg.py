@@ -321,7 +321,7 @@ def _neutral_mask(out_path: Path) -> Path:
 
     A whole-image all-ones mask restricts nothing (the model's ``_is_partial_mask`` treats it as absent),
     and in whole-volume mode a mask branch need not share the image grid, so a 2x2x2 sentinel yields a
-    byte-identical registration (verified) without reading (or even sizing to) the input. (The common
+    byte-identical registration without reading (or even sizing to) the input. (The common
     no-mask path passes no mask at all; konfai-apps fills both branches with an all-ones default.)
     """
     sitk.WriteImage(sitk.GetImageFromArray(np.ones((2, 2, 2), dtype=np.uint8)), str(out_path))

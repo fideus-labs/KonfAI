@@ -37,7 +37,7 @@ import torch
 
 from konfai.data.patching import DatasetManager
 from konfai.data.reduction import Reduction
-from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Transform
+from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Transform, stat_seed_valid
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import (
     Attribute,
@@ -230,7 +230,7 @@ def check_post_stages(post: list[Transform], output: str) -> None:
 
     A statistic may follow the reduction, but only over stages that leave the values alone: the stat
     pass measures the FOLD, so an earlier stage that changes the values makes the seed describe a
-    volume nobody wrote. This mirrors the same refusal in the per-case planner.
+    volume nobody wrote (``stat_seed_valid``, the per-case planner's rule).
     """
     localities: list[PatchLocality] = []
     for index, stage in enumerate(post):
@@ -245,7 +245,7 @@ def check_post_stages(post: list[Transform], output: str) -> None:
                 f"Only voxel-local stages can follow a reduction. End this chain, and put '{name}' in a"
                 f" second chain that reads '{output}' back.",
             )
-        if kind is LocalityKind.GLOBAL_STAT and not all(previous.statistics_preserving for previous in localities):
+        if kind is LocalityKind.GLOBAL_STAT and not stat_seed_valid(localities):
             raise ReductionError(
                 f"stage {index} '{name}' follows the Reduce into '{output}' and needs whole-volume"
                 " statistics, but an earlier stage after the Reduce changes the values: the"

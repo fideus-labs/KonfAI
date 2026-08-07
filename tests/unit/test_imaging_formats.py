@@ -337,6 +337,15 @@ class TestDatasetImagingBackends:
         np.testing.assert_array_equal(patch, volume[:, 2:3])
         assert len(decoded_files) == 1
 
+    def test_dicom_region_reads_are_priced_bounded(self, tmp_path: Path) -> None:
+        """The route pricer must see what the decode-count test above proves: a region decodes only
+        its slices, so a DICOM source prices as streamable instead of loading whole."""
+        pytest.importorskip("pydicom")
+        dataset = Dataset(tmp_path / "DICOM", "dicom")
+        dataset.write("CT", "CASE_001", np.zeros((1, 2, 3, 3), dtype=np.int16), _image_attributes())
+
+        assert dataset.bounded_region_reads("CT", "CASE_001")
+
     def test_dicom_round_trip_preserves_rotated_direction(self, tmp_path: Path) -> None:
         pytest.importorskip("pydicom")
         attributes = _image_attributes()

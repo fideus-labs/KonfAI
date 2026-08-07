@@ -235,8 +235,7 @@ class Vote(Reduction):
     blends, and the result keeps the input's dtype.
 
     A tie goes to the SMALLEST label, so a cohort folds to the same volume on every run and on every
-    rank. That is arbitrary but it has to be *something*, and an arbitrary rule stated here beats a
-    stable-sort detail nobody can see.
+    rank.
 
     Not incremental: a majority needs every case before it can be counted.
     """

@@ -30,7 +30,9 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Literal, cast
 
@@ -465,6 +467,40 @@ class Transformer(DistributedObject):
             self._sub_cap_sweeps = True
         return "STREAM", None
 
+    def _entry_verdict(
+        self,
+        manager: DatasetManager,
+        destination: Dataset,
+        group: str,
+        entry_name: str,
+        copy_index: int,
+        overwrite: bool,
+        probed: set[tuple[str, str]],
+        route: Callable[[], tuple[str, str | None]] | None = None,
+    ) -> tuple[str, str | None]:
+        """The SKIP -> streamable -> WHOLE-VOLUME cascade every planned output entry goes through.
+
+        An existing output is a resume (SKIP); a chain the patch planner accepts is priced by
+        ``route`` once its destinations survive the write probe; everything else falls to the
+        whole-volume pass, with the refusal spelled out. Only a plain case passes a ``route``
+        (STREAM or LOAD, :meth:`_route`): an Expand copy (``copy_index > 0``) passes none and is
+        always STREAM, because its copies share one read pass, which amortizes the very re-reads a
+        per-copy load would multiply. A copy's reason doubles as the solo/shared regime.
+        """
+        # Copies exist to carry augmentation draws: a real copy index asks the chain with them applied.
+        augmented = copy_index > 0
+        if not overwrite and destination.is_dataset_exist(group, entry_name):
+            return "SKIP", None
+        if not manager.can_stream_patch(copy_index, apply_augmentations=augmented):
+            return "WHOLE-VOLUME", manager.stream_refusal(copy_index, apply_augmentations=augmented)
+        probe_failure = self._probe_write_destinations(manager, probed, copy_index)
+        if probe_failure is not None:
+            # The run would fail the sweep at its first slab and fall back: say so now.
+            return "WHOLE-VOLUME", probe_failure
+        if route is not None:
+            return route()
+        return "STREAM", manager.expansion_solo_reason(copy_index)
+
     def compute_plan(self, world_size: int = 1, overwrite: bool = False) -> TransformPlan:
         """Plan every (case, chain) on the launcher, headers plus one write probe per destination."""
         budget = self.dataset.resolved_budget()
@@ -542,19 +578,10 @@ class Transformer(DistributedObject):
                     # own verdict, and, for STREAM: the regime that says who pays the reads.
                     for a in range(1, expansion.nb + 1):
                         entry_name = manager.copy_entry(a)
-                        regime: str | None = None
-                        if not overwrite and destination.is_dataset_exist(group, entry_name):
-                            verdict, reason = "SKIP", None
-                        elif manager.can_stream_patch(a, apply_augmentations=True):
-                            probe_failure = self._probe_write_destinations(manager, probed, a)
-                            if probe_failure is None:
-                                verdict, reason = "STREAM", manager.expansion_solo_reason(a)
-                                regime = "solo" if reason else "shared"
-                            else:
-                                verdict, reason = "WHOLE-VOLUME", probe_failure
-                        else:
-                            verdict = "WHOLE-VOLUME"
-                            reason = manager.stream_refusal(a, apply_augmentations=True)
+                        verdict, reason = self._entry_verdict(
+                            manager, destination, group, entry_name, a, overwrite, probed
+                        )
+                        regime = ("solo" if reason else "shared") if verdict == "STREAM" else None
                         entries.append(
                             TransformPlanEntry(
                                 entry_name,
@@ -568,18 +595,16 @@ class Transformer(DistributedObject):
                             )
                         )
                     continue
-                if not overwrite and destination.is_dataset_exist(group, manager.name):
-                    verdict, reason = "SKIP", None
-                elif manager.can_stream_patch(0, apply_augmentations=False):
-                    probe_failure = self._probe_write_destinations(manager, probed)
-                    if probe_failure is None:
-                        verdict, reason = self._route(manager, case_bytes, per_rank_budget)
-                    else:
-                        # The run would fail the sweep at its first slab and fall back: say so now.
-                        verdict, reason = "WHOLE-VOLUME", probe_failure
-                else:
-                    verdict = "WHOLE-VOLUME"
-                    reason = manager.stream_refusal(0, apply_augmentations=False)
+                verdict, reason = self._entry_verdict(
+                    manager,
+                    destination,
+                    group,
+                    manager.name,
+                    0,
+                    overwrite,
+                    probed,
+                    route=partial(self._route, manager, case_bytes, per_rank_budget),
+                )
                 entries.append(TransformPlanEntry(manager.name, group_src, group_dest, verdict, reason, case_bytes))
         dropped: dict[str, int] = {}
         kept = set(self.dataset._prepared_train_names)
@@ -654,36 +679,52 @@ class Transformer(DistributedObject):
 
         self._overwrite = os.environ.get("KONFAI_OVERWRITE", "False") == "True"
         plan = self.compute_plan(world_size, self._overwrite)
-        report = plan.report()
         print(plan.report(verbose=False))
         # The plan is an artifact, not a log line: Studio filters routine startup lines from the
         # console stream, and a plan that only ever existed as one is a plan nobody can re-read.
-        (self.transform_path / "plan.txt").write_text(report + "\n")
+        (self.transform_path / "plan.txt").write_text(plan.report() + "\n")
         # Where the data went, machine-readable beside the human-readable plan. This run directory
         # holds a log, a plan and a config copy, never the deliverable, which lands wherever each
         # Write pointed. Without this, the one thing a reader wants after the run is the one thing
         # nothing in the run directory names.
         (self.transform_path / "outputs.json").write_text(json.dumps(self.output_destinations(), indent=2) + "\n")
 
-        if world_size > 1:
-            for managers in self._managers().values():
-                for transform in managers[0].transforms if managers else []:
-                    if not isinstance(transform, Save):
-                        continue
-                    destination, _group = save_destination(transform, managers[0].dataset, managers[0].group_dest)
-                    # The question here is NOT concurrent_write_safe(): that one asks whether two
-                    # entries of one shared store may be written at once, and answers no for
-                    # omezarr, which would refuse the very destination this workflow recommends. Ranks
-                    # shard by CASE, and a directory dataset gives each case its own file or store
-                    # (<root>/<case>/<group>.<ext>), so their writes are disjoint by construction.
-                    # Only a single-file store (h5) puts every case in one handle.
-                    if not destination.is_directory:
-                        raise TransformerError(
-                            f"--cpu {world_size}: destination '{destination.filename}' is a"
-                            " single-file store, and every rank would write into the same file.",
-                            "Use one process, or a directory destination (omezarr, mha, nii.gz).",
-                        )
+        self._guard_sharded_destinations(world_size)
+        self._enforce_plan(plan)
 
+        self._budget_bytes = plan.budget_bytes
+        # The run executes the route the plan priced (LOAD assembles by choice, not fallback), and
+        # the console only speaks when the run DEVIATES from what the plan already printed.
+        self._planned = {(entry.group_dest, entry.case): entry.verdict for entry in plan.entries}
+        self._case_names = list(self.dataset._prepared_train_names)
+        self._shard_work(world_size)
+
+    def _guard_sharded_destinations(self, world_size: int) -> None:
+        """Multi-rank runs refuse a single-file Save destination before anything is written."""
+        if world_size <= 1:
+            return
+        for managers in self._managers().values():
+            for transform in managers[0].transforms if managers else []:
+                if not isinstance(transform, Save):
+                    continue
+                destination, _group = save_destination(transform, managers[0].dataset, managers[0].group_dest)
+                # The question here is NOT concurrent_write_safe(): that one asks whether two
+                # entries of one shared store may be written at once, and answers no for
+                # omezarr, which would refuse the very destination this workflow recommends. Ranks
+                # shard by CASE, and a directory dataset gives each case its own file or store
+                # (<root>/<case>/<group>.<ext>), so their writes are disjoint by construction.
+                # Only a single-file store (h5) puts every case in one handle.
+                if not destination.is_directory:
+                    raise TransformerError(
+                        f"--cpu {world_size}: destination '{destination.filename}' is a"
+                        " single-file store, and every rank would write into the same file.",
+                        "Use one process, or a directory destination (omezarr, mha, nii.gz).",
+                    )
+
+    def _enforce_plan(self, plan: TransformPlan) -> None:
+        """The refusals the plan's verdicts imply, raised before any byte moves: an output over the
+        budget, a whole-volume fallback under ``on_fallback: error``, a reduction that cannot
+        stream. Nothing here recomputes a verdict; it only speaks for the plan."""
         violations = plan.budget_violations()
         if violations:
             worst = max(violations, key=lambda entry: entry.working_set_bytes)
@@ -740,13 +781,12 @@ class Transformer(DistributedObject):
                 " path (reasons above). They fit the budget; set on_fallback: error to refuse them."
             )
 
-        self._budget_bytes = plan.budget_bytes
-        # The run executes the route the plan priced (LOAD assembles by choice, not fallback), and
-        # the console only speaks when the run DEVIATES from what the plan already printed.
-        self._planned = {(entry.group_dest, entry.case): entry.verdict for entry in plan.entries}
-        self._case_names = list(self.dataset._prepared_train_names)
-        # Work items, not cases: an ordinary chain has one per case, a reduction exactly one for all
-        # of them. Each item still writes its own entry, so the disjoint-writes guard above holds.
+    def _shard_work(self, world_size: int) -> None:
+        """Split the run into per-rank shards of work items.
+
+        Work items, not cases: an ordinary chain has one per case, a reduction exactly one for all
+        of them. Each item still writes its own entry, so the disjoint-writes guard of
+        :meth:`_guard_sharded_destinations` holds."""
         items: list[tuple[str, int]] = []
         for group_dest, managers in self._managers().items():
             if self._reduction(group_dest, managers) is not None:

@@ -19,6 +19,7 @@
 import os
 import tempfile
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing import current_process, get_context
@@ -99,6 +100,16 @@ class LocalityKind(Enum):
     WHOLE_VOLUME = "whole_volume"
 
     @property
+    def is_region(self) -> bool:
+        """Whether this kind is a region stage: its read is a remapped region of its source.
+
+        Region stages compose, so the streamed read and write dispatchers both carry any run of them
+        between their pointwise stages; the set must stay the same on both sides, or a kind added to
+        one would silently fall to the whole-volume path (write) or to a refusal (read) on the other.
+        """
+        return self in (LocalityKind.HALO, LocalityKind.ORIENTATION, LocalityKind.CROP, LocalityKind.REGRID)
+
+    @property
     def preserves_statistics(self) -> bool:
         """Whether this kind leaves every whole-volume statistic of its input untouched.
 
@@ -159,6 +170,16 @@ class PatchLocality:
         if self.preserves_statistics is not None:
             return self.preserves_statistics
         return self.kind.preserves_statistics
+
+
+def stat_seed_valid(upstream: Iterable[PatchLocality]) -> bool:
+    """Whether a ``GLOBAL_STAT`` stage's seed still describes its own input.
+
+    The seed is measured before the chain runs (on the stored volume, or on the fold a ``Reduce``
+    wrote), so it holds only while every stage between the measurement and the statistic leaves the
+    values untouched. Every planner that seeds a statistic must apply this one rule.
+    """
+    return all(locality.statistics_preserving for locality in upstream)
 
 
 class Transform(NeedDevice, ABC):
@@ -1061,8 +1082,8 @@ class _ReferenceGrid(_TargetGrid):
     ``Reduce``'s ``grid: strict`` something true to compare. That is the atlas-template build.
 
     THE REFERENCE IS AN IMAGE, NOT A LIST OF NUMBERS. A grid is fifteen numbers in two axis orders
-    at once, and transcribing them by hand is the mistake this file's history says is always made --
-    silently, because a transposed grid resamples perfectly well onto the wrong place. Naming an
+    at once, and transcribing them by hand is reliably wrong: silently, because a transposed grid
+    resamples perfectly well onto the wrong place. Naming an
     image cannot make it: the header IS the declaration. It is also what an atlas loop needs, where
     round N+1's reference is round N's own output.
 
@@ -2214,8 +2235,7 @@ class Save(Transform):
 
     ``downsample_method`` names how the coarse levels are derived, and its default is
     ``ITKWASM_BIN_SHRINK`` (block averaging), NOT ngff-zarr's own ``ITKWASM_GAUSSIAN``. Measured on a
-    real volume, the Gaussian holds a 0.9998 correlation while crushing peak intensity by 20 % --
-    exactly the shape of a difference that passes a sanity check and resurfaces months later.
+    real volume, the Gaussian holds a 0.9998 correlation while crushing peak intensity by 20 %.
     """
 
     def __init__(

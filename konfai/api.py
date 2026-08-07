@@ -44,11 +44,11 @@ import os
 import shutil
 import tempfile
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 
@@ -56,6 +56,9 @@ from konfai.utils.errors import ConfigError
 
 if TYPE_CHECKING:
     from konfai.transformer import TransformPlan
+    from konfai.utils.runtime import DistributedObject
+
+_T = TypeVar("_T")
 
 #: Where a bare stage name resolves, per stage family: the same rule the YAML loader applies.
 _STAGE_MODULES = ("konfai.data.transform", "konfai.data.augmentation")
@@ -89,6 +92,30 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
                 del os.environ[key]
         os.environ.update(saved)
         _ACTIVE.release()
+
+
+def _launch(
+    ranks: int,
+    build: "Callable[[], DistributedObject]",
+    finish: "Callable[[DistributedObject], _T]",
+    *,
+    gpu: Sequence[int] | None,
+    cpu: int | None,
+    overwrite: bool,
+    quiet: bool,
+) -> _T:
+    """Take the workflow lock, build, execute, and read the result out through ``finish``.
+
+    ``finish`` runs inside the lock on purpose: the workspace lives in ``KONFAI_*`` variables the
+    lock's exit restores to the caller's. ``ranks`` sizes the lock and stays the caller's own
+    expression: the entry points do not all derive it from ``gpu``/``cpu`` the same way.
+    """
+    from konfai.utils.runtime import execute_distributed_object
+
+    with _one_workflow_at_a_time(ranks):
+        workflow = build()
+        execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
+        return finish(workflow)
 
 
 def _yaml_safe(value: object, where: str) -> object:
@@ -266,13 +293,19 @@ def transform(
     """
     tree = _transform_tree(name, datasets, chains, memory_budget, on_fallback, manual_seed, dataset_options)
     from konfai.transformer import build_transform
-    from konfai.utils.runtime import execute_distributed_object
 
-    with _one_workflow_at_a_time(len(gpu or []) or cpu):
-        workflow = build_transform(transform_file=tree, transforms_dir=transforms_dir)
-        config_name = Path(os.environ["KONFAI_config_file"]).name
-        execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
-        workspace = Path(workflow.transform_path)  # type: ignore[attr-defined]
+    workspace, config_name = _launch(
+        len(gpu or []) or cpu,
+        lambda: build_transform(transform_file=tree, transforms_dir=transforms_dir),
+        lambda workflow: (
+            Path(workflow.transform_path),  # type: ignore[attr-defined]
+            Path(os.environ["KONFAI_config_file"]).name,
+        ),
+        gpu=gpu,
+        cpu=cpu,
+        overwrite=overwrite,
+        quiet=quiet,
+    )
     outputs = json.loads((workspace / "outputs.json").read_text(encoding="utf-8"))
     return TransformResult(workspace=workspace, outputs=outputs, config=workspace / config_name)
 
@@ -363,12 +396,16 @@ def evaluate(
     tree = {"Evaluator": {"train_name": name, "metrics": metrics_tree, "Dataset": dataset_tree}}
 
     from konfai.evaluator import build_evaluate
-    from konfai.utils.runtime import execute_distributed_object
 
-    with _one_workflow_at_a_time(len(gpu or []) or cpu):
-        workflow = build_evaluate(evaluations_file=tree, evaluations_dir=evaluations_dir)
-        execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
-        workspace = Path(os.environ["KONFAI_EVALUATIONS_DIRECTORY"]) / name
+    workspace = _launch(
+        len(gpu or []) or cpu,
+        lambda: build_evaluate(evaluations_file=tree, evaluations_dir=evaluations_dir),
+        lambda _: Path(os.environ["KONFAI_EVALUATIONS_DIRECTORY"]) / name,
+        gpu=gpu,
+        cpu=cpu,
+        overwrite=overwrite,
+        quiet=quiet,
+    )
     reports = {
         split: json.loads(report.read_text(encoding="utf-8"))
         for split in ("TRAIN", "VALIDATION")
@@ -411,16 +448,20 @@ def predict(
     (checkpoints, patching, TTA, ensembling) is wiring, and the tree is its honest spelling.
     """
     from konfai.predictor import build_predict
-    from konfai.utils.runtime import execute_distributed_object
 
-    with _one_workflow_at_a_time(len(gpu or []) or cpu):
-        workflow = build_predict(
+    return _launch(
+        len(gpu or []) or cpu,
+        lambda: build_predict(
             models=[Path(model) for model in models],
             prediction_file=_config_copy(config),
             predictions_dir=predictions_dir,
-        )
-        execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
-        return Path(os.environ["KONFAI_PREDICTIONS_DIRECTORY"]) / workflow.name
+        ),
+        lambda workflow: Path(os.environ["KONFAI_PREDICTIONS_DIRECTORY"]) / workflow.name,
+        gpu=gpu,
+        cpu=cpu,
+        overwrite=overwrite,
+        quiet=quiet,
+    )
 
 
 def train(
@@ -443,16 +484,21 @@ def train(
     each run keeps IS the record of what was tried.
     """
     from konfai.trainer import build_train
-    from konfai.utils.runtime import State, execute_distributed_object
+    from konfai.utils.runtime import State
 
-    with _one_workflow_at_a_time(len(gpu or []) or (cpu or 1)):
-        workflow = build_train(
+    return _launch(
+        len(gpu or []) or (cpu or 1),
+        lambda: build_train(
             command=State.RESUME if resume else State.TRAIN,
             model=model,
             config=_config_copy(config),
             checkpoints_dir=checkpoints_dir,
             statistics_dir=statistics_dir,
             lr=lr,
-        )
-        execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
-        return Path(os.environ["KONFAI_CHECKPOINTS_DIRECTORY"]) / workflow.name
+        ),
+        lambda workflow: Path(os.environ["KONFAI_CHECKPOINTS_DIRECTORY"]) / workflow.name,
+        gpu=gpu,
+        cpu=cpu,
+        overwrite=overwrite,
+        quiet=quiet,
+    )
