@@ -58,7 +58,7 @@ Three, and each one names what to change.
 - **data**: declare an OME-Zarr pyramid from a Write
 - **impact-reg**: seed the rigid from the centre of mass, not only the frame
 - **studio**: bundle icons through the app interface, and a way to stop Studio (#75)
-- **examples**: a Transform example -- a template folded out of a cohort, and drawn copies of a case
+- **examples**: a Transform example: a template folded out of a cohort, and drawn copies of a case
 
 ### 🐛 Bug Fixes
 
@@ -137,7 +137,7 @@ Several are new refusals: what they refuse was being done before, silently and w
   over `[1.0, 3.0]` now reduces to `2.0`. On an odd count the two agree.
 - **`Mean` and `Median` widen an integer input to float32**, including the single-tensor path that
   previously returned the tensor untouched. Rounding an average back onto an integer grid is a wrong
-  number, not a narrower one -- but a `uint8` prediction output now lands as float32, four times the
+  number, not a narrower one, but a `uint8` prediction output now lands as float32, four times the
   bytes on disk, and a downstream stage sees the wider dtype.
 - Together those two make **`Median` the wrong operator for a label map**: it can answer with a
   label that was in no input (over 1 and 5 it gives 3), and over exactly two cases it *is* `Mean`.
@@ -154,7 +154,7 @@ Several are new refusals: what they refuse was being done before, silently and w
 - **A `uint8` label map resampled through a `field` now takes the nearest voxel.** The warped path
   consulted no interpolation rule, so it blended labels and truncated: over a source holding
   `{0, 100}` it returned 29, 79 and 99. Anything stored as another integer dtype needs
-  `interpolation: nearest` spelled out -- a dtype cannot tell a label map from a CT.
+  `interpolation: nearest` spelled out, since a dtype cannot tell a label map from a CT.
 - **A chain declaring two `Reduce` markers is refused at parse time**, naming the cardinality
   marker, where the second one used to fall past the split and be reported as an ordinary stage
   reading across space.
