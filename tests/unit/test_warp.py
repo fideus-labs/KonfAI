@@ -249,4 +249,4 @@ def test_an_empty_field_path_declares_no_field() -> None:
 
 def test_unknown_interpolation_is_refused_at_construction() -> None:
     with pytest.raises(TransformError, match="unknown interpolation"):
-        Resample(field="./x:h5", interpolation="cubic")
+        Resample(field="./x:h5", interpolation="quadratic")

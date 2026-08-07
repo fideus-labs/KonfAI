@@ -114,6 +114,31 @@ def _kernel_weights(offset: torch.Tensor, order: int) -> torch.Tensor:
     raise ValueError(f"No B-spline kernel of order {order}: KonfAI evaluates {SUPPORTED_SPLINE_ORDERS}.")
 
 
+def _cubic_weights(offset: torch.Tensor) -> torch.Tensor:
+    """Keys' cubic convolution at a = -1/2 (Catmull-Rom): the interpolating cubic.
+
+    Four taps per axis, exact through the samples (weight 1 at distance 0, 0 at 1 and 2) and exact
+    on polynomials up to degree two, which is what the a = -1/2 choice buys. NOT the order-3
+    B-spline above: that one smooths unless its input is prefiltered coefficients, which a
+    displacement stage stores and an image does not. The weights go negative between 1 and 2:
+    that is what preserves an edge, and why a blend can overshoot the values it read.
+    """
+    distance = offset.abs()
+    near = 1.0 + distance * distance * (1.5 * distance - 2.5)
+    far = 2.0 - distance * (4.0 - distance * (2.5 - 0.5 * distance))
+    return torch.where(distance < 1.0, near, torch.where(distance < 2.0, far, torch.zeros_like(distance)))
+
+
+def _saturate_overshoot(blended: torch.Tensor, payload_dtype: torch.dtype) -> torch.Tensor:
+    """A cubic blend can overshoot the payload's range, and an integer cast WRAPS instead of
+    saturating: the bright rim a negative lobe builds beside an edge would come back as the
+    opposite extreme. Clamping to the dtype's range is the saturating cast ITK performs."""
+    if payload_dtype.is_floating_point:
+        return blended
+    info = torch.iinfo(payload_dtype)
+    return blended.clamp(float(info.min), float(info.max))
+
+
 def _apply(points_xyz: torch.Tensor, affine: AffineMap, device: torch.device) -> torch.Tensor:
     """``translation + Σ_j column_j · p_j``, accumulated in ``j`` order. ITK's own association.
 
@@ -365,6 +390,19 @@ def gather_separable(
         if mode == "nearest":
             out = out.index_select(array_axis + 1, local(nearest_index(axis), array_axis))
             continue
+        if mode == "cubic":
+            # The same axis-by-axis reduction as the blend below, four taps instead of two. The
+            # weights come from the GLOBAL coordinate, so a region sums the very numbers the whole
+            # volume sums.
+            base = torch.floor(axis) - 1.0
+            index = base.to(torch.long)
+            blended: torch.Tensor | None = None
+            for tap in range(4):
+                weight = broadcast(_cubic_weights(axis - (base + tap)).to(out.dtype), array_axis)
+                term = out.index_select(array_axis + 1, local(index + tap, array_axis)) * weight
+                blended = term if blended is None else blended + term
+            out = blended if blended is not None else out
+            continue
         # One axis at a time, not eight corners at once. The tensor product is the same sum, but
         # blending axis by axis reduces each extent before the next axis reads it: six gathers over
         # shrinking tensors instead of twenty-four over the largest one.
@@ -378,6 +416,8 @@ def gather_separable(
         out = torch.lerp(low, high, share)
     if mode == "nearest" and not out.is_floating_point():
         out = out.type(torch.float32)
+    if mode == "cubic":
+        out = _saturate_overshoot(out, source.dtype)
 
     if all(bool(mask.all()) for mask in inside_axes):
         # Nothing of this region falls outside the source, which is the ordinary case for a resample
@@ -447,6 +487,31 @@ def gather(
             flat = flat * window_zyx[array_axis] + local
         picked = work.reshape(int(work.shape[0]), -1).index_select(1, flat.reshape(-1)).reshape(out_shape)
         return picked.masked_fill(~inside.unsqueeze(0), fill).type(source.dtype)
+
+    if mode == "cubic":
+        # Keys' four taps per axis, corner by corner over a flat index: grid_sample has no cubic in
+        # 3-D, and the corner walk keeps the coordinates GLOBAL, so a streamed region and the whole
+        # volume agree exactly where the fused blend below pays ~1e-5 to normalisation.
+        base_xyz = torch.floor(coordinates_xyz) - 1.0
+        out = torch.zeros(out_shape, dtype=work.dtype, device=device)
+        for corner in itertools.product(range(4), repeat=rank):
+            weight = torch.ones(extent_zyx, dtype=_COORDINATE_DTYPE, device=device)
+            flat = torch.zeros(extent_zyx, dtype=torch.long, device=device)
+            for array_axis in range(rank):
+                axis = rank - 1 - array_axis
+                position = base_xyz[..., axis] + corner[axis]
+                weight = weight * _cubic_weights(coordinates_xyz[..., axis] - position)
+                local = window_index(
+                    position.to(torch.long),
+                    source_shape_zyx[array_axis],
+                    source_starts_zyx[array_axis],
+                    window_zyx[array_axis],
+                )
+                flat = flat * window_zyx[array_axis] + local
+            gathered = work.reshape(int(work.shape[0]), -1).index_select(1, flat.reshape(-1)).reshape(out_shape)
+            out = out + gathered * weight.to(work.dtype).unsqueeze(0)
+        out = _saturate_overshoot(out, source.dtype)
+        return out.masked_fill(~inside.unsqueeze(0), fill).type(source.dtype)
 
     # A BLEND goes through grid_sample, which is one fused kernel where the eight corners are eight
     # gathers over a flat index. `align_corners=False` IS ITK's domain: a sample is inside while

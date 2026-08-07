@@ -384,3 +384,41 @@ def test_a_stored_map_bridging_disjoint_frames_is_not_refused_as_disjoint():
     refused.set_datasets([_CrossFrameStore(reference, astray)])
     with pytest.raises(TransformError, match="nothing but 'fill'"):
         refused.transform_shape("", CASE, list(SIZE), _attribute(case))
+
+
+def test_cubic_tracks_the_bspline_oracle_closer_than_linear() -> None:
+    """Keys' cubic is a real cubic reconstruction: brought to another density, the phantom must
+    land nearer SimpleITK's spline resample than the linear blend does."""
+    image = _image(oblique=False)
+    volume = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
+    outputs: dict[str, torch.Tensor] = {}
+    attribute = _attribute(image)
+    for interpolation in ("linear", "cubic"):
+        attribute = _attribute(image)
+        stage = Resample(spacing=[0.5, 0.9, 1.1], interpolation=interpolation)
+        outputs[interpolation] = stage(CASE, volume.clone(), attribute)
+    reference = sitk.Image([int(extent) for extent in reversed(outputs["cubic"].shape[1:])], sitk.sitkFloat32)
+    reference.SetOrigin(tuple(attribute.get_np_array("Origin")))
+    reference.SetSpacing(tuple(attribute.get_np_array("Spacing")))
+    reference.SetDirection(tuple(attribute.get_np_array("Direction")))
+    oracle = sitk.GetArrayFromImage(sitk.Resample(image, reference, sitk.Transform(), sitk.sitkBSpline, 0.0))
+    crop = (slice(2, -2),) * 3  # away from the border, where tap-clamp and spline-edge policies differ
+    error = {name: float(np.abs(out.numpy()[0][crop] - oracle[crop]).mean()) for name, out in outputs.items()}
+    assert error["cubic"] < error["linear"]
+
+
+def test_cubic_saturates_overshoot_instead_of_wrapping() -> None:
+    """Keys' negative lobes overshoot beside an edge, and an integer cast would WRAP the overshoot
+    to the opposite extreme: a uint8 step must stay a step, saturated at its plateaus."""
+    volume = torch.zeros((1, 4, 4, 32), dtype=torch.uint8)
+    volume[..., 16:] = 255
+    attribute = Attribute()
+    attribute["Origin"] = np.zeros(3)
+    attribute["Spacing"] = np.ones(3)
+    attribute["Direction"] = np.eye(3).ravel()
+    stage = Resample(spacing=[0.5, 0.0, 0.0], interpolation="cubic")
+    out = stage(CASE, volume, attribute)
+    assert out.dtype == torch.uint8
+    dark, bright = out[..., : out.shape[-1] // 2 - 2], out[..., out.shape[-1] // 2 + 2 :]
+    assert int(dark.max()) <= 50
+    assert int(bright.min()) >= 200
