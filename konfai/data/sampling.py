@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Where each target voxel reads from, and the gather that reads it — in torch, on the volume's device.
+"""Where each target voxel reads from, and the gather that reads it, in torch, on the volume's device.
 
 Two halves, and only the first one varies. The COORDINATE PRODUCER turns a decoded transform into
 one source index per target voxel; the GATHER is ITK's sampler and is written once. A stage that
@@ -46,7 +46,7 @@ from konfai.data.geometry import (
 
 #: Coordinates are accumulated in float64 and only the gather runs in the payload's dtype. A world
 #: coordinate is an origin of hundreds of millimetres plus an index of hundreds of voxels, and in
-#: float32 that sum keeps about four digits past the voxel -- enough to move a sample across a
+#: float32 that sum keeps about four digits past the voxel: enough to move a sample across a
 #: voxel boundary on a large grid, which is a visibly different value on anything that is not
 #: smooth. Measured on a 64x512x512 slab: float32 coordinates disagree with SimpleITK by 0.35 on
 #: data in [0, 1], float64 by 3e-05 (which is the gather's own float32 rounding).
@@ -54,8 +54,8 @@ _COORDINATE_DTYPE = torch.float64
 
 
 # --------------------------------------------------------------------------------------------------
-# The rules every sampler below obeys. There are two gather strategies for one arithmetic -- per-axis
-# maps where the coordinate is separable, eight flat corners where a displacement makes it not -- and
+# The rules every sampler below obeys. There are two gather strategies for one arithmetic: per-axis
+# maps where the coordinate is separable, eight flat corners where a displacement makes it not: and
 # the strategies differ for a measured reason. The RULES must not: written out at each site they
 # drift, and the drift is silent because a resampled volume looks right either way.
 
@@ -65,7 +65,7 @@ def sampling_dtype(tensor: torch.Tensor) -> torch.dtype:
 
     An integer input has no arithmetic of its own to interpolate with. A CPU half does, and it should
     not be used: torch's CPU Half kernels are missing from older releases and lossy over a sum of
-    eight terms, at values a scanner actually produces. A CUDA half keeps its own -- every mode has a
+    eight terms, at values a scanner actually produces. A CUDA half keeps its own; every mode has a
     Half kernel there, and upcasting a whole multi-class volume would double its memory for nothing.
     """
     if not tensor.is_floating_point():
@@ -79,7 +79,7 @@ def nearest_index(coordinate: torch.Tensor) -> torch.Tensor:
     """ITK's nearest: round half UP on the continuous source index.
 
     ``torch.round`` breaks a tie to the even index, and ``F.interpolate``'s nearest is
-    ``floor(o * scale)`` -- a statement about a size RATIO, which says nothing once the target grid
+    ``floor(o * scale)``: a statement about a size RATIO, which says nothing once the target grid
     carries an origin of its own. On a label map either wrong rule still yields a label map.
     """
     return torch.floor(coordinate + 0.5).to(torch.long)
@@ -91,13 +91,13 @@ def window_index(index: torch.Tensor, n_in: int, region_start: int, window: int)
     Clamped twice, and both matter: to the SOURCE first, so a tap past the volume reproduces the
     border value rather than wrapping, and to the WINDOW second, so it stays inside the buffer on
     hand. The second clamp is only ever load-bearing where the first already put the sample outside,
-    which the caller masks to fill -- or, for a halo'd read, where the declared bound was checked.
+    which the caller masks to fill: or, for a halo'd read, where the declared bound was checked.
     """
     return torch.clamp(torch.clamp(index, 0, n_in - 1) - region_start, 0, window - 1)
 
 
 def _kernel_weights(offset: torch.Tensor, order: int) -> torch.Tensor:
-    """The 1-D B-spline weight at distance ``offset`` — ITK's own kernels.
+    """The 1-D B-spline weight at distance ``offset``: ITK's own kernels.
 
     Order 1 is the linear hat; order 3 is ``itkBSplineKernelFunction``'s cubic. Both are
     non-negative and sum to one over their support, which is what makes ``sup |values|`` a bound
@@ -115,7 +115,7 @@ def _kernel_weights(offset: torch.Tensor, order: int) -> torch.Tensor:
 
 
 def _apply(points_xyz: torch.Tensor, affine: AffineMap, device: torch.device) -> torch.Tensor:
-    """``translation + Σ_j column_j · p_j``, accumulated in ``j`` order — ITK's own association.
+    """``translation + Σ_j column_j · p_j``, accumulated in ``j`` order. ITK's own association.
 
     Not ``points @ matrix.T + offset``. That is the same sum in a different order, which BLAS is
     free to reassociate, and the two answers differ in the last bit; a continuous index landing on
@@ -133,7 +133,7 @@ def _to_index(world_xyz: torch.Tensor, grid: Grid, device: torch.device) -> torc
     """World to continuous index, in ITK's arithmetic: subtract the origin FIRST, then accumulate.
 
     ``TransformPhysicalPointToContinuousIndex`` sums ``M[i][j] * (p_j - O_j)`` from zero. Folding the
-    origin into a translation instead — which is what a generic inverted affine map is — reassociates
+    origin into a translation instead (which is what a generic inverted affine map is) reassociates
     a difference of large world coordinates against a small one and moves the last bit.
     """
     matrix = torch.tensor(grid.world_to_index.matrix, dtype=_COORDINATE_DTYPE, device=device)
@@ -146,12 +146,12 @@ def _to_index(world_xyz: torch.Tensor, grid: Grid, device: torch.device) -> torc
 
 
 def _displacement_at(stage: DisplacementStage, world_xyz: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """The stage's displacement at each world point — zero where its grid does not reach.
+    """The stage's displacement at each world point: zero where its grid does not reach.
 
     ITK returns the identity outside a BSpline's valid region and outside a field's domain, so a
     point past the values simply moves by nothing. That is also what makes a region of a field a
     legal stand-in for the whole of it: the part it does not cover was going to be identity here
-    anyway — which is exactly why the region handed in must COVER the target region, and why a
+    anyway, which is exactly why the region handed in must COVER the target region, and why a
     short one degrades in silence rather than raising.
     """
     rank = stage.grid.rank
@@ -164,7 +164,7 @@ def _displacement_at(stage: DisplacementStage, world_xyz: torch.Tensor, device: 
         # it JUST inside (``InsideValidRegion``): the support then fits and the value is the
         # continuous limit, the outermost tap's weight vanishing at the boundary. Without the nudge
         # the whole last plane of a grid commensurate with the coefficient mesh is silently the
-        # identity -- and a commensurate grid is exactly what a fitted transform domain produces.
+        # identity, and a commensurate grid is exactly what a fitted transform domain produces.
         for axis in range(rank):
             end = float(extent_xyz[axis] - 2)
             ulp = float(np.spacing(np.float64(max(1.0, end))))
@@ -177,7 +177,7 @@ def _displacement_at(stage: DisplacementStage, world_xyz: torch.Tensor, device: 
     # whole support lies in the coefficient grid (``InsideValidRegion``), so its edge falls off a
     # control point early. A dense field is an ordinary image: it interpolates anywhere in
     # ``[-0.5, n - 0.5)`` with the taps clamped, which reaches half a voxel past the outermost
-    # samples. Using the spline's rule for a field blanks that rim -- 10% of the voxels of a small
+    # samples. Using the spline's rule for a field blanks that rim: 10% of the voxels of a small
     # volume, all of them at the border, all of them silently un-warped.
     inside = torch.ones(index.shape[:-1], dtype=torch.bool, device=device)
     for axis in range(rank):
@@ -196,7 +196,7 @@ def _displacement_at(stage: DisplacementStage, world_xyz: torch.Tensor, device: 
             weight = weight * _kernel_weights(index[..., axis] - position, stage.order)
             positions_xyz.append(position.to(torch.long).clamp(0, extent_xyz[axis] - 1))
         # ``values`` is (component, Z, Y, X) and row-major over the spatial axes, so the flat index
-        # runs the ARRAY axes outermost-first with x fastest -- the mirror of the physical order the
+        # runs the ARRAY axes outermost-first with x fastest: the mirror of the physical order the
         # coordinates arrive in. Running it the other way samples the field transposed, which warps
         # the anatomy somewhere plausible and wrong.
         flat_index = torch.zeros(index.shape[:-1], dtype=torch.long, device=device)
@@ -215,15 +215,15 @@ def source_index(
 ) -> torch.Tensor:
     """One source continuous index per voxel of ``target_grid``, shaped ``(*size_zyx, rank)`` in ``(x, y, z)``.
 
-    ``target_grid`` is the REGION's grid — its own origin, not the volume's.
+    ``target_grid`` is the REGION's grid: its own origin, not the volume's.
 
     THE WORLD POINT IS MATERIALISED, never folded away. Target index to world and world to source
     index compose into one affine that is algebraically identical and one matmul cheaper, and it is
     the wrong arithmetic: ITK takes the two steps separately, so the two associations disagree in the
-    last bit — and a continuous index landing EXACTLY on ``k + 0.5`` (which is what a target grid
+    last bit, and a continuous index landing EXACTLY on ``k + 0.5`` (which is what a target grid
     commensurate with its source produces, in whole columns at a time) then rounds to a different
     voxel. Measured against ``sitk.Resample``: 150 of 1050 voxels of a label map, every one of them
-    a legal-looking label. Consecutive affine STAGES are still folded — that is between two world
+    a legal-looking label. Consecutive affine STAGES are still folded, that is between two world
     points, where nothing rounds to an index.
     """
     rank = target_grid.rank
@@ -250,7 +250,7 @@ def source_index(
 
 
 def _is_diagonal(matrix: np.ndarray) -> bool:
-    """Whether every off-diagonal entry is EXACTLY zero — no tolerance, deliberately.
+    """Whether every off-diagonal entry is EXACTLY zero: no tolerance, deliberately.
 
     A tolerance would admit maps whose separable form is only nearly the general one, and the two
     would then disagree in the last bit at exactly the coordinates that round to a different voxel.
@@ -271,7 +271,7 @@ def separable_source_index(
     THE SAME ARITHMETIC, with the terms that are exactly zero left out. Each component of
     :func:`source_index` is ``translation_k + Σ_j p_j · M[k, j]``; with ``M`` diagonal every ``j ≠ k``
     contributes ``p_j · 0.0``, and adding an exact zero changes no float. So this is bit-identical
-    where it applies rather than merely close -- which is what lets one case take it and another the
+    where it applies rather than merely close, which is what lets one case take it and another the
     general path without the two ever having to be reconciled.
 
     What it saves is not arithmetic but MEMORY TRAFFIC: the general path materialises a coordinate
@@ -297,8 +297,8 @@ def blend_order(target_grid: Grid, source_grid: Grid) -> list[int]:
 
     Each axis is reduced to its output extent before the next one reads it, so blending the axis
     that shrinks most FIRST makes every later pass smaller. On an isotropic change of spacing that
-    is worth nothing; on a thick-slice CT brought to isotropic -- 64x512x512 at 3x0.7x0.7 mm, where
-    z triples while y and x shrink -- it is 44 M intermediate elements against 110 M.
+    is worth nothing; on a thick-slice CT brought to isotropic (64x512x512 at 3x0.7x0.7 mm, where
+    z triples while y and x shrink): it is 44 M intermediate elements against 110 M.
 
     Keyed on the two grids' SPACINGS, never on the extents in hand: a streamed region and the whole
     volume have to blend in the same order or they stop being bit-identical, and their extents
@@ -321,10 +321,10 @@ def gather_separable(
     fill: float,
     blend: list[int] | None = None,
 ) -> torch.Tensor:
-    """:func:`gather`'s rules over a map that factorises — one ``index_select`` per axis, no volume.
+    """:func:`gather`'s rules over a map that factorises, one ``index_select`` per axis, no volume.
 
     Same interval, same tap clamp, same round-half-up, same fill. It sums the tensor product in a
-    different ORDER than the general gather -- axis by axis rather than corner by corner -- so the
+    different ORDER than the general gather (axis by axis rather than corner by corner), so the
     two agree to float rounding rather than bit for bit. That costs nothing: a map either factorises
     or it does not, so no case is ever served by both. The equality that has to be exact is a
     streamed region against the whole volume, and it is: the per-axis coordinates are global, so a
@@ -366,7 +366,7 @@ def gather_separable(
             out = out.index_select(array_axis + 1, local(nearest_index(axis), array_axis))
             continue
         # One axis at a time, not eight corners at once. The tensor product is the same sum, but
-        # blending axis by axis reduces each extent before the next axis reads it -- six gathers over
+        # blending axis by axis reduces each extent before the next axis reads it: six gathers over
         # shrinking tensors instead of twenty-four over the largest one.
         base = torch.floor(axis)
         share = broadcast((axis - base).to(out.dtype), array_axis)
@@ -381,7 +381,7 @@ def gather_separable(
 
     if all(bool(mask.all()) for mask in inside_axes):
         # Nothing of this region falls outside the source, which is the ordinary case for a resample
-        # within a volume -- so neither the mask nor the pass that applies it is built at all.
+        # within a volume, so neither the mask nor the pass that applies it is built at all.
         return out.type(source.dtype)
     mask = inside_axes[0]
     for array_axis in range(1, rank):
@@ -410,7 +410,7 @@ def gather(
 
     THE TWO MODES TAKE DIFFERENT ROUTES, and the difference is what each can afford. Nearest is one
     gather on the exact index, because the pick is discontinuous and the last bit decides it. Linear
-    is eight gathers over a flat index, which ``grid_sample`` does as one fused kernel -- at the cost
+    is eight gathers over a flat index, which ``grid_sample`` does as one fused kernel, at the cost
     of normalising by the extent it is handed, so a streamed region and the whole volume agree to
     ~1e-5 rather than exactly.
     """
@@ -429,13 +429,13 @@ def gather(
     if not bool(inside.any()):
         return torch.full(out_shape, fill, device=device, dtype=torch.float32).type(source.dtype)
 
-    # A nearest pick copies voxels: no blend, no working dtype -- and no float trip for a label,
+    # A nearest pick copies voxels: no blend, no working dtype, and no float trip for a label,
     # whose values above 2**24 a float32 cannot carry back (gather_separable holds the same rule).
     work = source if mode == "nearest" else source.type(sampling_dtype(source))
     if mode == "nearest":
         # One gather, on exact index arithmetic: a nearest pick is discontinuous, so the last bit of
         # a coordinate decides which voxel it lands on. Measured over 300 random grid pairs, a
-        # single-precision coordinate moves 2.6% of the picks -- in a label map, 2.6% of the voxels
+        # single-precision coordinate moves 2.6% of the picks, in a label map, 2.6% of the voxels
         # wearing a different label. There are no eight corners to fuse here, so nothing is bought
         # by handing it to a kernel that normalises coordinates.
         flat = torch.zeros(extent_zyx, dtype=torch.long, device=device)
@@ -449,24 +449,24 @@ def gather(
         return picked.masked_fill(~inside.unsqueeze(0), fill).type(source.dtype)
 
     # A BLEND goes through grid_sample, which is one fused kernel where the eight corners are eight
-    # gathers over a flat index. `align_corners=False` IS ITK's domain -- a sample is inside while
-    # its continuous index lies in [-0.5, n - 0.5) -- and `padding_mode="border"` IS ITK's tap clamp;
+    # gathers over a flat index. `align_corners=False` IS ITK's domain: a sample is inside while
+    # its continuous index lies in [-0.5, n - 0.5): and `padding_mode="border"` IS ITK's tap clamp;
     # what grid_sample has no notion of is the FILL, so the mask computed above still applies it.
     #
     # It costs the bit-identity between a streamed region and the whole volume, and that is the whole
     # of what it costs: grid_sample takes NORMALISED coordinates, so it divides by the extent of the
     # tensor handed to it, and a region is handed a window. The two agree to ~1e-5 instead of
-    # exactly. Deliberate, and asked for -- 4x on a warp.
+    # exactly. Deliberate, and asked for: 4x on a warp.
     local_axes = []
     for array_axis in range(rank):
         axis = rank - 1 - array_axis
         extent = window_zyx[array_axis]
         shifted = coordinates_xyz[..., axis] - float(source_starts_zyx[array_axis])
         local_axes.append((2.0 * shifted + 1.0) / extent - 1.0)
-    # grid_sample orders the last dimension (x, y, z) -- the mirror of the array axes, which is the
+    # grid_sample orders the last dimension (x, y, z): the mirror of the array axes, which is the
     # order the coordinates already arrive in. The grid counts voxels in float32 WHATEVER the
-    # payload: a half grid quantizes a coordinate at ~2^-11 of the window extent -- 0.06 voxel on a
-    # 512 axis, far past the ~1e-5 band above -- and the window is upcast with it because
+    # payload: a half grid quantizes a coordinate at ~2^-11 of the window extent: 0.06 voxel on a
+    # 512 axis, far past the ~1e-5 band above, and the window is upcast with it because
     # grid_sample takes one dtype. sampling_dtype's keep-half trade was measured for the values.
     blend_dtype = torch.float32 if work.dtype in (torch.float16, torch.bfloat16) else work.dtype
     sampling = torch.stack([local_axes[rank - 1 - axis] for axis in range(rank)], dim=-1).to(blend_dtype)
@@ -486,7 +486,7 @@ def source_window(
     bound: TransformBound,
     margin: int = 1,
 ) -> tuple[slice, ...]:
-    """The source window a target region pulls, from the bound alone — no voxel sampled.
+    """The source window a target region pulls, from the bound alone: no voxel sampled.
 
     Closed form, which is what lets a cost model price a decomposition without doing the bounding
     work for it: the target region's world box, mapped through the bound (an exact affine hull

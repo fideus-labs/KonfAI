@@ -67,7 +67,7 @@ class TestGridAgainstSimpleITK:
 
     def test_sub_grid_origin_is_the_slab_origin(self):
         # The load-bearing identity is internal, and bit-for-bit: the slab origin IS the parent
-        # map applied to the slab's first index -- a recomputation that associated differently
+        # map applied to the slab's first index: a recomputation that associated differently
         # would shear a streamed regrid at its seams. Agreement with ITK itself holds only to
         # tolerance: numpy does not reproduce ITK's product bit-for-bit on every ISA (arm64
         # contracts with FMA where x86-64 does not), so that half shares the neighbouring
@@ -162,7 +162,7 @@ class TestAffineMap:
 class TestTransformBound:
     def test_after_transports_the_residual_through_the_outer_matrix(self):
         # T = A ∘ (id + d): the residual scales by |A|, not by 1. An affine of scale 3 around a
-        # 5 mm spline reaches 15 mm — the naive bound is short by 10 voxels of every slab edge.
+        # 5 mm spline reaches 15 mm: the naive bound is short by 10 voxels of every slab edge.
         scale = TransformBound.exact(AffineMap(np.diag([3.0, 1.0, 1.0]), np.zeros(3)))
         wiggle = TransformBound.shift(np.array([5.0, 5.0, 5.0]))
         composed = scale.after(wiggle)

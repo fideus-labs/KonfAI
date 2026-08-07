@@ -17,7 +17,7 @@
 """Unit tests for ``create_ome_zarr_store``: the properties a region-by-region write depends on.
 
 ``write_ome_zarr`` and ``create_ome_zarr_store`` now share ngff-zarr as their single source of
-OME-NGFF metadata, which is what these tests are really protecting -- the alternative, a hand-built
+OME-NGFF metadata, which is what these tests are really protecting: the alternative, a hand-built
 ``multiscales`` entry, drifts from the spec silently and can only ever describe what its author knew.
 What that sharing must not cost is any of the guarantees the streaming path relies on, and most of
 them were previously covered only end to end, where a regression shows up as a wrong volume rather
@@ -114,7 +114,7 @@ def test_konfai_attributes_survive_the_metadata_write(tmp_path: Path) -> None:
 
     ``to_ngff_zarr(overwrite=True)`` reopens the root group in ``mode="w"`` and drops every attribute
     already there, so ordering is the whole test: written first, Direction disappears, and its loss is
-    silent -- the reader substitutes identity and returns a plausibly oriented volume.
+    silent: the reader substitutes identity and returns a plausibly oriented volume.
     """
     path = tmp_path / "attrs.ome.zarr"
     _create(path)
@@ -131,7 +131,7 @@ def test_level_zero_key_is_taken_from_the_metadata_not_a_literal(tmp_path: Path)
     either spelling makes KonfAI break on a convention that is not its own.
 
     Reading through the group, rather than through ngff-zarr, is also the only thing here that sees the
-    store's consolidated index -- a summary of its own contents that readers trust over the arrays
+    store's consolidated index: a summary of its own contents that readers trust over the arrays
     themselves, and that is written while the array is still a one-voxel stand-in.
     """
     path = tmp_path / "keyed.ome.zarr"
@@ -148,7 +148,7 @@ def test_creating_a_store_writes_no_pixel_bytes(tmp_path: Path) -> None:
     """Describing the store must not cost the volume.
 
     Handing a writer an array of the target shape, even an empty one, means a pass over every chunk of
-    it before the first real voxel arrives -- around 33 s for a 13.6 GiB field, to produce nothing.
+    it before the first real voxel arrives: around 33 s for a 13.6 GiB field, to produce nothing.
     Creation has to stay independent of the extent.
     """
     path = tmp_path / "bytes.ome.zarr"
@@ -169,7 +169,7 @@ def test_a_streamed_displacement_field_says_that_it_is_one(tmp_path: Path) -> No
     This is the case that matters, not the whole-volume one: a field small enough to assemble in
     memory never had to be streamed, so before this the store said what it was exactly when nobody
     needed to be told. A reader handed an untyped store sees three channels and no reason to treat
-    them as anything but an image -- and taking the first of them is a plausible-looking registration
+    them as anything but an image, and taking the first of them is a plausible-looking registration
     built on a third of the displacement.
     """
     path = tmp_path / "field.ome.zarr"

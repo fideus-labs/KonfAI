@@ -65,7 +65,7 @@ def read_dataset_sidecar(path: Path, max_lines: int = 200, max_chars: int = 6553
     """Read a bounded preview of a dataset's non-image text file (CSV/TSV, JSON, YAML, headers, lists).
 
     Streams at most ``max_chars`` characters (memory never scales with file size) and refuses binary
-    content by sniffing the first bytes for NUL — image volumes and weights belong to
+    content by sniffing the first bytes for NUL: image volumes and weights belong to
     ``inspect_dataset``/``preview_volume``, not a text reader. CSV/TSV additionally get a structured
     preview (header + up to ``max_lines`` rows) so the agent can map label columns to cases without
     parsing raw text.

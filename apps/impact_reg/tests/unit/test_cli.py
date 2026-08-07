@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Smoke tests for the ``impact-reg-konfai`` argparse tree: which subcommands exist and how the preset is
-passed. These lock the CLI contract the demo notebook / README depend on — ``register`` takes the preset(s)
+passed. These lock the CLI contract the demo notebook / README depend on: ``register`` takes the preset(s)
 as a **positional** argument, while ``eval`` / ``uncertainty`` take ``--preset``. No app is resolved (every
 invocation short-circuits on ``--help`` or an argument error)."""
 

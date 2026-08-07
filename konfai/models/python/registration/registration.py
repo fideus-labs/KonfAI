@@ -139,7 +139,7 @@ def rigid_affine(parameters: torch.Tensor, dim: int) -> torch.Tensor:
     The leading ``dim * (dim - 1) / 2`` parameters are rotation generators, the rest the translation.
     The rotation is the matrix exponential of the skew-symmetric matrix they fill: ``exp`` maps
     ``so(n)`` onto ``SO(n)``, so every parameter value is a proper rotation whatever the optimizer
-    does to it -- no re-orthogonalisation, no gimbal lock -- and zero is the identity, which is what
+    does to it (no re-orthogonalisation, no gimbal lock), and zero is the identity, which is what
     ``Rigid.init`` starts from.
     """
     n_angles = dim * (dim - 1) // 2
@@ -154,7 +154,7 @@ def rigid_affine(parameters: torch.Tensor, dim: int) -> torch.Tensor:
 class Rigid(network.ModuleArgsDict):
     """Regress a rigid transform: ``dim * (dim - 1) / 2`` rotation generators and ``dim`` translations.
 
-    Three parameters in 2-D, six in 3-D -- a rotation and a translation, which is what rigid means.
+    Three parameters in 2-D, six in 3-D: a rotation and a translation, which is what rigid means.
     """
 
     def __init__(self, in_channels: int, shape: list[int], dim: int) -> None:
@@ -213,7 +213,7 @@ class SpatialTransformer(torch.nn.Module):
         shape = flow.shape[2:]
         for i in range(len(shape)):
             new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
-        # grid_sample wants the axis component trailing, and ordered x..z -- the reverse of the
+        # grid_sample wants the axis component trailing, and ordered x..z: the reverse of the
         # tensor's (z,)y,x indexing.
         new_locs = new_locs.permute(0, *range(2, len(shape) + 2), 1)
         return F.grid_sample(src, new_locs[..., list(reversed(range(len(shape))))], align_corners=True, mode="bilinear")

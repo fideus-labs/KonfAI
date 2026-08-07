@@ -20,7 +20,7 @@ Two gaps this closes:
 
 * KonfAI's extension model ("subclass a base, reference it by classpath") and especially the
   external-library classpath syntax (``lib.module:Class``) are not surfaced anywhere in the MCP
-  tool surface -- the agent is biased toward copying/wrapping when it could often reference an
+  tool surface: the agent is biased toward copying/wrapping when it could often reference an
   installed library class directly. ``describe_extension_points`` makes the contract explicit.
 * There is no way to vet an external dependency before integrating a brick. ``check_external_dependency``
   reports importability/version/license without importing the module into the server process
@@ -63,7 +63,7 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
         "config_location": "Evaluator.metrics.<target_group>.targets_criterions.<group>.criterions_loader.<Name> (also usable as a monitored loss).",
         "direct_external": "Possible if the external metric already returns the (value, dict) shape; usually needs a thin wrapper.",
         "local_wrapper": "Subclass Criterion; return the metric tuple.",
-        "gotcha": "inspect_object_signature reports the forward signature -- use it to confirm Tensor vs tuple return before wiring.",
+        "gotcha": "inspect_object_signature reports the forward signature: use it to confirm Tensor vs tuple return before wiring.",
         "list_tool": "list_components('criterion')",
     },
     "model": {
@@ -73,7 +73,7 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
         ],
         "return_contract": "A routed ModuleArgsDict graph; named module outputs become the dotted keys used by outputs_criterions.",
         "config_location": "Trainer.Model.classpath = `segmentation.UNet.UNet` (built-in) | `Model:MyNet` (local) | `segmentation_models_pytorch:Unet` / `torchvision.models:resnet50` (external) | `UNet.yml` (declarative).",
-        "direct_external": "A non-Network external nn.Module is wrapped in MinimalModel automatically -- usable as a black-box model.",
+        "direct_external": "A non-Network external nn.Module is wrapped in MinimalModel automatically: usable as a black-box model.",
         "local_wrapper": "Subclass Network and re-add_module the external submodules (see examples/Synthesis/Model.py wrapping segmentation_models_pytorch's UnetPlusPlus).",
         "gotcha": "MinimalModel gives the external network a SINGLE 'Model' child with NO add_module graph, so outputs_criterions dotted keys (deep supervision / intermediate-feature / perceptual / multi-head) can only target the top-level output. To wire losses to internal features you MUST subclass Network and re-add_module.",
         "list_tool": "list_components('model')",
@@ -86,7 +86,7 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
         ],
         "return_contract": "One output tensor per input; same spatial shape (only Mask/Permute may change shape).",
         "config_location": "Trainer.Dataset.augmentations.DataAugmentation_*.data_augmentations.<Name>",
-        "direct_external": "External aug libs (albumentations/torchvision.transforms) do not match the index-keyed lazy contract -- almost always needs a wrapper.",
+        "direct_external": "External aug libs (albumentations/torchvision.transforms) do not match the index-keyed lazy contract: almost always needs a wrapper.",
         "local_wrapper": "Subclass DataAugmentation; sample params in _state_init keyed by index so all patches of a case stay consistent; apply in _compute.",
         "gotcha": "An external aug that randomizes per call breaks patch consistency silently. Keep per-case params in _state_init.",
         "list_tool": "list_components('augmentation')",
@@ -99,10 +99,10 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
         ],
         "return_contract": "transform_shape must return the EXACT output spatial shape; pair inverse() if apply_inverse.",
         "config_location": "Trainer.Dataset.groups_src.<src>.groups_dest.<dest>.transforms.<Name> (or patch_transforms).",
-        "direct_external": "An external image op rarely satisfies transform_shape -- wrap it.",
+        "direct_external": "An external image op rarely satisfies transform_shape: wrap it.",
         "local_wrapper": "Subclass Transform; implement __call__ AND transform_shape exactly.",
-        "gotcha": "Patch planning pre-computes slicing from transform_shape BEFORE data load. A wrong shape silently corrupts reassembly (no crash). A forward smoke test alone won't catch it -- run run_component_smoke_test, which asserts transform_shape(shape) == __call__(...).shape for you.",
-        "verify_tool": "run_component_smoke_test(classpath, kind='transform') -- executes the transform_shape/__call__ contract on dummy tensors in an isolated spawn subprocess.",
+        "gotcha": "Patch planning pre-computes slicing from transform_shape BEFORE data load. A wrong shape silently corrupts reassembly (no crash). A forward smoke test alone won't catch it: run run_component_smoke_test, which asserts transform_shape(shape) == __call__(...).shape for you.",
+        "verify_tool": "run_component_smoke_test(classpath, kind='transform'): executes the transform_shape/__call__ contract on dummy tensors in an isolated spawn subprocess.",
         "list_tool": "list_components('transform')",
     },
     "scheduler": {
@@ -110,13 +110,13 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
         "required_methods": ["get_value(self) -> float"],
         "return_contract": "Scalar weight for the current iteration (self.it updated by step()).",
         "config_location": "Trainer.Model.outputs_criterions.<...>.criterions_loader.<Criterion>.schedulers.<Name> (bare name only).",
-        "direct_external": "Not supported -- the ':' import path is NOT honored for weight schedulers.",
+        "direct_external": "Not supported: the ':' import path is NOT honored for weight schedulers.",
         "local_wrapper": "Not extensible without a core edit: only classes defined inside konfai.metric.schedulers resolve (a workspace-local subclass is unreachable). Pick a built-in from list_components('scheduler'). (LR schedulers are separate via LRSchedulersLoader using torch names.)",
         "gotcha": "Weight schedulers resolve by bare name inside konfai.metric.schedulers only.",
         "list_tool": "list_components('scheduler')",
     },
     "pretrained": {
-        "base_class": "(none -- ad hoc, inside a Network subclass)",
+        "base_class": "(none: ad hoc, inside a Network subclass)",
         "required_methods": [
             "Load weights in the model __init__ (torch.load / torch.hub) and apply via load_state_dict"
         ],
@@ -124,7 +124,7 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
         "config_location": "No first-class config hook; the loading lives in the model's Python code.",
         "direct_external": "No fetch/cache/verify path; HF/timm/torchvision weights are downloaded out of band or pre-saved as a .pt in the workspace.",
         "local_wrapper": "Subclass Network, build the graph with add_module, then load_state_dict with positional alias remapping (Network.load_state_dict does not recurse into nested Networks).",
-        "gotcha": "No provenance/version capture for fetched weights -- record the source/version yourself for reproducibility.",
+        "gotcha": "No provenance/version capture for fetched weights: record the source/version yourself for reproducibility.",
         "list_tool": "list_components('model')",
     },
 }
@@ -148,7 +148,7 @@ def describe_extension_points(kind: str | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "yaml_reference_syntax": YAML_REFERENCE_SYNTAX,
         "principle": (
-            "Every extension point is 'subclass a base, reference it by classpath in YAML' -- no core edits. "
+            "Every extension point is 'subclass a base, reference it by classpath in YAML': no core edits. "
             "Prefer referencing an installed library class directly (external syntax) over copying code; "
             "write a local wrapper only when the call/forward convention does not match the KonfAI base."
         ),
@@ -181,7 +181,7 @@ def _select_distribution(top: str, distributions: list[str], full: str | None = 
     """Pick the distribution that actually provides top-level import ``top``.
 
     ``packages_distributions()`` maps one import name to EVERY distribution that ships it, and a
-    namespace package (``itk``, ``google``) spans several wheels -- taking the first would report a
+    namespace package (``itk``, ``google``) spans several wheels: taking the first would report a
     sibling wheel's version/license. Prefer a distribution whose normalized name matches the import
     name; otherwise pick the one whose files include the module's own ``origin`` path.
 

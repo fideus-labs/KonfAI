@@ -47,7 +47,7 @@ def test_a_criterion_records_too() -> None:
 
 
 def test_a_subclass_with_no_init_of_its_own_records_the_inherited_one() -> None:
-    """Accuracy inherits Criterion's constructor whole -- the recording must come with it."""
+    """Accuracy inherits Criterion's constructor whole: the recording must come with it."""
     from konfai.metric.measure import Accuracy
 
     assert Accuracy()._konfai_given == {}

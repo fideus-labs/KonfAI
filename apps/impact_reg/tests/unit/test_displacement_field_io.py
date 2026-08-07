@@ -17,8 +17,8 @@
 """The orchestrator's displacement-field I/O, for a field written either as an ITK image or as an
 NGFF RFC-5 OME-Zarr store.
 
-A preset may emit its DVF in either form, and every step that follows -- locating it, copying it
-beside the results, averaging an ensemble, exporting ``Transform.h5`` -- used to assume ``DVF.mha``.
+A preset may emit its DVF in either form, and every step that follows (locating it, copying it
+beside the results, averaging an ensemble, exporting ``Transform.h5``) used to assume ``DVF.mha``.
 """
 
 from pathlib import Path
@@ -113,7 +113,7 @@ def test_find_outputs_reports_the_name_it_looked_for(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("suffix", [".mha", ".ome.zarr"])
 def test_copy_output_keeps_the_produced_form(tmp_path: Path, suffix: str) -> None:
-    """A store is copied as a store, an image as an image -- the destination keeps the suffix rather
+    """A store is copied as a store, an image as an image: the destination keeps the suffix rather
     than renaming everything to a form only one of them has."""
     source = tmp_path / "src"
     source.mkdir()
@@ -146,7 +146,7 @@ def test_replacing_a_store_is_not_served_from_the_reader_cache(tmp_path: Path) -
 
     The reader memoises NGFF metadata per store path, so a store copied over one already read is a
     hit: the new voxels arrive carrying the replaced store's geometry. Nothing raises when the two
-    have the same shape -- the field is simply sampled in the wrong place. Written without a konfai
+    have the same shape: the field is simply sampled in the wrong place. Written without a konfai
     sidecar (what a third-party RFC-5 producer emits), since the sidecar is read outside the memo
     and would mask exactly the staleness under test.
     """
@@ -206,7 +206,7 @@ def test_output_path_clears_the_stem_whatever_the_previous_form(tmp_path: Path) 
 
 def test_rerunning_in_the_other_form_leaves_one_output(tmp_path: Path) -> None:
     """Discovery is by stem, so a run that emits the other form must not leave the previous one
-    beside it -- discovery is by stem, and ``DVF.mha`` sorts before its store."""
+    beside it: discovery is by stem, and ``DVF.mha`` sorts before its store."""
     source, destination = tmp_path / "src", tmp_path / "out"
     source.mkdir()
     destination.mkdir()
@@ -222,7 +222,7 @@ def test_rerunning_in_the_other_form_leaves_one_output(tmp_path: Path) -> None:
 
 def test_ensemble_field_written_by_the_orchestrator_is_a_declared_field(tmp_path: Path) -> None:
     """The averaged DVF is folded by Reduce(Mean) and written through konfai's Write, in the
-    members' form — and must stay a DECLARED field: ``read_displacement_field`` refuses an
+    members' form, and must stay a DECLARED field: ``read_displacement_field`` refuses an
     undeclared 3-channel store, so dropping the declaration would break ``evaluate`` right after
     a successful register. The values are the voxel-wise mean, on the members' geometry."""
     members = []
@@ -245,7 +245,7 @@ def test_ensemble_field_written_by_the_orchestrator_is_a_declared_field(tmp_path
 def test_transform_reads_back_identically_from_either_form(tmp_path: Path, suffix: str) -> None:
     """What Transform.h5 is built from: the same transform whichever form the field was written in.
 
-    Checked on a mapped point, not only on the array -- a field read with its component axis mishandled
+    Checked on a mapped point, not only on the array: a field read with its component axis mishandled
     keeps a plausible shape, and only applying it exposes that.
     """
     original = _field()

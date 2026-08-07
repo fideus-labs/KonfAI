@@ -295,7 +295,7 @@ def _job_devices(gpu: list[int] | None, cpu: int | None, cluster: dict[str, Any]
 
 def _app_job_devices(gpu: list[int] | None, cpu: int | None) -> list[str]:
     """Device reservation for an APP job: konfai-apps defaults an omitted gpu to every visible CUDA
-    device (``cuda_visible_devices()``), unlike core workflows which default to CPU -- register what
+    device (``cuda_visible_devices()``), unlike core workflows which default to CPU: register what
     the job will actually hold so concurrent scheduling sees the real reservation."""
     if gpu is None:
         try:
@@ -614,8 +614,8 @@ def _runtime_capabilities() -> dict[str, Any]:
 def _vram_preflight(device_ids: list[str] | None) -> dict[str, Any] | None:
     """Free-VRAM snapshot for the GPUs a job will actually use, attached to its launch payload.
 
-    This puts the OOM-deciding number in front of the agent *at launch* -- where it can size the next
-    run -- instead of requiring a separate lookup. Returns None for CPU-only or device-less jobs, and
+    This puts the OOM-deciding number in front of the agent *at launch* (where it can size the next
+    run) instead of requiring a separate lookup. Returns None for CPU-only or device-less jobs, and
     never raises: monitoring must not block a launch.
     """
     if not device_ids:
@@ -959,7 +959,7 @@ def _statistics_failure_reason(group: str, extension: str, exc: Exception) -> st
         return (
             f"Group '{group}' is CORRUPT/UNREADABLE, not mis-structured: every sampled file exists on disk but "
             f"the '{extension}' backend reader raised on all of them. This is a file-content problem (truncated, "
-            "empty, or non-image bytes) -- do NOT restructure the dataset or change the format token to fix it; "
+            "empty, or non-image bytes): do NOT restructure the dataset or change the format token to fix it; "
             f"inspect or replace the offending files. Per-case reader errors: {cases}."
         )
     if isinstance(exc, ValueError) and "not found" in detail.lower():
@@ -967,7 +967,7 @@ def _statistics_failure_reason(group: str, extension: str, exc: Exception) -> st
             f"No readable cases for group '{group}' with format token '{extension}'. The structure scan found "
             "this group by filename, but the KonfAI dataset reader enumerated zero cases. Common causes: a flat "
             "directory (files are not per-case subdirectories), a DICOM series directory without series tags, an "
-            "OME-Zarr/HDF5 store handed in as the root, or a token/backend mismatch -- the read backend is chosen "
+            "OME-Zarr/HDF5 store handed in as the root, or a token/backend mismatch: the read backend is chosen "
             "by the format token (h5/omezarr/dicom vs SimpleITK), so a '.h5'/'.zarr'/DICOM group needs its own "
             "matching token (often via a separate dataset_filenames entry)."
         )
@@ -1120,8 +1120,8 @@ def _classpath_requires_import(classpath: str) -> bool:
 
     A shipped/local YAML model ('default|<Name>.yml' or '<Name>.yml') and a local workspace 'File:Class'
     (a single-token module before the colon, resolved as a workspace .py) are parsed statically and never
-    imported. Everything else -- an installed 'package.module:Class', the colon form 'package:module:Class'
-    (which _parse_classpath joins into a dotted module), or a bare/dotted builtin name -- triggers
+    imported. Everything else (an installed 'package.module:Class', the colon form 'package:module:Class'
+    (which _parse_classpath joins into a dotted module), or a bare/dotted builtin name) triggers
     importlib.import_module, so it must run isolated. The check errs toward isolation: it stays in-process
     only for the two forms proven not to import, matching summarize_classpath_signature's own branching.
     """
@@ -2068,7 +2068,7 @@ def get_run_metrics(
     run_name: Annotated[
         str,
         Field(
-            description="The run's train_name (the Evaluations/<run_name> folder) — or an app-trial label as "
+            description="The run's train_name (the Evaluations/<run_name> folder): or an app-trial label as "
             "returned by leaderboard."
         ),
     ],
@@ -2341,7 +2341,7 @@ def delete_run(
         Literal["train", "prediction", "evaluation", "uncertainty", "transform", "all"],
         Field(
             description="Which output to remove: train (Statistics + Checkpoints), prediction, evaluation, uncertainty, "
-            "transform (its log and plan only -- never the transformed data), or 'all' to remove every "
+            "transform (its log and plan only, never the transformed data), or 'all' to remove every "
             "output of that run name."
         ),
     ],
@@ -2421,7 +2421,7 @@ def validate_config_semantics(
     ]
     if result.get("ok", False):
         # Named from the normalized value: the parameter is case-insensitive and 'run_Transform' is not
-        # a tool. And a transform writes a dataset, so its plan comes first -- the order every other
+        # a tool. And a transform writes a dataset, so its plan comes first: the order every other
         # next_actions builder in this session already keeps.
         normalized = workflow.strip().lower()
         launchers = ["plan_transform", "run_transform"] if normalized == "transform" else [f"run_{normalized}"]

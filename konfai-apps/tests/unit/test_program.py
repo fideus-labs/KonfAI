@@ -109,7 +109,7 @@ def test_non_channel_axis_post_op_cannot_be_hoisted():
 
 
 def test_non_softmax_argmax_post_op_cannot_be_hoisted():
-    # A per-voxel intensity op in the post can't cross the channel reduction -- it belongs in each fold.
+    # A per-voxel intensity op in the post can't cross the channel reduction, it belongs in each fold.
     bad = {**MR, "postprocessing": [{"op": "unnormalize", "min_value": -1, "max_value": 1}]}
     with pytest.raises(AppMetadataError, match="cannot hoist post op"):
         assemble_program([{"id": "a", "manifest": bad}, {"id": "b", "manifest": bad}], reduce="mean")

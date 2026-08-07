@@ -2,7 +2,7 @@
 
 // Per-experiment UI state, consolidated from the parallel `Record<string, X>` maps that used to sit
 // side-by-side in App (one map per field, all keyed by the same session name). One entry per session;
-// every field is optional so a session that never touched a slice simply omits it — read it with the
+// every field is optional so a session that never touched a slice simply omits it: read it with the
 // same `?? fallback` the call sites already used.
 export interface SessionUiState {
   title?: string; // display name (server-titled; falls back to the raw session id)
@@ -25,7 +25,7 @@ export function patchSession(ui: SessionUi, session: string, patch: Partial<Sess
   return { ...ui, [session]: { ...ui[session], ...patch } };
 }
 
-// Replace one field across the whole map from a fresh server map — the old `setX(server ?? {})`
+// Replace one field across the whole map from a fresh server map: the old `setX(server ?? {})`
 // full-replace semantics, but scoped to a single field so the other per-session slices survive:
 // every existing session's field is reset to the server value (undefined when absent), and sessions
 // new to the server map are added.

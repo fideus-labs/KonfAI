@@ -337,7 +337,7 @@ class Measure:
                         )
                 for criterion in self.outputs_criterions[output_group][target_group]:
                     # ``criterion`` is the criterion module (dict key); the flag lives on it, not on
-                    # the CriterionsAttr value — indexing the dict here would always read False and
+                    # the CriterionsAttr value: indexing the dict here would always read False and
                     # silently skip graph-rewiring criteria such as KLDivergence.
                     if getattr(criterion, "accepts_init", False):
                         outputs_group_rename[output_group] = criterion.init(model, output_group, target_group)
@@ -527,7 +527,7 @@ def _leaf_spatial_stride(module: torch.nn.Module) -> list[int] | None:
 
 def _flat_downsampling(module: torch.nn.Module, ndim: int) -> list[int]:
     """Product of every strided ``Conv``/``MaxPool`` inside ``module`` (itself included), each
-    trailing-aligned to ``ndim`` -- a leaf of lower dimensionality acts on the LAST axes, so a 2D conv in
+    trailing-aligned to ``ndim``: a leaf of lower dimensionality acts on the LAST axes, so a 2D conv in
     a 3D graph leaves the leading axis untouched.
 
     This is the factor for an OPAQUE child: a plain torch module whose internal graph the branch trace
@@ -764,7 +764,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                         if ib not in branchs:
                             # Numeric branches fall back to the network input (branch '0' = input; extra
                             # indices are legitimate scratch wiring). A NAMED branch nobody produced is a
-                            # miswired graph -- routing the raw input silently would hide it.
+                            # miswired graph: routing the raw input silently would hide it.
                             if not ib.lstrip("-").isdigit():
                                 raise ConfigError(
                                     f"Module '{name}' reads branch '{ib}', which no earlier module has produced.",
@@ -866,7 +866,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
     def _trace_downsampling(self, seeds: list[list[int]], seen: list[list[int]]) -> list[int]:
         """Propagate the per-axis downsampling factor through the branch register, recording each branch
-        value in ``seen``. Parallel branches -- a residual shortcut beside the main path -- accumulate from
+        value in ``seen``. Parallel branches (a residual shortcut beside the main path) accumulate from
         the SAME seed and merge at their ``Add`` without multiplying, so a strided projection is not
         double-counted the way a flat ``modules()`` walk would. A child that is NOT a routed block is
         opaque and contributes its flat internal product (``_flat_downsampling``).
@@ -930,7 +930,7 @@ class Network(ModuleArgsDict, ABC):
         **kwargs,
     ) -> dict[str, object]:
         # The first caller in the recursion is the root graph; thread it (and the dotted key) down so a
-        # nested network can address the whole graph -- e.g. a GAN generator whose loss targets a module
+        # nested network can address the whole graph: e.g. a GAN generator whose loss targets a module
         # of a sibling discriminator branch, which only exists in the root's module namespace.
         root = root if root is not None else self
         results: dict[str, object] = {}
@@ -1561,7 +1561,7 @@ class Network(ModuleArgsDict, ABC):
 
     @_function_network()
     def rebase_lr(self, new_lr: float) -> None:
-        """Rebase the learning rate of this network and every nested one onto ``new_lr`` — the same restart a
+        """Rebase the learning rate of this network and every nested one onto ``new_lr``: the same restart a
         RESUME with ``--lr`` applies, reused for a live mid-run change so the value sticks past the scheduler."""
         self._rebase_lr_local(new_lr)
 
@@ -1610,7 +1610,7 @@ class Network(ModuleArgsDict, ABC):
 class MinimalModel(Network):
     """Small wrapper exposing a single network as a full KonfAI model graph.
 
-    The wrapped model arrives fully constructed — possibly carrying pretrained weights (a
+    The wrapped model arrives fully constructed: possibly carrying pretrained weights (a
     torchvision/MONAI/SMP class with ``weights=...``). ``load`` therefore never re-initialises:
     ``load(init=True)`` at training start applies ``init_func`` over every descendant and would
     silently destroy those weights with ``init_type`` noise. Models built from scratch keep
@@ -1667,7 +1667,7 @@ class ModelLoader:
         if self.classpath.startswith("default|"):
             # 'default|<Name>.yml' selects a model from the shipped catalog (konfai/models/yaml),
             # the declarative counterpart of 'default|segmentation.UNet.UNet' for Python classes. The
-            # catalog is a flat directory, so the name must be a bare filename -- reject any path
+            # catalog is a flat directory, so the name must be a bare filename: reject any path
             # separator or '..' that would resolve outside the shipped catalog.
             import konfai.models.yaml as yaml_catalog
 

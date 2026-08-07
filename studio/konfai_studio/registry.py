@@ -70,7 +70,7 @@ class _Registry:
         return {name: self.title(name) for name in self._sessions}
 
     def is_untitled(self, name: str) -> bool:
-        """A session the LLM has not named yet — its title is still the id or a placeholder."""
+        """A session the LLM has not named yet: its title is still the id or a placeholder."""
         state = self._sessions.get(name)
         return not (state is not None and state.named)
 
@@ -123,8 +123,7 @@ class _Registry:
         return self._model
 
     def set_model(self, model: str) -> None:
-        """Pin the LLM model ('' = the backend's default). Same lazy-rebuild as a brain switch —
-        conversation continuity survives it (SDK resume / persisted history)."""
+        """Pin the LLM model ('' = the backend's default). Same lazy-rebuild as a brain switch: conversation continuity survives it (SDK resume / persisted history)."""
         if model != self._model:
             self._model = model
             for state in self._sessions.values():
@@ -142,7 +141,7 @@ class _Registry:
 
     def set_device(self, name: str, device: str) -> None:
         """Preferred compute device(s) for a task's jobs ('auto', 'cpu', or GPU indices '0'/'0,1'). Applied
-        as a per-turn directive to the agent — no rebuild, so switching device keeps the conversation intact."""
+        as a per-turn directive to the agent: no rebuild, so switching device keeps the conversation intact."""
         value = _valid_device(device) or "auto"
         state = self._sessions.setdefault(name, SessionState())
         if state.device != value:
@@ -217,7 +216,7 @@ class _Registry:
         return state.agent
 
     async def remove(self, name: str) -> bool:
-        """Delete a task and its workspace. No task is special — a fresh draft is always one click away.
+        """Delete a task and its workspace. No task is special: a fresh draft is always one click away.
         The session lock is held so a streaming turn is never torn down mid-flight."""
         async with self.lock(name):
             state = self._sessions.get(name)

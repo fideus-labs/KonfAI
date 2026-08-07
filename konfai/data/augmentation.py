@@ -133,8 +133,8 @@ def _axis_rotation_matrix(theta: torch.Tensor, axis: torch.Tensor) -> torch.Tens
 
     Hue rotation is a rotation of the RGB vector about the luma axis (1, 1, 1)/sqrt(3): it preserves luma
     (a grey pixel stays grey) and is identity at theta = 0. The 4th (alpha) channel is left untouched.
-    Using Euler XYZ angles about the coordinate axes instead — as ``_rotation_3d_matrix(theta.repeat(3), v)``
-    did — is not a rotation about the luma axis and recolours grey pixels.
+    Using Euler XYZ angles about the coordinate axes instead (as ``_rotation_3d_matrix(theta.repeat(3), v)``
+    did) is not a rotation about the luma axis and recolours grey pixels.
     """
     k = (axis[:3] / torch.linalg.norm(axis[:3])).to(torch.float32)
     cross = torch.zeros((3, 3))
@@ -192,7 +192,7 @@ class DataAugmentationsList:
                 f"{konfai_root()}.Dataset.augmentations.{key}.data_augmentations.{_escape_key_component(augmentation)}"
             )(getattr(module, name))()
             # A foreign class is handed over wrapped, and the wrapper reads its own parameters from
-            # the same subtree the class read its arguments from -- as MinimalModel does for a model.
+            # the same subtree the class read its arguments from, as MinimalModel does for a model.
             data_augmentation: DataAugmentation = (
                 drawn
                 if isinstance(drawn, DataAugmentation)
@@ -287,8 +287,8 @@ class DataAugmentation(NeedDevice, ABC):
     def patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         """Declare how the draw of copy *a* makes its output depend on its input, for patch streaming.
 
-        The same contract as :meth:`konfai.data.transform.Transform.patch_locality` -- read-only, no
-        I/O, total, ``WHOLE_VOLUME`` by default -- asked of one copy of one case, because that is the
+        The same contract as :meth:`konfai.data.transform.Transform.patch_locality` (read-only, no
+        I/O, total, ``WHOLE_VOLUME`` by default) asked of one copy of one case, because that is the
         grain an augmentation is parameterised at: the halo of a geometric draw is the draw's own, so
         two copies of the same case answer differently and the same copy answers differently next
         epoch. A copy the draw did not select is the identity, which the base answers for.
@@ -332,7 +332,7 @@ class DataAugmentation(NeedDevice, ABC):
         )
 
     def compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        """Apply the draw of copy *a* to one tensor -- the forward counterpart of :meth:`inverse`."""
+        """Apply the draw of copy *a* to one tensor: the forward counterpart of :meth:`inverse`."""
         if a in self.who_index[index]:
             tensor = self._compute(name, index, self.who_index[index].index(a), tensor)
         return tensor
@@ -491,7 +491,7 @@ class Rotate(EulerTransform):
     def _draw_shape(cls, matrix: torch.Tensor, shape: list[int]) -> list[int]:
         """The spatial extents a draw lands on, given the ones it is applied to.
 
-        Output dim ``i`` reads input dim ``dims[i]``, so it carries that axis's extent with it -- what a
+        Output dim ``i`` reads input dim ``dims[i]``, so it carries that axis's extent with it: what a
         turn preserves is the volume, not which axis holds an extent. A sampled draw spans the extent it
         is given. ``dims`` is channel-first, so spatial axis k is dim k + 1.
         """
@@ -559,7 +559,7 @@ class Rotate(EulerTransform):
 
 class Scale(EulerTransform):
     # WHOLE_VOLUME on purpose: a scale about the volume centre displaces a voxel by |s - 1| * its
-    # distance from that centre, so the source region depends on where the patch sits -- no constant
+    # distance from that centre, so the source region depends on where the patch sits: no constant
     # halo is both correct at the border and cheap in the middle.
     def __init__(self, s_std: float = 0.2):
         super().__init__()
@@ -596,7 +596,7 @@ class Foreign(DataAugmentation):
     Name the ONE group a foreign draw belongs to. A single draw suits several groups only when the
     class consumes its random state identically whatever it is given and the draw does not SAMPLE:
     a rotation of the image is a rotation of the label, but a label interpolated between two ids is
-    neither. Subclass ``DataAugmentation`` for a draw that must span groups -- the draw is then a
+    neither. Subclass ``DataAugmentation`` for a draw that must span groups: the draw is then a
     value this framework holds, rather than a random state two libraries agree about.
     """
 
@@ -621,10 +621,10 @@ class Foreign(DataAugmentation):
 
         The global state belongs to the run, not to this draw. Left where the class stopped, the two
         groups of one case would leave it in the same place and whatever drew next would draw twice
-        the same -- and torch's seed reaches the devices, where the model draws its own.
+        the same, and torch's seed reaches the devices, where the model draws its own.
         """
         states = (random.getstate(), np.random.get_state(), torch.random.get_rng_state())
-        # torch.manual_seed also (re)seeds every CUDA generator, so snapshot those too -- but only when
+        # torch.manual_seed also (re)seeds every CUDA generator, so snapshot those too, but only when
         # CUDA is already initialised, so a CPU data-loader worker is never forced to spin CUDA up.
         cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
         try:
@@ -692,7 +692,7 @@ class Flip(DataAugmentation):
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         # A mirror is a bijection on the voxels (ORIENTATION). Negating a component channel is not: it
-        # maps values, so a later GLOBAL_STAT could no longer seed from the stored volume -- and only
+        # maps values, so a later GLOBAL_STAT could no longer seed from the stored volume, and only
         # the tensor's channel count says whether it fires, which a header-time declaration cannot see.
         if self.vector_field:
             return PatchLocality(
@@ -1110,7 +1110,7 @@ class Mask(DataAugmentation):
         return [list(self.mask_shape) for _ in shapes]
 
     # WHOLE_VOLUME on purpose: the output grid is the mask's, and the mask volume is already resident
-    # at that extent -- there is no whole-volume read left for a declaration to save.
+    # at that extent: there is no whole-volume read left for a declaration to save.
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         mask = self._load_mask()
         position = self.positions[index][a]

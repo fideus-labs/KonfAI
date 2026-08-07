@@ -16,14 +16,14 @@
 
 """VRAM-driven patch sizing: measure on the real run, shrink one step on OOM, restart.
 
-A model's VRAM footprint cannot be computed from headers -- it is its activations -- so it is
+A model's VRAM footprint cannot be computed from headers (it is its activations), so it is
 MEASURED, and measured for free: the real workflow run is the probe. The contract, shared by
 prediction and training, is ``transient(step) + resident(patch) <= free_VRAM x margin``, where each
 workflow declares its step (a forward; a forward+backward+optimizer step) and its resident set
 (accumulators and the streamed assembly window; parameters, gradients and optimizer state). The
 provisional grid starts at the worst case's full extent; when a step runs out of memory, the caller
-catches it, asks :func:`next_patch_candidate` for one shrink step -- scaled by the last measured
-transient when there is one, a fixed factor when the OOM left no number -- re-plans the grid and
+catches it, asks :func:`next_patch_candidate` for one shrink step (scaled by the last measured
+transient when there is one, a fixed factor when the OOM left no number) re-plans the grid and
 restarts. When everything fits (the common case) nothing here runs at all.
 """
 
@@ -43,8 +43,8 @@ def measure_transient_bytes(run: Callable[[], None], device: torch.device | int)
     """Measure the transient VRAM one ``run()`` peaks above the resident set, or ``None`` on OOM.
 
     The caller provides the run (a forward for prediction, forward+backward for training) so this
-    stays model-agnostic; an out-of-memory run is reported as ``None`` -- a valid "does not fit"
-    measurement -- with the partial allocations released. ``max_memory_allocated`` is a running
+    stays model-agnostic; an out-of-memory run is reported as ``None`` (a valid "does not fit"
+    measurement), with the partial allocations released. ``max_memory_allocated`` is a running
     high-water mark, so a stale peak can only over-estimate the transient, never under.
     """
     torch.cuda.synchronize(device)
@@ -78,13 +78,13 @@ def next_patch_candidate(
     """One shrink step toward a patch whose step fits ``usable_bytes``; ``None`` = nothing smaller.
 
     ``candidate`` is the size that just failed; ``patch_size`` is the user's per-axis convention
-    (``0`` = free, ``N`` = pinned, ``None`` = all free) -- only free axes move. With a measured
+    (``0`` = free, ``N`` = pinned, ``None`` = all free): only free axes move. With a measured
     transient the free axes scale ISOTROPICALLY by ``(usable / measured) ** (1 / n_free)`` (the
-    volume ratio activations follow, ~linear in voxels: one step lands near the target); without one
-    -- or when the measurement claims the candidate already fits, so scaling would not shrink -- each
+    volume ratio activations follow, ~linear in voxels: one step lands near the target); without one: or when
+    the measurement claims the candidate already fits, so scaling would not shrink: each
     free axis takes the fixed OOM step. Sizes snap DOWN to the model's valid multiples, floored at
     ``min(snap, extent)``. ``None`` means no smaller candidate exists (every free axis at its floor,
-    or ``usable_bytes`` leaves the step no memory at all) -- the caller owns the error message.
+    or ``usable_bytes`` leaves the step no memory at all): the caller owns the error message.
     """
     free = [d for d, p in enumerate(patch_size) if p == 0] if patch_size is not None else list(range(len(candidate)))
     if not free or usable_bytes <= 0:

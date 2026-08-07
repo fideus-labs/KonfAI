@@ -18,7 +18,7 @@
 
 A config page is a promise that what it shows works. Prose drifts from code silently and a reader
 who copies a broken example has no way to tell whose fault it is, so the examples are extracted from
-the page itself and executed — not transcribed here, where they could drift in turn.
+the page itself and executed, not transcribed here, where they could drift in turn.
 
 Planning is not enough: a plan is computed on the launcher and the run then spawns, so a chain can
 plan STREAM and still fail before its first byte. Each example is therefore run to completion.
@@ -77,7 +77,7 @@ def _yaml_blocks(text: str) -> list[tuple[int, str]]:
 
 
 def _python_modules(text: str) -> dict[str, str]:
-    """Python blocks whose first line names a file (``# BoxFilter.py -- ...``), as {filename: source}.
+    """Python blocks whose first line names a file (``# BoxFilter.py: ...``), as {filename: source}.
 
     The page tells the reader to drop that file next to the config, so the example that imports it
     is only runnable if the check does the same.

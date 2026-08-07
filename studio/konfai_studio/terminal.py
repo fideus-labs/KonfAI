@@ -91,11 +91,11 @@ class _PtySession:
 @router.websocket("/api/terminal")
 async def terminal(ws: WebSocket) -> None:
     """A real login shell rooted at the workspace, bridged over the socket. Trusted-local only: this is
-    arbitrary host execution by design (like konfai-mcp), so a remote deployment must gate it — set
+    arbitrary host execution by design (like konfai-mcp), so a remote deployment must gate it: set
     KONFAI_STUDIO_TERMINAL=0 to disable."""
     # CSWSH guard: WebSockets are exempt from the same-origin policy, so a same-site sibling page could
-    # open this shell via the auto-attached cookie. A browser always sends Origin on the handshake —
-    # reject a cross-origin one. Non-browser clients (no Origin, e.g. a bearer-token CLI) pass.
+    # open this shell via the auto-attached cookie. A browser always sends Origin on the handshake: # reject a
+    # cross-origin one. Non-browser clients (no Origin, e.g. a bearer-token CLI) pass.
     origin = ws.headers.get("origin")
     if origin is not None and urlparse(origin).netloc != ws.headers.get("host"):
         await ws.close(code=1008)

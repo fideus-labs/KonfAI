@@ -18,8 +18,8 @@
 
 With a ``memory_budget`` too small for a case, evaluation cuts it into the largest disjoint patches
 that fit and combines each metric's partial states; this proves end-to-end on disk that the produced
-``Metric_TRAIN.json`` matches the whole-volume run within float tolerance -- the invariant the whole
-feature stands on -- and that the budget run actually took the patched path.
+``Metric_TRAIN.json`` matches the whole-volume run within float tolerance (the invariant the whole
+feature stands on), and that the budget run actually took the patched path.
 """
 
 import json

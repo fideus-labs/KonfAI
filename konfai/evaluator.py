@@ -316,11 +316,11 @@ class Evaluator(DistributedObject):
         self._last_result: dict[str, float] = {}
         # Per-voxel error maps under the patched path: one region-write sink per (metric, case),
         # opened at the case's first patch, closed when the case flushes. Disjoint unpadded patches
-        # mean every voxel is written exactly once -- the streamed map equals the whole-volume one.
+        # mean every voxel is written exactly once: the streamed map equals the whole-volume one.
         self._map_sinks: dict[tuple[str, str, int], DataStream] = {}
         self._iter_dataset: DatasetIter | None = None
         # Where the metrics run. An evaluation has no model forward, so its tensors arrive from the
-        # DataLoader on CPU and reading the device off them pinned every metric to CPU -- including the
+        # DataLoader on CPU and reading the device off them pinned every metric to CPU: including the
         # ones that own a network (a perceptual metric moves its model to the tensor's device, and a
         # segmentation metric runs a whole nested inference). `run_process` sets the run's real device.
         self._device: torch.device | int = torch.device("cpu")
@@ -487,7 +487,7 @@ class Evaluator(DistributedObject):
         """Accumulate one PATCH's partial states; record the case when its next sibling arrives.
 
         The evaluation loader walks a case's disjoint patches contiguously (cases shard whole per
-        rank), so a change of case name marks the previous case complete -- ``_flush_pending`` at the
+        rank), so a change of case name marks the previous case complete: ``_flush_pending`` at the
         end of the split closes the last one.
         """
         name = batch_sample[next(iter(self.metrics))].name[0]

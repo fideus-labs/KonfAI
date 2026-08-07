@@ -194,7 +194,7 @@ def test_load_state_dict_warm_starts_resized_layer_and_keeps_siblings() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# Measure.Loss — loss records feeding the gradient and the logging windows
+# Measure.Loss: loss records feeding the gradient and the logging windows
 # --------------------------------------------------------------------------------------
 
 
@@ -252,7 +252,7 @@ def test_loss_add_keeps_plain_scalar_metric() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# Measure — accumulation backward (AMP scaler vs plain)
+# Measure: accumulation backward (AMP scaler vs plain)
 # --------------------------------------------------------------------------------------
 
 
@@ -339,7 +339,7 @@ def test_accumulation_backward_not_refired_by_plain_loss_in_same_group() -> None
 
 
 # --------------------------------------------------------------------------------------
-# Measure.update_scheduler — loss-weight window selection
+# Measure.update_scheduler: loss-weight window selection
 # --------------------------------------------------------------------------------------
 
 
@@ -571,8 +571,8 @@ def test_checkpoint_save_round_trip_restores_nested_network_state(tmp_path: Path
 
 
 def test_measure_validates_a_nested_loss_target_against_the_root_graph() -> None:
-    # A nested network's loss may address a module of a sibling branch -- a GAN generator's adversarial
-    # loss on the discriminator -- which exists only in the root's module namespace and is where runtime
+    # A nested network's loss may address a module of a sibling branch: a GAN generator's adversarial
+    # loss on the discriminator, which exists only in the root's module namespace and is where runtime
     # matching happens. Measure.init must validate against the root graph, not the owning network:
     # only there does the GAN's cross-network target resolve.
     from konfai.network.network import Measure

@@ -95,7 +95,7 @@ def test_assemble_with_missing_first_patch_does_not_crash():
     """#14: a missing index-0 patch must not raise UnboundLocalError.
 
     The seed tensor (shape/dtype/device) is taken from the first *present* patch,
-    so any single missing patch — including index 0 — assembles cleanly.
+    so any single missing patch (including index 0) assembles cleanly.
     """
     full = torch.arange(1 * 1 * 4 * 4, dtype=torch.float32).reshape(1, 1, 4, 4)
     patch_slices = [(slice(0, 2), slice(0, 4)), (slice(2, 4), slice(0, 4))]
@@ -335,8 +335,8 @@ def test_blended_reassembly_preserves_patch_dtype() -> None:
 
 
 def test_gaussian_blend_in_fp16_has_no_nan_at_single_coverage_corners() -> None:
-    # The 3-D Gaussian corner weight (~7e-10 for a 16^3 patch) underflows fp16 — and the 1e-8 division
-    # floor itself rounds to zero in fp16 — so corner voxels covered by a single patch reassemble as
+    # The 3-D Gaussian corner weight (~7e-10 for a 16^3 patch) underflows fp16, and the 1e-8 division
+    # floor itself rounds to zero in fp16, so corner voxels covered by a single patch reassemble as
     # 0/0 = NaN. Weights must be floored at the dtype's smallest normal instead, keeping the weighted
     # average exact wherever the true weight is representable and recoverable at the corners.
     gaussian = Gaussian()
@@ -484,7 +484,7 @@ def test_blend_weight_factorises_into_one_vector_per_axis(combine_cls):
 def test_blend_recovers_the_source_in_low_precision(combine_cls):
     """A float16 blend returns the volume it was cut from, borders included.
 
-    Each patch carries its SHARE of the weight, ``w / sum_k w`` — a ratio of comparable quantities, so
+    Each patch carries its SHARE of the weight, ``w / sum_k w``: a ratio of comparable quantities, so
     it stays in [0, 1]. The raw product underflows float16 at a tapered border (a Gaussian corner is
     ~1e-8 against a 6e-5 smallest normal), and flooring it there, as a weight accumulated in the blend
     dtype forces, leaves those voxels off by ~0.5.
@@ -617,7 +617,7 @@ def test_trim_reassembles_exactly_and_keeps_values_discrete(shape, patch, overla
     ],
 )
 def test_trim_kept_boxes_partition_the_volume(shape, patch, overlap):
-    """Every voxel is written exactly once — no gap, no overlap.
+    """Every voxel is written exactly once: no gap, no overlap.
 
     This is the property the selection path rests on: if the kept boxes tiled imperfectly, assembly
     would leave holes (never written) or race (written twice), and neither shows up as an error.
@@ -641,7 +641,7 @@ def test_trim_keeps_the_patch_whole_when_there_is_nothing_to_trim():
     """An overlap at least as wide as the patch leaves no central band; keep the patch instead.
 
     Trimming both sides would give an empty window, and a patch that keeps nothing has no box to
-    write — the box derivation would fail on an empty ``nonzero()``.
+    write: the box derivation would fail on an empty ``nonzero()``.
     """
     for size, overlap in ((4, 4), (3, 4), (1, 2), (2, 3)):
         assert torch.equal(Trim()._window_1d(size, overlap), torch.ones(size)), (size, overlap)
@@ -723,7 +723,7 @@ def test_best_sweep_axis_is_the_smallest_window(shape, patch, expected):
     assert windows[best_sweep_axis(patch, shape)] == min(windows)
 
 
-# DatasetManager construction — one augmentation draw per case, shared by every group
+# DatasetManager construction, one augmentation draw per case, shared by every group
 # --------------------------------------------------------------------------------------
 
 
@@ -731,7 +731,7 @@ def test_two_groups_share_one_construction_draw(streaming_dataset_stub) -> None:
     """Building the label group's manager must reuse the image group's draw, not redraw over it.
 
     A quarter Rotate transposes per-copy extents, so a per-group redraw leaves the two groups with
-    different copy grids -- crashing the streamed read of the stale grid's last patch.
+    different copy grids: crashing the streamed read of the stale grid's last patch.
     """
     volume = np.zeros((1, 6, 8, 10), dtype=np.float32)
     for seed in range(10):

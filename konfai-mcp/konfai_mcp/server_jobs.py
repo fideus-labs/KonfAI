@@ -41,13 +41,13 @@ def _detach_inherited_stdio(handle: TextIO) -> None:
     """Move the job's file descriptors 0/1/2 off the ones it inherited, onto devnull and its own log.
 
     ``redirect_stdout``/``redirect_stderr`` are Python-level only: they rebind ``sys.stdout``/``sys.stderr``
-    but leave fds 1 and 2 pointing at whatever the process inherited -- for a stdio MCP server, the JSON-RPC
+    but leave fds 1 and 2 pointing at whatever the process inherited, for a stdio MCP server, the JSON-RPC
     channel itself. Anything writing natively (a CUDA/PyTorch banner, a C extension, a DDP grandchild that
     inherits these fds in turn) then lands in the middle of the protocol stream and wedges the client.
     ``dup2`` closes that hole for the whole process tree. The Python-level redirect is still worth keeping:
     ``handle`` is line-buffered whereas ``sys.stdout`` over a file is block-buffered, so a traceback printed
     just before a SIGTERM/SIGKILL still reaches the log. fd 0 becomes devnull rather than staying on the
-    inherited request pipe -- a job that reads stdin would otherwise consume the client's bytes, or block
+    inherited request pipe: a job that reads stdin would otherwise consume the client's bytes, or block
     forever on a pipe nobody feeds it; devnull gives it an immediate EOF instead.
     """
     # Two independent blocks: fds 1/2 are what keep native writes off the protocol stream, and they
@@ -75,7 +75,7 @@ def _run_job(
 ) -> None:
     if os.name != "nt":
         # Become a new session / process-group leader so cancel_job can reap the WHOLE tree via killpg,
-        # including the mp.spawn DDP grandchildren this job may create -- otherwise they orphan and keep
+        # including the mp.spawn DDP grandchildren this job may create: otherwise they orphan and keep
         # holding GPU memory after the middle process is signalled. Harmless if already a group leader.
         try:
             os.setsid()
@@ -104,7 +104,7 @@ def _run_job(
 
             signal.signal(signal.SIGTERM, _on_terminate)
             # SIGUSR1 (KonfAI Studio's on-demand validation) is delivered group-wide but is meant only for
-            # the training workers — ignore it in this wrapper so it never terminates the job. A spawned
+            # the training workers: ignore it in this wrapper so it never terminates the job. A spawned
             # worker starts fresh and the trainer installs its own SIGUSR1 handler; if training runs inline
             # here, that same handler overrides this SIG_IGN.
             sigusr1 = getattr(signal, "SIGUSR1", None)  # absent on Windows
@@ -184,7 +184,7 @@ def _extract_error_excerpt(log_path: Path, max_scan_lines: int = 400) -> str | N
 
     KonfAI's error classes and multi-line RuntimeErrors (e.g. SimpleITK) put the actionable message on
     the lines AFTER the ``<Class>:`` header, so the following lines are kept until a blank line or a
-    new traceback record -- the header alone would read ``DatasetManagerError:`` with no message.
+    new traceback record: the header alone would read ``DatasetManagerError:`` with no message.
     """
     from .server_support import read_text_tail
 
@@ -214,7 +214,7 @@ def _extract_error_excerpt(log_path: Path, max_scan_lines: int = 400) -> str | N
             " [KonfAI hint] A DataLoader worker crashed, so the real error is hidden by multiprocessing "
             "(usually out-of-memory, or an exception inside a dataset transform). Re-run with "
             "'Dataset.num_workers: 0' to "
-            "surface the real traceback; if it then trains, the crash was worker memory pressure — reduce "
+            "surface the real traceback; if it then trains, the crash was worker memory pressure: reduce "
             "Dataset.num_workers, batch_size, or patch_size."
         )
     if "already exists" in lowered:
@@ -223,7 +223,7 @@ def _extract_error_excerpt(log_path: Path, max_scan_lines: int = 400) -> str | N
             "overwrite=True to replace them (train: deletes the existing Checkpoints/ and Statistics/ for "
             "this run name; evaluation: deletes the existing metric folder; prediction: writes into the "
             "existing Predictions folder WITHOUT clearing it, so delete it first if you need a clean "
-            "output) — or launch a new run under a different train_name to keep both."
+            "output): or launch a new run under a different train_name to keep both."
         )
     return excerpt
 
@@ -344,7 +344,7 @@ class JobRegistry:
         job_dir.mkdir(parents=True, exist_ok=True)
         state_path = self.workspace_layout.job_state_path(job.job_id)
         # Atomic write: a crash mid-write must not leave a truncated job.json, because the recovery loop
-        # json.loads every record at server start -- one half-written file would otherwise be fatal. Write
+        # json.loads every record at server start, one half-written file would otherwise be fatal. Write
         # a sibling temp file (hidden, so it is not matched by the "*/job.json" recovery glob) and rename
         # it into place; a reader only ever sees the whole old or the whole new file.
         tmp_path = state_path.with_name(f".{state_path.name}.{uuid.uuid4().hex}.tmp")
@@ -455,12 +455,12 @@ class JobRegistry:
                         elif job.output_path is not None and _output_missing_or_empty(job.output_path):
                             # No returncode survives a restart, so a clean exit can't be told from a kill.
                             # A recovered orphan that produced no declared output was almost certainly
-                            # OS-killed (SIGKILL/OOM) -- do not report a misleading "done".
+                            # OS-killed (SIGKILL/OOM): do not report a misleading "done".
                             job.status = "error"
                             job.error = (
                                 f"The recovered job is gone and wrote no output to {job.output_path}. With no "
                                 "returncode after a restart, a clean exit cannot be told from a kill (likely "
-                                "SIGKILL/OOM) -- treat this run as failed and re-launch it."
+                                "SIGKILL/OOM): treat this run as failed and re-launch it."
                             )
                         else:
                             job.status = "done"
@@ -472,7 +472,7 @@ class JobRegistry:
             job.returncode = returncode
             job.finished_at = time.time()
             # A negative returncode is the signal that ended the process. SIGTERM/SIGINT are what cancel
-            # sends, so a run that took one was stopped, not broken -- the flag alone missed the case where
+            # sends, so a run that took one was stopped, not broken: the flag alone missed the case where
             # the process died before the request was recorded, and Stop then reported "read the job log
             # for the traceback" over a job that has none.
             if job.cancel_requested or returncode in (-signal.SIGTERM, -signal.SIGINT):
@@ -480,13 +480,13 @@ class JobRegistry:
             elif returncode == 0:
                 job.status = "done"
                 # A job that declared an output but exited 0 without producing it did NOT succeed:
-                # never report a misleading "done" for an empty result. Generic — keyed only on whether
+                # never report a misleading "done" for an empty result. Generic: keyed only on whether
                 # an output was declared (output_path), not on the job kind.
                 if job.output_path is not None and _output_missing_or_empty(job.output_path):
                     job.status = "error"
                     job.error = (
                         f"The job exited 0 but wrote no output to {job.output_path}. It reported success "
-                        "without producing a result -- the run likely did nothing (e.g. an app that silently "
+                        "without producing a result: the run likely did nothing (e.g. an app that silently "
                         "no-ops on incompatible input, or an output path that was not honoured). Read the job "
                         "log and re-check the inputs before trusting this run."
                     )
@@ -518,7 +518,7 @@ class JobRegistry:
                 next_resources.append(f"job://{job.job_id}/manifest")
                 # Refine loop: incite iterating ONLY on the axis the user can actually turn, and ONLY when
                 # they signalled intent. A plain one-shot infer (no set_parameters) is a plain result and
-                # gets no evaluate/refine push — the loop never starts spontaneously.
+                # gets no evaluate/refine push: the loop never starts spontaneously.
                 if job.kind in ("evaluate", "pipeline"):
                     # There is a score: rank the trials, re-tune, keep the best.
                     next_actions.extend(["leaderboard", "compare_runs", "run_app_pipeline", "export_app"])
@@ -527,7 +527,7 @@ class JobRegistry:
                     next_actions.extend(["run_app_evaluate", "run_app_pipeline", "compare_runs"])
                 elif job.kind == "finetune":
                     # A fine-tune produces a bundle but keeps its training metrics out of it, so there is
-                    # nothing to rank yet: use the bundle, then evaluate it -- that evaluation lands where
+                    # nothing to rank yet: use the bundle, then evaluate it; that evaluation lands where
                     # leaderboard/compare_runs can rank this fine-tune against other training trials.
                     next_actions.extend(["run_app_infer", "run_app_evaluate"])
             else:
@@ -561,7 +561,7 @@ class JobRegistry:
             # run's score without a separate manifest read (None for an untuned run).
             "set_parameters": job.set_parameters,
             # True from the moment cancel_job is called; while the job is still active it signals
-            # cancellation-in-progress. A finished job is 'killed' iff this is True — external kills
+            # cancellation-in-progress. A finished job is 'killed' iff this is True: external kills
             # (OOM killer, manual signal) surface as status='error'.
             "cancel_requested": job.cancel_requested,
             "next_actions": next_actions,
@@ -680,7 +680,7 @@ class JobRegistry:
 
         try:
             # Snapshot + manifest are inside the try so a failure here (e.g. disk full) marks the job
-            # terminal instead of leaving it stuck "queued" forever -- a queued job counts as active, so
+            # terminal instead of leaving it stuck "queued" forever: a queued job counts as active, so
             # it would otherwise block every future launch on its device with no way to clear it.
             config_snapshots = self._snapshot_configs(job)
             self._persist_manifest(job, config_snapshots=config_snapshots, extra_manifest=extra_manifest)
@@ -739,7 +739,7 @@ class JobRegistry:
         if os.name != "nt" and pid is not None:
             # The child ran os.setsid(), so its pid IS its process-group id: signal the whole group to
             # reap the mp.spawn DDP grandchildren, not just the middle process. killpg(pid) can only hit
-            # that group -- before setsid runs (a launch/cancel race) pid is not a pgid and this raises,
+            # that group: before setsid runs (a launch/cancel race) pid is not a pgid and this raises,
             # so it can never signal the server's own group; we then fall back below.
             try:
                 os.killpg(pid, sig)
@@ -766,7 +766,7 @@ class JobRegistry:
         """Best-effort delivery of a **non-terminating** signal (e.g. SIGUSR1) to a job's process group.
 
         Unlike ``signal()`` it never falls back to killing the process, and it verifies the job is genuinely
-        alive (its own proc handle, or a recovered orphan's identity) before signalling — so a reused pid
+        alive (its own proc handle, or a recovered orphan's identity) before signalling, so a reused pid
         can never receive it (SIGUSR1's default action is Terminate). POSIX only; returns whether it landed.
         """
         proc = job.proc

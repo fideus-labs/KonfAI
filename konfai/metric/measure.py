@@ -62,7 +62,7 @@ def _require_optional(module: str, *, criterion: str, extra: str) -> ModuleType:
 
 class Criterion(torch.nn.Module, ABC):
     # Natural optimisation direction of this criterion's reported value: False = lower-is-better
-    # (the default -- losses and distances), True = higher-is-better (score-style metrics like Dice).
+    # (the default: losses and distances), True = higher-is-better (score-style metrics like Dice).
     # It is a property of the criterion, not a global mode: consumers (leaderboard ranking, best-metric
     # selection) read it via getattr instead of guessing the direction from the metric's name.
     maximize: bool = False
@@ -70,7 +70,7 @@ class Criterion(torch.nn.Module, ABC):
     # Streamed-evaluation contract, the metric mirror of ``Reduction.voxel_local``: ``True`` declares
     # that this metric's whole-case value can be rebuilt from per-patch PARTIAL states (running sums,
     # never per-patch final values), so evaluation may feed it disjoint patches instead of the whole
-    # volume. Default ``False``: an unknown metric evaluates whole -- a wrong ``True`` would corrupt
+    # volume. Default ``False``: an unknown metric evaluates whole: a wrong ``True`` would corrupt
     # the reported value, so only a metric whose ``partial_metric``/``combine_metric`` reproduce
     # ``forward`` exactly may set it.
     reducible: bool = False
@@ -202,7 +202,7 @@ class MaskedLoss(Criterion):
         loss = loss / true_nb
         return loss, loss.detach().item()
 
-    # -- Streamed-evaluation hooks -------------------------------------------------------------------
+    # . Streamed-evaluation hooks -------------------------------------------------------------------
     # A subclass whose ``loss`` reduces to a running sum provides its sufficient statistic and its
     # finisher, and declares itself ``reducible``; the generic partial/combine below then reproduces
     # ``forward`` exactly from disjoint patches (masked and unmasked paths alike).
@@ -251,7 +251,7 @@ class MaskedLoss(Criterion):
             value = self._finish(total, count)
             return torch.tensor(value), value
         # Masked: sum each batch item's statistic across patches, finish per item, then average the
-        # items that saw any masked voxel -- the exact structure of ``forward``.
+        # items that saw any masked voxel: the exact structure of ``forward``.
         n_items = len(states[0][1])
         values = []
         for item in range(n_items):
@@ -364,7 +364,7 @@ class PSNR(MaskedLoss):
         return float((x - y).pow(2).sum().item())
 
     def _finish(self, total: float, count: int) -> float:
-        # The log is a function of the RUNNING mean, applied once at the end -- never per patch.
+        # The log is a function of the RUNNING mean, applied once at the end, never per patch.
         return float(10 * np.log10(self._dynamic_range**2 / (total / count)))
 
 
@@ -533,7 +533,7 @@ class Dice(Criterion):
     def combine_metric(self, states: list[Any]) -> Any:
         # The whole volume's label set is exactly the union of the patches' label sets (sorted, as
         # torch.unique returns them); every dice is the ratio of GLOBAL sums, the smooth term applied
-        # once here -- never a mean of per-patch dices.
+        # once here, never a mean of per-patch dices.
         labels = self._labels if self._labels is not None else sorted({label for state in states for label in state})
         result: dict[int, float] = {}
         total = 0.0
@@ -755,7 +755,7 @@ class PerceptualLoss(Criterion):
                     int(np.prod(zipped_layers[0][1].shape[2:])),
                 )
                 # Apply every configured loss to every target layer. Zipping the losses against the
-                # targets instead drops losses whenever there are fewer targets than losses -- the
+                # targets instead drops losses whenever there are fewer targets than losses: the
                 # default {Gram, L1Loss} on a single reference would silently use only Gram.
                 for target_entry in zipped_layers[1:]:
                     target_layer = target_entry[1].view(
@@ -1007,7 +1007,7 @@ class CrossEntropyLoss(Criterion):
 def _check_feature_model(model_path: str, in_channels: int, shape: list[int], nb_layer: int) -> None:
     """Probe a TorchScript feature extractor on the CPU: one output feature map per layer weight, or raise.
 
-    Runs on the CPU only -- the probe result is discarded, and touching a GPU here crashed CPU-only hosts
+    Runs on the CPU only: the probe result is discarded, and touching a GPU here crashed CPU-only hosts
     and pinned every DDP rank to the same device.
     """
     model: torch.nn.Module = torch.jit.load(model_path, map_location=torch.device("cpu"))  # nosec B614
@@ -1065,7 +1065,7 @@ def _masked_feature_loss(
 
     ``output`` / ``target`` are ``[tensor, nb_layer, stats]`` triples as fed to an IMPACT TorchScript
     extractor. A patch without a mask voxel is skipped; a layer whose resampled mask vanishes, or whose
-    loss is NaN, contributes nothing. Returns the summed loss and the number of scored patches -- the
+    loss is NaN, contributes nothing. Returns the summed loss and the number of scored patches: the
     caller divides.
     """
     loss = torch.zeros((1), requires_grad=True).to(output[0].device, non_blocking=False).type(torch.float32)
@@ -1164,7 +1164,7 @@ class IMPACTReg(CriterionWithAttribute):
         self, output_feature: torch.Tensor, target_feature: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Reduce both feature maps to their top-``pca`` principal components. For every batch sample the
-        basis is fitted on the TARGET (reference) features and reused for the output — a channel-covariance
+        basis is fitted on the TARGET (reference) features and reused for the output: a channel-covariance
         eigendecomposition (``eigh`` is ascending, so the largest components live at the end), which
         reproduces itk-impact's per-image ``pca_fit`` by construction. itk-impact fits one basis per image,
         and a batch mixes unrelated cases, so the basis is fitted per sample: a shared basis would project

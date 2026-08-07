@@ -2,15 +2,13 @@
 
 Besides the {doc}`CLI <cli>` and the {doc}`HTTP server <app-server-api>`, KonfAI
 Apps expose a small **Python API** in the standalone `konfai_apps` package. Use it
-to run an app from a script or notebook — locally or against a remote server —
+to run an app from a script or notebook (locally or against a remote server)
 with the same behaviour as the CLI.
 
-```{note}
-This is the `konfai_apps` package API (install it separately — see
-{doc}`../getting-started/installation`). The low-level workflow functions
-`konfai.trainer.train` / `konfai.predictor.predict` / `konfai.evaluator.evaluate` /
-`konfai.transformer.transform` are documented under {doc}`api/workflows`; here we cover the app layer on top.
-```
+This is the `konfai_apps` package API (install it separately: see
+{doc}`../getting-started/installation`). KonfAI's own workflows are a different API: `konfai.transform` / `plan_transform` /
+`evaluate` / `predict` / `train`, shown in {doc}`../usage/python-workflows` and
+documented under {doc}`api/workflows`. This page covers the app layer on top.
 
 ## Public exports
 
@@ -18,7 +16,7 @@ This is the `konfai_apps` package API (install it separately — see
 `run_distributed_app`, `run_remote_job`, `main_apps`, `main_apps_server`. Plus
 `from konfai import RemoteServer`.
 
-## `KonfAIApp` — run an app locally
+## `KonfAIApp`: run an app locally
 
 ```python
 from konfai_apps import KonfAIApp
@@ -34,20 +32,18 @@ app.infer(
 
 `KonfAIApp(app, download, force_update)` resolves `app` to a **local directory** or
 a **Hugging Face repo** (`repo_id:app_name`, optionally `repo_id@revision:app_name`).
-A remote identifier raises — use `KonfAIAppClient` for that. Each call runs inside
+A remote identifier raises: use `KonfAIAppClient` for that. Each call runs inside
 an isolated temporary workspace.
 
 The full method signatures of `KonfAIApp` and `KonfAIAppClient` (`infer`,
 `evaluate`, `uncertainty`, `pipeline`, `fine_tune`) are single-sourced from the
 docstrings on the autodoc page {doc}`api/apps`.
 
-```{note}
 `inputs` (and `gt`, `mask`) are a **list of groups**, where each group is a list of
 file paths: `inputs=[[Path("a.nii.gz")]]` is one group of one file. Multi-modality
 apps take one group per modality.
-```
 
-## `KonfAIAppClient` — run an app on a remote server
+## `KonfAIAppClient`: run an app on a remote server
 
 ```python
 from konfai import RemoteServer
@@ -72,11 +68,11 @@ interrupt. `RemoteServer(host, port, token)` builds the base URL
 (`http://host:port`) and the `Authorization: Bearer` header.
 
 ```{warning}
-`RemoteServer` uses **plain HTTP** — the token and the medical volumes travel
+`RemoteServer` uses **plain HTTP**: the token and the medical volumes travel
 unencrypted. Put the server behind a TLS-terminating reverse proxy for anything
 beyond localhost. Remote `patch_size` / `batch_size` **are** carried: each job endpoint takes an
 `options` form field, and the client refuses the submission if the server does not
-echo the tunables back in `accepted_options` — a server too old to honour them fails
+echo the tunables back in `accepted_options`: a server too old to honour them fails
 loudly instead of ignoring them.
 ```
 
@@ -102,20 +98,18 @@ export_onnx_into_bundle(b, checkpoint="CV_0.pt")   # writes model.onnx + manifes
 | `export_onnx_into_bundle(bundle, *, patch_size=None, in_channels=None, prediction_config="Prediction.yml", checkpoint=None, output_module=None, root="Predictor")` | Load the model, export `model.onnx` + `manifest.json` via `konfai.export`. |
 | `derive_requirements(py_files)` | Best-effort AST import scan → PyPI names (a draft to review, not authoritative). |
 
-```{note}
 There is no `konfai` subcommand for ONNX export, but there **is** a
 `konfai-apps` one: `konfai-apps bundle <name> --onnx …` exports `model.onnx` plus a
 manifest into a bundle (and `--patch-size`, `--in-channels`, `--output-module` size
 it).
 It exports a **single, static-shape** head of a feed-forward model; custom-`forward`
 models (diffusion/StyleGAN/…) do not round-trip. See `konfai/export.py`.
-```
 
 ## Trust model
 
 ```{danger}
 Resolving an app **copies its `.py` files into the run workspace and imports
-them** unconditionally — running a model by classpath (`Model:MyNet`) executes
+them** unconditionally: running a model by classpath (`Model:MyNet`) executes
 the app's own Python, i.e. arbitrary code. Resolving also **pip-installs the
 app's `requirements.txt` by default**: only missing or version-mismatched
 packages are installed, core packages (`torch`, `konfai`, …) are never touched,
@@ -127,7 +121,7 @@ side, the `--apps` allowlist is the trust boundary; keep it tightly scoped.
 
 ## See also
 
-- {doc}`cli` — the `konfai-apps` / `konfai-apps-server` command line
-- {doc}`app-server-api` — the HTTP endpoints these clients call
-- {doc}`../ecosystem/index` — where the app bundles live
-- {doc}`api/workflows` — the low-level `train`/`predict`/`evaluate`/`transform` functions
+- {doc}`cli`: the `konfai-apps` / `konfai-apps-server` command line
+- {doc}`app-server-api`: the HTTP endpoints these clients call
+- {doc}`../ecosystem/index`: where the app bundles live
+- {doc}`api/workflows`: the low-level `train`/`predict`/`evaluate`/`transform` functions

@@ -61,7 +61,7 @@ def _lint_config_data(data: Any) -> list[dict[str, str]]:
     """Static lint for silent-failure traps an agent cannot see from the schema alone."""
     warnings: list[dict[str, str]] = []
     # Evaluator groups_dest entries bind to GroupTransformMetric, which has no patch_transforms
-    # parameter (and no -1 fill) -- the trap only exists for Trainer/Predictor datasets.
+    # parameter (and no -1 fill): the trap only exists for Trainer/Predictor datasets.
     if isinstance(data, dict) and isinstance(data.get("Evaluator"), dict):
         return warnings
 

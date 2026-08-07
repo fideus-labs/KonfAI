@@ -19,7 +19,7 @@
 ``trainer`` calls ``model.load(state_dict, init=True)`` at training start; for a model that
 arrives fully constructed (MinimalModel-wrapped external class, SMP with a pretrained
 encoder), re-initialisation would silently destroy the pretrained weights with
-``init_type`` noise. ``MinimalModel.init`` and ``SMP.init`` are therefore no-ops — locked here.
+``init_type`` noise. ``MinimalModel.init`` and ``SMP.init`` are therefore no-ops: locked here.
 """
 
 import pytest

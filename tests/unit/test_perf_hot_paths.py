@@ -27,7 +27,7 @@ from konfai.utils.dataset import Attribute, Dataset
 
 
 def test_accumulator_is_full_counts_without_rescanning():
-    """P6: is_full() is O(1) — a running counter, idempotent adds, reset on assemble."""
+    """P6: is_full() is O(1): a running counter, idempotent adds, reset on assemble."""
     patch_slices = [(slice(0, 2), slice(0, 2)), (slice(0, 2), slice(2, 4))]
     acc = Accumulator(patch_slices, [0, 0], None, batch=False)
 

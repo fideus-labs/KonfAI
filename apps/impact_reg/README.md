@@ -84,8 +84,8 @@ The CLI is organised into sub-commands, matching the registration workflow:
 
 | Sub-command | Purpose |
 |---|---|
-| `register` | Register a moving image onto a fixed image with one or more presets. Several presets are ensembled (their displacement fields are averaged). Writes the transform under the name and in the form the preset declared, the moved image derived from it, and — with `--keep_dvf` — the per-preset fields (kept for `uncertainty`). |
-| `eval` | Evaluate a registration on any subset of modalities — image (MAE), segmentation (Dice), landmarks (TRE). At least one modality is required. |
+| `register` | Register a moving image onto a fixed image with one or more presets. Several presets are ensembled (their displacement fields are averaged). Writes the transform under the name and in the form the preset declared, the moved image derived from it, and, with `--uncertainty`, the per-preset fields (kept under `Ensemble/` for `uncertainty`). |
+| `eval` | Evaluate a registration on any subset of modalities: image (MAE), segmentation (Dice), landmarks (TRE). At least one modality is required. |
 | `uncertainty` | Voxel-wise spread map from an ensemble of displacement fields. |
 
 Register a moving image onto a fixed image (ensemble several presets by listing them):
@@ -94,7 +94,7 @@ Register a moving image onto a fixed image (ensemble several presets by listing 
 impact-reg-konfai register <PRESET> [<PRESET_2> ...] -f fixed.nii.gz -m moving.nii.gz -o ./Output --gpu 0
 ```
 
-Evaluate a registration — any subset of modalities; the transform comes from a prior `register`:
+Evaluate a registration on any subset of modalities; the transform comes from a prior `register`:
 
 ```bash
 impact-reg-konfai eval \
@@ -118,18 +118,24 @@ impact-reg-konfai uncertainty --dvf ./Output/P000/Ensemble/*.mha -o ./Output/P00
 | `PRESET` | One or more presets from the published preset database (several are ensembled) | *required* |
 | `-f`, `--fixed-images` | Fixed image(s), or a dataset directory | *required* |
 | `-m`, `--moving-images` | Moving image(s), or a dataset directory | *required* |
+| `--fixed-mask`, `--moving-mask` | Optional masks restricting the metric region | *unset* |
 | `-o`, `--output` | Output directory | `./Output/` |
+| `--tta` | Test-time-augmentation draws per preset | `0` |
+| `--uncertainty` | Keep the per-preset fields under `Ensemble/` for a later `uncertainty` run | `False` |
+| `--fields-only` | Write the transforms and stop; skip deriving the moved images | `False` |
+| `--set NAME=VALUE` | Override a preset parameter (repeatable, forwarded to `konfai-apps infer`) | *unset* |
+| `--tmp-dir` | Where the intermediates are staged | system temp |
 | `--gpu` / `--cpu` | GPU id(s) / CPU worker processes | CPU if unset |
 | `-q`, `--quiet` | Suppress console output | `False` |
 
-### `eval` arguments — at least one modality required
+### `eval` arguments (at least one modality required)
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--transform` | Transform(s) from a prior `register` (identity if omitted) | *unset* |
-| `-f`, `-m` | Fixed / moving images — image modality (MAE) | *unset* |
-| `--gt-fixed-seg`, `--gt-moving-seg` | Fixed / moving segmentations — seg modality (Dice) | *unset* |
-| `--gt-fixed-fid`, `--gt-moving-fid` | Fixed / moving landmarks — fid modality (TRE) | *unset* |
+| `-f`, `-m` | Fixed / moving images: image modality (MAE) | *unset* |
+| `--gt-fixed-seg`, `--gt-moving-seg` | Fixed / moving segmentations: seg modality (Dice) | *unset* |
+| `--gt-fixed-fid`, `--gt-moving-fid` | Fixed / moving landmarks: fid modality (TRE) | *unset* |
 | `--mask` | Evaluation mask(s) for the image modality | *unset* |
 | `--preset` | Preset providing the evaluation configs | first available |
 

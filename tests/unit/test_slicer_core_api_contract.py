@@ -27,7 +27,7 @@ import inspect
 
 import pytest
 
-# (module, symbol, kind, expected parameter names) -- from `grep -r "from konfai\\." Slicer*`.
+# (module, symbol, kind, expected parameter names): from `grep -r "from konfai\\." Slicer*`.
 CONTRACT = [
     ("konfai.evaluator", "Statistics", "class", []),
     ("konfai.utils.dataset", "image_to_data", "func", ["image"]),
@@ -50,7 +50,7 @@ def test_slicer_consumed_core_symbol_is_stable(module_path: str, name: str, kind
     obj = getattr(module, name, None)
     assert obj is not None, (
         f"{module_path}.{name} is imported by SlicerKonfAI/SlicerImpactReg but no longer exists. "
-        "Removing/renaming it breaks the external Slicer extensions -- keep it, or update those repos."
+        "Removing/renaming it breaks the external Slicer extensions: keep it, or update those repos."
     )
 
     if kind == "class":

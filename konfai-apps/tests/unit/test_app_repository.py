@@ -708,7 +708,7 @@ def test_install_requirements_protects_against_non_canonical_spellings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # pip resolves 'konfai_apps' / 'Torch' to the same projects as 'konfai-apps' / 'torch', so the guard
-    # must canonicalize (PEP 503) rather than str.lower() -- otherwise these spellings slip past and pip
+    # must canonicalize (PEP 503) rather than str.lower(): otherwise these spellings slip past and pip
     # would downgrade a protected core package.
     app_root = tmp_path / "repo" / "demo_app"
     _write_app_with_requirements(
@@ -825,7 +825,7 @@ _MODEL_CONFIG = (
 
 
 # A typed model module: the constructor's annotations ARE the constraint declaration.
-# No `from __future__ import annotations` — get_parameters reads runtime annotation objects.
+# No `from __future__ import annotations`: get_parameters reads runtime annotation objects.
 _TYPED_MODEL_PY = (
     "from typing import Annotated, Literal\n"
     "from konfai.utils.config import Choices, Range\n"
@@ -854,7 +854,7 @@ _TYPED_MODEL_CONFIG = (
 
 
 def test_get_parameters_values_are_the_clean_model_block(tmp_path: Path) -> None:
-    # `values` is the model block minus structural wiring — a JSON-clean tree the CLI edits via --set.
+    # `values` is the model block minus structural wiring: a JSON-clean tree the CLI edits via --set.
     repo, _prediction = _local_repo_with_config(tmp_path, _MODEL_CONFIG)
     result = repo.get_parameters()
 
@@ -887,7 +887,7 @@ def test_get_parameters_constraints_read_from_model_types(tmp_path: Path) -> Non
 def test_get_parameters_constraints_from_an_installed_package_classpath(tmp_path: Path) -> None:
     """A preset that keeps only config + weights points its classpath at an INSTALLED package module (its
     requirements provide it), not a bundled .py. get_parameters must still read the constraints/descriptions
-    from that module's typed signature -- otherwise moving the model code out of the bundle would silently
+    from that module's typed signature: otherwise moving the model code out of the bundle would silently
     strip an agent's whole parameter surface."""
     import importlib
     import sys

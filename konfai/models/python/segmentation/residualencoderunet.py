@@ -14,12 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Parametric ResidualEncoderUNet -- weight-exact with nnU-Net's residual-encoder U-Net.
+"""Parametric ResidualEncoderUNet: weight-exact with nnU-Net's residual-encoder U-Net.
 
 This is the residual-encoder counterpart of ``konfai/models/python/segmentation/plainconvunet.py``.
 It builds, module-for-module and in forward-execution order, the network produced by
 ``dynamic_network_architectures.architectures.unet.ResidualEncoderUNet`` (the "ResEnc" nnU-Net
-backbone -- e.g. the ImpactSeg body model), so a **real ResEnc nnU-Net checkpoint of any depth**
+backbone: e.g. the ImpactSeg body model), so a **real ResEnc nnU-Net checkpoint of any depth**
 loads straight in through the execution-order bridge
 ``konfai.utils.pretrained.transfer_weights_by_execution_order`` and the KonfAI logits are
 ``torch.allclose`` with the reference output. Reference it as
@@ -28,7 +28,7 @@ loads straight in through the execution-order bridge
 The **decoder is identical** to ``PlainConvUNet``'s (nnU-Net shares ``UNetDecoder`` between the two
 backbones): a transpose conv (kernel = stride = the matching encoder stride), a concat with the
 encoder skip, ``n_conv_per_stage_decoder`` conv blocks, and a 1x1 seg head at **every** decoder
-resolution (native deep supervision -- what a real ResEnc checkpoint carries). Building every head
+resolution (native deep supervision: what a real ResEnc checkpoint carries). Building every head
 gives full parameter-count equality with the reference.
 
 Only the **encoder** differs. Following nnU-Net's ``ResidualEncoder``:
@@ -180,10 +180,10 @@ class ResidualEncoderUNet(network.Network):
                     out_branch=[f"enc{k}"],
                 )
 
-        # ----- Decoder (identical to PlainConvUNet -- nnU-Net shares UNetDecoder) ------------ #
+        # ----- Decoder (identical to PlainConvUNet: nnU-Net shares UNetDecoder) ------------ #
         # With ``deep_supervision`` (default) every decoder stage gets a head, matching nnU-Net's
         # full parameter count. With ``deep_supervision=False`` only the finest (full-resolution,
-        # j == n_stages - 2) head is built and traversed -- the single-output configuration used
+        # j == n_stages - 2) head is built and traversed: the single-output configuration used
         # e.g. by the ImpactSeg body model, so a checkpoint trained that way pairs leaf-for-leaf.
         build_unet_decoder(
             self,

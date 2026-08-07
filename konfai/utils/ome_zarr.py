@@ -17,7 +17,7 @@
 """OME-Zarr (OME-NGFF) read/write backend for KonfAI, built on ``ngff-zarr``.
 
 This module is a thin adapter: ``ngff-zarr`` owns all OME-NGFF metadata parsing,
-multiscale handling, and (de)serialisation — KonfAI does not re-implement the
+multiscale handling, and (de)serialisation: KonfAI does not re-implement the
 spec. We only
 
 1. map between KonfAI's channel-first ``C[Z]YX`` arrays / ``(x, y, z)`` geometry
@@ -71,13 +71,13 @@ _SPATIAL = ("z", "y", "x")
 def _native_byteorder(array: np.ndarray) -> np.ndarray:
     """The same samples in the machine's own byte order.
 
-    A store may hold big-endian samples -- some acquisition software writes them, and zarr keeps the
-    dtype it was given -- and a non-native array poisons everything downstream in two different ways.
+    A store may hold big-endian samples (some acquisition software writes them, and zarr keeps the
+    dtype it was given), and a non-native array poisons everything downstream in two different ways.
     ``torch.from_numpy`` refuses it outright ("given numpy array has byte order different from the
     native byte order"), which is the loud half. The quiet half is numpy: the flag rides along
     through slicing and arithmetic, so a value read here compares and writes correctly while any
-    consumer that reinterprets the buffer -- a raw ``.tobytes()``, a memory-mapped write, a C
-    extension taking a pointer -- sees the bytes swapped. Normalising once at the read boundary is
+    consumer that reinterprets the buffer (a raw ``.tobytes()``, a memory-mapped write, a C
+    extension taking a pointer) sees the bytes swapped. Normalising once at the read boundary is
     what every caller would otherwise have to remember to do by hand.
     """
     return array.astype(array.dtype.newbyteorder("="), copy=False) if array.dtype.byteorder == ">" else array
@@ -164,10 +164,10 @@ def _load_image(store_path: str, level: int) -> Any:
     A streamed run reads one patch per call, and re-parsing the NGFF metadata and rebuilding the
     lazy array graph per patch is pure per-read overhead: the image object is lazy (no voxel data),
     so a handful of them is cheap to keep. The key is the path alone, so anything that puts a
-    different store at a path already read must call ``clear_ome_zarr_cache()`` — see there.
+    different store at a path already read must call ``clear_ome_zarr_cache()``: see there.
 
     ``@N`` selects among the levels a store offers, so a single-level store has nothing to select: its
-    one level is read whatever ``N`` says (as every other backend does -- ``SitkFile`` ignores
+    one level is read whatever ``N`` says (as every other backend does: ``SitkFile`` ignores
     ``self.level`` too). Out of range on a store that IS a pyramid stays an error: asking level 3 of a
     three-level mask beside a four-level image is a real mismatch (it silently pairs 160 µm against
     320 µm), and quietly falling back to level 0 would hide it.
@@ -185,7 +185,7 @@ def _load_image(store_path: str, level: int) -> Any:
     if not 0 <= level < len(multiscales.images):
         # Its own message: the store is fine, the LEVEL is not. Reporting an out-of-range level as
         # "not a valid OME-NGFF store" sends the reader to inspect a store that has nothing wrong
-        # with it -- the mismatch is in what was asked of it.
+        # with it: the mismatch is in what was asked of it.
         raise DatasetManagerError(
             f"OME-Zarr store '{store_path}' has {len(multiscales.images)} level(s); level {level} is out of range.",
             f"Ask for a level in 0..{len(multiscales.images) - 1} (0 is the finest).",
@@ -197,7 +197,7 @@ def clear_ome_zarr_cache() -> None:
     """Forget the memoised NGFF images, so a store replaced on disk is parsed afresh.
 
     The write paths here call it for their own output. Anything that materialises a store by other
-    means -- copying one over another, say -- has to call it too: the memo is keyed on the path, and
+    means (copying one over another, say) has to call it too: the memo is keyed on the path, and
     a hit serves the previous store's axes and geometry against the new store's voxels. That reads as
     a shape mismatch when the two differ, and as nothing at all when they do not.
     """
@@ -211,7 +211,7 @@ def is_displacement_field(store_path: str | Path) -> bool:
     read from the store itself: the producer does not have to be trusted, and no sidecar convention
     (a filename, an attribute) has to be agreed on separately.
 
-    A store that predates RFC-5, or an ngff-zarr too old to model it, simply answers False -- an
+    A store that predates RFC-5, or an ngff-zarr too old to model it, simply answers False: an
     unreadable or absent store is not a displacement field either, so this never raises.
     """
     if not _NGFF_ZARR_AVAILABLE:
@@ -292,7 +292,7 @@ def _spatial_geometry(
     origin: Sequence[float] | None,
 ) -> tuple[list[str], list[float], list[float]]:
     """The NGFF spatial axes of a channel-first array with ``ndim`` dims, and its per-axis
-    scale/translation in axis order — geometry arrives ``(x, y, z)`` (SimpleITK order)."""
+    scale/translation in axis order: geometry arrives ``(x, y, z)`` (SimpleITK order)."""
     if ndim not in {3, 4}:
         raise DatasetManagerError(f"OME-Zarr writing expects a C-Y-X or C-Z-Y-X array, got {shape_label}.")
     spatial_axes = ["y", "x"] if ndim == 3 else ["z", "y", "x"]
@@ -317,7 +317,7 @@ def _downsample_method(downsample_method: str | None) -> Any:
     NOT ngff-zarr's own default, which is ``ITKWASM_GAUSSIAN``: a pyramid is indexed by position and
     read as "the same image, coarser", so a level that has been smoothed is a change of pixels that
     no reader can see. Measured on a real volume, the gaussian keeps a 0.9998 correlation while
-    crushing the peak intensity by 20 % -- the shape of difference that passes a sanity check and
+    crushing the peak intensity by 20 %: the shape of difference that passes a sanity check and
     resurfaces months later. ``ITKWASM_BIN_SHRINK`` is a plain block mean, so a caller that already
     downsamples by averaging blocks gets the same voxels from this writer.
     """
@@ -349,7 +349,7 @@ def write_ome_zarr(
 
     ``scale_factors`` makes it a pyramid: ``[4]`` writes level 0 plus level 0 shrunk 4x per spatial
     axis, ``[4, 4]`` adds a third at 16x. Consumers index a pyramid BY POSITION, so the order is the
-    contract -- 0 finest. Each level carries its OWN scale and translation, and ngff-zarr shifts the
+    contract: 0 finest. Each level carries its OWN scale and translation, and ngff-zarr shifts the
     coarse origin by half the spacing delta, which is the centre-of-voxel convention these stores
     use; getting that wrong biases every voxel by a fraction of a coarse voxel and still looks like a
     plausible image. ``downsample_method`` selects how (see :func:`_downsample_method`).
@@ -357,12 +357,12 @@ def write_ome_zarr(
     ``displacement_field`` writes it as a vector FIELD rather than an image: the component axis is
     typed ``displacement`` (NGFF RFC-5), which is what makes a registration DVF self-describing
     instead of an anonymous 3-channel image. A reader then no longer has to be told out of band that
-    the channels are a displacement -- the mistake that path invites is silent, not loud: index the
+    the channels are a displacement: the mistake that path invites is silent, not loud: index the
     component axis like any other and you get one third of the field back, and a plausible-looking
     registration with it.
 
     The NGFF version follows from that flag and is deliberately NOT a parameter. RFC-5 axis types
-    exist only from 0.6, so a caller passing both could only ever pass them consistently -- an
+    exist only from 0.6, so a caller passing both could only ever pass them consistently: an
     invariant worth removing rather than documenting.
     """
     clear_ome_zarr_cache()
@@ -378,7 +378,7 @@ def write_ome_zarr(
     image = ngff_zarr.to_ngff_image(array_data, dims=dims, scale=scale, translation=translation)
     # cache=False because the array is already resident: this function is handed one in memory, and
     # spilling it to a disk cache "to limit memory consumption" cannot lower a peak that has already
-    # happened -- it only adds a full write and a full read. The estimate that would otherwise trigger
+    # happened, it only adds a full write and a full read. The estimate that would otherwise trigger
     # it is inflated besides, by itemsize once per dimension, so a 13.6 GiB field reports 868 GiB and
     # takes that path every time.
     multiscales = ngff_zarr.to_multiscales(
@@ -404,8 +404,8 @@ def write_ome_zarr(
 def update_konfai_attributes(store_path: str | Path, extra: dict[str, Any]) -> None:
     """Merge ``extra`` into the store's KonfAI attribute sidecar, keeping what is already there.
 
-    For facts that are only knowable once the last region has landed -- a streamed field's own bound
-    being the case that motivated it -- so they can still be recorded without holding the volume.
+    For facts that are only knowable once the last region has landed (a streamed field's own bound
+    being the case that motivated it), so they can still be recorded without holding the volume.
     """
     if not extra:
         return
@@ -462,14 +462,14 @@ def create_ome_zarr_store(
     during the write.
 
     ngff-zarr writes that metadata, exactly as it does for the whole-array path, so both paths describe
-    a store the same way -- ``displacement_field`` included, which is the point of routing it through
+    a store the same way: ``displacement_field`` included, which is the point of routing it through
     ngff-zarr at all. A field too large to assemble in memory is written region by region, so this is
     the ONLY path a real one takes, and until it could type its component axis a DVF came out
     self-describing exactly when it was small enough not to need to be.
 
     It describes the store from a one-voxel stand-in rather than from an array of the target shape.
-    With a single resolution level the metadata does not depend on the extent at all -- axes and
-    coordinate transformations come from ``dims``, ``scale`` and ``translation`` -- and the two come
+    With a single resolution level the metadata does not depend on the extent at all (axes and
+    coordinate transformations come from ``dims``, ``scale`` and ``translation``), and the two come
     out byte-identical, verified for 0.4 and 0.6. Handing ngff-zarr the real shape instead costs a
     pass over every chunk of an array that is entirely zeros (~44 ms per chunk, ~33 s for a 13.6 GiB
     field) to write no bytes at all. The real array is then created underneath that metadata, which is
@@ -517,7 +517,7 @@ def create_ome_zarr_store(
         overwrite=True,
     )
     # Sidecar last: to_ngff_zarr(overwrite=True) reopens the root with mode="w" and drops every
-    # attribute it finds, so writing this first loses Direction -- and losing Direction is silent,
+    # attribute it finds, so writing this first loses Direction, and losing Direction is silent,
     # the reader falls back to identity and returns a plausibly-oriented volume.
     if attributes:
         group.attrs[_KONFAI_ATTR_KEY] = {"attributes": dict(attributes)}
@@ -540,19 +540,19 @@ def append_ome_zarr_levels(
     ``scale_factors`` up front, because no level exists until the last region lands. This derives the
     pyramid afterwards, from what is on disk.
 
-    It REWRITES level 0 rather than adding beside it -- ngff-zarr composes a multiscales as a whole,
+    It REWRITES level 0 rather than adding beside it: ngff-zarr composes a multiscales as a whole,
     and there is no supported way to graft a level onto a published one. The cost is real and
     proportional to the store (measured ~42 s for a 2 GiB store) while the peak stays chunk-sized.
     Worth knowing before calling it in a loop; not worth hiding.
 
     It writes to a SIBLING store and renames over the original, rather than in place. In place is not
     slower, it is wrong: level 0 is read lazily, ``to_ngff_zarr(overwrite=True)`` truncates the store
-    before dask pulls a single chunk through it, and the pyramid comes out uniformly zero -- with
+    before dask pulls a single chunk through it, and the pyramid comes out uniformly zero: with
     correct metadata, correct shapes, and nothing raised. The rename also makes the operation atomic,
     so an interrupted call leaves the original store intact instead of a half-written one.
 
     The KonfAI attribute sidecar and an RFC-5 displacement typing are carried across, because
-    ``to_ngff_zarr`` writes a root of its own -- and both losses are silent, one landing as an
+    ``to_ngff_zarr`` writes a root of its own, and both losses are silent, one landing as an
     identity Direction and the other as an anonymous 3-channel image.
     """
     _require_ngff_zarr()
@@ -609,7 +609,7 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
 
     Three of these keys describe the same level in two different orders, and mixing them is the
     single most productive mistake this module invites. ``shape``, ``scale`` and ``translation``
-    follow the STORE's own axes, listed in ``axes`` -- a scalar volume written without a channel
+    follow the STORE's own axes, listed in ``axes``: a scalar volume written without a channel
     axis has three of each. ``canonical_shape`` is the C[Z]YX form the reader indexes. So a caller
     that sizes its slices from ``canonical_shape`` and then reads ``scale[1:]`` for the spatial
     spacing is off by one axis, with plausible numbers and no error.
@@ -628,7 +628,7 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
         "shape": list(image.data.shape),
         # The shape the slices of `read_ome_zarr_data_slice` are indexed against. Both are here
         # because they differ whenever the store's axes are not already C[Z]YX, and a caller sizing
-        # its slices from "shape" then reads a transposed region -- with the right rank, plausible
+        # its slices from "shape" then reads a transposed region, with the right rank, plausible
         # values, and nothing raised. "shape" stays the store's own order; this one is the reader's.
         "canonical_shape": _canonical_shape(dims, image.data.shape),
         "chunks": list(getattr(image.data, "chunks", []) or []),

@@ -43,6 +43,7 @@ import numpy as np
 import SimpleITK as sitk
 from konfai.utils.dataset import read_landmarks, write_landmarks
 from konfai.utils.ITK import apply_to_data_transform, read_displacement_field
+from konfai.utils.utils import format_token, path_format_token, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import get_available_apps_on_hf_repo
 
@@ -52,10 +53,30 @@ IMPACT_REG_KONFAI_REPO = os.environ.get("KONFAI_IMPACTREG_REPO", "VBoussot/Impac
 
 _ENSEMBLE_DIR = "Ensemble"
 
-# Writing needs a format named -- nothing is on disk yet to detect one from. The store spellings and
-# the ITK transform files need translating; every other suffix is already the token Dataset
-# normalises (".mha" -> "mha").
-_FORMATS = {".ome.zarr": "omezarr", ".zarr": "omezarr", ".h5": "itktransform", ".tfm": "itktransform"}
+# The one place this layer disagrees with konfai's own reading of a suffix: an `.h5` or `.tfm` HERE
+# is a registration (what every preset writes), not konfai's monolithic HDF5 dataset. Everything
+# else (the store spellings, a DICOM series, plain extensions) is konfai's to resolve.
+_TRANSFORM_FORMS = {".h5", ".tfm"}
+
+
+def _form(path: Path) -> str:
+    """The storage form of ``path``: konfai's, which knows a dot in a stem is part of the name."""
+    return storage_form(path)
+
+
+def _format_token(form: str) -> str:
+    """The konfai backend token a storage form is read and written through, transforms included."""
+    return "itktransform" if form.lower() in _TRANSFORM_FORMS else format_token(form)
+
+
+def _backend(path: Path) -> str:
+    """The backend token ``path`` is read and written through, as it sits on disk.
+
+    A DICOM series is a directory carrying no extension at all, so its token cannot be read off a
+    name: ``path_format_token`` looks inside. Without that, a series staged as one unit was handed
+    to konfai as the default ``mha`` and the run died reading a directory of slices as one image.
+    """
+    return "itktransform" if _form(path).lower() in _TRANSFORM_FORMS else path_format_token(path)
 
 
 def _is_transform_file(path: Path) -> bool:
@@ -107,10 +128,10 @@ def get_available_presets(force_update: bool = False) -> list[str]:
 def _find_output_group(root: Path) -> str:
     """The name of the single output group a preset produced under ``root``.
 
-    A preset declares ONE output — its transform, in whatever form and under whatever name it chose.
+    A preset declares ONE output: its transform, in whatever form and under whatever name it chose.
     konfai writes one dataset per output group (``<run>/<group>/<case>/<group>.<ext>``), so the group
     is the directory holding the cases. Discovering it rather than assuming ``DVF`` is what lets an
-    official preset name its output ``Transform`` — where Slicer looks for it — while this pipeline's
+    official preset name its output ``Transform``: where Slicer looks for it, while this pipeline's
     own name theirs ``DVF``, with no branch here.
     """
     runs = [child for child in sorted(root.iterdir()) if child.is_dir()] if root.is_dir() else []
@@ -128,11 +149,11 @@ def _find_outputs(root: Path, stem: str) -> dict[str, Path]:
     """Every output named ``stem`` under ``root``, keyed by the CASE it belongs to.
 
     Matched on the name rather than on a fixed filename: a displacement field may come out as an ITK
-    image or as an OME-Zarr store, and a store is a DIRECTORY whose ``Path.stem`` is "DVF.ome" -- so a
+    image or as an OME-Zarr store, and a store is a DIRECTORY whose ``Path.stem`` is "DVF.ome", so a
     fixed "DVF.mha" finds nothing and the run dies with the output sitting in the directory it listed.
 
     A MAPPING, NOT THE FIRST MATCH. konfai-apps writes one dataset per output group --
-    ``<run>/<group>/<case>/<group>.<ext>`` -- and one run produces as many cases as the inputs expanded
+    ``<run>/<group>/<case>/<group>.<ext>``: and one run produces as many cases as the inputs expanded
     to, which is not the number of paths on the command line: a directory is walked so each volume in
     it becomes its own case. Taking ``matches[0]`` therefore kept P000 and dropped every case after it,
     silently, with the results sitting on disk. The case is the entry's parent directory.
@@ -143,6 +164,15 @@ def _find_outputs(root: Path, stem: str) -> dict[str, Path]:
     return {match.parent.name: match for match in matches}
 
 
+def _is_entry(path: Path, stem: str) -> bool:
+    """Whether ``path`` is an entry named ``stem``, in any form: extension, store, or bare name.
+
+    The bare name is a form of its own: a DICOM series is a directory carrying no extension at all,
+    so a rule written as ``startswith(f"{stem}.")`` looks straight past it.
+    """
+    return path.name == stem or path.name.startswith(f"{stem}.")
+
+
 def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
     """The path ``<stem><suffixes>`` in ``dest_dir``, with every earlier output of that stem removed.
 
@@ -151,7 +181,7 @@ def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
     sorts to the stale one. Only the current run's output is left standing.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    for stale in [p for p in dest_dir.iterdir() if p.name.startswith(f"{stem}.")]:
+    for stale in [p for p in dest_dir.iterdir() if _is_entry(p, stem)]:
         shutil.rmtree(stale) if stale.is_dir() else stale.unlink()
     return dest_dir / (stem + suffixes)
 
@@ -162,7 +192,7 @@ def _units(paths: list[Path]) -> list[Path]:
     A file, an OME-Zarr store or a DICOM series is one unit; a plain directory is walked so every
     supported file inside becomes one, sorted so groups pair consistently. Asking konfai-apps rather
     than counting the command line is what keeps this layer's notion of a case identical to the one the
-    ``Dataset/P{i:03d}`` staging is built with -- counting arguments instead is how a directory input
+    ``Dataset/P{i:03d}`` staging is built with: counting arguments instead is how a directory input
     came to register N volumes and report one.
     """
     return [source for source, _ in KonfAIApp._list_input_units(list(paths))] if paths else []
@@ -180,14 +210,14 @@ def _neutral_masks(work: Path, side: str, count: int) -> list[Path]:
 def _work_dir(tmp_dir: Path | None, prefix: str) -> Path:
     """A private scratch directory for one command's intermediates.
 
-    Under ``tmp_dir`` when the caller named one, under ``tempfile.gettempdir()`` otherwise — which is
+    Under ``tmp_dir`` when the caller named one, under ``tempfile.gettempdir()`` otherwise, which is
     the same contract every other KonfAI app CLI offers through ``--tmp-dir``.
 
     THE DEFAULT IS NOT ALWAYS A GOOD PLACE, WHICH IS WHY THE OPTION EXISTS. What is staged here is
     volume-sized: the moved image and the displacement field are written before being collected into
     ``--output``. Where TMPDIR is a tmpfs that traffic is charged to RAM, on top of the volumes the run
     already holds; on a large 3D case that is what fills memory or the temp quota mid-run. A caller who
-    knows better — a pipeline node with its results on real disk — names a directory here instead of
+    knows better (a pipeline node with its results on real disk) names a directory here instead of
     overriding ``TMPDIR`` from outside, which would also move things TMPDIR legitimately owns (torch's
     DataLoader opens its worker sockets there, and AF_UNIX addresses cap at ~108 bytes).
 
@@ -201,7 +231,7 @@ def _work_dir(tmp_dir: Path | None, prefix: str) -> Path:
 
 def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
     """Copy an output beside the results, keeping the form the preset produced (file or store)."""
-    dest = _output_path(dest_dir, stem, "".join(src.suffixes))
+    dest = _output_path(dest_dir, stem, _form(src))
     (shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
     if dest.is_dir():
         # A store put at a path already read is invisible to the reader's path-keyed memo, which
@@ -213,15 +243,15 @@ def _copy_output(src: Path, dest_dir: Path, stem: str) -> Path:
 
 
 def _stage_group(base: Path, group: str, entries: dict[str, Path]) -> str:
-    """One dataset ROOT holding one GROUP — ``base/<group>/<case>/<group><suffixes>`` symlinks —
+    """One dataset ROOT holding one GROUP (``base/<group>/<case>/<group><suffixes>`` symlinks)
     returned as the ``path:format`` spec a run consumes. No bytes move.
 
     One root per group, not one mixed cohort: a directory dataset's backend is detected from its
-    first case, and a single store entry flips the whole root to the store backend — the ``.mha``
+    first case, and a single store entry flips the whole root to the store backend: the ``.mha``
     beside it stops resolving. A homogeneous root keeps every entry readable whatever mix of forms
     the caller and the presets produced; the run reads all its roots side by side.
     """
-    forms = {"".join(source.suffixes).lower() for source in entries.values()}
+    forms = {_form(source).lower() for source in entries.values()}
     if len(forms) > 1:
         raise RuntimeError(
             f"group '{group}' mixes storage forms ({', '.join(sorted(forms))}); a directory dataset"
@@ -232,18 +262,19 @@ def _stage_group(base: Path, group: str, entries: dict[str, Path]) -> str:
     for case, source in entries.items():
         case_dir = root / case
         case_dir.mkdir(parents=True, exist_ok=True)
-        suffixes = "".join(source.suffixes)
+        suffixes = _form(source)
         # Clear every form of the entry, not only the current one: a re-stage that switched forms
-        # would otherwise leave two links and discovery by stem finds both.
-        for stale in case_dir.glob(f"{group}.*"):
+        # would otherwise leave two links and discovery by stem finds both. The bare name counts as
+        # a form, that is how a DICOM series is stored, as a directory carrying no extension.
+        for stale in [entry for entry in case_dir.iterdir() if _is_entry(entry, group)]:
             stale.unlink() if stale.is_symlink() or stale.is_file() else shutil.rmtree(stale)
         link = case_dir / (group + suffixes)
         link.symlink_to(source.resolve())
-    return f"{root}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.') or 'mha')}"
+    return f"{root}:{_backend(next(iter(entries.values())))}"
 
 
 def _the_output(dest_dir: Path, stem: str) -> Path:
-    """The single output named ``stem`` in ``dest_dir`` — one, exactly."""
+    """The single output named ``stem`` in ``dest_dir``: one, exactly."""
     matches = sorted(dest_dir.glob(f"{stem}.*"))
     if len(matches) != 1:
         found = ", ".join(path.name for path in matches) or "none"
@@ -267,7 +298,7 @@ def _run_transform(
     """One streamed TRANSFORM through konfai's Python API, its workspace under ``work``.
 
     Every derivation runs here: the plan prices each case and routes it (stream, load,
-    whole-volume — with the reason), so the orchestrator never holds a volume in RAM and never
+    whole-volume, with the reason), so the orchestrator never holds a volume in RAM and never
     resamples by hand. A designed refusal raises ``KonfAIError``; the CLI prints it.
     """
     from konfai import api
@@ -285,12 +316,12 @@ def _run_transform(
 
 
 def _neutral_mask(out_path: Path) -> Path:
-    """Write a tiny all-ones sentinel — a no-op mask used only to fill the positional gap when the caller
+    """Write a tiny all-ones sentinel: a no-op mask used only to fill the positional gap when the caller
     gives a moving mask but no fixed mask (inputs map positionally, so the fixed-mask slot must be present).
 
     A whole-image all-ones mask restricts nothing (the model's ``_is_partial_mask`` treats it as absent),
     and in whole-volume mode a mask branch need not share the image grid, so a 2x2x2 sentinel yields a
-    byte-identical registration (verified) without reading — or even sizing to — the input. (The common
+    byte-identical registration (verified) without reading (or even sizing to) the input. (The common
     no-mask path passes no mask at all; konfai-apps fills both branches with an all-ones default.)
     """
     sitk.WriteImage(sitk.GetImageFromArray(np.ones((2, 2, 2), dtype=np.uint8)), str(out_path))
@@ -324,8 +355,8 @@ class ImpactRegKonfAIApp:
         """Run one preset app on every case at once; return its output group and its transform per case.
 
         ONE RUN, NOT ONE PER CASE. Each ``-i`` is an input GROUP, and konfai-apps expands each group's
-        paths into units -- a file is one, a store or DICOM series is one, a plain directory is walked
-        so each volume in it becomes one -- then pairs the groups by position into ``Dataset/P{i:03d}``.
+        paths into units (a file is one, a store or DICOM series is one, a plain directory is walked
+        so each volume in it becomes one), then pairs the groups by position into ``Dataset/P{i:03d}``.
         So the whole cohort goes in a single invocation and the model is loaded once, rather than once
         per case.
 
@@ -334,7 +365,7 @@ class ImpactRegKonfAIApp:
 
         Masks are optional: konfai-apps fills any we omit with an all-ones default, so with no mask we pass
         only fixed+moving. Because the mapping is positional, a lone moving mask still needs the fixed-mask
-        slot present -- filled with one all-ones sentinel per case so the groups keep pairing.
+        slot present: filled with one all-ones sentinel per case so the groups keep pairing.
         """
         out = work / preset
         command = ["konfai-apps", "infer", _app_id(preset)]
@@ -369,7 +400,7 @@ class ImpactRegKonfAIApp:
         subprocess.run(command, check=True)  # nosec B603
         # THE PRESET'S CONTRACT IS THE FIELD, AND ONLY THE FIELD. A registration app produces a
         # displacement field on the fixed grid, in whatever format it declares; anything else that can
-        # be computed from it -- the moved image above all -- is this layer's job. Looking for a Moved
+        # be computed from it: the moved image above all: is this layer's job. Looking for a Moved
         # here would make every preset carry an output it does not owe, and a tiled one blend it across
         # every patch seam for a caller that has the field.
         group = _find_output_group(out)
@@ -404,13 +435,13 @@ class ImpactRegKonfAIApp:
         ``tmp_dir`` names where the intermediates are staged; see :func:`_work_dir`.
 
         ``fields_only`` writes the transforms and stops there. The moved image is derived FROM the
-        transform, at the cost of a full-size resample and a full-size rewrite -- worth it for a
+        transform, at the cost of a full-size resample and a full-size rewrite: worth it for a
         caller that wants a registration to look at, waste for one that composes the field with
         another and derives its own. A caller that reads only the fields should be able to say so
         rather than pay for an output it deletes.
         """
         # The cases are konfai-apps' to define, not ours to count. It expands each input GROUP into
-        # units -- a file, a store, a DICOM series, or every volume inside a plain directory -- and pairs
+        # units: a file, a store, a DICOM series, or every volume inside a plain directory, and pairs
         # the groups by position. Asking it for the moving group's units is what tells this layer which
         # volume belongs to which case, in the same order it will use, so a dataset in and a single pair
         # in go down one path.
@@ -489,7 +520,7 @@ class ImpactRegKonfAIApp:
                 if len(presets) == 1:
                     _copy_output(dvf_paths[0], case_out, group)
                 else:
-                    # Ensemble: fold the presets' fields (all on the fixed grid -- and Reduce VERIFIES
+                    # Ensemble: fold the presets' fields (all on the fixed grid, and Reduce VERIFIES
                     # the claim) into the averaged DVF, the one output no single preset produced.
                     # Streamed: the fold is incremental, so the peak is one accumulator plus the
                     # member being read, whatever the size of the ensemble.
@@ -515,13 +546,11 @@ class ImpactRegKonfAIApp:
         cpu: int | None,
         quiet: bool,
     ) -> None:
-        """Average one case's preset fields into ``<output>/<case>/<group>`` — Reduce(Mean), streamed."""
+        """Average one case's preset fields into ``<output>/<case>/<group>``: Reduce(Mean), streamed."""
         from konfai.data.transform import Reduce, Write
 
-        members = _stage_group(
-            work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True))
-        )
-        suffixes = "".join(dvf_paths[0].suffixes)
+        members = _stage_group(work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True)))
+        suffixes, backend = _form(dvf_paths[0]), _backend(dvf_paths[0])
         _output_path(output / case, group, suffixes)  # drop a stale other-form output before writing
         _run_transform(
             f"impact_reg_ensemble_{case}",
@@ -530,7 +559,7 @@ class ImpactRegKonfAIApp:
                 "DVF": {
                     group: [
                         Reduce(operator="Mean", output=case, grid="strict"),
-                        Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
+                        Write(dataset=f"{output}:{backend}"),
                     ]
                 }
             },
@@ -550,15 +579,15 @@ class ImpactRegKonfAIApp:
         cpu: int | None,
         quiet: bool,
     ) -> None:
-        """The moved images, derived from the transforms — one streamed run over the whole cohort.
+        """The moved images, derived from the transforms, one streamed run over the whole cohort.
 
         A preset that emits only a field is complete: everything else IS that field. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
-        fixed grid) and the field is the map (``field_group``) — one interpolation, streamed, each
+        fixed grid) and the field is the map (``field_group``): one interpolation, streamed, each
         slab's source window sized from the field values it reads.
 
-        NOTHING ELSE IS DERIVED. A preset writes its transform in the form its consumer reads — an ITK
-        transform file where Slicer picks it up, an RFC-5 store where this pipeline streams it — so
+        NOTHING ELSE IS DERIVED. A preset writes its transform in the form its consumer reads (an ITK
+        transform file where Slicer picks it up, an RFC-5 store where this pipeline streams it) so
         there is no second copy of the same field to produce under another name.
         """
         from konfai.data.transform import Resample, Write
@@ -567,7 +596,8 @@ class ImpactRegKonfAIApp:
         # The moved image is written in the MOVING's own form: the fields' form may be an ITK
         # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
         # below, so the first case's form speaks for the cohort.
-        suffixes = "".join(next(iter(cases.values())).suffixes)
+        moving = next(iter(cases.values()))
+        suffixes, backend = _form(moving), _backend(moving)
         for case in fields:
             _output_path(output / case, "Moved", suffixes)  # drop a stale other-form Moved
         moving_root = _stage_group(work / "moved_stage", "Moving", cases)
@@ -579,7 +609,7 @@ class ImpactRegKonfAIApp:
                 "Moving": {
                     "Moved": [
                         Resample(reference="{case}", reference_group="DVF", field_group="DVF"),
-                        Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
+                        Write(dataset=f"{output}:{backend}"),
                     ]
                 },
             },
@@ -697,11 +727,11 @@ class ImpactRegKonfAIApp:
         cpu: int | None,
         quiet: bool,
     ) -> Path:
-        """The moving warped onto the fixed grid — one streamed Resample; nearest for a ``seg``.
+        """The moving warped onto the fixed grid, one streamed Resample; nearest for a ``seg``.
 
         ``reference: '{case}'`` adopts the fixed grid; the transform, when given, is staged as a
-        stored-transform group konfai decodes itself (rigid, affine, spline, field or composite) —
-        with its exact affine box or its coefficient-derived bound sizing what each slab reads.
+        stored-transform group konfai decodes itself (rigid, affine, spline, field or composite): with its
+        exact affine box or its coefficient-derived bound sizing what each slab reads.
         With no transform the map is the identity and this is a change of grid alone.
         """
         from konfai.data.transform import Resample, Write
@@ -748,8 +778,8 @@ class ImpactRegKonfAIApp:
 
         Each member's magnitude, then the standard deviation across members: ``Magnitude`` is
         pointwise and ``Reduce(Std)`` folds with running moments, so no member is ever whole in RAM
-        whatever the size of the ensemble. ``preset`` is accepted for CLI compatibility and unused —
-        measuring a spread needs no preset app. Writes ``<output>/uncertainty/Uncertainty.<ext>``.
+        whatever the size of the ensemble. ``preset`` is accepted for CLI compatibility and unused: measuring
+        a spread needs no preset app. Writes ``<output>/uncertainty/Uncertainty.<ext>``.
         """
         del preset
         if len(dvfs) < 2:
@@ -760,7 +790,7 @@ class ImpactRegKonfAIApp:
 
             members = _units(list(dvfs))
             spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
-            suffixes = ".mha" if _is_transform_file(members[0]) else "".join(members[0].suffixes)
+            suffixes = ".mha" if _is_transform_file(members[0]) else _form(members[0])
             _output_path(output / "uncertainty", "Uncertainty", suffixes)  # drop a stale other-form map
             _run_transform(
                 "impact_reg_uncertainty",
@@ -770,7 +800,7 @@ class ImpactRegKonfAIApp:
                         "Uncertainty": [
                             Magnitude(),
                             Reduce(operator="Std", output="uncertainty", grid="strict"),
-                            Write(dataset=f"{output}:{_FORMATS.get(suffixes.lower(), suffixes.lstrip('.'))}"),
+                            Write(dataset=f"{output}:{_format_token(suffixes)}"),
                         ]
                     }
                 },

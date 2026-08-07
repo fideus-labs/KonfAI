@@ -35,7 +35,7 @@ class MetricsServiceMixin:
 
     if TYPE_CHECKING:
         # Type-only view of the members the host ``SessionService`` supplies; declared here so mypy
-        # resolves cross-mixin references. No runtime state — ``SessionService`` owns the real ones.
+        # resolves cross-mixin references. No runtime state: ``SessionService`` owns the real ones.
         workspace_layout: WorkspaceLayout
         max_log_tail_lines: int
 
@@ -49,7 +49,7 @@ class MetricsServiceMixin:
 
     # App evaluate/pipeline runs write their metric trees under these workspace subdirs; every trial's
     # inner run dir repeats the bundle's train_name, so a trial's IDENTITY is its top-level trial dir.
-    # One constant feeds both the search roots and the identity rule — a root added to only one of them
+    # One constant feeds both the search roots and the identity rule: a root added to only one of them
     # would silently reintroduce the shared-inner-name ambiguity.
     _APP_TRIAL_SUBDIRS = ("AppEvaluations", "AppPipelines")
 
@@ -65,7 +65,7 @@ class MetricsServiceMixin:
         ]
 
     def _metric_run_name(self, metrics_path: Path, layout: WorkspaceLayout | None = None) -> str:
-        """The run identifier of a metric file: its run directory's name — except an app trial
+        """The run identifier of a metric file: its run directory's name: except an app trial
         (``AppEvaluations/<label>-<uuid>/…/Metric_*.json``), identified by its parameter-suffixed trial
         directory, because every trial's inner run dir repeats the same bundle train_name."""
         layout = layout or self.workspace_layout
@@ -133,7 +133,7 @@ class MetricsServiceMixin:
 
     def _metric_direction(self, metric_name: str, declared: str | None = None) -> tuple[Literal["min", "max"], str]:
         # A direction declared by the criterion itself (via the evaluation JSON 'directions' block,
-        # sourced from each Criterion's `maximize` property) is authoritative -- no guessing.
+        # sourced from each Criterion's `maximize` property) is authoritative: no guessing.
         if declared in ("min", "max"):
             return declared, "declared"  # type: ignore[return-value]
         lowered = metric_name.lower()
@@ -451,7 +451,7 @@ class MetricsServiceMixin:
             if direction_source == "default:min":
                 warnings.append(
                     f"No declared or recognised direction for '{name}'; assumed minimize. If it is a "
-                    "higher-is-better metric, the winner is inverted -- re-evaluate so the metric declares "
+                    "higher-is-better metric, the winner is inverted: re-evaluate so the metric declares "
                     "its direction, or read per-case deltas directly."
                 )
             common_cases = sorted(set(cases_a[name]) & set(cases_b[name]))

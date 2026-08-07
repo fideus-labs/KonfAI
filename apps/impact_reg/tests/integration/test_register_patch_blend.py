@@ -77,7 +77,7 @@ def test_register_large_volume_with_patch_tiling_and_blending(make_reg_pair, tmp
     app = reg.ImpactRegKonfAIApp()
     out = tmp_path / "Output"
     # Force patch tiling (64^3, overlap 16) with a Cosinus partition-of-unity blend on both outputs, and
-    # trim the FireANTs iterations to keep the 8-patch run quick — all forwarded to `konfai-apps infer --set`.
+    # trim the FireANTs iterations to keep the 8-patch run quick: all forwarded to `konfai-apps infer --set`.
     app.register(
         ["FireANTs_SyN"],
         [fixed],

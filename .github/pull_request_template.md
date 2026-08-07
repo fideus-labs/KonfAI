@@ -16,13 +16,13 @@ Types: feat | fix | perf | refactor | docs | test | build | ci | chore
 
 ## Type of change
 
-- [ ] `feat` — new feature
-- [ ] `fix` — bug fix
-- [ ] `perf` — performance improvement
-- [ ] `refactor` — no behaviour change
-- [ ] `docs` — documentation only
-- [ ] `test` — tests only
-- [ ] `build` / `ci` / `chore` — tooling, deps, CI
+- [ ] `feat`: new feature
+- [ ] `fix`: bug fix
+- [ ] `perf`: performance improvement
+- [ ] `refactor`: no behaviour change
+- [ ] `docs`: documentation only
+- [ ] `test`: tests only
+- [ ] `build` / `ci` / `chore`: tooling, deps, CI
 - [ ] Breaking change (describe the migration below)
 
 ## How has this been tested?

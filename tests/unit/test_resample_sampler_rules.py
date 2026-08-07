@@ -16,7 +16,7 @@
 
 """The rules the one gather obeys, pinned apart from any stage that uses it.
 
-There is a single sampler in KonfAI — ``konfai.data.sampling.gather`` — and every resample, warp and
+There is a single sampler in KonfAI (``konfai.data.sampling.gather``), and every resample, warp and
 regrid reaches its voxels through it. That is recent: the rules used to be restated by a separable
 sampler and a non-separable one, which is how two of them came to disagree about a half-voxel rim.
 
@@ -55,7 +55,7 @@ def _coordinates(
         for axis, extent in enumerate(target_shape)
     ]
     grids = torch.meshgrid(*axes, indexing="ij")
-    # The gather wants the physical components last, in (x, y, z) — the mirror of the array axes.
+    # The gather wants the physical components last, in (x, y, z): the mirror of the array axes.
     return torch.stack(list(reversed(grids)), dim=-1)
 
 
@@ -99,7 +99,7 @@ def test_a_volume_comes_back_as_the_dtype_it_went_in_as(dtype: torch.dtype) -> N
 def test_nearest_is_itk_round_half_up_and_not_a_size_ratio() -> None:
     """``floor(c + 0.5)``, which is a statement about a coordinate.
 
-    ``F.interpolate``'s nearest is ``floor(o * scale)``, a statement about a size RATIO -- it says
+    ``F.interpolate``'s nearest is ``floor(o * scale)``, a statement about a size RATIO, it says
     nothing once the target grid carries an origin of its own, and it lags the LINEAR map of the same
     stage by ``(scale - 1) / 2`` source voxels, so an image and its label map resampled together come
     out shifted against each other. A label map is still a label map under either rule.
@@ -121,7 +121,7 @@ def test_nearest_is_itk_round_half_up_and_not_a_size_ratio() -> None:
 
 
 def test_inside_is_the_half_open_half_voxel_rim() -> None:
-    """A sample is inside while its source index is in ``[-0.5, n - 0.5)`` -- SimpleITK's interval.
+    """A sample is inside while its source index is in ``[-0.5, n - 0.5)``: SimpleITK's interval.
 
     The rim beyond the outermost voxel CENTRES is inside and reproduces the border value; a hair past
     it is fill. Getting this wrong shows as a one-voxel frame, which reads as anatomy.
@@ -149,8 +149,8 @@ def test_inside_is_the_half_open_half_voxel_rim() -> None:
 def test_the_gather_matches_simpleitk() -> None:
     """The independent check. Written against SimpleITK because that is what the arithmetic claims.
 
-    The oracle is skipped here and not at module scope: the rules above -- the working dtype, the
-    inside interval, round-half-up -- are checkable without it, and a net that evaporates when an
+    The oracle is skipped here and not at module scope: the rules above (the working dtype, the
+    inside interval, round-half-up) are checkable without it, and a net that evaporates when an
     optional dependency is missing is the failure mode this file exists to prevent.
     """
     sitk = pytest.importorskip("SimpleITK")
@@ -173,7 +173,7 @@ def test_a_region_reads_the_same_voxels_as_the_whole_volume() -> None:
     """Coordinates are GLOBAL, so handing the gather a window changes almost nothing.
 
     Almost, and the exception is named: a blend goes to ``grid_sample``, which takes NORMALISED
-    coordinates and therefore divides by the extent of the tensor it is handed -- a window, here.
+    coordinates and therefore divides by the extent of the tensor it is handed: a window, here.
     That is the one region-local number in the path, and it is what a fused kernel costs. Every
     other part of the arithmetic is global, which is why the disagreement stays at rounding rather
     than moving a sample.
@@ -196,8 +196,8 @@ def test_a_region_reads_the_same_voxels_as_the_whole_volume() -> None:
 def test_a_cuda_half_volume_is_blended_through_float32_coordinates() -> None:
     """The blend's grid counts voxels in float32 whatever the payload.
 
-    A half grid quantizes a coordinate at ~2^-11 of the window extent — 0.06 voxel on a 512 axis,
-    far past the ~1e-5 streamed-vs-whole band this path claims — so a half CUDA volume must land
+    A half grid quantizes a coordinate at ~2^-11 of the window extent (0.06 voxel on a 512 axis,
+    far past the ~1e-5 streamed-vs-whole band this path claims), so a half CUDA volume must land
     each sample where the float32 volume lands it, to half's own value precision.
     """
     extent = 512

@@ -68,7 +68,7 @@ def _store(tmp_path: Path) -> Dataset:
 
 
 def test_written_store_declares_the_displacement_axis(tmp_path: Path) -> None:
-    """The component axis is typed ``displacement`` on disk -- the whole point of RFC-5 here."""
+    """The component axis is typed ``displacement`` on disk: the whole point of RFC-5 here."""
     _store(tmp_path).write("case", "DVF", _displacement_field_transform())
 
     stores = list(tmp_path.rglob("*.ome.zarr"))
@@ -141,7 +141,7 @@ def test_non_displacement_transform_is_rejected(tmp_path: Path) -> None:
 def test_a_field_streamed_region_by_region_is_still_a_field(tmp_path: Path) -> None:
     """The marker on the attributes declares it, so no transform has to be built to say so.
 
-    A producer that emits blocks -- the predictor, and anything writing a field too large to hold --
+    A producer that emits blocks: the predictor, and anything writing a field too large to hold --
     has no transform to hand over, and wrapping one purely to be described correctly would mean
     assembling in memory the very volume streaming exists to avoid. So the declaration travels with
     the attributes instead, and the streamed store ends up saying exactly what the whole-volume one

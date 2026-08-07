@@ -269,7 +269,7 @@ def test_import_app_gates_local_and_rejects_remote(tmp_path: Path, monkeypatch: 
 
 
 def test_import_app_api_copies_weightless_registration_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A weightless registration app (engine-based, no .pt — e.g. ConvexAdam / FireANTs) imports cleanly:
+    """A weightless registration app (engine-based, no .pt: e.g. ConvexAdam / FireANTs) imports cleanly:
     the runner copies its config into the session and reports checkpoints=[] so run_prediction runs it
     with the config's own engine (no models= needed)."""
     monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")  # engine deps out of scope for the copy check
@@ -752,7 +752,7 @@ def test_prepare_finetune_bakes_set_parameters(tmp_path: Path) -> None:
 
 def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The tool -> prepare_* -> job-registry wiring: kind, runner target, devices, manifest and the
-    tuned parameters that gate the refine loop (the launch itself is stubbed -- no subprocess)."""
+    tuned parameters that gate the refine loop (the launch itself is stubbed: no subprocess)."""
     monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "ws"))
     import importlib
 
@@ -859,7 +859,7 @@ def _touch(path: Path) -> str:
 
 
 def _local_app(tmp_path: Path) -> str:
-    """A minimal resolvable local app bundle -- enough for the prepare_* path validation."""
+    """A minimal resolvable local app bundle: enough for the prepare_* path validation."""
     app_dir = tmp_path / "PairedApp"
     app_dir.mkdir(parents=True, exist_ok=True)
     (app_dir / "app.json").write_text(

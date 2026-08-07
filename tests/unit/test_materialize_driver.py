@@ -18,7 +18,7 @@
 
 Two branches, and the caller is told which one ran: the sweep when the chain streams, the classic
 load when it cannot. Both must leave the same bytes, and the streamed one must leave the volume on
-disk — never in memory, which is what a whole-volume patch through ``get_data`` would have done."""
+disk, never in memory, which is what a whole-volume patch through ``get_data`` would have done."""
 
 from pathlib import Path
 
@@ -94,7 +94,7 @@ def test_whole_volume_branch_still_writes_and_says_so(tmp_path: Path) -> None:
     """A statistic taken after a value-changing stage cannot stream: the stored volume's statistic
     is not Standardize's input, so the chain falls back.
 
-    This is the case the driver exists for — ``_stream_ready`` alone would have returned False and
+    This is the case the driver exists for: ``_stream_ready`` alone would have returned False and
     written nothing at all, silently."""
     source = _source(tmp_path)
     manager = _manager(source, [Clip(0.0, 50.0), Standardize(inverse=False), Save(str(tmp_path / "out"))])

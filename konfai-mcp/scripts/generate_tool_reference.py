@@ -24,9 +24,9 @@ async def render() -> str:
     templates = list(await mcp.list_resource_templates()) if hasattr(mcp, "list_resource_templates") else []
 
     lines = [
-        "# KonfAI MCP — Tool Reference",
+        "# KonfAI MCP. Tool Reference",
         "",
-        "> GENERATED from the registry by `konfai-mcp/scripts/generate_tool_reference.py` — do not edit by hand.",
+        "> GENERATED from the registry by `konfai-mcp/scripts/generate_tool_reference.py`: do not edit by hand.",
         "",
         f"{len(tools)} tools, {len(prompts)} prompts, {len(resources) + len(templates)} resources. "
         "The live equivalent is the `guide://tool-index` resource.",
@@ -41,10 +41,10 @@ async def render() -> str:
     if resources or templates:
         lines += ["", "## Resources", ""]
         for resource in resources:
-            lines.append(f"- `{resource.uri}` — {(resource.description or '').strip()}")
+            lines.append(f"- `{resource.uri}`: {(resource.description or '').strip()}")
         for template in templates:
             uri = getattr(template, "uriTemplate", None) or getattr(template, "uri_template", "")
-            lines.append(f"- `{uri}` — {(template.description or '').strip()}")
+            lines.append(f"- `{uri}`: {(template.description or '').strip()}")
     return "\n".join(lines) + "\n"
 
 

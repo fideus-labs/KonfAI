@@ -19,7 +19,7 @@
 A TTA case streams when every copy's un-augment acts slab by slab (a draw whose declared remap fixes
 the slab axis): each copy keeps its own sliding-window accumulator, a :class:`SlabAligner` holds the
 copies' finalized slabs until the slowest frontier passes, and the joint interval runs the SAME
-per-copy head and reduction call as the whole-volume ``get_output`` — which is why the streamed
+per-copy head and reduction call as the whole-volume ``get_output``: which is why the streamed
 output must equal the assembled one bit for bit, for every reduction (Mean, Median, Concat), blend,
 and dtype. A draw that moves the slab axis (a z-flip) must refuse and fall back, transparently."""
 
@@ -233,7 +233,7 @@ def test_aligner_joint_intervals_carry_every_stream_and_stay_bounded() -> None:
 def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, monkeypatch, drive_tta) -> None:
     # InferenceStack declares SLAB: per-voxel member reduction plus a per-region side write of the
     # stack. Fed through the streamed prefix it must produce the same main output AND the same stack
-    # entry as the whole-volume call — here on a TTA Concat chain, where the stack holds both copies.
+    # entry as the whole-volume call: here on a TTA Concat chain, where the stack holds both copies.
     def run(where: str, streamed: bool):
         stack = InferenceStack("", "stack", mode="Seg")
         streamed_out, whole_volume = drive_tta(
@@ -257,7 +257,7 @@ def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, mo
 
 def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path, monkeypatch, drive_tta) -> None:
     # A destination that cannot serve region writes must not lose the stack: the SLAB stage buffers
-    # and writes classically at the last slab — the whole-volume path's memory, never a missing file.
+    # and writes classically at the last slab: the whole-volume path's memory, never a missing file.
     stack = InferenceStack(f"{tmp_path}/stack_only.h5:h5", "stack", mode="Seg")
     stack.dataset.open_data_stream = lambda *args, **kwargs: None  # type: ignore[union-attr,method-assign]
     written, whole_volume = drive_tta(
@@ -276,7 +276,7 @@ def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path
 
 def test_streamed_tta_binds_the_draw_by_the_manager_case_index(tmp_path, monkeypatch, drive_tta) -> None:
     # A DDP shard remaps case indices to loader-local ones, but the draw was made under the manager's
-    # own index — the only key ``who_index`` holds. Both paths must un-augment through it: with the
+    # own index: the only key ``who_index`` holds. Both paths must un-augment through it: with the
     # local index (0 here) the state lookup has no entry at all.
     streamed, whole_volume = drive_tta(
         tmp_path / "streamed", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, case_index=7
@@ -326,7 +326,7 @@ def test_interleaved_case_entries_order_copies_by_slab_start() -> None:
 
 def test_interleaved_case_entries_keep_the_plain_order_when_groups_disagree() -> None:
     # One shared arrival order must serve every destination group: when their grids disagree on the
-    # slab starts (or one cannot even index an entry), the interleave silently steps aside — it is a
+    # slab starts (or one cannot even index an entry), the interleave silently steps aside, it is a
     # memory bound, never a correctness requirement.
     patch = DatasetPatch(patch_size=list(PATCH_SIZE), overlap=OVERLAP)
     patch.load(list(SHAPE), 0)

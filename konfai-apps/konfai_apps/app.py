@@ -37,7 +37,15 @@ from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import AppRepositoryError, KonfAIAppClientError
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, SUPPORTED_FORMATS, split_format_level, split_path_spec
+from konfai.utils.utils import (
+    SUPPORTED_EXTENSIONS,
+    SUPPORTED_FORMATS,
+    directory_volume_form,
+    is_dicom_file,
+    split_format_level,
+    split_path_spec,
+    storage_form,
+)
 from ruamel.yaml import YAML
 
 from .app_repository import LocalAppRepository, get_app_repository_info
@@ -195,9 +203,9 @@ def _finetune_target_has_loss(model_subtree: Any) -> bool:
 
     A RESUME whose model has ``outputs_criterions: None`` leaves ``network.measure is None``: the trainer
     runs forward-only, updates no weights, yet still writes back a checkpoint identical to its input. Scan
-    every ``outputs_criterions`` in the subtree (a nested sub-network — a GAN — carries its own one level
+    every ``outputs_criterions`` in the subtree (a nested sub-network (a GAN) carries its own one level
     deeper) and accept on the first real loss: a concrete criterion (not the ``default|a|b|c`` placeholder
-    key) whose ``is_loss`` is not ``false``. Optimizer presence is not required — nested GANs and inference
+    key) whose ``is_loss`` is not ``false``. Optimizer presence is not required: nested GANs and inference
     engines legitimately omit it, so it is no trainability signal.
     """
     found = False
@@ -811,11 +819,7 @@ class KonfAIApp(AbstractKonfAIApp):
         str
             The extension (dot-prefixed); falls back to `file.suffix` if nothing matches.
         """
-        lower = file.name.lower()
-        matches = [ext for ext in SUPPORTED_EXTENSIONS if lower.endswith("." + ext)]
-        if not matches:
-            return file.suffix
-        return "." + max(matches, key=len)
+        return storage_form(file)
 
     @staticmethod
     def _list_supported_files(paths: list[Path]) -> list[Path]:
@@ -864,49 +868,23 @@ class KonfAIApp(AbstractKonfAIApp):
 
         A DICOM series and an OME-Zarr store are directories, not files, so they must be staged
         whole (not fragmented into their slices/chunks). Returns the extension the KonfAI dataset
-        backend resolves the staged volume under -- ``.ome.zarr``/``.zarr`` for an OME-Zarr store,
-        ``""`` for a DICOM series directory (read as a bare ``Volume_i`` directory) -- or ``None``
+        backend resolves the staged volume under (``.ome.zarr``/``.zarr`` for an OME-Zarr store,
+        ``""`` for a DICOM series directory (read as a bare ``Volume_i`` directory)) or ``None``
         for a plain directory that holds separate per-case files.
         """
-        if not path.is_dir():
-            return None
-        lower = path.name.lower()
-        if lower.endswith(".ome.zarr"):
-            return ".ome.zarr"
-        if lower.endswith(".zarr"):
-            return ".zarr"
-        entries = sorted(path.iterdir(), key=lambda entry: entry.name)
-        names = {entry.name for entry in entries}
-        if names & {".zgroup", ".zattrs", "zarr.json"}:
-            return ".ome.zarr"
-        if any(name.lower().endswith((".dcm", ".dicom")) for name in names):
-            return ""
-        # A DICOM series is commonly exported with no extension at all, so the suffixes above miss it;
-        # the Part-10 magic (``DICM`` at offset 128) in the first file is what identifies it then.
-        files = [entry for entry in entries if entry.is_file()]
-        if any(KonfAIApp._is_dicom_file(file) for file in files):
-            return ""
-        return None
+        return directory_volume_form(path)
 
     @staticmethod
     def _is_dicom_file(path: Path) -> bool:
-        """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128.
-
-        Reimplemented here (not imported from ``konfai``) to stay on KonfAI's public API rather than
-        reach into a private helper.
-        """
-        try:
-            with open(path, "rb") as file:
-                return file.read(132)[128:132] == b"DICM"
-        except OSError:
-            return False
+        """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128."""
+        return is_dicom_file(path)
 
     @staticmethod
     def _list_input_units(paths: list[Path]) -> list[tuple[Path, str]]:
         """Expand input paths into ordered ``(source, staged_suffix)`` units for the ``Dataset/`` layout.
 
         A unit is either a single supported file, or a directory that is itself one volume (an
-        OME-Zarr store or a DICOM series directory -- see :meth:`_directory_volume_suffix`). A plain
+        OME-Zarr store or a DICOM series directory: see :meth:`_directory_volume_suffix`). A plain
         directory is walked so each contained file / store / series becomes its own case, in sorted
         order so cases pair consistently across input groups.
 
@@ -933,7 +911,7 @@ class KonfAIApp(AbstractKonfAIApp):
                     return
                 visited.add(real)
                 # A cyclic symlink raises OSError (ELOOP) at iterdir() itself, before the resolve()/visited
-                # guard above can see the child -- skip the unreadable entry instead of aborting staging.
+                # guard above can see the child: skip the unreadable entry instead of aborting staging.
                 try:
                     children = sorted(path.iterdir(), key=lambda entry: entry.name)
                 except OSError:
@@ -993,7 +971,7 @@ class KonfAIApp(AbstractKonfAIApp):
             Destination symlink path.
         """
         # ``is_symlink()`` also catches a BROKEN link (its target is gone), which ``exists()`` reports
-        # as absent -- left in place it makes both os.symlink and the copy fallback fail on FileExists.
+        # as absent: left in place it makes both os.symlink and the copy fallback fail on FileExists.
         if dst.is_symlink() or dst.exists():
             if dst.is_dir() and not dst.is_symlink():
                 shutil.rmtree(dst)
@@ -1042,7 +1020,7 @@ class KonfAIApp(AbstractKonfAIApp):
         config is the only place that level is declared.
 
         Format-neutral by construction: ``split_format_level`` knows nothing about any backend, and an
-        entry that declares no ``@N`` — which is every non-pyramid format — yields 0, the level those
+        entry that declares no ``@N`` (which is every non-pyramid format) yields 0, the level those
         backends are read at.
 
         Only the entry pointing at ``dataset_dir`` counts; a config listing several sources may read each
@@ -1074,14 +1052,14 @@ class KonfAIApp(AbstractKonfAIApp):
         Inputs map positionally to ``Volume_0..N-1`` in ``app.json`` declaration order, so only trailing
         inputs can be omitted. An optional input may declare a ``default`` in app.json (``"ones"`` /
         ``"zeros"``); konfai-apps then creates that ``Volume_i`` for every case, shaped and geo-referenced
-        like ``Volume_0`` but read from its header only (no pixel load) — so an app runs from its required
+        like ``Volume_0`` but read from its header only (no pixel load): so an app runs from its required
         inputs alone. The registration mask branches use ``"ones"`` (a whole-image mask restricts nothing).
         Optional inputs with no ``default`` are left absent; a genuinely-missing required input still fails
         downstream.
 
         "Like ``Volume_0``" has to include the LEVEL it is read at. On a multiscale input, level 1 is not
         the shape of level 0, so a default sized from level 0 is both the wrong shape and unopenable at
-        ``@1`` — the store has one level and the reader asks for the second. Taking the level from the
+        ``@1``: the store has one level and the reader asks for the second. Taking the level from the
         config keeps this one code path for every format: a flat input reports level 0.
         """
         declared = list(self.app_repository.get_inputs().items())
@@ -1179,8 +1157,8 @@ class KonfAIApp(AbstractKonfAIApp):
     def _stage_result_dir(output: Path, tmp_dir: Path | None, name: str) -> Path:
         """Where a stage writes its results.
 
-        With a caller-owned workspace (``tmp_dir`` set -- e.g. konfai-mcp runs directly in the session
-        dir so the run is inspectable live), write straight into ``output`` -- no throwaway ``./<name>``
+        With a caller-owned workspace (``tmp_dir`` set (e.g. konfai-mcp runs directly in the session
+        dir so the run is inspectable live), write straight into ``output``) no throwaway ``./<name>``
         + copy. Otherwise write to ``./<name>`` in the isolated temp workspace, which the caller then
         collects into ``output``.
         """
@@ -1201,7 +1179,7 @@ class KonfAIApp(AbstractKonfAIApp):
 
     @staticmethod
     def _collect_result(output: Path, tmp_dir: Path | None, name: str) -> None:
-        """Collect a stage's results into ``output`` -- the mirror of :meth:`_stage_result_dir`.
+        """Collect a stage's results into ``output``: the mirror of :meth:`_stage_result_dir`.
 
         Without a caller-owned workspace (``tmp_dir`` unset) the stage wrote ``./<name>`` in the isolated
         temp workspace; copy it into ``output`` before the workspace is deleted. With a caller-owned
@@ -1270,7 +1248,7 @@ class KonfAIApp(AbstractKonfAIApp):
             config_overrides=config_overrides,
         )
         # After install_inference, not before: the defaults are sized from the level the config asks for,
-        # and that config only exists here -- installation is what writes it out with any --set applied.
+        # and that config only exists here: installation is what writes it out with any --set applied.
         self._fill_optional_inputs(len(inputs), prediction_file)
         from konfai.predictor import predict
 
@@ -1595,13 +1573,13 @@ class KonfAIApp(AbstractKonfAIApp):
                 shutil.copy2(produced[-1], Path(checkpoint_name).name)
             # Honour `output` for every caller: the CLI passes tmp_dir=output (workspace IS the output
             # dir, nothing to do), but any other caller runs in a throwaway workspace that the decorator
-            # deletes -- so collect the resulting bundle files (app.json + configs + code + fine-tuned
+            # deletes, so collect the resulting bundle files (app.json + configs + code + fine-tuned
             # checkpoints) into `output`, mirroring how infer collects ./Predictions.
             output_dir = Path(output).resolve()
             if Path.cwd().resolve() != output_dir:
                 output_dir.mkdir(parents=True, exist_ok=True)
                 # Walk the whole bundle so nested assets survive (a subpackaged .yml/.py, requirements.txt,
-                # app.json, and the fine-tuned .pt) -- a root-only iterdir silently drops everything nested.
+                # app.json, and the fine-tuned .pt): a root-only iterdir silently drops everything nested.
                 # The ./Dataset symlink is the user's input, not a bundle asset, so it is excluded.
                 skip = {"Dataset"}
                 for artifact in Path(".").rglob("*"):

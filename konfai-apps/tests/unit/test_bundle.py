@@ -142,7 +142,7 @@ def test_transform_manifest_maps_the_pipeline_to_runtime_ops():
                             "Volume": {
                                 "transforms": {
                                     "TensorCast": {"dtype": "float32"},
-                                    "ResampleToResolution": {"spacing": [3, 3, 3], "inverse": True},
+                                    "Resample": {"spacing": [3, 3, 3], "inverse": True},
                                     "Standardize": {"mean": "None", "std": "None"},
                                 }
                             }
@@ -176,7 +176,7 @@ def test_transform_manifest_reads_canonical_and_before_reduction_post():
                 "g": {
                     "transforms": {
                         "Canonical": {"inverse": True},
-                        "ResampleToResolution": {"spacing": [1.5, 1.5, 1.5], "inverse": True},
+                        "Resample": {"spacing": [1.5, 1.5, 1.5], "inverse": True},
                     }
                 }
             },
@@ -223,7 +223,7 @@ def test_masked_tta_compiler_reads_the_config():
                                 "is_input": False,
                                 "transforms": {
                                     "KonfAIInference": {"repo_id": "R/S", "model_name": "body"},
-                                    "ResampleToResolution": {"spacing": [1, 1, 3]},
+                                    "Resample": {"spacing": [1, 1, 3]},
                                     "Dilate": {"dilate": 5},
                                     "Save": {"dataset": "x"},
                                 },

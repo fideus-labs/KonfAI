@@ -131,7 +131,7 @@ def test_unstreamable_formats_and_inputs_return_none(tmp_path: Path) -> None:
 
 
 def test_mha_float16_is_stored_as_float32_matching_the_whole_volume_path(tmp_path: Path) -> None:
-    """MetaImage has no half-float type, so a float16 output streams as float32 -- the exact widening
+    """MetaImage has no half-float type, so a float16 output streams as float32: the exact widening
     the whole-volume writer does too, so streamed and assembled stay byte-identical (not a crash, which
     is what a bare ``open_data_stream`` refusal would cause mid-run)."""
     volume = _volume(channels=2, dtype=np.float16)
@@ -197,11 +197,11 @@ def test_replaced_entry_stays_readable_until_its_replacement_is_complete(tmp_pat
 @pytest.mark.parametrize("file_format", ["mha", "omezarr"])
 def test_two_concurrent_streams_of_one_entry_publish_a_complete_volume(tmp_path: Path, file_format: str) -> None:
     """Two writers of the same entry (a case landing on two workers) must not share a temporary:
-    each owns its own, and whichever finalizes last publishes a COMPLETE volume — never an
+    each owns its own, and whichever finalizes last publishes a COMPLETE volume, never an
     interleaving where one writer's open truncated the other's in-flight file."""
     _skip_unavailable(file_format)
     # DISTINCT volumes: if the two temporaries interleaved into one final file, the result would equal
-    # neither whole -- writing the same values both times could not tell an interleaving from a clean
+    # neither whole: writing the same values both times could not tell an interleaving from a clean
     # publish. ``first`` finalizes last (its ``with`` closes after ``second``'s), so it must win whole.
     volume_a = _volume()
     volume_b = volume_a + 100

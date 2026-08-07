@@ -19,26 +19,26 @@
 Design rationale
 ----------------
 DICOM is not a folder of independent images.  A CT or MRI acquisition is a
-*series* — a collection of .dcm files that together define a 3-D volume.
+*series*: a collection of .dcm files that together define a 3-D volume.
 Reading a DICOM correctly requires:
 
-1. **Series discovery** — group files by SeriesInstanceUID.  A folder may
+1. **Series discovery**: group files by SeriesInstanceUID.  A folder may
    contain multiple series (e.g. a T1 and a T2 acquired in the same session).
 
-2. **Slice ordering** — sort slices by ImagePositionPatient (z-component along
+2. **Slice ordering**: sort slices by ImagePositionPatient (z-component along
    ImageOrientationPatient normal vector), not by filename or InstanceNumber,
    which can be unreliable.
 
-3. **Geometry extraction** — derive spacing_mm (PixelSpacing + SliceThickness /
+3. **Geometry extraction**: derive spacing_mm (PixelSpacing + SliceThickness /
    derived inter-slice distance), origin (ImagePositionPatient of first slice),
    and direction cosines (ImageOrientationPatient rows and columns + cross
    product for the z-axis).
 
-4. **CT intensity rescale** — apply RescaleSlope and RescaleIntercept to
+4. **CT intensity rescale**: apply RescaleSlope and RescaleIntercept to
    convert stored pixel values to Hounsfield Units (HU).  This is mandatory
    for CT and is absent (or identity) for MR.
 
-5. **Error handling** — missing tags, single-slice series, inconsistent spacing,
+5. **Error handling**: missing tags, single-slice series, inconsistent spacing,
    non-square pixels, and unsupported transfer syntaxes all need clear messages.
 
 Optional dependency: ``pydicom`` (``pip install konfai[dicom]``).
@@ -217,9 +217,9 @@ def extract_geometry(
     Returns
     -------
     tuple[np.ndarray, np.ndarray, np.ndarray]
-        - ``origin`` (3,) — physical position of the first voxel (mm).
-        - ``spacing`` (3,) — KonfAI/SimpleITK order (x, y, z) in mm.
-        - ``direction`` (9,) — row-major 3-by-3 direction cosine matrix, flattened.
+        - ``origin`` (3,): physical position of the first voxel (mm).
+        - ``spacing`` (3,): KonfAI/SimpleITK order (x, y, z) in mm.
+        - ``direction`` (9,): row-major 3-by-3 direction cosine matrix, flattened.
 
     Raises
     ------
@@ -575,10 +575,10 @@ def read_dicom_series(
     Returns
     -------
     tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
-        - ``volume`` — shape (1, Z, Y, X), dtype float32.
-        - ``origin`` — physical origin of the first voxel, mm (shape (3,)).
-        - ``spacing`` — voxel size in KonfAI/SimpleITK (x, y, z) order (shape (3,)).
-        - ``direction`` — row-major 3-by-3 direction cosine matrix, flat (shape (9,)).
+        - ``volume``: shape (1, Z, Y, X), dtype float32.
+        - ``origin``: physical origin of the first voxel, mm (shape (3,)).
+        - ``spacing``: voxel size in KonfAI/SimpleITK (x, y, z) order (shape (3,)).
+        - ``direction``: row-major 3-by-3 direction cosine matrix, flat (shape (9,)).
 
     Raises
     ------

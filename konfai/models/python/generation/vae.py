@@ -23,7 +23,7 @@ from konfai.network import blocks, network
 class VAE(network.Network):
     """Convolutional encoder-decoder (deterministic autoencoder).
 
-    Note: this network has no latent sampling — it is a plain autoencoder, not a
+    Note: this network has no latent sampling, it is a plain autoencoder, not a
     variational one. For a reparameterised latent (mu/log_std/z + KL-ready named
     outputs) use ``blocks.LatentDistribution`` as a bottleneck, as ``LinearVAE``
     demonstrates.

@@ -23,6 +23,6 @@ config + weights and points its ``classpath`` at one of these, e.g.
 ``impact_reg_konfai.models.convexadam:RegistrationNet``; a custom app imports the class and subclasses it.
 
 This ``__init__`` deliberately imports NOTHING: each engine pulls a heavy, distinct backend (itk-impact,
-fireants, elastix) at module import, so resolving one preset must not drag in the other two -- the
+fireants, elastix) at module import, so resolving one preset must not drag in the other two: the
 classpath imports only the single submodule it names.
 """

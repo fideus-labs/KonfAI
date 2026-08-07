@@ -1,206 +1,135 @@
 # Installation
 
-This page covers every supported way to install KonfAI — PyPI, Pixi, and from
-source — plus the optional extras and how to verify the result. Read it before
-your first run, or come back when a format reader or CLI entrypoint is missing.
-KonfAI targets **Python 3.10+**. The core package pulls in PyTorch, NumPy,
-`ruamel.yaml`, `huggingface_hub` and a few small utilities — but **no image
-reader**: SimpleITK, h5py, pydicom and zarr arrive through the extras below, so
-`pip install konfai` on its own cannot open a `.mha`.
-
-## Install from PyPI
+KonfAI needs **Python 3.10 or newer**. This is the line most people want:
 
 ```bash
-python -m pip install konfai
+python -m pip install "konfai[imaging]"
 ```
 
-This installs the core CLI entrypoints:
+`konfai` on its own brings PyTorch, NumPy, `ruamel.yaml`, `huggingface_hub` and
+the engine, but **no image reader**, so it cannot open a `.mha`. The `[imaging]`
+extra adds SimpleITK, h5py, pydicom, zarr and ngff-zarr, which covers all four
+storage backends at once. You do not need `[dicom]` or `[omezarr]` on top of it.
 
-- `konfai`
-- `konfai-cluster` with the `cluster` extra
-
-Optional extras exposed by the package metadata:
+Check the result:
 
 ```bash
-python -m pip install "konfai[imaging]"   # all imaging backends: SimpleITK, h5py, pydicom, zarr, ngff-zarr
-python -m pip install "konfai[dicom]"     # pydicom — DICOM series reader
-python -m pip install "konfai[omezarr]"   # zarr + ngff-zarr — OME-Zarr dataset read/write
-python -m pip install "konfai[all]"       # every optional extra at once
-python -m pip install "konfai[dev]"       # test, docs, and lint tooling
+python -c "import konfai; print(konfai.__version__)"
+konfai --help
 ```
 
-### Optional extras
+The shipped examples do not travel in the wheel, so run them from a checkout:
 
-**A bare `pip install konfai` includes no imaging backend** — reading `.mha`,
-HDF5, DICOM, or OME-Zarr data requires the matching extra below (`[imaging]`
-covers all four).
+```bash
+git clone https://github.com/fideus-labs/KonfAI.git
+cd KonfAI
+python -m pip install -e ".[imaging]"
+```
+
+## The extras
+
+Take one when you need a specific reader, metric or tool. `[all]` takes
+everything, `[dev]` adds the test, lint and docs tooling.
 
 | Extra | Pulls in | Use it for |
 | --- | --- | --- |
-| `itk` | `SimpleITK` | reading/writing ITK formats (`.mha`, `.nii.gz`, …) |
+| `imaging` | `SimpleITK`, `h5py`, `pydicom`, `zarr`, `ngff-zarr` | all four storage backends at once: ITK, HDF5, DICOM, OME-Zarr |
+| `itk` | `SimpleITK` | ITK formats only (`.mha`, `.nii.gz`, …) |
 | `hdf5` | `h5py` | HDF5-backed datasets |
-| `imaging` | `SimpleITK`, `h5py`, `pydicom`, `zarr`, `ngff-zarr` | **all four storage backends at once** (ITK + HDF5 + DICOM + OME-Zarr) — the common medical-imaging stack |
-| `dicom` | `pydicom` | DICOM series input — see {doc}`../reference/components/storage-backends` |
-| `omezarr` | `zarr`, `ngff-zarr` | OME-Zarr / OME-NGFF input — see {doc}`../reference/components/storage-backends` |
+| `dicom` | `pydicom` | DICOM series, see {doc}`../reference/components/storage-backends` |
+| `omezarr` | `zarr`, `ngff-zarr` | OME-Zarr / OME-NGFF, see {doc}`../reference/components/storage-backends` |
 | `tensorboard` | `tensorboard` | TensorBoard logging |
 | `monitoring` | `nvidia-ml-py` | GPU monitoring |
-| `vtk` | `vtk` | VTK-dependent rendering and mesh features |
-| `lpips` | `lpips` | the `LPIPS` perceptual metric |
+| `smp` | `segmentation-models-pytorch` | the SMP model bridge, **required by `examples/Synthesis`** |
+| `lpips` | `lpips` | the `LPIPS` metric |
 | `ssim` | `scikit-image` | the `SSIM` metric |
 | `fid` | `scipy`, `torchvision` | the `FID` metric |
-| `smp` | `segmentation-models-pytorch` | the `SMP` model bridge — **required by `examples/Synthesis`** |
-| `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export (experimental; see {doc}`../reference/python-api`) |
-| `cluster` | `submitit` | `konfai-cluster` job submission |
-| `all` | all of the above | install every optional extra at once |
-| `dev` | pytest, ruff, mypy, sphinx, … | local development, tests, docs, and linting |
+| `vtk` | `vtk` | VTK rendering and mesh features |
+| `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../reference/python-api` |
+| `cluster` | `submitit` | the `konfai-cluster` submitter |
+| `all` | everything above | one shot |
+| `dev` | pytest, ruff, mypy, sphinx, … | working on KonfAI itself |
 
-```{tip}
-`konfai[imaging]` already covers DICOM and OME-Zarr — you do **not** need to add
-`[dicom]` or `[omezarr]` on top of it. See {doc}`../reference/components/storage-backends`
-for which format token maps to which backend.
-```
+## Running packaged apps
 
-Install the standalone apps package separately when you need packaged app
-execution:
+Apps live in their own package:
 
 ```bash
 python -m pip install konfai-apps
 ```
 
-:::{important}
+It gives you the `konfai-apps` and `konfai-apps-server` commands, plus the
+Python API under `konfai_apps`. Check them with `konfai-apps --help` and
+`konfai-apps-server --help`; `konfai-cluster --help` comes with the `cluster`
+extra.
+
 Installing one of the bundled apps (`apps/impact_seg`, `apps/impact_synth`,
-`apps/impact_reg`, `apps/mrsegmentator`, `apps/totalsegmentator`) **from a checkout**
-needs both `konfai` and `konfai-apps` from that same checkout:
+`apps/impact_reg`, `apps/mrsegmentator`, `apps/totalsegmentator`) **from a
+checkout** needs all three from that same checkout:
 
 ```bash
 python -m pip install -e . -e konfai-apps -e apps/impact_seg
 ```
 
-Each bundle pins **`konfai==` and `konfai-apps==`** its own `setuptools_scm` version, and
-between release tags that version exists nowhere on PyPI — so installing the app alone
-fails to resolve with *"Could not find a version that satisfies the requirement
-konfai==1.7.1.devNN"*.
-Installing from PyPI (`pip install impact-seg-konfai`) is unaffected, because a released
-bundle pins a released `konfai-apps`.
-:::
+Each bundle pins `konfai==` and `konfai-apps==` at its own `setuptools_scm`
+version, and between release tags that version exists nowhere on PyPI. Install
+the app alone from a checkout and pip fails with *"Could not find a version that
+satisfies the requirement konfai==1.7.1.devNN"*. From PyPI
+(`pip install impact-seg-konfai`) it just works: a released bundle pins a
+released `konfai-apps`.
 
-This provides:
+## Pixi
 
-- `konfai-apps`
-- `konfai-apps-server`
-- the Python API under `konfai_apps`
-
-## Install with Pixi
-
-[Pixi](https://pixi.sh) is the recommended tool for reproducible environments
-because it pins both Python packages and system libraries.
-
-Install a released version:
+[Pixi](https://pixi.sh) pins system libraries as well as Python packages, so it
+is the reproducible option and the one to use when working on KonfAI itself.
 
 ```bash
-pixi add konfai
+pixi add konfai        # a released version, in your own project
 ```
 
-Or, for a fully locked development environment from the repository:
+From a checkout:
 
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
-pixi install        # resolves and installs all environments
-pixi run test       # run the test suite
-pixi run lint       # ruff lint the source tree
-pixi run check      # lint + format-check + test (run before pushing)
+pixi install           # every environment, locked
+pixi run test-fast     # the iteration loop, about 1 min 40
+pixi run lint          # ruff over the source tree
+pixi run check         # lint + format + tests, before pushing
 ```
 
-See {doc}`../development` for the full developer workflow and the complete task
-list.
+{doc}`../development` has the full task list.
 
-## Install from source (pip)
+## From source, without Pixi
 
-Use an editable pip install when Pixi is not available or when you need to
-install into an existing environment:
+An editable install works when Pixi is not available or when you already have an
+environment:
 
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 python -m pip install -e ".[imaging,dev]"
-pytest -q tests/    # verify
+pytest -q tests/
 ```
 
-## PyTorch and GPU notes
+## GPU
 
-KonfAI declares `torch` as a dependency, but the correct GPU-enabled PyTorch
-wheel still depends on your platform, drivers, and CUDA setup. In practice:
+KonfAI declares `torch` as a dependency but cannot pick the right wheel for your
+drivers and CUDA version. If your PyTorch already matches your machine, there is
+nothing to do. If you need a specific CUDA or a CPU-only build, install PyTorch
+first, then KonfAI. For containers, see {doc}`../usage/docker`.
 
-- if your default PyTorch install already matches your machine, `pip install konfai` is enough
-- if you need a specific CUDA or CPU-only wheel, install PyTorch first, then install KonfAI
-- for containerized usage, see {doc}`../usage/docker`
+## If something is missing
 
-## Verify the installation
+- **`ModuleNotFoundError` after installing**: the install landed in a different
+  environment than the one you are running. Reinstall with the same interpreter,
+  `python -m pip install -e .`.
+- **PyTorch sees your GPU but KonfAI does not**: KonfAI goes through PyTorch
+  device discovery and `CUDA_VISIBLE_DEVICES`. Check both with
+  `python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"`
+  and `echo "$CUDA_VISIBLE_DEVICES"`.
+- **`konfai-apps-server` not found**: `pip install konfai-apps`.
+- **`konfai-cluster` not found**: `pip install "konfai[cluster]"`.
 
-Check that the package imports correctly:
-
-```bash
-python -c "import konfai; print(konfai.__version__)"
-```
-
-Check that the main CLIs are available:
-
-```bash
-konfai --help
-```
-
-If you installed the standalone apps package or the `cluster` extra:
-
-```bash
-konfai-apps --help
-konfai-apps-server --help
-konfai-cluster --help
-```
-
-For a first real run after installation, go to {doc}`../quickstart`.
-
-## Common installation issues
-
-### `ModuleNotFoundError` after installation
-
-This usually means the package was installed into a different Python
-environment than the one you are currently using. Re-run the install with the
-same interpreter you will use to launch KonfAI:
-
-```bash
-python -m pip install -e .
-```
-
-### GPU is available in Python but not in KonfAI
-
-KonfAI relies on PyTorch device discovery and `CUDA_VISIBLE_DEVICES`. Check both:
-
-```bash
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"
-echo "$CUDA_VISIBLE_DEVICES"
-```
-
-### `konfai-apps-server` is missing
-
-Install the standalone apps package:
-
-```bash
-python -m pip install konfai-apps
-```
-
-### `konfai-cluster` is missing
-
-Install the `cluster` extra:
-
-```bash
-python -m pip install "konfai[cluster]"
-```
-
-## Next steps
-
-- {doc}`../quickstart` — run the full train → predict → evaluate loop on the
-  shipped segmentation example.
-- {doc}`../usage/docker` — containerized installs when you cannot manage the
-  host environment.
-- {doc}`../reference/cli` — every `konfai` command and flag in one place.
+Next: {doc}`../quickstart` runs a real train, predict and evaluate loop in about
+seven minutes. {doc}`../reference/cli` lists every command and flag.

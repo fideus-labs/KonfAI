@@ -17,7 +17,7 @@
 """The write side of the data surface: a declared pyramid, written by both paths identically.
 
 A pyramid is indexed by position (``:omezarr@1``), so a producer that writes one level where two
-were promised does not fail -- it resolves ``@1`` to something else, or to nothing. So each test
+were promised does not fail, it resolves ``@1`` to something else, or to nothing. So each test
 here asserts the two write paths agree: assembled in memory, and streamed region by region. They
 are different code (``write_ome_zarr`` against ``create_ome_zarr_store`` +
 ``append_ome_zarr_levels``), and the streamed one is the path a real volume takes.
@@ -55,8 +55,8 @@ def _geometry() -> Attribute:
 def test_a_declared_pyramid_is_written_by_both_paths_and_they_agree(tmp_path):
     """``scale_factors`` reaches the store from the dataset, streamed or not, with the same pixels.
 
-    The streamed path cannot take ``scale_factors`` at creation -- no level exists until the last
-    region lands -- so it derives them at finalize instead. That is different code, and the levels it
+    The streamed path cannot take ``scale_factors`` at creation (no level exists until the last
+    region lands), so it derives them at finalize instead. That is different code, and the levels it
     produces have to be the same ones, or a chain's output would depend on whether it happened to
     stream.
     """
@@ -87,7 +87,7 @@ def test_a_declared_pyramid_is_written_by_both_paths_and_they_agree(tmp_path):
     coarse_streamed, _ = Dataset(tmp_path / "streamed", "omezarr@1").read_data("G", "case")
     assert np.array_equal(np.asarray(coarse_whole), np.asarray(coarse_streamed))
     # Each level carries its OWN scale; the coarse one is the factor times the fine one. NGFF scale is
-    # (c, z, y, x) where Spacing is (x, y, z) -- the reversal is the point of asserting it here.
+    # (c, z, y, x) where Spacing is (x, y, z): the reversal is the point of asserting it here.
     assert get_ome_zarr_info(streamed, 0)["scale"] == [1.0, 1.0, 1.0, 2.0]
     assert get_ome_zarr_info(streamed, 1)["scale"] == [1.0, 4.0, 4.0, 8.0]
 

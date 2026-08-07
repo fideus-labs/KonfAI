@@ -16,9 +16,9 @@
 
 """What a decoded transform's bound must satisfy, against SimpleITK.
 
-Two properties, and both matter. CONTAINMENT: the true map never leaves the bound — a bound that
+Two properties, and both matter. CONTAINMENT: the true map never leaves the bound: a bound that
 is short reads a source window the resample then samples outside of, which returns background
-rather than failing. NON-VACUITY: the bound is not the whole world — a bound that contains
+rather than failing. NON-VACUITY: the bound is not the whole world: a bound that contains
 everything contains the truth and buys nothing.
 """
 
@@ -76,7 +76,7 @@ def _field(image: "sitk.Image") -> "sitk.Transform":
 
 
 def _world_points(image: "sitk.Image", count: int = 4000, overshoot: float = 6.0) -> np.ndarray:
-    """Points across the grid AND past its edges — the bound must hold everywhere, not just inside."""
+    """Points across the grid AND past its edges: the bound must hold everywhere, not just inside."""
     rng = np.random.RandomState(0)
     index = np.stack([rng.uniform(-overshoot, extent + overshoot, count) for extent in image.GetSize()], axis=1)
     return np.array([image.TransformContinuousIndexToPhysicalPoint(list(point)) for point in index])
@@ -150,7 +150,7 @@ def test_probing_the_affine_part_of_a_bspline_is_worse_than_the_structural_one()
 
 
 def test_the_bound_is_a_theorem_and_the_sampled_maximum_is_not():
-    # The sup-norm bound must dominate what any sample can reach — that is the whole claim. A design
+    # The sup-norm bound must dominate what any sample can reach, that is the whole claim. A design
     # that sized its halo from a dense sample would be under a bound it never proved.
     image = _image()
     transform = _bspline(image)
@@ -257,7 +257,7 @@ class TestDisplacementStage:
     def test_the_end_plane_of_a_bsplines_valid_region_is_warped_as_itk_warps_it(self):
         """ITK admits a continuous index ON the valid-region end (``InsideValidRegion`` nudges it
         back inside), so identity there is wrong bytes. The support slides one control point down,
-        which changes no value — the outermost tap's weight is exactly zero at an integer offset.
+        which changes no value: the outermost tap's weight is exactly zero at an integer offset.
         The regression this pins: that plane used to fail the inside test, and a grid commensurate
         with its coefficient mesh hits it in whole planes at a time, every voxel silently unmoved.
         """

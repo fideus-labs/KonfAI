@@ -293,14 +293,13 @@ def test_leaderboard_ranks_app_evaluation_trials(tmp_path: Path) -> None:
     paths = " ".join(row["metrics_path"] for row in payload["leaderboard"])
     assert "iterations_100" in paths
     assert "iterations_300" in paths
-    # Every trial repeats the inner 'SEG_EVAL' train_name, so the row identity must be the trial label —
-    # three rows all named 'SEG_EVAL' cannot be told apart, let alone addressed by get_run_metrics.
+    # Every trial repeats the inner 'SEG_EVAL' train_name, so the row identity must be the trial label: # three rows all named 'SEG_EVAL' cannot be told apart, let alone addressed by get_run_metrics.
     assert {row["run_name"] for row in payload["leaderboard"]} == {
         "eval_app__iterations_100-aaaa1111",
         "eval_app__iterations_300-bbbb2222",
         "pipe_app__spacing_2-cccc3333",
     }
-    # A specific trial is addressable by its label (not just the newest inner dir on mtime) — the
+    # A specific trial is addressable by its label (not just the newest inner dir on mtime): the
     # leaderboard's labels must round-trip through get_run_metrics.
     trial = service.run_metrics_payload("eval_app__iterations_100-aaaa1111")
     assert trial["metrics"]["aggregates"]["Dice"]["mean"] == 0.70

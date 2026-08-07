@@ -30,7 +30,7 @@ pytest.importorskip("konfai_mcp")
 from konfai_mcp.experiment_state import STAGE_ACTIONS, STAGES, Facts, experiment_state
 from konfai_studio.workflow import MAX_MOVES, moves, pre_prompt
 
-# Button prompts that frame nothing — the failure mode this builder exists to prevent.
+# Button prompts that frame nothing: the failure mode this builder exists to prevent.
 VAGUE = {"continue", "run it", "train model", "evaluate", "check results", "go", "next"}
 
 
@@ -62,7 +62,7 @@ def test_the_pre_prompt_is_three_short_lines_and_the_message() -> None:
 def test_the_instruction_matches_where_the_experiment_stands() -> None:
     """The stage's instruction rides the turn, so 'inspect the dataset' cannot reach a running job."""
     fresh = pre_prompt(state(), "", "here is my data")
-    assert "[now] Inspect the dataset -- inspect_dataset" in fresh
+    assert "[now] Inspect the dataset: inspect_dataset" in fresh
 
     running = pre_prompt(state(job_status="running", job_id="job-1", run="run_01"), "", "and now?")
     assert "[now] Job job-1 is still open: wait for it" in running
@@ -70,7 +70,7 @@ def test_the_instruction_matches_where_the_experiment_stands() -> None:
 
 
 def test_a_failure_arrives_already_diagnosed() -> None:
-    """The turn is told the cause and the correction — it does not have to re-derive them from a log."""
+    """The turn is told the cause and the correction, it does not have to re-derive them from a log."""
     failed = state(job_status="error", job_error="CUDA out of memory", run="run_01", configs=["Config.yml"])
     text = pre_prompt(failed, "", "what happened?")
     assert "[now] run_01 failed: the run ran out of memory." in text
@@ -97,7 +97,7 @@ def test_a_fallback_move_names_its_subject_and_what_clicking_it_does() -> None:
     payload = state(dataset="/data/pelvis", groups=["CT", "Label"])
     first = moves(payload)[0]
     assert first["label"] == "List apps"
-    assert first["prompt"].startswith("List apps — on the dataset at /data/pelvis.")
+    assert first["prompt"].startswith("List apps, on the dataset at /data/pelvis.")
     # The stage's instruction is to ASK the user which route. Repeating it into a button would send the
     # assistant back to asking instead of doing what was clicked, so a button says only what it does.
     assert "ASK which" not in first["prompt"]
@@ -112,7 +112,7 @@ def test_a_fallback_move_that_launches_a_job_demands_it_be_followed_through() ->
 def test_fallback_moves_follow_the_servers_ranking_deduped_and_capped() -> None:
     payload = state(checkpoints=["run_01"], job_status="done", job_kind="train", run="run_01")
     proposed = moves(payload)
-    # The server's own ranking, in its order — the count follows what applies rather than a fixed three.
+    # The server's own ranking, in its order: the count follows what applies rather than a fixed three.
     assert [move["label"] for move in proposed][:3] == [
         "Run prediction",
         "Read training curves",
@@ -163,7 +163,7 @@ def test_no_ranked_action_points_at_a_tool_that_no_longer_exists(tmp_path: Any, 
 
 
 def test_no_move_offers_a_tool_the_experiment_cannot_run_yet() -> None:
-    """`summarize_session` needs a workspace `initialize_session` has not made yet — offered before that
+    """`summarize_session` needs a workspace `initialize_session` has not made yet: offered before that
     it comes back "call initialize_session first", which is a dead button, not a next step."""
     early = state(dataset="/data/pelvis", groups=["CT", "Label"])
     assert "Summarize session" not in labels(early)

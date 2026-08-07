@@ -8,7 +8,7 @@ or plain HTTP.
 
 ## Authentication
 
-Every route — including `/health` — is behind a bearer-token dependency:
+Every route (including `/health`) is behind a bearer-token dependency:
 
 - The server reads the token from the env var **`KONFAI_API_TOKEN`**.
 - If it is **unset or empty, authentication is disabled** and all endpoints are
@@ -18,7 +18,7 @@ Every route — including `/health` — is behind a bearer-token dependency:
   "Invalid token"**.
 
 ```{warning}
-The server speaks **plain HTTP** — the token and the uploaded medical volumes
+The server speaks **plain HTTP**: the token and the uploaded medical volumes
 travel unencrypted. Terminate TLS with a reverse proxy before exposing it beyond
 localhost, and keep the `--apps` allowlist tightly scoped (it is the trust
 boundary that stops a token holder from making the resolver fetch arbitrary
@@ -31,16 +31,16 @@ repos). See {doc}`python-api`.
 
 | Method | Path | Params | Response |
 | --- | --- | --- | --- |
-| `GET` | `/health` | — | `{"status":"ok"}` |
-| `GET` | `/available_devices` | — | `{"devices_index":[int], "devices_name":[str]}` |
-| `GET` | `/ram` | — | `{"used_gb":float, "total_gb":float}` |
+| `GET` | `/health` |: | `{"status":"ok"}` |
+| `GET` | `/available_devices` |: | `{"devices_index":[int], "devices_name":[str]}` |
+| `GET` | `/ram` |: | `{"used_gb":float, "total_gb":float}` |
 | `GET` | `/vram` | `devices` (repeated int, required) | `{"used_gb":float, "total_gb":float}` |
 
 ### App repository
 
 | Method | Path | Response |
 | --- | --- | --- |
-| `GET` | `/repo_apps_list` | `{"apps":[str,…]}` — the configured allowlist |
+| `GET` | `/repo_apps_list` | `{"apps":[str,…]}`: the configured allowlist |
 | `GET` | `/repo_apps/{app_id}` | App metadata & capabilities (display name, description, `checkpoints_name`, `maximum_tta`, `mc_dropout`, `patch_size`, `inputs`/`outputs`, `terminology`, …). 404 if not allowlisted. |
 | `GET` | `/repo_apps_config/{app_id}` | `application/zip` of the app's config files (no `.pt`). |
 
@@ -73,20 +73,20 @@ client knows the tunables it sent were applied. A server too old to send it make
 **Multipart fields** (files via `File`, scalars via `Form`; `*_groups` are CSV
 group-size lists used to re-split the flat file list into per-group folders):
 
-- **infer** — `inputs` (files, required), `inputs_groups`, `ensemble` (0),
+- **infer**: `inputs` (files, required), `inputs_groups`, `ensemble` (0),
   `ensemble_models` (CSV), `tta` (0), `mc` (0), `uncertainty` (false),
   `prediction_file` (`Prediction.yml`), `gpu` (CSV), `cpu` (1), `quiet` (false).
-- **evaluate** — `inputs`, `gt` (files, required), `mask` (files), the matching
+- **evaluate**: `inputs`, `gt` (files, required), `mask` (files), the matching
   `*_groups`, `evaluation_file` (`Evaluation.yml`), `gpu`/`cpu`/`quiet`.
-- **uncertainty** — `inputs`, `inputs_groups`, `uncertainty_file`
+- **uncertainty**: `inputs`, `inputs_groups`, `uncertainty_file`
   (`Uncertainty.yml`), `gpu`/`cpu`/`quiet`.
-- **pipeline** — union of the above; here `gt` is **required** and `uncertainty`
+- **pipeline**: union of the above; here `gt` is **required** and `uncertainty`
   defaults to **true**.
-- **fine_tune** — `dataset` (single zip, required — extracted with zip-slip
+- **fine_tune**: `dataset` (single zip, required: extracted with zip-slip
   protection), `name` (`Finetune`), `epochs` (10), `it_validation` (1000),
   `models` (CSV), `config_file` (`Config.yml`), `lr` (optional), `gpu`/`cpu`/`quiet`.
 
-Every one of the five also takes **`options`** (a JSON object, default `"{}"`) — the
+Every one of the five also takes **`options`** (a JSON object, default `"{}"`): the
 only channel for the tunables the plain form fields cannot carry: `patch_size` and
 `batch_size` on `infer`/`pipeline`, and `config_overrides` on those two plus
 `fine_tune`. An unknown key, or a malformed value, is rejected with **422**.
@@ -95,12 +95,12 @@ only channel for the tunables the plain form fields cannot carry: `patch_size` a
 
 | Method | Path | Response |
 | --- | --- | --- |
-| `GET` | `/jobs/{job_id}` | `{"job_id","status","error"}` — status ∈ `queued/waiting/running/done/error/killed`. 404 unknown. |
-| `GET` | `/jobs/{job_id}/logs` | `text/event-stream` (SSE) — see below. |
+| `GET` | `/jobs/{job_id}` | `{"job_id","status","error"}`: status ∈ `queued/waiting/running/done/error/killed`. 404 unknown. |
+| `GET` | `/jobs/{job_id}/logs` | `text/event-stream` (SSE): see below. |
 | `GET` | `/jobs/{job_id}/result` | `application/zip` (`result.zip`); **202** while running; **500** on error. |
-| `POST` | `/jobs/{job_id}/kill` | `{"job_id","status","message"}` — SIGTERM → SIGKILL the process group. |
+| `POST` | `/jobs/{job_id}/kill` | `{"job_id","status","message"}`: SIGTERM → SIGKILL the process group. |
 
-**SSE log stream** — each event is `data: <line>\n\n`; a `: keepalive` comment is
+**SSE log stream**: each event is `data: <line>\n\n`; a `: keepalive` comment is
 sent every 15 s of silence. Terminal markers are `__DONE__` and `__ERROR__ <msg>`.
 Admission control: at most one stream per job (else 429), and a global cap of 200.
 
@@ -113,7 +113,7 @@ Admission control: at most one stream per job (else 429), and a global cap of 20
 | Per-file upload | 2 GB | **413** on overflow |
 | Total upload | 6 GB | **413** on overflow |
 | GPU scheduling | one semaphore per visible GPU | auto mode waits for any free GPU; explicit mode acquires all requested (400 unknown id, 503 if none) |
-| Result grace period | 120 s after completion | workspace and job are then removed — **download promptly** |
+| Result grace period | 120 s after completion | workspace and job are then removed: **download promptly** |
 
 Jobs run in an isolated temp workspace; the command is built as an argv list and
 launched with `subprocess.Popen` (no shell), so there is no shell injection.
@@ -140,6 +140,6 @@ curl -X POST -H "Authorization: Bearer $TOKEN" $BASE/jobs/$JOB/kill
 
 ## Next steps
 
-- {doc}`python-api` — `KonfAIAppClient` wraps all of this for you
-- {doc}`cli` — `konfai-apps-server` options
-- {doc}`../usage/apps` — what an app is and how to run the server day-to-day
+- {doc}`python-api`: `KonfAIAppClient` wraps all of this for you
+- {doc}`cli`: `konfai-apps-server` options
+- {doc}`../usage/apps`: what an app is and how to run the server day-to-day

@@ -79,7 +79,7 @@ def announced_runs(session: Path, monkeypatch: pytest.MonkeyPatch, root: Path) -
 
 
 def test_a_workflow_job_gets_its_tab_before_it_writes_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A training names its own runtime log, so its run is known at launch — the tab exists through the
+    """A training names its own runtime log, so its run is known at launch: the tab exists through the
     warm-up, and even if it dies before its first iteration."""
     session = tmp_path / "sessions" / "exp"
     session.mkdir(parents=True)
@@ -91,7 +91,7 @@ def test_a_workflow_job_gets_its_tab_before_it_writes_anything(tmp_path: Path, m
 
 
 def test_a_transform_run_carries_where_its_data_went(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A transform's run directory holds a log, a plan and a config copy — never the volumes.
+    """A transform's run directory holds a log, a plan and a config copy, never the volumes.
 
     They land wherever each `Write:` pointed, which the run records in `outputs.json`. Without the
     `data` field the panel would answer "what did it produce" by opening a YAML file, so the field
@@ -151,7 +151,7 @@ def test_a_run_that_died_says_so_even_though_it_was_announced_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A workflow run is announced at launch AND followed through its log. When two blocks each marked
-    the transition as seen, the first won and the terminal `status` never went out — Stop stayed on
+    the transition as seen, the first won and the terminal `status` never went out. Stop stayed on
     screen over a finished run, and every panel keyed on it stopped refreshing."""
     session = tmp_path / "sessions" / "exp"
     log = session / "Statistics" / "MR2CT" / "log_0.txt"
@@ -191,7 +191,7 @@ def said(path: str) -> dict[str, Any]:
 
 def test_two_volumes_across_a_turn_open_a_comparison(tmp_path: Path) -> None:
     """ "Show me the sCT next to the real CT" surfaces the two paths in two different steps, so they are
-    counted over the turn — not within one step, where only one of them ever appears."""
+    counted over the turn, not within one step, where only one of them ever appears."""
     sct, ct = tmp_path / "sCT.mha", tmp_path / "CT.mha"
     for volume in (sct, ct):
         volume.write_bytes(b"\x00")
@@ -256,7 +256,7 @@ def test_the_result_pair_wins_over_the_input_the_run_was_given(tmp_path: Path) -
 
 def test_an_inventory_does_not_choose_what_the_viewer_shows(tmp_path: Path) -> None:
     """inspect_dataset names one file per group to prove the group exists. Reading the viewer off that
-    payload opened whichever group sorted first — a body mask present in 30 of 75 cases — and the MR and
+    payload opened whichever group sorted first (a body mask present in 30 of 75 cases), and the MR and
     CT the assistant then previewed never reached the pane."""
     case = tmp_path / "1ABB006"
     case.mkdir()
@@ -286,7 +286,7 @@ def text_parts(script: list[dict[str, Any]]) -> list[str]:
 def test_a_tool_call_does_not_cut_the_sentence_in_half() -> None:
     """The marker can only arrive at the end of the reply, so only a genuine partial marker is worth
     holding back. Holding a fixed seven characters stranded them on the far side of every tool block:
-    "Launching training on GPU" | run_train | "0 now." — one sentence, cut mid-word, in every reply."""
+    "Launching training on GPU" | run_train | "0 now.", one sentence, cut mid-word, in every reply."""
     parts = text_parts(
         [
             {"type": "text", "text": "Launching training on GPU 0 now."},

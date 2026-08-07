@@ -42,7 +42,7 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
       .then((m) => {
         setManifest(m);
         setStage("ready");
-        setMessage("pick a volume and run — nothing leaves your machine.");
+        setMessage("pick a volume and run: nothing leaves your machine.");
       })
       .catch((e) => {
         setStage("undeployable");
@@ -97,7 +97,7 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
       overlay.opacity = 0.6;
       nv.addVolume(overlay);
       setStage("done");
-      setMessage(`done — ${channels}×${outShape.join("×")} rendered as overlay (${chosenBackend}).`);
+      setMessage(`done: ${channels}×${outShape.join("×")} rendered as overlay (${chosenBackend}).`);
     } catch (e) {
       setStage("error");
       setMessage(`error: ${(e as Error).message}`);

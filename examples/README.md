@@ -4,7 +4,7 @@ Every example here is a notebook you can **open and run top to bottom**. Each on
 generates) its own data, runs the real KonfAI commands, and ends by showing you the result. Nothing
 is hidden behind a flag you have to flip.
 
-They all work from a fresh environment, including **Google Colab** — click the badge in any example's
+They all work from a fresh environment, including **Google Colab**: click the badge in any example's
 README, then *Runtime > Run all*.
 
 ## Start here
@@ -21,10 +21,10 @@ These four are the framework itself: a YAML config, the `konfai` CLI, and nothin
 `Registration` is the shortest way to see the whole `TRAIN -> PREDICTION -> EVALUATION` loop.
 `Segmentation` is the best template to copy for your own data. `Synthesis` shows the richer patterns:
 a custom Python model, a perceptual loss, test-time augmentation, and an optional GAN variant.
-`Transform` is the odd one out and the quickest: no network, no checkpoint, no download — it is the
+`Transform` is the odd one out and the quickest: no network, no checkpoint, no download. It is the
 workflow for when what you need is data rather than a prediction.
 
-Their training runs are **deliberately short** — enough to see the pipeline work end to end, not
+Their training runs are **deliberately short**: enough to see the pipeline work end to end, not
 enough to produce a usable model. Each README says what score to expect and which knob to raise.
 
 ## Then: run a published model
@@ -42,8 +42,8 @@ prefer a GPU.
 | [`ImpactReg`](ImpactReg/) | `impact-reg-konfai register FireANTs_SyN` | register two real patients, scored on their reference labels |
 
 `ImpactReg` is the most instructive of the five, and the only fully unsupervised task in this folder:
-it aligns **two different patients** — a real anatomical difference, with no ground-truth field to
-recover — and scores the result by propagating one patient's 41-label reference through the recovered
+it aligns **two different patients**, a real anatomical difference with no ground-truth field to
+recover, and scores the result by propagating one patient's 41-label reference through the recovered
 displacement field and measuring its Dice against the other's.
 
 ## Demo data
@@ -51,7 +51,7 @@ displacement field and measuring its Dice against the other's.
 The public demo dataset lives on the Hugging Face Hub at
 [`VBoussot/konfai-demo`](https://huggingface.co/datasets/VBoussot/konfai-demo) and provides a
 `Segmentation/` subset (pelvis CT with a 41-label reference) and a `Synthesis/` subset (paired MR /
-CT / body mask). Every notebook fetches what it needs, and the Hub caches it after the first run —
+CT / body mask). Every notebook fetches what it needs, and the Hub caches it after the first run,
 `Registration` and `ImpactReg` both build on the pelvis CT.
 
 ## Running from the command line instead
@@ -64,7 +64,7 @@ konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BA
 konfai EVALUATION -y          --config Evaluation.yml
 ```
 
-`SEG_BASELINE` is that example's `train_name` — `Registration` uses `REG_BASELINE` and `Synthesis`
+`SEG_BASELINE` is that example's `train_name`; `Registration` uses `REG_BASELINE` and `Synthesis`
 `TRAIN_01`. Checkpoints are named after the moment they were written, so the glob is what saves you
 looking the filename up.
 
@@ -73,7 +73,7 @@ and the resolved config), `Predictions/`, and `Evaluations/` (the metric JSON).
 
 ## Where to go next
 
-- adapt one of the three configs to your own dataset — each example's `README.md` lists the fields to
+- adapt one of the three configs to your own dataset: each example's `README.md` lists the fields to
   change first, in order;
-- package a mature workflow as an app of your own — see [`apps/`](../apps/);
-- drive KonfAI from an LLM agent — see [`konfai-mcp/`](../konfai-mcp/).
+- package a mature workflow as an app of your own: see [`apps/`](../apps/);
+- drive KonfAI from an LLM agent: see [`konfai-mcp/`](../konfai-mcp/).

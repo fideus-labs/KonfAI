@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Parametric PlainConvUNet -- weight-exact with nnU-Net's plain U-Net, at any topology.
+"""Parametric PlainConvUNet: weight-exact with nnU-Net's plain U-Net, at any topology.
 
 This is the Python counterpart of the declarative ``konfai/models/yaml/PlainConvUNet.yml``.
 The YAML template is fixed to a 4-stage graph because a declarative config cannot loop; this
@@ -45,7 +45,7 @@ nnU-Net signature reproduced here (Isensee et al., Nature Methods 18, 2021):
 The segmentation heads emit **raw logits** (no softmax/argmax inside), like nnU-Net: the head
 of decoder stage ``j`` is the trace node ``SegHead_j`` and is the weight-exact comparison
 point. Building every head (rather than only the executed one, as the fixed YAML does) gives
-full parameter-count equality with the reference -- there is no built-but-unused head gap.
+full parameter-count equality with the reference: there is no built-but-unused head gap.
 
 ``strides`` accepts both isotropic ints (e.g. ``2``) and per-axis lists (e.g. ``[1, 2, 2]``)
 per stage, so real anisotropic TotalSegmentator / MRSeg configs load unchanged, e.g.

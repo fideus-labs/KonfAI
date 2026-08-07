@@ -18,7 +18,7 @@
 
 ``ElastixEngine`` installs the elastix-IMPACT binary, downloads the TorchScript feature models, stages the
 parameter maps (generated from the model matrix or copied + overridden), runs the subprocess, and resamples.
-``ElastixRegistration`` is the graph module ``RegistrationNet`` wires — it bridges KonfAI tensors <-> SITK
+``ElastixRegistration`` is the graph module ``RegistrationNet`` wires, it bridges KonfAI tensors <-> SITK
 images. The config -> parameter-map MAPPING lives in ``elastix.py`` and is imported here.
 """
 
@@ -45,7 +45,7 @@ ELASTIX_CACHE = Path.home() / ".cache" / "konfai" / "elastix-impact"
 
 
 def _is_partial_mask(mask: "sitk.Image | None") -> bool:
-    """True only for a mask that actually restricts the metric region — some voxels in, some out. An
+    """True only for a mask that actually restricts the metric region: some voxels in, some out. An
     absent optional mask arrives as a whole-image (all-ones) default from KonfAI, and an all-zero mask
     is degenerate; both are treated as no mask, so elastix runs without ``-fMask`` / ``-mMask`` (i.e.
     the whole image) instead of paying for a mask that restricts nothing."""
@@ -74,12 +74,12 @@ class ElastixEngine:
         mode: str = "Static",
     ) -> None:
         # The parameter-map .txt files are per-preset config staged into the run's working directory (KonfAIApp
-        # chdir's into the app workspace before building the model), so resolve them against cwd -- not this
+        # chdir's into the app workspace before building the model), so resolve them against cwd, not this
         # module's directory, which is the installed package, not next to the .txt.
         self._bundle_dir = Path.cwd()
         self._parameter_maps = [self._bundle_dir / Path(p).name for p in parameter_maps]
         # Matrix mode rewrites a template's resolution-dependent lines; it never creates one. Without a
-        # map, elastix would launch with no -p and die in a cryptic subprocess error — fail here instead.
+        # map, elastix would launch with no -p and die in a cryptic subprocess error: fail here instead.
         if not self._parameter_maps:
             raise ValueError(
                 "at least one parameter-map template is required; 'resolutions' rewrites a template, "
@@ -97,7 +97,7 @@ class ElastixEngine:
         # intensity preset (no IMPACT models): the fixed maps are staged with only the global overrides.
         self._resolutions = resolutions
         self._registry = load_models_registry() if resolutions else {}
-        # Feature models are DERIVED — the unique refs across the matrix cells (no flat ``models`` param).
+        # Feature models are DERIVED: the unique refs across the matrix cells (no flat ``models`` param).
         models: list[str] = []
         for res in _sorted_specs(resolutions):
             for model in _sorted_specs(res.models):
@@ -105,7 +105,7 @@ class ElastixEngine:
                     models.append(model.ref)
         self._models = models
         # Matrix mode reads each model's fixed properties (dimension, channels, FOV) from the registry
-        # at map-generation time — an absent key would surface as a bare KeyError mid-register, after
+        # at map-generation time: an absent key would surface as a bare KeyError mid-register, after
         # the binary install and the first case already ran. Refuse at build instead.
         missing = [ref for ref in models if _model_key(ref) not in self._registry]
         if missing:
@@ -119,7 +119,7 @@ class ElastixEngine:
         self._local_models = self._download_models()
 
     def _total_iterations(self) -> int:
-        """Total iterations across resolutions — the progress-bar budget, from the config (or the maps)."""
+        """Total iterations across resolutions: the progress-bar budget, from the config (or the maps)."""
         if self._resolutions:
             return sum(int(res.max_iterations) for res in _sorted_specs(self._resolutions))
         total = 0
@@ -145,8 +145,8 @@ class ElastixEngine:
 
     def _download_models(self) -> list[tuple[str, Path]]:
         """Fetch the TorchScript feature models (``repo:filename``, or a local file); keep
-        ``(staged_name, local_path)``. The staged name equals ``_model_key(ref)`` -- the path the
-        generated/preset map references -- so a local ref stages under the very name the map resolves.
+        ``(staged_name, local_path)``. The staged name equals ``_model_key(ref)`` (the path the
+        generated/preset map references), so a local ref stages under the very name the map resolves.
         A missing local file fails HERE, at build: staging a broken path later would plant a dangling
         symlink at the user-supplied location and crash the second case with an unrelated error."""
         models = []
@@ -168,7 +168,7 @@ class ElastixEngine:
         ``per_token`` maps an elastix key (or the ``ImpactSubsetFeatures`` prefix) to a value replacing
         **each** existing token, preserving per-resolution / per-model multiplicity. ``exact`` entries (from
         ``parameter_overrides``, ``Key=value text``) replace the whole value verbatim and win over the named
-        knobs. Overrides only REPLACE keys already present — never inject. ``global_only`` (matrix mode) drops
+        knobs. Overrides only REPLACE keys already present, never inject. ``global_only`` (matrix mode) drops
         ``max_iterations`` / ``subset_features`` (the matrix already sets those per cell).
         """
         per_token: dict[str, str] = {}
@@ -217,7 +217,7 @@ class ElastixEngine:
                             replaced = " ".join(per_token[token_key] for _ in values.split())
                             line = f"{indent}({key} {replaced})"
             lines.append(line)
-        # Overrides never inject keys, so a knob set for a key absent from every map silently does nothing —
+        # Overrides never inject keys, so a knob set for a key absent from every map silently does nothing: #
         # surface it (e.g. final_grid_spacing on a rigid-only preset).
         for key in sorted(requested - seen):
             print(f"[ImpactReg] note: override '{key}' matched no entry in the preset's parameter maps.")

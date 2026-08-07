@@ -209,6 +209,7 @@ sphinx-autodoc-typehints = "*"
 sphinx-copybutton = "*"
 sphinx-togglebutton = "*"
 sphinx-tabs = "*"
+sphinxcontrib-mermaid = "*"
 
 [tool.pixi.feature.docs.tasks]
 build-docs = { cmd = "make html", cwd = "docs", description = "Build Sphinx documentation" }

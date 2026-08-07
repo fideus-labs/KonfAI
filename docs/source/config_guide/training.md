@@ -24,7 +24,7 @@ konfai TRAIN -y --gpu 0 --config Config.yml
 
 If you do not have a GPU available, use `--cpu 1` instead of `--gpu 0`.
 
-Add `-tb` to enable TensorBoard — KonfAI allocates a free local port
+Add `-tb` to enable TensorBoard: KonfAI allocates a free local port
 automatically:
 
 ```bash
@@ -32,7 +32,7 @@ konfai TRAIN -y --gpu 0 --config Config.yml -tb
 ```
 
 Resume from an existing checkpoint with `RESUME`. Checkpoints are named after the
-moment they were written, so substitute the one training produced — `--model`
+moment they were written, so substitute the one training produced: `--model`
 takes exactly one:
 
 ```bash
@@ -111,8 +111,7 @@ outputs_criterions:
                 value: 1
 ```
 
-Several criteria can share one output, and several outputs can each carry their own —
-`examples/Segmentation` pairs the cross entropy above with a `Dice` loss on
+Several criteria can share one output, and several outputs can each carry their own: `examples/Segmentation` pairs the cross entropy above with a `Dice` loss on
 `UNetBlock_0:Head:Softmax`, because the two want different forms of the same head.
 
 Structure:
@@ -131,17 +130,17 @@ Common fields:
 | Field | Type | Default in code | Effect |
 | --- | --- | --- | --- |
 | `dataset_filenames` | list[str] | `["default\|./Dataset:mha"]` | Dataset sources and selection mode. |
-| `groups_src` | mapping | `{Labels: Group()}` | Maps on-disk groups to loaded tensors. The default binds a single group named `Labels`, which is almost never what you want — treat it as required. |
+| `groups_src` | mapping | `{Labels: Group()}` | Maps on-disk groups to loaded tensors. The default binds a single group named `Labels`, which is almost never what you want: treat it as required. |
 | `augmentations` | mapping or null | one default augmentation list | Data augmentations sampled during training. |
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
 | `memory_budget` | number / string / null | `null` = `auto` | RAM budget the loading regime is derived from: the dataset caches when its per-rank share fits, streams otherwise. An absent key (`null`) means `auto`: 80% of the detected memory decides. |
-| `subset` | string / list / null | `null` | Restricts which cases are used — a flat selector (a case-list file, a list of names, or a `start:end` slice), not a nested object. `shuffle` and `shuffle_window` are sibling `Dataset` keys. |
+| `subset` | string / list / null | `null` | Restricts which cases are used: a flat selector (a case-list file, a list of names, or a `start:end` slice), not a nested object. `shuffle` and `shuffle_window` are sibling `Dataset` keys. |
 | `batch_size` | int | `1` | Batch size. |
 | `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` on the cache regime, and to `max(1, min(cpu_count, 4))` on the stream/buffer regime. A `KonfAIInference` transform in any group forces `0` whatever the value. |
 | `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |
 | `prefetch_factor` | int or null | `None` | Prefetched batches per worker. Applies only when workers are enabled, where `None` resolves to `2`. |
-| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. **Forced to `false`** — an explicit `true` included — when `inline_augmentations` is on with any augmentation declared, because persistent workers freeze the per-epoch redraw. |
+| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. **Forced to `false`**: an explicit `true` included, when `inline_augmentations` is on with any augmentation declared, because persistent workers freeze the per-epoch redraw. |
 | `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. |
 | `validation_augmentations` | bool | `true` | Whether validation also iterates over augmented variants. Set `false` to validate only on base (non-augmented) samples. |
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
@@ -159,8 +158,7 @@ the training and validation subsets alike. Training defaults to the cache;
 - **Stream** (budget exceeded, patch-compatible preprocessing). Each patch is
   read from its own region of the source file. No volume is materialized.
 - **Buffer** (budget exceeded, preprocessing that needs the whole volume).
-  The case is loaded whole into a FIFO of `batch_size + 1` cases —
-  `max(batch_size + 1, shuffle_window)` when a window is set — evicting the
+  The case is loaded whole into a FIFO of `batch_size + 1` cases (`max(batch_size + 1, shuffle_window)` when a window is set) evicting the
   oldest.
 
 Nothing in YAML selects streaming. KonfAI derives it from the declared transforms
@@ -179,8 +177,7 @@ RSS of 0.46 GiB, flat across epochs, with one batch (2 MiB) resident on the GPU.
 
 `memory_budget` derives the loading regime from a RAM budget. KonfAI estimates
 the dataset size from image headers alone (no voxel read), caches when the
-per-rank share fits the budget, and takes the streaming/buffer path otherwise —
-a budget below the dataset's size therefore forces streaming. The decision
+per-rank share fits the budget, and takes the streaming/buffer path otherwise: a budget below the dataset's size therefore forces streaming. The decision
 is made once on the launcher, before any rank is spawned, and the estimate, the
 budget, its source, and the chosen regime are printed. `null` (the default)
 means `auto`: the detected memory decides -- a dataset that fits caches exactly
@@ -188,7 +185,7 @@ as before, one that does not streams instead of overrunning the node.
 
 | Value | Read as |
 | --- | --- |
-| `24`, `"24"` | 24 GiB — a bare number is GiB |
+| `24`, `"24"` | 24 GiB: a bare number is GiB |
 | `"24GB"`, `"512MB"` | decimal, 10^n |
 | `"32GiB"`, `"512MiB"` | binary, 2^n |
 | `"1024b"` | bytes |
@@ -203,51 +200,47 @@ An explicit budget is **per rank**: the comparison is
 (`KONFAI_LOCAL_RANKS`), not by `world_size`. On a single node the two coincide, the
 ranks cancel, and it reduces to "does the whole dataset fit 80% of the detected
 memory"; across nodes the numerator still uses `world_size`, so they do not cancel. `"auto"`
-takes whichever is tighter of the **cgroup limit** — set under a container or
-SLURM — and the host's available RAM; the log names which one won.
+takes whichever is tighter of the **cgroup limit** (set under a container or
+SLURM), and the host's available RAM; the log names which one won.
 
-```{warning}
 The dataset size is an estimate, not a guarantee. It sums `prod(header_shape) x 4`
 bytes over the source groups: it models a float32 cached tensor, so a `uint8`
 source is over-counted and a `float64` one under-counted. It reads the raw header
 shape and ignores transforms that shrink (resample-down, crop) or grow (pad,
 one-hot) the tensor. It also counts one copy per case, while the cache holds every
-augmented copy of every case — with augmentations declared, the real footprint is a
+augmented copy of every case, with augmentations declared, the real footprint is a
 multiple of the estimate. `inline_augmentations: true` defers those copies rather
 than dropping them: they are built on demand and released once per epoch, so the
 peak is the same. Caching also peaks above its steady state while it runs. Leave
 headroom.
-```
 
 ### `shuffle_window`
 
 Each non-streamable case is loaded into the FIFO buffer, so a global patch shuffle
 reloads a volume once per patch that lands after an eviction. A window keeps
-`shuffle_window` cases in play at a time — their patches shuffled together, all
-emitted before advancing — which reads each volume about once per epoch. `1` is
+`shuffle_window` cases in play at a time (their patches shuffled together, all
+emitted before advancing), which reads each volume about once per epoch. `1` is
 perfect locality and no decorrelation; larger windows trade one back for the other.
 
 The window applies to the training loader only. Validation is scored over the whole
 subset whatever the order, so it follows `shuffle` without a window.
 
-The window resolves back to a plain global shuffle — byte for byte — when it is
+The window resolves back to a plain global shuffle (byte for byte), when it is
 `null` (the default), when it is `>=` the number of cases, or when `num_workers`
 exceeds the number of cases. Under a window, cases are partitioned across workers
 and the per-worker batches interleaved, so every volume is read by exactly one
 worker. The buffer is sized to hold the window, so a non-streamable run holds
 `max(batch_size + 1, shuffle_window)` volumes per worker.
 
-```{note}
 `shuffle_window` works under DDP: the sampler's length is the mapping's length, so
 the window reorders without changing the count, and each training shard is padded to
 the longest one. Ranks stay in step.
-```
 
 ### Free patch axes: sizing by measurement
 
 `Patch.patch_size` accepts the same free-axis convention as prediction: `0`
 entries are sized by the framework, starting at the full extent and shrinking
-only on a CUDA out-of-memory — the failed step (forward, backward and optimizer)
+only on a CUDA out-of-memory: the failed step (forward, backward and optimizer)
 already measured its cost, so the shrink lands near the target and the run
 restarts on the re-planned grid. Training runs out of memory at the first step
 when it does at all (its memory is maximal from step one), so a restart loses no
@@ -293,8 +286,8 @@ The most practical examples in the repository are:
 
 ## Next steps
 
-- {doc}`../concepts/datasets` — the shared `dataset_filenames`, `groups_src`,
+- {doc}`../concepts/datasets`: the shared `dataset_filenames`, `groups_src`,
   `subset`, and `validation` conventions used above.
-- {doc}`../concepts/model-graph` — how module names become the output paths
+- {doc}`../concepts/model-graph`: how module names become the output paths
   used in `outputs_criterions`.
-- {doc}`prediction` — to configure inference with the trained model.
+- {doc}`prediction`: to configure inference with the trained model.

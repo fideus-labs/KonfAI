@@ -20,13 +20,13 @@
 # the other catalog entries. ``num_tokens`` must equal the number of patches produced by the patch embedding.
 #
 # VALIDATION LEVEL: structural-strict, plus verified NUMERICAL EQUIVALENCE of the encoder to MONAI 1.4.0
-# ``ViT(classification=False)`` — after transferring MONAI's weights into this graph in forward-execution
+# ``ViT(classification=False)``: after transferring MONAI's weights into this graph in forward-execution
 # order (and copying the single positional-embedding parameter), the normalised token features match MONAI
 # to ``torch.allclose`` (see tests/unit/test_yaml_model_vit.py). Documented divergences from MONAI's ViT:
 #   * the learnable positional embedding is a standalone ``PositionalEmbedding`` leaf here, whereas MONAI
 #     stores it as a parameter on the (non-leaf) ``PatchEmbeddingBlock``; because of this, the shipped
 #     ``transfer_weights_by_execution_order`` bridge (which pairs weighted *leaf* modules) cannot pair the
-#     two graphs directly — the equivalence test transfers the shared leaves and copies the positional
+#     two graphs directly: the equivalence test transfers the shared leaves and copies the positional
 #     embedding explicitly;
 #   * classification uses global-average-pooling over the token sequence, not a prepended ``cls`` token
 #     (MONAI's ``classification=True`` default); the encoder itself is token-for-token identical;

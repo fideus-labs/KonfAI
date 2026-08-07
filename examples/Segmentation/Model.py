@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""The Python form of this example's model — the same U-Net as ``UNet.yml``.
+"""The Python form of this example's model: the same U-Net as ``UNet.yml``.
 
 KonfAI accepts a model as a declarative ``.yml`` graph (``classpath: UNet.yml``) or as a
 Python ``network.Network`` built with ``add_module`` (``classpath: Model:UNet``). This file
@@ -31,7 +31,7 @@ from konfai.network import blocks, network
 
 
 def _conv_block(in_channels: int, out_channels: int, dim: int) -> blocks.ConvBlock:
-    """Two ``Conv(3x3) -> ReLU`` layers, no normalization — matching ``UNet.yml``'s ConvBlock."""
+    """Two ``Conv(3x3) -> ReLU`` layers, no normalization: matching ``UNet.yml``'s ConvBlock."""
     cfg = blocks.BlockConfig(kernel_size=3, stride=1, padding=1, activation="ReLU", norm_mode="NONE")
     return blocks.ConvBlock(in_channels, out_channels, [cfg, cfg], dim)
 
@@ -72,7 +72,7 @@ class UNetBlock(network.ModuleArgsDict):
 
 
 class UNet(network.Network):
-    """The example U-Net, built in Python — equivalent to ``UNet.yml``."""
+    """The example U-Net, built in Python: equivalent to ``UNet.yml``."""
 
     def __init__(
         self,

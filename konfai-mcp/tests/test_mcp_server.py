@@ -345,7 +345,7 @@ def test_run_train_config_file_and_cluster(
             )
             assert done.structured_content["status"] == "done"
 
-            # Writing the bad file succeeds -- validation happens at launch, not at write.
+            # Writing the bad file succeeds: validation happens at launch, not at write.
             await client.call_tool(
                 "write_session_file",
                 {"relative_path": "Bad.yml", "content": yaml_dump({"Predictor": {}})},

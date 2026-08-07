@@ -489,7 +489,7 @@ def test_job_state_write_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 def test_manifest_failure_marks_job_terminal_not_stuck_queued(tmp_path: Path) -> None:
     # A snapshot/manifest failure during launch must mark the job terminal (error), not leave it "queued"
-    # forever -- a queued job counts as active and would block every future launch on its device.
+    # forever: a queued job counts as active and would block every future launch on its device.
     layout = WorkspaceLayout(tmp_path)
     layout.ensure_session_workspace()
     registry = JobRegistry({"queued", "running"}, workspace_layout=layout)
@@ -611,7 +611,7 @@ def test_run_resume_weights_only_strips_to_model(
             # A full training checkpoint: Model weights beside the counters/optimizer a plain RESUME restores.
             torch.save({"Model": {"w": torch.zeros(2)}, "epoch": 9, "it": 900, "optimizer": {"state": {}}}, checkpoint)
 
-            # A URL cannot be stripped to weights -- weights_only demands a local checkpoint.
+            # A URL cannot be stripped to weights: weights_only demands a local checkpoint.
             with pytest.raises(Exception, match="local checkpoint"):
                 await client.call_tool("run_resume", {"weights_only": True, "model": "https://example.com/model.pt"})
 
@@ -692,7 +692,7 @@ def test_job_native_writes_never_reach_the_inherited_stdio(tmp_path: Path) -> No
         f"{marker}-grandchild",
     ):
         assert expected in log_text, f"'{expected}' missing from the job log:\n{log_text}"
-    # The JSON-RPC channel: not "no marker" but not a single byte -- anything at all desynchronises it.
+    # The JSON-RPC channel: not "no marker" but not a single byte: anything at all desynchronises it.
     assert inherited_stdout.read_bytes() == b""
     assert marker not in inherited_stderr.read_text(encoding="utf-8", errors="replace")
 
@@ -702,7 +702,7 @@ def test_isolated_api_never_writes_on_the_inherited_stdio(tmp_path: Path) -> Non
 
     A single stray byte desynchronises the stream: the response to this very call is delivered and then
     destroyed, and the caller waits forever for an answer that already arrived. This covers the path
-    `validate_config_semantics`, `run_component_smoke_test` and `import_app` all take — `import_app` runs
+    `validate_config_semantics`, `run_component_smoke_test` and `import_app` all take: `import_app` runs
     `pip install`, whose `\\r` progress bars are exactly the shape that eats a frame.
     """
     from konfai_mcp.runner import run_api_in_subprocess
@@ -725,7 +725,7 @@ def test_isolated_api_never_writes_on_the_inherited_stdio(tmp_path: Path) -> Non
 
 
 def test_a_failing_isolated_api_keeps_what_the_child_printed(tmp_path: Path) -> None:
-    """Its output is the child's only diagnostic — a native crash leaves nothing else behind."""
+    """Its output is the child's only diagnostic: a native crash leaves nothing else behind."""
     from konfai_mcp.runner import run_api_in_subprocess
 
     with pytest.raises(RuntimeError) as failure:
@@ -770,8 +770,8 @@ def test_a_job_stopped_on_purpose_is_killed_not_broken() -> None:
 def test_a_weightless_model_is_not_blocked_for_want_of_a_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
 ) -> None:
-    """KonfAI runs a model with zero parameters as constructed -- a registration engine has no weights to
-    load -- and refuses a parameterised one itself. The MCP raised before ever reaching it, so no weightless
+    """KonfAI runs a model with zero parameters as constructed (a registration engine has no weights to
+    load), and refuses a parameterised one itself. The MCP raised before ever reaching it, so no weightless
     app could be launched through it. The readiness summary still reports the absent checkpoint as advice."""
     monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     server = load_mcp_server()
@@ -785,7 +785,7 @@ def test_a_weightless_model_is_not_blocked_for_want_of_a_checkpoint(
 
 def test_a_failed_stdio_detach_is_said_in_the_sink(tmp_path: Path) -> None:
     """dup2 can fail on an exotic fd state; the call goes on, but a child running with fd 1 still on the
-    protocol must say so where ``run_api_in_subprocess`` already looks — silence here replays the frozen
+    protocol must say so where ``run_api_in_subprocess`` already looks: silence here replays the frozen
     stream as an unexplainable mystery."""
     sink = tmp_path / "subprocess.log"
     context = multiprocessing.get_context("spawn")

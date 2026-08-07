@@ -2,13 +2,13 @@
 
 `konfai-mcp` turns KonfAI into a backend an LLM agent can *drive*. Give it a dataset
 and a goal in plain language and it inspects the data, picks the cheapest path that
-fits — reuse a published model, fine-tune one, or train from scratch — writes and
+fits (reuse a published model, fine-tune one, or train from scratch), writes and
 validates the config, runs training / prediction / evaluation, monitors the jobs, and
 returns metrics with a record you can reproduce.
 
 It is the agent-facing counterpart to the CLI: same framework, same YAML, but exposed
 as structured, deterministic tools instead of hand-edited files. The package is kept
-deliberately separate — `konfai` is the machine-learning framework; `konfai-mcp` is the
+deliberately separate: `konfai` is the machine-learning framework, `konfai-mcp` is the
 MCP server that exposes it to agents, and the core never depends on it.
 
 ## Vision
@@ -169,7 +169,7 @@ build/runtime split for validation and execution.
 Structured resources exposed by the server include:
 
 - `server://info` / `server://capabilities`
-- `guide://tool-index` — the full tool + prompt index, **generated from the registry** (never drifts)
+- `guide://tool-index`: the full tool + prompt index, **generated from the registry** (never drifts)
 - `guide://config-design`, `docs://{index,patching,modeling,configuration,dataset-mapping,examples}`
 - `templates://list`, `template://{name}/summary`
 - `sessions://list`, `session://current/{summary,config/{workflow},log,metrics}`
@@ -182,7 +182,7 @@ needs to recover state, inspect artifacts, or decide the next step.
 ## MCP Tools
 
 Tools are grouped by stage below. To avoid drift and wasted tokens, each tool's
-**contract (inputs, outputs, `next_actions`) is not duplicated here** — it lives
+**contract (inputs, outputs, `next_actions`) is not duplicated here**; it lives
 once, generated from the registry:
 
 - live: the `guide://tool-index` resource, with `describe_konfai_capabilities`
@@ -192,30 +192,30 @@ once, generated from the registry:
 
 At a glance, by stage:
 
-- **Discovery** — `list_components`, `inspect_object_signature`,
+- **Discovery**: `list_components`, `inspect_object_signature`,
   `describe_konfai_capabilities`, `describe_config_schema`,
   `describe_extension_points`, `check_external_dependency`
-- **Dataset onboarding** — `browse_dataset`, `inspect_dataset`, `read_dataset_file`,
+- **Dataset onboarding**: `browse_dataset`, `inspect_dataset`, `read_dataset_file`,
   `preview_volume`, `prepare_dataset_aliases`
-- **Config authoring** — `design_config_strategy`, `initialize_session`,
+- **Config authoring**: `design_config_strategy`, `initialize_session`,
   `write_workflow_config`, `write_session_file` / `read_session_file`,
   `read_template_file`
-- **Validation & iteration** — `review_config_semantics`,
+- **Validation & iteration**: `review_config_semantics`,
   `validate_config_semantics`, `summarize_session`, `leaderboard`,
   `get_run_metrics`, `compare_runs`, `diff_run_configs`, `describe_model_outputs`,
   `run_component_smoke_test`
-- **Execution & monitoring** — `run_train` / `run_resume` / `run_prediction` /
+- **Execution & monitoring**: `run_train` / `run_resume` / `run_prediction` /
   `run_evaluation`, `run_batch`, `generate_folds`, `list_jobs` /
   `get_job_status` / `cancel_job`, `wait_for_job`, `read_live_metrics`,
   `read_job_log`
-- **Apps** — see [Use a published app](#use-a-published-app-instead-of-training)
-- **Session lifecycle** — `create_session` / `switch_session` / `delete_session`,
+- **Apps**: see [Use a published app](#use-a-published-app-instead-of-training)
+- **Session lifecycle**: `create_session` / `switch_session` / `delete_session`,
   `import_experiment`, `export_run_record`
 
 Hardware for device selection is a **resource, not a tool**: `server://capabilities`
 reports per-GPU total / used / **free** VRAM and a recommended device, and every
 train / predict / evaluate / fine-tune launch payload carries a `vram_preflight`
-block for the GPUs it will use — so an agent sizes `batch_size` / `patch_size` to
+block for the GPUs it will use, so an agent sizes `batch_size` / `patch_size` to
 the free VRAM without an extra call.
 
 ## Use a published app instead of training
@@ -224,37 +224,37 @@ Training from scratch is only one of three ways to satisfy a request. Many tasks
 are already solved by a **published KonfAI app** (a config + code + weights bundle
 on a local path, a HuggingFace repo, or a remote server). The MCP exposes the whole
 *use / adapt / package* half of the lifecycle, so an agent can pick the cheapest
-path that actually fits — **without ever training when a model already exists.**
+path that actually fits, **without ever training when a model already exists.**
 
 The `solve_task` prompt frames the entry decision as a three-way fork:
 
-1. **Use an app as-is** — no training. Discover with `list_apps`, read each
+1. **Use an app as-is**, no training. Discover with `list_apps`, read each
    candidate's manifest with `describe_app` (judge fit from the app's own
    description and its declared inputs/outputs), then run it **as published**:
-   - `run_app_infer` — inference on the user's data
-   - `run_app_evaluate` — score predictions with the app's own metrics
-   - `run_app_uncertainty` — uncertainty maps
-   - `run_app_pipeline` — infer → evaluate → uncertainty in one call
-   - `list_app_parameters` / `set_parameters` — read tunable parameters (with
+   - `run_app_infer`: inference on the user's data
+   - `run_app_evaluate`: score predictions with the app's own metrics
+   - `run_app_uncertainty`: uncertainty maps
+   - `run_app_pipeline`: infer → evaluate → uncertainty in one call
+   - `list_app_parameters` / `set_parameters`: read tunable parameters (with
      their constraints) and override them per run
-   - `import_app` — only when the app must be **modified** first: it copies the
+   - `import_app`: only when the app must be **modified** first. It copies the
      app (config + code + checkpoints) into the session so it runs as a normal
      experiment through `run_prediction` / `run_resume` / `run_evaluation`
-2. **Fine-tune an app** — start training from a published model rather than a
+2. **Fine-tune an app**: start training from a published model rather than a
    blank slate: `fine_tune_app` adapts it to the user's dataset and writes a
    resolvable app bundle (or `import_app` + `run_resume(weights_only=True)` when
    the training config has to be edited first).
-3. **Train from scratch** — author a config (the loop above) and, when done,
+3. **Train from scratch**: author a config (the loop above) and, when done,
    `package_app_from_session` turns the trained model into a bundle too.
 
-Both training paths therefore **end at the same reusable artifact — a bundle** —
+Both training paths therefore **end at the same reusable artifact, a bundle**,
 which `describe_app` / `run_app_infer` can then consume, and `export_app` can
 snapshot (with tuned parameters baked in) as the reproducibility record a
 challenge submission wants. (A remote `host:port:name` app keeps its code on the
-user's own server; it is not runnable from the MCP server — drive it with
+user's own server; it is not runnable from the MCP server. Drive it with
 `konfai-apps` directly.)
 
-**App catalogue.** `list_apps` reads a layered catalogue of app sources — a
+**App catalogue.** `list_apps` reads a layered catalogue of app sources: a
 shipped default, an editable per-workspace file, and the `KONFAI_MCP_APP_CATALOG`
 env file (same `{"apps": [...]}` shape as the `konfai-apps` server's `--apps`),
 plus an ad-hoc `repos=[...]` override. `register_app_source` / `unregister_app_source`
@@ -270,7 +270,7 @@ let a user pin their own HuggingFace repo or local app. A bare HuggingFace
 
 For a dataset-driven task, the intended loop is:
 
-0. `list_apps` / `describe_app` — check whether a published app already solves it
+0. `list_apps` / `describe_app`: check whether a published app already solves it
 1. `inspect_dataset`
 2. `design_config_strategy`
 3. `initialize_session`

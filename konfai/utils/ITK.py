@@ -48,7 +48,7 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
     third of the field and a registration that is wrong without being obviously wrong. This is the one
     place that knows how to open either form, so no caller has to decide.
 
-    The result is ``sitkVectorFloat64`` -- what ``DisplacementFieldTransform`` requires.
+    The result is ``sitkVectorFloat64``: what ``DisplacementFieldTransform`` requires.
     """
     _require_simpleitk()
     path = Path(path)
@@ -63,7 +63,7 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
             f"'{path}' is an OME-Zarr image, not a displacement field: its component axis is not "
             "typed as an NGFF RFC-5 displacement.",
             "A three-component volume is a perfectly ordinary image, so the store's own declaration "
-            "is the only thing that tells them apart -- write the field with "
+            "is the only thing that tells them apart: write the field with "
             "write_ome_zarr(displacement_field=True).",
         )
     axes = get_ome_zarr_info(path)["axes"]
@@ -189,15 +189,15 @@ def crop_with_mask(image: sitk.Image, box: np.ndarray) -> sitk.Image:
 def _linear_map(transform: sitk.Transform) -> AffineMap:
     """The exact world map of a linear transform: ``T(p) = M p + T(0)``.
 
-    ``M`` comes from ``GetMatrix`` where the type has one -- the number ITK itself resamples with,
+    ``M`` comes from ``GetMatrix`` where the type has one: the number ITK itself resamples with,
     read past the centre/translation parameterisation that differs between Euler, Similarity,
-    Scale and Affine -- and from ``T(e_k) - T(0)`` otherwise. The offset is ``T(0)`` directly
+    Scale and Affine, and from ``T(e_k) - T(0)`` otherwise. The offset is ``T(0)`` directly
     rather than assembled from centre and translation: one call, no cancellation, and true for
     every parameterisation at once.
 
     Probing is sound HERE and nowhere else in this file: for an affine map the columns are the map,
     exactly, by linearity. For a non-linear one the same arithmetic measures a local gradient and
-    extrapolates it, which under-bounds -- which is why a BSpline's affine part is the identity and
+    extrapolates it, which under-bounds, which is why a BSpline's affine part is the identity and
     all of its reach lives in the residual.
     """
     from konfai.data.geometry import AffineMap
@@ -243,7 +243,7 @@ def _displacement_stage(grid: Grid, per_component: list[np.ndarray], order: int,
 def decode_transform_stages(transform: sitk.Transform) -> SpatialStages:
     """A stored transform as geometry stages in APPLICATION order, or a refusal naming the type.
 
-    ``CompositeTransform`` applies its member list in REVERSE (the last added runs first — verified
+    ``CompositeTransform`` applies its member list in REVERSE (the last added runs first: verified
     against SimpleITK, where ``GetNthTransform(0)`` is nonetheless the first added); the reversal is
     normalized here, once, so every consumer reads stages first-applied-first.
     """
@@ -284,7 +284,7 @@ def invert_stages(stages: SpatialStages, rank: int) -> SpatialStages | None:
     """The exact inverse of an all-affine decoded map, or ``None`` when one is not algebraic.
 
     A BSpline or a field inverts by an iterative dense solve, not an algebraic step, and a field
-    solved per region is not the restriction of the field solved once — so a non-affine inverse is
+    solved per region is not the restriction of the field solved once, so a non-affine inverse is
     ``None`` here and the caller refuses with the remedy, rather than resampling through a guess.
     """
     from konfai.data.geometry import AffineMap, AffineStage

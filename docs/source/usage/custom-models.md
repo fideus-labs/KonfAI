@@ -1,7 +1,7 @@
 # Using custom models, transforms, augmentations, and losses
 
 When the built-in components are not enough, you extend KonfAI by writing
-regular Python classes and selecting them from YAML — no core edits. Custom
+regular Python classes and selecting them from YAML: no core edits. Custom
 objects are selected through `classpath` and instantiated through
 `apply_config()`; this page gives the contract each object type must satisfy.
 
@@ -19,7 +19,7 @@ This page focuses on the custom object types that matter most in practice:
 - losses and metrics
 
 **A local classpath such as `Model:UNetpp5` imports a Python file resolved
-from the directory you launch `konfai` in** — keep the custom `.py` next to
+from the directory you launch `konfai` in**: keep the custom `.py` next to
 the YAML and run the command from that directory.
 
 ## General rules
@@ -190,7 +190,7 @@ Trainer:
 - The output path is a graph name, not a dataset name. For example, in the
   shipped `examples/Segmentation/Config.yml` the cross-entropy loss is attached to
   `UNetBlock_0:Head:Conv` (the pre-softmax logits) while a Dice loss is attached to
-  `UNetBlock_0:Head:Softmax` on the same head — each criterion reads the output whose
+  `UNetBlock_0:Head:Softmax` on the same head, each criterion reads the output whose
   form it expects.
 
 KonfAI can wrap a simpler module internally in some situations, but if you want
@@ -306,7 +306,7 @@ augmentations:
 
 ### Augmentation contract details
 
-- `_compute(name, index, a, tensor)` receives **one tensor at a time** — `a`
+- `_compute(name, index, a, tensor)` receives **one tensor at a time**: `a`
   identifies the augmented copy within the case; KonfAI applies it across the
   group in `__call__`, so each call returns a single tensor.
 - `prob` lives in the same YAML branch as the augmentation-specific parameters.
@@ -387,9 +387,9 @@ outputs_criterions:
 
 ## Next steps
 
-- {doc}`../concepts/configuration` — how `classpath` and `apply_config()` bind
+- {doc}`../concepts/configuration`: how `classpath` and `apply_config()` bind
   YAML keys to constructor arguments.
-- {doc}`../concepts/model-graph` — how `add_module(...)` names become the
+- {doc}`../concepts/model-graph`: how `add_module(...)` names become the
   output paths that `outputs_criterions` points at.
-- {doc}`../reference/api/extension-points` — the full API of the base classes
+- {doc}`../reference/api/extension-points`: the full API of the base classes
   used on this page.

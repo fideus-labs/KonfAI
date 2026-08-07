@@ -28,7 +28,7 @@ docker run --rm vboussot/konfai
 ## Local Build
 
 The image installs the wheels it finds in `dist/`, so build them first. It then ships the
-working tree — there is no version to name anywhere, and none to keep in sync:
+working tree, so there is no version to name anywhere and none to keep in sync:
 
 ```bash
 python -m build --wheel --outdir dist .
@@ -39,7 +39,7 @@ docker build -f docker/Dockerfile -t konfai .
 The release workflow does exactly this with the wheels the tag built, which is why the
 published image never waits on an index to serve what was just uploaded.
 
-**For an image of a published release, pull it** — every version has its own tag:
+**For an image of a published release, pull it**: every version has its own tag.
 
 ```bash
 docker pull vboussot/konfai:1.7.0

@@ -16,8 +16,8 @@
 
 """The write mirror of the read-side patch-streaming dispatcher.
 
-A finalize chain streams to the written image through its region stages — composed in any number,
-each pulling through the next — scheduled by :class:`SlabRegionStream` from the stages' own
+A finalize chain streams to the written image through its region stages (composed in any number,
+each pulling through the next) scheduled by :class:`SlabRegionStream` from the stages' own
 declarations (``inverse_patch_locality``, ``stream_region_target``), with the read side's promise:
 streaming is an optimisation, so every streamed output must equal the whole-volume result voxel for
 voxel. These tests prove that per region kind and in composition over random slab partitions, pin
@@ -55,7 +55,7 @@ from konfai.utils.errors import PatchError
 
 # --------------------------------------------------------------------------------------
 # SlabRegionStream: each region kind, streamed over random slab partitions, must equal the
-# whole-volume operator — and hold only a bounded window while doing it.
+# whole-volume operator, and hold only a bounded window while doing it.
 # --------------------------------------------------------------------------------------
 
 C, Z, Y, X = 2, 8, 6, 5
@@ -87,7 +87,7 @@ def _partitions(n: int, rng: np.random.Generator) -> list[int]:
 
 @pytest.mark.parametrize("seed", range(4))
 def test_stream_orientation_mirrored_slab_axis_matches_whole_volume(seed: int) -> None:
-    # Flip on the slab axis: input slabs arrive ascending, output regions descend — the scheduler must
+    # Flip on the slab axis: input slabs arrive ascending, output regions descend: the scheduler must
     # discover the mirrored direction from the pull map alone and still tile the output exactly.
     rng = np.random.default_rng(seed)
     volume = torch.from_numpy(rng.standard_normal((C, Z, Y, X)).astype(np.float32))
@@ -279,7 +279,7 @@ def test_stream_rescale_linear_matches_the_whole_volume_inverse_to_float_roundin
 @pytest.mark.parametrize("seed", range(4))
 def test_stream_halo_dilate_matches_whole_volume(seed: int) -> None:
     # A forward HALO stage (Dilate) rides the same window: the pull enlarges by the declared radius,
-    # the stage runs on the window, and the halo is cropped back — seams must agree bit for bit.
+    # the stage runs on the window, and the halo is cropped back: seams must agree bit for bit.
     rng = np.random.default_rng(seed)
     volume = (torch.from_numpy(rng.standard_normal((C, Z, Y, X)).astype(np.float32)) > 0.7).to(torch.float32)
     dilate = Dilate(1)
@@ -446,7 +446,7 @@ def test_plan_one_geometry_inverse_streams_through_the_region_stage() -> None:
 
 def test_plan_several_region_stages_compose_into_one_streamed_pipe() -> None:
     # Padding + Flip inverses: region stages compose (each pulls through the next), so a multi-inverse
-    # geometry chain still streams to the write — no chain is one region too many.
+    # geometry chain still streams to the write: no chain is one region too many.
     plan = _output_dataset()._plan_stream(
         _dataset_iter([Flip("0", inverse=True), Padding([0, 0, 0, 0, 2, 1], inverse=True)]),
         0,
@@ -457,7 +457,7 @@ def test_plan_several_region_stages_compose_into_one_streamed_pipe() -> None:
 
 
 def test_plan_whole_volume_stage_falls_to_the_buffered_tail_and_swallows_the_region() -> None:
-    # [region, WHOLE_VOLUME]: the tail must start at the region stage, not after it — a buffered head
+    # [region, WHOLE_VOLUME]: the tail must start at the region stage, not after it: a buffered head
     # is pointwise-only so the buffer sits on the accumulator grid.
     plan = _output_dataset(final=[Softmax(1)])._plan_stream(
         _dataset_iter([Flip("0", inverse=True)]), 0, _geometry_attribute()
@@ -468,7 +468,7 @@ def test_plan_whole_volume_stage_falls_to_the_buffered_tail_and_swallows_the_reg
 
 def test_plan_seeded_global_stat_counts_as_pointwise_and_unseeded_does_not() -> None:
     # Normalize forward in the finalize chain needs the volume's Min/Max: with the statistic already on
-    # the case it is a per-voxel map; without it each slab would derive its own — so it must be a tail.
+    # the case it is a per-voxel map; without it each slab would derive its own, so it must be a tail.
     seeded = _geometry_attribute()
     seeded["Min"] = 0.0
     seeded["Max"] = 1.0
@@ -581,8 +581,7 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
 
 def test_add_layer_streams_a_flip_inverse_through_the_region_stage(tmp_path, monkeypatch) -> None:
     # The forward Flip was applied to the model input, so the accumulator holds the flipped volume and
-    # the finalize chain flips it back; the streamed sink entry must equal the original bit for bit —
-    # and equal what the whole-volume path (kill-switch) writes.
+    # the finalize chain flips it back; the streamed sink entry must equal the original bit for bit: # and equal what the whole-volume path (kill-switch) writes.
     volume = torch.from_numpy(np.random.default_rng(0).standard_normal((1, 6, 4, 3)).astype(np.float32))
     transforms = [Flip("0", inverse=True)]
     streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True)
@@ -636,7 +635,7 @@ def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_p
 def test_the_stream_worth_gate_prices_the_config_budget_not_the_machine(monkeypatch) -> None:
     """The streamed-vs-assembled route is a function of configuration and data.
 
-    Same accumulators, two budgets: the verdict must flip with the budget — and with none pushed,
+    Same accumulators, two budgets: the verdict must flip with the budget, and with none pushed,
     the gate prices the auto-budget's own fraction of the machine, never raw free memory.
     """
     from types import SimpleNamespace

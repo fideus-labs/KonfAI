@@ -64,7 +64,7 @@ from konfai.utils.runtime import (
 from konfai.utils.utils import SUPPORTED_FORMATS, OverlapSpec, resolve_patch, split_path_spec
 
 # A cached case is a float32 tensor (torch's default dtype, and the default TensorCast's target), so
-# bytes are counted at 4/element from the header shape alone -- not the on-disk dtype, and without
+# bytes are counted at 4/element from the header shape alone, not the on-disk dtype, and without
 # modelling transforms that shrink or grow the cached tensor.
 _CACHE_ELEMENT_BYTES = 4
 
@@ -84,7 +84,7 @@ _MEMORY_UNIT_BYTES: dict[str, int] = {
 
 
 def _format_gib(num_bytes: float) -> str:
-    """Human bytes at the unit that carries digits — a 0.3 MB refusal must not read '0.00 GiB'."""
+    """Human bytes at the unit that carries digits: a 0.3 MB refusal must not read '0.00 GiB'."""
     for shift, unit in ((40, "TiB"), (30, "GiB"), (20, "MiB"), (10, "KiB")):
         if abs(num_bytes) >= 2**shift:
             return f"{num_bytes / 2**shift:.2f} {unit}"
@@ -98,7 +98,7 @@ class MemoryBudget:
     The one decision no consumer may make for itself: an ``auto`` budget measures the NODE, so
     ranks sharing it split it; an explicit budget is the user's per-rank figure, taken as is.
     Handing consumers a bare number with an ``is_auto`` flag makes each of them re-derive that
-    rule — this object answers it once, through :meth:`per_rank_bytes`.
+    rule: this object answers it once, through :meth:`per_rank_bytes`.
     """
 
     total_bytes: float
@@ -110,10 +110,10 @@ class MemoryBudget:
 
 
 def _node_local_ranks(world_size: int | None = None) -> int:
-    """How many ranks of this run share ONE node's RAM -- the divisor a node-scoped budget needs.
+    """How many ranks of this run share ONE node's RAM: the divisor a node-scoped budget needs.
 
     The launcher publishes the count in ``KONFAI_LOCAL_RANKS``, because a budget is often sized before
-    the spawn where a world size exists at all. Without it -- direct API use, a garbled value -- the
+    the spawn where a world size exists at all. Without it (direct API use, a garbled value) the
     world size stands in: exact on a single node, conservative everywhere else.
     """
     try:
@@ -128,9 +128,9 @@ def _node_local_ranks(world_size: int | None = None) -> int:
 def _parse_memory_budget_bytes(value: str | float) -> int:
     """Parse an explicit memory budget to bytes: a bare number is GiB, a string carries its own unit.
 
-    KonfAI reports RAM in GiB throughout, so an unadorned ``24`` reads as ``24 GiB`` -- whether it
+    KonfAI reports RAM in GiB throughout, so an unadorned ``24`` reads as ``24 GiB``: whether it
     arrives as a number or, through the YAML binding, as the string ``"24"``. A string may name its
-    unit -- decimal ``GB``/``MB`` (10^n) or binary ``GiB``/``MiB`` (2^n), case-insensitive, optional
+    unit: decimal ``GB``/``MB`` (10^n) or binary ``GiB``/``MiB`` (2^n), case-insensitive, optional
     space (``"24GB"``, ``"32 GiB"``, ``"512mb"``); ``"b"`` means bytes. ``"auto"`` is resolved by the
     caller, not here.
     """
@@ -155,7 +155,7 @@ def _parse_memory_budget_bytes(value: str | float) -> int:
     raise ConfigError(
         f"memory_budget: '{value}' is not a valid memory size.",
         "Use a number in GiB (e.g. 24), a unit string ('24GB', '32GiB', '512MB'), 'auto', or None "
-        "(the default) -- which means 'auto': size from the detected memory.",
+        "(the default): which means 'auto': size from the detected memory.",
     )
 
 
@@ -171,7 +171,7 @@ def _check_patch_transform_locality(transform: Transform, group_src: str, group_
     Only POINTWISE and GLOBAL_STAT are correct on one patch (per-patch GLOBAL_STAT means: derive the
     statistic from this patch; use ``lazy=True`` case-level to feed it the volume's). The messages in
     ``reasons`` below say why each other kind is rejected. Probed with an empty ``Attribute`` (config
-    time has no case), so an image-decided kind answers WHOLE_VOLUME -- the right answer here.
+    time has no case), so an image-decided kind answers WHOLE_VOLUME: the right answer here.
     """
     kind = transform.patch_locality(Attribute()).kind
     if kind in (LocalityKind.POINTWISE, LocalityKind.GLOBAL_STAT):
@@ -195,7 +195,7 @@ def _check_patch_transform_locality(transform: Transform, group_src: str, group_
         ),
         LocalityKind.REGRID: (
             f"'{name}' resamples its input onto another grid: applied to one patch it would rescale"
-            " that patch about its own extent, or hand back the whole target extent -- neither of"
+            " that patch about its own extent, or hand back the whole target extent: neither of"
             " which is the patch grid predictions are reassembled onto."
         ),
         LocalityKind.WHOLE_VOLUME: f"'{name}' needs the whole volume.",
@@ -212,11 +212,11 @@ def _check_patch_transform_shape(transform: Transform, group_src: str, group_des
     The patch grid is folded from the CASE-level ``transforms`` only (``DatasetManager``), so a
     patch_transform that changes the spatial shape hands back a patch the batch cannot collate and the
     ``Accumulator`` cannot write onto the grid. ``_check_patch_transform_locality`` above takes the
-    transform at its word; this is the structural check, and it is asked of ``transform_shape`` -- the
-    contract every transform already owes the patch planner -- with distinct extents, so a swap or a
+    transform at its word; this is the structural check, and it is asked of ``transform_shape`` (the
+    contract every transform already owes the patch planner), with distinct extents, so a swap or a
     resize of any single axis shows up. Only the SPATIAL shape is at stake: patching hands
     ``transform_shape`` the channel-stripped shape, so a transform that changes only the channel count
-    (``OneHot``) is not caught here, and must not be -- the grid it feeds is spatial.
+    (``OneHot``) is not caught here, and must not be: the grid it feeds is spatial.
 
     Runs after the locality check, which is what makes the bare probe attribute safe: by here the
     transform is POINTWISE or GLOBAL_STAT, and the kinds whose ``transform_shape`` needs real geometry
@@ -243,10 +243,10 @@ def _check_patch_transform_invertible(
 
     A ``GLOBAL_STAT`` transform is allowed in ``patch_transforms`` (see
     ``_check_patch_transform_locality``): run per patch it standardizes each patch by that patch's OWN
-    statistic, which is what asking for it per-patch means -- correct, and the deliberate training use.
+    statistic, which is what asking for it per-patch means: correct, and the deliberate training use.
     But the per-patch statistic lives in the per-patch attribute scope and never reaches the case
-    attribute, so at prediction the finalize inverse -- which seeds every patch from the CASE attribute
-    and pops the statistic -- has nothing to pop. Nor could it: the reassembled volume was normalised
+    attribute, so at prediction the finalize inverse, which seeds every patch from the CASE attribute
+    and pops the statistic: has nothing to pop. Nor could it: the reassembled volume was normalised
     patch by patch with different coefficients, so a single case-level inverse cannot un-apply it. Refuse
     here, at config time, rather than fail deep in the inverse with a bare ``NameError``.
 
@@ -304,7 +304,7 @@ class GroupTransform:
 
     def prepare(self, group_src: str, group_dest: str) -> None:
         # Binds ONCE. A workflow that inspects its chains before handing over to Data.prepare() calls
-        # this first, and Data.prepare() calls it again for every group -- so without the guard every
+        # this first, and Data.prepare() calls it again for every group, so without the guard every
         # stage is constructed twice, and anything the workflow attached to the first set is silently
         # thrown away with it. A stage's __init__ is user code and may not be run twice for free.
         if self._prepared:
@@ -413,14 +413,14 @@ def _interleaved_case_entries(patches: list["DatasetPatch"], entries: list[tuple
     """One case's ``(copy, patch)`` entries ordered so the copies advance together along the slab axis.
 
     A streamed TTA write reduces the copies slab by slab, so it can only advance to the slowest
-    copy's frontier: walked copy-major, the first copy would be complete — and fully retained —
+    copy's frontier: walked copy-major, the first copy would be complete (and fully retained)
     before the second began. Ordering by each patch's declared first-spatial-axis start bounds that
     skew at one patch extent, whatever grid each copy was cut on. The sort is total on
-    ``(start, copy, patch)``, so within a copy the order is untouched — per-copy accumulation is
+    ``(start, copy, patch)``, so within a copy the order is untouched: per-copy accumulation is
     byte-identical either way, and the whole-volume path reduces at the end whatever the order.
 
     ``patches`` holds every destination group's grid for the case: one shared order must serve them
-    all, so if the groups disagree on the slab starts — or a group cannot even index an entry — the
+    all, so if the groups disagree on the slab starts (or a group cannot even index an entry) the
     plain order is kept. The interleave is a memory bound, never a correctness requirement.
     """
 
@@ -441,9 +441,9 @@ class WindowedCaseSampler(Sampler[int]):
     """Locality-aware training order: shuffle cases, window them, shuffle patches within each window.
 
     ``DatasetIter`` loads each non-streamable case into a FIFO buffer, so a global patch shuffle
-    reloads a volume repeatedly -- once per patch that lands after an eviction. Keeping only
-    ``window`` cases in play at a time — their patches shuffled together, emitted before advancing —
-    reads each volume ~once. ``window`` is the decorrelation knob: ``1`` is perfect locality, and
+    reloads a volume repeatedly (once per patch that lands after an eviction. Keeping only
+    ``window`` cases in play at a time) their patches shuffled together, emitted before advancing: reads each
+    volume ~once. ``window`` is the decorrelation knob: ``1`` is perfect locality, and
     ``None`` (default) or ``>= n_cases`` is a single all-cases window, i.e. a plain global shuffle,
     byte for byte.
 
@@ -479,7 +479,7 @@ class WindowedCaseSampler(Sampler[int]):
         A worker is handed whole cases, because a case is what its buffer keeps resident. Handing out
         an equal COUNT of them leaves the patch counts as uneven as the cases are, and it is patches
         that are walked: the workers then run out at different times, and the batches of whoever is
-        left shift onto the workers that finished -- a case landing on two of them, each reading the
+        left shift onto the workers that finished: a case landing on two of them, each reading the
         volume. Give the next case to whoever holds the fewest patches so far, largest first.
         """
         loads = [0] * self.num_workers
@@ -513,12 +513,12 @@ class WindowedCaseSampler(Sampler[int]):
         # Three things are wanted here and only two of them fit. An epoch must be one pass over the
         # mapping; a worker must keep whole cases, since a case is what its buffer holds; and a case
         # should stay on one worker, which needs every stream the same length. A case does not split,
-        # so streams of equal length are not something `_partitions` can always hand over -- one case
+        # so streams of equal length are not something `_partitions` can always hand over, one case
         # of 200 patches beside ten of 2 is longer on its own than a quarter of the epoch.
         #
         # So a short stream runs out and the ones still going shift onto the workers that finished:
         # a case lands on two of them and each reads its volume. The epoch stays exact and the reads
-        # stay close to 1x -- far below the redundant reads of no window at all. Padding the streams
+        # stay close to 1x: far below the redundant reads of no window at all. Padding the streams
         # instead buys the affinity back by walking part of the epoch twice and the rest not at all,
         # which is not a trade to make.
         batch = self.batch_size
@@ -536,7 +536,7 @@ class WindowedCaseSampler(Sampler[int]):
         return iter(self._windowed_order())
 
     def __len__(self) -> int:
-        # One epoch is one pass over the mapping -- windowing chooses the ORDER, not the size. This is
+        # One epoch is one pass over the mapping: windowing chooses the ORDER, not the size. This is
         # what keeps the ranks in step: `Data._split` gives them equal-length shards, but not equal
         # cases, so any length read from the per-rank cases (their partitions, or even whether the
         # window engages at all) would differ and hang DDP's collectives.
@@ -642,7 +642,7 @@ class DatasetIter(data.Dataset):
             for index in range(self.nb_dataset):
                 # Augmentation objects are shared across destination groups AND across the train and
                 # validation loaders, so the per-case draw is cached by the manager's own augmentation
-                # index (globally unique, offset for validation), not the loader-local position -- else a
+                # index (globally unique, offset for validation), not the loader-local position: else a
                 # validation case would reset (and reuse) a train case's draw and folded shape.
                 case_index = next(iter(self.data.values()))[index].index
                 for data_augmentations in self.data_augmentations_list:
@@ -992,7 +992,7 @@ class Data(ABC):
         """The configured memory budget as an object that knows its own scope.
 
         ``None``/``"auto"`` offers ``_AUTO_MEMORY_SAFETY_FRACTION`` of the node's allocatable
-        memory — a NODE budget, which ranks sharing the node split; an explicit budget is the
+        memory: a NODE budget, which ranks sharing the node split; an explicit budget is the
         caller's own figure, per rank as declared."""
         if self.memory_budget is None or (
             isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto"
@@ -1081,12 +1081,12 @@ class Data(ABC):
     def _resolve_cache_regime(self, world_size: int) -> None:
         """Derive ``use_cache`` from ``memory_budget``. ``None`` means ``"auto"``.
 
-        The cache is chosen iff the per-rank dataset (``dataset / world_size`` -- ``Data._split``
+        The cache is chosen iff the per-rank dataset (``dataset / world_size``: ``Data._split``
         shards cases across ranks) fits the per-rank budget: an explicit budget is taken as declared
-        per rank; ``"auto"`` -- also what an absent key means -- divides the detected node memory
+        per rank; ``"auto"``: also what an absent key means: divides the detected node memory
         (cgroup-capped) by the ranks sharing THAT node, so on a single node the two divisions cancel
         and the test reduces to "does the whole dataset fit the node". The decision is logged once
-        here -- ``get_data`` runs on the launcher alone, before any worker is spawned.
+        here: ``get_data`` runs on the launcher alone, before any worker is spawned.
         """
         if not self._budget_caches_when_fit:
             # One-pass workflows (prediction, evaluation) read each case exactly once: a cache is
@@ -1134,7 +1134,7 @@ class Data(ABC):
 
         It is the key everything downstream indexes by: the prepared managers, the sample handed to
         a model, the plan's lines. Two source groups declaring the same destination name would
-        silently keep only the last one -- the first chain built, then dropped, with nothing
+        silently keep only the last one: the first chain built, then dropped, with nothing
         anywhere looking wrong. Naming the chain is free: what a chain WRITES is the ``Write``'s own ``group``,
         which is a separate word for a separate thing.
         """
@@ -1207,10 +1207,10 @@ class Data(ABC):
         """Re-cut every prepared grid for a new GLOBAL patch size (the OOM-restart path).
 
         The managers are rebuilt against the already-resolved sources and the SAME case lists --
-        NOT through ``prepare()`` (its idempotence guard would skip the rebuild) -- so a later
+        NOT through ``prepare()`` (its idempotence guard would skip the rebuild): so a later
         ``get_data`` shards cases identically across the restart: only the grids and the patch mapping change.
         Each manager copies the shared ``DatasetPatch`` (with ``pad_to_patch``) at construction,
-        which is why the new sizes are written into that shared list IN PLACE -- the loader factory
+        which is why the new sizes are written into that shared list IN PLACE: the loader factory
         holds a reference to it too.
         """
         if self.patch is None or self._prepared_data is None or self._prepared_validation_data is None:
@@ -1346,7 +1346,7 @@ class Data(ABC):
                 f"Subset object applied: {self.subset}",
                 f"Subset requested : {', '.join(subset_names)}",
                 "None of the dataset entries matched the given subset.",
-                "Please check your 'subset' configuration — it may be too restrictive or incorrectly formatted.",
+                "Please check your 'subset' configuration: it may be too restrictive or incorrectly formatted.",
                 "Examples of valid subset formats:",
                 "\tsubset: [0, 1]            # explicit indices",
                 "\tsubset: [./A.txt, ./B.txt]# union of multiple files",
@@ -1567,7 +1567,7 @@ class Data(ABC):
         # PREDICTION walks the mapping in order, and the copies of a TTA case must advance together
         # along the slab axis for the streamed write to hold a bounded window (see
         # ``_interleaved_case_entries``). TRAIN shuffles the mapping anyway and keeps the plain
-        # order — as does a dataset prepared outside any workflow, where no state is set at all.
+        # order, as does a dataset prepared outside any workflow, where no state is set at all.
         interleave = nb_augmentation > 1 and os.environ.get("KONFAI_STATE") == str(State.PREDICTION)
         for x in range(nb_dataset):
             entries = [(y, z) for y in range(nb_augmentation) for z in range(nb_patch[x][y])]
@@ -1590,7 +1590,7 @@ class Data(ABC):
 
         mappings: list[list[tuple[int, int, int]]] = []
         # One-pass workflows shard by CASE; the default branch below is the TRAIN one, whose
-        # duplicate-padding (for DDP) would hand the same case to two ranks — two concurrent writers
+        # duplicate-padding (for DDP) would hand the same case to two ranks: two concurrent writers
         # of the same output file for a workflow that writes per case.
         if konfai_state() in (str(State.PREDICTION), str(State.EVALUATION), str(State.TRANSFORM)):
             mapping_by_index: dict[int, list[tuple[int, int, int]]] = {}
@@ -1617,7 +1617,7 @@ class Data(ABC):
             # keeps every sample training with only a harmless duplicate. world_size == 1 is a no-op.
             # A shard fills itself from its own head, and one that holds nothing has no head to fill
             # from: fewer entries than ranks leaves it empty, and an empty rank runs no backward at
-            # all -- the very hang this equalises against. It takes the mapping's head instead.
+            # all: the very hang this equalises against. It takes the mapping's head instead.
             max_len = max(len(shard) for shard in mappings)
             mappings = [shard + (shard if shard else mapping)[: max_len - len(shard)] for shard in mappings]
         return mappings
@@ -1757,7 +1757,7 @@ class DataTrain(Data):
 class DataPrediction(Data):
     """Dataset configuration used by the prediction workflow."""
 
-    # One pass: each case is read once, a cache is never re-read -- always stream/buffer.
+    # One pass: each case is read once, a cache is never re-read, always stream/buffer.
     _budget_caches_when_fit = False
 
     def __init__(
@@ -1799,14 +1799,14 @@ class DataMetric(Data):
     """Dataset configuration used by the evaluation workflow.
 
     Evaluation never exposes a patch: each run sizes its own from ``memory_budget`` (a missing key
-    means ``"auto"``) -- a case that fits the budget is evaluated whole (exact); one
+    means ``"auto"``): a case that fits the budget is evaluated whole (exact); one
     that does not is cut into the largest DISJOINT patches that fit (overlap 0, no padding) and the
     reducible metrics combine their running partials into the exact whole-case value. The evaluator
     disables this sizing when any of its metrics is not reducible, so a metric that needs the whole
     volume always gets it.
     """
 
-    # One pass: each case is read once, a cache is never re-read -- always stream/buffer.
+    # One pass: each case is read once, a cache is never re-read, always stream/buffer.
     _budget_caches_when_fit = False
 
     #: Working copies a metric makes of the patch pair (float casts, the difference, a masked select):
@@ -1909,14 +1909,14 @@ class DataTransform(Data):
     """Dataset configuration used by the transform workflow.
 
     The amputated grammar, on the DataMetric precedent: no patch (the planner cuts slabs, never the
-    user), no batch, no validation split, no shuffle, and no ``augmentations`` section — a draw is a
+    user), no batch, no validation split, no shuffle, and no ``augmentations`` section: a draw is a
     stage, so it is declared IN the chain, at the place it applies, after an
     :class:`~konfai.data.transform.Expand` marker. What remains is what the workflow is: sources,
     chains, a budget. Everything decidable from the config alone is refused here, before a single
     byte is read.
     """
 
-    # One pass: each case is read once, a cache is never re-read -- always stream/buffer.
+    # One pass: each case is read once, a cache is never re-read, always stream/buffer.
     _budget_caches_when_fit = False
 
     def __init__(
@@ -1975,7 +1975,7 @@ class DataTransform(Data):
                         transform.seed = self.manual_seed
 
     def _output_destinations(self) -> dict[tuple[str, str], list[tuple[str, str]]]:
-        """Resolved ``(root, group)`` of every Save/Write, keyed by chain — the parse-time view of
+        """Resolved ``(root, group)`` of every Save/Write, keyed by chain: the parse-time view of
         what the run would write, resolved exactly as ``save_destination`` will resolve it."""
         destinations: dict[tuple[str, str], list[tuple[str, str]]] = {}
         for group_src in self.groups_src:
@@ -1992,7 +1992,7 @@ class DataTransform(Data):
 
     def _validate_write_chains(self) -> None:
         """The parse-time refusals: everything below is decidable before any byte is read, so failing
-        later — or worse, succeeding wrongly — would be a silent failure by choice."""
+        later (or worse, succeeding wrongly) would be a silent failure by choice."""
         write_targets: dict[tuple[str, str], tuple[str, str]] = {}
         source_roots = {str(Path(filename).resolve()) for filename in self.datasets}
         destinations = self._output_destinations()
@@ -2049,8 +2049,8 @@ class DataTransform(Data):
 
         A draw only means something behind a cardinality change: applied once per case it is a
         random transform, which is not what an augmentation is for and not what a reproducible
-        data-processing pass should contain. So a draw before the marker — or with no marker at
-        all — is refused with the place to move it to.
+        data-processing pass should contain. So a draw before the marker (or with no marker at
+        all) is refused with the place to move it to.
         """
         for (group_src, group_dest), group_transform in (
             ((gs, gd), self.groups_src[gs][gd]) for gs in self.groups_src for gd in self.groups_src[gs]

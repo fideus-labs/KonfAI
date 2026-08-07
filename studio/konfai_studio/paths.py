@@ -65,7 +65,7 @@ def _delete_workspace(name: str) -> None:
 
 
 def _session_path(session: str, rel: str) -> Path:
-    """Resolve a path inside a session's workspace — jailed, never escapes the session root."""
+    """Resolve a path inside a session's workspace: jailed, never escapes the session root."""
     target = _jail(_session_dir(session), rel)
     if target is None:
         raise HTTPException(400, "path escapes the session workspace")

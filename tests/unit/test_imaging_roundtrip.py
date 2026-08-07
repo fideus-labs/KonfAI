@@ -165,7 +165,7 @@ def test_ome_zarr_slice_arity_mismatch_raises_dataset_manager_error(tmp_path: Pa
 
 
 # ---------------------------------------------------------------------------
-# OME-Zarr resolution (pyramid level) selection — `omezarr@<level>`
+# OME-Zarr resolution (pyramid level) selection: `omezarr@<level>`
 # ---------------------------------------------------------------------------
 
 

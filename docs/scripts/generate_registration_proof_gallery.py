@@ -430,7 +430,7 @@ def main() -> None:
     cards = [
         card(
             moving_image,
-            "1. Moving MR — before",
+            "1. Moving MR: before",
             "Fixed-CT contours expose the known offset",
             f"NCC TO ALIGNED MR {summary.before_ncc:.3f}",
         ),
@@ -442,7 +442,7 @@ def main() -> None:
         ),
         card(
             moved_image,
-            "3. Moved MR — after",
+            "3. Moved MR: after",
             "ConvexAdam_Composite output on fixed grid",
             f"NCC {summary.after_ncc:.3f} · MAE {summary.after_mae:.2f}",
         ),

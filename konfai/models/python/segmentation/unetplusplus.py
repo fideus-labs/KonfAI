@@ -14,13 +14,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Parametric UNet++ -- weight-exact and forward-exact with ``smp.UnetPlusPlus`` (ResNet encoder).
+"""Parametric UNet++: weight-exact and forward-exact with ``smp.UnetPlusPlus`` (ResNet encoder).
 
 This is the Python counterpart of the fixed declarative ``UNetpp.yml`` used by the ImpactSynth app.
 It builds, module-for-module and in forward-execution order, the network produced by
 ``segmentation_models_pytorch.UnetPlusPlus(encoder_name="resnet34", encoder_weights=None,
-in_channels=IN, classes=CLS, activation=None)`` -- a **ResNet-18/34 encoder** feeding a **UNet++
-nested (dense) decoder** -- so a real smp checkpoint loads straight in through the execution-order
+in_channels=IN, classes=CLS, activation=None)`` (a **ResNet-18/34 encoder** feeding a **UNet++
+nested (dense) decoder**), so a real smp checkpoint loads straight in through the execution-order
 bridge ``konfai.utils.pretrained.transfer_weights_by_execution_order`` and the KonfAI logits are
 ``torch.allclose`` with the reference output. Reference it as
 ``classpath: segmentation.unetplusplus.UNetPlusPlus``.

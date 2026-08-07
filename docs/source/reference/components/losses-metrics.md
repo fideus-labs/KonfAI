@@ -1,13 +1,13 @@
 # Losses & metrics
 
-Losses and metrics are both **criteria** — subclasses of
+Losses and metrics are both **criteria**: subclasses of
 `konfai.metric.measure.Criterion` in `konfai/metric/measure.py`. You attach them
 to a **named model output** and one or more **target dataset groups**, under
 `outputs_criterions:` (training) or `metrics:` (evaluation). Bare names resolve
 inside `konfai.metric.measure`; you can also point at any library, e.g.
 `torch:nn:L1Loss` or `monai.losses:DiceLoss`.
 
-## Loss vs metric — how KonfAI actually decides
+## Loss vs metric: how KonfAI actually decides
 
 ```{important}
 Whether a criterion is **back-propagated is decided by the `is_loss:` flag in the
@@ -68,7 +68,7 @@ groups act as a mask.
 | --- | --- | --- |
 | `MSE` | Masked mean-squared error. | `reduction="mean"` |
 | `MAE` | Masked mean-absolute error. | `reduction="mean"` |
-| `ME` | Signed mean error `(x−y).mean()` (bias). | — |
+| `ME` | Signed mean error `(x−y).mean()` (bias). |: |
 | `PSNR` | Peak SNR over the mask. Default `dynamic_range` falls back to `4095` (HU range). | `dynamic_range=None` |
 | `MAESaveMap` | MAE that also returns a voxelwise L1 error map (a 3-tuple, for a save-map consumer). | `reduction="mean", dataset=None, group=None` |
 
@@ -79,7 +79,7 @@ groups act as a mask.
 | `Dice` | `(Tensor, dict)` dual-use | Soft Dice per label; loss `= 1 − mean(dice)`, per-label dict logged. Resamples target to output (nearest). | `labels=None` (None → all present labels) |
 | `CrossEntropyLoss` | `Tensor` loss | Wraps `nn.CrossEntropyLoss` (squeezes the target channel). | `weight=None, reduction="mean"` |
 | `FocalLoss` | `Tensor` loss | Multi-class focal loss. Note: `alpha` is a per-label weight list indexed by label id. | `gamma=2.0, alpha=[0.5,2.0,0.5,0.5,1], reduction="mean"` |
-| `Accuracy` | `Tensor` metric | This batch's classification accuracy. It keeps no state: the logging window averages it over the batches and resets between train and validation, so one figure never blends epochs or splits. | — |
+| `Accuracy` | `Tensor` metric | This batch's classification accuracy. It keeps no state: the logging window averages it over the batches and resets between train and validation, so one figure never blends epochs or splits. |: |
 | `DiceSaveMap` | 3-tuple | Dice + voxelwise error map (for a save-map consumer). | `labels=None, dataset=None, group=None` |
 
 ## Adversarial / style
@@ -88,16 +88,16 @@ groups act as a mask.
 | --- | --- | --- |
 | `BCE` | `BCEWithLogitsLoss` against a constant real/fake target. | `target=0` |
 | `PatchGanLoss` | LSGAN-style MSE against a constant target. | `target=0` |
-| `WGP` | `mean((output−1)²)` WGAN-style penalty. | — |
-| `Gram` | Gram-matrix (style) loss. | — |
+| `WGP` | `mean((output−1)²)` WGAN-style penalty. |: |
+| `Gram` | Gram-matrix (style) loss. |: |
 | `PerceptualLoss` | Feature-space perceptual loss over a pretrained KonfAI `Network` (custom multi-model forward; requires a real `path_model` checkpoint). | `model_loader`, `path_model`, `modules`, `shape` |
 
 ## Registration / distributions
 
 | Name | Role | Purpose | Key args (defaults) |
 | --- | --- | --- | --- |
-| `TRE` | `(Tensor, dict)` metric | Target Registration Error between predicted/target landmark coordinates. | — |
-| `GradientImages` | `Tensor` loss | Image-gradient smoothness loss (2D/3D auto); regulariser, or gradient-difference if a target is given. | — |
+| `TRE` | `(Tensor, dict)` metric | Target Registration Error between predicted/target landmark coordinates. |: |
+| `GradientImages` | `Tensor` loss | Image-gradient smoothness loss (2D/3D auto); regulariser, or gradient-difference if a target is given. |: |
 | `MutualInformationLoss` | `Tensor` loss | Parzen-window Gaussian mutual information (returns `−MI`). Subclasses `nn.Module` directly. | `num_bins=23, sigma_ratio=0.5` |
 | `KLDivergence` | `Tensor` loss | VAE KL term. **Rewires the graph** on init, inserting a `LatentDistribution` block; computes closed-form KL from `mu`/`log_std`. | `shape` (**required**), `dim=100, mu=0, std=1` |
 
@@ -107,14 +107,14 @@ groups act as a mask.
 | --- | --- | --- | --- |
 | `Variance` | `(Tensor, float)` metric | Channel-wise variance mean (ensemble/uncertainty). | `name="Variance"` |
 | `Mean` | `(Tensor, float)` metric | Mean of the output tensor. | `name="Mean"` |
-| `TripletLoss` | `Tensor` loss | `nn.TripletMarginLoss` over a 3-tuple output. | — |
-| `L1LossRepresentation` | `Tensor` loss | L1 between two representations + variance-collapse regulariser. | — |
+| `TripletLoss` | `Tensor` loss | `nn.TripletMarginLoss` over a 3-tuple output. |: |
+| `L1LossRepresentation` | `Tensor` loss | L1 between two representations + variance-collapse regulariser. |: |
 
 ## IMPACT feature-based criteria
 
 These download TorchScript feature extractors from Hugging Face at construction
 (`hf_hub_download`), so they need **network access**. The sanity check that probes the
-extractor runs on the **CPU** — deliberately, since touching a GPU there crashed
+extractor runs on the **CPU**: deliberately, since touching a GPU there crashed
 CPU-only hosts and pinned every DDP rank to the same device.
 All are `CriterionWithAttribute` and consume per-group `Attribute` statistics.
 
@@ -132,17 +132,15 @@ Imported lazily; a missing package raises a `MeasureError` with an install hint.
 | --- | --- | --- | --- |
 | `SSIM` | `konfai[ssim]` (scikit-image) | Masked structural similarity. Default `dynamic_range → 4024`. | `dynamic_range=None` |
 | `LPIPS` | `konfai[lpips]` | Learned perceptual similarity (AlexNet by default), tiled over patches. | `model="alex"` |
-| `FID` | `konfai[fid]` (scipy + torchvision) | Fréchet Inception Distance (InceptionV3). | — |
+| `FID` | `konfai[fid]` (scipy + torchvision) | Fréchet Inception Distance (InceptionV3). |: |
 
-```{note}
 None of these pins a device. The `IMPACT*` sanity check probes its TorchScript
 extractor on the CPU and discards the result; `LPIPS` and `FID` follow the device
-of the tensor they are given — the rank's GPU under DDP, or the CPU. `SAM_Perceptual`
+of the tensor they are given: the rank's GPU under DDP, or the CPU. `SAM_Perceptual`
 runs no sanity check at all.
-```
 
 ## Next steps
 
-- {doc}`schedulers` — the weight schedulers used in the `schedulers:` subtree
-- {doc}`../../concepts/model-graph` — the named outputs criteria attach to
-- {doc}`../api/extension-points` — write your own `Criterion`
+- {doc}`schedulers`: the weight schedulers used in the `schedulers:` subtree
+- {doc}`../../concepts/model-graph`: the named outputs criteria attach to
+- {doc}`../api/extension-points`: write your own `Criterion`

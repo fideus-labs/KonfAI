@@ -1,19 +1,35 @@
 # Execution flow
 
 This page walks through what happens when you launch the four KonfAI
-workflows — `TRAIN`, `PREDICTION`, `EVALUATION`, and `TRANSFORM` — from config
+workflows (`TRAIN`, `PREDICTION`, `EVALUATION`, and `TRANSFORM`), from config
 parsing to the files each one writes. Read it to know where a run's outputs land
 and how the distributed runtime wraps every command.
 
-**The model workflows write into a single workspace keyed by `train_name` —
-`Checkpoints/<train_name>/`, `Predictions/<train_name>/`,
-`Evaluations/<train_name>/` — so the `train_name` in each config file must name
+**The model workflows write into a single workspace keyed by `train_name`: `Checkpoints/<train_name>/`, `Predictions/<train_name>/`,
+`Evaluations/<train_name>/`: so the `train_name` in each config file must name
 the run you intend to touch. `TRANSFORM` is the exception: it is keyed by `name`,
 and only its log, its plan and a copy of its config land in the workspace
-(`Transforms/<name>/`) — the data goes wherever each `Write:` stage says, which
+(`Transforms/<name>/`): the data goes wherever each `Write:` stage says, which
 that run directory records in `outputs.json`.**
 
 KonfAI ships four low-level workflows and one higher-level app layer.
+
+```{mermaid}
+flowchart LR
+    C[Config.yml<br/>Trainer:]:::cfg --> T([konfai TRAIN]):::cmd
+    P[Prediction.yml<br/>Predictor:]:::cfg --> R([konfai PREDICTION]):::cmd
+    E[Evaluation.yml<br/>Evaluator:]:::cfg --> V([konfai EVALUATION]):::cmd
+    X[Transform.yml<br/>Transformer:]:::cfg --> W([konfai TRANSFORM]):::cmd
+
+    T --> TO[Checkpoints/&lt;train_name&gt;<br/>Statistics/&lt;train_name&gt;]:::out
+    R --> RO[Predictions/&lt;train_name&gt;]:::out
+    V --> VO[Evaluations/&lt;train_name&gt;<br/>Metric_*.json]:::out
+    W --> WO[wherever each Write: points<br/>Transforms/&lt;name&gt;/plan.txt]:::out
+
+```
+
+One root key per file, one command per file. The same reflection engine builds
+each one: only the root key changes what it builds.
 
 ## Low-level workflows
 
@@ -88,10 +104,10 @@ Outputs are written to:
 
 1. parses `Transform.yml` into a `Transformer`, refusing any key its grammar
    does not know
-2. binds every chain and runs the parse-time refusals — a chain not ending in
+2. binds every chain and runs the parse-time refusals: a chain not ending in
    `Write`, two chains writing the same target, a `Write` inside a source
-3. computes and prints the per-case plan — `STREAM`, `WHOLE-VOLUME`, `REDUCE`,
-   `SKIP` or `REFUSED` — probing each destination with a real region-write open
+3. computes and prints the per-case plan: `STREAM`, `WHOLE-VOLUME`, `REDUCE`,
+   `SKIP` or `REFUSED`: probing each destination with a real region-write open
 4. refuses **before writing a byte** when an entry's working set exceeds the
    per-rank `memory_budget`
 5. shards the cases across ranks and materializes each chain's `Write` stages,
@@ -114,7 +130,7 @@ The same workflows can also be built programmatically through:
 This is useful when you want to validate a config before launching the full
 runtime. `konfai.transformer.plan_transform(...)` goes one step further: it
 builds the workflow, computes the plan, prints it, and returns the
-`TransformPlan` without transforming anything — the `--plan` flag's entrypoint.
+`TransformPlan` without transforming anything: the `--plan` flag's entrypoint.
 
 ## Distributed execution
 
@@ -141,7 +157,7 @@ See {doc}`../usage/apps`.
 
 ## Next steps
 
-- {doc}`../config_guide/training` — every `Config.yml` key the training workflow reads.
-- {doc}`../config_guide/prediction` — configuring checkpoints, patch inference, and `outputs_dataset`.
-- {doc}`../config_guide/evaluation` — turning predictions and ground truth into metric JSON.
-- {doc}`../config_guide/transform` — the model-less workflow: chains, `Write`, and the plan.
+- {doc}`../config_guide/training`: every `Config.yml` key the training workflow reads.
+- {doc}`../config_guide/prediction`: configuring checkpoints, patch inference, and `outputs_dataset`.
+- {doc}`../config_guide/evaluation`: turning predictions and ground truth into metric JSON.
+- {doc}`../config_guide/transform`: the model-less workflow: chains, `Write`, and the plan.

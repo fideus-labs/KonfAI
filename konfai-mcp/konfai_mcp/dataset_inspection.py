@@ -153,12 +153,9 @@ class DatasetInspectionMixin:
     @staticmethod
     def _is_dicom_file(path: Path) -> bool:
         """True if the file carries the DICOM Part-10 ``DICM`` magic at offset 128 (extensionless slices)."""
-        try:
-            with path.open("rb") as handle:
-                handle.seek(128)
-                return handle.read(4) == b"DICM"
-        except OSError:
-            return False
+        from konfai.utils.utils import is_dicom_file
+
+        return is_dicom_file(path)
 
     def _scan_case_directory(
         self,
@@ -271,8 +268,8 @@ class DatasetInspectionMixin:
                         "patch_transforms": None,
                         # A group's role is task-dependent and cannot be inferred from its name
                         # (a CT is the input for segmentation but the target for MR->CT synthesis),
-                        # so leave it null and let the agent set it from the user's objective —
-                        # see is_input_meaning. Guessing here silently mis-wires the config.
+                        # so leave it null and let the agent set it from the user's objective: # see
+                        # is_input_meaning. Guessing here silently mis-wires the config.
                         "is_input": None,
                     }
                 }
@@ -471,7 +468,7 @@ class DatasetInspectionMixin:
                     "No supported groups were found directly under the requested path. "
                     "Inspect candidate_dataset_roots or call browse_dataset to locate the actual dataset root.",
                 ]
-            # Once groups are found the real question is what to DO with the dataset -- use a published app
+            # Once groups are found the real question is what to DO with the dataset: use a published app
             # as is, fine-tune a close one, or train from scratch. Only when nothing was found does the next
             # step remain "locate the dataset".
             payload["next_actions"] = (
@@ -516,7 +513,7 @@ class DatasetInspectionMixin:
         sampled_names = self._sample_dataset_names(names, max_cases, seed)
         sampled_items: dict[str, dict[str, Any]] = {}
         per_case_labels: dict[str, dict[str, float]] = {}
-        # Cap separating a label map (a bounded class set -- whole-body atlases like TotalSegmentator
+        # Cap separating a label map (a bounded class set: whole-body atlases like TotalSegmentator
         # top out around 117 classes) from an intensity image stored as an integer (int16 CT -> thousands
         # of distinct values, for which per-label voxel fractions are meaningless and huge).
         label_stats_max_classes = 512
@@ -528,7 +525,7 @@ class DatasetInspectionMixin:
             except Exception as exc:
                 # A single bad file must not abort the whole group.
                 # The structure scan already found this file on disk, so a read failure means the file
-                # itself is unreadable (corrupt, truncated, empty, or non-image bytes) -- a different
+                # itself is unreadable (corrupt, truncated, empty, or non-image bytes): a different
                 # problem from a missing group or a layout/token mismatch. Record it per case and keep
                 # going so one bad file never hides the healthy cases' statistics.
                 unreadable_cases[name] = f"{type(exc).__name__}: {str(exc).strip() or 'read failed'}"
@@ -574,7 +571,7 @@ class DatasetInspectionMixin:
             "readable_cases": len(sampled_items),
             "sample_names": sampled_names[: min(20, len(sampled_names))],
             "sampled": len(sampled_names) != len(names),
-            # The aggregates answer every question the per-case half does — and the per-case half is one
+            # The aggregates answer every question the per-case half does, and the per-case half is one
             # number per metric per sampled case, which was 43% of the whole inspect_dataset payload.
             "statistics": statistics.get("aggregates", {}),
         }

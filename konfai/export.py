@@ -158,7 +158,7 @@ def export_to_onnx(
 
     Returns
     -------
-    ``(onnx_path, manifest)`` -- the written ONNX path and the manifest dict (also written
+    ``(onnx_path, manifest)``: the written ONNX path and the manifest dict (also written
     to ``manifest.json`` when ``write_manifest``).
     """
     onnx = _require("onnx")

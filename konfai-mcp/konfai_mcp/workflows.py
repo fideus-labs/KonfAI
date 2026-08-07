@@ -17,7 +17,7 @@
 """The single source of truth for workflow-kind identity.
 
 Adding a workflow kind means: one ``WorkflowSpec`` entry here, extending the two ``Literal``
-aliases below (a static ``Literal`` cannot be derived from data), and nothing else -- every other
+aliases below (a static ``Literal`` cannot be derived from data), and nothing else, every other
 map (config filename, root key, runner command, capabilities class, retry tool) is derived from
 this table. ``test_workflow_registry_drift`` pins the aliases to the table.
 """
@@ -114,7 +114,7 @@ WORKFLOW_DONE_NEXT: dict[str, list[str]] = {
 
 
 def workflow_choice_description(action: str) -> str:
-    """``"<action>: train -> Config.yml (Trainer), ..."`` — a tool's ``workflow`` parameter, from the table.
+    """``"<action>: train -> Config.yml (Trainer), ..."``: a tool's ``workflow`` parameter, from the table.
 
     Generated, because these descriptions are the only view an agent has of what a parameter accepts:
     a workflow missing from the prose is a workflow the agent never tries, whatever the type allows.

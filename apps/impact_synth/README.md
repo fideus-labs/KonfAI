@@ -72,14 +72,14 @@ impact-synth-konfai pipeline CBCT -i patient01.nii.gz --gt ct.nii.gz -o patient0
 
 | Flag | Description | Default |
 |------|--------------|----------|
-| `MODEL` | Model name on Hugging Face (`MR`, `CBCT` or `MR_CBCT`) — determines what is predicted | *required* |
+| `MODEL` | Model name on Hugging Face (`MR`, `CBCT` or `MR_CBCT`), which determines what is predicted | *required* |
 | `-i`, `--inputs` | Input file(s) or a dataset directory | *required* |
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--ensemble` | Number of models to ensemble (`synthesize` / `pipeline`) | `0` |
 | `--tta` | Number of test-time augmentations (`synthesize` / `pipeline`) | `0` |
 | `--mc` | Monte Carlo dropout samples (`synthesize` / `pipeline`) | `0` |
 | `-uncertainty` | Also write the inference stack (`synthesize` / `pipeline`) | `False` |
-| `--gt` | Reference CT(s) — required by `eval`, optional in `pipeline` | *unset* |
+| `--gt` | Reference CT(s): required by `eval`, optional in `pipeline` | *unset* |
 | `--mask` | Evaluation mask(s) (`eval` / `pipeline`) | *unset* |
 | `--gpu` | GPU id(s), e.g. `0` or `0 1` | CPU if unset |
 | `--cpu` | Number of CPU worker processes | *unset* |
@@ -117,11 +117,11 @@ Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body M
 
 | Free VRAM | Batch (auto) | Peak VRAM | Time / case |
 |:--|:--|:--|:--|
-| 8 GB  | 16 | ~7.6 GB | — |
-| 16 GB | 28 | ~15 GB  | — |
+| 8 GB  | 16 | ~7.6 GB | n/a |
+| 16 GB | 28 | ~15 GB  | n/a |
 | 24 GB | 32 | ~16 GB  | **~24 s** |
 
-Single-model sCT keeps **system RAM ~2 GB**. The plan leaves memory headroom — a larger batch saturates the card and slows inference (batch 48 → ~22 GB). A full **5-model ensemble** runs in ~82 s. Inference scales with the case size.
+Single-model sCT keeps **system RAM ~2 GB**. The plan leaves memory headroom: a larger batch saturates the card and slows inference (batch 48 → ~22 GB). A full **5-model ensemble** runs in ~82 s. Inference scales with the case size.
 
 ---
 

@@ -35,6 +35,6 @@ definitions in `Model.py` if the built-in modules are not enough.
 
 Next steps:
 
-- {doc}`../concepts/model-graph` — how routed module graphs like the one in `Model.py` are composed
-- {doc}`../usage/custom-models` — to write and reference your own modules through `classpath`
-- {doc}`../config_guide/training` — reference for the training-side configuration keys
+- {doc}`../concepts/model-graph`: how routed module graphs like the one in `Model.py` are composed
+- {doc}`../usage/custom-models`: to write and reference your own modules through `classpath`
+- {doc}`../config_guide/training`: reference for the training-side configuration keys

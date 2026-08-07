@@ -1,13 +1,13 @@
 # IMPACT-Reg Example
 
 This example registers **two different patients** with [IMPACT-Reg](https://github.com/vboussot/ImpactLoss),
-run through the KonfAI runtime — real pelvis CT, a real anatomical difference to recover, and a score
+run through the KonfAI runtime: real pelvis CT, a real anatomical difference to recover, and a score
 computed on reference segmentations rather than on a deformation we invented.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/ImpactReg/register_demo.ipynb)
 
 **Run all the cells of `register_demo.ipynb`.** It downloads the public pelvis CT subset, aligns
-`1PC032` onto `1PC006`, then scores the result twice — before and after — and plots both. About one
+`1PC032` onto `1PC006`, then scores the result twice, before and after, and plots both. About one
 minute on a GPU.
 
 Unlike the `Segmentation` and `Synthesis` examples (raw `konfai TRAIN -> PREDICTION -> EVALUATION`), a
@@ -28,7 +28,7 @@ examples/ImpactReg/
 
 Both patients ship a 41-label reference segmentation, and that is the ground truth: propagate the
 moving patient's labels through the recovered displacement field and measure their Dice against the
-fixed patient's labels. `impact-reg-konfai eval` does exactly that — run it with no `--transform` for
+fixed patient's labels. `impact-reg-konfai eval` does exactly that; run it with no `--transform` for
 the **before**, and with the `Transform.h5` that `register` wrote for the **after**.
 
 On `1PC032 -> 1PC006` with the `FireANTs_SyN` preset, mean Dice over the 23 labels present goes from
@@ -80,8 +80,8 @@ preset and any volume.
 
 ## What to adapt first
 
-1. **preset** — `register ConvexAdam_Fine ...` (itk-impact, GPU) or `register Generic_Rigid ...` (elastix, CPU);
-2. **ensemble** — pass several presets as positionals (`register FireANTs_SyN ConvexAdam_Fine ...`); the fields
+1. **preset**: `register ConvexAdam_Fine ...` (itk-impact, GPU) or `register Generic_Rigid ...` (elastix, CPU);
+2. **ensemble**: pass several presets as positionals (`register FireANTs_SyN ConvexAdam_Fine ...`); the fields
    are averaged, and `--uncertainty` retains the per-preset fields for an `impact-reg-konfai uncertainty` map;
-3. **patch size / overlap** — size the patch to your GPU budget; larger overlap = smoother blend;
-4. **inputs** — the same command reads OME-Zarr or DICOM directly (KonfAI auto-detects the store format).
+3. **patch size / overlap**: size the patch to your GPU budget; larger overlap = smoother blend;
+4. **inputs**: the same command reads OME-Zarr or DICOM directly (KonfAI auto-detects the store format).

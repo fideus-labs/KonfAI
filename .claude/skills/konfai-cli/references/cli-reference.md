@@ -16,7 +16,7 @@ EVALUATION to `konfai.evaluator.evaluate`.
 
 | Option | Meaning |
 |---|---|
-| `-c`, `--config PATH` | Path to the workflow YAML. If omitted, a command-specific default filename is used — **always pass it explicitly** to avoid ambiguity. |
+| `-c`, `--config PATH` | Path to the workflow YAML. If omitted, a command-specific default filename is used: **always pass it explicitly** to avoid ambiguity. |
 | `-y`, `--overwrite` | Overwrite existing outputs (checkpoints, logs, predictions) without prompting. |
 | `--gpu ID [ID ...]` | GPU device ids, constrained to the visible devices, e.g. `--gpu 0` or `--gpu 0 1 2`. Omit to run on CPU. |
 | `--cpu N` | Run on CPU with `N` (>0) worker processes. **Mutually exclusive with `--gpu`.** |
@@ -25,7 +25,7 @@ EVALUATION to `konfai.evaluator.evaluate`.
 
 `--gpu` and `--cpu` are a mutually-exclusive group. With neither, execution falls back to CPU.
 
-## `TRAIN` — train from scratch
+## `TRAIN`: train from scratch
 
 Reads a `Trainer:` config and runs the full training loop.
 
@@ -38,7 +38,7 @@ Reads a `Trainer:` config and runs the full training loop.
 konfai TRAIN -y --gpu 0 --config Config.yml
 ```
 
-## `RESUME` — continue an existing run
+## `RESUME`: continue an existing run
 
 Same as TRAIN plus checkpoint reload.
 
@@ -53,7 +53,7 @@ Same as TRAIN plus checkpoint reload.
 konfai RESUME -y --gpu 0 --config Config.yml --model Checkpoints/TRAIN_01/last.pt
 ```
 
-## `PREDICTION` — inference with a trained model
+## `PREDICTION`: inference with a trained model
 
 Reads a `Predictor:` config. The `--config` value is passed as `prediction_file`.
 
@@ -66,7 +66,7 @@ Reads a `Predictor:` config. The `--config` value is passed as `prediction_file`
 konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_01/best.pt
 ```
 
-## `EVALUATION` — score predictions against ground truth
+## `EVALUATION`: score predictions against ground truth
 
 Reads an `Evaluator:` config. The `--config` value is passed as `evaluations_file`.
 
@@ -78,7 +78,7 @@ Reads an `Evaluator:` config. The `--config` value is passed as `evaluations_fil
 konfai EVALUATION -y --config Evaluation.yml
 ```
 
-## `konfai-cluster` — SLURM submission
+## `konfai-cluster`: SLURM submission
 
 Same four subcommands, plus a "Cluster manager arguments" group that submits via `submitit`
 instead of running locally:

@@ -1,6 +1,6 @@
-# KonfAI MCP — Tool Reference
+# KonfAI MCP. Tool Reference
 
-> GENERATED from the registry by `konfai-mcp/scripts/generate_tool_reference.py` — do not edit by hand.
+> GENERATED from the registry by `konfai-mcp/scripts/generate_tool_reference.py`: do not edit by hand.
 
 62 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
 
@@ -52,7 +52,7 @@ Use at the start, or whenever you need to orient, to learn what KonfAI can do an
 
 ### `describe_model_outputs`
 
-Use to ENUMERATE a model's addressable module paths — the exact keys outputs_criterions and outputs_dataset accept — instead of guessing dotted paths and reading MeasureError lists from failed runs. This builds the workflow from the session config (side-effect-free, like validation) and walks every Network's module graph; terminal=true marks output heads (deep-supervision losses attach to non-terminal paths). Outputs: networks {attr: [{path, terminal, module}]}, reference_hint, next_actions. Next: write_workflow_config, then validate_config_semantics.
+Use to ENUMERATE a model's addressable module paths (the exact keys outputs_criterions and outputs_dataset accept) instead of guessing dotted paths and reading MeasureError lists from failed runs. This builds the workflow from the session config (side-effect-free, like validation) and walks every Network's module graph; terminal=true marks output heads (deep-supervision losses attach to non-terminal paths). Outputs: networks {attr: [{path, terminal, module}]}, reference_hint, next_actions. Next: write_workflow_config, then validate_config_semantics.
 
 ### `design_config_strategy`
 
@@ -60,7 +60,7 @@ Use once the user task is known and the dataset root is understood. This builds 
 
 ### `diff_run_configs`
 
-Use to DIFF the exact configs two jobs ran with, from their immutable launch-time snapshots — 'what changed between run A and run B' without trusting memory. It does not diff live session files (they may have been rewritten since). Outputs: identical flag, unified diff text, next_actions. Next: compare_runs on the two runs' metrics.
+Use to DIFF the exact configs two jobs ran with, from their immutable launch-time snapshots: 'what changed between run A and run B' without trusting memory. It does not diff live session files (they may have been rewritten since). Outputs: identical flag, unified diff text, next_actions. Next: compare_runs on the two runs' metrics.
 
 ### `export_app`
 
@@ -68,7 +68,7 @@ Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters)
 
 ### `export_run_record`
 
-Use to EXPORT the full reproducibility record of one run: the job manifest (command, devices, environment snapshot with package versions and GPUs), the launch-time config snapshots' CONTENT, the post-run resolved config, every split's metrics, and a log tail — a Methods-section-grade record in one payload. It does not rerun anything. Caveat: resolved_config is read from the LIVE session config, which may have been rewritten since the run -- the launch-time truth is config_snapshots. Outputs: job, manifest, config_snapshots (text), resolved_config, metrics per split, log_tail. Next: compare_runs or read_training_curves.
+Use to EXPORT the full reproducibility record of one run: the job manifest (command, devices, environment snapshot with package versions and GPUs), the launch-time config snapshots' CONTENT, the post-run resolved config, every split's metrics, and a log tail: a Methods-section-grade record in one payload. It does not rerun anything. Caveat: resolved_config is read from the LIVE session config, which may have been rewritten since the run -- the launch-time truth is config_snapshots. Outputs: job, manifest, config_snapshots (text), resolved_config, metrics per split, log_tail. Next: compare_runs or read_training_curves.
 
 ### `fine_tune_app`
 
@@ -84,7 +84,7 @@ Use when you need the latest state for one job without waiting. This returns the
 
 ### `get_run_metrics`
 
-Use to read the FULL evaluation metrics (per-case values + aggregates) of ONE named run, instead of the newest-file-only view of session://current/metrics — essential when comparing specific past runs. This reads Evaluations/<run_name>/Metric_<SPLIT>.json in the current session — or an app trial's metrics when run_name is a trial label as returned by leaderboard (an AppEvaluations/AppPipelines directory such as 'eval_app__iterations_300-1a2b3c4d'). It does not rerun evaluation. Outputs: run_name, split, path, updated_at, metrics (full JSON), summary, next_actions. Next: leaderboard or summarize_session.
+Use to read the FULL evaluation metrics (per-case values + aggregates) of ONE named run, instead of the newest-file-only view of session://current/metrics (essential when comparing specific past runs. This reads Evaluations/<run_name>/Metric_<SPLIT>.json in the current session) or an app trial's metrics when run_name is a trial label as returned by leaderboard (an AppEvaluations/AppPipelines directory such as 'eval_app__iterations_300-1a2b3c4d'). It does not rerun evaluation. Outputs: run_name, split, path, updated_at, metrics (full JSON), summary, next_actions. Next: leaderboard or summarize_session.
 
 ### `import_app`
 
@@ -104,7 +104,7 @@ Use after the dataset root is chosen (browse_dataset first when the root is ambi
 
 ### `inspect_object_signature`
 
-Use when choosing, customizing, or debugging any configurable object classpath such as a model, loss, transform, or helper module — including a declarative YAML model ('default|<Name>.yml' from the shipped catalog, or a session-local .yml). This returns local or imported signature details, defaults, doc summary, and detected contract hints; for a YAML model it returns its hyperparameters (all overridable from the run config), the loss-attachable terminal_leaves paths for outputs_criterions, the full yaml_content, and how_to_adapt guidance (override hyperparameters vs copy-and-edit the structure) — parsed statically, never built. It does not validate the full workflow config or decide which object to use. Outputs: source type, signature, parameters, defaults, detected_contract, limitations, and next_actions. Next: write_session_file, write_workflow_config, or review_config_semantics.
+Use when choosing, customizing, or debugging any configurable object classpath such as a model, loss, transform, or helper module: including a declarative YAML model ('default|<Name>.yml' from the shipped catalog, or a session-local .yml). This returns local or imported signature details, defaults, doc summary, and detected contract hints; for a YAML model it returns its hyperparameters (all overridable from the run config), the loss-attachable terminal_leaves paths for outputs_criterions, the full yaml_content, and how_to_adapt guidance (override hyperparameters vs copy-and-edit the structure): parsed statically, never built. It does not validate the full workflow config or decide which object to use. Outputs: source type, signature, parameters, defaults, detected_contract, limitations, and next_actions. Next: write_session_file, write_workflow_config, or review_config_semantics.
 
 ### `leaderboard`
 
@@ -148,7 +148,7 @@ Use to READ a dataset's small non-image text file: a labels/metadata CSV or TSV,
 
 ### `read_job_log`
 
-Use to READ a job's log as a tool — the crash-triage primitive: tail more than the fixed resource tail, page through it, or filter it with a regex to find the traceback. This reads the job console log (or the KonfAI runtime log when present) and returns the selected lines. It does not parse metrics; use read_live_metrics for parsed metrics. Outputs: job_id, status, path, content, lines_returned, next_actions. Next: validate_config_semantics then the matching run_* tool to retry, or cancel_job.
+Use to READ a job's log as a tool: the crash-triage primitive: tail more than the fixed resource tail, page through it, or filter it with a regex to find the traceback. This reads the job console log (or the KonfAI runtime log when present) and returns the selected lines. It does not parse metrics; use read_live_metrics for parsed metrics. Outputs: job_id, status, path, content, lines_returned, next_actions. Next: validate_config_semantics then the matching run_* tool to retry, or cancel_job.
 
 ### `read_live_metrics`
 
@@ -160,11 +160,11 @@ Use to READ BACK a file from the current session workspace: a config, a support 
 
 ### `read_template_file`
 
-Use to READ a file shipped with an example template — a reference implementation such as a local model (Model.py), a custom transform (UnNormalize.py), a declarative model (UNet.yml), or an alternate config (Config_GAN.yml) — so you can understand or adapt it instead of guessing what it contains. This returns a bounded character range of one template file. It does not modify templates. Outputs: template, filename, content, truncated, next_actions. Next: write_session_file to adapt it into the session, or initialize_session to copy files wholesale.
+Use to READ a file shipped with an example template (a reference implementation such as a local model (Model.py), a custom transform (UnNormalize.py), a declarative model (UNet.yml), or an alternate config (Config_GAN.yml)), so you can understand or adapt it instead of guessing what it contains. This returns a bounded character range of one template file. It does not modify templates. Outputs: template, filename, content, truncated, next_actions. Next: write_session_file to adapt it into the session, or initialize_session to copy files wholesale.
 
 ### `read_training_curves`
 
-Use to read a run's TRAINING CURVES (loss/metric scalars over iterations) from the TensorBoard event files KonfAI writes under Statistics/<run_name>/ — the full history, not just the live log tail. This parses tfevents into downsampled scalar series. It requires the 'tensorboard' package. Outputs: tags, curves {tag: [{step, value}]}, next_actions. Next: compare_runs or leaderboard.
+Use to read a run's TRAINING CURVES (loss/metric scalars over iterations) from the TensorBoard event files KonfAI writes under Statistics/<run_name>/: the full history, not just the live log tail. This parses tfevents into downsampled scalar series. It requires the 'tensorboard' package. Outputs: tags, curves {tag: [{step, value}]}, next_actions. Next: compare_runs or leaderboard.
 
 ### `register_app_source`
 
@@ -200,7 +200,7 @@ Use to RUN A SWEEP: launch several training configs SEQUENTIALLY server-side (ea
 
 ### `run_component_smoke_test`
 
-Use to SMOKE-TEST a component you wrote or referenced BEFORE wiring it into a config: it executes the component's runtime contract on dummy tensors. For a transform it asserts transform_shape(shape) == __call__(tensor).shape — the contract whose silent violation corrupts patch reassembly; for a criterion it reports Tensor-vs-tuple return (loss vs metric convention) and whether backward() works. TRUST: this imports and EXECUTES the component's code — in an isolated spawn subprocess, never in the server process — but still only run it on code you or the user wrote. Outputs: ok, stage, contract details (predicted vs actual shape, returns, backward_ok) or the full traceback. Next: write_workflow_config when ok, or write_session_file to fix the component.
+Use to SMOKE-TEST a component you wrote or referenced BEFORE wiring it into a config: it executes the component's runtime contract on dummy tensors. For a transform it asserts transform_shape(shape) == __call__(tensor).shape: the contract whose silent violation corrupts patch reassembly; for a criterion it reports Tensor-vs-tuple return (loss vs metric convention) and whether backward() works. TRUST: this imports and EXECUTES the component's code, in an isolated spawn subprocess, never in the server process, but still only run it on code you or the user wrote. Outputs: ok, stage, contract details (predicted vs actual shape, returns, backward_ok) or the full traceback. Next: write_workflow_config when ok, or write_session_file to fix the component.
 
 ### `run_evaluation`
 
@@ -274,26 +274,26 @@ Route a dataset+goal request: use an existing app, fine-tune one, or train from 
 
 ## Resources
 
-- `server://info` — Return a compact summary of the MCP server workspace and in-memory jobs.
-- `server://capabilities` — Describe the runtime resources visible to the MCP server for device selection.
-- `guide://tool-index` — Read the guide to the MCP tool and prompt surface, generated from the registry so it can never drift.
-- `guide://config-design` — Read the compact KonfAI config-design summary first, then go into docs if needed.
-- `docs://index` — List the broader reasoning docs available through the MCP server.
-- `docs://patching` — Read the detailed KonfAI patching doc.
-- `docs://modeling` — Read the detailed KonfAI modeling doc.
-- `docs://configuration` — Read the detailed KonfAI configuration doc.
-- `docs://prediction` — Read the prediction authoring doc: TTA, multi-model ensembles, outputs_dataset reassembly.
-- `docs://compute` — Read the compute doc: device selection, DDP semantics, memory knobs, SLURM submission.
-- `docs://dataset-mapping` — Read the dataset-to-task mapping doc for clarifying inputs, targets, and support groups.
-- `docs://examples` — Read how example templates should be used by an agent.
-- `templates://list` — List example templates that can seed the current session workspace.
-- `sessions://list` — List session workspaces available under the workspace root.
-- `session://current/summary` — Read the current summary for the current session workspace.
-- `session://current/log` — Read the latest available session log tail.
-- `session://current/metrics` — Read the latest evaluation metrics for the current session as structured JSON.
-- `apps://catalog` — Return the resolved app-source catalogue (shipped default + workspace file + env override).
-- `template://{name}/summary` — Read the compact template summary, including config/model hints, before opening broader docs.
-- `session://current/config/{workflow}` — Read one current-session config chosen by workflow.
-- `job://{job_id}/status` — Read the latest status payload for one job.
-- `job://{job_id}/log` — Read the latest job log tail.
-- `job://{job_id}/manifest` — Read the immutable manifest captured when the job was launched.
+- `server://info`: Return a compact summary of the MCP server workspace and in-memory jobs.
+- `server://capabilities`: Describe the runtime resources visible to the MCP server for device selection.
+- `guide://tool-index`: Read the guide to the MCP tool and prompt surface, generated from the registry so it can never drift.
+- `guide://config-design`: Read the compact KonfAI config-design summary first, then go into docs if needed.
+- `docs://index`: List the broader reasoning docs available through the MCP server.
+- `docs://patching`: Read the detailed KonfAI patching doc.
+- `docs://modeling`: Read the detailed KonfAI modeling doc.
+- `docs://configuration`: Read the detailed KonfAI configuration doc.
+- `docs://prediction`: Read the prediction authoring doc: TTA, multi-model ensembles, outputs_dataset reassembly.
+- `docs://compute`: Read the compute doc: device selection, DDP semantics, memory knobs, SLURM submission.
+- `docs://dataset-mapping`: Read the dataset-to-task mapping doc for clarifying inputs, targets, and support groups.
+- `docs://examples`: Read how example templates should be used by an agent.
+- `templates://list`: List example templates that can seed the current session workspace.
+- `sessions://list`: List session workspaces available under the workspace root.
+- `session://current/summary`: Read the current summary for the current session workspace.
+- `session://current/log`: Read the latest available session log tail.
+- `session://current/metrics`: Read the latest evaluation metrics for the current session as structured JSON.
+- `apps://catalog`: Return the resolved app-source catalogue (shipped default + workspace file + env override).
+- `template://{name}/summary`: Read the compact template summary, including config/model hints, before opening broader docs.
+- `session://current/config/{workflow}`: Read one current-session config chosen by workflow.
+- `job://{job_id}/status`: Read the latest status payload for one job.
+- `job://{job_id}/log`: Read the latest job log tail.
+- `job://{job_id}/manifest`: Read the immutable manifest captured when the job was launched.

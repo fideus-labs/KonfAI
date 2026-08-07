@@ -165,7 +165,7 @@ class TestFreeAxisReachesTheModelAsAValidMultiple:
 
     def test_a_2d_multiple_aligns_to_the_trailing_axes(self):
         # A 2D model's factor has two entries but the slice regime's patch has three axes: the factor
-        # constrains Y and X (the axes the model sees), never Z — front-indexing would leave X raw and
+        # constrains Y and X (the axes the model sees), never Z: front-indexing would leave X raw and
         # round Y by the X factor.
         import torch
         from konfai.data.patching import DatasetPatch

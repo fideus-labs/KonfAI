@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for the B1 memory-budget chooser: it derives ``use_cache`` from a declared RAM budget,
-estimates the dataset size from headers alone, and -- for ``"auto"`` -- reads the cgroup limit rather
+estimates the dataset size from headers alone, and (for ``"auto"``) reads the cgroup limit rather
 than the host so a container/SLURM job is not OOM-killed."""
 
 import os
@@ -36,7 +36,7 @@ from konfai.utils import runtime
 from konfai.utils.errors import ConfigError
 
 # --------------------------------------------------------------------------------------
-# Budget parsing -- a bare number is GiB, a string carries its own unit
+# Budget parsing: a bare number is GiB, a string carries its own unit
 # --------------------------------------------------------------------------------------
 
 
@@ -64,7 +64,7 @@ def test_parse_memory_budget_bytes_rejects_garbage(value: str) -> None:
 
 
 # --------------------------------------------------------------------------------------
-# THE CGROUP TRAP -- "auto" must see the cgroup ceiling, not the host's RAM
+# THE CGROUP TRAP: "auto" must see the cgroup ceiling, not the host's RAM
 # --------------------------------------------------------------------------------------
 
 
@@ -122,7 +122,7 @@ def test_no_cgroup_falls_back_to_host(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # --------------------------------------------------------------------------------------
-# The chooser -- derive use_cache from the budget vs the estimated dataset size
+# The chooser: derive use_cache from the budget vs the estimated dataset size
 # --------------------------------------------------------------------------------------
 
 # Two source groups, four cases each, a [1, 8, 8, 8] volume per case:
@@ -150,7 +150,7 @@ def test_estimate_matches_known_fixture() -> None:
 def test_estimate_counts_one_copy_per_augmentation_draw() -> None:
     """A cached case holds its base tensor plus one per draw, so the estimate must multiply by them.
 
-    Counting the base tensor alone under-reports the cache by the augmentation count -- the budget
+    Counting the base tensor alone under-reports the cache by the augmentation count: the budget
     then picks CACHE for a dataset several times too big for it and the run is OOM-killed anyway.
     """
     data = DataTrain(
@@ -247,7 +247,7 @@ def test_an_auto_budget_is_split_across_one_node_not_the_whole_cluster(monkeypat
 
 
 # --------------------------------------------------------------------------------------
-# The evaluation auto-patch -- an AUTO budget is a NODE budget, split across the local ranks
+# The evaluation auto-patch: an AUTO budget is a NODE budget, split across the local ranks
 # --------------------------------------------------------------------------------------
 
 
@@ -298,7 +298,7 @@ def test_a_garbled_local_ranks_variable_keeps_the_undivided_default(monkeypatch:
 
 def test_run_distributed_app_exports_and_restores_local_ranks(monkeypatch: pytest.MonkeyPatch) -> None:
     # The wrapper leaves the per-node rank count in the environment while the workflow is built
-    # (the KeyboardInterrupt escapes the factory before any spawn), and restores it after -- a
+    # (the KeyboardInterrupt escapes the factory before any spawn), and restores it after: a
     # leak would silently shrink a later in-process run's patches.
     captured: list[str] = []
 
@@ -316,8 +316,7 @@ def test_run_distributed_app_exports_and_restores_local_ranks(monkeypatch: pytes
     factory(gpu=[0])
     assert captured[-1] == "1" and os.environ["KONFAI_LOCAL_RANKS"] == "7"
 
-    # A genuine factory failure (not the swallowed KeyboardInterrupt) must restore the variable too —
-    # the restore lives in a finally, not in the interrupt handler.
+    # A genuine factory failure (not the swallowed KeyboardInterrupt) must restore the variable too: # the restore lives in a finally, not in the interrupt handler.
     monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
 
     @runtime.run_distributed_app

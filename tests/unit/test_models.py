@@ -152,7 +152,7 @@ def test_voxelmorph_rejects_a_shape_that_contradicts_dim() -> None:
 @pytest.mark.parametrize("dim", [2, 3])
 def test_rigid_affine_is_a_proper_rotation_and_starts_at_identity(dim: int) -> None:
     # The rotation is exp of a skew-symmetric generator, so it must land in SO(n) for ANY parameter
-    # value the optimizer produces -- orthogonal with det +1, never a reflection or a shear -- and
+    # value the optimizer produces (orthogonal with det +1, never a reflection or a shear) and
     # zero parameters must be the identity, which is what Rigid.init relies on.
     n_parameters = dim * (dim + 1) // 2
     affine = rigid_affine(torch.randn(4, n_parameters), dim)

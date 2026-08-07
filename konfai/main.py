@@ -37,7 +37,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
 
     This function:
     1) defines common arguments used by TRAIN / RESUME / PREDICTION / EVALUATION
-       (config file, overwrite, device selection, quiet, tensorboard) -- TRANSFORM
+       (config file, overwrite, device selection, quiet, tensorboard): TRANSFORM
        declares its own set, since it has no TOP-LEVEL model and so nothing to
        write scalars about (a chain may still embed a `KonfAIInference` stage)
     2) defines subcommands and their command-specific arguments
@@ -72,7 +72,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
             type=str,
             default=None,
             help="Path to the configuration file (YAML). "
-            "If omitted, a command-specific default is used (e.g. Train.yml, Prediction.yml, Evaluation.yml).",
+            "If omitted, a command-specific default is used: Config.yml, Prediction.yml, Evaluation.yml.",
         )
         parser.add_argument(
             "-y",
@@ -243,7 +243,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Print the per-case streaming plan and exit without transforming. The plan probes each"
         " destination with a real region-write open (created then removed), so it reports the run's"
-        " actual verdict — it touches the output directories even in plan mode.",
+        " actual verdict, it touches the output directories even in plan mode.",
     )
     transform_p.add_argument(
         "--transforms-dir",
@@ -295,7 +295,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
         train(**args)
     else:
         # Exhaustive on purpose: a catch-all else would silently launch the trainer for any command
-        # it does not know -- a new workflow would train a UNet instead of failing.
+        # it does not know: a new workflow would train a UNet instead of failing.
         parser.error(f"Unknown command '{args['command']}'.")
 
 
@@ -317,7 +317,7 @@ def main():
     -----
     The actual execution logic is implemented in `konfai.trainer.train`,
     `konfai.predictor.predict`, `konfai.evaluator.evaluate`, and
-    `konfai.transformer.transform` -- the one command with no top-level model.
+    `konfai.transformer.transform`: the one command with no top-level model.
     """
     parser = argparse.ArgumentParser(
         prog="konfAI", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False

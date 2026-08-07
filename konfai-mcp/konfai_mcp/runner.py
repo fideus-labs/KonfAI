@@ -43,8 +43,8 @@ def _subprocess_entry(queue: Any, target: str, kwargs: dict[str, Any], output_pa
     """Run one runner API and post its result back, with the child's stdio off the server's.
 
     The server speaks JSON-RPC over its own stdio, and this child inherits those descriptors. Anything it
-    or its descendants write to fd 1 -- KonfAI's own progress bars, a pip install during app resolution, a
-    library banner at import -- lands inside a protocol frame and desynchronises the stream: the response
+    or its descendants write to fd 1 (KonfAI's own progress bars, a pip install during app resolution, a
+    library banner at import) lands inside a protocol frame and desynchronises the stream: the response
     to THIS call is delivered and then destroyed, and the caller waits forever for an answer that already
     arrived. Redirecting at fd level covers the whole process tree; ``sys.stdout`` alone would not, since a
     grandchild inherits descriptors rather than Python objects.
@@ -66,7 +66,7 @@ def _subprocess_entry(queue: Any, target: str, kwargs: dict[str, Any], output_pa
                 os.dup2(sink.fileno(), 1)
                 os.dup2(sink.fileno(), 2)
         except OSError as exc:
-            # The call goes on -- refusing every validation over an exotic fd state would be worse --
+            # The call goes on: refusing every validation over an exotic fd state would be worse --
             # with fd 1 possibly still on the protocol. Said in the sink, by path: open() does not need
             # the fds that just failed, and a wedged or failing call then carries its explanation.
             with contextlib.suppress(OSError), open(output_path, "ab") as sink:
@@ -138,7 +138,7 @@ def run_api_in_subprocess(target: str, kwargs: dict[str, Any], timeout_s: float 
                     }
     # Bounded join: the result is already in hand, so the child should exit near-instantly. If it wedged
     # during teardown (e.g. a native/CUDA context that will not exit), an unbounded join would hang the
-    # server thread forever -- exactly what the timeout above exists to prevent -- so escalate to
+    # server thread forever (exactly what the timeout above exists to prevent), so escalate to
     # terminate/kill instead, matching the timeout branch.
     process.join(10)
     if process.is_alive():
@@ -161,7 +161,7 @@ def preserved_config(config_path: Path):
     """Keep the authored config bytes across a child that builds a workflow from them.
 
     Building materializes every default into the file, and the child puts it back in its own
-    ``finally`` -- which a timeout kill (SIGTERM) never reaches. Only the parent is guaranteed to
+    ``finally``: which a timeout kill (SIGTERM) never reaches. Only the parent is guaranteed to
     outlive the child, so the snapshot belongs on this side of the spawn.
     """
     backup = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
@@ -316,7 +316,7 @@ def run_workflow_api(
             _apply_single_process_patches()
         # Build-time sizing (the evaluation auto-patch) divides the auto memory budget by the per-node
         # rank count it finds in the environment. KonfAI's own launcher exports it, but this child
-        # entrypoint builds the workflow itself — export it here too (the spawn child owns its env).
+        # entrypoint builds the workflow itself: export it here too (the spawn child owns its env).
         os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, len(gpu or []) or int(cpu or 1)))
         workflow = _build_workflow(command, config, models, model=model, lr=lr)
         execute_distributed_object(
@@ -352,7 +352,7 @@ def run_app_api(
 
     Resolving the app imports its Python code and pip-installs its requirements (the trust boundary,
     gated in the parent tool), so it runs here in the spawn subprocess. Local and HuggingFace apps
-    only -- a remote app server is not driven from the MCP.
+    only: a remote app server is not driven from the MCP.
     """
     with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
         _ensure_local_imports()
@@ -461,7 +461,7 @@ def app_parameters_api(*, ref: str, force_update: bool = False) -> dict[str, Any
     """Child entrypoint that reads an app's tunable parameters (``{values, constraints}``).
 
     ``get_parameters`` imports the app's model class to derive constraints from its type hints --
-    the trust boundary -- so it runs here in the spawn subprocess, never in the server process.
+    the trust boundary, so it runs here in the spawn subprocess, never in the server process.
     """
     from konfai_apps.app_repository import LocalAppRepository, get_app_repository_info
 
@@ -658,7 +658,7 @@ def _check_worker_spawn_picklability(workflow_object: Any, requested_num_workers
 
     Validation loads single-process, so an unpicklable dataset member (an open file handle, a lambda in
     a transform, a SimpleITK object) passes validation and then kills the DataLoader workers at the real
-    run's setup — the classic "validation passes, training crashes" gap. ``pickle.dumps`` on each
+    run's setup: the classic "validation passes, training crashes" gap. ``pickle.dumps`` on each
     dataloader's dataset reproduces the spawn transfer without spawning anything.
     """
     result: dict[str, Any] = {"requested_num_workers": requested_num_workers, "checked": False}
@@ -737,8 +737,8 @@ def plan_transform_api(
 ) -> dict[str, Any]:
     """Child entrypoint for the TRANSFORM dry-run: plan every case, write nothing.
 
-    The plan is the workflow's own verdict, not a prediction — it opens and removes a real
-    region-write on each destination — so it is the one thing an agent should read before launching
+    The plan is the workflow's own verdict, not a prediction (it opens and removes a real
+    region-write on each destination), so it is the one thing an agent should read before launching
     a job that writes a dataset. Runs in a spawn child like every other workflow API: the config is
     rewritten in place by KonfAI's own binder, so its bytes are snapshotted and restored.
     """
@@ -805,7 +805,7 @@ def validate_workflow_api(
 
     Levels: 'instantiate' builds the workflow object, 'setup' also builds datasets/dataloaders,
     'train_step' additionally runs one forward+backward on one batch. The authored config bytes are
-    snapshotted and restored, and all outputs go to a throwaway validate root -- with one exception.
+    snapshotted and restored, and all outputs go to a throwaway validate root, with one exception.
     ``workflow='transform'`` at ``level='setup'`` runs ``Transformer.setup``, whose plan opens and
     removes a real region-write probe on every destination the config's Write/Save stages name: those
     are the author's own stores, not the validate root. A directory store gets a probe case created
@@ -925,7 +925,7 @@ def validate_workflow_api(
                 except OSError as restore_exc:
                     # The side-effect-free invariant is broken: KonfAI already rewrote the config with all
                     # defaults materialised and the author's bytes could not be put back. Never swallow
-                    # this silently -- a "success" payload would then hide a mutated config on disk.
+                    # this silently: a "success" payload would then hide a mutated config on disk.
                     warnings.warn(
                         f"Failed to restore the validated config at {config_path}: {restore_exc}. The file "
                         "was left rewritten by KonfAI (defaults materialised, not the authored bytes).",

@@ -16,7 +16,7 @@
 
 """A chat turn end to end through the BFF, with a scripted agent in place of the LLM.
 
-The agent here does what the real tools do — it writes to the workspace — because that is where the
+The agent here does what the real tools do (it writes to the workspace), because that is where the
 next turn's state comes from. So these cover the orchestration no prompt can guarantee: what rides into
 a turn, what is derived from what the turn actually achieved, and what comes back out of it.
 """
@@ -220,7 +220,7 @@ def test_training_hands_over_to_prediction(studio: tuple[TestClient, _ScriptedAg
 def test_the_assistant_writes_its_own_buttons_at_the_end_of_its_reply(
     studio: tuple[TestClient, _ScriptedAgent, Path],
 ) -> None:
-    """The buttons come out of the reply itself — no second model call, and no wait after the answer.
+    """The buttons come out of the reply itself: no second model call, and no wait after the answer.
     The block is stripped from what the user reads and becomes the bar."""
     client, agent, session = studio
     agent.script = [
@@ -341,7 +341,7 @@ def test_the_state_and_the_moves_survive_a_reload(studio: tuple[TestClient, _Scr
 
 def test_the_index_is_never_cached_and_the_assets_always_are(studio: tuple[TestClient, _ScriptedAgent, Path]) -> None:
     """index.html is what names the fingerprinted bundle, so a cached one pins the browser to the
-    previous build — an updated Studio silently serving the old front. The assets it names carry a hash,
+    previous build: an updated Studio silently serving the old front. The assets it names carry a hash,
     so their bytes never change and they can be cached for a year."""
     client, _agent, _ = studio
 
@@ -361,7 +361,7 @@ def test_an_interrupted_turn_keeps_the_buttons_that_still_apply(
     studio: tuple[TestClient, _ScriptedAgent, Path],
 ) -> None:
     """A turn cut short writes no moves block. Falling straight back to the generic fill-in throws away
-    the last real ones — they still apply while the experiment has not moved."""
+    the last real ones, they still apply while the experiment has not moved."""
     client, agent, _ = studio
     agent.script = [
         {"type": "text", "text": "Which do you want?\n<<NEXT>>\nDo MR To CT :: Fine-tune the MR->CT app.\n"},
@@ -380,7 +380,7 @@ def test_a_question_is_not_padded_with_tool_named_buttons(
     studio: tuple[TestClient, _ScriptedAgent, Path],
 ) -> None:
     """When the reply asks a question its moves ARE the options. A derived "Run train" beside them answers
-    a question nobody asked — and launches the config the reply just said was wrong."""
+    a question nobody asked, and launches the config the reply just said was wrong."""
     client, agent, session = studio
     agent.script = [
         {"type": "text", "text": "That patch cannot work. Which do you want?\n<<NEXT>>\n"},
@@ -433,7 +433,7 @@ def test_the_transcript_is_served_to_a_browser_that_missed_the_turns(
 def test_an_interrupted_tool_is_recorded_as_cut_not_left_running(
     studio: tuple[TestClient, _ScriptedAgent, Path],
 ) -> None:
-    """A stream that dies before the tool answers still leaves a turn on disk — with the tool marked
+    """A stream that dies before the tool answers still leaves a turn on disk, with the tool marked
     interrupted, not spinning forever on whichever browser reloads it."""
     client, agent, _session = studio
     agent.script = [

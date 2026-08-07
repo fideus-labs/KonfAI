@@ -41,7 +41,7 @@ def _next_actions(job: Job) -> list[str]:
 
 
 def test_plain_infer_is_not_dragged_into_refine(tmp_path: Path) -> None:
-    """A one-shot infer with no set_parameters stays a plain result -- no evaluate/refine push."""
+    """A one-shot infer with no set_parameters stays a plain result: no evaluate/refine push."""
     actions = _next_actions(_done_job(tmp_path, "infer"))
     assert "run_app_evaluate" not in actions
     assert "leaderboard" not in actions

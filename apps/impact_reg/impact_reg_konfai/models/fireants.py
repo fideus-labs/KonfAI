@@ -16,7 +16,7 @@
 #
 # This wrapper does NOT copy any FireANTs source: it only calls the public FireANTs API of the
 # separately-installed ``fireants`` wheel (PyPI). FireANTs is distributed under the FireANTs License
-# v1.0 and must be cited — see the NOTICE file in this directory for the license, copyright and
+# v1.0 and must be cited: see the NOTICE file in this directory for the license, copyright and
 # bibliography that ship with this app.
 
 """FireANTs registration as a self-contained KonfAI model (shared by the FireANTs presets).
@@ -31,19 +31,19 @@ composable stages (GPU, Riemannian Adam), each seeding the next like ANTs' ``-t`
 Two mirrored knobs specialise this shared module into the different presets (as ConvexAdam's shared
 module is specialised by ``stages``). ``deformable_method`` picks the deformable stage:
 
-    "syn"    symmetric diffeomorphic SyN (CC)   — invertible, higher quality, averages cleanly for ensembling
-    "greedy" greedy diffeomorphic (CC)          — one-directional, faster / lower VRAM
-    "none"   no deformable                      — the linear stage IS the transform (FireANTs_Affine)
+    "syn"    symmetric diffeomorphic SyN (CC) (invertible, higher quality, averages cleanly for ensembling
+    "greedy" greedy diffeomorphic (CC)) one-directional, faster / lower VRAM
+    "none"   no deformable: the linear stage IS the transform (FireANTs_Affine)
 
 and ``linear_method`` picks the linear one:
 
-    "rigid_affine"  Rigid then Affine, as ANTs   — the default
-    "rigid"         Rigid only                   — no free scale or shear
-    "none"          deformable from identity     — for a pair already globally aligned
+    "rigid_affine"  Rigid then Affine, as ANTs (the default
+    "rigid"         Rigid only) no free scale or shear
+    "none"          deformable from identity, for a pair already globally aligned
 
 They compose, so ``deformable_method="none"`` runs whichever linear stage was asked for rather than
 always Rigid+Affine: with ``linear_method="rigid"`` it is a rigid-only registration. The one
-combination refused is both set to ``"none"`` -- that leaves nothing to optimise, and the engine
+combination refused is both set to ``"none"``: that leaves nothing to optimise, and the engine
 raises ``ValueError`` at build time rather than returning an identity transform.
 
 Masks: the optional Fixed/Moving masks restrict the metric to a region. FireANTs implements this by
@@ -53,12 +53,12 @@ unchanged (an absent optional mask arrives as a whole-image default and is treat
 
 The deformable stages produce the single TOTAL displacement field on the fixed grid (the linear
 pre-align is baked in via ``init_affine``, ANTs convention); ``none`` uses the affine matrix directly.
-the emitted ``DisplacementField`` is rebuilt from that transform with SimpleITK —
-the same output path as the ConvexAdam engine — so all presets/engines are interchangeable in an
+the emitted ``DisplacementField`` is rebuilt from that transform with SimpleITK (the same output path as the
+ConvexAdam engine), so all presets/engines are interchangeable in an
 ensemble. FireANTs' output-transform writer only serialises to a file, so the deformable field is
 round-tripped through a temporary NIfTI (no FireANTs internals are reimplemented here).
 
-NOTE: do NOT add ``from __future__ import annotations`` — KonfAI's config engine relies on
+NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine relies on
 runtime-evaluated annotations (``get_origin``); PEP 563 stringized annotations break binding.
 """
 
@@ -94,7 +94,7 @@ _IMPACT_MODELS_REGISTRY = "VBoussot/impact-torchscript-models:models.json"
 # Feature distances, mirroring the itk-impact C++ metric (ITKIMPACT ImpactLoss.h) so FireANTs offers the same
 # set as the ConvexAdam / elastix presets. The channel axis is dim 1 (features are [B, C, *spatial]). itk-impact
 # computes gradients analytically; FireANTs optimises by autograd, so each loss is the plain differentiable
-# value -- for Dice this means the SOFT overlap (the C++ rounds activations to {0, 1} and cannot be autograd'd).
+# value, for Dice this means the SOFT overlap (the C++ rounds activations to {0, 1} and cannot be autograd'd).
 _EPS = 1e-6
 
 
@@ -157,7 +157,7 @@ def _fireants_git_ref() -> str:
 
 
 def ensure_fireants_runtime(build_kernels: bool = True) -> None:
-    """Make the ``fireants`` runtime importable before a preset uses it — best-effort, never fatal.
+    """Make the ``fireants`` runtime importable before a preset uses it: best-effort, never fatal.
 
     A plain ``pip install fireants`` fails inside a host like 3D Slicer for two reasons, both handled
     here with a clear one-line status at each step:
@@ -168,7 +168,7 @@ def ensure_fireants_runtime(build_kernels: bool = True) -> None:
     2. **The fused CUDA kernels** (``fireants_fused_ops``) that make registration fast and
        memory-light are OPTIONAL. Without them fireants runs in pure PyTorch (correct, only slower).
        We enable them only when a CUDA compiler (``nvcc``) is present, compiling from the upstream
-       FireANTs source at install time — nothing is vendored into this app. No compiler, or a failed
+       FireANTs source at install time: nothing is vendored into this app. No compiler, or a failed
        build, simply falls back to pure PyTorch.
     """
     import importlib
@@ -179,7 +179,7 @@ def ensure_fireants_runtime(build_kernels: bool = True) -> None:
     def _log(message: str) -> None:
         print(f"[FireANTs] {message}", flush=True)
 
-    # 1) fireants itself — install --no-deps to sidestep its unsatisfiable ``simpleitk==2.2.1`` pin.
+    # 1) fireants itself: install --no-deps to sidestep its unsatisfiable ``simpleitk==2.2.1`` pin.
     try:
         importlib.import_module("fireants")
     except Exception:
@@ -201,7 +201,7 @@ def ensure_fireants_runtime(build_kernels: bool = True) -> None:
         _log("skipping the fused CUDA kernels -> pure PyTorch (correct, slower and more memory).")
         return
 
-    # 2) fused CUDA kernels — optional accelerator.
+    # 2) fused CUDA kernels: optional accelerator.
     try:
         importlib.import_module("fireants_fused_ops")
         _log("fused CUDA kernels already available.")
@@ -229,7 +229,7 @@ def ensure_fireants_runtime(build_kernels: bool = True) -> None:
     # 2b) local build is OPT-IN: compiling CUDA kernels is heavy and can exhaust RAM on the user's
     # machine, so it NEVER runs by default. Set FIREANTS_BUILD_KERNELS=1 to enable it (devs with a
     # CUDA toolkit); it then builds ONE file at a time (MAX_JOBS=1) to keep memory bounded. The clean
-    # path for end users is a prebuilt wheel (2a) — a local compile also needs Python dev headers
+    # path for end users is a prebuilt wheel (2a): a local compile also needs Python dev headers
     # (absent from some embedded Pythons, e.g. Slicer) and a CUDA-compatible host compiler.
     if os.environ.get("FIREANTS_BUILD_KERNELS", "").strip().lower() not in ("1", "true", "yes"):
         _log(
@@ -275,7 +275,7 @@ def ensure_fireants_runtime(build_kernels: bool = True) -> None:
 
 
 def registry_choices() -> list[str]:
-    """The per-model ``ref`` picker's values — model refs (``repo:path``) from the feature-model registry."""
+    """The per-model ``ref`` picker's values: model refs (``repo:path``) from the feature-model registry."""
     repo = _IMPACT_MODELS_REGISTRY.split(":", 1)[0]
     return [f"{repo}:{key}" for key in load_models_registry()]
 
@@ -293,7 +293,7 @@ def load_models_registry(ref: str = _IMPACT_MODELS_REGISTRY) -> dict:
         path = Path(hf_hub_download(repo_id=repo, filename=filename, repo_type="model"))  # nosec B615
     else:
         raise ValueError(
-            f"models_registry '{ref}' must be a 'repo:file' Hugging Face reference — or set "
+            f"models_registry '{ref}' must be a 'repo:file' Hugging Face reference: or set "
             "KONFAI_IMPACT_MODELS_REGISTRY to a local file for offline use."
         )
     return json.loads(path.read_text(encoding="utf-8"))
@@ -307,7 +307,7 @@ def _sorted_specs(mapping: dict) -> list:
 @dataclass
 class ModelSpec:
     """One IMPACT feature model in the deformable metric (several are fused). ``ref`` picks the model; the
-    rest are its per-model knobs — the same as the ConvexAdam / elastix ``ModelSpec`` except ``voxel_size``
+    rest are its per-model knobs: the same as the ConvexAdam / elastix ``ModelSpec`` except ``voxel_size``
     (an itk-impact resampling knob) has no meaning for FireANTs' geometry-free torch ``custom_loss`` and is
     intentionally absent."""
 
@@ -362,8 +362,8 @@ def _no_texpr_fuser():
 class _ImpactCore(IMPACTReg):
     """One IMPACT feature model, exposed as a FireANTs ``forward(moved, fixed)``.
 
-    Reuses ``IMPACTReg._compute`` / ``preprocessing`` verbatim — the stats-normalised feature extraction
-    (the model wants per-image ``[min, mean, max, std]``) and the per-layer weighted distance — so the
+    Reuses ``IMPACTReg._compute`` / ``preprocessing`` verbatim (the stats-normalised feature extraction
+    (the model wants per-image ``[min, mean, max, std]``) and the per-layer weighted distance), so the
     metric is exactly KonfAI's, not a re-derivation. Only KonfAI's config-binding ``__init__`` and its
     ``Attribute``-based geometry are replaced: FireANTs passes raw tensors at the current pyramid scale, so
     the intensity statistics are computed from those tensors directly. ``pca`` (absent from KonfAI's torch
@@ -381,7 +381,7 @@ class _ImpactCore(IMPACTReg):
         self.loss = _DISTANCES[distance]()
         self.pca = int(pca)  # PCA lives in KonfAI's IMPACTReg._compute (same behaviour as itk-impact)
         self.dim = DIM
-        self.shape = None  # score the whole (downsampled) tensor — no ModelPatch tiling
+        self.shape = None  # score the whole (downsampled) tensor: no ModelPatch tiling
         if _is_local_ref(ref):  # otherwise a "repo:path" HF reference
             self.model_path = ref
         else:
@@ -476,7 +476,7 @@ class FireANTsEngine:
         # guard run for minutes, and a run that reaches them has already paid for the read.
         if linear_method not in _LINEAR_METHODS:
             # Named, not silently ignored. Every unrecognised value would otherwise fall through to
-            # the rigid-then-affine branch, so a typo -- "affine", say -- would register with a stage
+            # the rigid-then-affine branch, so a typo ("affine", say) would register with a stage
             # the caller did not ask for and produce a perfectly plausible result.
             raise ValueError(
                 f"Unknown linear_method '{linear_method}' (expected {', '.join(map(repr, _LINEAR_METHODS))})."
@@ -545,7 +545,7 @@ class FireANTsEngine:
 
     @staticmethod
     def _is_partial_mask(mask: "sitk.Image | None") -> bool:
-        """True only for a mask that actually restricts the region — some voxels in, some out. An absent
+        """True only for a mask that actually restricts the region: some voxels in, some out. An absent
         optional mask arrives as a whole-image (all-ones) default and an all-zero mask is degenerate; both
         are treated as no mask so the plain (non-masked) metric path is used."""
         if mask is None:
@@ -568,7 +568,7 @@ class FireANTsEngine:
         SimpleITK ``DisplacementFieldTransform`` on the fixed grid.
 
         FireANTs serialises the total field (ANTs convention, fixed grid) only to a file, so it is
-        round-tripped through a temporary NIfTI — its public API, no internals reimplemented."""
+        round-tripped through a temporary NIfTI: its public API, no internals reimplemented."""
         reg.optimize()
         with tempfile.TemporaryDirectory() as tmp:
             warp_path = os.path.join(tmp, "total_warp.nii.gz")
@@ -619,7 +619,7 @@ class FireANTsEngine:
         # deformable stage (or is the whole transform when deformable_method == "none").
         #
         # ``linear_method`` is ``deformable_method``'s mirror. "none" skips the linear stage entirely
-        # and starts the deformable from identity: for a pair already globally aligned -- a tiled
+        # and starts the deformable from identity: for a pair already globally aligned: a tiled
         # refinement at full resolution, where each patch sees only local anatomy, so a per-patch
         # rigid has no global meaning and neighbouring patches would each estimate a different one
         # and tear the blended field at the seams.
@@ -654,7 +654,7 @@ class FireANTsEngine:
             rigid_matrix = rigid.get_rigid_matrix().detach()
 
             if self._linear_method == "rigid":
-                # The rigid -- rotation and translation, no scale or shear -- IS the linear transform.
+                # The rigid (rotation and translation, no scale or shear) IS the linear transform.
                 # For inspecting the linear stage without the affine's free scale, and for a pair whose
                 # scale difference is known to be nothing the affine should be free to invent.
                 affine_matrix = rigid_matrix
@@ -714,7 +714,7 @@ class FireANTsEngine:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        # The DVF is rebuilt from the single transform on the fixed grid — the ConvexAdam output path,
+        # The DVF is rebuilt from the single transform on the fixed grid: the ConvexAdam output path,
         # so every FireANTs preset emits identical-shaped results.
         dvf = sitk.TransformToDisplacementField(
             transform,
@@ -838,13 +838,13 @@ class RegistrationNet(network.Network):
             Literal["rigid_affine", "rigid", "none"],
             "Linear stage before the deformable: 'rigid_affine' (rigid then affine, as ANTs), 'rigid' to stop "
             "after the rigid and leave scale and shear alone, or 'none' to skip it and start the deformable "
-            "from identity. Use 'none' only on a pair already globally aligned -- a tiled pass at full "
+            "from identity. Use 'none' only on a pair already globally aligned: a tiled pass at full "
             "resolution, where a patch sees no global context and a per-patch linear has no global meaning.",
         ] = "rigid_affine",
         deformable_method: Annotated[
             Literal["none", "syn", "greedy"],
             "Deformable algorithm: 'syn' (symmetric diffeomorphic), 'greedy', or 'none' to stop after the linear "
-            "stage, whichever 'linear_method' selected -- with linear_method='rigid' that is a rigid-only "
+            "stage, whichever 'linear_method' selected, with linear_method='rigid' that is a rigid-only "
             "registration. Both set to 'none' is refused: it would optimise nothing.",
         ] = "syn",
         deformable_metric: Annotated[

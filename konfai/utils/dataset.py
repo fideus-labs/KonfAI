@@ -51,7 +51,7 @@ except ImportError:
 
 from konfai import current_date
 from konfai.utils.errors import DatasetManagerError
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_format_level
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, directory_volume_form, split_format_level
 
 _h5_file_locks: dict[str, threading.RLock] = {}
 _h5_file_locks_guard = threading.Lock()
@@ -79,15 +79,15 @@ class _H5ReadPool:
     """Pooled read handles, one per file per process, LRU-bounded.
 
     The HDF5 chunk cache lives on the open handle, so reusing the handle across patch reads is what
-    makes the cache effective — a per-read open rebuilds it empty every time. ``get``/``drop`` must be
+    makes the cache effective: a per-read open rebuilds it empty every time. ``get``/``drop`` must be
     called under the file's lock; a write drops the file's reader so it never serves stale metadata;
     handles inherited across ``fork`` are dropped unused (closing them would flush another process's
     state). Pooled handles open with ``locking=False``: a held HDF5 read lock would block every other
-    process's write-open of the file for as long as the handle lives — the pool's whole lifetime.
+    process's write-open of the file for as long as the handle lives: the pool's whole lifetime.
     Same-process access is serialized by the per-file thread lock.
 
-    A handle also stops answering for a store another PROCESS has written — a loader worker producing
-    the group its parent reads — so one is kept only while the file it was opened on is unchanged.
+    A handle also stops answering for a store another PROCESS has written (a loader worker producing
+    the group its parent reads), so one is kept only while the file it was opened on is unchanged.
     Reopening alone would not do: HDF5 shares a file's metadata state across the handles one process
     holds, so a second handle inherits the first's view. The stale one is closed before the new open."""
 
@@ -114,7 +114,7 @@ class _H5ReadPool:
 
         The reopen happens exactly when another process has just written, which is when that process is
         most likely to still be mid-transaction: HDF5 without SWMR then refuses the open. It is transient,
-        so it is retried, and each attempt takes its own stamp — a handle is never paired with a view of
+        so it is retried, and each attempt takes its own stamp: a handle is never paired with a view of
         the store taken before the write that made the previous attempt fail."""
         for remaining in reversed(range(self._OPEN_ATTEMPTS)):
             stamp = self._stamp(filename)
@@ -160,7 +160,7 @@ class _H5ReadPool:
 
     def _close_idle(self, filename: str, pooled: _PooledRead) -> None:
         # An evicted handle may be mid-read under its file's lock: close only when that lock is free,
-        # otherwise put it back in the pool — an untracked open handle could never be dropped again.
+        # otherwise put it back in the pool: an untracked open handle could never be dropped again.
         # It goes back with the stamp it came with: re-stamping would hand it the store as it is now,
         # and a write it never saw would stay invisible for the rest of the process.
         lock = _get_h5_file_lock(filename)
@@ -202,8 +202,8 @@ def _store_chunks(shape: list[int], region_shape: list[int] | None, dtype: Any) 
 
     A region write that straddles a chunk becomes a read-modify-write of the whole chunk, so the
     writer's own region is the honest starting point. Taking it verbatim is not: a slab sweep
-    declares the whole trailing plane, which at 2048x2048 float32 is a gigabyte in one chunk -- past
-    what zarr will hold in a single buffer at 4096x4096 -- and every later partial read pays it,
+    declares the whole trailing plane, which at 2048x2048 float32 is a gigabyte in one chunk (past
+    what zarr will hold in a single buffer at 4096x4096), and every later partial read pays it,
     including readers that are not KonfAI.
 
     So an axis the region covers END TO END is tiled, and an axis where the region is a strict
@@ -231,7 +231,7 @@ def _store_chunks(shape: list[int], region_shape: list[int] | None, dtype: Any) 
 class Attribute(dict[str, Any]):
     """Metadata container storing repeated values with a stack-like naming scheme.
 
-    Values are text, always. Both doors normalize -- assignment and construction -- so an attribute
+    Values are text, always. Both doors normalize (assignment and construction), so an attribute
     built from a store's own sidecar, which JSON hands back as live lists, is the same thing as one
     assigned in Python. Anything less and a value can be stored and not written back out.
     """
@@ -245,7 +245,7 @@ class Attribute(dict[str, Any]):
     @staticmethod
     def _is_stack_member(stored_key: str, key: str) -> bool:
         # Values are stacked as ``{key}_{n}``; match that exact pattern (or the bare key) so a sibling that
-        # merely shares a prefix -- ``SpacingOriginal`` vs ``Spacing`` -- is not miscounted as another entry.
+        # merely shares a prefix (``SpacingOriginal`` vs ``Spacing``) is not miscounted as another entry.
         if stored_key == key:
             return True
         prefix = f"{key}_"
@@ -281,8 +281,8 @@ class Attribute(dict[str, Any]):
     def _parse_array(text: str) -> np.ndarray:
         """Both printed forms of a sequence: NumPy's ``[1.5 1.5 2.]`` and Python's ``[1.5, 1.5, 2.0]``.
 
-        Which one an attribute holds follows from what the writer handed over -- an ``ndarray``, or
-        the plain list a JSON sidecar gives back -- and no reader should have to make that
+        Which one an attribute holds follows from what the writer handed over (an ``ndarray``, or
+        the plain list a JSON sidecar gives back), and no reader should have to make that
         distinction. ``np.fromstring`` reads whitespace only, so the commas go first.
         """
         return np.fromstring(text[1:-1].replace(",", " "), sep=" ", dtype=np.double)
@@ -331,7 +331,7 @@ def _update_running_statistics(
     Both grains come from one pass because they come from the same samples: a chunk arrives as
     ``(C, ...)``, so the per-channel figures are the same Welford recurrence applied along axis 0,
     and the whole-volume ones are that recurrence pooled. Computing them separately would mean
-    scanning the volume once per channel -- three passes over a displacement field to learn three
+    scanning the volume once per channel: three passes over a displacement field to learn three
     numbers.
     """
     values = np.asarray(array, dtype=np.float64)
@@ -348,7 +348,7 @@ def _update_running_statistics(
     chunk_mean = float(flat.mean())
     chunk_m2 = float(np.square(flat - chunk_mean).sum())
 
-    # Per channel, the same recurrence on vectors -- one entry per channel, updated together.
+    # Per channel, the same recurrence on vectors, one entry per channel, updated together.
     channel_count = float(per_channel.shape[1])
     channel_mean = per_channel.mean(axis=1)
     channel_m2 = np.square(per_channel - channel_mean[:, None]).sum(axis=1)
@@ -395,7 +395,7 @@ def _finalize_running_statistics(state: dict[str, Any] | None) -> dict[str, Any]
     """Convert a running-statistics state into the public stats dictionary.
 
     The four scalars are the volume's; the four ``*_per_channel`` lists are the same figures per
-    channel, which is what a vector-valued quantity needs -- the mean of a displacement field is
+    channel, which is what a vector-valued quantity needs: the mean of a displacement field is
     three numbers, and pooling them into one describes nothing.
     """
     if state is None or state["count"] == 0:
@@ -433,7 +433,7 @@ def _warn_unstreamed_region_read(path: str) -> None:
     _unstreamed_formats_warned.add(suffix)
     warnings.warn(
         f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region "
-        "(NRRD, or any compressed file), so every patch decodes the whole volume again -- many times "
+        "(NRRD, or any compressed file), so every patch decodes the whole volume again: many times "
         "the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI "
         "streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
         stacklevel=2,
@@ -513,8 +513,8 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
 def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     """A KonfAI ``Attribute`` (Origin / Spacing / Direction) from an OME-Zarr entry's metadata.
 
-    The store's konfai sidecar wins when present -- it carries the full Direction matrix, which NGFF
-    scale/translation cannot express -- otherwise geometry falls back to the NGFF transforms, Direction
+    The store's konfai sidecar wins when present (it carries the full Direction matrix, which NGFF
+    scale/translation cannot express) otherwise geometry falls back to the NGFF transforms, Direction
     defaulting to identity. Shared by the Dataset OME-Zarr reader and ``ITK.read_displacement_field``
     so both recover geometry the one same way.
     """
@@ -595,7 +595,7 @@ def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     for k in file_reader.GetMetaDataKeys():
         attributes[k] = file_reader.GetMetaData(k)
     # SimpleITK GetSize() is (x, y, [z], ...); KonfAI arrays are numpy-order [C, (Z), Y, X], so the
-    # spatial size must be reversed for EVERY rank -- a 3-D-only reversal transposes 2-D/4-D data.
+    # spatial size must be reversed for EVERY rank: a 3-D-only reversal transposes 2-D/4-D data.
     size = list(reversed(file_reader.GetSize()))
     size = [file_reader.GetNumberOfComponents(), *size]
     return size, attributes
@@ -650,7 +650,7 @@ class DataStream(ABC):
     a replaced entry stays readable until its replacement is complete, and a hard-killed writer leaves
     only temporary debris, never a plausible-looking partial volume under the final name. The
     temporary name is unique per stream (PID + sequence): two writers of the same entry (a case
-    landing on two workers) each own their temporary, and whichever finalizes last publishes — a
+    landing on two workers) each own their temporary, and whichever finalizes last publishes: a
     complete entry either way, never an interleaving of the two."""
 
     _sequence = itertools.count()
@@ -725,7 +725,7 @@ def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attrib
     """An ITK displacement-transform HDF5 file with its parameters dataset still to fill.
 
     Three datasets, as ITK's own writer lays them out: the type (a variable-length ASCII string,
-    which is what ITK's reader accepts), the fixed parameters — size, origin, spacing, direction —
+    which is what ITK's reader accepts), the fixed parameters (size, origin, spacing, direction)
     and the parameters, the field buffer with the component fastest, float64. Returns the open file
     and the parameters dataset.
     """
@@ -754,8 +754,8 @@ class _ItkTransformDataStream(DataStream):
     """An ITK displacement-transform file written region by region.
 
     A slab of the field maps to one contiguous span of the parameters (the buffer is ``[z][y][x]``
-    with the component fastest), so full-width leading-axis slabs — what the streamed write
-    dispatcher emits — land with plain offset writes. Under a temporary name until the clean exit,
+    with the component fastest), so full-width leading-axis slabs (what the streamed write
+    dispatcher emits) land with plain offset writes. Under a temporary name until the clean exit,
     like every stream.
     """
 
@@ -806,7 +806,7 @@ _NIFTI_DATATYPES = {
 class _NiftiDataStream(DataStream):
     """Uncompressed NIfTI-1 written region by region: a hand-written 348-byte header, then a memmap
     over the raw block. NIfTI's data order is x fastest with the vector dimension SLOWEST, which is
-    exactly the channel-first ``[C, Z, Y, X]`` layout in C order — the map is the block itself.
+    exactly the channel-first ``[C, Z, Y, X]`` layout in C order: the map is the block itself.
     The sform carries the geometry, and NIfTI speaks RAS where the pipeline speaks LPS: the
     affine's first two rows are negated on the way out, the one convention this class owns."""
 
@@ -959,7 +959,7 @@ class _OmeZarrDataStream(DataStream):
             append_ome_zarr_levels(self._store_path, self._scale_factors, downsample_method=self._downsample_method)
             self._array = None
         # Move an existing store aside instead of deleting it up front, so a replaced entry stays
-        # recoverable (at <name>.replaced-<pid>) until the new store is renamed into place -- a directory
+        # recoverable (at <name>.replaced-<pid>) until the new store is renamed into place: a directory
         # swap is not atomic, and deleting first loses both stores on a crash in the window.
         replaced = self._final_path.exists()
         backup = self._final_path.with_name(f"{self._final_path.name}.replaced-{os.getpid()}")
@@ -978,7 +978,7 @@ class _OmeZarrDataStream(DataStream):
             shutil.rmtree(backup, ignore_errors=True)
         # The reader memoises loaded stores by path, and this rename changes what that path holds.
         # A store replaced by one written through a different code path can differ down to the key
-        # its level-0 array lives under, so a stale entry does not merely serve old pixels -- it
+        # its level-0 array lives under, so a stale entry does not merely serve old pixels: it
         # points at a component that is no longer there.
         clear_ome_zarr_cache()
 
@@ -1011,7 +1011,7 @@ class Dataset:
             """Whether a region read decodes only the region, or the whole volume behind the scenes.
 
             The base answers ``False``: getting this wrong only ever costs speed, never correctness,
-            and an unknown backend is priced pessimistically. What it prices is the ROUTE — a store
+            and an unknown backend is priced pessimistically. What it prices is the ROUTE: a store
             that decodes the whole volume once per slab makes streaming read the source many times
             over, where loading reads it once.
             """
@@ -1103,7 +1103,7 @@ class Dataset:
                     _h5_read_pool.drop(self.filename)
                     # locking=False on every KonfAI open: the HDF5 file-lock flag must agree across a file's
                     # handles, and the pooled reader (unlocked) stays open on the same file while a stream
-                    # writes it -- the "invisible until finalize" read contract reads the store mid-write.
+                    # writes it: the "invisible until finalize" read contract reads the store mid-write.
                     # Same-process races are held off by the per-file thread lock above.
                     if not os.path.exists(self.filename):
                         Path(self.filename).parent.mkdir(parents=True, exist_ok=True)
@@ -1436,7 +1436,7 @@ class Dataset:
                 # header plus zero-reserved pixels) and deprioritize the sidecar halves of paired formats
                 # (.raw/.zraw are unreadable standalone; .img reads only via its paired .hdr, so prefer the
                 # header). glob order is unsorted, so without this a '.mhd'+'.raw' pair could hand the '.raw'
-                # to ReadImage, or a leftover '.tmp' a zero-filled partial volume -- as in _resolve_data_path.
+                # to ReadImage, or a leftover '.tmp' a zero-filled partial volume, as in _resolve_data_path.
                 direct = f"{self.filename}{name}.{self.file_format}"
                 if os.path.exists(direct):
                     path = direct
@@ -1765,8 +1765,8 @@ class Dataset:
 
             attributes = attributes or Attribute()
             # Two ways to say "this is a field": hand over a DisplacementFieldTransform, or mark the
-            # attributes. The second exists because a producer that never builds a transform -- the
-            # predictor emits arrays -- would otherwise have to wrap its output in one purely to be
+            # attributes. The second exists because a producer that never builds a transform: the
+            # predictor emits arrays: would otherwise have to wrap its output in one purely to be
             # described correctly, and a field too large to hold in memory cannot be wrapped at all.
             displacement_field = DISPLACEMENT_FIELD_ATTRIBUTE in attributes
             if sitk is not None and isinstance(data, sitk.Image):
@@ -1816,11 +1816,11 @@ class Dataset:
                 displacement_field=DISPLACEMENT_FIELD_ATTRIBUTE in attributes,
                 # Chunked against what the writer says it will write, capped to something a reader
                 # can open. Guessing the writer's access pattern costs a read-modify-write on every
-                # region whose extent straddles a chunk -- measured 1.8x on a slab sweep, paid on
+                # region whose extent straddles a chunk: measured 1.8x on a slab sweep, paid on
                 # every byte, and invisible because the bytes are correct either way.
                 chunks=_store_chunks(shape, region_shape, dtype),
             )
-            # The pyramid cannot be created up front -- no level exists until the last region lands --
+            # The pyramid cannot be created up front: no level exists until the last region lands --
             # so the stream derives it at finalize, on the TEMPORARY store, before the rename. That
             # order is what keeps publication atomic: a reader never sees a store whose level 0 is
             # complete but whose coarser levels are not.
@@ -1995,7 +1995,7 @@ class Dataset:
         """ITK transform files, one ``<case>/<group>.h5`` per entry.
 
         The write side is the point: ``sitk.WriteTransform`` needs the whole field resident in
-        float64, where the FILE is three HDF5 datasets that write by regions — so a displacement
+        float64, where the FILE is three HDF5 datasets that write by regions, so a displacement
         field streams into a transform any ITK consumer (Slicer first) loads. The read side hands
         back what ``Dataset.read_transform`` decodes: a displacement entry carries its field and
         the displacement marker; any other stored transform, the parameter rows and type keys of
@@ -2052,7 +2052,7 @@ class Dataset:
 
             The buffer is ``[z][y][x]`` with the component fastest, so a span of leading-axis rows
             is one contiguous span of the parameters: read, reshaped, and sliced down to the exact
-            region — the peak is the row span, never the field.
+            region: the peak is the row span, never the field.
             """
             shape, attributes = self.get_infos(group, name)
             leading = slices[1].indices(shape[1]) if len(shape) == 4 else (0, 0, 1)
@@ -2219,7 +2219,7 @@ class Dataset:
         self.filename, self.is_directory = Dataset._normalize_path(filename, file_format)
         self.file_format = file_format
         # The store backend is auto-detected from what is actually on disk (like SitkFile already probes
-        # every supported extension) — an OME-Zarr / Zarr / DICOM store is a directory whose type is
+        # every supported extension): an OME-Zarr / Zarr / DICOM store is a directory whose type is
         # knowable from its structure, so a ``:mha`` token never forces it to be mis-read. The token then
         # only carries the WRITE format and the OME-Zarr pyramid level (``@N``).
         detected = Dataset._detect_directory_store_format(self.filename) if self.is_directory else None
@@ -2259,7 +2259,7 @@ class Dataset:
     def _detect_directory_store_format(root: str) -> str | None:
         """Detect a directory dataset's store backend from disk (``omezarr`` / ``dicom``), independent of the
         format token; ``None`` when it is plain per-file volumes (the SitkFile path, which auto-detects the
-        extension itself). Probes the first case's entries only — cheap, and cases share one layout."""
+        extension itself). Probes the first case's entries only: cheap, and cases share one layout."""
         base = Path(root)
         if not base.is_dir():
             return None
@@ -2267,33 +2267,11 @@ class Dataset:
             if not case.is_dir():
                 continue
             for entry in sorted(case.iterdir()):
-                if entry.is_dir():
-                    name = entry.name.lower()
-                    if (
-                        name.endswith((".ome.zarr", ".zarr"))
-                        or (entry / ".zgroup").exists()
-                        or (entry / "zarr.json").exists()
-                    ):
-                        return "omezarr"
-                    files = [child for child in sorted(entry.iterdir()) if child.is_file()]
-                    if any(child.suffix.lower() in (".dcm", ".dicom") for child in files):
-                        return "dicom"
-                    # A DICOM series is commonly exported with no extension at all, so the suffixes
-                    # above miss it; the Part-10 magic at offset 128 is what identifies it then. A
-                    # non-DICOM file may sort first, so probe every file, not only files[0].
-                    if any(Dataset._is_dicom_file(file) for file in files):
-                        return "dicom"
+                volume = directory_volume_form(entry)
+                if volume is not None:
+                    return "dicom" if volume == "" else "omezarr"
             return None  # first case is representative of the whole dataset's layout
         return None
-
-    @staticmethod
-    def _is_dicom_file(path: Path) -> bool:
-        """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128."""
-        try:
-            with open(path, "rb") as file:
-                return file.read(132)[128:132] == b"DICM"
-        except OSError:
-            return False
 
     def _exists_on_disk(self) -> bool:
         if os.path.exists(self.filename):
@@ -2383,7 +2361,7 @@ class Dataset:
 
         ``region_shape`` is the extent the caller will write at a time, channels included. A store
         that chunks on it never pays a read-modify-write; a store left to guess pays one on every
-        region that straddles a chunk. Declaring it is the writer's job -- it is the only party that
+        region that straddles a chunk. Declaring it is the writer's job, it is the only party that
         knows its own access pattern.
         """
         if attributes is None:
@@ -2446,7 +2424,7 @@ class Dataset:
 
         What it prices is the ROUTE, never the answer: a store that decodes the whole volume once
         per slab (compressed MetaImage, NRRD, gzipped NIfTI) makes streaming read the source many
-        times over, where loading reads it once. ``False`` for a missing entry — pessimistic, and
+        times over, where loading reads it once. ``False`` for a missing entry: pessimistic, and
         only ever costing speed.
         """
         if not self._exists_on_disk():
@@ -2520,14 +2498,14 @@ class Dataset:
         """Whether ``(group, name)`` is on disk, asked of disk at the moment it is asked.
 
         Deliberately NOT a slice of :meth:`get_names`: that listing is a planning-time snapshot, and a
-        group the run itself produces -- a ``Save`` writing into the dataset being read -- gains cases
+        group the run itself produces (a ``Save`` writing into the dataset being read) gains cases
         while it is read, through a different ``Dataset`` object and, when the loader has workers, a
         different PROCESS. No memo can be invalidated across that boundary, so membership asks the disk.
         One entry, one probe: O(1) in the number of cases, where the listing is O(N) headers, and cheaper
         than the listing it replaces.
         """
         if not self._exists_on_disk():
-            # A store that is not there yet holds nothing -- the first probe of every fresh
+            # A store that is not there yet holds nothing: the first probe of every fresh
             # destination, which a single-file backend would otherwise turn into an open error.
             return False
         if self.is_directory:

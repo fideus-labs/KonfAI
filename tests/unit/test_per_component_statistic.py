@@ -19,7 +19,7 @@
 The stage under test is deliberately a user's: KonfAI ships generic transforms, and centring a
 displacement field per component then scaling it is one step of an atlas build, which belongs to the
 pipeline that needs it. What the framework owes such a stage is that declaring a locality contract is
-enough to stream it -- and that is exactly what these tests pin.
+enough to stream it, and that is exactly what these tests pin.
 
 So this doubles as the worked example: forty lines below, written against the public surface only,
 is a user transform that streams a volume it never assembles.

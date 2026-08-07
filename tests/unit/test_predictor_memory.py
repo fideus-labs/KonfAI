@@ -73,7 +73,7 @@ def test_model_composite_streams_ensemble_through_a_single_loaded_model() -> Non
 
 
 def test_model_composite_runs_a_weightless_model_without_a_checkpoint() -> None:
-    """A model with no trainable weights (0 parameters) runs once, as constructed, with no state sources -- a
+    """A model with no trainable weights (0 parameters) runs once, as constructed, with no state sources: a
     classical/optimisation engine (e.g. registration) needs no checkpoint."""
     model = DummyPredictNetwork()  # scale=1.0, held as a plain float -> 0 parameters
     assert not list(model.parameters())
@@ -457,7 +457,7 @@ def test_gate_approved_blend_falls_back_to_cpu_when_the_allocation_fails() -> No
 
 def test_mid_blend_oom_stays_fatal() -> None:
     # Only the volume-sized FIRST allocation may retry on CPU: once patches are blended into a
-    # GPU-resident buffer, a CPU retry would mix devices inside one accumulator — re-raise instead.
+    # GPU-resident buffer, a CPU retry would mix devices inside one accumulator: re-raise instead.
     class DummyGroupTransform:
         patch_transforms: ClassVar[list[object]] = []
 

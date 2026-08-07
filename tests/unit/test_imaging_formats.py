@@ -23,7 +23,13 @@ import numpy as np
 import pytest
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import DatasetManagerError
-from konfai.utils.utils import SUPPORTED_FORMATS, split_path_spec
+from konfai.utils.utils import (
+    SUPPORTED_FORMATS,
+    directory_volume_form,
+    path_format_token,
+    split_path_spec,
+    storage_form,
+)
 
 
 def _image_attributes() -> Attribute:
@@ -37,7 +43,7 @@ def _image_attributes() -> Attribute:
 def test_flatten_transforms_recurses_into_nested_composites() -> None:
     """The transform serializer walks a composite to its leaves. SimpleITK keeps a nested composite
     nested (``GetNthTransform`` returns it as-is), so a single-level walk would hand that composite to
-    the per-leaf type switch, which rejects it -- the recursion is what keeps a nested chain storable."""
+    the per-leaf type switch, which rejects it: the recursion is what keeps a nested chain storable."""
     sitk = pytest.importorskip("SimpleITK")
     from konfai.utils.dataset import _flatten_transforms
 
@@ -54,7 +60,7 @@ def test_flatten_transforms_recurses_into_nested_composites() -> None:
 
 
 # ---------------------------------------------------------------------------
-# DICOM tests (no real DICOM files — uses unittest.mock)
+# DICOM tests (no real DICOM files: uses unittest.mock)
 # ---------------------------------------------------------------------------
 
 
@@ -226,7 +232,7 @@ class TestDicomReadVolume:
 
 
 # ---------------------------------------------------------------------------
-# OME-Zarr tests (no real Zarr store — uses unittest.mock)
+# OME-Zarr tests (no real Zarr store: uses unittest.mock)
 # ---------------------------------------------------------------------------
 
 
@@ -362,6 +368,44 @@ class TestDatasetImagingBackends:
     @pytest.mark.parametrize("file_format", ["omezarr", "ome-zarr", "ome_zarr", "zarr"])
     def test_ome_zarr_format_aliases(self, tmp_path: Path, file_format: str) -> None:
         assert Dataset(tmp_path / file_format, file_format).file_format == "omezarr"
+
+    @pytest.mark.parametrize(
+        ("name", "form"),
+        [
+            ("patient.mha", ".mha"),
+            ("patient.v2.mha", ".mha"),  # a dot in the STEM is part of the name
+            ("CT.contrast.nii.gz", ".nii.gz"),  # the compound extension, not its tail
+            ("study.ome.zarr", ".ome.zarr"),  # ".ome.zarr" wins over ".zarr"
+            ("scan.UNKNOWN", ".UNKNOWN"),  # nothing matches: the last suffix, as spelled
+        ],
+    )
+    def test_storage_form_is_the_extension_not_every_dotted_segment(self, name: str, form: str) -> None:
+        """``"".join(path.suffixes)`` reads ``patient.v2.mha`` as a ``v2.mha`` backend, which lets how a
+        caller named a file decide whether a run starts at all."""
+        assert storage_form(Path(name)) == form
+
+    def test_a_dicom_series_is_a_directory_volume_with_no_form(self, tmp_path: Path) -> None:
+        """A series carries no extension: neither the directory nor, often, the slices. Read off the
+        name alone it looks like nothing, and the default file format is what a caller would get."""
+        pytest.importorskip("pydicom")
+        from konfai.utils import dicom
+
+        root = tmp_path / "SERIES"
+        root.mkdir()
+        dicom.write_dicom_series(root, np.zeros((1, 3, 4, 4), dtype=np.int16), origin=(0.0,) * 3, spacing=(1.0,) * 3)
+        for slice_file in sorted(root.glob("*.dcm")):  # exported without an extension, as scanners do
+            slice_file.rename(slice_file.with_suffix(""))
+
+        assert storage_form(root) == ""
+        assert directory_volume_form(root) == ""  # a volume, not a directory of volumes
+        assert path_format_token(root) == "dicom"
+
+    def test_a_plain_directory_of_volumes_is_not_one(self, tmp_path: Path) -> None:
+        root = tmp_path / "CASES"
+        root.mkdir()
+        Dataset(root / "A", "mha").write("CT", "CASE_001", np.zeros((1, 2, 3, 3), dtype=np.int16), _image_attributes())
+
+        assert directory_volume_form(root) is None
 
     @pytest.mark.parametrize("file_format", ["dicom", "omezarr", "ome-zarr", "ome_zarr", "zarr", "itktransform"])
     def test_data_manager_path_parser_accepts_imaging_backend(self, file_format: str) -> None:

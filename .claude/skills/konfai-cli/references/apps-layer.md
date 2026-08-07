@@ -18,13 +18,13 @@ An **app bundle** contains a KonfAI config + custom `.py` module(s) + model weig
 | `repo_id:app_name` (one `:`, e.g. `VBoussot/ImpactSynth:sCT`) | **HuggingFace repo** (weights/config pulled via `huggingface_hub`) |
 | any app id **with `--host`/`--port`/`--token`** | **Remote server** (`konfai-apps-server`) |
 
-## ⚠️ Trust model — read before resolving an app
+## ⚠️ Trust model: read before resolving an app
 
 Resolving or running an app is **not** a pure data download. It:
 
 - **copies the app's `.py` files into a run workspace and imports them** (the workspace is put
-  on `sys.path`, and KonfAI imports the custom modules) — i.e. it **runs arbitrary code**;
-- **pip-installs `requirements.txt` by default** on every local resolution — only missing or
+  on `sys.path`, and KonfAI imports the custom modules): i.e. it **runs arbitrary code**;
+- **pip-installs `requirements.txt` by default** on every local resolution: only missing or
   version-mismatched packages, core packages (`torch`, `konfai`, …) are never touched, and
   non-PEP 508 lines are skipped; opt out with `KONFAI_APPS_INSTALL_REQUIREMENTS=0`;
 - for HuggingFace apps, **downloads weights/config over the network**;
@@ -71,7 +71,7 @@ konfai-apps infer my_app -i mr.nii.gz -o ./Out --host 127.0.0.1 --port 8000 --to
 
 ## Published app bundles (`apps/`)
 
-The `apps/` directory holds ready-to-use bundles — each an **independent pip package** that
+The `apps/` directory holds ready-to-use bundles, each an **independent pip package** that
 layers on `konfai` + `konfai-apps` (excluded from the `konfai` wheel):
 
 | Bundle | Task | Entry / usage |

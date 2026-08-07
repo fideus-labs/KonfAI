@@ -10,12 +10,11 @@ when you are writing YAML, :doc:`cli` when you are scripting commands, and
 :doc:`environment` when you are debugging what the runtime wrappers set. The
 remaining pages cover the app-server HTTP contract and the Python API.
 
-.. toctree::
-   :maxdepth: 1
+The pages:
 
-   components/index
-   cli
-   environment
-   app-server-api
-   python-api
-   api/index
+- :doc:`component catalogue <components/index>`
+- :doc:`cli`
+- :doc:`environment`
+- :doc:`python-api`
+- :doc:`app-server-api`
+- :doc:`API reference <api/index>`

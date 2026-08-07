@@ -1,4 +1,4 @@
-/* KonfAI Studio — IDE shell in the VS Code / Claude Code desktop idiom:
+/* KonfAI Studio. IDE shell in the VS Code / Claude Code desktop idiom:
    warm-neutral dark chrome, flat panels, one restrained accent = KonfAI sage. */
 :root {
   --bg: #1b1b1a; /* editor ground, warm near-black */
@@ -12,14 +12,14 @@
   --faint: #63625b;
   --line: #322f2b; /* hairline borders */
   --line-2: #403d38;
-  --accent: #d6d5cf; /* near-white — buttons, focus (the green stays in the logo) */
+  --accent: #d6d5cf; /* near-white: buttons, focus (the green stays in the logo) */
   --accent-ink: #e7e6e1; /* emphasized text on dark */
   --accent-t: rgba(230, 229, 224, 0.08);
   --accent-solid: #3a3a37; /* filled buttons: raised neutral */
-  --sage: #52b89b; /* KonfAI sage — micro-signals only (status dots) */
-  --working: #d6a24f; /* amber — a tool is running */
+  --sage: #52b89b; /* KonfAI sage: micro-signals only (status dots) */
+  --working: #d6a24f; /* amber: a tool is running */
   --good: #6bc38d; /* ready / done */
-  --err: #e07b62; /* soft red — errors only */
+  --err: #e07b62; /* soft red: errors only */
   --fsans: system-ui, -apple-system, "Segoe UI", "Roboto", "Helvetica", "Arial", sans-serif;
   --fmono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", monospace;
 }
@@ -525,7 +525,7 @@ body {
   color: var(--ink-2);
 }
 
-/* waiting for the model — three pulsing dots */
+/* waiting for the model: three pulsing dots */
 .thinking {
   display: inline-flex;
   gap: 5px;
@@ -564,7 +564,7 @@ body {
   }
 }
 
-/* tool call — a small "terminal task" card */
+/* tool call: a small "terminal task" card */
 .tool {
   font-family: var(--fmono);
   font-size: 12px;
@@ -651,7 +651,7 @@ body {
   color: var(--ink);
 }
 
-/* composer: one rounded pill (Claude/ChatGPT idiom) — textarea over a control bar */
+/* composer: one rounded pill (Claude/ChatGPT idiom): textarea over a control bar */
 .composer {
   position: relative;
   margin: 10px 12px 12px;
@@ -1020,7 +1020,7 @@ body {
   padding: 10px 12px;
 }
 
-/* live training curves — uniform cards */
+/* live training curves: uniform cards */
 .mgrid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -1290,7 +1290,7 @@ body {
   color: var(--working);
 }
 
-/* per-case scores: a scrollable table under the aggregate — navigate every case */
+/* per-case scores: a scrollable table under the aggregate: navigate every case */
 .evcase-wrap {
   margin-top: 8px;
 }
@@ -2493,7 +2493,7 @@ body {
   border-right: none;
 }
 
-/* app tiles on the welcome hero — start an experiment from an app */
+/* app tiles on the welcome hero: start an experiment from an app */
 .welcome-apps {
   display: flex;
   flex-direction: column;
@@ -3398,7 +3398,7 @@ body {
 .task.on .tdot.st-idle { background: var(--sage); } /* keep the "selected" cue when nothing is running */
 .task .tspin.st-run { border-top-color: var(--working); }
 
-/* device picker in the composer — opens upward (composer sits at the bottom) */
+/* device picker in the composer: opens upward (composer sits at the bottom) */
 .cbar-dev {
   position: relative;
   display: inline-flex;

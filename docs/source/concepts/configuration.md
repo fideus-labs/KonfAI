@@ -1,6 +1,6 @@
 # Configuration model
 
-This page explains how KonfAI turns a YAML file into live Python objects — the
+This page explains how KonfAI turns a YAML file into live Python objects: the
 reflection engine behind every `Trainer`, `Predictor`, `Evaluator`, and `Transformer`. Read it
 when a config key is not binding the way you expect, or before you expose a
 custom class to YAML.
@@ -9,7 +9,7 @@ custom class to YAML.
 Reading a config **mutates it**: loading a run resolves every default and
 rewrites the YAML file in place, so the file on disk becomes the fully-resolved
 record of the experiment. One consequence: a `None` value round-trips as the
-literal string `"None"` — it is written back as `"None"` and reparsed to
+literal string `"None"`: it is written back as `"None"` and reparsed to
 `None` on the next read.
 ```
 
@@ -46,6 +46,24 @@ In practice, the mapping is straightforward:
 3. YAML fields are matched against constructor parameter names
 4. nested objects are recursively instantiated from nested mappings
 
+```{mermaid}
+flowchart TB
+    Y["Trainer:<br/>&nbsp;&nbsp;epochs: 100<br/>&nbsp;&nbsp;Model:<br/>&nbsp;&nbsp;&nbsp;&nbsp;classpath: UNet.yml"]:::yaml
+    S["signature of Trainer.__init__<br/>(epochs, model, dataset, …)"]:::sig
+    O["Trainer(epochs=100, model=…)"]:::obj
+    N["the Model subtree, read the same way<br/>against Network.__init__"]:::obj
+    B["the resolved defaults, written back<br/>into the same YAML file"]:::back
+
+    Y -- "the subtree this callable owns" --> S
+    S -- "one argument per parameter name" --> O
+    O -. "recurses on each nested @config object" .-> N
+    O --> B
+
+```
+
+The write-back is the last arrow, and it is why reading a config changes the file:
+whatever the signature defaulted is now spelled out in it.
+
 This is why KonfAI configuration keys should generally:
 
 - use **snake_case**
@@ -54,7 +72,7 @@ This is why KonfAI configuration keys should generally:
 
 One important detail about models: the nesting is the same with or without a
 decorator. `@config()` defaults to the class name, and an *undecorated* class gets
-its class name appended by the model loader — so `classpath: Model:UNetpp5` reads
+its class name appended by the model loader, so `classpath: Model:UNetpp5` reads
 from `Trainer.Model.UNetpp5` either way. A decorator only *renames* that subtree; it
 never removes it. `examples/Synthesis` shows the shape: `Model.py` decorates
 `UNetpp5` with `@config()`, and `Config.yml` nests its parameters under
@@ -71,7 +89,7 @@ directly from `os.environ` by `konfai.utils.config.Config`:
 | `KONFAI_CONFIG_MODE` | Controls what happens when the config file or individual keys are missing. See **Config modes** below. |
 
 The KonfAI CLI sets both variables for you from the `--config` argument. You only
-need to set them by hand when you call configurable classes directly — for
+need to set them by hand when you call configurable classes directly: for
 example from a test or a notebook (see the testing notes in `AGENTS.md`).
 
 ## The `apply_config` decorator and `Config` context manager
@@ -96,11 +114,11 @@ binds to; without it, the key defaults to the object's own name.
 `inspect.signature()` and, for each parameter, reads a value from the active YAML
 subtree using the parameter's **type annotation** to decide how to convert it:
 
-- `int`, `float`, `bool`, `str`, `torch.Tensor` — cast directly from the YAML scalar
-- `Literal[...]` — validated against the allowed set (an invalid value raises `ConfigError`)
-- `pathlib.Path` — wrapped as a `Path`; a non-existent path only logs a warning
-- `list[...]` / `dict[str, ...]` — parsed element-wise
-- a nested configurable class — instantiated recursively by re-entering
+- `int`, `float`, `bool`, `str`, `torch.Tensor`: cast directly from the YAML scalar
+- `Literal[...]`: validated against the allowed set (an invalid value raises `ConfigError`)
+- `pathlib.Path`: wrapped as a `Path`; a non-existent path only logs a warning
+- `list[...]` / `dict[str, ...]`: parsed element-wise
+- a nested configurable class: instantiated recursively by re-entering
   `apply_config` on the nested subtree
 
 Because the parameter *names* are the YAML keys, configuration keys should use
@@ -117,8 +135,8 @@ provided (see below).
 | `Done` | Normal run mode. The config file must already exist; values are read and the visited subtree is written back. A missing file raises `ConfigError`. |
 | `default` | Materialize defaults non-interactively. Missing files or keys are created from each field's `default\|...` value (or its Python default), and the file is written. |
 | `interactive` | Like `default`, but prompt on stdin for each `default\|...` field so a config can be generated interactively. Falls back to `default` when stdin is unavailable. |
-| `Import` | Skip config binding entirely. The decorated object is called with the arguments it was given, without reading the YAML — used when importing or constructing classes outside the config-driven flow. |
-| `remove` | Delete the config file on context exit instead of writing it back — used for throwaway configs, for example in tests. |
+| `Import` | Skip config binding entirely. The decorated object is called with the arguments it was given, without reading the YAML: used when importing or constructing classes outside the config-driven flow. |
+| `remove` | Delete the config file on context exit instead of writing it back: used for throwaway configs, for example in tests. |
 
 An *unknown* value behaves like `Done`. An **unset** `KONFAI_CONFIG_MODE` is
 different: `apply_config` binds nothing at all (as under `Import`), and using
@@ -210,6 +228,6 @@ The `examples/Synthesis` workflow is the clearest repository example:
 
 ## Next steps
 
-- {doc}`datasets` — how the configured dataset sections map onto lazy, patch-based storage.
-- {doc}`model-graph` — how `Model` sections address named module outputs for losses and metrics.
-- {doc}`../config_guide/index` — the key-by-key reference for the workflow config files.
+- {doc}`datasets`: how the configured dataset sections map onto lazy, patch-based storage.
+- {doc}`model-graph`: how `Model` sections address named module outputs for losses and metrics.
+- {doc}`../config_guide/index`: the key-by-key reference for the workflow config files.

@@ -21,6 +21,7 @@ import itertools
 import os
 import re
 from math import prod
+from pathlib import Path
 from types import ModuleType
 
 import numpy as np
@@ -30,7 +31,7 @@ from konfai.utils.errors import ConfigError, DatasetManagerError
 
 def env_flag(name: str, default: bool) -> bool:
     """A ``KONFAI_*`` boolean switch: ``0``/``false`` is off, anything else set is on, unset is
-    ``default`` — one parser, so a switch read in two places accepts the same spellings."""
+    ``default``: one parser, so a switch read in two places accepts the same spellings."""
     value = os.environ.get(name)
     if value is None:
         return default
@@ -67,7 +68,7 @@ def best_sweep_axis(patch_size: list[int], shape: list[int]) -> int:
     """The axis whose reassembly window is smallest.
 
     The window holds ``min(patch, extent)`` rows of the swept axis across the whole of every other, so
-    it costs ``min(patch_d, extent_d) x prod(extent_e != d)`` -- smallest on the axis the patch divides
+    it costs ``min(patch_d, extent_d) x prod(extent_e != d)``: smallest on the axis the patch divides
     most. Measured on a 256x512x640 volume with a 128 patch: 0.47 GiB sweeping axis 0 against 0.19
     sweeping axis 2, for the same patches read in the same total time (the set is identical, only the
     order changes, and every chunk is read either way).
@@ -88,7 +89,7 @@ def _sweep_first(slices: list[list[slice]], sweep_axis: int) -> list[tuple[slice
 
     Which axis is outermost is what the reassembly window slides along: a patch's arrival finalizes
     everything behind it on that axis and nothing else, so the window costs ``patch[axis] x (the other
-    extents)``. The order is the contract between the read and the write -- both must be given the same
+    extents)``. The order is the contract between the read and the write, both must be given the same
     axis, or reassembly hands out regions that are not final.
     """
     order = [sweep_axis, *(dim for dim in range(len(slices)) if dim != sweep_axis)]
@@ -140,7 +141,7 @@ def concretize_patch_size(
     fixed by the user and passes through (clamped to the extent so a patch never exceeds the volume).
 
     ``multiple`` (the model's per-axis ``downsampling_factor``) rounds a free axis UP to a valid input
-    size for the network — 122 -> 128 for a factor 16 — so its encoder/decoder skips align. The rounded
+    size for the network (122 -> 128 for a factor 16), so its encoder/decoder skips align. The rounded
     size may exceed the extent; the border padding (``pad_to_patch``) fills it and the accumulator crops
     it back, exactly as it does for any patch larger than its case. A factor shorter than the patch rank
     aligns to the TRAILING axes (a 2D model in a ``[1,0,0]`` slice regime constrains Y and X, not Z).
@@ -167,7 +168,7 @@ def concretize_patch_size(
 
 def free_axis_rounding(multiple: list[int] | None, axis: int, rank: int) -> int:
     """The rounding factor a free axis at spatial index ``axis`` (of ``rank`` axes) takes from the
-    model's per-axis ``multiple`` — trailing-aligned: a 2D model's ``[fy, fx]`` in a 3-axis patch
+    model's per-axis ``multiple``: trailing-aligned: a 2D model's ``[fy, fx]`` in a 3-axis patch
     constrains Y and X and leaves Z at 1."""
     if multiple is None:
         return 1
@@ -182,7 +183,7 @@ def size_free_axes(
 ) -> list[int] | None:
     """The up-front concrete patch for a free (``0``) axis config: the worst case with each free axis
     rounded up to the model's ``multiple`` (its ``downsampling_factor``), so the first attempt is a
-    valid model input. ``None`` when there is nothing to size — no free axis, unknown worst case, or
+    valid model input. ``None`` when there is nothing to size: no free axis, unknown worst case, or
     every free extent is already a valid multiple (the raw path already works). Shared by the
     prediction and training auto-patch loops so the rounding lives in one place.
     """
@@ -198,7 +199,7 @@ def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int
     Accepted forms: ``None`` -> ``DEFAULT_OVERLAP_FRACTION`` of the patch per axis; an ``int`` ->
     absolute voxels on every axis; a ``float`` in [0,1[ or a ``"20%"`` string -> that fraction of the
     patch per axis; a per-axis list mixing those forms. Whatever the spec, an axis that is not tiled
-    (single patch spans the extent) resolves to 0 -- overlap only exists between patches.
+    (single patch spans the extent) resolves to 0: overlap only exists between patches.
     """
 
     def one(spec: int | float | str, size: int) -> int:
@@ -253,8 +254,8 @@ def resolve_patch(
     """Size the free axes of ``patch_size`` so ONE patch fits ``budget_bytes``; fixed axes never move.
 
     ``0`` entries are free (their max = the volume's extent); positive entries are pinned by the user.
-    A patch's footprint is ``(resident_images + intermediate_factor) * voxels * channels * dtype_bytes``
-    -- ``resident_images`` is exact (counted from the config: output + targets + masks), the
+    A patch's footprint is ``(resident_images + intermediate_factor) * voxels * channels * dtype_bytes``:
+    ``resident_images`` is exact (counted from the config: output + targets + masks), the
     ``intermediate_factor`` covers the op's working copies. When everything fits, the free axes take
     their full extent (the whole volume when all axes are free). Otherwise the free axes shrink
     ISOTROPICALLY (the patch keeps the volume's proportions), optionally snapped down to ``snap``
@@ -299,7 +300,7 @@ def get_patch_slices_from_shape(
 ) -> tuple[list[tuple[slice, ...]], list[tuple[int, bool]]]:
 
     # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple`` so a
-    # small case still reaches the network at a valid input size -- the up-front worst-case sizing only
+    # small case still reaches the network at a valid input size: the up-front worst-case sizing only
     # guarantees the largest case, and a heterogeneous smaller one would otherwise arrive non-divisible.
     template = [0] * len(shape) if patch_size is None else patch_size
     # ``declared_free_axis`` carries the original free-axis intent when a restart has already pinned
@@ -406,6 +407,92 @@ SUPPORTED_BACKEND_FORMATS = [
 
 # Everything a `path[:flag]:format` spec may name.
 SUPPORTED_FORMATS = [*SUPPORTED_EXTENSIONS, *SUPPORTED_BACKEND_FORMATS]
+
+# Every spelling of an OME-Zarr store, plus the compound `.ome.zarr` no single token covers.
+_STORE_FORMS = {".ome.zarr", ".ome-zarr", ".ome_zarr", ".omezarr", ".zarr"}
+
+# Longest first, so a compound extension wins over its tail: `.ome.zarr` over `.zarr`, `.nii.gz`
+# over `.gz`.
+_STORAGE_FORMS = sorted({f".{extension}" for extension in SUPPORTED_EXTENSIONS} | _STORE_FORMS, key=len, reverse=True)
+
+
+def is_dicom_file(path: Path) -> bool:
+    """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128.
+
+    A series is commonly exported with no extension at all, so its name proves nothing and the magic
+    is what identifies it.
+    """
+    try:
+        with open(path, "rb") as file:
+            return file.read(132)[128:132] == b"DICM"
+    except OSError:
+        return False
+
+
+def storage_form(path: Path) -> str:
+    """The extension KonfAI resolves ``path`` under, spelled as the path spells it.
+
+    NOT ``"".join(path.suffixes)``: a dot in the STEM belongs to the name, not to the format --
+    ``patient.v2.mha`` is a MetaImage and ``CT.contrast.nii.gz`` a gzipped NIfTI, where joining every
+    suffix asks for a ``v2.mha`` backend and lets a caller's file naming decide whether a run starts.
+    Matched from the right, longest first. A file whose end matches nothing keeps its last suffix; a
+    directory that carries none (a DICOM series) has no form at all.
+    """
+    name = path.name
+    lowered = name.lower()
+    for form in _STORAGE_FORMS:
+        if lowered.endswith(form):
+            return name[len(name) - len(form) :]
+    return "" if path.is_dir() else path.suffix
+
+
+def directory_volume_form(path: Path) -> str | None:
+    """The form a directory that is ITSELF one volume is read under, or ``None`` for a plain one.
+
+    ``.ome.zarr``/``.zarr`` for an OME-Zarr store, ``""`` for a DICOM series, ``None`` for a
+    directory holding separate per-case files. A store and a series are directories, not files, so
+    anything that stages or detects them has to tell the two apart: one travels whole, the other is
+    walked into the volumes it holds.
+    """
+    if not path.is_dir():
+        return None
+    form = storage_form(path)
+    if form.lower() in _STORE_FORMS:
+        return form
+    entries = sorted(path.iterdir(), key=lambda entry: entry.name)
+    if {entry.name for entry in entries} & {".zgroup", ".zattrs", "zarr.json"}:
+        return ".ome.zarr"
+    files = [entry for entry in entries if entry.is_file()]
+    if any(file.suffix.lower() in (".dcm", ".dicom") for file in files):
+        return ""
+    # A non-DICOM file may sort first, so probe every file, not only the first one.
+    if any(is_dicom_file(file) for file in files):
+        return ""
+    return None
+
+
+def format_token(form: str, *, directory: bool = False) -> str:
+    """The dataset backend token a storage form is read and written through.
+
+    Writing needs one NAMED: nothing is on disk yet to detect it from. ``directory`` says the entry
+    is a directory volume, where the absence of a form means a DICOM series rather than the default
+    file format.
+    """
+    lowered = form.lower()
+    if lowered in _STORE_FORMS:
+        return "omezarr"
+    if not lowered:
+        return "dicom" if directory else "mha"
+    return lowered.lstrip(".")
+
+
+def path_format_token(path: Path) -> str:
+    """The dataset backend token ``path`` is read and written through, as it sits on disk."""
+    if path.is_dir():
+        volume = directory_volume_form(path)
+        if volume is not None:
+            return format_token(volume, directory=True)
+    return format_token(storage_form(path))
 
 
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")

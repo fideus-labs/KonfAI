@@ -203,7 +203,7 @@ def main() -> None:
     )
 
     # konfai's Python API raises designed refusals (message + remedy); the CLI's job is to print
-    # them and exit 1 -- the same contract the konfai CLI itself offers.
+    # them and exit 1: the same contract the konfai CLI itself offers.
     from konfai.utils.errors import KonfAIError
 
     try:

@@ -5,7 +5,7 @@ from konfai.data.transform import LocalityKind, PatchLocality, Transform
 
 
 class DoubleThenBias(Transform):
-    """Pointwise `2*x + bias` -- the kind of custom intensity transform that folds into the ONNX."""
+    """Pointwise `2*x + bias`: the kind of custom intensity transform that folds into the ONNX."""
 
     def __init__(self, bias: float = 1.0) -> None:
         super().__init__()

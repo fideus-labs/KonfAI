@@ -9,8 +9,8 @@ It is deliberately a transparent learning task, not a clinical registration
 recipe. Every `MOVING` image is a **real pelvis CT slice** pushed through a
 displacement field the data-preparation script picks, so the answer is known
 exactly while the anatomy is real. For registration between two *different*
-patients — a genuine anatomical difference with no ground-truth field, scored on
-reference segmentations — see {doc}`the IMPACT-Reg example <../usage/apps>` and
+patients (a genuine anatomical difference with no ground-truth field, scored on
+reference segmentations) see {doc}`the IMPACT-Reg example <../usage/apps>` and
 `examples/ImpactReg/`.
 
 ## Before you start
@@ -28,7 +28,7 @@ cd examples/Registration
 displacement field; it is the only extra that carries it.
 
 The commands below show GPU 0; replace `--gpu 0` with `--cpu 1` for a CPU-only
-run, but note the shipped configuration is 400 epochs at `256 × 256` — about
+run, but note the shipped configuration is 400 epochs at `256 × 256`: about
 three minutes on a GPU, considerably longer on CPU.
 
 ## What the example contains
@@ -44,8 +44,7 @@ examples/Registration/
 ```
 
 `make_dataset.py` takes six axial slices from each of the five public pelvis CT
-cases, windows them to `[0, 1]`, and crops each to `256 × 256` around the body —
-30 single-slice pairs in all:
+cases, windows them to `[0, 1]`, and crops each to `256 × 256` around the body: 30 single-slice pairs in all:
 
 ```text
 Dataset/
@@ -68,9 +67,9 @@ python make_dataset.py
 ```
 
 The CT comes from `VBoussot/konfai-demo` on the Hugging Face Hub, cached after
-the first run. For registration between two *different* patients — a genuine
+the first run. For registration between two *different* patients: a genuine
 anatomical difference with no ground-truth field, scored on the reference
-segmentations — see `examples/ImpactReg`.
+segmentations: see `examples/ImpactReg`.
 
 ## How the two images reach the model
 
@@ -96,7 +95,7 @@ part of the patch `patch_size: [1, 256, 256]` in **both** `Config.yml` and
 ## Run train → predict → evaluate
 
 `Registration_demo.ipynb` runs the three commands below and plots the
-before/after — run every cell. To do it by hand instead:
+before/after: run every cell. To do it by hand instead:
 
 ### 1. Train the registration model
 
@@ -146,14 +145,14 @@ The JSON contains both baselines:
 - `MOVED:FIXED:MAE` and `MOVED:FIXED:MSE` measure error after registration.
 
 On the 30 shipped CT slices at 400 epochs, a typical run reports `0.069 → 0.033`
-for MAE and `0.017 → 0.0042` for MSE — a little over 2x and 4x. Exact values may
+for MAE and `0.017 → 0.0042` for MSE: a little over 2x and 4x. Exact values may
 vary, but a useful run should make the after-registration errors clearly lower
 than the matching before-registration errors.
 
 Real anatomy is a far harder target than a synthetic phantom, and 400 epochs over
 22 training slices is a demonstration rather than a trained model.
 
-## What this baseline does—and does not—prove
+## What this baseline does (and does not)prove
 
 This example demonstrates the complete KonfAI registration workflow: ordered
 multi-input data, a named warped-image output, checkpoint inference, medical
@@ -177,9 +176,9 @@ Full attribution and hashes are in the
 <a href="../_static/apps/ASSET_PROVENANCE.md">asset provenance manifest</a>.
 
 <ul class="kf-example-grid kf-example-grid--registration" aria-label="Real IMPACT-Reg execution stages, separate from the VoxelMorph tutorial">
-  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moving-before.png" aria-label="Open the real moving MR before registration"><img src="../_static/apps/impact-reg/moving-before.png" alt="Coronal view of the real moving abdominal MR before registration, with fixed CT contours showing the controlled spatial offset." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · REAL APP INPUT</span><strong>Moving MR — before</strong><span>Fixed-CT contours expose the controlled metadata-only offset.</span><span class="kf-example-stats">NCC 0.129 · MAE 106.11</span></figcaption></figure></li>
+  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moving-before.png" aria-label="Open the real moving MR before registration"><img src="../_static/apps/impact-reg/moving-before.png" alt="Coronal view of the real moving abdominal MR before registration, with fixed CT contours showing the controlled spatial offset." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · REAL APP INPUT</span><strong>Moving MR: before</strong><span>Fixed-CT contours expose the controlled metadata-only offset.</span><span class="kf-example-stats">NCC 0.129 · MAE 106.11</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/fixed-ct.png" aria-label="Open the real fixed CT target"><img src="../_static/apps/impact-reg/fixed-ct.png" alt="Coronal view of the real fixed abdominal CT that defines the registration target and output geometry." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">02 · REAL REFERENCE</span><strong>Fixed CT target</strong><span>The reference image defines the physical output grid.</span><span class="kf-example-stats">222 × 226 × 124 · 2 MM GRID</span></figcaption></figure></li>
-  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moved-after.png" aria-label="Open the real moved MR after registration"><img src="../_static/apps/impact-reg/moved-after.png" alt="Coronal view of the real moved abdominal MR after ConvexAdam Composite registration on the fixed CT grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">03 · REAL APP OUTPUT</span><strong>Moved MR — after</strong><span><code>ConvexAdam_Composite</code> writes the moved image on the fixed grid.</span><span class="kf-example-stats">NCC 0.937 · MAE 21.09</span></figcaption></figure></li>
+  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moved-after.png" aria-label="Open the real moved MR after registration"><img src="../_static/apps/impact-reg/moved-after.png" alt="Coronal view of the real moved abdominal MR after ConvexAdam Composite registration on the fixed CT grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">03 · REAL APP OUTPUT</span><strong>Moved MR: after</strong><span><code>ConvexAdam_Composite</code> writes the moved image on the fixed grid.</span><span class="kf-example-stats">NCC 0.937 · MAE 21.09</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/displacement-field.png" aria-label="Open the physical displacement-field visualization"><img src="../_static/apps/impact-reg/displacement-field.png" alt="Visualization of the real three-component displacement field, with physical magnitude and sampled in-plane vectors." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">04 · PHYSICAL FIELD</span><strong>Displacement field</strong><span>Three physical components in millimetres, with sampled vectors.</span><span class="kf-example-stats">MEAN 23.06 MM · P95 25.55 MM</span></figcaption></figure></li>
 </ul>
 

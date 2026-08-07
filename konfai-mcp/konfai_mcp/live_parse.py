@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pure parsing of KonfAI runtime-log lines — metrics and tqdm progress.
+"""Pure parsing of KonfAI runtime-log lines: metrics and tqdm progress.
 
 The single source of truth for reading a live training/validation log line. It carries no dependency
 beyond ``re``, so any co-located consumer (the MCP ``read_live_metrics`` tool, KonfAI Studio's live feed)
@@ -27,7 +27,7 @@ from typing import Any
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 _STAGE_RE = re.compile(r"\b(Training|Validation|Prediction)\s*:")
-# The evaluator/uncertainty desc — "Metric TRAIN : out:tgt:Dice: 0.91 | out:tgt:HD95: 3.4" — carries no
+# The evaluator/uncertainty desc ("Metric TRAIN : out:tgt:Dice: 0.91 | out:tgt:HD95: 3.4") carries no
 # Loss(...) body, so it needs its own reader (its per-case metrics would otherwise never become curves).
 _EVAL_SPLIT_RE = re.compile(r"\bMetric\s+([A-Za-z]+)\s*:")
 # One "output:target:Name: value" pair; the key may itself contain ':' so the value is anchored at the end
@@ -41,7 +41,7 @@ _PROGRESS_RE = re.compile(
 
 
 def parse_live_progress(text: str) -> dict[str, Any] | None:
-    """The tqdm progress on a live log line — percent, step/total, rate, elapsed and remaining ETA — or
+    """The tqdm progress on a live log line (percent, step/total, rate, elapsed and remaining ETA) or
     None if the line carries no progress bar. Works for both training lines and the data-caching phase."""
     match = _PROGRESS_RE.search(ANSI_ESCAPE_RE.sub("", text))
     if match is None:
@@ -58,7 +58,7 @@ def parse_live_progress(text: str) -> dict[str, Any] | None:
 
 
 def progress_label(text: str) -> str:
-    """The phase a progress line belongs to — the tqdm desc, e.g. 'Caching Train', 'Caching Validation',
+    """The phase a progress line belongs to: the tqdm desc, e.g. 'Caching Train', 'Caching Validation',
     'Training', 'Validation'. Taken as the text before the first colon so the per-iteration loss suffix is
     dropped; best-effort and length-capped."""
     head = ANSI_ESCAPE_RE.sub("", text).strip().split(":", 1)[0].strip()

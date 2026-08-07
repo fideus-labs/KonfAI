@@ -2,7 +2,7 @@
 
 KonfAI reads and writes datasets through pluggable backends in
 `konfai/utils/dataset.py` (inner classes of `Dataset`). You rarely name a backend
-directly — you pick a **format token** in a `dataset_filenames` spec
+directly, you pick a **format token** in a `dataset_filenames` spec
 (`./Dataset:a:mha`), and the token is dispatched to a backend. See
 {doc}`../../concepts/datasets` for the grouped case/group layout these backends
 serve; the DICOM and OME-Zarr reader APIs are detailed below.
@@ -18,16 +18,23 @@ whole).
 
 | Backend | Format token(s) | Kind | Region reads | Streamed writes | Optional extra |
 | --- | --- | --- | --- | --- | --- |
-| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | **uncompressed MetaImage and NIfTI only** — compressed streams are not seekable, and NRRD never streams in ITK | **uncompressed `.mha` and `.nii`** (memmap over the raw pixel block; needs image geometry) — the region-writable set is the region-readable one, deliberately | `konfai[itk]` (`SimpleITK`) |
+| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | **uncompressed MetaImage and NIfTI only** | **the same set**: uncompressed `.mha` and `.nii` | `konfai[itk]` (`SimpleITK`) |
 | `Dataset.H5File` | `h5` | Single monolithic HDF5 file | yes (chunked) | yes | `konfai[hdf5]` (`h5py`) |
 | `Dataset.OmeZarrFile` | `omezarr, ome-zarr, ome_zarr, zarr` (+ `@level`) | OME-Zarr pyramid directory | yes (chunked) | yes, `scale_factors` pyramids included | `konfai[omezarr]` (`zarr` + `ngff-zarr`) |
 | `Dataset.DicomFile` (DICOM series; scalar-array writes) | `dicom` | DICOM series directory | per slice | no (whole series) | `konfai[dicom]` (`pydicom`) |
-| `Dataset.ItkTransformFile` | `itktransform` | ITK transform files (`.h5`, `.tfm`), one per case/group | yes for a displacement entry (the parameters are HDF5; a row span is one contiguous read) | yes, **for a 3-component 3-D displacement field with image geometry** — the parameters fill region by region, and the file is what `sitk.WriteTransform` would have written; any other transform kind is whole-entry | `konfai[itk]` + `konfai[hdf5]` (the parameters are touched through `h5py`) |
+| `Dataset.ItkTransformFile` | `itktransform` | ITK transform files (`.h5`, `.tfm`), one per case and group | yes, for a displacement entry | yes, for a 3-component 3-D displacement field with image geometry | `konfai[itk]` + `konfai[hdf5]` |
 
-```{tip}
+Reading a region is only cheap when the format allows it. A compressed stream is
+not seekable, and NRRD never streams in ITK, so those decode the whole volume per
+region: correct, but slow. The region-**writable** set is deliberately the
+region-**readable** one, a memmap over the raw pixel block, which needs the image
+geometry up front. An `:itktransform` entry writes its parameters region by
+region and the file is exactly what `sitk.WriteTransform` would have produced;
+any other transform kind is written whole.
+
+
 `pip install "konfai[imaging]"` installs every backend at once
 (`SimpleITK, h5py, pydicom, zarr, ngff-zarr`).
-```
 
 The extras column above is the summary; {doc}`../../getting-started/installation`
 is the canonical home for the optional-extras table.
@@ -36,17 +43,16 @@ is the canonical home for the optional-extras table.
 
 `:itktransform` stores one ITK transform per entry (`<case>/<group>.h5`). The
 write side is the point: a displacement field streams into the exact file
-`sitk.WriteTransform` would produce — pinned identical through ITK's own reader
-— without ever holding the field whole in float64. The read side hands back what
+`sitk.WriteTransform` would produce (pinned identical through ITK's own reader), without ever holding the field whole in float64. The read side hands back what
 `Dataset.read_transform` decodes: a displacement entry as its field (region
 reads included), any other stored transform (affine, composite, `.tfm`) as its
-parameters. This is how a registration preset's transform deliverable — under whatever
-name it declares — is a plain `Write:` like any other, and how a staged
+parameters. This is how a registration preset's transform deliverable (under whatever
+name it declares) is a plain `Write:` like any other, and how a staged
 transform file resolves through the same `Dataset` surface as an image.
 
 `itktransform` is a **backend token, not an extension**: the file on disk is
 `<group>.h5` (or `.tfm`), and nothing is ever named `.itktransform`. That is the
-one thing `SUPPORTED_BACKEND_FORMATS` exists to say — a format may be declared in
+one thing `SUPPORTED_BACKEND_FORMATS` exists to say: a format may be declared in
 a dataset spec without being a suffix any path can carry.
 
 ## The `SitkFile` default backend also handles sidecars
@@ -126,7 +132,7 @@ round-trips exactly; floating-point data is stored as signed 16-bit pixels with
 
 Unlike a NIfTI file, an OME-Zarr array is **already lazy**: it is stored as
 chunked Zarr, so reading a sub-region only fetches the chunks it touches. This
-maps naturally onto KonfAI's patch-based loading — the reader
+maps naturally onto KonfAI's patch-based loading: the reader
 (`konfai/utils/ome_zarr.py`) never materializes the whole volume.
 
 ### Multiscale levels
@@ -209,8 +215,8 @@ Two Python libraries read OME-NGFF: the OME consortium's `ome-zarr` and
 `ngff-zarr`. KonfAI's `omezarr` extra depends on **`ngff-zarr`** (alongside raw
 `zarr`) for one decisive reason:
 
-> `ngff-zarr` exposes **per-scale physical coordinates** — the `scale` and
-> `translation` of each pyramid level — as plain numeric arrays that convert
+> `ngff-zarr` exposes **per-scale physical coordinates**: the `scale` and
+> `translation` of each pyramid level, as plain numeric arrays that convert
 > directly to SimpleITK geometry. That is exactly the `(Origin, Spacing,
 > Direction)` triple KonfAI stores in an `Attribute`, so OME-Zarr input lines up
 > with every other format without a bespoke geometry adapter.
@@ -250,10 +256,10 @@ slices. In workflow YAML use `./Dataset:dicom` or `./Dataset:omezarr` in
 The data layer (`konfai/data/patching.py`, `konfai/data/data_manager.py`) never
 loads a whole volume when it can avoid it:
 
-- **`DatasetPatch`** (the `Patch:` config block) — `patch_size` (default
+- **`DatasetPatch`** (the `Patch:` config block): `patch_size` (default
   `[128,128,128]`), `overlap` (`None` → auto-tiling), `pad_value` (`None` → pad
   with `data.min()`), `extend_slice` (2.5-D context, only when `patch_size[0]==1`).
-- **`ModelPatch`** — patching applied *inside* a model graph, with a
+- **`ModelPatch`**: patching applied *inside* a model graph, with a
   `patch_combine` blender for overlap reassembly: `Mean`, `Cosinus`, `Trim`, or
   `Gaussian` (nnU-Net-style importance weighting).
 - **Streaming** reads a planned source region through `read_data_slice`.
@@ -262,8 +268,7 @@ loads a whole volume when it can avoid it:
   chain cannot be represented by one bounded region, KonfAI uses the safe
   whole-volume buffer. See {doc}`../../concepts/streaming` for the planner.
 - **`Accumulator`** reassembles patches with overlap blending, correcting border
-  voxels covered by fewer patches. Patch **read order must match write order** —
-  a load-bearing invariant.
+  voxels covered by fewer patches. Patch **read order must match write order**: a load-bearing invariant.
 
 ```{important}
 For PREDICTION / EVALUATION, **all patches of a case stay on the same DDP rank**
@@ -271,23 +276,25 @@ For PREDICTION / EVALUATION, **all patches of a case stay on the same DDP rank**
 same length so every rank executes the same number of backward passes.
 ```
 
-## Honest caveats
+## Three things to know
 
 ```{warning}
-- **`dcm` ≠ `dicom`.** The token `dcm` reads a **single file** through SITK; only
-  the literal token `dicom` uses the DICOM-**series** backend. Easy to trip over.
-- **`vtk` is an ungated import** — `.vtk` I/O raises `ImportError` if `vtk` isn't
-  installed, and there is no dedicated extra that declares it (`konfai[vtk]`
-  installs it, but the sidecar path doesn't advertise the requirement).
-- **`Attribute` only round-trips scalars and 1-D arrays.** The geometry sidecar
-  stringifies values and reparses with `np.fromstring` after stripping the outer
-  brackets, so anything multi-dimensional will **not** survive a read. Geometry is
-  safe only because `Origin`/`Spacing` are 1-D and `Direction` is stored
-  flattened. Store only flat scalars / 1-D arrays in an `Attribute`.
+**`dcm` is not `dicom`.** The token `dcm` reads a **single file** through
+SimpleITK; only the literal token `dicom` uses the series backend. The two look
+alike and read different things.
 ```
+
+`.vtk` I/O raises `ImportError` when `vtk` is missing. `konfai[vtk]` installs it,
+but no extra declares it for the sidecar path, so the requirement is not
+advertised where you meet it.
+
+An `Attribute` round-trips **flat scalars and 1-D arrays only**. The sidecar
+stringifies each value and reparses it with `np.fromstring`, so anything
+multi-dimensional does not survive a read. Geometry is safe because `Origin` and
+`Spacing` are 1-D and `Direction` is stored flattened.
 
 ## Next steps
 
-- {doc}`../../concepts/datasets` — grouped dataset layout, selectors, patching
-- {doc}`../../concepts/streaming` — locality declarations, planner rules, and fallbacks
-- {doc}`transforms` — transform capabilities and streamability
+- {doc}`../../concepts/datasets`: grouped dataset layout, selectors, patching
+- {doc}`../../concepts/streaming`: locality declarations, planner rules, and fallbacks
+- {doc}`transforms`: transform capabilities and streamability

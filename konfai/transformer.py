@@ -16,8 +16,8 @@
 
 """The TRANSFORM workflow: apply a declared transform chain to a dataset. No model.
 
-The engine is :meth:`DatasetManager.materialize` — the streamed Save sweep with its whole-volume
-fallback — and the product is the plan: before a byte is written, every (case, chain) is planned on
+The engine is :meth:`DatasetManager.materialize` (the streamed Save sweep with its whole-volume
+fallback), and the product is the plan: before a byte is written, every (case, chain) is planned on
 the launcher, each output destination is probed with a real region-write open (created then
 removed, so the printed verdict is the run's own), and the whole thing is printed and kept on disk.
 Nothing here falls back silently: a chain that cannot stream says which stage refused and why, and
@@ -75,7 +75,7 @@ class TransformPlanEntry:
     group_dest: str
     #: "STREAM" | "LOAD" | "WHOLE-VOLUME" | "SKIP" | "REDUCE" | "REFUSED". LOAD is a choice, not a
     #: fallback: the case fits the budget and streaming would re-read the source, so the run
-    #: assembles it -- same bytes as far as the chain is byte-stable, one read instead of many.
+    #: assembles it: same bytes as far as the chain is byte-stable, one read instead of many.
     verdict: str
     reason: str | None
     case_bytes: int
@@ -91,7 +91,7 @@ class TransformPlanEntry:
 
     @property
     def working_set_bytes(self) -> int:
-        """What this entry holds at its peak — the figure the budget bounds.
+        """What this entry holds at its peak: the figure the budget bounds.
 
         A reduction's ``case_bytes`` is already its resident regions (it holds one region per case,
         not one volume), where a whole-volume fallback holds the case plus one in-flight copy.
@@ -101,7 +101,7 @@ class TransformPlanEntry:
 
 @dataclass
 class TransformPlan:
-    """The plan as an object — what ``--plan`` prints and ``setup`` enforces."""
+    """The plan as an object: what ``--plan`` prints and ``setup`` enforces."""
 
     entries: list[TransformPlanEntry]
     budget_bytes: float
@@ -109,11 +109,11 @@ class TransformPlan:
     world_size: int
     dropped_cases: dict[str, int]
     dtype_hypothesis: str
-    #: What the stages themselves asked the plan to say (``Transform.plan_note``) — a cost the
+    #: What the stages themselves asked the plan to say (``Transform.plan_note``): a cost the
     #: columns above have no room for. Part of the plan, not of the run, so ``--plan`` carries it:
     #: a note only worth reading after the bytes are written is not worth printing.
     notes: tuple[str, ...] = ()
-    #: Per (group_src, group_dest): the chain spelled out with its destination — the one fact a
+    #: Per (group_src, group_dest): the chain spelled out with its destination: the one fact a
     #: reader wants from a plan line ("what runs, and where does it land").
     chain_labels: dict[tuple[str, str], str] = field(default_factory=dict)
 
@@ -128,12 +128,12 @@ class TransformPlan:
         return [entry for entry in self.entries if entry.verdict == "REFUSED"]
 
     def budget_violations(self) -> list[TransformPlanEntry]:
-        """Entries whose working set exceeds the per-rank budget — the hard constraint.
+        """Entries whose working set exceeds the per-rank budget: the hard constraint.
 
         Two kinds qualify, and for the same reason: they hold something the budget cannot shrink.
         A whole-volume fallback holds the case (times the in-flight factor). A reduction holds one
-        region per case, and once its region is down to a single row there is nothing left to fold —
-        so unlike a streamed case, whose slab height simply keeps shrinking, it has to refuse. The
+        region per case, and once its region is down to a single row there is nothing left to fold, so unlike
+        a streamed case, whose slab height simply keeps shrinking, it has to refuse. The
         estimate is from headers alone and the margin is printed, never hidden: an entry within a
         few percent of the budget may still exceed it.
         """
@@ -174,7 +174,7 @@ class TransformPlan:
             if reductions:
                 for entry in reductions:
                     lines.append(
-                        f"  {chain}: REDUCE {len(entry.reduced)} case(s) -> 1 output '{entry.case}' -- {entry.verdict}"
+                        f"  {chain}: REDUCE {len(entry.reduced)} case(s) -> 1 output '{entry.case}': {entry.verdict}"
                     )
                     if entry.reason:
                         lines.append(f"    {entry.reason}")
@@ -195,7 +195,7 @@ class TransformPlan:
                 solo = sum(1 for entry in expanded if entry.regime == "solo")
                 lines.append(
                     f"  {chain}: EXPAND {cases} case(s) ->"
-                    f" {len(expanded)} cop(ies) -- {shared} STREAM (shared read pass),"
+                    f" {len(expanded)} cop(ies): {shared} STREAM (shared read pass),"
                     f" {solo} STREAM (own pass), {counts['WHOLE-VOLUME']} WHOLE-VOLUME,"
                     f" {counts['SKIP']} SKIP (copy already written)"
                 )
@@ -284,7 +284,7 @@ class Transformer(DistributedObject):
         """The reduction this chain declares, or ``None`` when it is an ordinary per-case chain.
 
         The cases are re-managed with the PRE-reduction stages only: the prepared managers carry the
-        whole chain, ``Reduce`` included, and a manager holding it would refuse to stream — rightly,
+        whole chain, ``Reduce`` included, and a manager holding it would refuse to stream: rightly,
         since as a per-case stage it cannot run at all.
 
         Built once per chain and kept, because planning, sharding and running all ask for it and
@@ -359,7 +359,7 @@ class Transformer(DistributedObject):
         This is what makes the plan the run's own verdict: ``can_stream_data`` is a capability
         check, but the refusals that matter (rank, dtype, geometry) live in ``open_data_stream``,
         which the engine only reaches at the first computed slab. The probe pays one entry creation
-        per destination — removed immediately — so ``--plan`` touches the output directories.
+        per destination (removed immediately), so ``--plan`` touches the output directories.
         """
         channels = int(manager.base_shape[0])
         dtype = self._dtype_hypothesis(manager)
@@ -378,7 +378,7 @@ class Transformer(DistributedObject):
     def _probe_destination(
         destination: Dataset, group: str, shape: list[int], dtype: np.dtype, attributes: Attribute
     ) -> str | None:
-        """One real region-write open, removed immediately — the probe both chains and reductions
+        """One real region-write open, removed immediately: the probe both chains and reductions
         share, so the plan's verdict is the run's own on every kind of output."""
         try:
             stream = destination.open_data_stream(group, _PROBE_ENTRY, shape, dtype, attributes)
@@ -407,7 +407,7 @@ class Transformer(DistributedObject):
         Aborting the stream removes the ENTRY, but a directory dataset gives every case a directory
         of its own (``<root>/<case>/<group>.<ext>``) and that one belongs to the store, not the
         stream. It has to go too: it is shaped exactly like a case, ``get_names`` lists it as one,
-        and a dry run must leave the output as it found it. ``rmdir``, never ``rmtree`` -- anything
+        and a dry run must leave the output as it found it. ``rmdir``, never ``rmtree``: anything
         actually in there is not the probe's, and then the right move is to leave it alone.
         """
         if not destination.is_directory:
@@ -419,7 +419,7 @@ class Transformer(DistributedObject):
         """Every chain's terminal ``Write``, as ``{group_src, group_dest, dataset, group, format}``.
 
         What the run produced, said in the run's own terms. The deliverable never lives under the
-        run directory, so this is how a reader -- a person, Studio's run panel, the next workflow --
+        run directory, so this is how a reader: a person, Studio's run panel, the next workflow --
         finds it without parsing the plan or re-reading the config.
         """
         destinations: list[dict[str, str]] = []
@@ -444,12 +444,12 @@ class Transformer(DistributedObject):
     _STREAM_WORTH_FACTOR = 1.5
 
     def _route(self, manager: DatasetManager, case_bytes: int, budget_bytes: float) -> tuple[str, str | None]:
-        """``STREAM`` or ``LOAD``, priced against the budget — the machine chooses the route, never
+        """``STREAM`` or ``LOAD``, priced against the budget: the machine chooses the route, never
         the answer.
 
         A case whose working set exceeds the budget must stream. One that fits streams only while
         streaming is no dearer than loading (:meth:`DatasetManager.predicted_stream_read_factor`);
-        past that it is LOADED — one read of the source instead of many, holding a case the budget
+        past that it is LOADED, one read of the source instead of many, holding a case the budget
         already covers. Expand copies are not routed here: their copies share one read pass, which
         amortizes the very re-reads a per-copy load would multiply.
         """
@@ -489,7 +489,7 @@ class Transformer(DistributedObject):
             if reduction is not None:
                 # Read off the chain, not assumed: a pointwise cast is allowed after the Reduce, and
                 # the probe below opens the destination with this dtype. A constant here would test
-                # a write the run never makes -- and mha refuses on dtype.
+                # a write the run never makes, and mha refuses on dtype.
                 reduction_dtype = self._dtype_hypothesis(managers[0])
                 planned_dtypes.add(str(reduction_dtype))
                 reduction_plan = reduction.plan()
@@ -506,7 +506,7 @@ class Transformer(DistributedObject):
                 )
                 if verdict == "REDUCE":
                     # A reduction has no whole-volume fallback, so a destination that would refuse
-                    # its stream at the first region refuses the plan -- probed here, like a chain's.
+                    # its stream at the first region refuses the plan: probed here, like a chain's.
                     probe_failure = self._probe_destination(
                         reduction.destination,
                         reduction.group,
@@ -539,7 +539,7 @@ class Transformer(DistributedObject):
                 destination, group = self._terminal_destination(manager)
                 if expansion is not None:
                     # One line per copy: the copies are the outputs, each with its own resume, its
-                    # own verdict, and -- for STREAM -- the regime that says who pays the reads.
+                    # own verdict, and, for STREAM: the regime that says who pays the reads.
                     for a in range(1, expansion.nb + 1):
                         entry_name = manager.copy_entry(a)
                         regime: str | None = None
@@ -605,7 +605,7 @@ class Transformer(DistributedObject):
         """What the stages themselves ask the plan to say, in chain order, each said once.
 
         A verdict and a byte count are what the plan can compute ABOUT a chain; this is what the
-        chain knows about itself — a nested inference whose memory nothing here can bound, a case
+        chain knows about itself: a nested inference whose memory nothing here can bound, a case
         that meets only part of the grid it is being resampled onto. Deduplicated because a note
         about the stage repeats identically for every case of its chain, while a note about the
         case does not: what is printed is the set of distinct things there are to say.
@@ -624,8 +624,8 @@ class Transformer(DistributedObject):
                 # way the streamed planner folds it, over a copy of the stored state.
                 shape = [int(extent) for extent in manager.base_shape[1:]]
                 attributes = manager.stored_attributes
-                # Only as far as a Reduce. Past it the grid is the COHORT's -- another case's
-                # entirely under `reference:<case>` -- and a fold started from this case would hand
+                # Only as far as a Reduce. Past it the grid is the COHORT's: another case's
+                # entirely under `reference:<case>`: and a fold started from this case would hand
                 # the stages after it a geometry belonging to nobody. What the reduction writes is
                 # its own plan line, not a note derived from one of its members.
                 for stage in split_chain(manager.transforms)[0]:
@@ -645,9 +645,9 @@ class Transformer(DistributedObject):
         return notes
 
     def setup(self, world_size: int):
-        """Plan, print, enforce, shard — before any spawn, before any byte."""
+        """Plan, print, enforce, shard: before any spawn, before any byte."""
         # No overwrite prompt on the run folder: it holds logs, the plan and a config copy, all
-        # rewritten in place -- and prompting here would break the default per-case resume (a second
+        # rewritten in place, and prompting here would break the default per-case resume (a second
         # run would refuse because the first one left its config copy behind).
         os.makedirs(self.transform_path, exist_ok=True)
         shutil.copyfile(config_file(), self.transform_path / config_file().name)
@@ -660,7 +660,7 @@ class Transformer(DistributedObject):
         # console stream, and a plan that only ever existed as one is a plan nobody can re-read.
         (self.transform_path / "plan.txt").write_text(report + "\n")
         # Where the data went, machine-readable beside the human-readable plan. This run directory
-        # holds a log, a plan and a config copy -- never the deliverable, which lands wherever each
+        # holds a log, a plan and a config copy, never the deliverable, which lands wherever each
         # Write pointed. Without this, the one thing a reader wants after the run is the one thing
         # nothing in the run directory names.
         (self.transform_path / "outputs.json").write_text(json.dumps(self.output_destinations(), indent=2) + "\n")
@@ -672,8 +672,8 @@ class Transformer(DistributedObject):
                         continue
                     destination, _group = save_destination(transform, managers[0].dataset, managers[0].group_dest)
                     # The question here is NOT concurrent_write_safe(): that one asks whether two
-                    # entries of one shared store may be written at once, and answers no for omezarr
-                    # -- which would refuse the very destination this workflow recommends. Ranks
+                    # entries of one shared store may be written at once, and answers no for
+                    # omezarr, which would refuse the very destination this workflow recommends. Ranks
                     # shard by CASE, and a directory dataset gives each case its own file or store
                     # (<root>/<case>/<group>.<ext>), so their writes are disjoint by construction.
                     # Only a single-file store (h5) puts every case in one handle.
@@ -703,7 +703,7 @@ class Transformer(DistributedObject):
             raise TransformerError(
                 f"{len(violations)} output(s) do not fit the per-rank budget"
                 f" ({_format_gib(plan.budget_bytes)}): worst is"
-                f" ~{_format_gib(worst.working_set_bytes)} -- {what}.",
+                f" ~{_format_gib(worst.working_set_bytes)}: {what}.",
                 remedy,
             )
         if self.on_fallback == "error" and plan.fallback_entries:
@@ -725,8 +725,8 @@ class Transformer(DistributedObject):
                 " Reduce, or declare grid: reference:<case> / shape_only if the cohort is already"
                 " aligned."
                 if reduction is not None and reduction.check_grid() is not None
-                else "A reduction has no whole-volume path to fall back to -- folding every case in"
-                " memory is what it exists to avoid -- so this refuses the run whatever on_fallback"
+                else "A reduction has no whole-volume path to fall back to: folding every case in"
+                " memory is what it exists to avoid, so this refuses the run whatever on_fallback"
                 " says. Fix the refusing stage, or put a Save before the Reduce."
             )
             raise TransformerError(
@@ -896,8 +896,8 @@ def _stage_class(classpath: str, default_classpath: str = "konfai.data.transform
 def _stage_arguments(classpath: str, mapping: dict) -> set[str] | None:
     """The argument names one stage accepts, or ``None`` when they cannot be known from here.
 
-    A ``Reduce`` also accepts its operator's own parameters -- ``resolve_operator`` binds them from
-    the same mapping -- so its allowed set is the union of the two signatures.
+    A ``Reduce`` also accepts its operator's own parameters (``resolve_operator`` binds them from
+    the same mapping), so its allowed set is the union of the two signatures.
     """
     stage = _stage_class(str(classpath))
     if stage is None:
@@ -928,7 +928,7 @@ def _reject_unknown_stage_arguments(chain: object, path: str) -> None:
     """A typo'd stage argument is refused like a typo'd structural key.
 
     The binder reads only the parameters a stage's signature names and materializes the default
-    beside anything else -- ``Clip: {min_val: 0}`` clips at -1024 and exits 0. A stage that resolves
+    beside anything else: ``Clip: {min_val: 0}`` clips at -1024 and exits 0. A stage that resolves
     nowhere, takes ``**kwargs`` or hides its signature is left to the loader's own error.
     """
     if not isinstance(chain, dict):
@@ -951,7 +951,7 @@ def _reject_unknown_stage_arguments(chain: object, path: str) -> None:
 def _reject_unknown_keys(config_path: Path) -> None:
     """Strict mode: any key the TRANSFORM grammar does not know is a parse error.
 
-    The binder reads a key when it exists and materializes the default when it does not — a typo'd
+    The binder reads a key when it exists and materializes the default when it does not: a typo'd
     ``memory_budge:`` silently becomes ``memory_budget: auto``. On this workflow the config IS the
     product, so an unknown key is refused with its exact path instead of being carried along. The
     same bar holds inside a chain: a stage's arguments are checked against its own signature.
@@ -995,7 +995,7 @@ def build_transform(
     """Build and return the configured transform workflow without executing it.
 
     The returned object carries the plan: ``compute_plan()`` is the programmatic dry-run, and
-    ``setup()`` prints and enforces it. This is the in-process surface — ``transform()`` stays
+    ``setup()`` prints and enforces it. This is the in-process surface: ``transform()`` stays
     ``None``-returning like every workflow entrypoint.
 
     ``transform_file`` may be the config TREE itself, as a dict, instead of a path: the Python
@@ -1022,7 +1022,7 @@ def plan_transform(
     transforms_dir: Path | str = Path("./Transforms").resolve(),
     **_ignored: object,
 ) -> TransformPlan:
-    """CLI ``--plan``: build, plan, print, and stop — the workflow never runs.
+    """CLI ``--plan``: build, plan, print, and stop: the workflow never runs.
 
     The probe opens then removes one region-write entry per destination, so even plan mode touches
     the output directories: that is the price of a verdict that is the run's own (the printed plan
@@ -1045,7 +1045,7 @@ def transform(
 ) -> DistributedObject:
     """Build and execute the configured transform workflow.
 
-    ``transform_file`` accepts the config tree as a dict — the pure-Python spelling of the same
+    ``transform_file`` accepts the config tree as a dict: the pure-Python spelling of the same
     run; the resolved YAML still lands in the workspace as the run's record.
     """
     del overwrite, gpu, cpu, quiet

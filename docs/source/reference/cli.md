@@ -28,7 +28,7 @@ Use `konfai` when you are still designing a workflow directly from YAML.
 | `RESUME` | Resume training from a checkpoint. |
 | `PREDICTION` | Run inference using one or more checkpoints. |
 | `EVALUATION` | Compute metrics on saved outputs. |
-| `TRANSFORM` | Apply a transform chain to a dataset — no model. |
+| `TRANSFORM` | Apply a transform chain to a dataset: no model. |
 
 ### Common options
 
@@ -39,7 +39,7 @@ meanings noted below, and has **no** `-tb`.
 | Option | Meaning |
 | --- | --- |
 | `-c`, `--config` | YAML file to use. |
-| `-y`, `--overwrite` | Overwrite existing outputs without prompting. Under `TRANSFORM`: recompute cases whose output exists — without it such a case is skipped, and nothing prompts. |
+| `-y`, `--overwrite` | Overwrite existing outputs without prompting. Under `TRANSFORM`: recompute cases whose output exists, without it such a case is skipped, and nothing prompts. |
 | `--gpu` | One or more GPU ids. |
 | `--cpu` | Number of CPU workers when not using GPUs. Under `TRANSFORM`: shard the cases over N worker processes (default 1). |
 | `-q`, `--quiet` | Reduce console output. |
@@ -57,12 +57,8 @@ current directory**:
 | `EVALUATION` | `./Evaluation.yml` | `Evaluator:` |
 | `TRANSFORM` | `./Transform.yml` | `Transformer:` |
 
-```{note}
-The `--config` help text mentions `Train.yml`, but the real TRAIN default is
-**`./Config.yml`**. Also remember that **reading a config rewrites it on disk** —
-after a run your YAML will contain the resolved defaults. See
-{doc}`../concepts/configuration`.
-```
+Reading a config rewrites it on disk: after a run your YAML holds the resolved
+defaults. See {doc}`../concepts/configuration`.
 
 ### Command-specific options
 
@@ -73,16 +69,16 @@ after a run your YAML will contain the resolved defaults. See
 
 `RESUME`
 
-- `--model` — checkpoint path to resume from (**required**)
-- `--lr` — override the learning rate on resume (omit to keep the checkpoint LR)
-- `-checkpoints-dir` / `-statistics-dir` — note the **single leading dash** here, an
+- `--model`: checkpoint path to resume from (**required**)
+- `--lr`: override the learning rate on resume (omit to keep the checkpoint LR)
+- `-checkpoints-dir` / `-statistics-dir`: note the **single leading dash** here, an
   inconsistency with TRAIN's `--` forms. Only the single-dash spelling parses on
   RESUME (`--checkpoints-dir` gives *unrecognized arguments*), so invoke them exactly
   as written; the underscore variants (`-checkpoints_dir`) also work.
 
 `PREDICTION`
 
-- `--models` — one or more checkpoint paths (**required**); multiple = ensemble
+- `--models`: one or more checkpoint paths (**required**); multiple = ensemble
 - `--predictions-dir` / `--predictions_dir` (default `./Predictions/`)
 
 `EVALUATION`
@@ -91,10 +87,10 @@ after a run your YAML will contain the resolved defaults. See
 
 `TRANSFORM`
 
-- `--plan` — print the per-case streaming plan and exit. The plan probes each
+- `--plan`: print the per-case streaming plan and exit. The plan probes each
   destination with a real region-write open (created, then removed), so its
-  verdict is the run's own — and even plan mode touches the output directories.
-- `--transforms-dir` / `--transforms_dir` (default `./Transforms/`) — run logs
+  verdict is the run's own, and even plan mode touches the output directories.
+- `--transforms-dir` / `--transforms_dir` (default `./Transforms/`): run logs
   and the plan; the outputs go where each `Write:` says.
 - `--gpu` exists for one reason: a `KonfAIInference` stage runs a nested
   inference that does use the device. Plain read transforms run on CPU either
@@ -105,13 +101,10 @@ after a run your YAML will contain the resolved defaults. See
   per-rank budget a four-process run would actually get. An explicit
   `memory_budget` is already per rank and is not divided.
 
-```{note}
-**Device selection quirks.** The CLI default is **CPU** (`--gpu` defaults to an
-empty list); pass `--gpu 0` to use a GPU. Valid `--gpu` ids are frozen at startup
-from the visible CUDA devices, so an id that isn't visible is rejected by argparse.
-`--cpu` must be `> 0`. `--version` works on the root parser (`konfai --version`)
-but not on a subcommand.
-```
+The default is **CPU**: `--gpu` defaults to an empty list, so pass `--gpu 0` to
+use a card. Valid ids are frozen at startup from the visible CUDA devices, and an
+id that is not visible is rejected by argparse. `--cpu` must be greater than 0.
+`--version` works on the root parser, `konfai --version`, not on a subcommand.
 
 ## `konfai-apps`
 
@@ -129,18 +122,16 @@ This command is provided by the standalone `konfai-apps` package.
 | `infer` | Run inference for an app. |
 | `eval` | Run evaluation for an app. |
 | `uncertainty` | Run uncertainty estimation for an app. |
-| `pipeline` | Chain inference, evaluation, and optional uncertainty. **`--gt` is required** — it always evaluates. |
+| `pipeline` | Chain inference, evaluation, and optional uncertainty. **`--gt` is required**: it always evaluates. |
 | `fine-tune` | Fine-tune an app on a dataset. |
 | `bundle` | Assemble an app bundle (HF layout), optionally with a portable ONNX model. |
 | `download` | Pre-fetch an app's files from Hugging Face into the local cache (offline use). |
 
-```{note}
-`bundle` and `download` take neither `app` nor the shared options below — they have
-their own signatures. `bundle NAME` **requires** `--out`, `--app-json`, `--config`
-and `--checkpoint` (and its `--patch-size` sizes the *ONNX export*, not inference).
-`download APP [FILES…]` takes `--no-force-update`. Run `--help` on either for the
-full list.
-```
+`bundle` and `download` have their own signatures: neither takes `app` nor the
+shared options below. `bundle NAME` requires `--out`, `--app-json`, `--config` and
+`--checkpoint`, and its `--patch-size` sizes the ONNX export rather than
+inference. `download APP [FILES…]` takes `--no-force-update`. Run `--help` on either for
+the full signature.
 
 ### Shared options
 
@@ -150,7 +141,7 @@ full list.
 | `--host`, `--port`, `--token` | Switch from local app execution to remote server mode. |
 | `-i`, `--inputs` | Input paths, grouped by repeated flag occurrences. |
 | `-o`, `--output` | Output directory. |
-| `--gpu` / `--cpu` | Device selection — **mutually exclusive**, as on the `konfai` CLI. |
+| `--gpu` / `--cpu` | Device selection: **mutually exclusive**, as on the `konfai` CLI. |
 | `--tmp-dir` (alias: `--tmp_dir`) | Where intermediate artifacts are written. On `infer`, `eval`, `uncertainty` and `pipeline` only. |
 | `-q`, `--quiet` | Reduce console output. |
 | `--download` | Pre-download the full app locally. |
@@ -160,7 +151,7 @@ full list.
 
 `infer`
 
-- `--ensemble` / `--ensemble-models` — **mutually exclusive**
+- `--ensemble` / `--ensemble-models`: **mutually exclusive**
 - `--tta`
 - `--mc`
 - `-uncertainty`
@@ -185,11 +176,11 @@ full list.
 
 - positional `name`
 - `-d`, `--dataset`
-- `--models` — checkpoint name(s) to fine-tune, e.g. `CV_0 CV_1` (default: first available)
+- `--models`: checkpoint name(s) to fine-tune, e.g. `CV_0 CV_1` (default: first available)
 - `--epochs`
 - `--it-validation`
-- `--lr` — override the learning rate; omitted, the checkpoint's is resumed
-- `--set` — the same config overrides as `infer` (see below)
+- `--lr`: override the learning rate; omitted, the checkpoint's is resumed
+- `--set`: the same config overrides as `infer` (see below)
 - `--config` (aliases: `--config-file`, `--config_file`)
 
 ### Tuning a preset (`--set`, `--patch-size`, `--batch-size`)
@@ -206,14 +197,12 @@ a published App without editing its bundled config:
 
 These are the same knobs SlicerKonfAI drives through its ⚙ **Advanced** dialog.
 
-```{note}
-These overrides are honoured in **remote** mode too (`--host …`). Each operation
-declares which tunables the server must carry — `infer` and `pipeline` forward
-`patch_size`, `batch_size` and `config_overrides`; `fine-tune` forwards
-`config_overrides` — and the client **refuses the submission** if the server does
-not echo them back in `accepted_options`. A server too old to honour a tunable
-fails loudly rather than ignoring it silently.
-```
+These overrides work in remote mode too (`--host …`). Each operation declares
+which tunables the server must carry: `infer` and `pipeline` forward `patch_size`,
+`batch_size` and `config_overrides`, `fine-tune` forwards `config_overrides`. The
+client refuses the submission when the server does not echo them back in
+`accepted_options`, so a server too old to honour a tunable fails loudly instead
+of ignoring it.
 
 ## `konfai-apps-server`
 
@@ -247,10 +236,10 @@ the optional `cluster` extra.
 | `--num-nodes` | `1` | Nodes to request. |
 | `--memory` | `16` | Memory per node, in GB. |
 | `--time-limit` | `1440` | Wall-clock limit, in minutes. |
-| `--resubmit` | off | Accepted, but **not implemented** — the run warns and does not requeue. |
+| `--resubmit` | off | Accepted, but **not implemented**: the run warns and does not requeue. |
 
 Otherwise `konfai-cluster` takes the same subcommands and arguments as `konfai`.
-**The cluster options come before the subcommand** — they sit on the top-level
+**The cluster options come before the subcommand**: they sit on the top-level
 parser, so putting them after it fails with `the following arguments are
 required: --name`:
 
@@ -262,7 +251,7 @@ konfai-cluster --name my_job --num-nodes 2 TRAIN -y --config Config.yml
 
 Runs the MCP server that exposes KonfAI to an LLM agent. Every option also reads
 an environment variable, so a client that can only set `env` can configure the
-server without arguments — see {doc}`environment`.
+server without arguments: see {doc}`environment`.
 
 | Option | Meaning |
 | --- | --- |
@@ -291,17 +280,16 @@ requires authentication, because Studio drives arbitrary host compute.
 ```{warning}
 Binding a non-loopback address without `KONFAI_STUDIO_TOKEN` is refused, not
 warned about: an unauthenticated Studio is a shell on the host. Set a token and
-serve over TLS — see `studio/docs/REMOTE.md`.
+serve over TLS: see `studio/docs/REMOTE.md`.
 ```
 
 ## ONNX export is not a subcommand
 
 `konfai/export.py` can export a trained model to ONNX (+ a manifest) for the
-`konfai-rs` portable-inference path, but it is a **Python-API-only** feature —
-there is no `konfai export` subcommand. See {doc}`python-api`.
+`konfai-rs` portable-inference path, but it is a **Python-API-only** feature: there is no `konfai export` subcommand. See {doc}`python-api`.
 
 ## Next steps
 
-- {doc}`components/index` — the component names those YAML configs can reference
-- {doc}`environment` — the variables these wrappers read and set
-- {doc}`../usage/apps` — the guided workflow behind `konfai-apps`
+- {doc}`components/index`: the component names those YAML configs can reference
+- {doc}`environment`: the variables these wrappers read and set
+- {doc}`../usage/apps`: the guided workflow behind `konfai-apps`

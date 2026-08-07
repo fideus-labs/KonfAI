@@ -57,7 +57,7 @@ def test_serves_the_built_frontend() -> None:
 
 
 def test_a_certfile_without_its_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Half a TLS pair cannot serve; uvicorn would fail after the sockets are already claimed — refuse
+    """Half a TLS pair cannot serve; uvicorn would fail after the sockets are already claimed: refuse
     at the CLI, where the message can still name the missing flag."""
     from konfai_studio.cli import main
 

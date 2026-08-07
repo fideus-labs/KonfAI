@@ -20,7 +20,7 @@ SlicerKonfAI (and SlicerImpactReg) live in separate repositories that are NOT in
 that renames/removes a symbol they import breaks a clinician's Slicer session instead of failing here.
 This test locks the SPECIFIC symbols those extensions import today (derived by grepping the Slicer repos),
 at the signature level, so such a break fails konfai-apps CI first. It intentionally does NOT freeze the
-whole API -- only what Slicer actually uses. If Slicer starts using a new symbol, add it to CONTRACT below.
+whole API: only what Slicer actually uses. If Slicer starts using a new symbol, add it to CONTRACT below.
 
 Incident this guards against: dropping ``current_free_vram`` from ``app_repository`` broke SlicerKonfAI.
 """
@@ -29,7 +29,7 @@ import inspect
 
 import pytest
 
-# (module, symbol, kind, expected parameter names) -- funcs only list params; classes leave it empty.
+# (module, symbol, kind, expected parameter names): funcs only list params; classes leave it empty.
 # Sourced from `grep -r "from konfai_apps" Slicer*` (see module docstring).
 CONTRACT = [
     ("konfai_apps.app_repository", "current_free_vram", "func", ["devices", "remote_server"]),
@@ -53,7 +53,7 @@ def test_slicer_consumed_symbol_is_stable(module_path: str, name: str, kind: str
     obj = getattr(module, name, None)
     assert obj is not None, (
         f"{module_path}.{name} is imported by SlicerKonfAI/SlicerImpactReg but no longer exists. "
-        "Removing/renaming it breaks the external Slicer extensions -- keep it, or update those repos."
+        "Removing/renaming it breaks the external Slicer extensions: keep it, or update those repos."
     )
 
     if kind == "class":

@@ -16,7 +16,7 @@
 
 """Operators that aggregate several tensors into one, and the contract that lets them stream.
 
-Two callers, one vocabulary. The predictor reduces the copies of ONE case — an ensemble's models,
+Two callers, one vocabulary. The predictor reduces the copies of ONE case: an ensemble's models,
 a TTA draw's augmentations. The transform workflow reduces one region across N CASES. Both fold a
 leading axis at fixed voxel, which is why both can run region by region and neither ever has to
 hold a whole volume.
@@ -40,7 +40,7 @@ class Reduction(ABC):
     **The layout both engines hand over is** ``[1, K, C, *spatial]``: a singleton stack axis, then
     whatever axis distinguishes the things being folded (the models of an ensemble; for a cohort
     there is one per case, so ``K`` is the case's channels), then the volume. One convention,
-    because ``Concat`` puts the folded things SIDE BY SIDE — that means naming an axis, and an
+    because ``Concat`` puts the folded things SIDE BY SIDE, which means naming an axis, and an
     operator cannot name one that its callers disagree about.
     """
 
@@ -53,7 +53,7 @@ class Reduction(ABC):
     #: - **Default False.** Leave it False unless you are sure: an unknown reduction then takes the
     #:   whole-volume path, costing the streaming optimisation but never correctness.
     #: - **Set True only if voxel-local.** Reducing/stacking along the case axis (dim 0) or the
-    #:   channel axis (dim 1) is fine — both are orthogonal to the spatial axes. Anything reading
+    #:   channel axis (dim 1) is fine: both are orthogonal to the spatial axes. Anything reading
     #:   across spatial positions (a blur, a resample, a global argmax over Z) must stay False.
     #: - **A wrong True corrupts the streamed output** (each region would be reduced with only its
     #:   own cases); the gate trusts this flag and checks nothing else.
@@ -83,7 +83,7 @@ class Reduction(ABC):
         ``transform_shape`` maps spatial extents and says nothing about the leading axis, so a
         planner asked to size the output has no way to tell an averaging operator from a stacking
         one. Overriding it wrongly costs a plan that probes a shape the run never writes, never a
-        wrong volume -- the write opens on the block it actually holds.
+        wrong volume: the write opens on the block it actually holds.
         """
         del cases
         return channels
@@ -108,7 +108,7 @@ def _averaged_dtype(reference: torch.dtype) -> torch.dtype:
 
     Floating inputs keep their own: an ensemble of float16 predictions must not silently double the
     bytes its output takes on disk. Integer inputs widen and stay widened, because the mean of 1 and
-    2 is not 1 -- rounding an average back into an integer grid is a wrong number, not a narrower one.
+    2 is not 1: rounding an average back into an integer grid is a wrong number, not a narrower one.
     """
     return reference if reference.is_floating_point else torch.float32
 
@@ -155,7 +155,7 @@ class Mean(Reduction):
 
 
 class Std(Reduction):
-    """The element-wise standard deviation across cases — the ensemble-spread map.
+    """The element-wise standard deviation across cases: the ensemble-spread map.
 
     Welford's running moments, so the peak is two float32 accumulators plus the case being read,
     whatever N is. Unbiased (N-1), matching ``torch.std``; a single case has no spread and
@@ -165,7 +165,7 @@ class Std(Reduction):
     voxel_local = True
     incremental = True
     # Two persistent accumulators (mean, m2) plus, per accumulate: the float copy of the case,
-    # ``delta``, and ``value - mean`` again after the mean moved -- five buffers beside the region.
+    # ``delta``, and ``value - mean`` again after the mean moved: five buffers beside the region.
     working_multiple = 5.0
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
@@ -201,7 +201,7 @@ class Median(Reduction):
     """The element-wise median across cases.
 
     ``torch.median`` returns the LOWER of the two middle values for an even count, where a median is
-    their average — over two cases it hands back the element-wise minimum, which is not a median
+    their average: over two cases it hands back the element-wise minimum, which is not a median
     of anything. An even number of cases is ordinary, so this averages the middle pair as
     ``numpy.median`` does; on an odd count the two agree and nothing changes.
 
@@ -210,7 +210,7 @@ class Median(Reduction):
     rather than the volume.
 
     **Not for label maps.** Averaging the middle pair means the result can be a value that was in no
-    input -- over labels 1 and 5 it is 3, a different structure -- and over exactly two cases it is
+    input (over labels 1 and 5 it is 3, a different structure), and over exactly two cases it is
     the mean, so the robustness the name promises is gone. Fold segmentations with :class:`Vote`.
     """
 
@@ -254,7 +254,7 @@ class Vote(Reduction):
 class Concat(Reduction):
     """Concatenate the cases along the channel dimension."""
 
-    # Cats along the channel axis, orthogonal to the spatial axes -- per-voxel, so region-local.
+    # Cats along the channel axis, orthogonal to the spatial axes: per-voxel, so region-local.
     voxel_local = True
     # Nothing on top of the buffer: the concatenation IS the output region, and the plan charges that
     # separately at this operator's own (wider) output width.

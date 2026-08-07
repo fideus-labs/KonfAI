@@ -173,6 +173,13 @@ KonfAI
            <p>Choose cache, bounded buffering, or direct regional reads and understand exactly when streaming falls back.</p>
            <span class="go">Large-image guide &rarr;</span>
          </a>
+         <a class="kf-nextcard kf-h-amber" href="usage/making-data.html">
+           <span class="intent">Make</span>
+           <h3>Build a dataset</h3>
+           <p>No model at all: resample a cohort onto one grid, fold it into a template,
+              draw augmented copies, or write a field another tool can open.</p>
+           <span class="go">Making datasets &rarr;</span>
+         </a>
          <a class="kf-nextcard kf-h-teal" href="usage/adopting-konfai.html">
            <span class="intent">Reuse</span>
            <h3>Bring PyTorch or MONAI</h3>
@@ -206,18 +213,21 @@ KonfAI
        <div class="kf-docindex">
          <div class="dhead">
            <h3>Or browse the full documentation</h3>
-           <span>Every page stays one click away &mdash; this landing is a map, not a wall.</span>
+           <span>The same sections as the sidebar, in the same order: every page is one click away.</span>
          </div>
          <div class="kf-doclinks">
-           <a class="kf-h-violet" href="concepts/index.html">Core concepts</a>
-           <a class="kf-h-teal" href="config_guide/index.html">Config guide</a>
-           <a class="kf-h-teal" href="reference/components/index.html">Component catalogue</a>
-           <a class="kf-h-steel" href="reference/cli.html">CLI reference</a>
+           <a class="kf-h-teal" href="quickstart.html">Quickstart</a>
            <a class="kf-h-violet" href="examples/index.html">Examples</a>
+           <a class="kf-h-steel" href="usage/index.html">Guides</a>
+           <a class="kf-h-amber" href="usage/making-data.html">Making datasets</a>
+           <a class="kf-h-teal" href="config_guide/index.html">Config guide</a>
+           <a class="kf-h-teal" href="reference/components/index.html">Components</a>
+           <a class="kf-h-violet" href="concepts/index.html">Concepts</a>
            <a class="kf-h-coral" href="usage/apps.html">Apps &amp; API server</a>
            <a class="kf-h-amber" href="usage/mcp.html">Agents &amp; MCP</a>
            <a class="kf-h-violet" href="usage/studio.html">KonfAI Studio</a>
-           <a class="kf-h-steel" href="reference/python-api.html">Python API</a>
+           <a class="kf-h-steel" href="reference/cli.html">CLI reference</a>
+           <a class="kf-h-steel" href="usage/python-workflows.html">Python workflows</a>
            <a class="kf-h-amber" href="troubleshooting.html">Troubleshooting</a>
          </div>
        </div>
@@ -236,8 +246,9 @@ KonfAI
 
    </div>
 
+
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Getting started
    :hidden:
 
@@ -245,45 +256,91 @@ KonfAI
    quickstart
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Tutorials
+   :maxdepth: 1
+   :caption: Examples
    :hidden:
 
-   examples/index
+   Overview <examples/index>
+   examples/visual-gallery
+   examples/transform
+   examples/segmentation
+   examples/registration
+   examples/synthesis
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Task-oriented guides
+   :maxdepth: 1
+   :caption: Guides
    :hidden:
 
-   usage/index
+   Overview <usage/index>
+   usage/adopting-konfai
+   usage/making-data
+   usage/python-workflows
+   usage/large-images
+   usage/custom-models
+   usage/docker
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Going deeper
+   :maxdepth: 1
+   :caption: Config guide
    :hidden:
 
-   concepts/index
-   config_guide/index
+   Overview <config_guide/index>
+   config_guide/training
+   config_guide/prediction
+   config_guide/evaluation
+   config_guide/transform
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Apps and automation
+   :maxdepth: 1
+   :caption: Components
+   :hidden:
+
+   Overview <reference/components/index>
+   reference/components/models
+   reference/components/losses-metrics
+   reference/components/transforms
+   reference/components/augmentations
+   reference/components/schedulers
+   reference/components/storage-backends
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Concepts
+   :hidden:
+
+   Overview <concepts/index>
+   concepts/configuration
+   concepts/datasets
+   concepts/streaming
+   concepts/model-graph
+   concepts/yaml-model-builder
+   concepts/execution-flow
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Apps, MCP, Studio
    :hidden:
 
    usage/apps
    usage/mcp
+   usage/studio
    ecosystem/index
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Reference
    :hidden:
 
-   reference/index
+   Overview <reference/index>
+   reference/cli
+   reference/environment
+   reference/python-api
+   reference/app-server-api
+   reference/api/index
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Project
    :hidden:
 

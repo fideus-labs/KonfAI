@@ -5,7 +5,7 @@ This example provides a **simple deformable image registration baseline** for Ko
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/Registration/Registration_demo.ipynb)
 
 **Fastest way to run it:** open `Registration_demo.ipynb` and run every cell. It builds the dataset,
-trains, predicts, evaluates and plots the before/after — about 3 minutes on a GPU.
+trains, predicts, evaluates and plots the before/after, in about 3 minutes on a GPU.
 
 It is intentionally small and self-contained, and is meant to be:
 
@@ -27,8 +27,8 @@ The task is deliberately transparent: each `MOVING` image is its `FIXED` slice p
 against `FIXED`. The anatomy is real; the deformation is the part we choose, which is what makes the
 check exact.
 
-> For registration between **two different patients** — a genuine anatomical difference, with no
-> ground-truth field at all, scored by propagating one patient's reference labels — see
+> For registration between **two different patients**, a genuine anatomical difference with no
+> ground-truth field at all, scored by propagating one patient's reference labels, see
 > [`examples/ImpactReg`](../ImpactReg/).
 
 ## What you will find in this folder
@@ -69,8 +69,8 @@ The Segmentation example ships its UNet in both a YAML and a Python form; `Voxel
 by contrast, is a **built-in Python model with no YAML twin**. Its scaling-and-squaring
 integration of the velocity field and its spatial-transformer warp are a custom `forward`,
 which the declarative YAML builder (a feed-forward `add_module` graph over curated block
-types) cannot express. Custom-`forward` models — registration warps, diffusion samplers,
-adversarial loops — stay in Python; standard feed-forward graphs can be YAML.
+types) cannot express. Custom-`forward` models (registration warps, diffusion samplers,
+adversarial loops) stay in Python; standard feed-forward graphs can be YAML.
 
 > `VoxelMorph` currently supports `dim: 2` only (its warping components are 2D-hardcoded),
 > so this example is slice-wise. Keep `shape` equal to the `(Y, X)` size of the training patch.
@@ -81,7 +81,7 @@ adversarial loops — stay in Python; standard feed-forward graphs can be YAML.
 (`VBoussot/konfai-demo`, cached by the Hub after the first run), windows them to `[0, 1]`, and crops
 each to `256x256` around the body.
 
-It needs `scipy` to apply the displacement field, which the base install does not pull in — KonfAI
+It needs `scipy` to apply the displacement field, which the base install does not pull in. KonfAI
 carries it only under the `fid` extra. (`huggingface_hub`, which fetches the CT, is a core dependency.)
 
 Run all commands from this directory:
@@ -109,7 +109,7 @@ examples/Registration/
 - `FIXED`: the CT slice as acquired
 - `MOVING`: the same slice pushed through a known smooth field of up to `AMPLITUDE` voxels (default 8)
 
-The crop size is also the `shape` `VoxelMorph` is built with and the training patch size — change one
+The crop size is also the `shape` `VoxelMorph` is built with and the training patch size, so change one
 and you change all three.
 
 ## Quick start
@@ -154,8 +154,8 @@ This creates `Evaluations/REG_BASELINE/Metric_TRAIN.json`.
 `Evaluation.yml` computes two comparisons against `FIXED` so the improvement is visible in a single
 JSON file:
 
-- `MOVING:FIXED:MAE` / `MOVING:FIXED:MSE` — the error **before** registration (baseline)
-- `MOVED:FIXED:MAE` / `MOVED:FIXED:MSE` — the error **after** registration
+- `MOVING:FIXED:MAE` / `MOVING:FIXED:MSE`: the error **before** registration (baseline)
+- `MOVED:FIXED:MAE` / `MOVED:FIXED:MSE`: the error **after** registration
 
 A successful run shows the `MOVED` error clearly below the `MOVING` error. On the 30 shipped CT slices
 (400 epochs) a typical result is:
@@ -166,7 +166,7 @@ A successful run shows the `MOVED` error clearly below the `MOVING` error. On th
 | MSE    | ~0.017                       | ~0.0038                    |
 
 So a little over 2x on MAE and 4x on MSE. Real anatomy is a much harder target than a synthetic
-phantom, and 400 epochs over 22 training slices is a demo, not a trained model — raise `epochs` and
+phantom, and 400 epochs over 22 training slices is a demo, not a trained model; raise `epochs` and
 add cases before reading anything into the numbers.
 
 ## Why training uses MSE here

@@ -59,7 +59,7 @@ pytestmark = pytest.mark.slow
 # PlainConvUNet: the declarative PlainConvUNet.yml is weight-exact with nnU-Net's PlainConvUNet.
 #
 # ``PlainConvUNet.yml`` reproduces, module-for-module and in forward-execution order,
-# ``dynamic_network_architectures.architectures.unet.PlainConvUNet`` -- the "plain conv"
+# ``dynamic_network_architectures.architectures.unet.PlainConvUNet``: the "plain conv"
 # nnU-Net backbone used by nnU-Net, TotalSegmentator and MRSeg. Every conv block is
 # Conv -> InstanceNorm(affine=True) -> LeakyReLU(0.01) with conv_bias=True, downsampling is a
 # strided conv (first conv of each stage), upsampling is a transpose conv whose kernel and
@@ -1213,7 +1213,7 @@ def test_vgg16_small_variant_forward_shapes_without_torchvision() -> None:
 #     pair, so the equivalence test transfers the shared leaves and copies the positional
 #     embedding explicitly;
 #   * classification uses global-average-pooling over the token sequence instead of a
-#     prepended ``cls`` token (MONAI's ``classification=True`` default) -- the ENCODER is
+#     prepended ``cls`` token (MONAI's ``classification=True`` default): the ENCODER is
 #     identical, only the head differs;
 #   * MONAI 1.4.0's transformer block allocates unused cross-attention parameters that this
 #     graph omits.
@@ -1381,7 +1381,7 @@ def test_shipped_bridge_refuses_the_raw_pair_because_of_the_positional_embedding
 #
 # MONAI's ``VNet`` registers each block's activation *before* its convolution and
 # defaults to ELU (not in the registry); we instantiate the oracle with
-# ``act='prelu'`` -- matching V-Net's canonical channel-wise PReLU -- and pair the
+# ``act='prelu'`` (matching V-Net's canonical channel-wise PReLU), and pair the
 # leaves in forward-execution order rather than by state_dict key order.
 # =========================================================================================== #
 VNET_YML = CATALOG / "VNet.yml"
@@ -1486,7 +1486,7 @@ def test_vnet_weight_exact_vs_monai() -> None:
 #
 # ``ResidualEncoderUNet.yml`` reproduces, stage-for-stage and in forward-execution order, the
 # parametric ``konfai.models.python.segmentation.residualencoderunet.ResidualEncoderUNet``
-# (the nnU-Net ResEnc backbone -- the ImpactSeg "body" topology). It is authored at the STAGE
+# (the nnU-Net ResEnc backbone: the ImpactSeg "body" topology). It is authored at the STAGE
 # level from two generic composite blocks, ``ResidualStage`` (a stack of ``ResidualBlockD``)
 # and ``DecoderStage`` (a two-input upsample/concat/conv block), so the ~20-node graph reads
 # as the architecture, not a conv-by-conv unroll.
@@ -1623,7 +1623,7 @@ def test_residualencoderunet_yaml_builds_and_forwards() -> None:
 
 def test_residualencoderunet_yaml_uses_avgpool_skip_on_the_bottleneck() -> None:
     # Stage 5 keeps 256->256 at stride 2: no channel change, so its first residual block downsamples the
-    # skip with an AvgPool (no projection conv/norm) -- the generic ResidualStage must reproduce that.
+    # skip with an AvgPool (no projection conv/norm): the generic ResidualStage must reproduce that.
     net = _build_resenc()
     bottleneck_block = net["Encoder_5"]["Block_0"]
     child_types = [type(module).__name__ for module in bottleneck_block.values()]
@@ -1677,8 +1677,8 @@ def test_residualencoderunet_yaml_stem_tracks_kernel_size_and_negative_slope() -
 # "MR" backbone: a torchvision ResNet-34 encoder + a UNet++ nested decoder). It is authored at
 # the BLOCK level from two generic composite blocks, ``ResNetStage`` (a stack of
 # ``ResNetBasicBlock``) and ``UNetPlusPlusNode`` (a multi-input upsample / dense-concat /
-# two-conv grid node), so the graph reads as the architecture -- encoder stages + the UNet++
-# decoder grid + head -- not a conv-by-conv unroll.
+# two-conv grid node), so the graph reads as the architecture: encoder stages + the UNet++
+# decoder grid + head, not a conv-by-conv unroll.
 #
 # Because the weighted leaves execute in the same order as the parametric model, the parametric
 # weights transfer straight into the YAML graph through ``transfer_weights_by_execution_order``

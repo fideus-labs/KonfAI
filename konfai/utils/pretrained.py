@@ -112,7 +112,7 @@ def transfer_weights_by_execution_order(
     Every ``target`` tensor is written or the call raises; ``source`` tensors its forward does not reach
     (an unused deep-supervision head) have no counterpart to feed and are ignored.
 
-    Raises ``ConfigError`` when the two graphs are not weight-exact -- a target tensor no traced leaf
+    Raises ``ConfigError`` when the two graphs are not weight-exact: a target tensor no traced leaf
     owns, a different number of weighted leaves, or a paired leaf whose local ``state_dict`` (its own
     weight/bias/buffers) does not match in keys or shapes. That is intentional: silently loading a
     mismatched network is worse than failing.
@@ -141,7 +141,7 @@ def transfer_weights_by_execution_order(
         )
     # A tensor tied across two target leaves would be written twice by the per-leaf loads below, so the
     # earlier leaf would silently end up with the later leaf's source weights. state_dict(keep_vars=True)
-    # yields the live parameters AND persistent buffers -- exactly what load_state_dict writes -- so a tied
+    # yields the live parameters AND persistent buffers: exactly what load_state_dict writes, so a tied
     # buffer is caught as well. Refuse rather than mis-load.
     seen_tensors: dict[int, str] = {}
     for leaf in target_leaves:

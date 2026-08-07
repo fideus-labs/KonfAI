@@ -16,11 +16,11 @@
 
 """A region read through an unwritten ``Save`` sweeps it first, instead of failing on it.
 
-``Save`` is the remedy KonfAI recommends in its own refusal messages -- a statistic that follows a
+``Save`` is the remedy KonfAI recommends in its own refusal messages: a statistic that follows a
 value-changing stage cannot stream, and cutting the chain with a ``Save`` makes the cache the source
 the statistic seeds from. A ``read_region`` that replayed its stream source
 directly, without consuming the pending sweeps it carries, would plan STREAM and fail at the first
-region -- the worst shape of answer, because the plan is what a caller reads before committing.
+region: the worst shape of answer, because the plan is what a caller reads before committing.
 
 The whole-volume result is the reference here, as everywhere on this path: streaming is an
 optimisation of memory, never of meaning.
@@ -98,7 +98,7 @@ def test_the_swept_cache_is_written_where_the_save_named_it(tmp_path):
 def test_a_sweep_failure_does_not_survive_the_flip_to_rewriting_saves(tmp_path, monkeypatch):
     """A failed sweep is a verdict about one boundary answer, and ``--overwrite`` asks the other.
 
-    Kept across the flip it condemns every Save of the new mode to the whole-volume path -- the one
+    Kept across the flip it condemns every Save of the new mode to the whole-volume path: the one
     path a case too large to assemble cannot take.
     """
     _source(tmp_path)

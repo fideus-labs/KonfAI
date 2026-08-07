@@ -162,8 +162,8 @@ def test_plan_leaves_no_probe_case_in_a_directory_store(tmp_path: Path) -> None:
 def test_a_planned_workflow_survives_the_spawn_that_runs_it(tmp_path: Path) -> None:
     """``setup`` runs on the launcher and ``mp.spawn`` then pickles the workflow whole.
 
-    So everything planning leaves behind — the memoized stream sources, the region stages' pull
-    maps — has to cross a process boundary, and anything unpicklable in there kills every chain the
+    So everything planning leaves behind (the memoized stream sources, the region stages' pull
+    maps) has to cross a process boundary, and anything unpicklable in there kills every chain the
     plan just called STREAM before its first byte. The round-trip below is that boundary; the other
     tests call ``run_process`` in-process and cannot see it.
     """
@@ -206,7 +206,7 @@ def test_on_fallback_error_refuses_before_any_byte(tmp_path: Path) -> None:
 
 def test_budget_is_a_hard_constraint_for_fallback_cases(tmp_path: Path) -> None:
     """A case that cannot stream and does not fit the declared budget refuses globally, before any
-    byte — never 40 cases written then a crash at the 41st."""
+    byte, never 40 cases written then a crash at the 41st."""
     _write_source(tmp_path)
     config_path = _write_config(tmp_path, _UNSTREAMABLE.format(out=tmp_path / "out"))
     config_path.write_text(config_path.read_text().replace("memory_budget: auto", "memory_budget: 1b"))
@@ -301,7 +301,7 @@ def test_two_chains_sharing_an_intermediate_save_are_refused(tmp_path: Path) -> 
     """The terminal Write is not the only boundary two chains can collide on.
 
     A Save is keyed by (dataset, group, case) and nothing else, so the second chain finds the first
-    one's cache already written, adopts it as its own source, and skips its own prefix -- producing a
+    one's cache already written, adopts it as its own source, and skips its own prefix: producing a
     deliverable computed from another chain's transforms, with no warning and no failed case.
     """
     _write_source(tmp_path)
@@ -412,7 +412,7 @@ def test_a_stage_is_asked_about_its_own_input_not_the_case_as_stored(tmp_path: P
 
     The resample takes 12x10x8 down to 12x7x2 and keeps voxel zero where it is, so the case's far
     edge falls short of the reference's and part of the output will be fill. Asked about the case as
-    STORED it covers all of it and says nothing -- and the plan would stay silent about that fill.
+    STORED it covers all of it and says nothing, and the plan would stay silent about that fill.
 
     (With ``align: extent``, the default, the box is preserved and the answer is honestly 100%.)
     """
@@ -701,7 +701,7 @@ def test_an_expansion_plans_and_writes_one_entry_per_copy(tmp_path: Path) -> Non
         "CASE_000_r03",
     ]
     assert {entry.verdict for entry in plan.entries} == {"STREAM"}
-    # A pointwise draw rides the case's single read pass -- the regime the engine exists for.
+    # A pointwise draw rides the case's single read pass: the regime the engine exists for.
     assert {entry.regime for entry in plan.entries} == {"shared"}
     assert "EXPAND 2 case(s) -> 6 cop(ies)" in plan.report()
     assert "shared read pass" in plan.report()
@@ -936,7 +936,7 @@ def test_the_strict_grammar_knows_every_key_the_binder_can_read() -> None:
 
 def test_two_ranks_partition_the_cases_and_every_output_is_written_once(tmp_path: Path) -> None:
     """The DDP contract, executed: the shards partition the work items, and running each rank's
-    shard writes every case exactly once -- a case in no shard (or in two) is a wrong dataset
+    shard writes every case exactly once: a case in no shard (or in two) is a wrong dataset
     delivered with exit code 0."""
     _write_source(tmp_path, cases=3)
     _write_config(
@@ -959,10 +959,10 @@ def test_two_ranks_partition_the_cases_and_every_output_is_written_once(tmp_path
 def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The route is chosen from predicted cost against the budget — never the answer.
+    """The route is chosen from predicted cost against the budget, never the answer.
 
     A gzipped NIfTI cannot serve bounded region reads, so streaming decodes the whole source once
-    per slab; a case whose working set fits the budget is then LOADED — one read — and the plan
+    per slab; a case whose working set fits the budget is then LOADED (one read), and the plan
     says so with the factor. LOAD is a choice, not a fallback: on_fallback=error must not refuse
     it, and the bytes match the streamed route of the same chain.
     """

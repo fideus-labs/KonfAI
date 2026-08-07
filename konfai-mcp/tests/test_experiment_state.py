@@ -89,7 +89,7 @@ def state(root: Path, jobs: list[dict[str, Any]] | None = None, **kwargs: Any) -
 
 
 def test_an_empty_workspace_starts_at_the_dataset(tmp_path: Path) -> None:
-    """4. Nothing is known yet, so the next step is finding the data — not guessing at it."""
+    """4. Nothing is known yet, so the next step is finding the data, not guessing at it."""
     assert state(workspace(tmp_path))["stage"] == "dataset_inspection"
 
 
@@ -100,7 +100,7 @@ def test_a_dataset_path_alone_is_not_yet_a_route(tmp_path: Path) -> None:
 
 
 def test_the_data_itself_is_read_so_a_route_can_be_chosen(tmp_path: Path) -> None:
-    """1-2. The dataset lives outside the workspace, so its structure is read from the data — and once
+    """1-2. The dataset lives outside the workspace, so its structure is read from the data, and once
     the groups are in hand the question becomes what to DO with them."""
     data = tmp_path / "pelvis"
     for case in ("case_a", "case_b"):
@@ -113,14 +113,13 @@ def test_the_data_itself_is_read_so_a_route_can_be_chosen(tmp_path: Path) -> Non
     assert payload["stage"] == "action_selection"
     assert payload["groups"] == ["CT", "Label"] and payload["cases"] == 2
     assert payload["next_actions"][0] == "list_apps"
-    # This is where the user decides. The step the stage owes is to ASK them which route they want —
-    # the options are not enumerated here, the assistant raises them and the buttons become its answers.
+    # This is where the user decides. The step the stage owes is to ASK them which route they want: # the options are not enumerated here, the assistant raises them and the buttons become its answers.
     assert "ASK which of the four routes" in payload["focus"]
     assert "theirs to choose" in payload["focus"]
 
 
 def test_the_data_is_read_once_and_re_read_when_it_changes(tmp_path: Path) -> None:
-    """The scan is the one expensive fact here, so it is cached — keyed by the directory's own mtime, so
+    """The scan is the one expensive fact here, so it is cached: keyed by the directory's own mtime, so
     a case added to the dataset is picked up rather than remembered wrong."""
     data = tmp_path / "pelvis"
     (data / "case_a").mkdir(parents=True)
@@ -133,7 +132,7 @@ def test_the_data_is_read_once_and_re_read_when_it_changes(tmp_path: Path) -> No
 
 
 def test_the_dataset_is_read_back_from_the_config_without_rewriting_it(tmp_path: Path) -> None:
-    """A config names its dataset and its groups; reading them must leave the file untouched — loading a
+    """A config names its dataset and its groups; reading them must leave the file untouched: loading a
     KonfAI config through the framework would rewrite it."""
     root = workspace(tmp_path, config=True)
     before = (root / "Config.yml").read_bytes()
@@ -157,7 +156,7 @@ def test_an_imported_app_is_a_fact_like_any_other(tmp_path: Path) -> None:
 
 
 def test_the_workspace_decides_the_stage_even_with_no_job_history(tmp_path: Path) -> None:
-    """7. Checkpoints, then predictions, then metrics — each supersedes the last, whoever produced them."""
+    """7. Checkpoints, then predictions, then metrics, each supersedes the last, whoever produced them."""
     assert state(workspace(tmp_path, config=True))["stage"] == "configuration"
     assert state(workspace(tmp_path, config=True, checkpoints=["run_01"]))["stage"] == "checkpoint_selection"
     assert state(workspace(tmp_path, config=True, checkpoints=["run_01"], predictions=["run_01"]))["stage"] == (
@@ -173,8 +172,8 @@ def test_the_workspace_decides_the_stage_even_with_no_job_history(tmp_path: Path
 def test_a_session_is_offered_the_workflow_it_actually_wrote(tmp_path: Path) -> None:
     """The action bar is built from these, so a workflow missing here is unreachable in Studio.
 
-    A session holding only a Transform.yml was told to "run train" — an action naming a file it does
-    not have — while the one workflow it could run was offered by nothing.
+    A session holding only a Transform.yml was told to "run train" (an action naming a file it does
+    not have), while the one workflow it could run was offered by nothing.
     """
     payload = state(workspace(tmp_path, transform_config=True))
 
@@ -187,7 +186,7 @@ def test_choosing_among_configs_does_not_hide_the_step_that_comes_next(tmp_path:
     """A launcher only describes what the session HAS while it is choosing among its configs.
 
     At `checkpoint_selection` it names the step that follows, and `run_prediction` is offered exactly
-    because no Prediction.yml exists yet — filtering there would remove the whole point of the stage.
+    because no Prediction.yml exists yet: filtering there would remove the whole point of the stage.
     """
     payload = state(workspace(tmp_path, config=True, checkpoints=["run_01"]), [job("done")])
 
@@ -245,7 +244,7 @@ def test_a_failure_that_is_the_users_call_is_not_corrected_alone(tmp_path: Path)
 
 
 def test_the_retry_budget_is_counted_from_the_job_records(tmp_path: Path) -> None:
-    """12b. Two failures in a row and the loop stops — counted from disk, so a restart cannot reset it."""
+    """12b. Two failures in a row and the loop stops: counted from disk, so a restart cannot reset it."""
     failures = [job("error", error="CUDA out of memory") for _ in range(MAX_ATTEMPTS)]
     payload = state(workspace(tmp_path, config=True), failures)
     assert payload["attempts"] == MAX_ATTEMPTS

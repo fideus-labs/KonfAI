@@ -16,7 +16,7 @@
 
 """Agent-facing guide prose for the MCP surface: tool descriptions and prompt text.
 
-These strings are runtime API -- an agent routes on them -- so they live here as data,
+These strings are runtime API (an agent routes on them), so they live here as data,
 keyed by tool name, and ``server.py`` only wires them to registrations. Editing a
 description changes behaviour for every connected agent; moving one never should.
 """
@@ -64,12 +64,12 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "inspect_object_signature": (
         "Use when choosing, customizing, or debugging any configurable object classpath such as a model, loss, "
-        "transform, or helper module — including a declarative YAML model ('default|<Name>.yml' from the shipped "
+        "transform, or helper module: including a declarative YAML model ('default|<Name>.yml' from the shipped "
         "catalog, or a session-local .yml). "
         "This returns local or imported signature details, defaults, doc summary, and detected contract hints; "
         "for a YAML model it returns its hyperparameters (all overridable from the run config), the "
         "loss-attachable terminal_leaves paths for outputs_criterions, the full yaml_content, and how_to_adapt "
-        "guidance (override hyperparameters vs copy-and-edit the structure) — parsed statically, never built. "
+        "guidance (override hyperparameters vs copy-and-edit the structure): parsed statically, never built. "
         "It does not validate the full workflow config or decide which object to use. "
         "Outputs: source type, signature, parameters, defaults, detected_contract, limitations, and next_actions. "
         "Next: write_session_file, write_workflow_config, or review_config_semantics."
@@ -78,7 +78,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Use to DISCOVER which KonfAI components exist before authoring a config from scratch, when you do not "
         "already know the class name/path to put in the YAML. "
         "This enumerates the built-in component zoo for one kind. "
-        "It does not return full constructor signatures -- chain to inspect_object_signature for that. "
+        "It does not return full constructor signatures: chain to inspect_object_signature for that. "
         "Outputs: components [{name, config_reference, inspect_classpath, module, doc}], a reference_hint explaining "
         "where the name goes in the config, and next_actions. "
         "Next: inspect_object_signature on a chosen component, then design_config_strategy or write_workflow_config."
@@ -94,8 +94,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "describe_config_schema": (
         "Use before authoring a config to learn the top-level schema of a workflow. "
         "This is GENERATED from the Trainer/Predictor/Evaluator/Transformer constructor via KonfAI's reflection engine, so it "
-        "never drifts: it returns each top-level field with its type, default, whether it is required, and -- for "
-        "nested config objects -- a classpath to drill into with inspect_object_signature. "
+        "never drifts: it returns each top-level field with its type, default, whether it is required, and, for "
+        "nested config objects: a classpath to drill into with inspect_object_signature. "
         "It does not return a full ready-to-run config; combine it with the example templates. "
         "Outputs: root_key, yaml_path, fields[{name,yaml_key,type,default,default_hidden,required,"
         "nested_config_classpath}], next_actions. Each field's yaml_key is the LITERAL key to write in the YAML "
@@ -106,8 +106,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Use when you want to ADD or EXTEND a component (a new loss, metric, model/network, augmentation, transform, "
         "scheduler, or pretrained model) and need to know exactly where/how to plug it into KonfAI. "
         "This returns the extension contract per kind: the base class to subclass, the required methods and "
-        "return/forward contract, where it is referenced in the YAML, and the THREE classpath syntaxes -- builtin name, "
-        "local `File:Class`, and external `package.module:Class` (e.g. `monai.losses:DiceLoss`) -- plus the load-bearing "
+        "return/forward contract, where it is referenced in the YAML, and the THREE classpath syntaxes: builtin name, "
+        "local `File:Class`, and external `package.module:Class` (e.g. `monai.losses:DiceLoss`): plus the load-bearing "
         "gotcha for that kind. "
         "It does not write code or fetch anything. "
         "Outputs: extension_point(s), yaml_reference_syntax, principle, next_actions. "
@@ -117,9 +117,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Use to PRE-FLIGHT an external library before integrating a brick from it (e.g. before referencing "
         "`monai.losses:DiceLoss` or wrapping `segmentation_models_pytorch`). "
         "This reports whether the library is importable, its version and license, whether it is already a KonfAI "
-        "dependency, and an install hint -- WITHOUT importing the library into the server process (no import side "
+        "dependency, and an install hint, WITHOUT importing the library into the server process (no import side "
         "effects run here). Only the TOP-LEVEL package is checked ('monai.losses' checks 'monai'): it answers "
-        "'not installed' vs 'installed', not whether the submodule or class exists -- use inspect_object_signature "
+        "'not installed' vs 'installed', not whether the submodule or class exists: use inspect_object_signature "
         "to verify the full classpath. "
         "Outputs: installed, version, license, distribution, is_konfai_dependency, install_hint, caution, next_actions. "
         "Next: inspect_object_signature on the chosen classpath, or describe_extension_points to write a wrapper."
@@ -128,7 +128,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Use FIRST when the user wants a result from an existing model and has NOT asked to train one: check "
         "whether a published KonfAI app already does what they want, before authoring and training a config from "
         "scratch. An app can do any task, so judge whether one fits from its own description (read it with "
-        "describe_app) and its declared inputs/outputs -- not from any preset list of tasks. "
+        "describe_app) and its declared inputs/outputs, not from any preset list of tasks. "
         "This enumerates apps from a referenced catalogue (shipped default + the editable workspace file + the "
         "KONFAI_MCP_APP_CATALOG env file), expanding bare HuggingFace repo ids into their contained apps. "
         "It does not run inference or import any app code; without include_summary it does not even resolve manifests. "
@@ -136,7 +136,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Next: describe_app on a candidate to read its manifest, else design_config_strategy to train one."
     ),
     "describe_app": (
-        "Use to read one app's manifest so you can decide whether it matches the user's task -- the app's free-text "
+        "Use to read one app's manifest so you can decide whether it matches the user's task: the app's free-text "
         "description is the primary signal, with the input/output modality confirming the fit. "
         "This resolves a single app and returns its app.json: display name, description, input and output modality "
         "(with volume types), inference/evaluation/uncertainty capabilities, checkpoints, and segmentation "
@@ -159,21 +159,21 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "export_app": (
         "Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters) as a local, editable app "
-        "bundle -- the reproducibility artifact a challenge submission wants. It copies the app's files and, when "
+        "bundle: the reproducibility artifact a challenge submission wants. It copies the app's files and, when "
         "set_parameters is given, bakes those values into the copied config. Distinct from package_app_from_session, "
         "which packages a model YOU trained this session. "
         "It copies files and rewrites config only (no model-code import). Local/HuggingFace apps only. "
         "Outputs: exported_to, next_actions. Next: describe_app / run_app_infer / import_app / register_app_source."
     ),
     "import_app": (
-        "Use to RUN a published KonfAI app as a NORMAL experiment in this session -- the single path to use a local "
+        "Use to RUN a published KonfAI app as a NORMAL experiment in this session: the single path to use a local "
         "or HuggingFace app. It copies the app's config(s), custom code, and .pt checkpoints into the session root "
         "and pip-installs its requirements, so predict / fine-tune / evaluate then go through the ordinary "
         "run_prediction / run_resume / run_evaluation tools (no app-specific wrapper, no extra sub-folder). The "
         "copied checkpoints are returned so run_prediction can pass them as models, and run_resume(weights_only=True) "
         "warm-starts a fine-tune from them. "
         "TRUST GATE: copying+running the app's Python code and installing its requirements is the trust boundary, so "
-        "you MUST pass allow_untrusted_code=True to confirm you trust the source. Local/HuggingFace apps only -- a "
+        "you MUST pass allow_untrusted_code=True to confirm you trust the source. Local/HuggingFace apps only: a "
         "remote server keeps its code remote and cannot be imported (drive a remote app with konfai-apps directly). "
         "Outputs: imported_to, files, checkpoints, configs, next_actions. "
         "Next: run_prediction (pass checkpoints as models) / run_resume (fine-tune) / run_evaluation."
@@ -181,7 +181,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "register_app_source": (
         "Use when the user points at their own app or HuggingFace repo and wants it to persist across sessions. "
         "This appends an app reference to the editable workspace catalogue file (the same one list_apps merges). "
-        "It does not validate that the reference resolves -- call describe_app to check. "
+        "It does not validate that the reference resolves: call describe_app to check. "
         "Outputs: ref, added flag, catalog_path, the updated apps list, next_actions. "
         "Next: list_apps or describe_app."
     ),
@@ -195,10 +195,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "run_app_infer": (
         "Use to RUN a published KonfAI app on the user's data (the 'use an existing model instead of training' "
         "path), after describe_app confirmed the app fits. This launches a tracked inference job and reassembles "
-        "the app's outputs into the given output directory. It runs the app AS PUBLISHED -- prefer it over "
+        "the app's outputs into the given output directory. It runs the app AS PUBLISHED: prefer it over "
         "import_app + run_prediction, which requires hand-editing the copied config. "
         "TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so you MUST pass "
-        "allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only -- a remote "
+        "allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only: a remote "
         "'host:port:name' app server is not driven from the MCP (run it with konfai-apps directly). "
         "It does not choose the app or prepare the data for you. "
         "Outputs: a job payload (status, resources, next_actions) plus the output directory. "
@@ -247,7 +247,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "package_app_from_session": (
         "Use to PACKAGE a model trained in the current session (the train-from-scratch branch) into a resolvable "
-        "KonfAI app bundle -- the same endpoint fine_tune_app produces, so a from-scratch run can also finish as a "
+        "KonfAI app bundle: the same endpoint fine_tune_app produces, so a from-scratch run can also finish as a "
         "reusable app. It gathers the session's checkpoints "
         "and a config, writes an app.json from the metadata you give, and assembles a bundle (app.json + config + "
         "checkpoint + optional Model.py/requirements) that describe_app / run_app_infer / import_app can consume. "
@@ -267,10 +267,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "This creates or resets the current session workspace and can seed selected workflow files "
         "from one example template. "
         "DESTRUCTIVE with overwrite=True: it DELETES everything in the existing workspace, trained "
-        "Checkpoints/ and Predictions/ included -- to keep those, switch_session to a new name instead. "
+        "Checkpoints/ and Predictions/ included, to keep those, switch_session to a new name instead. "
         "It does not adapt example YAML to your dataset automatically. Referenced .yml models are always "
         "seeded; an example whose model/loss lives in a local .py (e.g. Synthesis) needs "
-        "include_support_files=True to be runnable -- the result carries a warning otherwise. "
+        "include_support_files=True to be runnable: the result carries a warning otherwise. "
         "Outputs: created workspace paths, copied files, resources, and next_actions. "
         "Next: write_workflow_config or inspect copied template files."
     ),
@@ -316,17 +316,17 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Next: write_session_file or write_workflow_config to edit, then review_config_semantics."
     ),
     "read_template_file": (
-        "Use to READ a file shipped with an example template — a reference implementation such as a local model "
+        "Use to READ a file shipped with an example template: a reference implementation such as a local model "
         "(Model.py), a custom transform (UnNormalize.py), a declarative model (UNet.yml), or an alternate config "
-        "(Config_GAN.yml) — so you can understand or adapt it instead of guessing what it contains. "
+        "(Config_GAN.yml): so you can understand or adapt it instead of guessing what it contains. "
         "This returns a bounded character range of one template file. It does not modify templates. "
         "Outputs: template, filename, content, truncated, next_actions. "
         "Next: write_session_file to adapt it into the session, or initialize_session to copy files wholesale."
     ),
     "get_run_metrics": (
         "Use to read the FULL evaluation metrics (per-case values + aggregates) of ONE named run, instead of the "
-        "newest-file-only view of session://current/metrics — essential when comparing specific past runs. "
-        "This reads Evaluations/<run_name>/Metric_<SPLIT>.json in the current session — or an app trial's "
+        "newest-file-only view of session://current/metrics: essential when comparing specific past runs. "
+        "This reads Evaluations/<run_name>/Metric_<SPLIT>.json in the current session: or an app trial's "
         "metrics when run_name is a trial label as returned by leaderboard (an AppEvaluations/AppPipelines "
         "directory such as 'eval_app__iterations_300-1a2b3c4d'). It does not rerun evaluation. "
         "Outputs: run_name, split, path, updated_at, metrics (full JSON), summary, next_actions. "
@@ -342,7 +342,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "read_training_curves": (
         "Use to read a run's TRAINING CURVES (loss/metric scalars over iterations) from the TensorBoard event "
-        "files KonfAI writes under Statistics/<run_name>/ — the full history, not just the live log tail. "
+        "files KonfAI writes under Statistics/<run_name>/: the full history, not just the live log tail. "
         "This parses tfevents into downsampled scalar series. It requires the 'tensorboard' package. "
         "Outputs: tags, curves {tag: [{step, value}]}, next_actions. "
         "Next: compare_runs or leaderboard."
@@ -350,23 +350,23 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "export_run_record": (
         "Use to EXPORT the full reproducibility record of one run: the job manifest (command, devices, "
         "environment snapshot with package versions and GPUs), the launch-time config snapshots' CONTENT, the "
-        "post-run resolved config, every split's metrics, and a log tail — a Methods-section-grade record in "
+        "post-run resolved config, every split's metrics, and a log tail: a Methods-section-grade record in "
         "one payload. "
         "It does not rerun anything. Caveat: resolved_config is read from the LIVE session config, which may "
-        "have been rewritten since the run -- the launch-time truth is config_snapshots. "
+        "have been rewritten since the run: the launch-time truth is config_snapshots. "
         "Outputs: job, manifest, config_snapshots (text), resolved_config, metrics per split, log_tail. "
         "Next: compare_runs or read_training_curves."
     ),
     "diff_run_configs": (
-        "Use to DIFF the exact configs two jobs ran with, from their immutable launch-time snapshots — "
+        "Use to DIFF the exact configs two jobs ran with, from their immutable launch-time snapshots: "
         "'what changed between run A and run B' without trusting memory. "
         "It does not diff live session files (they may have been rewritten since). "
         "Outputs: identical flag, unified diff text, next_actions. "
         "Next: compare_runs on the two runs' metrics."
     ),
     "describe_model_outputs": (
-        "Use to ENUMERATE a model's addressable module paths — the exact keys outputs_criterions and "
-        "outputs_dataset accept — instead of guessing dotted paths and reading MeasureError lists from failed "
+        "Use to ENUMERATE a model's addressable module paths: the exact keys outputs_criterions and "
+        "outputs_dataset accept: instead of guessing dotted paths and reading MeasureError lists from failed "
         "runs. This builds the workflow from the session config (side-effect-free, like validation) and walks "
         "every Network's module graph; terminal=true marks output heads (deep-supervision losses attach to "
         "non-terminal paths). "
@@ -376,11 +376,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "run_component_smoke_test": (
         "Use to SMOKE-TEST a component you wrote or referenced BEFORE wiring it into a config: it executes the "
         "component's runtime contract on dummy tensors. For a transform it asserts "
-        "transform_shape(shape) == __call__(tensor).shape — the contract whose silent violation corrupts patch "
+        "transform_shape(shape) == __call__(tensor).shape: the contract whose silent violation corrupts patch "
         "reassembly; for a criterion it reports Tensor-vs-tuple return (loss vs metric convention) and whether "
         "backward() works. "
-        "TRUST: this imports and EXECUTES the component's code — in an isolated spawn subprocess, never in the "
-        "server process — but still only run it on code you or the user wrote. "
+        "TRUST: this imports and EXECUTES the component's code, in an isolated spawn subprocess, never in the "
+        "server process, but still only run it on code you or the user wrote. "
         "Outputs: ok, stage, contract details (predicted vs actual shape, returns, backward_ok) or the full "
         "traceback. "
         "Next: write_workflow_config when ok, or write_session_file to fix the component."
@@ -396,7 +396,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Use to remove ONE run's outputs from the current session, leaving the rest of the workspace intact. "
         "This deletes the run's directory under the kind's output root (train removes Statistics/<run_name> and "
         "Checkpoints/<run_name>; prediction, evaluation, uncertainty remove their <run_name> folder; transform removes "
-        "Transforms/<run_name>, its log and plan only -- never the transformed data), jailed to the "
+        "Transforms/<run_name>, its log and plan only, never the transformed data), jailed to the "
         "session workspace. It refuses a run_name containing a path separator, and never touches configs or the dataset. "
         "Outputs: the deleted paths (relative to the workspace). "
         "Next: summarize_session, or leaderboard to compare the remaining runs."
@@ -408,7 +408,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "server process. It does not launch jobs. "
         "Levels: 'instantiate' builds the objects, 'setup' also builds the dataloader, 'train_step' additionally "
         "runs ONE forward+backward on ONE batch (train workflow only, single-process CPU, no checkpoint, config "
-        "restored) to catch runtime-only errors -- target dtype/shape mismatches, an outputs_criterions key that "
+        "restored) to catch runtime-only errors: target dtype/shape mismatches, an outputs_criterions key that "
         "does not resolve, a detached loss. "
         "Outputs: ok flag, runtime details, semantic review, and next_actions. "
         "Next: run_train, run_prediction, run_evaluation, or fix the config."
@@ -453,7 +453,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "run_train": (
         "Use after train config review and validation succeed. "
         "This launches a training job and returns structured job resources. "
-        "It does not choose the device or repair config issues automatically -- omitting gpu trains on CPU, "
+        "It does not choose the device or repair config issues automatically: omitting gpu trains on CPU, "
         "so pass gpu explicitly for GPU training. "
         "Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. "
         "Next: read_live_metrics or wait_for_job."
@@ -461,7 +461,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "run_resume": (
         "Use to RESUME an interrupted or crashed training run from a checkpoint: model, optimizer, scheduler, and "
         "epoch/iteration counters are restored (KonfAI's RESUME command). Set weights_only=True instead to WARM-START "
-        "a fine-tune from an imported app -- load only the checkpoint's model weights and restart epoch/optimizer "
+        "a fine-tune from an imported app: load only the checkpoint's model weights and restart epoch/optimizer "
         "from scratch; prefer fine_tune_app when the app is used as published, since it needs no config editing. "
         "This launches a resumed training job from the current session Config.yml. "
         "It does not pick between runs: by default it resumes from the newest checkpoint of the configured run "
@@ -473,7 +473,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "run_batch": (
         "Use to RUN A SWEEP: launch several training configs SEQUENTIALLY server-side (each waits for the "
-        "previous to finish), collecting per-run outcomes -- fold training or hyperparameter variants in one "
+        "previous to finish), collecting per-run outcomes: fold training or hyperparameter variants in one "
         "call instead of hand-chaining run_train/wait_for_job. "
         "This blocks until the batch ends, like wait_for_job; each config needs a distinct train_name. "
         "Outputs: requested, completed, results [{config_file, job_id, run_name, status, error}], next_actions. "
@@ -489,8 +489,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "preview_volume": (
         "Use to SEE a volume: returns one slice as a PNG image (rendered in image-capable MCP clients) for "
-        "qualitative QC of a dataset case or a produced prediction -- orientation, field of view, obvious "
-        "artefacts -- instead of judging from numbers alone. "
+        "qualitative QC of a dataset case or a produced prediction: orientation, field of view, obvious "
+        "artefacts: instead of judging from numbers alone. "
         "This reads any SimpleITK-readable file (mha/nii.gz/...), windows it between the 1st and 99th "
         "percentile, and downsamples to max_size. It does not modify the file. "
         "Outputs: a PNG image content block. "
@@ -506,9 +506,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "plan_transform": (
         "Use BEFORE run_transform, always: it is the dry run, and it produces none of the deliverable. "
         "This plans every (case, chain) from the session Transform.yml. The plan is a measurement, not an "
-        "estimate -- it opens and removes a real region-write on each destination -- so its verdict is the one "
+        "estimate, it opens and removes a real region-write on each destination, so its verdict is the one "
         "the run will act on: STREAM (bounded memory), LOAD (the case fits the budget and streaming would reread "
-        "the source past its worth -- a cost choice, not a fallback), WHOLE-VOLUME (the case is assembled whole, "
+        "the source past its worth: a cost choice, not a fallback), WHOLE-VOLUME (the case is assembled whole, "
         "with the stage that refused it named), SKIP (already written), REDUCE, REFUSED. That probe TOUCHES the output "
         "locations, which are the user's own stores: an entry is created and removed, and a single-file store "
         "(h5) is created if it did not exist. "
@@ -519,7 +519,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "run_transform": (
         "Use to apply a transform chain to a dataset with NO model: read, transform, write. "
-        "Read plan_transform first -- this writes a dataset, and the plan is what says how much and how. "
+        "Read plan_transform first: this writes a dataset, and the plan is what says how much and how. "
         "This launches a transform job from the session Transform.yml and returns structured job resources. "
         "The run replans, stores the plan, and refuses outright when a case can neither stream nor fit "
         "memory_budget. A case whose output already exists is skipped, so an interrupted run resumes; pass "
@@ -549,7 +549,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Next: wait_for_job or read_live_metrics."
     ),
     "read_job_log": (
-        "Use to READ a job's log as a tool — the crash-triage primitive: tail more than the fixed resource tail, "
+        "Use to READ a job's log as a tool: the crash-triage primitive: tail more than the fixed resource tail, "
         "page through it, or filter it with a regex to find the traceback. "
         "This reads the job console log (or the KonfAI runtime log when present) and returns the selected lines. "
         "It does not parse metrics; use read_live_metrics for parsed metrics. "
@@ -580,7 +580,7 @@ SOLVE_TASK_PROMPT = (
     "1. USE AN EXISTING APP (no training). Call list_apps, then describe_app on each plausible "
     "candidate. Judge fit from the app's own description first, confirmed by its declared "
     "inputs/outputs. If one clearly does the job, run it with run_app_infer (or run_app_pipeline to "
-    "also score it) -- done. Use import_app instead only when the app must be MODIFIED before running.\n"
+    "also score it): done. Use import_app instead only when the app must be MODIFIED before running.\n"
     "2. FINE-TUNE FROM AN APP. If no app is usable as-is but one is a close starting point, train "
     "from it with fine_tune_app on the user's dataset, producing a bundle you can then run.\n"
     "3. TRAIN FROM A BLANK SLATE. If no app is a useful starting point, author a config from scratch "

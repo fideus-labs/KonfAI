@@ -1,7 +1,7 @@
 # Transform configuration
 
 Transform configuration lives under the `Transformer` root object. It runs **no
-model** — nor does `EVALUATION`, and the difference is what comes out: an
+model**: nor does `EVALUATION`, and the difference is what comes out: an
 evaluation measures, this one **makes**. It reads a dataset, applies a chain of
 transforms, and writes a dataset. If you never train anything, this is the only
 page you need.
@@ -26,7 +26,7 @@ Transformer:
 ```
 
 That writes `./Out/<case>/CT_iso.ome.zarr/` for every case in `./Raw`, one slab
-at a time — the whole volume is never held in memory.
+at a time: the whole volume is never held in memory.
 
 ## Running it
 
@@ -36,13 +36,13 @@ konfai TRANSFORM --config Transform.yml --plan   # print the plan and stop
 konfai TRANSFORM --config Transform.yml --cpu 4  # shard the cases over 4 processes
 ```
 
-A case whose output already exists is **skipped** — rerunning after an
+A case whose output already exists is **skipped**: rerunning after an
 interruption resumes where it stopped. Pass `-y/--overwrite` to recompute
 everything.
 
 Read transforms run on CPU; `--gpu` matters only when a chain embeds a
 `KonfAIInference` stage, whose nested inference does use the device. That stage
-is whole-volume and its GPU/RAM usage lives **outside** `memory_budget` — the
+is whole-volume and its GPU/RAM usage lives **outside** `memory_budget`: the
 plan prints a note saying it cannot bound those chains. There is no `-tb`: the
 workflow emits no scalars.
 
@@ -65,20 +65,20 @@ float32 / source channels until the first slab
 
 The verdicts, and each one is a fact about *your* run:
 
-- **STREAM** — the case is read and written region by region. Memory is one
+- **STREAM**: the case is read and written region by region. Memory is one
   slab, whatever the volume's size.
-- **LOAD** — the case *could* stream, fits the budget, and streaming would
+- **LOAD**: the case *could* stream, fits the budget, and streaming would
   re-read the source (a halo re-reads its overlap, a regrid pulls each slab's
   window through its map, a compressed store decodes the whole volume per
   slab). Loading reads it once; the line prints the predicted factor. A choice,
-  not a fallback — `on_fallback` has nothing to say about it. Streaming is a
+  not a fallback: `on_fallback` has nothing to say about it. Streaming is a
   memory strategy: it is chosen when the case does not fit, or when it costs
   nothing.
-- **WHOLE-VOLUME** — the case cannot stream and is assembled in memory, then
+- **WHOLE-VOLUME**: the case cannot stream and is assembled in memory, then
   written. Always correct, never bounded. The line says which stage refused and
   why.
-- **SKIP** — the output already exists; nothing is recomputed.
-- **REDUCE** / **REFUSED** — a chain that folds the cohort into one entry
+- **SKIP**: the output already exists; nothing is recomputed.
+- **REDUCE** / **REFUSED**: a chain that folds the cohort into one entry
   ({doc}`Reduce <../reference/components/transforms>`)
   prints one line for the whole cohort rather than one per case: `REDUCE` when
   the fold streams, `REFUSED` when it cannot. A reduction has no whole-volume
@@ -101,9 +101,9 @@ few percent of the budget can still exceed it.
 
 | Value | Effect |
 | --- | --- |
-| `allow` | Take the whole-volume path silently — but the plan still names it. |
+| `allow` | Take the whole-volume path silently, but the plan still names it. |
 | `warn` (default) | Same, plus a warning line after the plan. |
-| `error` | Refuse the run. Nothing is written. A fallback only discovered mid-run (a failed sweep) stops at that case — earlier cases stay written, and the per-case resume covers the rerun. |
+| `error` | Refuse the run. Nothing is written. A fallback only discovered mid-run (a failed sweep) stops at that case: earlier cases stay written, and the per-case resume covers the rerun. |
 
 Independently of `on_fallback`, a case that **cannot stream and does not fit
 `memory_budget`** always refuses the whole run, before the first byte. Writing
@@ -114,14 +114,14 @@ The usual reasons a chain refuses to stream, and what to do:
 
 | Reason in the plan | Fix |
 | --- | --- |
-| a stage declares `WHOLE_VOLUME` | Some transforms genuinely need the volume (`Squeeze`, `Norm` change the tensor's rank). Nothing to fix — check it fits the budget. |
+| a stage declares `WHOLE_VOLUME` | Some transforms genuinely need the volume (`Squeeze`, `Norm` change the tensor's rank). Nothing to fix: check it fits the budget. |
 | a statistic after a value-changing stage | Insert a `Save:` before the statistic; the cache becomes the source the statistic reads. See below. |
 | the destination cannot serve region writes | Write to `:h5` or `:omezarr` (or `:mha`/`:nii` for an image with geometry). |
 | a halo too wide for the grid | The transform's neighbourhood is over half the slab extent; it is cheaper to load the volume. |
 
 ### `Save:` unlocks chains that would otherwise refuse
 
-`[Clip, Standardize]` cannot stream — after `Clip`, the stored volume's
+`[Clip, Standardize]` cannot stream: after `Clip`, the stored volume's
 statistics are no longer `Standardize`'s input. Cutting the chain in two fixes
 it:
 
@@ -148,9 +148,9 @@ a byte is read:
 - a chain that does not end with a `Write` (it would read everything and write
   nothing), or a transform placed *after* the terminal `Write` (its result goes
   nowhere);
-- two chains writing the same `(dataset, group)` — the second would find the
+- two chains writing the same `(dataset, group)`: the second would find the
   first one's output and report the case as already done;
-- a `Write` whose destination is inside a source dataset — reading is lazy and
+- a `Write` whose destination is inside a source dataset: reading is lazy and
   streaming re-reads the source while writing, so an in-place transform would
   read its own half-written output;
 - a `Save` with no `dataset` of its own, which would write next to the source;
@@ -167,7 +167,7 @@ a byte is read:
 | --- | --- | --- | --- |
 | `name` | string | `TRANSFORM_01` | Names the run folder under `--transforms-dir`. |
 | `on_fallback` | `allow` \| `warn` \| `error` | `warn` | What a whole-volume case means. |
-| `manual_seed` | int | `0` | The seed every `Expand` in the run draws from. Same seed, same copies — which is what makes a resumed run redraw what it already wrote. |
+| `manual_seed` | int | `0` | The seed every `Expand` in the run draws from. Same seed, same copies, which is what makes a resumed run redraw what it already wrote. |
 | `Dataset` | mapping | `DataTransform()` | Sources, chains, budget. |
 
 Under `Dataset:`:
@@ -176,8 +176,8 @@ Under `Dataset:`:
 | --- | --- | --- | --- |
 | `dataset_filenames` | list of `path[:format]` | `["./Dataset:mha"]` | Where cases are read. |
 | `memory_budget` | size string or number | `auto` | Per-rank ceiling. A bare number is GiB; `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. |
-| `subset` | string / list / null | `null` | Restricts which cases run: a flat selector — a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. **Not** a nested mapping; a block written under it is refused. |
-| `groups_src` | mapping | — | The chains, keyed by source group then destination group. |
+| `subset` | string / list / null | `null` | Restricts which cases run: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. **Not** a nested mapping; a block written under it is refused. |
+| `groups_src` | mapping |: | The chains, keyed by source group then destination group. |
 
 The grammar is deliberately **smaller** than `Train`'s `Dataset:`. There is no
 `patch:` (the planner cuts slabs; declaring a patch size would be guessing on
@@ -185,16 +185,14 @@ KonfAI's behalf, and would make the output depend on it), no `batch_size`, no
 `validation`, no `shuffle`, no `is_input` (every group is an input when there is
 no network).
 
-```{note}
 Several `groups_src` keep only the cases present in **all** of them: a case with
 an image but no label disappears from the run. The plan prints how many were
 dropped, before writing anything.
-```
 
 ## Three cardinalities, and where a chain changes its own
 
 A chain is 1-to-1 by default: one case in, one entry out. Two markers change
-that, at a **declared position** — everything before the marker runs at the old
+that, at a **declared position**: everything before the marker runs at the old
 cardinality, everything after it at the new one.
 
 | Marker | Cardinality | Writes |
@@ -203,16 +201,16 @@ cardinality, everything after it at the new one.
 | `Reduce` | N-to-1 over the cohort | one entry, named by `output` |
 | `Expand` | 1-to-N per case | one entry per copy, named by `pattern` |
 
-One chain changes its cardinality at most once. Composing the two — augment a
-cohort, then fold it — is two invocations, the second reading the first one's
+One chain changes its cardinality at most once. Composing the two (augment a
+cohort, then fold it) is two invocations, the second reading the first one's
 output back.
 
 ### `Reduce`: N cases, one volume
 
 Everything before the marker runs once per case, `Reduce` folds the cohort at
 fixed voxel, and everything after it runs once on the result. The chain is
-driven by the reduction engine — it walks the *output's* regions and, within a
-region, the cases — so peak memory is a few regions, never N volumes:
+driven by the reduction engine (it walks the *output's* regions and, within a
+region, the cases), so peak memory is a few regions, never N volumes:
 
 ```yaml
 transforms:
@@ -228,23 +226,22 @@ That writes **one** entry named `template`, whatever the cohort's size.
 | Field | Default | Effect |
 | --- | --- | --- |
 | `operator` | `Median` | A classpath resolved against `konfai.data.reduction`: `Mean`, `Median`, `Vote`, `Concat`, or your own `Reduction` subclass. An operator's own parameters go in the same mapping, next to `operator`. |
-| `output` | — | **Required**: the entry name the single result is written under. |
+| `output` |: | **Required**: the entry name the single result is written under. |
 | `grid` | `strict` | How much agreement between members is demanded before a byte is read (below). |
 | `grid_tolerance` | `1e-6` | The tolerance `strict` compares geometry within. |
-| `provenance` | `true` | Record the operator and the folded case list in the output's header — a cohort that silently changed between two runs writes a different volume under the same name, and nothing about the output would look wrong. |
+| `provenance` | `true` | Record the operator and the folded case list in the output's header: a cohort that silently changed between two runs writes a different volume under the same name, and nothing about the output would look wrong. |
 
 **Operators.** `Mean` folds one case at a time, so its working set is two
 regions whatever N is. `Median` needs every case per region, and stacks and
-sorts them on top — the plan says how many regions that is, and `memory_budget`
+sorts them on top: the plan says how many regions that is, and `memory_budget`
 sizes and refuses against it. `Concat` puts the cases side by side: the output
-carries `N × C` channels. A custom operator must declare `voxel_local = True` —
-one that reads across space cannot stream and is refused outright. It should
+carries `N × C` channels. A custom operator must declare `voxel_local = True`: one that reads across space cannot stream and is refused outright. It should
 also declare `working_multiple` if it allocates over the buffer it is handed,
 or the plan promises a working set the run exceeds.
 
 ```{warning}
 `Mean` and `Median` are for intensities. Both answer with values that were in no
-input — the median of labels `1` and `5` is `3`, a different structure — and
+input (the median of labels `1` and `5` is `3`, a different structure) and
 both widen an integer input to float32. Over exactly two cases `Median` *is*
 `Mean`, so the robustness the name promises is not there. Fold segmentations
 with **`Vote`**, which takes the label the most cases agree on, keeps the input
@@ -254,24 +251,24 @@ dtype, and breaks a tie toward the smallest label so the fold is reproducible.
 **`grid` decides what counts as "the same space"**, compared on the grid each
 case's chain *lands* on (a `Resample` before the `Reduce` counts):
 
-- `strict` (default) — equal extents **and** equal `Spacing`/`Origin`/
+- `strict` (default): equal extents **and** equal `Spacing`/`Origin`/
   `Direction` within `grid_tolerance`.
-- `shape_only` — equal extents alone: the escape hatch for volumes already
+- `shape_only`: equal extents alone: the escape hatch for volumes already
   resampled together but carrying approximate headers.
-- `reference:<case>` — equal extents, and the output adopts that member's
+- `reference:<case>`: equal extents, and the output adopts that member's
   geometry: how a cohort says its members disagree on their headers and which
   one to believe.
 
 ```{warning}
-Nothing can verify that the members truly live in a common space — only that
+Nothing can verify that the members truly live in a common space: only that
 they claim to. `shape_only` and `reference:` will happily average misaligned
 volumes; the result still looks like a volume and is an artefact. Put the
-cohort on one grid first — `Resample: {reference: …}`, below.
+cohort on one grid first: `Resample: {reference: …}`, below.
 ```
 
 **A reduction has no whole-volume fallback.** Folding every case in memory is
 what it exists to avoid, so a `Reduce` that cannot stream refuses the run
-whatever `on_fallback` says — the plan prints `REFUSED` and the reason. Only
+whatever `on_fallback` says: the plan prints `REFUSED` and the reason. Only
 voxel-local stages (and statistics, seeded by an extra pass of the engine's
 own) may follow the `Reduce` in the same chain: anything reading across space
 belongs in a second chain that reads the written output back.
@@ -283,11 +280,11 @@ questions:
 
 | | key | meaning |
 | --- | --- | --- |
-| **which grid to write on** | *(nothing)* | the case's own — the map moves the anatomy, the voxels stay put |
+| **which grid to write on** | *(nothing)* | the case's own: the map moves the anatomy, the voxels stay put |
 | | `spacing` | the same field of view at another density |
 | | `shape` | the same field of view at a given count |
 | | `reference` | the grid of a stored image, adopted whole |
-| **what map to write it through** | *(nothing)* | the identity — a change of grid and nothing else |
+| **what map to write it through** | *(nothing)* | the identity: a change of grid and nothing else |
 | | `field` | a displacement field, on its own grid, in world units |
 | | `transforms` | transforms stored beside the cases (rigid, affine, BSpline, field, composite) |
 
@@ -297,16 +294,15 @@ two stages resamples twice, and a volume interpolated twice has lost detail the
 second pass invented no more of.
 
 `align` places a `spacing` or `shape` grid, and it is the one choice the family
-used to make silently: `extent` (the default) keeps the field of view — the
-outer faces coincide — while `origin` keeps voxel zero's centre where it is. A
+used to make silently: `extent` (the default) keeps the field of view (the
+outer faces coincide), while `origin` keeps voxel zero's centre where it is. A
 quarter of a voxel of anatomy separates them, and a `reference` states its own
 placement and ignores this.
 
 ### `Resample: {reference: …}`: making `strict` true rather than waived
 
 A reference can also **follow the case**: `reference: '{case}'` adopts, for each case,
-the grid of that case's *own* entry in `reference_group`. That is the registration idiom —
-`reference: '{case}', reference_group: DVF` lands every moved image on its own field's grid,
+the grid of that case's *own* entry in `reference_group`. That is the registration idiom: `reference: '{case}', reference_group: DVF` lands every moved image on its own field's grid,
 which is where a displacement field is defined. A literal reference stays one header lookup
 for the whole cohort; a per-case one is one per case, headers only either way.
 
@@ -314,7 +310,7 @@ for the whole cohort; a per-case one is one per case, headers only either way.
 A cohort as acquired rarely passes `strict`: extents differ, and origins can
 differ by more than the volumes are wide, because an acquisition's stage
 coordinates are not an anatomical frame. A `reference` grid is what makes
-`strict` true rather than waived — it resamples each case onto the grid of a
+`strict` true rather than waived, it resamples each case onto the grid of a
 **declared reference**, adopting its extent, spacing, origin and direction:
 
 ```yaml
@@ -324,7 +320,7 @@ transforms:
   Write: {dataset: ./Template:mha}
 ```
 
-The reference is a stored image, named by `reference` — and by
+The reference is a stored image, named by `reference`, and by
 `reference_group` when the store holds more than one. It is looked up by entry, not by the case being
 processed, because one grid serves the whole cohort: in the run's own
 `dataset_filenames`, or in a store of its own.
@@ -336,13 +332,12 @@ transforms:
 ```
 
 `reference_dataset:` takes the same `path[:format]` spec as everywhere else, so the
-reference can live anywhere — which is the atlas loop: point round N+1 at the
+reference can live anywhere, which is the atlas loop: point round N+1 at the
 store round N wrote its template into.
 
 #### Through a displacement field, in one interpolation
 
-Add `field:` and the stage becomes the whole of a registration's apply step —
-`sitk.Resample(image, reference_grid, DisplacementFieldTransform(field))`. For
+Add `field:` and the stage becomes the whole of a registration's apply step: `sitk.Resample(image, reference_grid, DisplacementFieldTransform(field))`. For
 each voxel of the **target** grid the field is read at that voxel's world
 position, added, and the source sampled **once** at the displaced point:
 
@@ -356,7 +351,7 @@ transforms:
   Write: {dataset: ./Registered:mha}
 ```
 
-Fields stored *beside* the cases — one entry per case, in the same roots — need
+Fields stored *beside* the cases (one entry per case, in the same roots) need
 no path at all: `field_group: DVF` on its own finds them.
 
 Doing this as two stages instead (resample onto the grid, then warp) costs
@@ -367,21 +362,20 @@ an atlas rebuilds its appearance from native volumes rather than from resampled
 ones.
 
 The field lives on **its own grid**, usually coarser than either the source or
-the target, and is read where it is asked — it is defined in world units, so a
+the target, and is read where it is asked, it is defined in world units, so a
 field solved at 120 µm moves a volume stored at 30 µm without being upsampled
 first. Outside its own extent the displacement is zero: the transform is the
 identity where the field says nothing, as SimpleITK has it.
 
 Nothing is declared about how far the field reaches, and nothing is recorded.
-The field window a region samples is its own box, read for sampling regardless
-— and the sup of the values just read bounds that region's source pull, so
+The field window a region samples is its own box, read for sampling regardless, and the sup of the values just read bounds that region's source pull, so
 each slab pays exactly the halo *its* displacements require, measured at run
 from a read the sampler needed anyway. The one thing the plan cannot know from
 headers is the cost of those reads: it prices them as if the field were zero,
 and says so.
 
-Naming no target grid is the shape update of an atlas build — the field applied
-on the case's *own* grid — and is the same stage with `reference` left out:
+Naming no target grid is the shape update of an atlas build (the field applied
+on the case's *own* grid), and is the same stage with `reference` left out:
 
 ```yaml
 transforms:
@@ -389,28 +383,24 @@ transforms:
   Write: {dataset: ./Warped:mha}
 ```
 
-```{note}
 The field and the case need not share a grid: the field is read at each target
 voxel's world position on the field's own grid, so a field solved at 120 µm
 moves a volume stored at 30 µm without being upsampled first.
-```
 
 Naming an image rather than fifteen numbers is deliberate. A grid is an extent
 in array order `(Z, Y, X)` plus an origin, a spacing and a direction in physical
-`(x, y, z)` — transcribing those by hand is the mistake that actually gets made,
+`(x, y, z)`: transcribing those by hand is the mistake that actually gets made,
 and a transposed grid resamples perfectly well onto the wrong place. A header
 cannot make that mistake.
 
-```{note}
 It streams: a slab of the output reads only the part of the input under it, so a
-case never has to fit in memory. The sampler is `sitk.Resample`'s — linear with
+case never has to fit in memory. The sampler is `sitk.Resample`'s: linear with
 taps clamped to the buffer, nearest by round-half-up, and `fill` wherever the
 reference grid reaches past the case.
-```
 
 **Label maps.** Left unset, `interpolation` is read off the dtype: `uint8` takes
 the nearest voxel, everything else is interpolated. A dtype cannot decide this
-on its own — a CT is `int16` and so is nothing else about it — so a label map
+on its own (a CT is `int16` and so is nothing else about it), so a label map
 stored as anything but `uint8` must say so:
 
 ```yaml
@@ -422,13 +412,13 @@ the source, the dtype is unchanged, and the result is still a label map.
 
 **What it refuses**, rather than write something plausible and wrong:
 
-- a case or a reference carrying no `Origin` / `Spacing` / `Direction` — without
+- a case or a reference carrying no `Origin` / `Spacing` / `Direction`: without
   geometry there is no physical space to resample in, and a size ratio must not
   quietly stand in for one;
-- a reference whose `Direction` differs from the case's — the map between them
+- a reference whose `Direction` differs from the case's: the map between them
   is then a rotation, not a scale and a shift per axis. Reorient first
   (`Canonical`);
-- a case that does not meet the reference grid **anywhere** — its output would
+- a case that does not meet the reference grid **anywhere**: its output would
   be `fill` from edge to edge, and a median would take that as anatomy.
 
 Partial overlap is legal and ordinary: the rest of the output is `fill`, and the
@@ -438,7 +428,7 @@ background" is then something read before the run rather than after it.
 ### `Resample: {transforms: …}`: applying a registration that was already solved
 
 With no target grid named, `Resample` changes nothing about the grid and moves
-the anatomy through transforms **stored beside the cases** — the apply step of a
+the anatomy through transforms **stored beside the cases**: the apply step of a
 registration solved elsewhere:
 
 ```yaml
@@ -450,48 +440,45 @@ transforms:
 Each key of `transforms:` is a group of the run's own datasets holding one
 transform per case; the value says whether to invert it. Rigid, affine, BSpline
 and displacement-field entries are all read the same way, and several groups
-compose — the **last declared is applied first**, which is SimpleITK's own
+compose: the **last declared is applied first**, which is SimpleITK's own
 composite order.
 
 **It streams**, and what makes that possible is that a stored transform can say
 how far it reaches. A rigid or affine map is an exact affine, so the source box
 of a target region is that region's box mapped through it. A BSpline and a dense
 field are values on a grid read through a kernel that is non-negative and sums
-to one, so the largest of those values bounds the displacement at *every* point
-— not at the points someone sampled. The region a slab must read is therefore
+to one, so the largest of those values bounds the displacement at *every* point, not at the points someone sampled. The region a slab must read is therefore
 known before a voxel is touched.
 
-```{warning}
 Bounded is not the same as cheap. A map **oblique to the storage axes** has an
 axis-aligned source box that covers most of the volume on two axes, and it gets
 worse the thinner the slabs: the same case that reads 1.0× its bytes in one
-piece reads several times that in slabs. The bound is exact either way — this is
-a property of the decomposition, not a defect — but it is why streaming such a
+piece reads several times that in slabs. The bound is exact either way (this is
+a property of the decomposition, not a defect), but it is why streaming such a
 map is not automatically worth it. Bring the case onto an axis-aligned grid
 first (`Canonical`) when the geometry allows it.
-```
 
 **What it refuses**, declaring `WHOLE_VOLUME` with the reason so the run
 proceeds on the whole-volume path rather than breaking:
 
-- a case whose header carries no `Origin` / `Spacing` / `Direction` — a stored
+- a case whose header carries no `Origin` / `Spacing` / `Direction`: a stored
   transform is applied in physical space, and without a geometry there is none;
 - a transform type that decomposes into no bounded map, naming the type;
 - `invert: true` on a spline or a displacement field. Inverting one is a dense
   solve over the whole grid, and a field solved per region is not the
-  restriction of the field solved once — so store the inverse where the
+  restriction of the field solved once, so store the inverse where the
   transform is written, or set the group to `false`.
 
 `interpolation` and `fill` work the same wherever they appear: unset, `uint8`
 takes the nearest voxel and everything else is interpolated, and a label map
 stored as anything else must say `interpolation: nearest`. Nearest here is ITK's
-round-half-up on the physical index — the same coordinate the linear sampler
+round-half-up on the physical index: the same coordinate the linear sampler
 reads, so a mask and the image beside it land on the same voxels.
 
 ### `Expand`: one case, N copies
 
 `Expand` multiplies, and nothing else. The draws are **ordinary stages of the
-chain**, declared where they apply — so transforms and augmentations interleave
+chain**, declared where they apply, so transforms and augmentations interleave
 freely after the marker, and `T, draw, T, draw` means exactly what it reads
 like.
 
@@ -529,7 +516,7 @@ per case.
 Each stage is parameterised on the grid and the case state the stages before it
 leave: a draw that permutes axes hands the next stage its own extent, and a
 resample between two draws is seen by the second. That is the same contract a
-transform has — a draw is a stage, not a separate phase.
+transform has: a draw is a stage, not a separate phase.
 
 ```{warning}
 A bare name resolves against `konfai.data.transform` **first**, and only then
@@ -553,7 +540,7 @@ be identical).
 
 The copies are drawn from `manual_seed`, not from a shared random generator: each
 draw is parameterised from `(seed, case, which draw this is)`. Two chains never
-meet and cannot agree on the order they consume a generator in — but they can
+meet and cannot agree on the order they consume a generator in, but they can
 derive from one number they both hold. So declaring the same `nb` in both chains
 is enough, and copy `k` of the mask carries copy `k` of the image's rotation:
 
@@ -583,7 +570,7 @@ Transformer:
 ```
 
 A draw is keyed on its own class and its rank among draws of that class, not on
-its position in the chain — so `Brightness`, declared in one chain and not the
+its position in the chain, so `Brightness`, declared in one chain and not the
 other, does not desynchronise the `Rotate` they share.
 
 `Expand` also takes a `seed` of its own. Leave it out and the chain inherits
@@ -602,21 +589,21 @@ picks a regime per copy and the plan prints which:
     read geometry is the draw's own and it sweeps its own pass.
 ```
 
-- **shared read pass** — every copy whose stages after the marker are per-voxel
+- **shared read pass**: every copy whose stages after the marker are per-voxel
   rides *one* read of the case: each slab is decompressed once, each copy applies
   its draw to it and writes into its own stream. The marginal cost of a copy is
   its draw and its write, no reads at all.
-- **own pass** — a draw that reads somewhere other than its target slab (a
+- **own pass**: a draw that reads somewhere other than its target slab (a
   rotation, a halo) has its own read geometry, so it sweeps its own pass. The
   plan names the stage that decided it.
-- **WHOLE-VOLUME** — the copy's chain cannot stream at all; the shared part is
+- **WHOLE-VOLUME**: the copy's chain cannot stream at all; the shared part is
   still assembled only once for the case.
 
 When the shared prefix is expensive (a resample, a warp), put a `Save` before
 the `Expand`: it is materialized once and every copy reads the cache.
 
 Resume is **per copy**: a copy whose entry exists is skipped, so an interrupted
-run picks up at the copy it stopped on — and because the draws come from
+run picks up at the copy it stopped on, and because the draws come from
 `manual_seed` rather than from the order a generator was consumed in, the copies
 it keeps are the copies it would have written.
 
@@ -625,7 +612,7 @@ it keeps are the copies it would have written.
 A stage that needs a whole-volume figure declares it rather than computing it:
 `GLOBAL_STAT` with the keys it reads. The planner obtains them once, by scanning
 the stored entry without materialising it, and the stage is then an ordinary
-value map — so it streams. That is how `Normalize` and `Standardize` work.
+value map, so it streams. That is how `Normalize` and `Standardize` work.
 
 Two grains are available, and they come from the **same single pass**:
 
@@ -638,14 +625,12 @@ The per-channel form exists because some quantities have no single mean. The
 spatial mean of a displacement field is a **translation**: it has one part per
 component, and pooling them into one number describes nothing.
 
-```{warning}
 A statistic is the STORED volume's. It is still the stage's own input only when
-every stage before it preserves statistics — a reorientation does, a `Clip` does
+every stage before it preserves statistics: a reorientation does, a `Clip` does
 not. `Clip` then `Normalize` therefore takes the whole-volume path, and the plan
 says so. Reorder the chain, or cut it with a `Save`.
-```
 
-Handed the whole volume anyway — a chain that fell back for another reason — a
+Handed the whole volume anyway (a chain that fell back for another reason) a
 stage should take the statistic from the tensor in hand and record it, so both
 paths leave the same state behind.
 
@@ -693,16 +678,16 @@ transforms:
 That is the whole contract. The dispatcher builds the region map from your
 declaration; you never touch it.
 
-**Declare honestly — that is the one rule.** `patch_locality` is a promise about
+**Declare honestly, that is the one rule.** `patch_locality` is a promise about
 what your `__call__` reads, and nothing verifies it against the code. Declaring
 `POINTWISE` while reading your neighbours produces seams at every slab boundary:
-a plausible, wrong image, with no error. When unsure, declare nothing — the
+a plausible, wrong image, with no error. When unsure, declare nothing: the
 default is `WHOLE_VOLUME`, which is always correct and merely slower. The plan
 will tell you that is what you got.
 
 Two details the example carries on purpose. The internal padding must be the one
 the whole-volume path would apply (here `avg_pool3d`'s zero padding, which the
-halo never reaches except at the real volume border) — a `reflect` pad computed
+halo never reaches except at the real volume border): a `reflect` pad computed
 on the received extent would reflect the *patch*'s edge, not the volume's. And
 the halo must stay small relative to the slab: a radius over half the extent is
 refused (cheaper to load the volume), and the plan says so.
@@ -720,8 +705,8 @@ refused (cheaper to load the volume), and the plan says so.
 | the same, per component | `GLOBAL_STAT`, with `MinPerChannel`/`MaxPerChannel`/`MeanPerChannel`/`StdPerChannel` | nothing |
 | genuinely the whole volume | nothing (the default) | nothing |
 
-A transform that does not subclass `Transform` still works — it is wrapped
-automatically — but it is treated as `WHOLE_VOLUME`.
+A transform that does not subclass `Transform` still works (it is wrapped
+automatically), but it is treated as `WHOLE_VOLUME`.
 
 ## Python API
 
