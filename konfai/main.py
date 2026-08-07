@@ -63,7 +63,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         choices=cuda_visible_devices(),
         default=[],
-        help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
+        help="GPU device ids to use, space separated: --gpu 0, or --gpu 0 1 2. If omitted runs on CPU.",
     )
     device_group.add_argument(
         "--cpu",
