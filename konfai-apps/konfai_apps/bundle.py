@@ -214,7 +214,7 @@ def _op_clip(p: dict[str, Any]) -> dict[str, Any]:
 _OP_MAP = {
     "TensorCast": _op_cast,
     "Clip": _op_clip,
-    "ResampleToResolution": _op_resample,
+    "Resample": _op_resample,
     # Canonical reorients from the volume's own direction cosines at runtime; the manifest op is just the inverse flag.
     "Canonical": lambda p: {"op": "canonical", "inverse": bool(p.get("inverse", True))},
     "Standardize": _op_standardize,
@@ -521,7 +521,7 @@ def _aux_mask_groups(config: dict[str, Any], root: str) -> dict[str, dict[str, A
                 base = tname.split("/", 1)[0]
                 if base == "KonfAIInference":
                     inference = params
-                elif base == "ResampleToResolution":
+                elif base == "Resample":
                     ops.append(("resample", params))
                 elif base == "Dilate":
                     ops.append(("dilate", int((params or {}).get("dilate", 0))))

@@ -25,7 +25,7 @@ def test_try_fold_accepts_pointwise_refuses_global_and_geometric():
     out = fold(torch.linspace(-50.0, 50.0, 21))
     assert out.min().item() == -10.0 and out.max().item() == 40.0
     assert _try_fold("Standardize", {}) is None  # GLOBAL_STAT: needs whole-volume stats
-    assert _try_fold("ResampleToResolution", {"spacing": [1, 1, 3]}) is None  # not pointwise
+    assert _try_fold("Resample", {"spacing": [1, 1, 3]}) is None  # not pointwise
 
 
 def test_custom_pointwise_transform_folds_instead_of_refusing():
