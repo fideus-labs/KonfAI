@@ -17,7 +17,7 @@
 """Live control channel for a running training job.
 
 A training loop tails a ``control.json`` written into its run directory by an external steerer (the KonfAI
-MCP server / Studio) to change tunables — learning rate, validation interval — mid-run without a restart.
+MCP server / Studio) to change tunables (learning rate, validation interval) mid-run without a restart.
 Each write carries an incrementing ``revision`` so a change is consumed exactly once; the trainer applies it
 at a DDP poll boundary and records an audit trail into the run's config snapshot.
 """
@@ -41,7 +41,7 @@ class LiveControl:
 
     def take(self) -> dict[str, Any] | None:
         """The pending tunables if a newer revision was written since the last take, else ``None``. A missing,
-        unreadable, or malformed file reads as 'nothing pending' — steering is best-effort, never fatal."""
+        unreadable, or malformed file reads as 'nothing pending': steering is best-effort, never fatal."""
         try:
             data = json.loads(self.control_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

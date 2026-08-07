@@ -47,7 +47,7 @@ from konfai.utils.runtime import State
 from konfai.utils.utils import split_path_spec
 
 # --------------------------------------------------------------------------------------
-# Data._split — TRAIN/RESUME shards must be equal length to avoid a DDP hang
+# Data._split. TRAIN/RESUME shards must be equal length to avoid a DDP hang
 # --------------------------------------------------------------------------------------
 
 
@@ -89,7 +89,7 @@ def test_train_split_single_process_keeps_everything(monkeypatch: pytest.MonkeyP
 
 
 # --------------------------------------------------------------------------------------
-# Data._split — PREDICTION/EVALUATION shards must keep every case whole on one rank
+# Data._split. PREDICTION/EVALUATION shards must keep every case whole on one rank
 # --------------------------------------------------------------------------------------
 
 
@@ -151,7 +151,7 @@ def test_data_remap_dataset_indices_compacts_sparse_mapping_indices() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# DataTrain train/validation split — reproducible and seeded from sorted names
+# DataTrain train/validation split: reproducible and seeded from sorted names
 # --------------------------------------------------------------------------------------
 
 _SPLIT_PROBE = """
@@ -349,15 +349,15 @@ def test_streaming_tensorcast_persists_source_dtype_for_inverse(streaming_datase
 
 
 # --------------------------------------------------------------------------------------
-# DatasetIter — inline augmentations and per-case state draws
+# DatasetIter: inline augmentations and per-case state draws
 # --------------------------------------------------------------------------------------
 
 
 class _WholeVolumeTransform(Transform):
     """A spatial identity that declares nothing, so its chain can only run on a whole volume.
 
-    Cases here are about what happens once a volume is resident -- the FIFO buffer, the augmentation
-    draws -- so they need a chain the streamer refuses. Declaring it is how a chain says so.
+    Cases here are about what happens once a volume is resident (the FIFO buffer, the augmentation
+    draws), so they need a chain the streamer refuses. Declaring it is how a chain says so.
     """
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -624,12 +624,12 @@ def test_windowed_sampler_epoch_length_is_equal_across_ddp_ranks(monkeypatch: py
     ``Data._split`` pads the shards to equal length precisely because DDP(static_graph=True) hangs
     when the ranks disagree on the batch count. A length read from the per-rank case-to-worker
     partition undoes that: the shards carry the same NUMBER of patches but different cases, so the
-    partitions -- and the epoch -- come out different sizes.
+    partitions (and the epoch) come out different sizes.
     """
     monkeypatch.setenv("KONFAI_STATE", str(State.TRAIN))
     # Cases of increasing size, as a real dataset's volumes are: the shards then carry the same
-    # patch COUNT but different cases, which is what makes the partitions -- and the length read
-    # from them -- differ. A symmetric distribution hides this.
+    # patch COUNT but different cases, which is what makes the partitions, and the length read
+    # from them: differ. A symmetric distribution hides this.
     mapping = [(case, 0, patch) for case, count in enumerate([1, 2, 3, 4, 5, 6, 7, 8]) for patch in range(count)]
     shards = Data._split(mapping, 2)
     assert len({len(shard) for shard in shards}) == 1, "precondition: _split equalises shard length"
@@ -764,7 +764,7 @@ def test_train_subset_exposes_shuffle_window_knob() -> None:
 def test_the_windowed_order_is_a_permutation_of_the_epoch() -> None:
     # An epoch is one pass over the mapping: the window chooses the order, never the contents. Cases
     # differ in patch count and the partitions are cut by case, so the per-worker streams are uneven
-    # by nature -- padding the short ones up to the longest and cutting the result back to length
+    # by nature: padding the short ones up to the longest and cutting the result back to length
     # keeps the length right while dropping and repeating almost half of an uneven epoch.
     mapping = [(case, patch, 0) for case in range(12) for patch in range(200 if case < 2 else 2)]
     sampler = WindowedCaseSampler(mapping, shuffle=True, window=4, batch_size=2, num_workers=4)
@@ -798,7 +798,7 @@ def test_a_window_keeps_a_worker_reading_each_volume_once() -> None:
 def test_every_rank_gets_a_shard_of_the_same_length(entries: int, world_size: int, monkeypatch) -> None:
     # DDP(static_graph=True) needs every rank to run the same number of backward all-reduces. A shard
     # fills itself from its own head, and one holding nothing has no head: fewer entries than ranks
-    # left it empty, and an empty rank runs no backward at all -- the hang this equalises against.
+    # left it empty, and an empty rank runs no backward at all: the hang this equalises against.
     monkeypatch.setenv("KONFAI_STATE", "TRAIN")
     mapping = [(index, 0, 0) for index in range(entries)]
     shards = Data._split(mapping, world_size)
@@ -807,7 +807,7 @@ def test_every_rank_gets_a_shard_of_the_same_length(entries: int, world_size: in
 
 
 # --------------------------------------------------------------------------------------
-# DataLoader arguments — worker prefetch and persistent workers per workflow
+# DataLoader arguments: worker prefetch and persistent workers per workflow
 # --------------------------------------------------------------------------------------
 
 
@@ -887,7 +887,7 @@ def test_data_prediction_disables_workers_for_konfai_inference_transforms() -> N
 
 
 # --------------------------------------------------------------------------------------
-# PredictionSubset — case selection and common-name resolution
+# PredictionSubset: case selection and common-name resolution
 # --------------------------------------------------------------------------------------
 
 
@@ -1019,7 +1019,7 @@ def test_custom_subset_can_still_request_infos_during_common_name_resolution() -
 
 
 # --------------------------------------------------------------------------------------
-# split_path_spec — the "path[:flag]:format" dataset specs the groups are configured with
+# split_path_spec: the "path[:flag]:format" dataset specs the groups are configured with
 # --------------------------------------------------------------------------------------
 def test_split_path_spec_supports_unix_style_dataset_specs() -> None:
     assert split_path_spec("./Dataset") == ("./Dataset", None, "mha")

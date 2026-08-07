@@ -1,7 +1,7 @@
-# Transform — the workflow that makes a dataset
+# Transform: the workflow that makes a dataset
 
 `konfai TRANSFORM` reads a dataset, applies a chain of transforms, and writes a
-dataset. There is no network, no checkpoint and no training loop — `EVALUATION`
+dataset. There is no network, no checkpoint and no training loop. `EVALUATION`
 has none either, and the difference is the product: an evaluation measures, this
 one is the workflow you reach for when the thing you need is *data*.
 
@@ -34,16 +34,16 @@ each destination and removes it, so the output store itself may be created.
 
 `make_dataset.py` writes six volumes that agree about nothing: extents differ by
 a few voxels, spacings by up to 30%, origins by more than a voxel. That is the
-ordinary state of a cohort as acquired — an acquisition's stage coordinates are
-not an anatomical frame — and it is why `Reduce` refuses it as stored:
+ordinary state of a cohort as acquired (an acquisition's stage coordinates are
+not an anatomical frame), and it is why `Reduce` refuses it as stored:
 
 ```text
 case 'CASE_001' lands on extent [44, 60, 52] where 'CASE_000' lands on [48, 56, 56]
 ```
 
 `Resample: {reference: ...}` is what makes the agreement true rather than waived. It
-puts every member on one named member's grid — extent, spacing, origin and
-direction — so `grid: strict` passes because the cohort really is on one grid,
+puts every member on one named member's grid (extent, spacing, origin and
+direction), so `grid: strict` passes because the cohort really is on one grid,
 not because the check was relaxed.
 
 ```{warning}
@@ -66,7 +66,7 @@ the plan is the run's own verdict, not an estimate of it:
 Nineteen regions for six cases is `Median` being honest: it needs every case
 resident to name the middle one, then stacks them into a new tensor and sorts a
 copy of that. `Mean` folds one case at a time and holds two regions whatever the
-cohort's size — swap `operator: Mean` and watch the line change.
+cohort's size: swap `operator: Mean` and watch the line change.
 
 The plan also reports how much of the reference each member actually covers:
 
@@ -100,7 +100,7 @@ is applied once per case, which is a random transform rather than an
 augmentation, and the run refuses it and says so.
 
 Because `Brightness` is pointwise, the four copies share a single read pass over
-the source — the plan says `4 shared pass, 0 own pass`. A draw that moves voxels
+the source: the plan says `4 shared pass, 0 own pass`. A draw that moves voxels
 around (`Rotate`, `Flip`) cannot share it, and each copy gets its own pass.
 
 ## Reproducibility
@@ -109,10 +109,10 @@ around (`Rotate`, `Flip`) cannot share it, and each copy gets its own pass.
 chain draw the *same* copies. The two chains never meet: each derives its draws
 from `(seed, case, which copy)`, so they agree without coordinating. A mask
 rotated by a different angle than its image is a silently ruined dataset, not an
-error — which is why the seed is not optional in practice.
+error, which is why the seed is not optional in practice.
 
 ## Next
 
-- The full reference: [`config_guide/transform.md`](../../docs/source/config_guide/transform.md)
+- The full reference: [TRANSFORM configuration](https://konfai.readthedocs.io/en/latest/config_guide/transform.html)
 - Chains that embed a trained model (`KonfAIInference`), streaming rules and the
   memory budget are all documented there.

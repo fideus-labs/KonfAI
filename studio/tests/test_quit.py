@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The guards on ``POST /api/quit``.
 
-Shutting the server down is reachable from any page the user has open — to the server, every request
-a browser makes to localhost looks local — so it only fires for a caller that is both on this machine
+Shutting the server down is reachable from any page the user has open (to the server, every request
+a browser makes to localhost looks local), so it only fires for a caller that is both on this machine
 and able to set a header, which a cross-origin form cannot.
 """
 

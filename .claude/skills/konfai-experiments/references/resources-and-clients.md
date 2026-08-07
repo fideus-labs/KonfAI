@@ -15,14 +15,14 @@ Prefer these over re-deriving state; they are the machine-readable checkpoints.
 **Session (current workspace)**
 - `sessions://list`
 - `session://current/summary`
-- `session://current/config/{workflow}` — `workflow` in `train` | `prediction` | `evaluation`
+- `session://current/config/{workflow}`: `workflow` in `train` | `prediction` | `evaluation`
 - `session://current/log`
 - `session://current/metrics`
 
 **Jobs**
 - `job://{job_id}/status`, `job://{job_id}/log`, `job://{job_id}/manifest`
 
-The job **manifest** holds the config snapshot captured at launch — the reproducible record
+The job **manifest** holds the config snapshot captured at launch: the reproducible record
 of that run, independent of any later config edit.
 
 ## Environment variables
@@ -58,7 +58,7 @@ The intended entrypoint is the installed `konfai-mcp` command, not an ad-hoc wra
 }
 ```
 
-Once connected, the tools appear namespaced as `mcp__konfai__<tool>` — e.g.
+Once connected, the tools appear namespaced as `mcp__konfai__<tool>`: e.g.
 `mcp__konfai__inspect_dataset`, `mcp__konfai__run_train`. If they are absent, the server is
 not wired in (run `scripts/check_setup.py` to tell "not installed" from "not wired").
 
@@ -84,12 +84,11 @@ Set `tool_timeout_sec` generously (training is long) and rely on `wait_for_job` 
 `stdio` (the default, used by local Claude Code / Codex) needs no auth. For `sse` and
 `streamable-http` the bearer token is **optional and enforced only when set**: with
 `KONFAI_MCP_BEARER_TOKEN` set, unauthenticated requests get a `401` with a `Bearer`
-challenge; **with it unset, the HTTP transport starts fully unauthenticated (no `401`)** —
-there is no guard rejecting a tokenless HTTP start. Since this server executes real compute,
+challenge; **with it unset, the HTTP transport starts fully unauthenticated (no `401`)**: there is no guard rejecting a tokenless HTTP start. Since this server executes real compute,
 **always set a token before exposing `sse` / `streamable-http`.**
 
 A bearer token is only as safe as the channel: over plain HTTP it travels in clear and is
 trivially sniffable, so the token alone protects nothing on the wire. **Keep `sse` /
 `streamable-http` bound to loopback** (reach it over an SSH tunnel or a reverse proxy) **or
-terminate TLS in front of the server** — never expose a tokened-but-unencrypted endpoint
+terminate TLS in front of the server**: never expose a tokened-but-unencrypted endpoint
 beyond `localhost`.

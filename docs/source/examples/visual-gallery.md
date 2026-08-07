@@ -158,9 +158,9 @@ follow the same sampled geometry and use nearest-neighbour interpolation.
 ## Registration: moving image to physical field
 
 <ul class="kf-example-grid kf-example-grid--registration" aria-label="Executed deformable-registration stages">
-  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moving-before.png" aria-label="Open the moving MR before registration"><img src="../_static/apps/impact-reg/moving-before.png" alt="The real moving MR before registration, with fixed CT contours exposing the controlled offset." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · INPUT</span><strong>Moving MR — before</strong><span>Fixed-CT contours expose the controlled offset</span><span class="kf-example-stats">NCC 0.129 · MAE 106.11</span></figcaption></figure></li>
+  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moving-before.png" aria-label="Open the moving MR before registration"><img src="../_static/apps/impact-reg/moving-before.png" alt="The real moving MR before registration, with fixed CT contours exposing the controlled offset." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · INPUT</span><strong>Moving MR: before</strong><span>Fixed-CT contours expose the controlled offset</span><span class="kf-example-stats">NCC 0.129 · MAE 106.11</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/fixed-ct.png" aria-label="Open the fixed CT target"><img src="../_static/apps/impact-reg/fixed-ct.png" alt="The real fixed CT target defining the output grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">02 · REFERENCE</span><strong>Fixed CT target</strong><span>Reference geometry and output grid</span><span class="kf-example-stats">222 × 226 × 124 · 2 MM GRID</span></figcaption></figure></li>
-  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moved-after.png" aria-label="Open the moved MR after registration"><img src="../_static/apps/impact-reg/moved-after.png" alt="The moved MR produced by ConvexAdam Composite on the fixed CT grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">03 · OUTPUT</span><strong>Moved MR — after</strong><span>ConvexAdam_Composite output on the fixed grid</span><span class="kf-example-stats">NCC 0.937 · MAE 21.09</span></figcaption></figure></li>
+  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moved-after.png" aria-label="Open the moved MR after registration"><img src="../_static/apps/impact-reg/moved-after.png" alt="The moved MR produced by ConvexAdam Composite on the fixed CT grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">03 · OUTPUT</span><strong>Moved MR: after</strong><span>ConvexAdam_Composite output on the fixed grid</span><span class="kf-example-stats">NCC 0.937 · MAE 21.09</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/displacement-field.png" aria-label="Open the physical displacement field"><img src="../_static/apps/impact-reg/displacement-field.png" alt="The three-component physical displacement field with magnitude and sampled vectors." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">04 · FIELD</span><strong>Displacement field</strong><span>Three physical components with sampled vectors</span><span class="kf-example-stats">MEAN 23.06 MM · P95 25.55 MM</span></figcaption></figure></li>
 </ul>
 
@@ -210,7 +210,7 @@ plane at a time.
 
 ## Next steps
 
-- {doc}`../reference/components/transforms` — every transform and argument
-- {doc}`../reference/components/augmentations` — every augmentation and lifecycle detail
-- {doc}`segmentation` — use preprocessing and augmentation in a complete task
-- {doc}`../usage/apps` — reproduce registration, evaluation, uncertainty, and Slicer delivery
+- {doc}`../reference/components/transforms`: every transform and argument
+- {doc}`../reference/components/augmentations`: every augmentation and lifecycle detail
+- {doc}`segmentation`: use preprocessing and augmentation in a complete task
+- {doc}`../usage/apps`: reproduce registration, evaluation, uncertainty, and Slicer delivery

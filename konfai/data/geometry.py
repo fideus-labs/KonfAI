@@ -14,12 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Grids, boxes and affine maps in world coordinates — the value vocabulary a resample shares.
+"""Grids, boxes and affine maps in world coordinates: the value vocabulary a resample shares.
 
 Two axis orders coexist in every KonfAI header, and every geometry bug this file's history records
 is a confusion between them: array data is ``(Z, Y, X)``, physical geometry (``Origin``,
-``Spacing``, ``Direction``) is ``(x, y, z)``. The types here carry the order in the field name —
-``size_zyx``, ``origin_xyz`` — so a mixed expression reads as wrong at the call site instead of
+``Spacing``, ``Direction``) is ``(x, y, z)``. The types here carry the order in the field name (``size_zyx``,
+``origin_xyz``), so a mixed expression reads as wrong at the call site instead of
 resampling perfectly onto the wrong place.
 
 Everything is plain float64 numpy: no torch, no SimpleITK. A value built here crosses the
@@ -74,7 +74,7 @@ class AffineMap:
     def apply(self, points_xyz: np.ndarray) -> np.ndarray:
         """Map points of shape ``(..., rank)``, accumulating exactly as ITK does.
 
-        ``translation + Σ_j column_j · p_j`` with ``j`` ascending — the association of
+        ``translation + Σ_j column_j · p_j`` with ``j`` ascending: the association of
         ``TransformIndexToPhysicalPoint``. A matmul sums in whatever order BLAS picks, which is
         one ULP away on an oblique grid, and one ULP of origin is the difference between a
         streamed slab that is bit-identical to the whole volume and one that is merely close.
@@ -122,7 +122,7 @@ class WorldBox:
 
         Centre and half-extents: the image of centre ``c`` is ``A c + b``, and the largest reach of
         ``A h`` over the corners is ``|A| h`` because each corner coordinate is ``±h_k``. Equal to
-        the hull of the ``2^rank`` mapped corners — pinned by a test against that enumeration — in
+        the hull of the ``2^rank`` mapped corners (pinned by a test against that enumeration) in
         O(rank²) and with no corner loop to get wrong.
         """
         centre = (self.low_xyz + self.high_xyz) / 2.0
@@ -134,13 +134,13 @@ class WorldBox:
 
 #: How close to a whole number a voxel count must be before it is taken to BE that number. A
 #: spacing of 0.7 mm is not representable in binary, so 90 voxels of it re-cut at 1.5 mm come to
-#: 41.999999999999997 and truncate to 41 -- one slice of anatomy dropped, and a spacing recorded
+#: 41.999999999999997 and truncate to 41, one slice of anatomy dropped, and a spacing recorded
 #: that no longer covers what was read. The band is far narrower than any density a header states.
 _COUNT_TOLERANCE = 1e-6
 
 
 def _voxel_count(extent: int, spacing: float, wanted: float) -> int:
-    """How many voxels of ``wanted`` size cover ``extent`` voxels of ``spacing`` — truncated."""
+    """How many voxels of ``wanted`` size cover ``extent`` voxels of ``spacing``: truncated."""
     return int(np.floor(extent * spacing / wanted + _COUNT_TOLERANCE))
 
 
@@ -159,7 +159,7 @@ class Grid:
 
         What a header carrying no ``Origin``/``Spacing``/``Direction`` means when the question is
         only a change of extent. Under it a world coordinate IS an index, so a resample onto another
-        grid degenerates to the size ratio it always was -- which is how one engine serves a case
+        grid degenerates to the size ratio it always was, which is how one engine serves a case
         whose geometry is known and one whose is not, instead of a physical path and a ratio path
         that have to be kept agreeing.
         """
@@ -168,7 +168,7 @@ class Grid:
 
     @classmethod
     def from_header(cls, spatial_shape: list[int], attribute: Attribute, what: str) -> tuple[Grid, frozenset[str]]:
-        """The grid a header describes AND which of its keys it did not say — never a refusal.
+        """The grid a header describes AND which of its keys it did not say, never a refusal.
 
         The identity stands in for what is absent, and the caller is told what it stood in for: what
         a missing key costs depends on the question. An extent change needs none of them; a density
@@ -218,7 +218,7 @@ class Grid:
 
     @staticmethod
     def readable(attribute: Attribute) -> bool:
-        """Whether a header carries a full geometry — total, read-only, no I/O."""
+        """Whether a header carries a full geometry: total, read-only, no I/O."""
         return all(key in attribute for key in _GEOMETRY_KEYS)
 
     @property
@@ -227,7 +227,7 @@ class Grid:
 
     @property
     def index_to_world(self) -> AffineMap:
-        """Continuous index ``(x, y, z)`` to world: ``p = O + D S i`` — ITK's own association."""
+        """Continuous index ``(x, y, z)`` to world: ``p = O + D S i``: ITK's own association."""
         return AffineMap(self.direction_xyz @ np.diag(self.spacing_xyz), np.asarray(self.origin_xyz, dtype=np.float64))
 
     @property
@@ -262,8 +262,8 @@ class Grid:
         """The clamped array-order window a world box needs, grown by ``margin`` whole voxels.
 
         ``floor``/``ceil`` on the continuous-index box, plus the margin the interpolation taps
-        reach; clamped to a non-empty window, exactly as ``Resample._offset_window`` clamps —
-        a region entirely off the grid is a real place for a regrid (every sample takes the
+        reach; clamped to a non-empty window, exactly as ``Resample._offset_window`` clamps: a region entirely
+        off the grid is a real place for a regrid (every sample takes the
         fill) and a zero-width read is not something every backend serves.
         """
         low, high = self.continuous_box(box)
@@ -285,13 +285,13 @@ class Grid:
         """The same anatomy at another sampling density: give a spacing, or give a count.
 
         A component left at zero keeps that axis as it is. Whichever is given, the other follows,
-        and ``align`` decides where the new grid SITS — the one real choice here, worth a quarter
+        and ``align`` decides where the new grid SITS: the one real choice here, worth a quarter
         of a voxel of anatomy, and made silently by every library that offers only one of them:
 
-        - ``extent`` — the outer faces coincide, so both grids cover exactly the same box and a
+        - ``extent``: the outer faces coincide, so both grids cover exactly the same box and a
           target index reads ``scale * (i + 0.5) - 0.5`` of the source. What ``F.interpolate`` does,
           and what KonfAI has always done.
-        - ``origin`` — voxel zero's CENTRE stays put, so a target index reads ``scale * i`` and the
+        - ``origin``: voxel zero's CENTRE stays put, so a target index reads ``scale * i`` and the
           far edge moves by whatever the count rounded away. What resampling onto a grid that
           shares an origin does.
 
@@ -339,7 +339,7 @@ class Grid:
 
         The load-bearing line of every streamed regrid: a region left at the volume's origin
         replays the volume's first slab wherever it lands, and the output still looks like an
-        image. The origin is ``index_to_world`` of the region's start — one application of the
+        image. The origin is ``index_to_world`` of the region's start, one application of the
         parent's own map, never a second association that could land a slab origin apart from it.
         """
         start_xyz = np.array([float(part.start) for part in reversed(region_zyx)])
@@ -375,7 +375,7 @@ class TransformBound:
         return TransformBound(AffineMap.identity(int(residual_xyz.size)), np.asarray(residual_xyz, dtype=np.float64))
 
     def after(self, inner: TransformBound) -> TransformBound:
-        """The bound of ``self(inner(p))`` — interval arithmetic through the outer affine."""
+        """The bound of ``self(inner(p))``: interval arithmetic through the outer affine."""
         return TransformBound(
             inner.affine.then(self.affine),
             np.abs(self.affine.matrix) @ inner.residual_xyz + self.residual_xyz,
@@ -388,7 +388,7 @@ class TransformBound:
 
 @dataclass(frozen=True)
 class AffineStage:
-    """One affine step of a decoded transform — exact, in world coordinates."""
+    """One affine step of a decoded transform: exact, in world coordinates."""
 
     map: AffineMap
 
@@ -398,7 +398,7 @@ class AffineStage:
 
 #: The B-spline orders KonfAI evaluates: the linear hat a dense field is read through, and the cubic
 #: ITK writes a BSplineTransform with. ITK will happily write orders 0 and 2, which decode as
-#: readily as any other and have no kernel here -- so the refusal belongs where the value is built,
+#: readily as any other and have no kernel here, so the refusal belongs where the value is built,
 #: not where it is finally sampled, which is mid-run and per region.
 SUPPORTED_SPLINE_ORDERS = (1, 3)
 
@@ -410,12 +410,12 @@ class DisplacementStage:
     One shape for the two non-linear things a stored transform can be. A BSpline is order-3
     coefficients on a coarse control grid; a dense field is order-1 samples on its own grid. Both
     kernels are non-negative and sum to one, so the displacement anywhere is a convex combination
-    of ``values`` and ``sup |values|`` per component bounds it at every point — the bound that
+    of ``values`` and ``sup |values|`` per component bounds it at every point: the bound that
     replaces walking a region's boundary, which under-bounds a wiggle narrower than the region
     and costs more than the resample it serves (both measured).
 
     ``values`` is ``(rank, Z, Y, X)`` float64, components in physical ``(x, y, z)`` order, world
-    units — ITK applies no direction matrix to them (verified in ``itkBSplineTransform.hxx``).
+    units. ITK applies no direction matrix to them (verified in ``itkBSplineTransform.hxx``).
     Outside the grid's reach the displacement is zero: ITK returns the identity there.
     """
 
@@ -441,7 +441,7 @@ class DisplacementStage:
 
 
 #: A decoded stored transform: stages in APPLICATION order (first applied first). SimpleITK's
-#: ``CompositeTransform`` applies its list in reverse — the decoder normalizes that here, once.
+#: ``CompositeTransform`` applies its list in reverse: the decoder normalizes that here, once.
 SpatialStages = tuple["AffineStage | DisplacementStage", ...]
 
 

@@ -5,7 +5,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
-// The bottom drawer is a real login shell rooted at the workspace — run nvidia-smi, activate an env,
+// The bottom drawer is a real login shell rooted at the workspace: run nvidia-smi, activate an env,
 // inspect files. The job log lives in the Live tab now, so this is a general-purpose terminal.
 export default function Console() {
   const [open, setOpen] = useState(false);
@@ -15,8 +15,7 @@ export default function Console() {
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Spin up the shell the first time the drawer opens (lazy), then keep it alive across collapses —
-  // the host is only hidden, so the session and scrollback survive.
+  // Spin up the shell the first time the drawer opens (lazy), then keep it alive across collapses: // the host is only hidden, so the session and scrollback survive.
   useEffect(() => {
     if (!open || termRef.current || !hostRef.current) return;
     const term = new Terminal({
@@ -43,7 +42,7 @@ export default function Console() {
     ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
     ws.onclose = () => {
       setConnected(false);
-      term.write("\r\n\x1b[2m[shell ended — reopen the drawer to start a new one]\x1b[0m\r\n");
+      term.write("\r\n\x1b[2m[shell ended: reopen the drawer to start a new one]\x1b[0m\r\n");
       termRef.current = null; // let a reopen spawn a fresh shell
     };
     term.onData((d) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "input", data: d })));

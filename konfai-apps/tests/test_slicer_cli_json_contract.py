@@ -107,7 +107,7 @@ def test_infer_argv_slicer_builds_parses_and_dispatches(monkeypatch: pytest.Monk
     assert app.download is True
     assert app.infer_kwargs is not None
     kwargs = app.infer_kwargs
-    # dests Slicer's flags map to -- a rename would silently break its subprocess call.
+    # dests Slicer's flags map to: a rename would silently break its subprocess call.
     assert kwargs["config_overrides"] == ["iterations=300"]
     assert kwargs["patch_size"] == [192, 192, 192]
     assert kwargs["batch_size"] == 2
@@ -163,7 +163,7 @@ def test_get_parameters_returns_values_and_constraints_shape(tmp_path: Path) -> 
     repo = app_repository_module.get_app_repository_info(str(app_dir), False)
     params = repo.get_parameters()
 
-    # The Advanced dialog reads params["values"] and params["constraints"] -- both must always be present.
+    # The Advanced dialog reads params["values"] and params["constraints"]: both must always be present.
     assert set(params) == {"values", "constraints"}
     assert isinstance(params["values"], dict)
     assert isinstance(params["constraints"], dict)
@@ -189,7 +189,7 @@ def test_constraint_vocabulary_matches_slicer_value_editor() -> None:
 
 
 def test_constraint_surfaces_parameter_description() -> None:
-    """A bare string in Annotated adds the knob's meaning to its constraint, for any base type -- so an agent
+    """A bare string in Annotated adds the knob's meaning to its constraint, for any base type, so an agent
     tuning it knows what it does. It is additive: Slicer ignores the extra key, bounds/choices are unchanged."""
 
     class _DocumentedModel:
@@ -207,7 +207,7 @@ def test_constraint_surfaces_parameter_description() -> None:
         "max": 1000,
         "description": "Optimization steps; higher = more accurate, slower.",
     }
-    # A described Literal keeps its choices AND gains the meaning -- the case a description= field could not cover.
+    # A described Literal keeps its choices AND gains the meaning: the case a description= field could not cover.
     assert constraints["metric"] == {
         "choices": ["L1", "L2"],
         "description": "Similarity metric on the MIND features.",

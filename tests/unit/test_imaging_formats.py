@@ -43,7 +43,7 @@ def _image_attributes() -> Attribute:
 def test_flatten_transforms_recurses_into_nested_composites() -> None:
     """The transform serializer walks a composite to its leaves. SimpleITK keeps a nested composite
     nested (``GetNthTransform`` returns it as-is), so a single-level walk would hand that composite to
-    the per-leaf type switch, which rejects it -- the recursion is what keeps a nested chain storable."""
+    the per-leaf type switch, which rejects it: the recursion is what keeps a nested chain storable."""
     sitk = pytest.importorskip("SimpleITK")
     from konfai.utils.dataset import _flatten_transforms
 
@@ -60,7 +60,7 @@ def test_flatten_transforms_recurses_into_nested_composites() -> None:
 
 
 # ---------------------------------------------------------------------------
-# DICOM tests (no real DICOM files — uses unittest.mock)
+# DICOM tests (no real DICOM files: uses unittest.mock)
 # ---------------------------------------------------------------------------
 
 
@@ -232,7 +232,7 @@ class TestDicomReadVolume:
 
 
 # ---------------------------------------------------------------------------
-# OME-Zarr tests (no real Zarr store — uses unittest.mock)
+# OME-Zarr tests (no real Zarr store: uses unittest.mock)
 # ---------------------------------------------------------------------------
 
 
@@ -385,7 +385,7 @@ class TestDatasetImagingBackends:
         assert storage_form(Path(name)) == form
 
     def test_a_dicom_series_is_a_directory_volume_with_no_form(self, tmp_path: Path) -> None:
-        """A series carries no extension — neither the directory nor, often, the slices. Read off the
+        """A series carries no extension: neither the directory nor, often, the slices. Read off the
         name alone it looks like nothing, and the default file format is what a caller would get."""
         pytest.importorskip("pydicom")
         from konfai.utils import dicom

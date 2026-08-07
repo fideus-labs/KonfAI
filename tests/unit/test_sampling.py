@@ -17,8 +17,8 @@
 """The torch coordinate producer and gather, against SimpleITK.
 
 The oracle is external on purpose: two KonfAI paths agree by construction, including on a grid
-placed in the wrong place. The fixture is high-frequency — a smooth phantom would pass a wrong
-map — and its direction cosines are oblique, which is the case the separable samplers refuse and
+placed in the wrong place. The fixture is high-frequency (a smooth phantom would pass a wrong
+map), and its direction cosines are oblique, which is the case the separable samplers refuse and
 this one exists for.
 """
 
@@ -152,12 +152,12 @@ def test_the_streamed_slabs_agree_with_the_whole_volume(device: torch.device, ro
 
     NOT bit for bit, and the reason is deliberate: a blend through a map that does not factorise
     goes to ``grid_sample``, one fused kernel worth 4x on a warp, and grid_sample takes NORMALISED
-    coordinates -- so it divides by the extent of the tensor handed to it, and a slab is handed a
+    coordinates, so it divides by the extent of the tensor handed to it, and a slab is handed a
     window. What is bit-identical is the SEPARABLE path, which is most resamples, and which
     ``test_resample.py`` pins.
 
     The bound below is a fraction of the data's own range, and it is roughly thirty times the worst
-    disagreement measured -- while a slab whose map actually moved is wrong by VOXELS, orders of
+    disagreement measured, while a slab whose map actually moved is wrong by VOXELS, orders of
     magnitude above it. The companion test underneath keeps that end honest.
     """
     image = _image()
@@ -200,7 +200,7 @@ def test_a_slab_left_at_the_volume_origin_is_loudly_wrong():
 def test_the_fill_mask_matches_simpleitk_voxel_for_voxel():
     device = torch.device("cpu")
     # The sharp test: where the map leaves the source, SimpleITK writes the fill and so must this.
-    # A source window one voxel short does not raise — it returns background — so the only thing
+    # A source window one voxel short does not raise (it returns background), so the only thing
     # that catches it is comparing WHICH voxels are fill, with no tolerance at all.
     image = _image()
     transform = sitk.TranslationTransform(3, (14.0, 9.0, 7.0))

@@ -145,7 +145,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             next_actions.append("run_evaluation")
         if readiness.get("transform"):
             # The plan first, always: run_transform writes a dataset, and the plan is what says how
-            # much and how -- including whether the run would refuse before writing a byte.
+            # much and how: including whether the run would refuse before writing a byte.
             next_actions.extend(["plan_transform", "run_transform"])
         if not all(configs_present.values()):
             next_actions.append("write_workflow_config")
@@ -1082,7 +1082,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         active_jobs = [self.job_payload(job) for job in self.active_jobs()]
         latest_job = self.discover_latest_job()
         readiness = self._session_readiness()
-        # Where this experiment stands, read back from the workspace rather than remembered — so it is the
+        # Where this experiment stands, read back from the workspace rather than remembered, so it is the
         # same answer for every client, and it survives a restart or a session driven entirely by hand.
         jobs = sorted(
             (self.job_payload(job) for job in self.job_registry.jobs.values()),

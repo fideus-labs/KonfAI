@@ -32,7 +32,7 @@ from konfai.utils.ome_zarr import _zarr_v3_available
 
 pytest.importorskip("SimpleITK")
 
-# A field records its bound in an RFC-5 store, which is zarr v3 (NGFF >= 0.5) -- and zarr 2.x, the
+# A field records its bound in an RFC-5 store, which is zarr v3 (NGFF >= 0.5): and zarr 2.x, the
 # newest release for Python 3.10, cannot write one. Everything else here reads an h5 field.
 _needs_rfc5 = pytest.mark.skipif(
     not _zarr_v3_available(),
@@ -82,7 +82,7 @@ def _manager(source: Dataset, transforms: list) -> DatasetManager:
 
 
 def _recorded(warp: Resample, attribute: Attribute | None = None, shape: tuple[int, ...] = (10, 12, 14)) -> Resample:
-    """A stage that has met its case — which is when a region can be asked about at all."""
+    """A stage that has met its case, which is when a region can be asked about at all."""
     warp.transform_shape("CT", "CASE_000", list(shape), attribute if attribute is not None else _attributes())
     return warp
 
@@ -91,7 +91,7 @@ def test_the_source_region_is_the_target_grown_by_the_field_reach(tmp_path: Path
     """A warp is a regrid onto the case's own grid, and its window is the field's reach in voxels.
 
     Spacing is (x=2, y=1, z=1), so in array order (z, y, x) 4 um of displacement is 4, 4 and 2
-    voxels -- plus the one voxel the linear taps reach. Declared as REGRID and not HALO because the
+    voxels: plus the one voxel the linear taps reach. Declared as REGRID and not HALO because the
     window is derived from the case's GEOMETRY: see the oblique case below, which a per-axis halo
     cannot express at all.
     """
@@ -117,7 +117,7 @@ def test_an_oblique_case_grows_its_window_on_every_axis(tmp_path: Path) -> None:
     """The bug a per-axis halo hid: a displacement along x reaches into y and z when the axes turn.
 
     A world bound converted to a halo per ARRAY axis silently assumes the direction cosines are
-    the identity -- on a turned case the window is short on the axes the displacement actually
+    the identity, on a turned case the window is short on the axes the displacement actually
     reaches, and a short window returns the border value rather than raising.
     """
     turned = _attributes()
@@ -138,7 +138,7 @@ def test_the_header_scan_survives_an_unreadable_entry_in_the_field_group(tmp_pat
     """The whole group is header-read, including entries this run never warps.
 
     A directory store lists its entries from the filesystem alone, so a corrupt one is only met at
-    its header -- and the planner reads them all before any case is chosen. Left to raise, one bad
+    its header, and the planner reads them all before any case is chosen. Left to raise, one bad
     file anywhere under the field root aborts the run with a SimpleITK error instead of the
     whole-volume answer the same guard promises for a field dataset it cannot read.
     """
@@ -156,8 +156,7 @@ def test_the_header_scan_survives_an_unreadable_entry_in_the_field_group(tmp_pat
 
 def test_a_field_with_no_bound_still_streams_with_windows_measured_at_run(tmp_path: Path) -> None:
     """A bound-less field is not a whole-volume answer: the field window a region samples is read
-    for sampling regardless, and the sup of those very values sizes that region's source pull —
-    per region, so a quiet slab pays a quiet halo where the shifted one pays its shift."""
+    for sampling regardless, and the sup of those very values sizes that region's source pull: per region, so a quiet slab pays a quiet halo where the shifted one pays its shift."""
     _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 0.0, 0.0))  # 4 um along x alone
     warp = _recorded(Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF"))
 
@@ -204,7 +203,7 @@ def test_a_constant_shift_moves_the_volume_by_that_many_voxels(tmp_path: Path) -
 
 
 def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The claim that matters: the same answer, region by region, with several regions — and
+    """The claim that matters: the same answer, region by region, with several regions: and
     nothing was declared to make it true, the windows being measured from the field itself."""
     from konfai.data import patching as patching_module
 

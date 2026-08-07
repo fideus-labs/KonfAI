@@ -1,8 +1,8 @@
 # Troubleshooting
 
 Symptom-first fixes for the most common KonfAI failures. Scan the headings for
-what you are seeing — a missing command, a rejected config key, an empty
-metric file — and each entry gives the likely cause and the fix. Come here
+what you are seeing (a missing command, a rejected config key, an empty
+metric file), and each entry gives the likely cause and the fix. Come here
 whenever a command fails or an expected output never appears.
 
 ## Installation problems
@@ -28,7 +28,7 @@ python -m pip install konfai-apps
 
 `konfai-cluster` is **not** in this category: it ships with the core package
 unconditionally, so it can never be missing. The `cluster` extra adds `submitit`,
-which is imported lazily at submission time — install `konfai[cluster]` if
+which is imported lazily at submission time: install `konfai[cluster]` if
 `konfai-cluster` fails when it submits, not because the command is absent.
 
 ### GPU works in Python but not in KonfAI
@@ -105,7 +105,7 @@ and `Standardize` given **both** `mean` and `std`; `Normalize` and an automatic
 the region kinds are `Flip`, `Permute`, **axis-aligned** `Canonical`,
 `Resample` (to a grid, or through a stored transform or field), `Dilate` and `Gradient`. A `Clip` with a
 percentile bound needs the whole histogram, and `Padding` streams on the **write**
-side only — on the read side it loads the case whole. See the transform reference for
+side only, on the read side it loads the case whole. See the transform reference for
 the per-transform answer.
 A transform that reads a second volume (`Mask`, masked `Clip`/`Standardize`), a
 global histogram (`HistogramMatching`), or an undeclared custom transform uses
@@ -210,9 +210,9 @@ array. Start with level 0, then consult
 
 ## Next steps
 
-- {doc}`getting-started/installation` — the extras and verification steps
+- {doc}`getting-started/installation`: the extras and verification steps
   behind most install-time symptoms.
-- {doc}`reference/environment` — the `KONFAI_*` environment variables that
+- {doc}`reference/environment`: the `KONFAI_*` environment variables that
   drive runtime behavior.
-- {doc}`usage/apps` — running packaged apps locally or against a remote
+- {doc}`usage/apps`: running packaged apps locally or against a remote
   `konfai-apps-server`.

@@ -39,7 +39,7 @@ def _tb_image_dir(session: str, base: str = "") -> Path | None:
     (isolated app run), so an isolated run's images resolve under its own output subtree. Jailed: ``base``
     may contain '/', never '..'. Without a base, the most recently written tb dir anywhere under the session."""
     root = _session_dir(session).resolve()
-    if base:  # a provided base is authoritative — a traversal attempt is rejected, never fallen back on
+    if base:  # a provided base is authoritative: a traversal attempt is rejected, never fallen back on
         if ".." in Path(base).parts:
             return None
         one = _jail(root, f"{base}/tb")
@@ -62,7 +62,7 @@ def _tb_accumulator(tb_dir: Path, history: int) -> Any | None:
 
 
 def _tb_previews(session: str, base: str = "", limit: int = 24) -> list[dict[str, Any]]:
-    """A manifest of a run's TensorBoard image tags: [{label, steps:[…], step}] — the step history per
+    """A manifest of a run's TensorBoard image tags: [{label, steps:[…], step}]: the step history per
     output (Training/CT, Validation/MR, …), with NO image bytes (those are fetched per step, lazily, so a
     long history never bloats the payload). Empty if that run has no images yet."""
     tb_dir = _tb_image_dir(session, base)
@@ -109,7 +109,7 @@ async def previews(session: str = Query("default"), base: str = Query("")) -> di
 async def preview_image(
     session: str = Query("default"), base: str = Query(""), tag: str = Query(...), step: int = Query(...)
 ) -> Response:
-    """One TensorBoard image montage (PNG) for a (base, tag, step) — the lazy per-frame fetch behind the slider."""
+    """One TensorBoard image montage (PNG) for a (base, tag, step): the lazy per-frame fetch behind the slider."""
     data = await asyncio.to_thread(_tb_image_bytes, _sane_session(session), base, tag, step)
     if data is None:
         raise HTTPException(404, "image not found")
@@ -126,18 +126,18 @@ def _free_port() -> int:
 
 @router.get("/api/tensorboard")
 async def tensorboard_link(session: str = Query("default")) -> dict[str, Any]:
-    """Ensure a TensorBoard server is running for the task's Statistics dir and return its URL — the full
+    """Ensure a TensorBoard server is running for the task's Statistics dir and return its URL: the full
     TensorBoard UI (scalars, images, histograms) for every run, alongside Studio's own live feed. One
     server per task, reused while alive, bound to 127.0.0.1 (a remote deployment must proxy the port)."""
     name = _sane_session(session)
     live = _TB_SERVERS.get(name)
     if live and live["proc"].poll() is None:
         return {"ok": True, "url": live["url"]}
-    # The session root, not Statistics/: TensorBoard recurses, so it surfaces every "*/tb" at any depth —
+    # The session root, not Statistics/: TensorBoard recurses, so it surfaces every "*/tb" at any depth: #
     # session-root runs AND isolated app-output runs (<app_output>-<hash>/Statistics/<run>/tb) alike.
     session_root = _session_dir(name)
     if not session_root.is_dir() or not any(session_root.glob("**/tb")):
-        return {"ok": False, "detail": "no TensorBoard events yet — run a training first"}
+        return {"ok": False, "detail": "no TensorBoard events yet: run a training first"}
     # Look next to the running interpreter first: the server is launched as a console script, so the env's
     # bin dir may not be on PATH and shutil.which alone would miss it.
     sibling = Path(sys.executable).with_name("tensorboard")

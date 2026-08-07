@@ -18,8 +18,8 @@
 
 The streamed-equals-whole-volume property is proven for this stage where it is proven for every
 other, in ``test_transform_locality_contract.py``; what is proven here is the half that contract
-cannot see. A stage can be perfectly self-consistent -- both its paths agreeing on the same wrong
-place -- so the arithmetic is checked against SimpleITK, which resamples in physical space and knows
+cannot see. A stage can be perfectly self-consistent (both its paths agreeing on the same wrong
+place), so the arithmetic is checked against SimpleITK, which resamples in physical space and knows
 nothing about this file. And a stage that lands on another grid can be wrong in ways no equality
 test reaches: by writing the right voxels under the wrong header, or by writing a case that never
 met the reference at all.
@@ -46,7 +46,7 @@ _CASE = "CASE_000"
 _SOURCE_SPATIAL = (9, 13, 11)
 _REFERENCE_SPATIAL = (7, 10, 15)
 # Physical (x, y, z), as a header stores them. Nothing lines up: neither extent, nor spacing, nor
-# origin -- and the reference reaches past the case on x, so part of it has no data to read.
+# origin, and the reference reaches past the case on x, so part of it has no data to read.
 _SOURCE_ORIGIN, _SOURCE_SPACING = [-3.0, 5.0, 11.0], [1.5, 1.1, 2.0]
 _REFERENCE_ORIGIN, _REFERENCE_SPACING = [-1.25, 4.2, 12.7], [1.9, 1.7, 1.3]
 _FILL = -777.0
@@ -99,7 +99,7 @@ def _manager(dataset: Dataset, stage: Resample, group: str = "Case") -> DatasetM
 
 
 def _simpleitk(volume: np.ndarray, source: Attribute, reference: Attribute, nearest: bool = False) -> np.ndarray:
-    """The same resample, done by SimpleITK — the oracle this stage's arithmetic is checked against."""
+    """The same resample, done by SimpleITK: the oracle this stage's arithmetic is checked against."""
     image = sitk.GetImageFromArray(volume[0])
     image.SetOrigin(source.get_np_array("Origin").tolist())
     image.SetSpacing(source.get_np_array("Spacing").tolist())
@@ -135,7 +135,7 @@ def test_it_resamples_where_simpleitk_does(dataset: Dataset) -> None:
 
 
 def test_the_edge_of_the_data_is_where_simpleitk_puts_it(dataset: Dataset) -> None:
-    """The fill boundary, voxel for voxel — the half of a regrid that a tolerance cannot check.
+    """The fill boundary, voxel for voxel: the half of a regrid that a tolerance cannot check.
 
     A map off by one voxel still interpolates real data almost everywhere; where it shows is at the
     rim, in which voxels stop having a source at all. Counting them against ITK's own
@@ -158,8 +158,8 @@ def test_a_label_map_takes_the_nearest_voxel_itk_takes(dataset: Dataset, tmp_pat
     by a constant delta; the accumulation drifts, so a continuous index that is exactly ``k + 0.5``
     lands a hair below and rounds down. Given anything it classes non-linear it calls
     ``TransformPhysicalPointToContinuousIndex`` per voxel and rounds up, as the rule says. On this
-    fixture the two disagree with EACH OTHER on 56 of 1050 voxels -- asserted below, so this is a
-    statement about ITK and not a guess -- and KonfAI matches the exact one.
+    fixture the two disagree with EACH OTHER on 56 of 1050 voxels (asserted below, so this is a
+    statement about ITK and not a guess), and KonfAI matches the exact one.
 
     Reproducing the drift instead is not available: it depends on where a scanline starts, so a
     streamed region and the whole volume would round differently at the same voxel.
@@ -196,7 +196,7 @@ def test_it_resamples_the_dtypes_a_microscope_and_a_scanner_store(tmp_path: Path
     """uint16 is what a light-sheet volume IS, and torch fills only some integer dtypes.
 
     ``masked_fill`` is unimplemented for uint16, so filling after the cast back to the source dtype
-    raises on precisely the volumes this stage was built for -- and only where the reference grid
+    raises on precisely the volumes this stage was built for, and only where the reference grid
     reaches past the case, which is to say on the interesting ones.
     """
     dataset = Dataset(tmp_path / f"Dtype{np.dtype(dtype).name}", "mha")
@@ -237,7 +237,7 @@ def test_an_oblique_pair_resamples_where_simpleitk_does(tmp_path: Path) -> None:
 
 
 def test_the_case_lands_on_the_reference_grid(dataset: Dataset) -> None:
-    """Extent, spacing, origin and direction all adopted — which is the whole point of the stage.
+    """Extent, spacing, origin and direction all adopted, which is the whole point of the stage.
 
     Right voxels under the wrong header is the failure this stage exists to prevent, and the one a
     value comparison cannot see: ``Reduce(grid: strict)`` reads exactly these four.
@@ -343,8 +343,8 @@ def test_it_never_assembles_the_volume(dataset: Dataset, tmp_path: Path) -> None
 def test_a_region_off_the_source_reads_one_voxel(offset: float) -> None:
     """A target region with no source under it pulls one voxel, not the extent it was clamped from.
 
-    A case whose grid meets the reference somewhere still has slabs that do not -- that is the
-    ordinary shape of a cohort resampled onto one grid -- and every one of them reads a window it
+    A case whose grid meets the reference somewhere still has slabs that do not (that is the
+    ordinary shape of a cohort resampled onto one grid), and every one of them reads a window it
     will overwrite with fill. Clamping to a legal-but-empty region is what keeps that read at one
     voxel instead of the case's whole cross-section, on every such slab.
     """
@@ -380,7 +380,7 @@ def test_it_is_refused_as_a_patch_transform(dataset: Dataset, monkeypatch: pytes
     that table would raise a KeyError instead of saying what to do about it.
     """
     monkeypatch.setenv("KONFAI_ROOT", "Trainer")
-    # Config time has no case, so a target that needs a physical space answers WHOLE_VOLUME -- still
+    # Config time has no case, so a target that needs a physical space answers WHOLE_VOLUME: still
     # refused, and by the row that says so.
     with pytest.raises(ConfigError, match="needs the whole volume"):
         _check_patch_transform_locality(_stage(dataset), "CT", "CT")
@@ -394,7 +394,7 @@ def test_a_differing_direction_is_resampled_and_not_refused(tmp_path: Path) -> N
     """Axes that do not line up used to be refused. They are a rotation, and a rotation is ordinary.
 
     The old map was a scale and a shift per axis, which no rotation is, so the stage refused and told
-    the reader to run ``Canonical`` first -- a second resample, and a second interpolation of the
+    the reader to run ``Canonical`` first: a second resample, and a second interpolation of the
     same voxels. The source region of a target region is now that region's world box mapped through
     the map and read back as an index window, which a rotation answers as readily as a translation.
     """
@@ -413,7 +413,7 @@ def test_a_differing_direction_is_resampled_and_not_refused(tmp_path: Path) -> N
 
 
 def test_a_case_with_no_geometry_is_refused(dataset: Dataset) -> None:
-    """No origin, no physical space to resample in — and a size ratio must not stand in for one."""
+    """No origin, no physical space to resample in, and a size ratio must not stand in for one."""
     bare = Attribute()
     bare["Spacing"] = np.asarray(_SOURCE_SPACING)
     with pytest.raises(TransformError, match="carries no Origin, Direction"):
@@ -463,8 +463,8 @@ def test_a_blank_reference_is_refused_at_construction() -> None:
 def test_the_plan_is_told_how_much_of_the_grid_the_case_covers(dataset: Dataset) -> None:
     """Partial coverage is legal, common, and worth a line: the rest of the output is fill.
 
-    Nothing else in the plan can say it -- the verdict is STREAM and the byte count is the same
-    either way -- so a template that is mostly background would otherwise be a discovery made in a
+    Nothing else in the plan can say it (the verdict is STREAM and the byte count is the same
+    either way), so a template that is mostly background would otherwise be a discovery made in a
     viewer.
     """
     note = _stage(dataset).plan_note(
@@ -494,7 +494,7 @@ def test_the_inverse_returns_the_case_to_its_own_grid(dataset: Dataset) -> None:
     """A prediction made on the reference grid comes back to the grid the case was stored on.
 
     The inverse is the same map solved for the other index, so what it must restore is the extent
-    and the header -- not the values, which an interpolation onto a coarser grid has already lost.
+    and the header, not the values, which an interpolation onto a coarser grid has already lost.
     """
     stage = _stage(dataset)
     source = _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)
@@ -514,7 +514,7 @@ def test_the_inverse_streams_once_the_forward_has_stacked_its_geometry(dataset: 
     """A change of grid inverts to a change of grid, and needs no memory of the case to do it.
 
     The forward stacks the target geometry over the source's, so the inverse reads the grid it is
-    holding, pops, and reads the grid it is restoring -- both off the attribute in hand. That is what
+    holding, pops, and reads the grid it is restoring, both off the attribute in hand. That is what
     lets a prediction finalize through this stage stay streamed instead of assembling the volume.
     """
     stage = _stage(dataset)
@@ -532,7 +532,7 @@ def test_the_inverse_streams_once_the_forward_has_stacked_its_geometry(dataset: 
 
 
 def test_the_inverse_says_why_when_the_forward_left_no_stack(dataset: Dataset) -> None:
-    """Asked cold, it cannot know the shape it restores -- and says that rather than guessing."""
+    """Asked cold, it cannot know the shape it restores, and says that rather than guessing."""
     locality = _stage(dataset).inverse_patch_locality(Attribute())
     assert locality.kind is LocalityKind.WHOLE_VOLUME
     assert locality.reason is not None and "not on the attribute" in locality.reason
@@ -551,7 +551,7 @@ def _displacement(shape: tuple[int, ...] = _FIELD_SPATIAL) -> np.ndarray:
     """A field whose three components are DIFFERENT functions of DIFFERENT axes.
 
     Component-first, in physical (x, y, z). Every component varies, and none is a multiple of
-    another, so swapping two of them — or reversing the component axis against the array axes —
+    another, so swapping two of them (or reversing the component axis against the array axes)
     moves the anatomy somewhere a comparison against SimpleITK cannot miss.
     """
     z, y, x = np.meshgrid(*[np.arange(n) for n in shape], indexing="ij")
@@ -566,7 +566,7 @@ def _high_frequency(shape: tuple[int, ...] = _SOURCE_SPATIAL) -> np.ndarray:
 
 @pytest.fixture
 def warped(tmp_path: Path) -> tuple[Dataset, Dataset, np.ndarray]:
-    """A case, a reference grid and a field — three grids that agree about nothing."""
+    """A case, a reference grid and a field: three grids that agree about nothing."""
     images = Dataset(tmp_path / "Images", "h5")
     volume = _high_frequency()
     images.write("Case", _CASE, volume, _attributes(_SOURCE_ORIGIN, _SOURCE_SPACING))
@@ -598,7 +598,7 @@ def _simpleitk_warp(
     fill: float = _FILL,
     field_direction: np.ndarray | None = None,
 ) -> np.ndarray:
-    """``sitk.Resample(image, grid, DisplacementFieldTransform(field))`` — the one-pass authority."""
+    """``sitk.Resample(image, grid, DisplacementFieldTransform(field))``: the one-pass authority."""
     image = sitk.GetImageFromArray(volume[0])
     image.SetOrigin(_SOURCE_ORIGIN)
     image.SetSpacing(_SOURCE_SPACING)
@@ -627,7 +627,7 @@ def test_a_label_map_warped_through_a_field_takes_the_nearest_voxel(tmp_path: Pa
     """The warped path has a sampler of its own, and it has to pick a label rather than blend two.
 
     Blending is silent here: two labels average into a third that was never in the source, the dtype
-    is unchanged, and the result is still a label map -- so nothing downstream reports it. The
+    is unchanged, and the result is still a label map, so nothing downstream reports it. The
     fixture holds only 0 and 100 so that any other value can only have come from an interpolation.
     """
     images = Dataset(tmp_path / "Images", "h5")
@@ -651,7 +651,7 @@ def test_a_label_map_warped_through_a_field_takes_the_nearest_voxel(tmp_path: Pa
 
 @pytest.mark.parametrize("warping", [False, True], ids=["grid_change", "composed_with_a_field"])
 def test_an_explicit_interpolation_is_honoured_on_both_paths(tmp_path: Path, warping: bool) -> None:
-    """A dtype cannot decide this on its own -- a CT is int16 and so is nothing else about it -- so
+    """A dtype cannot decide this on its own (a CT is int16 and so is nothing else about it) so
     the heuristic only ever claims uint8 and ``interpolation`` covers everything it cannot know.
 
     Parametrised over BOTH gathers on purpose. A declaration honoured by the composed path and
@@ -717,7 +717,7 @@ def test_the_field_components_are_not_reversed(tmp_path: Path) -> None:
 
     One component is non-zero and the displacement is a whole number of source voxels on that axis,
     so the answer is the source shifted by an exact voxel count along ONE array axis. Put the
-    displacement on z instead of x — which is what reversing the component axis does — and the
+    displacement on z instead of x (which is what reversing the component axis does), and the
     result is shifted along the wrong axis, by a different number of voxels, because the spacings
     differ too.
     """
@@ -752,7 +752,7 @@ def test_the_field_components_are_not_reversed(tmp_path: Path) -> None:
 def test_it_interpolates_once_not_twice(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
     """The reason this is one stage: two resamples cost detail that the second cannot put back.
 
-    The two-pass baseline is built entirely in SimpleITK — resample onto the grid, then warp on it —
+    The two-pass baseline is built entirely in SimpleITK (resample onto the grid, then warp on it)
     so what it costs is measured independently of anything here. On a high-frequency source that
     cost is a large fraction of the range, while this stage sits at float rounding from the one-pass
     result. Asserted as an ORDER OF MAGNITUDE, not a number: the point is the gap, not its digits.
@@ -859,7 +859,7 @@ def test_the_warped_run_never_assembles_the_volume(warped: tuple[Dataset, Datase
 
 def test_a_field_with_no_bound_still_streams(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:
     """The run sizes each region's pull from the field
-    values it reads for sampling: the plan prices the field as zero -- a pricing gap, not a fallback."""
+    values it reads for sampling: the plan prices the field as zero: a pricing gap, not a fallback."""
     images, fields, _volume = warped
     stage = _warping(images, fields)
     assert stage.patch_locality(_attributes(_SOURCE_ORIGIN, _SOURCE_SPACING)).kind is LocalityKind.REGRID
@@ -902,7 +902,7 @@ def test_fields_can_live_beside_the_cases(warped: tuple[Dataset, Dataset, np.nda
     """No 'field' path: the fields are a group of the run's own roots, one entry per case.
 
     That is how a cohort registered in place stores them, and it is the same answer as naming the
-    store explicitly — which is what makes it a shorthand rather than a second code path.
+    store explicitly, which is what makes it a shorthand rather than a second code path.
     """
     images, fields, volume = warped
     images.write("DVF", _CASE, _displacement(), _attributes(_FIELD_ORIGIN, _FIELD_SPACING))
@@ -920,17 +920,17 @@ def test_the_two_gathers_obey_the_same_rules_through_an_identity_field(tmp_path:
     """One arithmetic, two loops: per-axis maps, and eight corners at a coordinate volume.
 
     The separable loop cannot serve a displacement (a displacement is not separable) and the corner
-    gather is far the slower way to do a map that is -- measured at 43x versus 660x of
+    gather is far the slower way to do a map that is: measured at 43x versus 660x of
     ``F.interpolate`` on a CT. So both exist, and both have to obey the same inside interval, the
     same tap clamp and the same fill. A ZERO field is where that is checkable: the composed path
     reduces to the grid change alone, so the two must land on the same voxels.
 
-    WHICH VOXELS ARE FILL is asserted exactly, because that is the rule a drifting loop drops -- one
+    WHICH VOXELS ARE FILL is asserted exactly, because that is the rule a drifting loop drops: one
     of them quietly widening its domain by half a voxel is invisible in the values and obvious here.
     The VALUES agree to float rounding and not bit for bit: the separable loop sums the tensor
     product axis by axis and the other corner by corner, which is the same sum in a different order.
-    Nothing needs them identical -- a map either factorises or it does not, so no case is ever served
-    by both -- and the equality that must be exact, a streamed region against the whole volume, is
+    Nothing needs them identical: a map either factorises or it does not, so no case is ever served
+    by both, and the equality that must be exact, a streamed region against the whole volume, is
     asserted where it lives.
     """
     images = Dataset(tmp_path / "Images", "h5")

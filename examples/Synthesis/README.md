@@ -8,7 +8,7 @@ This example shows how to run a complete **medical image synthesis workflow** wi
 data, trains, predicts, evaluates, and plots the synthetic CT beside the real one.
 
 > The generator wraps `segmentation_models_pytorch`, which the base install does not pull in. Install
-> `konfai[smp]` before running from the command line — the notebook does it for you.
+> `konfai[smp]` before running from the command line; the notebook does it for you.
 
 It is the best starting point if you want to understand how KonfAI combines:
 
@@ -45,17 +45,17 @@ examples/Synthesis/
 
 ## Two ways to define the model
 
-The **baseline generator** ships in both forms, like the Segmentation UNet — swap the
+The **baseline generator** ships in both forms, like the Segmentation UNet: swap the
 `classpath` in `Config.yml`, they are weight-identical and both expose the `Head:Tanh` output:
 
 ```yaml
 Model:
   classpath: Model:UNetpp5  # Python form (Model.py)
-  # classpath: UNetpp.yml   # declarative form — the same smp UNet++ + Tanh, node-for-node
+  # classpath: UNetpp.yml   # declarative form: the same smp UNet++ + Tanh, node-for-node
 ```
 
 `UNetpp5` wraps `segmentation_models_pytorch.UnetPlusPlus` (a ResNet-34-encoder UNet++, ~117
-conv layers) with a `Tanh` head, so `UNetpp.yml` is large — it shows that **even an
+conv layers) with a `Tanh` head, so `UNetpp.yml` is large, and it shows that **even an
 encoder-backed model can be fully declarative**. In practice `classpath: segmentation.smp.SMP`
 (with `arch`/`encoder_name` as parameters) is the compact way to declare the smp backbone.
 
@@ -75,14 +75,14 @@ on a GPU and reaches roughly
 | SSIM | ~0.92  |
 
 Soft tissue, lungs and bone all come out at plausible Hounsfield values; the residual error sits on
-bone edges and the sharpest air/tissue boundaries. That is a demonstration, not a trained model — real
+bone edges and the sharpest air/tissue boundaries. That is a demonstration, not a trained model; real
 training is 100 epochs on far more than two cases, and `epochs` in `Config.yml` is the knob.
 
 ### The prediction transforms must mirror the training transforms
 
 This is worth knowing before you adapt the example. `Config.yml` standardizes the MR on **whole-volume**
 statistics (`Standardize` with `mask: None`). If `Prediction.yml` standardizes inside the body mask
-instead — which looks like the more careful choice — the network receives an intensity scale it never
+instead, which looks like the more careful choice, the network receives an intensity scale it never
 saw in training, and the same checkpoint scores **409 HU instead of 98**: four times worse, with no
 error message anywhere. Training with the masked statistics instead is not the answer either; measured
 on this data it lands at 143 HU.

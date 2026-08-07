@@ -1,7 +1,7 @@
 # Ecosystem
 
 KonfAI is the core, but several packages and tools sit around it. This page maps
-how they relate and — importantly — **what is shipped versus what is external
+how they relate and (importantly) **what is shipped versus what is external
 or experimental**, so you know what you can rely on today.
 
 ## The map
@@ -119,8 +119,8 @@ or experimental**, so you know what you can rely on today.
 | Piece | Status | What it is |
 | --- | --- | --- |
 | **`konfai`** | ✅ Shipped (PyPI) | The core framework: config-by-reflection, lazy patch-based data, model graphs, and the three YAML workflows. This is what the rest of this documentation is about. |
-| **`konfai-apps`** | ✅ Shipped (PyPI, own CI) | Packages a mature workflow as a reusable **app** — see {doc}`../usage/apps`. |
-| **`konfai-mcp`** | ✅ Shipped (PyPI, own CI) | Operates KonfAI workflows and Apps through structured tools for dataset inspection, config authoring and validation, job execution, monitoring, metrics, and comparison — see {doc}`../usage/mcp`. |
+| **`konfai-apps`** | ✅ Shipped (PyPI, own CI) | Packages a mature workflow as a reusable **app**: see {doc}`../usage/apps`. |
+| **`konfai-mcp`** | ✅ Shipped (PyPI, own CI) | Operates KonfAI workflows and Apps through structured tools for dataset inspection, config authoring and validation, job execution, monitoring, metrics, and comparison: see {doc}`../usage/mcp`. |
 | **App bundles** (`apps/`) | ✅ Shipped (thin wrappers) | Ready-to-use CLI shims: `impact-synth-konfai`, `impact-seg-konfai`, `mrsegmentator-konfai`, `totalsegmentator-konfai`. Config + weights live on Hugging Face and download on first run. |
 | **`impact-reg-konfai`** | 🟡 Shipped, heaviest | A full multi-preset registration orchestrator with Elastix, ConvexAdam, and FireANTs engines behind the IMPACT semantic metric, **not** a thin wrapper. The most moving parts of the five. |
 | **Demo data & models (HF)** | ✅ Published | `VBoussot/konfai-demo` (demo dataset), plus per-app model repos (`ImpactSynth`, `ImpactSeg`, `TotalSegmentator-KonfAI`, `MRSegmentator-KonfAI`, `ImpactReg`) and `impact-torchscript-models` (the SAM2.1 backbone behind `IMPACTSynth`). |
@@ -152,10 +152,10 @@ wrappers add `pipeline`. See {doc}`../usage/apps` for how to run them and
 **Trust model.** Resolving a `konfai-apps` app copies and imports its `.py`
 files (arbitrary code) and pip-installs its `requirements.txt` by default
 (opt out with `KONFAI_APPS_INSTALL_REQUIREMENTS=0`), so only resolve apps
-from sources you trust — see {doc}`../reference/python-api`.
+from sources you trust: see {doc}`../reference/python-api`.
 ```
 
 ## See also
 
-- {doc}`../usage/apps` — what an app is and how to run apps from the CLI
-- {doc}`../reference/cli` — the full flag reference for the app CLIs
+- {doc}`../usage/apps`: what an app is and how to run apps from the CLI
+- {doc}`../reference/cli`: the full flag reference for the app CLIs

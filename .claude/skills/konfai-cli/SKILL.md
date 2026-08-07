@@ -17,14 +17,14 @@ description: >-
 
 KonfAI is **config-driven**: a model, its data pipeline, losses/metrics, optimizer, and the
 whole train/predict/evaluate workflow are described in **YAML** and mapped onto Python objects
-by a reflection engine — no experiment-specific code for standard tasks. **The config is the
+by a reflection engine: no experiment-specific code for standard tasks. **The config is the
 experiment**, and every run leaves a fully-resolved config on disk.
 
 There are two command-line surfaces:
 
-- **`konfai`** — the low-level engine: author a config and `TRAIN` / `RESUME` / `PREDICTION` /
+- **`konfai`**: the low-level engine: author a config and `TRAIN` / `RESUME` / `PREDICTION` /
   `EVALUATION`. This is the main path for building and training a workflow.
-- **`konfai-apps`** — the packaged-app runtime: run inference/evaluation with an already-trained
+- **`konfai-apps`**: the packaged-app runtime: run inference/evaluation with an already-trained
   model bundled as an *app* (local, HuggingFace, or a remote server). Use this to *run* a
   stable model, not to build one. See [references/apps-layer.md](references/apps-layer.md).
 
@@ -40,13 +40,13 @@ Each workflow maps to one file with one mandatory root key:
 | `TRANSFORM` | `Transform.yml` | `Transformer:` |
 
 `TRANSFORM` sits outside the loop: it runs no model. It reads a dataset, applies a chain, and writes
-a dataset — resampling a cohort onto one grid, folding it into a template (`Reduce`, N→1), expanding
+a dataset: resampling a cohort onto one grid, folding it into a template (`Reduce`, N→1), expanding
 each case into drawn copies (`Expand`, 1→N). A chain may still embed a `KonfAIInference` stage, so
 "no model" means no top-level one. It takes no `-tb`, and `--plan` prints what a run would do and
-stops without writing the deliverable — it does probe each destination with a real region-write it
+stops without writing the deliverable, it does probe each destination with a real region-write it
 then removes, so the output store may be created.
 
-**Don't write configs from scratch — copy a runnable template from `examples/`** (Segmentation,
+**Don't write configs from scratch: copy a runnable template from `examples/`** (Segmentation,
 Synthesis, Registration or Transform) and adapt it. Then:
 
 ```bash
@@ -71,20 +71,20 @@ Segmentation, Synthesis and Registration recipes, and
 ## Rules that keep runs correct
 
 - **Run from the directory that holds the configs** (and `Dataset/`). KonfAI resolves relative
-  paths — configs, `Dataset/`, output dirs, and local `File:Class` classpaths — against the
+  paths (configs, `Dataset/`, output dirs, and local `File:Class` classpaths) against the
   current working directory (it prepends CWD to `sys.path`).
 - **Reading a config rewrites it on disk.** A run materialises resolved defaults back into the
   YAML (`None` becomes the literal `"None"`). Expect a post-run git diff; keep configs under
   version control. There is no read-only path. (Details:
   [references/workspace-and-runtime.md](references/workspace-and-runtime.md).)
 - **`train_name` is the join key.** `Prediction.yml` and `Evaluation.yml` must use the *same*
-  `train_name` as the training run whose checkpoints/predictions they consume — the most common
+  `train_name` as the training run whose checkpoints/predictions they consume: the most common
   failure is "evaluation can't find predictions" from a mismatched `train_name`.
 - **`--gpu` and `--cpu` are mutually exclusive**; with neither, it runs on CPU. `--gpu` ids are
   validated against the visible CUDA devices. `--cpu N` needs `N > 0`.
 - **Install the imaging extra** to read `.mha` / medical formats: `pip install "konfai[imaging]"`
   (a bare install fails on the first data read).
-- **`-y/--overwrite` overwrites existing outputs without prompting** — a destructive flag;
+- **`-y/--overwrite` overwrites existing outputs without prompting**: a destructive flag;
   don't add it blindly when a prior run's outputs matter. `RESUME` needs `--model`; `PREDICTION`
   needs `--models`.
 - **Custom models/losses/transforms** live in a `.py` beside the config and are referenced by
@@ -110,12 +110,16 @@ are thin task-named wrappers.
 
 ## Reference material (load on demand)
 
-- [references/cli-reference.md](references/cli-reference.md) — the `konfai` / `konfai-cluster` commands and every flag.
-- [references/config-authoring.md](references/config-authoring.md) — writing KonfAI YAML: files, root keys, classpaths, conventions, the mutation invariant.
-- [references/examples-and-recipes.md](references/examples-and-recipes.md) — verified Segmentation + Synthesis + Registration train→predict→evaluate recipes.
-- [references/workspace-and-runtime.md](references/workspace-and-runtime.md) — outputs keyed by `train_name`, env vars, DDP, SLURM, config modes.
-- [references/apps-layer.md](references/apps-layer.md) — `konfai-apps` / `konfai-apps-server`, app resolution, trust model, published bundles.
+- [references/cli-reference.md](references/cli-reference.md): the `konfai` / `konfai-cluster` commands and every flag.
+- [references/config-authoring.md](references/config-authoring.md): writing KonfAI YAML: files, root keys, classpaths, conventions, the mutation invariant.
+- [references/examples-and-recipes.md](references/examples-and-recipes.md): verified Segmentation + Synthesis + Registration train→predict→evaluate recipes.
+- [references/workspace-and-runtime.md](references/workspace-and-runtime.md): outputs keyed by `train_name`, env vars, DDP, SLURM, config modes.
+- [references/apps-layer.md](references/apps-layer.md): `konfai-apps` / `konfai-apps-server`, app resolution, trust model, published bundles.
+
+The five workflows are also **Python callables** (`konfai.transform` / `plan_transform` /
+`evaluate` / `predict` / `train`), with structured results and a copy-the-caller's-config contract;
+see `docs/source/usage/python-workflows.md` when a script or notebook fits better than the CLI.
 
 The authoritative user-facing catalogue lives in `docs/source/config_guide/` (`training.md`,
-`prediction.md`, `evaluation.md`) and `docs/source/reference/cli.md`; `AGENTS.md` is the source
-of truth for framework internals and conventions.
+`prediction.md`, `evaluation.md`, `transform.md`) and `docs/source/reference/cli.md`; `AGENTS.md`
+is the source of truth for framework internals and conventions.

@@ -17,8 +17,8 @@
 """Tests for ``konfai.predictor``: the background writer overlaps disk writes with the prediction
 loop, byte-identically.
 
-Writes are submitted to one worker per output dataset — in order, bounded queue, failures kept and
-re-raised — but only when the destination serves disjoint files per entry
+Writes are submitted to one worker per output dataset (in order, bounded queue, failures kept and
+re-raised), but only when the destination serves disjoint files per entry
 (``Dataset.concurrent_write_safe``): a single-store backend (h5, zarr) stays inline, so no store is
 ever written from two threads. Pure ``threading``/``queue``, no fork and no signals, so the behaviour
 is the same on Linux, macOS and Windows."""
@@ -37,7 +37,7 @@ def test_async_writer_runs_in_order_and_surfaces_failures() -> None:
     writer.submit(lambda: done.append(1))
     writer.submit(lambda: (_ for _ in ()).throw(PredictorError("destination died")))
     # Operations submitted after a failure drain unexecuted; the failure surfaces at the LATEST at
-    # close(), possibly earlier at this submit if the worker already recorded it -- accept it wherever
+    # close(), possibly earlier at this submit if the worker already recorded it: accept it wherever
     # it lands, so a run can never end with a write silently missing.
     with pytest.raises(PredictorError, match="destination died"):
         writer.submit(lambda: done.append(2))
@@ -52,9 +52,9 @@ def test_concurrent_write_safety_is_declared_per_backend(tmp_path) -> None:
 
 
 def test_async_streamed_writes_match_the_inline_reference(tmp_path, monkeypatch, drive_tta) -> None:
-    # A per-file destination goes through the background writer (forced here — the automatic gate
+    # A per-file destination goes through the background writer (forced here: the automatic gate
     # also requires a GPU-placed output); the kill-switch runs the same store inline. Same
-    # operations, same order — the files must match bit for bit.
+    # operations, same order: the files must match bit for bit.
     used: list[int] = []
     submit = _AsyncWriter.submit
     monkeypatch.setattr(_AsyncWriter, "submit", lambda self, op: (used.append(1), submit(self, op))[1])

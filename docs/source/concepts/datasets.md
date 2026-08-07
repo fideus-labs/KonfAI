@@ -47,20 +47,20 @@ OmeDataset/CASE_001/CT.ome.zarr/
 
 Data handling is split across two packages with distinct responsibilities.
 
-**`konfai/utils/` — format readers.** These modules turn an on-disk file into a
+**`konfai/utils/`: format readers.** These modules turn an on-disk file into a
 channel-first array plus its physical geometry; they are the only place that
 knows about file formats, and the per-backend table (format tokens, optional
 extras, API details) lives in {doc}`../reference/components/storage-backends`.
 
-**`konfai/data/` — PyTorch datasets and dataloaders.** These modules build the
+**`konfai/data/`: PyTorch datasets and dataloaders.** These modules build the
 `torch.utils.data.Dataset` / `DataLoader` machinery on top of the readers:
 
 | Module | Role |
 | --- | --- |
 | `konfai/data/data_manager.py` | grouped `Data*` datasets, `GroupTransform`, subset/validation splitting |
-| `konfai/data/augmentation.py` | `DataAugmentationsList` — on-the-fly augmentation |
-| `konfai/data/patching.py` | `DatasetPatch` — patch extraction and reassembly |
-| `konfai/data/case_reduction.py` | `CaseReduction`, `ReductionPlan` — the N-to-1 engine behind a `Reduce` stage |
+| `konfai/data/augmentation.py` | `DataAugmentationsList`: on-the-fly augmentation |
+| `konfai/data/patching.py` | `DatasetPatch`: patch extraction and reassembly |
+| `konfai/data/case_reduction.py` | `CaseReduction`, `ReductionPlan`: the N-to-1 engine behind a `Reduce` stage |
 | `konfai/data/reduction.py` | `Reduction` and the built-in operators `Mean`, `Median`, `Concat` |
 
 ### Patch-native execution from storage
@@ -79,21 +79,21 @@ the spatial-planner rules.
 
 ### The `Attribute` class
 
-Reading a medical image is not just reading pixels — the physical geometry must
+Reading a medical image is not just reading pixels: the physical geometry must
 travel with the array so predictions can be written back into the same space.
 `konfai.utils.dataset.Attribute` is the container that carries it.
 
 `Attribute` is a `dict[str, Any]` subclass that stores, among other metadata, the
 three values that define an image in physical space:
 
-- **`Origin`** — physical position of the first voxel
-- **`Spacing`** — voxel size along each axis
-- **`Direction`** — the flattened direction-cosine matrix
+- **`Origin`**: physical position of the first voxel
+- **`Spacing`**: voxel size along each axis
+- **`Direction`**: the flattened direction-cosine matrix
 
 Numeric values are stored as strings and recovered with `get_np_array(key)` or
 `get_tensor(key)`. Keys use a stack-like naming scheme (`Origin_0`, `Origin_1`,
 …) so a chain of transforms can push successive geometries and pop them to invert
-the chain — which is how KonfAI restores the original geometry when exporting a
+the chain, which is how KonfAI restores the original geometry when exporting a
 prediction.
 
 ## `groups_src` and `groups_dest`
@@ -212,7 +212,7 @@ network itself. See {doc}`model-graph`.
 
 ## Next steps
 
-- {doc}`model-graph` — to attach losses and metrics that target these groups
-- {doc}`../reference/components/storage-backends` — format tokens, optional extras, and the DICOM / OME-Zarr APIs
-- {doc}`../usage/large-images` — regional execution, bounded fallback, and tuning
-- {doc}`../config_guide/training` — the `Dataset` keys in the context of a full training config
+- {doc}`model-graph`: to attach losses and metrics that target these groups
+- {doc}`../reference/components/storage-backends`: format tokens, optional extras, and the DICOM / OME-Zarr APIs
+- {doc}`../usage/large-images`: regional execution, bounded fallback, and tuning
+- {doc}`../config_guide/training`: the `Dataset` keys in the context of a full training config

@@ -233,7 +233,7 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
                 p.chmod(p.stat().st_mode | stat.S_IEXEC)
 
     # LibTorch comes from the environment's pip ``torch`` at runtime (elastix_engine.py adds torch's lib/ dir
-    # to the loader path) -- the same LibTorch the elastix asset is built against in CI, so elastix and the
+    # to the loader path): the same LibTorch the elastix asset is built against in CI, so elastix and the
     # rest of the stack stay on one torch. The elastix asset is the only download here.
 
 

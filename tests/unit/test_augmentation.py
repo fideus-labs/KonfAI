@@ -57,7 +57,7 @@ def test_hue_axis_rotation_preserves_luma() -> None:
 
 def test_saturation_matrix_scales_chroma_not_luma() -> None:
     # v vT + (I - v vT) * s : s=1 is identity, s=0 collapses a colour to its luma (greyscale), and luma is
-    # preserved for any s -- (v vT + (I - v vT)) * s = I * s would be a uniform gain instead.
+    # preserved for any s: (v vT + (I - v vT)) * s = I * s would be a uniform gain instead.
     v = torch.tensor([1.0, 1.0, 1.0, 0.0]) / torch.sqrt(torch.tensor(3.0))
     colour = torch.tensor([0.8, 0.2, 0.5, 0.0])
     luma = colour[:3].mean()
@@ -140,7 +140,7 @@ def test_intensity_augmentation_inverses_are_identity():
 
 
 # --------------------------------------------------------------------------------------
-# Flip — vector-field awareness
+# Flip: vector-field awareness
 # --------------------------------------------------------------------------------------
 
 
@@ -259,7 +259,7 @@ def test_rotate_quarter_is_an_exact_bijection_on_a_cubic_grid(seed: int) -> None
     # A multiple of 90 degrees about each axis composes to a signed permutation of the axes, so it only
     # moves voxels: the sorted multiset of values must come back bit for bit. This is what
     # LocalityKind.preserves_statistics lets a later stage trust, and it is strictly stronger than
-    # comparing statistics -- a sampled turn can leave one looking right while moving the values under it.
+    # comparing statistics: a sampled turn can leave one looking right while moving the values under it.
     torch.manual_seed(seed)
     volume = _rotate_volume((12, 12, 12))
     rotate = Rotate(is_quarter=True)
@@ -292,7 +292,7 @@ def test_rotate_quarter_inverse_restores_the_volume_exactly(seed: int) -> None:
 @pytest.mark.parametrize("seed", range(12))
 def test_rotate_quarter_transposes_a_non_cubic_grid_exactly(seed: int) -> None:
     # A 90 degree turn transposes the two extents it swaps, so the copy it draws is cut on the grid the
-    # turn lands on -- which _state_init announces and the patch grid is loaded from. The remap stays a
+    # turn lands on, which _state_init announces and the patch grid is loaded from. The remap stays a
     # bijection on the voxels whatever the extents: only where they sit changes.
     torch.manual_seed(seed)
     volume = _rotate_volume((9, 10, 11))
@@ -310,7 +310,7 @@ def test_rotate_quarter_transposes_a_non_cubic_grid_exactly(seed: int) -> None:
 
 def test_rotate_declares_orientation_from_the_draw_not_from_the_flag() -> None:
     # The declaration is about the turn that was drawn, so a free range pinned to a right angle is just
-    # as exact as a quarter draw, and a free angle is not -- whatever the extents it was drawn for.
+    # as exact as a quarter draw, and a free angle is not: whatever the extents it was drawn for.
     torch.manual_seed(0)
     right_angle = Rotate(a_min=90.0, a_max=90.0)
     right_angle._state_init(0, [[9, 10, 11]], [Attribute()])

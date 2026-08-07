@@ -13,8 +13,8 @@
 # limitations under the License.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""``Network.downsampling_factor`` reads the per-axis input divisor off the graph -- the coarsest
-downsampling the branch register reaches -- used to size a free patch axis to a valid extent for the
+"""``Network.downsampling_factor`` reads the per-axis input divisor off the graph (the coarsest
+downsampling the branch register reaches) used to size a free patch axis to a valid extent for the
 model. Parallel branches (a residual shortcut beside the main path) reduce the same level once."""
 
 import pytest
@@ -73,7 +73,7 @@ def test_downsampling_factor_counts_a_main_path_avgpool_but_not_the_decoder_upsa
 
 def test_downsampling_factor_does_not_inflate_a_parallel_residual_avgpool():
     """A residual shortcut's AvgPool runs PARALLEL to the strided main conv (KonfAI's ResNet-D block):
-    both reduce the same level, merged by the ``Add``. Counting AvgPool must not double-count here — the
+    both reduce the same level, merged by the ``Add``. Counting AvgPool must not double-count here: the
     branch-aware max sees the two parallel /2 branches as one /2, not /4."""
 
     class _ResDBlock(Network):
@@ -88,7 +88,7 @@ def test_downsampling_factor_does_not_inflate_a_parallel_residual_avgpool():
 
 def test_downsampling_factor_counts_a_parallel_strided_shortcut_once():
     """A torchvision-style residual block (KonfAI ``ResBlock``) strides its main conv AND its
-    projection shortcut in parallel -- both reduce the SAME level, merged by the residual ``Add``. A
+    projection shortcut in parallel, both reduce the SAME level, merged by the residual ``Add``. A
     flat ``modules()`` walk multiplies the two strides and double-counts the level; the branch trace
     follows the two parallel branches to their merge and counts it once. Two strided blocks reduce by
     2 each -> [4, 4, 4], not the [16, 16, 16] the double-count would report."""
@@ -104,7 +104,7 @@ def test_downsampling_factor_counts_a_parallel_strided_shortcut_once():
 
 def test_downsampling_factor_sees_inside_an_opaque_wrapped_module():
     """A third-party net added as ONE plain leaf (the smp/torchvision wrapping pattern) hides its graph
-    from the branch trace; its internal strides must still count — a lost factor disables the free-axis
+    from the branch trace; its internal strides must still count: a lost factor disables the free-axis
     rounding entirely and the model crashes on a non-divisible extent."""
 
     class _Wrapped(Network):
@@ -141,7 +141,7 @@ def test_downsampling_factor_seeds_a_nested_block_from_all_its_inputs():
     """A nested routed block reading several branches at DIFFERENT factors must see each at its own
     resolution: if it downsamples a non-first input, seeding every internal branch from the first input
     would undercount that deeper level. Here a block takes a /2 branch and a /8 branch and pools the /8
-    one further to /16 -- that /16 is the graph's coarsest level and must surface."""
+    one further to /16, that /16 is the graph's coarsest level and must surface."""
 
     class _Deeper(Network):
         def __init__(self) -> None:

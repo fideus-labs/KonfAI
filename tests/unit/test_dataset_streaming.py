@@ -520,7 +520,7 @@ def test_dataset_is_dataset_exist_probes_the_entry_without_listing(tmp_path: Pat
 
 
 # --------------------------------------------------------------------------------------
-# patch_transforms — the per-patch opt-in, guarded by the patch-locality contract
+# patch_transforms: the per-patch opt-in, guarded by the patch-locality contract
 #
 # A patch transform only ever sees ONE patch, and that is what asking for it there means: a
 # GLOBAL_STAT transform handed a patch derives the PATCH's statistic, deliberately. The volume's
@@ -622,7 +622,7 @@ def test_patch_transform_standardize_is_independent_of_patch_order(patch_manager
 
 
 def test_patch_transform_is_identical_across_managers(patch_manager) -> None:
-    """A fresh manager per patch -- the per-DataLoader-worker case -- gives the same patch.
+    """A fresh manager per patch (the per-DataLoader-worker case) gives the same patch.
 
     Each worker owns its own cache attribute, so anything a patch records on it makes the result
     depend on which worker drew which patch. Every patch here must be reproducible on its own.
@@ -704,8 +704,8 @@ def test_patch_transform_reads_no_disk_statistic_when_the_volume_is_loaded(
 ) -> None:
     """A loaded volume already holds the answer: the patch path must not go back to disk for it.
 
-    The lazy pass computes Mean/Std from the tensor in hand -- free, and carrying whatever the
-    preceding chain did to it -- so a `read_data_statistics` scan here would be both wasted and a
+    The lazy pass computes Mean/Std from the tensor in hand (free, and carrying whatever the
+    preceding chain did to it), so a `read_data_statistics` scan here would be both wasted and a
     statistic of the wrong (stored) version of the volume.
     """
     volume = _structured_volume()
@@ -858,7 +858,7 @@ def test_patch_transform_shape_guard_is_spatial_not_channel(monkeypatch: pytest.
 
 
 def test_group_transform_prepare_guards_the_shape_of_every_patch_transform(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The guard runs at config time, from prepare() -- not only when someone calls it directly."""
+    """The guard runs at config time, from prepare(): not only when someone calls it directly."""
     monkeypatch.setenv("KONFAI_ROOT", "Trainer")
     monkeypatch.setattr(TransformLoader, "get_transform", lambda *_, **__: _ShapeChangingPointwise())
     group = GroupTransform(transforms=None, patch_transforms={"_ShapeChangingPointwise": TransformLoader()})
@@ -910,7 +910,7 @@ def test_per_patch_global_stat_without_inverse_is_allowed_at_prediction(monkeypa
 # Overlapping patch reads revisit the same chunks: the HDF5 read handle carries a chunk cache
 # sized for imaging chunks (the library default holds barely one), and the OME-Zarr image
 # handle is memoised per (store, level) so a streamed run parses the NGFF metadata once, not
-# once per patch — invalidated by every write path, because a store just written must be
+# once per patch: invalidated by every write path, because a store just written must be
 # re-read.
 # --------------------------------------------------------------------------------------
 def test_h5_read_handle_carries_an_imaging_sized_chunk_cache(tmp_path) -> None:

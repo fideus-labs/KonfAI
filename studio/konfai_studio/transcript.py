@@ -17,7 +17,7 @@
 
 The browser keeps its copy in localStorage, which is per device: without a server copy, an experiment
 driven on one machine shows empty on every other. The server records every turn it streams and serves
-it back — the browser with the shorter history adopts it.
+it back: the browser with the shorter history adopts it.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def note_event(parts: list[dict[str, Any]], event: dict[str, Any]) -> None:
 
 
 def record_turn(session_dir: Path, user_text: str, parts: list[dict[str, Any]]) -> None:
-    """Append one turn, atomically. A tool still 'running' here was cut by an interrupt — recorded as
+    """Append one turn, atomically. A tool still 'running' here was cut by an interrupt: recorded as
     such rather than left spinning forever on the browser that reloads it."""
     for part in parts:
         if part.get("kind") == "tool" and part.get("status") == "running":

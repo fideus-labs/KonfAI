@@ -5,7 +5,7 @@ import { readSSE } from "./sse";
 
 export type Point = { x: number; y: number };
 
-// tqdm progress, parsed once by konfai-mcp (konfai_mcp.live_parse) and relayed structured — the front
+// tqdm progress, parsed once by konfai-mcp (konfai_mcp.live_parse) and relayed structured: the front
 // never re-parses a log line. Present during data-caching and training/validation/prediction/evaluation.
 export type Progress = {
   percent: number;
@@ -17,12 +17,12 @@ export type Progress = {
   rate_unit: string;
 };
 
-// One metric's continuous curve across the whole run, on the global-iteration axis — the TensorBoard
+// One metric's continuous curve across the whole run, on the global-iteration axis: the TensorBoard
 // shape. `label` is the line's identity within its chart (Training vs Validation vs Metric TRAIN…). `at`
 // is the wall-clock of the last point (when it was produced, for the feed timestamps).
 export type Series = { label: string; stage: string; points: Point[]; at: number };
 
-// The live "now" of a run — the one thing TensorBoard lacks: the current phase, its progress bar, and the
+// The live "now" of a run: the one thing TensorBoard lacks: the current phase, its progress bar, and the
 // host resources while it runs (RAM/CPU during caching, GPU memory + it/s during training).
 export type LiveStatus = {
   label: string;
@@ -39,13 +39,13 @@ export type LiveStatus = {
 };
 
 // One run of the experiment (a runtime-log directory: a training MR2CT_01, a prediction, an evaluation…).
-// Runs of every kind accumulate and persist — launching a prediction never clears the training runs.
+// Runs of every kind accumulate and persist: launching a prediction never clears the training runs.
 // Metrics accumulate into one continuous series per (label, metric) so a curve spans the whole run.
 export type RunFeed = {
   key: string; // unique across kinds: `${run} ${kind}` (a train and a prediction can share a run name)
   run: string; // display name (train_name)
   kind: string;
-  base: string; // run dir relative to the session root — "Statistics/<run>" or "<app_output>-<hash>/…/<run>"
+  base: string; // run dir relative to the session root: "Statistics/<run>" or "<app_output>-<hash>/…/<run>"
   data: string; // where the run's DATA is, when that is not its run dir (a transform writes elsewhere); "" otherwise
   status: string;
   startedAt: number;
@@ -54,12 +54,12 @@ export type RunFeed = {
 };
 
 // One live subscription to the active task. The whole runtime log is replayed on connect, so the curves
-// rebuild in full — the feed survives a reload or a server restart.
+// rebuild in full: the feed survives a reload or a server restart.
 export type JobStream = {
   lines: string[]; // console output (errors only)
-  runs: RunFeed[]; // every run of the experiment, newest first — one tab each
+  runs: RunFeed[]; // every run of the experiment, newest first, one tab each
   activeRun: string; // key of the latest job's run (the tab to default to)
-  run: string; // latest job's run name — for the header badge
+  run: string; // latest job's run name, for the header badge
   status: string;
   kind: string;
   metricNonce: number; // bumps the first time a metric arrives
@@ -70,7 +70,7 @@ const POINT_CAP = 1200; // per series; the full history lives in TensorBoard (Cu
 const RUN_CAP = 8;
 
 // Append a point, replacing the last one when it shares the x (a validation pass logs several lines at the
-// same training iteration — keep the converged value, one marker per pass).
+// same training iteration: keep the converged value, one marker per pass).
 function appendPoint(points: Point[], x: number, y: number): Point[] {
   const last = points[points.length - 1];
   if (last && last.x === x) return [...points.slice(0, -1), { x, y }];
@@ -87,7 +87,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
   const [metricNonce, setMetricNonce] = useState(0);
   const [doneNonce, setDoneNonce] = useState(0);
   const sawMetric = useRef(false);
-  const activeKeyRef = useRef(""); // key of the latest job's run — keeps the header status fresh when it ends
+  const activeKeyRef = useRef(""); // key of the latest job's run: keeps the header status fresh when it ends
   const itCount = useRef<Record<string, number>>({}); // per run: monotonic training-iteration counter (the curve x-axis)
   const ramTick = useRef<Record<string, number>>({}); // per run: monotonic x for the caching RAM trace
   const alive = useRef<Set<string>>(new Set()); // runs that have actually produced progress or metrics
@@ -108,7 +108,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
 
     const rkey = (r: string, k: string) => `${r} ${k}`; // unique run identity across kinds
 
-    // The tab opens on the latest job, which may be one that has not written a line yet — a job still
+    // The tab opens on the latest job, which may be one that has not written a line yet: a job still
     // warming up, or one that died before it could. Sitting there shows nothing while another run is
     // streaming beside it, so the first run to actually produce output takes the tab from an empty one.
     const cameAlive = (key: string) => {
@@ -120,8 +120,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
       }
     };
 
-    // Find-or-create a run bucket by its (run, kind) key, apply `mutate` to a shallow copy. Runs persist —
-    // buckets are only cleared when the subscription resets (a different experiment).
+    // Find-or-create a run bucket by its (run, kind) key, apply `mutate` to a shallow copy. Runs persist: // buckets are only cleared when the subscription resets (a different experiment).
     const withRun = (r: string, k: string, mutate: (feed: RunFeed) => RunFeed) =>
       setRuns((prev) => {
         const key = rkey(r, k);
@@ -184,7 +183,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
       for await (const ev of readSSE(resp)) {
         seen();
         if (ev.type === "job") {
-          // The latest job — sets the header + the default tab. It never clears runs: a new job (a
+          // The latest job: sets the header + the default tab. It never clears runs: a new job (a
           // prediction after a training) adds a run, it doesn't wipe the ones already followed.
           activeKeyRef.current = rkey(ev.run || "", ev.kind || "");
           setActiveRun(activeKeyRef.current);
@@ -193,7 +192,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
           setStatus(ev.status || "running");
           setLines([]); // console is per-job
         } else if (ev.type === "run") {
-          // A run of the experiment was announced or discovered — make sure its tab exists, even before
+          // A run of the experiment was announced or discovered: make sure its tab exists, even before
           // it has produced a single metric.
           withRun(ev.run, ev.kind || "", (r) => ({
             ...r,
@@ -228,7 +227,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
             // The x-axis depends on the stage. Training: a monotonic iteration counter (the tqdm step
             // resets each epoch, so we count training lines instead). Validation of a training: pinned to
             // that training iteration, so its pass collapses to one point on the training axis. Evaluation
-            // / prediction: the case index (progress.step) — a running curve over cases, one point each.
+            // / prediction: the case index (progress.step): a running curve over cases, one point each.
             let x: number;
             if (stage === "training") {
               x = itCount.current[key] = (itCount.current[key] ?? 0) + 1;
@@ -262,8 +261,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
       }
     }
 
-    // The server pings every 10s. A stream that has gone quiet for far longer is not idle, it is dead —
-    // a connection the browser is still holding open against a server that restarted under it, which no
+    // The server pings every 10s. A stream that has gone quiet for far longer is not idle, it is dead: // a connection the browser is still holding open against a server that restarted under it, which no
     // amount of waiting recovers. Dropping it makes the loop below reconnect.
     let lastEvent = Date.now();
     const watchdog = setInterval(() => {
@@ -280,7 +278,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
         if (stopped) return;
         ctrl = new AbortController(); // the old one is spent, aborted by the watchdog or by the drop
         lastEvent = Date.now();
-        await new Promise((r) => setTimeout(r, 1500)); // stream dropped (server restart?) — reconnect
+        await new Promise((r) => setTimeout(r, 1500)); // stream dropped (server restart?): reconnect
       }
     })();
 

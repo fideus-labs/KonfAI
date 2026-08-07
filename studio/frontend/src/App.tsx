@@ -24,11 +24,11 @@ type Gpu = {
 type Ram = { used_gb: number; total_gb: number };
 type Brain = { id: string; label: string; detail: string; available: boolean; models?: { id: string; label: string }[] };
 
-// A draft "experiment" with no server session yet — the first prompt materialises it.
+// A draft "experiment" with no server session yet: the first prompt materialises it.
 const NEW = "__new__";
 
 // On a token-required deployment, sign-out / session-expiry must not leave chat transcripts behind in
-// localStorage (Chat.tsx persists the last messages per experiment) — they'd be readable on a shared
+// localStorage (Chat.tsx persists the last messages per experiment): they'd be readable on a shared
 // browser without the token. Clear the per-experiment chat keys; UI prefs (split, rail width) stay.
 function purgeStudioChat() {
   for (const k of Object.keys(localStorage)) if (k.startsWith("konfai-studio:chat:")) localStorage.removeItem(k);
@@ -99,7 +99,7 @@ function Meter({
   used: number | null;
   total: number | null;
   title?: string;
-  // What the click reveals, one sparkline each — a GPU has two things worth watching over time (how
+  // What the click reveals, one sparkline each: a GPU has two things worth watching over time (how
   // busy it is, and how full), RAM and CPU only one.
   traces?: { label: string; points: number[] }[];
   // A meter reads "used/total GB" by default; CPU has no total to speak of, so it renders its own text.
@@ -186,7 +186,7 @@ export default function App() {
 function Studio({ remote }: { remote: boolean }) {
   const [status, setStatus] = useState("connecting…");
   const [stopped, setStopped] = useState(false); // the user shut the local server down from the titlebar
-  const [sessions, setSessions] = useState<string[]>([]); // starts empty — no phantom "default" experiment
+  const [sessions, setSessions] = useState<string[]>([]); // starts empty: no phantom "default" experiment
   // The status poll reads this to spot an experiment it does not know yet; a ref, because the poll's
   // interval closure would otherwise forever see the mount-time empty list.
   const sessionsRef = useRef<string[]>([]);
@@ -207,7 +207,7 @@ function Studio({ remote }: { remote: boolean }) {
   }
   const [active, setActive] = useState(NEW);
   // One consolidated map of per-experiment UI state (title, dataset, device, status, volumes, run nonce,
-  // inject prompt, busy) — replaces the dozen parallel `Record<string, X>` maps keyed by session name.
+  // inject prompt, busy): replaces the dozen parallel `Record<string, X>` maps keyed by session name.
   const [ui, setUi] = useState<SessionUi>({});
   const [recent, setRecent] = useState<string[]>([]);
   const [fileRecent, setFileRecent] = useState<string[]>([]);
@@ -224,7 +224,7 @@ function Studio({ remote }: { remote: boolean }) {
   const [modelText, setModelText] = useState(""); // free-text model for the local backend
   const [defaultDevice, setDefaultDevice] = useState("auto"); // what a fresh experiment starts on
   const [menu, setMenu] = useState<{ session: string; x: number; y: number } | null>(null);
-  // What the right-clicked experiment contains — greys out actions that would just fail (fails open to null).
+  // What the right-clicked experiment contains: greys out actions that would just fail (fails open to null).
   const { data: menuCaps } = useJson<{ bundlable?: boolean; exportable?: boolean }>(
     menu ? `/api/experiment?session=${encodeURIComponent(menu.session)}` : "",
     [menu?.session],
@@ -272,7 +272,7 @@ function Studio({ remote }: { remote: boolean }) {
 
   // Generic horizontal drag: attach move/up listeners, restore cursor on release. A full-screen shield is
   // raised for the duration so the drag keeps working over the NiiVue canvas (which otherwise swallows the
-  // mousemove) — resizing must not stall just because a volume is loaded.
+  // mousemove): resizing must not stall just because a volume is loaded.
   function drag(onMove: (x: number) => void) {
     return (e: ReactMouseEvent) => {
       e.preventDefault();
@@ -335,7 +335,7 @@ function Studio({ remote }: { remote: boolean }) {
       .catch(() => {});
   }, []);
 
-  // Live VRAM + RAM in the title bar — a light poll, co-located with training.
+  // Live VRAM + RAM in the title bar: a light poll, co-located with training.
   useEffect(() => {
     const pull = () => {
       getJson("/api/system")
@@ -387,7 +387,7 @@ function Studio({ remote }: { remote: boolean }) {
       .then((d) => {
         setBrains(d.options ?? []);
         setBrain(d.current ?? id);
-        // A model pinned for another backend doesn't carry over — fall back to that backend's default.
+        // A model pinned for another backend doesn't carry over: fall back to that backend's default.
         const models = (d.options ?? []).find((b: Brain) => b.id === (d.current ?? id))?.models ?? [];
         if (models.length && !models.some((m: { id: string }) => m.id === d.model)) chooseModel("");
       })
@@ -416,7 +416,7 @@ function Studio({ remote }: { remote: boolean }) {
     postJson("/api/device", { session, device: val }).catch(() => {});
   }
 
-  // A machine with a GPU should train on it — default a fresh experiment to GPU 0 once, so jobs don't
+  // A machine with a GPU should train on it: default a fresh experiment to GPU 0 once, so jobs don't
   // silently fall back to (very slow) CPU. Per-experiment overrides still win.
   const deviceDefaulted = useRef(false);
   useEffect(() => {
@@ -465,7 +465,7 @@ function Studio({ remote }: { remote: boolean }) {
       .catch(() => {});
   }
 
-  // "+ New experiment" just clears the selection — nothing is created until the first prompt.
+  // "+ New experiment" just clears the selection: nothing is created until the first prompt.
   function newDraft() {
     clearChat(NEW); // a fresh draft, not the leftovers of the last one
     setActive(NEW);
@@ -501,7 +501,7 @@ function Studio({ remote }: { remote: boolean }) {
     const base = `I want to use the app "${ref}". Inspect it with describe_app, then import_app it into the session so it runs as a normal experiment`;
     const text = dataset
       ? `${base} on my dataset at ${dataset}. Check the dataset fits the app (its expected input groups against my dataset's group names), then run_prediction with the imported checkpoints; ask whether I want inference, evaluation, or fine-tuning (run_resume with weights_only).`
-      : `${base} on my dataset — ask me for the dataset path if you don't have it, then run_prediction with the imported checkpoints; ask whether I want inference, evaluation, or fine-tuning (run_resume with weights_only).`;
+      : `${base} on my dataset: ask me for the dataset path if you don't have it, then run_prediction with the imported checkpoints; ask whether I want inference, evaluation, or fine-tuning (run_resume with weights_only).`;
     if (dataset) {
       // Keep it in the recent list too; startExperiment records it per-session so it mounts in the tree.
       postJson("/api/datasets", { path: dataset })
@@ -557,7 +557,7 @@ function Studio({ remote }: { remote: boolean }) {
       .catch(() => setToast("Delete failed."));
   }
 
-  // Bundle/export are deterministic MCP actions (no LLM) — they only need a destination folder.
+  // Bundle/export are deterministic MCP actions (no LLM): they only need a destination folder.
   function runAction(session: string, action: "bundle" | "export", output: string) {
     setPick(null);
     const label = ui[session]?.title ?? session;
@@ -630,7 +630,7 @@ function Studio({ remote }: { remote: boolean }) {
                 ? ` ${g.util_percent}% · ${g.used_gb}/${g.total_gb} GB`
                 : undefined
             }
-            title={`${g.name} — compute load and VRAM`}
+            title={`${g.name}: compute load and VRAM`}
             traces={[
               { label: "load", points: gpuHist[g.index] ?? [] },
               { label: "VRAM", points: gpuVramHist[g.index] ?? [] },
@@ -748,7 +748,7 @@ function Studio({ remote }: { remote: boolean }) {
                     onVolume={(p, c) =>
                       // Two volumes surfaced together is a comparison ("the sCT next to the real CT"):
                       // the second fills the compare pane, which opens itself. The nonce says the
-                      // assistant pointed at something — an event, not a state, so re-showing the same
+                      // assistant pointed at something: an event, not a state, so re-showing the same
                       // volume still brings the viewer forward instead of leaving a run tab in front.
                       setUi((u) =>
                         patchSession(u, s, {
@@ -846,7 +846,7 @@ function Studio({ remote }: { remote: boolean }) {
             <button onClick={() => renameExperiment(menu.session)}>Rename…</button>
             <button
               disabled={menuCaps ? !menuCaps.bundlable : false}
-              title={menuCaps && !menuCaps.bundlable ? "No checkpoints to package yet — train first" : undefined}
+              title={menuCaps && !menuCaps.bundlable ? "No checkpoints to package yet: train first" : undefined}
               onClick={() => {
                 setPick({ session: menu.session, action: "bundle" });
                 setMenu(null);

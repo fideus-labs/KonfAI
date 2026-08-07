@@ -107,7 +107,7 @@ def build_unet_decoder(
     Decoder stage j runs coarsest-first (j=0 upsamples the bottleneck), exactly matching nnU-Net's
     ``UNetDecoder`` execution order: transpose conv (kernel = stride = the matching encoder stride),
     concat ``(transpose_output, encoder_skip)`` in that order, ``n_conv_decoder[j]`` conv blocks,
-    then the stage's 1x1 seg head -- before moving to the next (finer) stage. Heads emit raw logits;
+    then the stage's 1x1 seg head: before moving to the next (finer) stage. Heads emit raw logits;
     ``build_head(j)`` decides which stages get one (deep supervision), and a head's bias is always
     True regardless of ``conv_bias``, like nnU-Net's seg layers.
     """

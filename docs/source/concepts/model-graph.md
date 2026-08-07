@@ -1,13 +1,30 @@
 # Model graph and output naming
 
 This page explains the naming scheme behind every `outputs_criterions` and
-`outputs_dataset` key — how KonfAI addresses individual modules inside a model
+`outputs_dataset` key: how KonfAI addresses individual modules inside a model
 graph. Read it before attaching a loss, metric, or exported prediction to a
 model output.
 
 KonfAI models are not treated as opaque single-output blocks. A model is a
 **named module graph**, and KonfAI lets you attach losses, metrics, and exported
 datasets to specific named outputs.
+
+```{mermaid}
+flowchart TB
+    IN[branch '0', the input]:::branch --> E[UNetBlock_0]:::mod
+    E --> H[Head]:::mod
+    H --> CV[Conv]:::mod
+    CV --> SM[Softmax]:::mod
+    SM --> OUT[out_branch]:::branch
+    CV -. "UNetBlock_0:Head:Conv" .-> L1[[CrossEntropyLoss]]:::crit
+    SM -. "UNetBlock_0:Head:Softmax" .-> L2[[Dice]]:::crit
+
+```
+
+Every module has a dotted path, and that path is the key you write in the config.
+Two losses can read two different outputs of the same head, which is what the
+dashed arrows above are: `Conv` carries the raw logits CrossEntropy expects,
+`Softmax` the probabilities Dice expects.
 
 ## Networks
 
@@ -39,7 +56,7 @@ Losses and metrics are attached through `outputs_criterions`. Keys in this
 mapping correspond to named modules or outputs in the model graph.
 
 Example from the segmentation baseline, which attaches two losses to two different
-outputs of the same head — cross entropy wants logits, Dice wants probabilities:
+outputs of the same head: cross entropy wants logits, Dice wants probabilities:
 
 ```yaml
 outputs_criterions:
@@ -61,12 +78,10 @@ outputs_criterions:
 A bare name (`CrossEntropyLoss`, `Dice`) resolves inside the criterion package;
 `torch:nn:CrossEntropyLoss` would import the torch class directly instead.
 
-```{note}
 An `outputs_criterions` or `outputs_dataset` key must match a module's dotted
-path **exactly** — the `:` separators between graph levels are load-bearing. A
+path **exactly**: the `:` separators between graph levels are load-bearing. A
 key that does not match any module path raises a configuration error at
 runtime.
-```
 
 ## Targets and metrics
 
@@ -142,6 +157,6 @@ This lets you control:
 
 ## Next steps
 
-- {doc}`yaml-model-builder` — define the same named graphs entirely in YAML.
-- {doc}`../usage/custom-models` — write your own `Network` subclass and wire it with `add_module`.
-- {doc}`../config_guide/prediction` — the full `outputs_dataset` reference for inference runs.
+- {doc}`yaml-model-builder`: define the same named graphs entirely in YAML.
+- {doc}`../usage/custom-models`: write your own `Network` subclass and wire it with `add_module`.
+- {doc}`../config_guide/prediction`: the full `outputs_dataset` reference for inference runs.

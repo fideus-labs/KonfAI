@@ -42,7 +42,7 @@ _log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Range:
-    """UI hint attached to a parameter's type — its inclusive numeric bounds.
+    """UI hint attached to a parameter's type: its inclusive numeric bounds.
 
     Use ``Annotated[int, Range(0, 100)]`` (or ``float``) in a config-bound signature: the binder ignores the
     metadata and validates the base type, while a UI reads the bounds to size a spinbox. Introspection-only.
@@ -53,11 +53,11 @@ class Range:
 
 
 class Choices:
-    """UI hint attached to a parameter's type — its allowed values.
+    """UI hint attached to a parameter's type: its allowed values.
 
     Use ``Annotated[str, Choices([...])]`` for a fixed list, or ``Annotated[str, Choices(resolver)]`` where
     ``resolver`` is a zero-arg callable the app owns (e.g. one that lists a model registry it already
-    fetches). ``resolve()`` returns the list — a reader calls it lazily, so the app resolves its own values
+    fetches). ``resolve()`` returns the list: a reader calls it lazily, so the app resolves its own values
     and no tool re-fetches. Introspection-only; the binder ignores it (a value outside the list is still
     accepted, e.g. a local path). For a small FIXED, binder-validated set, prefer ``Literal[...]``.
     """
@@ -330,7 +330,7 @@ _CONFIG_SUPPORTED_TYPES_MESSAGE = (
 def _recordable(value):
     """Normalize a default to the form the config file stores and the callable accepts back.
 
-    An ``Enum`` is recorded as its ``.value``, any other ``type`` as its ``.__name__`` -- the forms
+    An ``Enum`` is recorded as its ``.value``, any other ``type`` as its ``.__name__``: the forms
     the declaring parameter accepts (``LossReduction | str``, ``numpy.dtype | type | str``).
     """
     if isinstance(value, Enum):
@@ -671,11 +671,11 @@ def apply_config(konfai_args: str | None = None):
 
 
 def record_given_arguments(cls: type) -> None:
-    """Make ``cls`` record, on each instance, the constructor arguments AS GIVEN — the binder's mirror.
+    """Make ``cls`` record, on each instance, the constructor arguments AS GIVEN: the binder's mirror.
 
     The binder builds an object from a config subtree; this makes the reverse spelling possible: an
     object built in Python remembers what the caller said (``_konfai_given``), so :mod:`konfai.api`
-    can write a workflow tree from live objects with no second grammar — the recorded kwargs go
+    can write a workflow tree from live objects with no second grammar: the recorded kwargs go
     back through the binder, which stays the one place that validates and resolves defaults.
 
     Only the OUTERMOST constructor records: a subclass delegating to ``super().__init__`` keeps its

@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument(
         "--forwarded-allow-ips",
         default="127.0.0.1",
-        help="proxy IPs allowed to set forwarded headers ('*' trusts any — only behind a trusted proxy)",
+        help="proxy IPs allowed to set forwarded headers ('*' trusts any: only behind a trusted proxy)",
     )
     parser.add_argument(
         "--i-know-this-is-insecure",
@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument(
         "--ssl-certfile",
         default=None,
-        help="TLS certificate (PEM). With --ssl-keyfile, Studio serves https directly — which is also what "
+        help="TLS certificate (PEM). With --ssl-keyfile, Studio serves https directly, which is also what "
         "lets the browser grant the microphone off localhost.",
     )
     parser.add_argument("--ssl-keyfile", default=None, help="TLS private key (PEM), required with --ssl-certfile")
@@ -42,23 +42,23 @@ def main() -> None:
         if value == "":
             # An unset shell variable in the documented one-liner lands here; uvicorn treats "" as
             # no-TLS and comes up in plain http with the token on the wire.
-            parser.error(f"{flag} is empty — an unset shell variable? Studio will not silently fall back to http.")
+            parser.error(f"{flag} is empty: an unset shell variable? Studio will not silently fall back to http.")
     if (args.ssl_certfile is None) != (args.ssl_keyfile is None):
-        parser.error("--ssl-certfile and --ssl-keyfile go together — a certificate cannot serve without its key.")
+        parser.error("--ssl-certfile and --ssl-keyfile go together: a certificate cannot serve without its key.")
 
     loopback = args.host in {"127.0.0.1", "::1", "localhost"}
     authed = bool(os.environ.get("KONFAI_STUDIO_TOKEN", "").strip())
     if not loopback and not authed and not args.i_know_this_is_insecure:
-        # Studio drives arbitrary host compute — exposing it unauthenticated is a remote-shell handout.
+        # Studio drives arbitrary host compute: exposing it unauthenticated is a remote-shell handout.
         # Refuse by default (a printed warning is invisible under systemd); require a deliberate override.
         parser.error(
-            f"refusing to bind {args.host} with no KONFAI_STUDIO_TOKEN — this exposes an unauthenticated UI "
+            f"refusing to bind {args.host} with no KONFAI_STUDIO_TOKEN: this exposes an unauthenticated UI "
             "and host shell to the network. Set a token and serve over TLS (see studio/docs/REMOTE.md), or pass "
             "--i-know-this-is-insecure to override."
         )
     if not loopback and not authed:
         print(
-            f"WARNING: {args.host} bound with no auth (--i-know-this-is-insecure) — anyone on the network has a shell."
+            f"WARNING: {args.host} bound with no auth (--i-know-this-is-insecure): anyone on the network has a shell."
         )
     scheme = "https" if args.ssl_certfile else "http"
     print(f"KonfAI Studio -> {scheme}://{args.host}:{args.port}  (auth {'on' if authed else 'off'})")

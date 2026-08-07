@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""MIND -- Modality-Independent Neighbourhood Descriptor (Heinrich et al. 2012).
+"""MIND. Modality-Independent Neighbourhood Descriptor (Heinrich et al. 2012).
 
 A hand-crafted, parameter-free feature extractor: fixed neighbourhood-shift convolution
 kernels turn an image into a self-similarity descriptor that is robust across modalities.

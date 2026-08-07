@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 // Navigate the compute node's filesystem to pick a folder (or, with onPickFile, a file).
-// Data/outputs never leave the machine — the browser only points Studio at what already lives here.
+// Data/outputs never leave the machine: the browser only points Studio at what already lives here.
 export default function FolderBrowser({
   start,
   onPick,

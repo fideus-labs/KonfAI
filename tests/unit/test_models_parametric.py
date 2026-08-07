@@ -20,7 +20,7 @@ Three families, one CONFIGS table each: ``PlainConvUNet`` and ``ResidualEncoderU
 ``dynamic_network_architectures`` (nnU-Net), and ``UNetPlusPlus`` vs
 ``segmentation_models_pytorch``. Each test transfers a **real** oracle into the KonfAI graph
 through the execution-order bridge and asserts the KonfAI logits are ``torch.allclose`` with the
-reference output -- plus full parameter-count equality (no built-but-unused module gap). The
+reference output: plus full parameter-count equality (no built-but-unused module gap). The
 topologies cover isotropic and anisotropic strides, anisotropic kernels, extra depth, and the
 exact ImpactSeg / ImpactSynth checkpoints, which is the whole point: any oracle checkpoint of
 any depth must load. Structural tests (build + forward + ``load`` weight preservation) run
@@ -55,7 +55,7 @@ pytestmark = pytest.mark.slow
 PLAINCONV_CONFIGS = [
     # 1. 4 stages, isotropic strides, kernel 3, 3D (nnU-Net 3D full-res default depth).
     ("4stage_isotropic", 4, [8, 16, 32, 64], [1, 2, 2, 2], 3, 2, 2, 2),
-    # 2. 5 stages, isotropic strides, 3D (deeper -- proves the stage loop scales).
+    # 2. 5 stages, isotropic strides, 3D (deeper: proves the stage loop scales).
     ("5stage_isotropic", 5, [8, 16, 32, 64, 128], [1, 2, 2, 2, 2], 3, 2, 2, 2),
     # 3. 4 stages with per-axis anisotropic strides (TotalSegmentator / MRSeg style).
     ("4stage_anisotropic", 4, [8, 16, 32, 64], [1, [1, 2, 2], [2, 2, 2], [2, 2, 2]], 3, 2, 2, 2),
@@ -63,7 +63,7 @@ PLAINCONV_CONFIGS = [
     #    (proves the encoder and decoder per-stage loops are independent and correct).
     ("3stage_nconv3", 3, [8, 16, 32], [1, 2, 2], 3, 3, 2, 2),
     # 5. ANISOTROPIC KERNELS decoupled from strides ([1, 3, 3] at stage 0 while stride is [1, 2, 2])
-    #    -- kernel_sizes and strides are independent in nnU-Net; a real anisotropic-spacing plan
+    #: kernel_sizes and strides are independent in nnU-Net; a real anisotropic-spacing plan
     #    uses kernel != 3 and kernel != stride.
     (
         "4stage_anisotropic_kernels",
@@ -75,7 +75,7 @@ PLAINCONV_CONFIGS = [
         2,
         2,
     ),
-    # 6. Per-stage isotropic kernels != 3 (kernel 1 at the stem, kernel 5 deeper) -- proves padding
+    # 6. Per-stage isotropic kernels != 3 (kernel 1 at the stem, kernel 5 deeper): proves padding
     #    is derived from the kernel per stage, not hardcoded.
     ("4stage_mixed_kernels", 4, [8, 16, 32, 64], [1, 2, 2, 2], [1, 3, 5, 3], 2, 2, 2),
 ]
@@ -160,7 +160,7 @@ def test_plainconvunet_is_weight_exact(
 RESENC_CONFIGS = [
     # 1. The EXACT ImpactSeg "body" model: 2D, 5 input channels, 6 stages, 12 classes. This is the
     #    real ResEnc nnU-Net whose checkpoint has 572 state-dict tensors (encoder duplicated under
-    #    decoder.encoder) and 11,845,036 parameters -- see the dedicated test below.
+    #    decoder.encoder) and 11,845,036 parameters: see the dedicated test below.
     (
         "impactseg_2d",
         2,
@@ -249,7 +249,7 @@ def _expected_resenc_leaf_count(
     """Weighted leaves executed by both graphs (deep supervision on): stem + residual stages + decoder.
 
     Each residual block contributes 4 leaves on the main path (conv1+norm1, conv2+norm2); the first
-    block of a stage adds 2 more when the channel count changes (a 1x1 projection conv + norm) -- a
+    block of a stage adds 2 more when the channel count changes (a 1x1 projection conv + norm): a
     stride-only skip is an avgpool, which carries NO weights. The decoder mirrors PlainConvUNet.
     """
     n_blocks_list = [n_blocks] * n_stages if isinstance(n_blocks, int) else list(n_blocks)

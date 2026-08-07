@@ -49,7 +49,7 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
     def fake_run(command, **kwargs):
         captured.append(list(command))
         # Stand in for the preset run: konfai-apps leaves one dataset per output group under -o,
-        # laid out <run>/<group>/<case> -- the shape _find_output_group discovers the group from.
+        # laid out <run>/<group>/<case>: the shape _find_output_group discovers the group from.
         write_preset_output(Path(command[command.index("-o") + 1]) / "reg" / "DVF" / "P000")
         return None
 
@@ -66,7 +66,7 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
 
 def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_preset_output) -> None:
     """The staging and the run workspaces live in a private directory INSIDE the caller's tmp_dir --
-    never under the system TMPDIR -- and the caller's directory is left standing, emptied, when the
+    never under the system TMPDIR, and the caller's directory is left standing, emptied, when the
     run is done. The spread map is the one deliverable, under <output>/uncertainty/."""
     _, first = write_preset_output(tmp_path / "a")
     _, second = write_preset_output(tmp_path / "b")

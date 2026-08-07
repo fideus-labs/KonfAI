@@ -158,7 +158,7 @@ def test_apply_config_keeps_a_none_default_when_the_config_is_silent(write_confi
     """A config that never names an ``X | None = None`` object leaves it None, and records that.
 
     Binding it anyway would construct X and write X's OWN defaults back, so a model declaring "no
-    patch" ran with a patch nobody configured -- and the resolved config, the record of the run,
+    patch" ran with a patch nobody configured, and the resolved config, the record of the run,
     described that phantom instead of what happened.
     """
     config_path = write_config("Root: {}\n")
@@ -358,7 +358,7 @@ def test_apply_config_refuses_a_nested_block_where_a_value_is_expected(write_con
 
     ``str(CommentedMap)`` never fails, so a union containing ``str`` would otherwise bind a nested
     block to its repr, and the failure would surface far from the config line that caused it ("All
-    data entries were excluded" -- a matching symptom for a parsing cause).
+    data entries were excluded": a matching symptom for a parsing cause).
     """
     write_config("Root:\n  subset:\n    CT:\n      - CASE_000\n      - CASE_001\n")
 
@@ -591,7 +591,7 @@ def test_apply_config_keeps_config_path_during_constructor_call(write_config) ->
 
 def test_a_block_type_outside_its_two_names_is_refused(tmp_path: Path, monkeypatch) -> None:
     # A `block_type` str tested only for "Conv" builds the residual model for every other value, a
-    # typo included -- another architecture, another checkpoint, and nothing says so.
+    # typo included: another architecture, another checkpoint, and nothing says so.
     from konfai.models.python.segmentation.UNet import UNet
     from konfai.utils.config import apply_config
 

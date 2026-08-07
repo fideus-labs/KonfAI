@@ -7,7 +7,7 @@ import { getJson, postJson } from "./api";
 import { useJson } from "./useJson";
 import { isRunning, jobState } from "./status";
 
-// A render error in the feed must never blank the whole app — catch it, show a line, and retry when new
+// A render error in the feed must never blank the whole app: catch it, show a line, and retry when new
 // data arrives (resetKey changes on each stream update).
 class FeedBoundary extends Component<{ resetKey: unknown; children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -18,7 +18,7 @@ class FeedBoundary extends Component<{ resetKey: unknown; children: ReactNode },
     if (this.state.failed && prev.resetKey !== this.props.resetKey) this.setState({ failed: false });
   }
   render() {
-    if (this.state.failed) return <div className="feed-sub">A panel hit a display error — recovering…</div>;
+    if (this.state.failed) return <div className="feed-sub">A panel hit a display error: recovering…</div>;
     return this.props.children;
   }
 }
@@ -35,7 +35,7 @@ function curve(points: Point[], w: number, h: number): { line: string; area: str
 }
 
 function fmt(v: number | undefined): string {
-  return typeof v === "number" ? v.toFixed(4) : "—";
+  return typeof v === "number" ? v.toFixed(4) : ": ";
 }
 
 function shortMetric(name: string): string {
@@ -51,13 +51,13 @@ function useEscapeToClose(onClose: () => void) {
   }, [onClose]);
 }
 
-// Wall-clock HH:MM:SS — when a feed item was last produced.
+// Wall-clock HH:MM:SS, when a feed item was last produced.
 function fmtClock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 // A run's status at a glance: a spinner while it runs, a coloured dot once it settles (green done, red
-// error) — so "still going" never looks like "finished".
+// error): so "still going" never looks like "finished".
 function StatusMark({ status }: { status: string }) {
   if (isRunning(status)) return <span className="rt-spin" title={status} />;
   return <span className={`rt-dot ${status}`} title={status} />;
@@ -191,7 +191,7 @@ function SampleRow({ session, base, type, label, steps, onOpen }: { session: str
           {sel == null && steps.length > 1 && <span className="sample-live"> · live</span>}
         </span>
       </div>
-      <button className="sample-big" onClick={() => onOpen(src)} title={`${label} · step ${step} — click to enlarge`}>
+      <button className="sample-big" onClick={() => onOpen(src)} title={`${label} · step ${step}: click to enlarge`}>
         <img src={src} alt={label} />
       </button>
       {steps.length > 1 && (
@@ -223,7 +223,7 @@ function Samples({
 }) {
   const [tick, setTick] = useState(0);
   useEffect(() => {
-    const id = window.setInterval(() => setTick((t) => t + 1), 12000); // konfai writes sample images mid-run — pick them up as they land
+    const id = window.setInterval(() => setTick((t) => t + 1), 12000); // konfai writes sample images mid-run: pick them up as they land
     return () => window.clearInterval(id);
   }, []);
   const { data } = useJson<{ previews?: Preview[] }>(
@@ -302,7 +302,7 @@ function EvaluationView({
 
   if (runs.length === 0) {
     if (hideWhenEmpty || !loaded) return null;
-    return <div className="empty">no evaluation yet — run an evaluation and its scores will appear here.</div>;
+    return <div className="empty">no evaluation yet: run an evaluation and its scores will appear here.</div>;
   }
 
   return (
@@ -408,7 +408,7 @@ function fmtSize(b?: number): string {
   return `${(b / 1073741824).toFixed(2)} GB`;
 }
 
-// One directory node, listed lazily on expand. `list` abstracts where it reads from — the jailed
+// One directory node, listed lazily on expand. `list` abstracts where it reads from: the jailed
 // experiment workspace or the (read-only) dataset folder outside it.
 function DirNode({
   list,
@@ -478,7 +478,7 @@ function DirNode({
               className={sel === frel || focusRel === frel ? "trow file on" : volume ? "trow file vol" : "trow file"}
               style={{ paddingLeft: (depth + 1) * 14 }}
               onClick={() => onFile(frel, `${ls.root}/${frel}`)}
-              title={volume ? `${frel} — click to open (or fill the compare pane when Compare is on)` : frel}
+              title={volume ? `${frel}: click to open (or fill the compare pane when Compare is on)` : frel}
             >
               <span className="tf-name">{f.name}</span>
               <span className="tf-size">{fmtSize(f.size)}</span>
@@ -489,9 +489,9 @@ function DirNode({
   );
 }
 
-// The whole experiment folder — configs, dataset, checkpoints, predictions, statistics — as a lazy
+// The whole experiment folder (configs, dataset, checkpoints, predictions, statistics), as a lazy
 // tree, with one adaptive content pane: YAML/text opens in the editor (atomic jailed save for .yml),
-// a volume opens inline in NiiVue. No separate Viewer tab — the file's type decides how it's shown.
+// a volume opens inline in NiiVue. No separate Viewer tab: the file's type decides how it's shown.
 function ExperimentView({
   session,
   volumePath,
@@ -559,7 +559,7 @@ function ExperimentView({
     [dataset],
   );
 
-  // The focused volume, made relative to whichever tree it lives under — that tree auto-expands to it.
+  // The focused volume, made relative to whichever tree it lives under, that tree auto-expands to it.
   const relTo = (base: string) =>
     base && volumePath && volumePath.startsWith(base + "/") ? volumePath.slice(base.length + 1) : "";
   const wsFocus = relTo(root);
@@ -600,8 +600,8 @@ function ExperimentView({
     if (volumePath) setShowVolume(true);
   }, [volumePath]);
 
-  // "Browse files" from a run tab: reveal the run's folder and auto-open its key artifact — a config in the
-  // editor, a prediction volume in NiiVue, Metric_TRAIN.json in the editor — routed through openFile.
+  // "Browse files" from a run tab: reveal the run's folder and auto-open its key artifact (a config in the
+  // editor, a prediction volume in NiiVue, Metric_TRAIN.json in the editor) routed through openFile.
   useEffect(() => {
     if (!focusDir) return;
     let alive = true;
@@ -763,7 +763,7 @@ function ExperimentView({
           )}
           {!showVolume && !doc && (
             <div className="cfg-empty">
-              Browse the experiment folder — YAML and text open here to read/edit, volumes open inline in NiiVue.
+              Browse the experiment folder. YAML and text open here to read/edit, volumes open inline in NiiVue.
             </div>
           )}
         </div>
@@ -772,9 +772,9 @@ function ExperimentView({
   );
 }
 
-// Validation reads amber, everything else sage-green — so a metric's train/val lines are told apart at a
+// Validation reads amber, everything else sage-green, so a metric's train/val lines are told apart at a
 // glance (orange = validation, the one comparison that matters on a training chart).
-// The workflow order runs happen in — drives the sub-tab order (train first, evaluation last).
+// The workflow order runs happen in: drives the sub-tab order (train first, evaluation last).
 const KIND_ORDER: Record<string, number> = { train: 0, finetune: 1, prediction: 2, uncertainty: 3, evaluation: 4, transform: 5 };
 
 const SAGE = "var(--sage)";
@@ -822,7 +822,7 @@ function MetricChart({
   const px = (p: Point) => (((p.x - xmin) / xr) * W).toFixed(1);
   const py = (p: Point) => (H - ((p.y - ymin) / yr) * H).toFixed(1);
   const gid = "grad_" + id.replace(/[^a-z0-9]/gi, "");
-  // Evaluation and prediction advance one point per case, not per training iteration — label the axis so.
+  // Evaluation and prediction advance one point per case, not per training iteration: label the axis so.
   const xUnit = stage === "training" || stage === "validation" ? "iteration" : "case";
   return (
     <div
@@ -842,7 +842,7 @@ function MetricChart({
             const last = l.points[l.points.length - 1];
             return (
               <span key={l.key} className="leg" style={{ color: lineColor(l.label) }} title={l.label}>
-                {last ? last.y.toFixed(4) : "—"}
+                {last ? last.y.toFixed(4) : ": "}
               </span>
             );
           })}
@@ -890,7 +890,7 @@ function MetricChart({
   );
 }
 
-// A run's current activity — the one thing TensorBoard has no notion of: which phase is running, its
+// A run's current activity: the one thing TensorBoard has no notion of: which phase is running, its
 // progress bar + it/s + ETA, and live host resources (GPU memory while training, a RAM trace while caching).
 function LiveStrip({ live, active }: { live: LiveStatus; active: boolean }) {
   const p = live.progress;
@@ -955,7 +955,7 @@ function RunSection({
   active: boolean;
   onExpand: (runKey: string, seriesKey: string) => void;
 }) {
-  // One card per (metric × phase) — train and validation are separate curves, never merged. Same-metric
+  // One card per (metric × phase): train and validation are separate curves, never merged. Same-metric
   // cards sit next to each other (training first), learning rate last.
   const cards = Object.entries(run.series)
     .map(([key, s]) => ({ key, id: chartId(key, s.label), label: s.label, points: s.points, stage: s.stage, at: s.at }))
@@ -996,7 +996,7 @@ function RunSection({
   );
 }
 
-// A zoomable/pannable image viewer for the sample montages — wheel to zoom, drag to pan, double-click to
+// A zoomable/pannable image viewer for the sample montages: wheel to zoom, drag to pan, double-click to
 // reset. Montages are wide (5 slices side by side), so real inspection needs zoom, not just fit-to-screen.
 function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
   useEscapeToClose(onClose);
@@ -1050,9 +1050,9 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
 
 type LbRow = { run_name: string; value: number; direction?: string };
 
-// Rank the experiment's runs by their evaluation metrics — one ranked table per metric, via konfai-mcp's
+// Rank the experiment's runs by their evaluation metrics, one ranked table per metric, via konfai-mcp's
 // leaderboard (which reads the Metric_<SPLIT>.json files live). Appears once there are ≥2 runs.
-// Pick any two ranked runs and see exactly what differs in their launch configs — model, losses, optimizer,
+// Pick any two ranked runs and see exactly what differs in their launch configs: model, losses, optimizer,
 // augmentations, and any live interventions recorded during the run.
 function LbDiff({ session, runs }: { session: string; runs: string[] }) {
   const [a, setA] = useState(runs[0] ?? "");
@@ -1150,7 +1150,7 @@ function Leaderboard({ session }: { session: string }) {
       </div>
       {metrics.length === 0 ? (
         <div className="empty">
-          {loaded ? `No ${split} evaluations yet — evaluate two or more runs to rank them here.` : "Loading…"}
+          {loaded ? `No ${split} evaluations yet: evaluate two or more runs to rank them here.` : "Loading…"}
         </div>
       ) : (
         <div className="lb-grid">
@@ -1248,7 +1248,7 @@ export default function RightPanel({
   onReload?: () => void; // reconnect the live stream (e.g. after deleting a run) so state rebuilds from disk
 }) {
   const [tab, setTab] = useState<string>("config"); // "config" (Workspace) or a run name
-  // Run tabs closed by their ✕ — a view choice, nothing on disk: they come back via the "+n closed"
+  // Run tabs closed by their ✕: a view choice, nothing on disk: they come back via the "+n closed"
   // chip, on reload, or by themselves when their run starts working again.
   const [hiddenTabs, setHiddenTabs] = useState<string[]>([]);
   const [subKey, setSubKey] = useState(""); // the selected kind (a run key) within the open run name
@@ -1277,7 +1277,7 @@ export default function RightPanel({
   const active = stream.runs.find((r) => r.key === stream.activeRun);
   const runNames: string[] = [];
   for (const r of stream.runs) if (!runNames.includes(r.run)) runNames.push(r.run);
-  // Sub-tabs follow the workflow order — train, then prediction, then evaluation — the order you actually
+  // Sub-tabs follow the workflow order (train, then prediction, then evaluation) the order you actually
   // ran them, not newest-first (and robust while a training is still writing its log).
   const kindsForName = stream.runs
     .filter((r) => r.run === tab)
@@ -1285,7 +1285,7 @@ export default function RightPanel({
   const sel = kindsForName.find((r) => r.key === subKey) ?? kindsForName[0];
   const isActiveSel = !!sel && sel.key === stream.activeRun;
   const running = isRunning(active?.status ?? stream.status);
-  // The session's job itself — true while it starts up and while an isolated app run has not been
+  // The session's job itself: true while it starts up and while an isolated app run has not been
   // discovered yet, so Stop never depends on a run being found (or selected).
   const jobRunning = isRunning(stream.status);
   const stage = active?.live?.stage ?? "";
@@ -1318,7 +1318,7 @@ export default function RightPanel({
   }
 
   async function openTensorboard() {
-    // Open synchronously (in the click) so it isn't popup-blocked, but WITHOUT `noopener` — that flag makes
+    // Open synchronously (in the click) so it isn't popup-blocked, but WITHOUT `noopener`: that flag makes
     // window.open return null, so we could never navigate the tab to the resolved URL.
     const tab = window.open("about:blank", "_blank");
     try {
@@ -1385,7 +1385,7 @@ export default function RightPanel({
     setTab("config");
   }
 
-  // A run starting (or its first metric) brings its name tab + kind forward — so the warm-up (caching) and
+  // A run starting (or its first metric) brings its name tab + kind forward, so the warm-up (caching) and
   // then the curves are visible without a manual switch.
   useEffect(() => {
     if (active && auto) {
@@ -1427,7 +1427,7 @@ export default function RightPanel({
             Leaderboard
           </button>
         )}
-        {/* A job with no run of its own yet — an app fetching its bundle, or one that died during warm-up.
+        {/* A job with no run of its own yet: an app fetching its bundle, or one that died during warm-up.
             It gets a tab of its own so it is reachable at all; the run's tab appears beside it when it
             starts writing, and this one goes as soon as the job settles. */}
         {jobRunning && stream.run && !runNames.includes(stream.run) && (
@@ -1452,7 +1452,7 @@ export default function RightPanel({
                   e.preventDefault();
                   deleteRun(name, "all", "the whole run (all outputs)");
                 }}
-                title={`${name} — ✕ closes the tab only; right-click deletes the whole run`}
+                title={`${name}: ✕ closes the tab only; right-click deletes the whole run`}
               >
                 {newest && <StatusMark status={newest.status} />}
                 {name}
@@ -1475,7 +1475,7 @@ export default function RightPanel({
             +{hiddenTabs.length} closed
           </button>
         )}
-        {/* The job-level Stop: bound to the session's job, not to a discovered run — so it is there while a
+        {/* The job-level Stop: bound to the session's job, not to a discovered run, so it is there while a
             job is still starting, and on every tab, run selected or not. */}
         {jobRunning && (
           <button
@@ -1512,7 +1512,7 @@ export default function RightPanel({
                       e.preventDefault();
                       deleteRun(r.run, r.kind, `the ${r.kind} outputs`);
                     }}
-                    title={`${r.kind} · ${r.status} — right-click to delete`}
+                    title={`${r.kind} · ${r.status}: right-click to delete`}
                   >
                     <StatusMark status={r.status} />
                     {r.kind}
@@ -1593,7 +1593,7 @@ export default function RightPanel({
             </FeedBoundary>
           </>
         ) : jobRunning || stream.lines.length > 0 ? (
-          // A job with no run of its own yet — fetching its bundle, warming up, or dead before its first
+          // A job with no run of its own yet: fetching its bundle, warming up, or dead before its first
           // iteration. Its console is the only thing it has produced, so that is what is shown, rather
           // than an invitation to launch the job that is already running.
           <>
@@ -1602,7 +1602,7 @@ export default function RightPanel({
                 {stream.kind || "job"}
                 {stream.run ? ` · ${stream.run}` : ""}
               </span>
-              <span className="feed-note">{jobRunning ? "starting — no output yet" : "finished"}</span>
+              <span className="feed-note">{jobRunning ? "starting: no output yet" : "finished"}</span>
             </div>
             <div className="feed-log">
               {stream.lines.slice(-60).map((line, i) => (
@@ -1613,7 +1613,7 @@ export default function RightPanel({
             </div>
           </>
         ) : (
-          <div className="feed-hint">Launch a job — its live curves, sample images and evaluation scores stream here.</div>
+          <div className="feed-hint">Launch a job: its live curves, sample images and evaluation scores stream here.</div>
         )}
       </div>
 

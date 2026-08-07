@@ -24,7 +24,7 @@
 
 **KonfAI is a declarative medical-imaging execution engine.** It turns a
 reproducible research workflow into patch-native training, complete
-medical-image inference, and a reusable application—without giving up the
+medical-image inference, and a reusable application, without giving up the
 PyTorch and MONAI components you already trust.
 
 One configuration model connects storage, transforms, model graphs, losses,
@@ -64,8 +64,8 @@ registration, and synthesis:
 > 📄 **Paper:** [KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging](https://www.arxiv.org/abs/2508.09823) (Boussot & Dillenseger, 2025)
 
 > 🤖 **Agent-operable.** KonfAI ships an **[MCP server](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
-> so an LLM agent can drive the *entire* experiment loop — inspect a dataset, author & validate YAML,
-> launch train / predict / evaluate / transform, monitor jobs, and compare runs — always grounded in the same
+> so an LLM agent can drive the *entire* experiment loop (inspect a dataset, author & validate YAML,
+> launch train / predict / evaluate / transform, monitor jobs, compare runs), always grounded in the same
 > reproducible configs a human would run. → **[Agents & MCP](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
 
 ---
@@ -94,7 +94,7 @@ registration, and synthesis:
 Already use another stack? Keep it. KonfAI can instantiate regular PyTorch and
 MONAI components, and its catalog includes documented compatibility paths for
 selected MONAI, nnU-Net, torchvision, and segmentation-models-pytorch models.
-[See when to use KonfAI—or another tool.](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html)
+[See when to use KonfAI, or another tool.](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html)
 
 ## One engine owns the complete medical workflow
 
@@ -108,17 +108,17 @@ selected MONAI, nnU-Net, torchvision, and segmentation-models-pytorch models.
 | **Automation** | Dataset inspection, config validation, smoke tests, jobs, metrics, run comparison through MCP |
 
 That vertical integration is the product. YAML is its durable, inspectable
-interface—not the value proposition by itself.
+interface, not the value proposition by itself.
 
 ## Real workloads, one App contract
 
 The same App interface already ships full segmentation, synthesis and
-registration systems—not reduced demonstration networks:
+registration systems, not reduced demonstration networks:
 
 | App | Workload | Published RTX PRO 5000 benchmark |
 | --- | --- | --- |
-| **TotalSegmentator-KonfAI** | CT: 117 labels / 5 models · MRI: 50 labels / 2 models | **CT `total`: ≈42 s / ≈20 GB VRAM / ≈19 GB RAM** — 1.5–3.6× faster, 2.7–4.1× less host RAM than the original |
-| **MRSegmentator-KonfAI** | MRI: 40 labels, 5-fold ensemble | **≈27 s / ≈22 GB VRAM** — 1.6–2.6× faster, up to ~6× less host RAM than the original |
+| **TotalSegmentator-KonfAI** | CT: 117 labels / 5 models · MRI: 50 labels / 2 models | **CT `total`: ≈42 s / ≈20 GB VRAM / ≈19 GB RAM**: 1.5–3.6× faster, 2.7–4.1× less host RAM than the original |
+| **MRSegmentator-KonfAI** | MRI: 40 labels, 5-fold ensemble | **≈27 s / ≈22 GB VRAM**: 1.6–2.6× faster, up to ~6× less host RAM than the original |
 | **ImpactSynth** | three MR/CBCT→sCT variants, 2.5D UNet++, 5 models each | ≈24 s / ≈16 GB VRAM for the benchmark inference; ≈82 s full ensemble; ≈2 GB RAM |
 | **ImpactSeg** | one model segments 11 structures from CT, MRI, or CBCT | ≈7 s / ≈10 GB VRAM / ≈1.6 GB RAM |
 | **IMPACT-Reg** | 13 multimodal presets across elastix+IMPACT, ConvexAdam, and FireANTs | `ConvexAdam_Composite`: ≈5.1 s / ≈2.1 GB VRAM |
@@ -152,7 +152,7 @@ pip install "konfai[imaging]"     # core + all imaging backends (recommended)
 pip install konfai                # core only (bring your own data reader)
 ```
 
-`[imaging]` pulls SimpleITK / h5py / pydicom / zarr — needed to read `.mha`,
+`[imaging]` pulls SimpleITK / h5py / pydicom / zarr, needed to read `.mha`,
 `.nii.gz`, DICOM, and OME-Zarr. For the full extras matrix (`smp`, `ssim`, `fid`,
 `lpips`, `export`, `cluster`, …) and a reproducible Pixi setup, see the
 [installation guide](https://konfai.readthedocs.io/en/latest/getting-started/installation.html).
@@ -173,6 +173,24 @@ KonfAI is command-driven; each CLI state maps to one YAML file:
 Full CLI reference (flags, `konfai-cluster`, `konfai-apps`):
 [docs/reference/cli](https://konfai.readthedocs.io/en/latest/reference/cli.html).
 
+The same four workflows are Python callables, with structured results and the
+config tree as a dict, which is the idiom for a sweep or a notebook:
+
+```python
+import konfai
+from konfai.data.transform import Reduce, Resample, Write
+
+result = konfai.transform("template", "./Cohorte:mha",
+    {"CT": {"CT": [Resample(reference="atlas_000", reference_group="CT"),
+                   Reduce(operator="Median", output="template", grid="strict"),
+                   Write(dataset="./Template:mha")]}})
+result.outputs   # where each deliverable landed
+```
+
+`konfai.plan_transform` returns the plan without running it; `konfai.train`,
+`konfai.predict` and `konfai.evaluate` take a config path or the same tree as a
+dict. → [**Python workflows**](https://konfai.readthedocs.io/en/latest/usage/python-workflows.html).
+
 ---
 
 ## Quickstart (first smoke run)
@@ -191,10 +209,10 @@ konfai TRAIN -y --gpu 0 --config Config.yml     # use --cpu 1 if you have no GPU
 ```
 
 > 💡 After a run, `Config.yml` will contain the resolved defaults KonfAI
-> materialised — that's expected, and it's what makes runs reproducible.
+> materialised. That's expected, and it's what makes runs reproducible.
 
 The shipped `epochs: 5` is demo-sized: it walks the complete path in a few
-minutes and is not meant to produce a useful checkpoint — raise it to 100+ for a
+minutes and is not meant to produce a useful checkpoint; raise it to 100+ for a
 real run. To do all of the above in one go, including predict, evaluate and a
 plot of the result, run every cell of
 [`examples/Segmentation/Segmentation_demo.ipynb`](examples/Segmentation/Segmentation_demo.ipynb).
@@ -210,7 +228,7 @@ notebook entry points) lives in the
 Volumes are read as patches. Whether the volume is *also* held in RAM depends on
 the workflow's loading regime (training caches, and `memory_budget` makes that
 adaptive; prediction, evaluation and transform read each case once and never
-cache) and on whether your preprocessing chain can be streamed — KonfAI derives
+cache) and on whether your preprocessing chain can be streamed. KonfAI derives
 streamability from the transforms you declared:
 
 | Regime | When | Memory held |
@@ -221,17 +239,17 @@ streamability from the transforms you declared:
 | **Whole-volume** | transform, chain not streamable | one case plus one in-flight copy |
 
 A chain streams when every step declares the region it needs: the exact patch
-(`OneHot`), a halo (`Dilate`), a remap (`Flip`), a resample (`ResampleToShape`),
+(`OneHot`), a halo (`Dilate`), a remap (`Flip`), a resample (`Resample`),
 or a whole-volume statistic read once from disk (`Normalize`). On the stream
 path, a 16 GiB uncompressed `.mha` trains at patch 64³ under an 8 GiB memory cap
 with a peak resident set of 0.46 GiB.
 
-`konfai TRANSFORM` prints that decision per case *before* it writes a byte —
-STREAM, WHOLE-VOLUME, REDUCE or SKIP, naming the stage that refused to stream —
+`konfai TRANSFORM` prints that decision per case *before* it writes a byte
+(STREAM, WHOLE-VOLUME, REDUCE or SKIP, naming the stage that refused to stream),
 and keeps the report at `./Transforms/<name>/plan.txt`. `--plan` prints the same
 report and stops without transforming.
 
-→ [**Patch streaming**](https://konfai.readthedocs.io/en/latest/concepts/streaming.html) — what streams, what does not, and why.
+→ [**Patch streaming**](https://konfai.readthedocs.io/en/latest/concepts/streaming.html): what streams, what does not, and why.
 
 ---
 
@@ -266,7 +284,7 @@ experimentation**. Through the **KonfAI-MCP server**, an agent can:
 - 📈 read live metrics, compare runs, and iterate
 
 Every execution stays **reproducible, structured, and grounded in the same YAML
-workflows** a human would run — bridging LLM reasoning and real experimental
+workflows** a human would run, bridging LLM reasoning and real experimental
 execution. See the [ecosystem map](https://konfai.readthedocs.io/en/latest/ecosystem/index.html)
 for the current status.
 
@@ -278,9 +296,9 @@ for the current status.
 a single chatbot web UI over the MCP server. Point it at your own dataset and,
 from the conversation alone, inspect the data, author or reuse a model, train,
 predict, evaluate, compare runs, and view the volumes in a built-in NiiVue
-viewer — every step a `konfai-mcp` tool call, the compute staying on your
+viewer. Every step is a `konfai-mcp` tool call, the compute staying on your
 machine. It is a product surface over `konfai-mcp`, not a new engine, and it
-ships **no API key**: you bring your own LLM — your Claude Code subscription by
+ships **no API key**: you bring your own LLM, your Claude Code subscription by
 default, the Claude API with your key, or a fully local OpenAI-compatible server
 such as Ollama or vLLM.
 
@@ -298,12 +316,12 @@ konfai-studio            # -> http://127.0.0.1:8730
 | Package | What it is |
 | --- | --- |
 | **`konfai`** | the core framework (this repo) |
-| **`konfai-apps`** | package a workflow as an app — [CLI](https://konfai.readthedocs.io/en/latest/reference/cli.html), [HTTP server](https://konfai.readthedocs.io/en/latest/reference/app-server-api.html), [Python API](https://konfai.readthedocs.io/en/latest/reference/python-api.html) |
+| **`konfai-apps`** | package a workflow as an app: [CLI](https://konfai.readthedocs.io/en/latest/reference/cli.html), [HTTP server](https://konfai.readthedocs.io/en/latest/reference/app-server-api.html), [Python API](https://konfai.readthedocs.io/en/latest/reference/python-api.html) |
 | **App bundles** (`apps/`) | ready-to-run: `impact-synth`, `impact-seg`, `mrsegmentator`, `totalsegmentator`, `impact-reg` |
 | **[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI)** | run segmentation, synthesis, evaluation, and uncertainty Apps from 3D Slicer |
 | **[SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg)** | run IMPACT-Reg presets and inspect registration results in 3D Slicer |
-| **KonfAI-MCP** | expose KonfAI to LLM agents — inspect data, author configs, launch and monitor runs |
-| **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** | a chat web UI over `konfai-mcp` — inspect data, train, predict, evaluate, and compare from one conversation |
+| **KonfAI-MCP** | expose KonfAI to LLM agents: inspect data, author configs, launch and monitor runs |
+| **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** | a chat web UI over `konfai-mcp`: inspect data, train, predict, evaluate, and compare from one conversation |
 
 See the [ecosystem map](https://konfai.readthedocs.io/en/latest/ecosystem/index.html)
 for what is shipped vs. in-progress.
@@ -314,14 +332,14 @@ for what is shipped vs. in-progress.
 
 📚 **Full docs: <https://konfai.readthedocs.io/en/latest/>**
 
-- [Quickstart](https://konfai.readthedocs.io/en/latest/quickstart.html) — first end-to-end run
-- [Core concepts](https://konfai.readthedocs.io/en/latest/concepts/index.html) — how YAML becomes Python objects
-- [Large images](https://konfai.readthedocs.io/en/latest/usage/large-images.html) — regional reads, fallback, and tuning
-- [Adopt from PyTorch/MONAI](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html) — reuse and tool choice
-- [Component catalogue](https://konfai.readthedocs.io/en/latest/reference/components/index.html) — everything you can configure
-- [Examples](https://konfai.readthedocs.io/en/latest/examples/index.html) — runnable Segmentation, Synthesis & Registration workflows, plus five published-app demos
+- [Quickstart](https://konfai.readthedocs.io/en/latest/quickstart.html): first end-to-end run
+- [Core concepts](https://konfai.readthedocs.io/en/latest/concepts/index.html): how YAML becomes Python objects
+- [Large images](https://konfai.readthedocs.io/en/latest/usage/large-images.html): regional reads, fallback, and tuning
+- [Adopt from PyTorch/MONAI](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html): reuse and tool choice
+- [Component catalogue](https://konfai.readthedocs.io/en/latest/reference/components/index.html): everything you can configure
+- [Examples](https://konfai.readthedocs.io/en/latest/examples/index.html): runnable Segmentation, Synthesis & Registration workflows, plus five published-app demos
 
-🐳 **Docker:** `vboussot/konfai` —
+🐳 **Docker:** `vboussot/konfai`,
 [guide](https://konfai.readthedocs.io/en/latest/usage/docker.html).
 
 ---
@@ -335,11 +353,11 @@ pixi run test      # run the test suite
 pixi run check     # lint + format-check + test (run before pushing)
 ```
 
-Contributions are welcome — improve examples, clarify docs, add tests, or extend
+Contributions are welcome: improve examples, clarify docs, add tests, or extend
 models / transforms / apps. See the
 [developer guide](https://konfai.readthedocs.io/en/latest/development.html).
 
-**AI coding agents:** start with [`AGENTS.md`](AGENTS.md) — the canonical
+**AI coding agents:** start with [`AGENTS.md`](AGENTS.md), the canonical
 reference for conventions, commands, and repository rules.
 
 ---

@@ -29,7 +29,7 @@ so importing this module is cheap and does not hard-require the optional ``konfa
 
 This module is the SAFE tier: ``list_apps``/``describe_app`` read manifest metadata only. They never
 import an app's model ``.py`` nor pip-install its requirements (only the parameter/inference tools do
-that, and they live behind the explicit ``allow_untrusted_code`` gate -- see ``_require_trust``).
+that, and they live behind the explicit ``allow_untrusted_code`` gate: see ``_require_trust``).
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ class AppService:
         self.workspace_layout = workspace_layout
         self.default_catalog_path = default_catalog_path or DEFAULT_CATALOG_PATH
 
-    # -- catalogue resolution -------------------------------------------------------------------
+    #: catalogue resolution -------------------------------------------------------------------
 
     @staticmethod
     def _read_catalog_file(path: Path) -> list[str]:
@@ -157,7 +157,7 @@ class AppService:
                 deduped.append(ref)
         return deduped, provenance
 
-    # -- reference classification ---------------------------------------------------------------
+    #: reference classification ---------------------------------------------------------------
 
     @staticmethod
     def _classify(ref: str) -> str:
@@ -176,7 +176,7 @@ class AppService:
         # 'host:port[|token]' is a remote server to enumerate (not a single app).
         if len(parts) == 2 and parts[1].split("|")[0].isdigit():
             return "remote_server"
-        # An HF app id is 'repo_id:app_name' where repo_id is 'org/name' -- require the '/', so a
+        # An HF app id is 'repo_id:app_name' where repo_id is 'org/name': require the '/', so a
         # bare 'host:port' is not mistaken for an HF app.
         if ":" in ref and "/" in ref.split(":", 1)[0]:
             return "hf_app"
@@ -184,7 +184,7 @@ class AppService:
             return "hf_repo"
         return "unknown"
 
-    # -- tools ----------------------------------------------------------------------------------
+    #: tools ----------------------------------------------------------------------------------
 
     def list_apps(
         self,
@@ -433,7 +433,7 @@ class AppService:
         if self._is_remote(ref):
             raise ValueError(
                 "Importing into the session is only for local or HuggingFace apps; a remote server keeps its "
-                "code remote and cannot be imported — drive a remote app with konfai-apps directly."
+                "code remote and cannot be imported: drive a remote app with konfai-apps directly."
             )
         self._require_trust(self._infer_mode(ref), allow_untrusted_code, "Importing")
         target = (
@@ -460,7 +460,7 @@ class AppService:
             "next_actions": ["run_resume", "run_prediction", "run_evaluation", "validate_config_semantics"],
         }
 
-    # -- app resolution helpers (mode + trust gate) ----------------------------------------------
+    #: app resolution helpers (mode + trust gate) ----------------------------------------------
 
     def _infer_mode(self, ref: str) -> str:
         """Resolve which execution path an app reference takes: ``local`` (local/HF) or ``remote``."""
@@ -490,7 +490,7 @@ class AppService:
         if self._is_remote(ref):
             raise ValueError(
                 f"{verb} is only supported for local or HuggingFace apps: {ref!r} is a remote app server, "
-                "which the MCP does not drive -- run it with konfai-apps directly."
+                "which the MCP does not drive: run it with konfai-apps directly."
             )
         self._require_trust(self._infer_mode(ref), allow_untrusted_code, verb)
 
@@ -564,7 +564,7 @@ class AppService:
                 "Set the env KONFAI_APPS_INSTALL_REQUIREMENTS=0 to skip requirement installs."
             )
 
-    # -- run planning (the job specs the app tools launch) ---------------------------------------
+    #: run planning (the job specs the app tools launch) ---------------------------------------
 
     def prepare_infer(
         self,
@@ -868,7 +868,7 @@ class AppService:
             "output": resolved_output,
         }
 
-    # -- packaging ------------------------------------------------------------------------------
+    #: packaging ------------------------------------------------------------------------------
 
     def package_from_session(
         self,
@@ -1009,7 +1009,7 @@ class AppService:
     def _resolve_package_configs(self, configs: list[str] | None) -> list[str]:
         if configs is None:
             # Bundle BOTH the prediction config (to run) and the train config (so fine_tune_app can warm-start
-            # from the bundle) when present -- a Prediction.yml-only bundle cannot be fine-tuned.
+            # from the bundle) when present: a Prediction.yml-only bundle cannot be fine-tuned.
             prediction = self.workspace_layout.config_path("prediction")
             train = self.workspace_layout.config_path("train")
             configs = [str(path) for path in (prediction, train) if path.exists()]
@@ -1092,7 +1092,7 @@ class AppService:
 
         konfai_apps stages inference inputs at ``./Dataset/P{idx}/Volume_{i}.<ext>`` in a temp workspace,
         so a runnable bundle must read group ``Volume_i`` from ``./Dataset``. A session Prediction.yml
-        instead points at the session's absolute dataset path with the session's group names -- packaged
+        instead points at the session's absolute dataset path with the session's group names: packaged
         as-is it silently predicts on the TRAINING data. Only the bundle copy is rewritten (idempotent on
         already-conformant configs), never the session file.
         """

@@ -101,14 +101,14 @@ def test_out_of_range_level_says_so_instead_of_blaming_the_store(tmp_path: Path)
 
 def test_write_ome_zarr_builds_a_pyramid_by_position(tmp_path: Path) -> None:
     store = tmp_path / "pyramid.ome.zarr"
-    # spacing arrives (x, y, z) SimpleITK-style, so this is x=2 um, y=1, z=1 -- and the metadata
+    # spacing arrives (x, y, z) SimpleITK-style, so this is x=2 um, y=1, z=1, and the metadata
     # below is read back (c, z, y, x). The two orders meeting here is the whole reason to assert it.
     write_ome_zarr(store, _volume(), spacing=[2.0, 1.0, 1.0], scale_factors=[2])
 
     assert get_ome_zarr_info(store)["n_levels"] == 2
     fine, coarse = get_ome_zarr_info(store, 0), get_ome_zarr_info(store, 1)
     assert coarse["canonical_shape"] == [1, 4, 6, 8]
-    # Level 1 is level 0 halved, and carries its OWN spacing -- a consumer indexing by position gets
+    # Level 1 is level 0 halved, and carries its OWN spacing: a consumer indexing by position gets
     # a coarser image, not the same image mislabelled.
     assert [round(s, 6) for s in fine["scale"]] == [1.0, 1.0, 1.0, 2.0]
     assert [round(s, 6) for s in coarse["scale"]] == [1.0, 2.0, 2.0, 4.0]
@@ -138,8 +138,8 @@ def test_unknown_downsample_method_names_the_valid_ones(tmp_path: Path) -> None:
 
 
 def test_append_levels_turns_a_streamed_store_into_a_pyramid(tmp_path: Path) -> None:
-    """The region-written path cannot take scale_factors up front — no level exists until the last
-    region lands — so the pyramid is derived afterwards, and level 0 must survive it untouched."""
+    """The region-written path cannot take scale_factors up front (no level exists until the last
+    region lands), so the pyramid is derived afterwards, and level 0 must survive it untouched."""
     volume = _volume()
     store = tmp_path / "streamed.ome.zarr"
     write_ome_zarr(store, volume, spacing=[2.0, 1.0, 1.0], attributes={"Direction": [1, 0, 0, 0, 1, 0, 0, 0, 1]})

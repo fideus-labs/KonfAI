@@ -260,7 +260,7 @@ def test_a_rank_dropping_stage_refuses_instead_of_writing_a_broadcast_store(
     """`Sum(dim=0)` drops the leading axis, so its slab is no longer C[Z]YX.
 
     Written anyway, the header takes the slab's first spatial extent for a channel count and
-    publishes that many broadcast copies -- a store whose rank disagrees with the whole-volume path,
+    publishes that many broadcast copies: a store whose rank disagrees with the whole-volume path,
     with no exception raised. It must refuse and fall back instead."""
     from konfai.data import patching as patching_module
     from konfai.data.transform import Sum

@@ -81,7 +81,7 @@ def _write_dvf(path: Path, vector, reference: sitk.Image) -> Path:
 
 def test_ensemble_mean_is_the_voxelwise_mean_with_reference_geometry(tmp_path: Path) -> None:
     """Reduce(Mean) over members-as-cases: the averaged DVF lands at <output>/<case>/DVF, on the
-    members' shared grid — which ``grid: strict`` verified rather than assumed."""
+    members' shared grid, which ``grid: strict`` verified rather than assumed."""
     reference = sitk.GetImageFromArray(np.zeros((6, 6, 6), dtype=np.float32))
     reference.SetSpacing((1.5, 1.5, 1.5))
     reference.SetOrigin((3.0, -2.0, 1.0))
@@ -162,7 +162,7 @@ def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Pat
     """A preset is complete with a displacement field alone: the moved image is derived here.
 
     The field IS the registration; the moved image is that field applied to the moving. Requiring both
-    made every preset carry a second output whose content the orchestrator can produce itself — and
+    made every preset carry a second output whose content the orchestrator can produce itself: and
     for the tiled presets, blend across every patch seam only to have it thrown away.
     """
     moving = tmp_path / "moving.mha"
@@ -194,7 +194,7 @@ def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Pat
 def test_register_fields_only_writes_nothing_derived(tmp_path: Path) -> None:
     """A caller that composes the field itself pays for the field, and nothing else.
 
-    The moved image is derived FROM the field -- a full-size resample of the same voxels. The tiled
+    The moved image is derived FROM the field: a full-size resample of the same voxels. The tiled
     refinement reads the field, composes it with its global pass and derives its own moved, so
     producing one for it is pure waste.
     """
@@ -215,7 +215,7 @@ def test_register_fields_only_writes_nothing_derived(tmp_path: Path) -> None:
 
 
 def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> None:
-    """One store entry beside an ``.mha`` flips a mixed root's backend — the staging keeps one root
+    """One store entry beside an ``.mha`` flips a mixed root's backend: the staging keeps one root
     per group, so a caller's OME-Zarr moving registers against the ``.mha`` field every published
     preset declares."""
     ome_zarr = pytest.importorskip("konfai.utils.ome_zarr")
@@ -241,7 +241,7 @@ def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> N
     out = tmp_path / "Output"
     app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
 
-    # The moved image takes the MOVING's form -- a store in, a store out -- while the field the
+    # The moved image takes the MOVING's form (a store in, a store out), while the field the
     # preset wrote keeps its own. moved(p) = moving(p + d), d = +2 along x on a unit grid:
     # moving is z*64 + y*8 + x.
     store = out / "P000" / "Moved.ome.zarr"
@@ -254,7 +254,7 @@ def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> N
 
 def test_register_adopts_the_presets_output_name(tmp_path: Path) -> None:
     """A preset names its output; the pipeline follows. An official preset calls its transform
-    ``Transform`` — where Slicer looks for it — and ``register`` must not rename it ``DVF``."""
+    ``Transform`` (where Slicer looks for it), and ``register`` must not rename it ``DVF``."""
     moving = tmp_path / "moving.mha"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
     fixed = tmp_path / "fixed.mha"
@@ -290,7 +290,7 @@ def test_a_transform_file_is_a_transform_here(name: str, token: str) -> None:
 
 def test_register_reads_a_dicom_series_as_the_moving(tmp_path: Path) -> None:
     """A DICOM series is a DIRECTORY carrying no extension, so its backend cannot be read off a name.
-    Staged as ``mha`` — the default a formless name falls back to — konfai was handed a directory of
+    Staged as ``mha`` (the default a formless name falls back to) konfai was handed a directory of
     slices to read as one image."""
     pytest.importorskip("pydicom")
     from konfai.utils import dicom

@@ -1,193 +1,51 @@
 # Using KonfAI Apps
 
-KonfAI Apps are the **deployment and reuse layer** of the framework: packaged
-workflows that expose a stable user interface on top of KonfAI's low-level
-prediction, evaluation, uncertainty, and fine-tuning logic. This page explains
-what an app is and shows how to drive packaged apps with the `konfai-apps`
-CLI — locally or against a remote server.
-
-The screenshots below show Apps running through the real SlicerKonfAI client.
-They are actual interface captures with medical inputs and returned results—not
-procedural illustrations or simulated predictions.
-
-```{tip}
-Five published Apps ship as runnable notebooks — each fetches a demo case, runs
-the model, and plots the result, with no training and no YAML to write. They are
-the fastest way to see what an App produces: see {doc}`../examples/index`.
-```
-
-## What an app is
-
-Where low-level KonfAI workflows are designed directly through YAML files and
-local Python modules, a KonfAI App bundles those assets into a reusable package
-that can run through:
-
-- `konfai-apps` on the command line
-- Python via `konfai_apps.KonfAIApp`
-- a remote FastAPI server via `konfai-apps-server`
-- clients such as 3D Slicer integrations
-
-An end user does not need to write YAML to consume a published App. The YAML is
-still inside the bundle as the inspectable workflow record, so the same App can
-later be evaluated, fine-tuned, served, or automated instead of being replaced
-by an unrelated deployment script.
-
-A KonfAI App repository is recognized by the presence of an `app.json` file.
-Typical contents are:
-
-```text
-my_app/
-├── app.json
-├── Prediction.yml
-├── Evaluation.yml
-├── Uncertainty.yml
-└── checkpoint.pt
-```
-
-Depending on the app, some files are optional:
-
-- `Prediction.yml` is the core inference entrypoint
-- `Evaluation.yml` is needed for `eval`
-- `Uncertainty.yml` is needed for `uncertainty`
-- fine-tuning relies on training assets and checkpoint files that live next to the app
-
-**When to use apps.** Use low-level YAML workflows when you are still designing
-or debugging a model. Package it as a KonfAI App once that workflow is stable
-and you want:
-
-- a stable inference interface — a smaller, more repeatable interface for end users
-- reusable packaging for a team
-- distribution through Hugging Face or a private repository
-- local and remote execution with the same user-facing command
-
-## Turn a trained workflow into an App
-
-The `bundle` command is the research-to-application handoff. It validates the
-metadata, copies prediction/evaluation configs and checkpoints, includes custom
-Python when needed, and produces the directory layout understood by local,
-Hugging Face, and server resolvers.
-
-Create `app.json`:
-
-```json
-{
-  "display_name": "My segmentation model",
-  "description": "Segments the target anatomy from CT.",
-  "short_description": "CT segmentation",
-  "tta": 0,
-  "mc_dropout": 0
-}
-```
-
-Then assemble the tested artifacts:
+One command runs a published medical model on your data:
 
 ```bash
-konfai-apps bundle CT_SEG \
-  --out dist \
-  --app-json app.json \
-  --config Prediction.yml Evaluation.yml \
-  --checkpoint Checkpoints/SEG_BASELINE/*.pt \
-  --model-py Model.py
+konfai-apps infer VBoussot/ImpactSynth:CBCT -i input.mha -o ./Output --gpu 0
 ```
 
-The result is `dist/CT_SEG/`. `app.json.models` is filled from the checkpoint
-filenames when omitted, and an omitted `requirements.txt` is drafted from
-`Model.py` imports. Review that draft—it is a convenience, not a reproducible
-environment lock.
+No YAML, no training, no download step. The app carries its weights, its
+preprocessing, its reconstruction and its evaluation, so the result comes back on
+your input's geometry, ready to open.
 
-Validate the bundle locally before publishing:
-
-```bash
-konfai-apps infer ./dist/CT_SEG -i input.mha -o ./Output --gpu 0
-konfai-apps eval ./dist/CT_SEG -i ./Output/<prediction>.mha --gt reference.mha
+```{warning}
+Resolving an app **copies and imports its `.py` files**, so it runs arbitrary
+code, and it pip-installs its `requirements.txt` by default
+(`KONFAI_APPS_INSTALL_REQUIREMENTS=0` opts out). Only run apps from sources you
+trust.
 ```
 
-Inspect the output medical image, geometry, and evaluation values; a command
-returning successfully is not sufficient validation. Once local inference is
-equivalent to the research workflow, upload the `CT_SEG/` folder as a variant
-inside a Hugging Face model repository and address it as `owner/repository:CT_SEG`.
+## What ships today
 
-If the workflow uses no custom Python, omit `--model-py`. ONNX export is an
-experimental optional addition (`--onnx`), not required for normal PyTorch App
-execution.
+These are full medical models, not demonstrations. Every figure is measured on an
+NVIDIA RTX PRO 5000 24 GB and quoted from the bundle's own README; the rows are
+not comparable to each other, since the tasks, inputs and ensemble sizes differ.
 
-## The `konfai-apps` CLI
-
-The app CLI currently exposes these subcommands:
-
-- `infer`
-- `eval`
-- `uncertainty`
-- `pipeline`
-- `fine-tune`
-- `bundle`
-- `download`
-
-The main command pattern is:
-
-```bash
-konfai-apps <command> <app> [options]
-```
-
-## App identifiers
-
-Apps can be local or remote repository identifiers. The repository examples and
-tests show Hugging Face style identifiers such as:
-
-- ``VBoussot/ImpactSynth:MR``
-- ``VBoussot/ImpactSynth:CBCT``
-- ``VBoussot/TotalSegmentator-KonfAI:total``
-
-## Ready-to-run Apps with measured workloads
-
-The published bundles are not toy examples. They package full medical models,
-their preprocessing and reconstruction, evaluation where available, and the
-metadata consumed by CLI, server, and Slicer clients.
-
-| App | Executable workload | Published bundle benchmark |
+| App | Workload | Measured |
 | --- | --- | --- |
-| `TotalSegmentator-KonfAI` | CT → 117 labels (`total`: 5 models; `total-3mm`: 1), MRI → 50 labels (`total_mr`: 2; `total_mr-3mm`: 1) | CT `total` on a 295 × 259 × 219 2 mm case: ≈42 s, ≈20 GB VRAM, ≈19 GB RAM. Head to head on a 533 × 390 × 177 case: **17 s / 6.5 GB RAM** against the original's **61 s / 26.5 GB** |
-| `MRSegmentator-KonfAI:MRSegmentator` | MRI → 40 labels, five-fold ensemble | ≈27 s and ≈22 GB VRAM on a 295 × 259 × 219 2 mm case. Head to head on a 533 × 390 × 177 case: **25 s / 7.5 GB RAM** against the original's **65 s / 14.6 GB** |
-| `ImpactSeg:body` | one CT/MR/CBCT model → 11 structures | ≈7 s, ≈10 GB VRAM and ≈1.6 GB RAM |
-| `ImpactSynth` | three MR/CBCT→sCT variants, five models each | ≈24 s and ≈16 GB VRAM for the benchmark inference; ≈82 s for all five; ≈2 GB RAM |
-| `ImpactReg:ConvexAdam_Composite` | fixed + moving → `MovedImage` and `DisplacementField` on the fixed grid | ≈5.1 s and ≈2.1 GB VRAM on a real abdominal MR→CT pair |
+| `TotalSegmentator-KonfAI` | CT → 117 labels (`total`: 5 models, `total-3mm`: 1), MRI → 50 labels (`total_mr`: 2, `total_mr-3mm`: 1) | 42 s, 20 GB VRAM, 19 GB RAM on a 295 × 259 × 219 case. Head to head on 533 × 390 × 177: **17 s / 6.5 GB RAM** against the original's 61 s / 26.5 GB |
+| `MRSegmentator-KonfAI:MRSegmentator` | MRI → 40 labels, five-fold ensemble | 27 s and 22 GB VRAM. Head to head on 533 × 390 × 177: **25 s / 7.5 GB RAM** against 65 s / 14.6 GB |
+| `ImpactSeg:body` | one CT/MR/CBCT model → 11 structures | 7 s, 10 GB VRAM, 1.6 GB RAM |
+| `ImpactSynth` | three MR/CBCT→sCT variants, five models each | 24 s and 16 GB VRAM for one inference, 82 s for the full ensemble, 2 GB RAM |
+| `ImpactReg:ConvexAdam_Composite` | fixed + moving → moved image and displacement field on the fixed grid | 5.1 s and 2.1 GB VRAM on a real abdominal MR→CT pair |
 
-Every figure is quoted from the matching bundle README, measured on an NVIDIA RTX PRO
-5000 24 GB. The one exception is the `ImpactReg` row: that bundle's README has no
-performance section, so the number comes from the repository README and cannot be
-reproduced from this tree. Each README times its own benchmark case and, separately,
-a head-to-head case against the original tool — the two are different volumes, which
-is why the comparisons above state their dimensions.
+Between them: four TotalSegmentator tasks, a five-fold MRSegmentator, one
+modality-agnostic ImpactSeg model, three ImpactSynth variants and thirteen
+IMPACT-Reg presets. Each ships as a runnable notebook that fetches a demo case
+and plots the result, which is the fastest way to see what one produces: see
+{doc}`../examples/index`.
 
-Rows are not comparable to each other: the inputs, tasks and ensemble sizes differ, so
-the table shows deployable scale rather than a model leaderboard. Patch size, ensemble
-size, case dimensions and GPU placement are part of every result.
+### One real case, end to end
 
-Together these READMEs describe four TotalSegmentator tasks, a five-fold
-MRSegmentator, one modality-agnostic ImpactSeg model, three ImpactSynth variants,
-and thirteen IMPACT-Reg presets. These are deployable medical workflows, not a
-catalogue of untrained architecture names.
-
-### One real case through the complete App workflow
-
-The cards below are built from de-identified SynthRAD 2025 Task 1 abdomen case
-`1ABB124` and the medical-image artifacts produced by the published Apps.
-The source case is distributed under CC BY-NC 4.0; the exact attribution,
-input/output hashes, and panel hashes are recorded in the
-<a href="../_static/apps/ASSET_PROVENANCE.md">asset provenance manifest</a>.
-ImpactSynth ran five
-checkpoints over the original input and two test-time augmentations (15 states);
-the full TotalSegmentator App ran its five checkpoints on the resulting sCT.
-KonfAI then executed the App's evaluation and reference-free uncertainty
-workflows—there are no fabricated predictions in this figure.
-
-Each panel uses the same physical axial plane. The heat-map limits are robust
-display ranges; the headline values come from the completed per-case metric
-JSON, not from the displayed slice alone. ImpactSynth's uncertainty is its
-configured ensemble variance expressed as a percentage of the bundle baseline.
-The displayed anatomy is the full five-model `total` output. Dice 0.665 comes
-from a separate, single-checkpoint `total-3mm` evaluation branch and is not a
-score assigned to the displayed five-model overlay.
+SynthRAD 2025 Task 1 abdomen case `1ABB124`, de-identified, CC BY-NC 4.0, with
+hashes in the <a href="../_static/apps/ASSET_PROVENANCE.md">asset provenance
+manifest</a>. ImpactSynth ran five checkpoints and two test-time augmentations
+over the MR; the full TotalSegmentator app then ran its five checkpoints on the
+resulting synthetic CT; KonfAI ran the evaluation and uncertainty workflows on
+top. Every panel is a real output on the same physical plane, and the headline
+values come from the per-case metric JSON.
 
 <ul class="kf-example-grid kf-example-grid--compact" aria-label="Completed real-data KonfAI App workflow stages">
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-synth/mr-input.png" aria-label="Open the real abdominal MR input"><img src="../_static/apps/impact-synth/mr-input.png" alt="Real abdominal MR plane used as input to the completed ImpactSynth App execution." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · INPUT</span><strong>MR input</strong><span>One extracted plane from the paired abdominal case.</span><span class="kf-example-stats">Z +18 MM · 2 MM GRID</span></figcaption></figure></li>
@@ -198,52 +56,44 @@ score assigned to the displayed five-model overlay.
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-synth/uncertainty-map.png" aria-label="Open the real ImpactSynth uncertainty map"><img src="../_static/apps/impact-synth/uncertainty-map.png" alt="Reference-free ensemble-uncertainty heat map from the completed 15-state ImpactSynth App workflow over the MR anatomy." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">06 · UNCERTAINTY</span><strong>Ensemble uncertainty</strong><span>Display range 0–4520.81% of baseline (P99) across the 15 states.</span><span class="kf-example-stats">MEAN 109.61% BASELINE · DISAGREEMENT 0.016</span></figcaption></figure></li>
 </ul>
 
-<p class="kf-example-caption"><strong>One real case, one continuous App workflow.</strong><span>MR → 15-state sCT → five-model anatomy · evaluation and uncertainty remain medical-image datasets</span></p>
+## Running one
 
-Reproduction snapshot: KonfAI `5195b79`; ImpactSynth `db04a8e`. The committed
-generator requests one plane from each image through SimpleITK's extraction
-API. Compressed MHA inputs may still require internal backend decompression.
+An app exposes four operations, all on the same package:
 
-## Common app workflows
+```bash
+konfai-apps infer       APP -i input.mha -o ./Output --gpu 0
+konfai-apps eval        APP -i prediction.mha --gt ct.mha --mask mask.mha
+konfai-apps uncertainty APP -i input.mha -o ./Output
+konfai-apps pipeline    APP -i input.mha --gt ct.mha -o ./Output -uncertainty
+```
 
-These commands all use the same app package, but they expose different levels
-of workflow orchestration.
+`pipeline` chains inference, evaluation and uncertainty in one call. What each
+family returns:
 
-| App family | Typical input | Materialised result | Additional workflow |
+| Family | Input | Result | Also available |
 | --- | --- | --- | --- |
-| Segmentation | CT, MR, or CBCT | label map on the input grid | Dice evaluation, ensemble/TTA uncertainty |
-| Synthesis | MR or CBCT | synthetic CT with reference geometry | masked MAE/SSIM-style evaluation, uncertainty |
-| Registration | fixed + moving images | moved image, DVF, transform | image/label/landmark evaluation, field uncertainty |
+| Segmentation | CT, MR or CBCT | label map on the input grid | Dice evaluation, ensemble/TTA uncertainty |
+| Synthesis | MR or CBCT | synthetic CT with the reference geometry | masked MAE/SSIM evaluation, uncertainty |
+| Registration | fixed + moving | moved image, displacement field, transform | image, label and landmark evaluation, field spread |
 
-Inference:
+An app identifier is a local directory or a Hugging Face reference,
+`owner/repository:variant`, optionally pinned to a revision with
+`owner/repository@rev:variant`. For example `VBoussot/ImpactSynth:MR`,
+`VBoussot/TotalSegmentator-KonfAI:total`.
 
-```bash
-konfai-apps infer VBoussot/ImpactSynth:CBCT \
-  -i input.mha -o ./Output --gpu 0
-```
+Repeat `-i` / `--inputs` to pass several input groups, which is how an app that
+expects an image plus a mask, or several files per group, receives them. The same
+operations are available from Python through `konfai_apps.KonfAIApp`.
 
-Evaluation:
+### Registration
 
-```bash
-konfai-apps eval VBoussot/ImpactSynth:CBCT \
-  -i prediction.mha --gt ct.mha --mask mask.mha --gpu 0
-```
-
-Pipeline:
-
-```bash
-konfai-apps pipeline VBoussot/ImpactSynth:CBCT \
-  -i input.mha --gt ct.mha --mask mask.mha -o ./Output -uncertainty
-```
-
-### Registration is a first-class App family
-
-IMPACT-Reg packages thirteen rigid, rigid+B-spline, modality-specific MR/CT and
-CBCT/CT semantic presets, native ConvexAdam stages, and FireANTs presets. A
-preset produces the moved image and displacement field on the fixed grid. The
-registration orchestrator can average fields from several presets, write a
-reusable transform, evaluate image/segmentation/landmark pairs, and derive a
-voxel-wise field-spread map.
+IMPACT-Reg packages thirteen presets: rigid, rigid plus B-spline,
+modality-specific MR/CT and CBCT/CT semantic presets, native ConvexAdam stages
+and FireANTs presets. A preset writes `Moved.mha` and `DVF.mha`, the moved image and
+the displacement field, on the fixed grid (the groups are named `MovedImage` and
+`DisplacementField`). The orchestrator can ensemble several presets, write a
+reusable transform, evaluate against images, labels or landmarks, and derive a
+voxel-wise spread map from the ensemble.
 
 ```bash
 impact-reg-konfai register MR_CT_MRSeg MR_CT_TS \
@@ -251,137 +101,58 @@ impact-reg-konfai register MR_CT_MRSeg MR_CT_TS \
   --uncertainty -o ./Registration --gpu 0
 ```
 
-The following cards use the published `ConvexAdam_Composite` preset on
-de-identified SynthRAD 2025 Task 1 abdomen case `1ABB123`, distributed under
-CC BY-NC 4.0 and detailed in the
-<a href="../_static/apps/ASSET_PROVENANCE.md">asset provenance manifest</a>.
-Because its MR was already aligned by
-IMPACT, the test changes only its origin (`+20 mm` X, `-12 mm` Y); its decoded
-voxel values remain exactly identical, verified one plane at a time. This
-creates a known, reproducible offset without inventing anatomy or interpolating
-an input image.
-
-The App writes the transform the preset declared — here a three-component
-`DVF.mha` in millimetres — and `Moved.mha`, both on the fixed CT grid. Compared with the unshifted MR,
-foreground NCC improves from `0.129` to `0.937` and MAE from `106.11` to
-`21.09`. The field has a mean magnitude of `23.06 mm` and a 95th percentile of
-`25.55 mm`. These validation values were accumulated one axial plane at a time.
-The generator requests plane-sized outputs; compressed sources may still be
-decompressed internally by the imaging backend.
-
 <ul class="kf-example-grid kf-example-grid--registration" aria-label="Completed real-data IMPACT-Reg stages">
-  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moving-before.png" aria-label="Open the real moving MR before registration"><img src="../_static/apps/impact-reg/moving-before.png" alt="Real moving abdominal MR before registration, with fixed CT contours showing the controlled spatial offset." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · MOVING INPUT</span><strong>Moving MR — before</strong><span>Fixed-CT contours expose the controlled metadata-only offset.</span><span class="kf-example-stats">NCC 0.129 · MAE 106.11</span></figcaption></figure></li>
+  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moving-before.png" aria-label="Open the real moving MR before registration"><img src="../_static/apps/impact-reg/moving-before.png" alt="Real moving abdominal MR before registration, with fixed CT contours showing the controlled spatial offset." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · MOVING INPUT</span><strong>Moving MR: before</strong><span>Fixed-CT contours expose the controlled metadata-only offset.</span><span class="kf-example-stats">NCC 0.129 · MAE 106.11</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/fixed-ct.png" aria-label="Open the real fixed CT target"><img src="../_static/apps/impact-reg/fixed-ct.png" alt="Real fixed abdominal CT defining the registration target and output geometry." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">02 · FIXED REFERENCE</span><strong>Fixed CT target</strong><span>The reference image defines the physical output grid.</span><span class="kf-example-stats">222 × 226 × 124 · 2 MM GRID</span></figcaption></figure></li>
-  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moved-after.png" aria-label="Open the real moved MR after registration"><img src="../_static/apps/impact-reg/moved-after.png" alt="Real moved abdominal MR after ConvexAdam Composite registration on the fixed CT grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">03 · MOVED OUTPUT</span><strong>Moved MR — after</strong><span><code>ConvexAdam_Composite</code> writes the result on the fixed grid.</span><span class="kf-example-stats">NCC 0.937 · MAE 21.09</span></figcaption></figure></li>
+  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moved-after.png" aria-label="Open the real moved MR after registration"><img src="../_static/apps/impact-reg/moved-after.png" alt="Real moved abdominal MR after ConvexAdam Composite registration on the fixed CT grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">03 · MOVED OUTPUT</span><strong>Moved MR: after</strong><span><code>ConvexAdam_Composite</code> writes the result on the fixed grid.</span><span class="kf-example-stats">NCC 0.937 · MAE 21.09</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/displacement-field.png" aria-label="Open the real physical displacement field"><img src="../_static/apps/impact-reg/displacement-field.png" alt="Real three-component displacement field visualized with physical magnitude and sampled in-plane vectors." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">04 · PHYSICAL FIELD</span><strong>Displacement field</strong><span>Three physical components in millimetres, with sampled vectors.</span><span class="kf-example-stats">MEAN 23.06 MM · P95 25.55 MM</span></figcaption></figure></li>
 </ul>
 
-<p class="kf-example-caption"><strong>A real registration run with an inspectable physical field.</strong><span>Controlled offset · <code>ConvexAdam_Composite</code> · NCC 0.129 → 0.937 · moved image + DVF + reusable transform</span></p>
-
-The light-gray body and bone contours come from the fixed CT and are overlaid
-unchanged before and after registration. DVF brightness encodes full 3-D
-magnitude; the sparse arrows show its in-plane X/Z components. Reproduction
-snapshot: KonfAI `5195b79`, ImpactReg `1e7ef81`.
-
-The work also exists at dataset scale. The IMPACT pipeline produced and
-published reusable Elastix B-spline transforms for:
-
-- [SynthRAD 2023 IMPACT registrations](https://huggingface.co/datasets/VBoussot/synthrad2023-impact-registration): 317 MR→CT and 289 CBCT→CT transforms;
-- [SynthRAD 2025 IMPACT registrations](https://huggingface.co/datasets/VBoussot/synthrad2025-impact-registration): 411 MR→CT and 638 CBCT→CT transforms.
-
-These repositories contain transformation parameter files—not redistributed
-patient images. Each transform aligns the alternate modality into CT space.
-The released registrations use third-order B-splines, four resolution levels
-and a final 10 mm grid; their dataset cards document exclusions and the
-CC BY-NC 4.0 terms. They are concrete research artifacts behind the aligned
-pairs used to train and evaluate the synthesis workflows.
-
-## Grouped inputs
-
-The CLI accepts grouped inputs by repeating `--inputs` / `-i`. This matches the
-grouping behavior documented in `konfai_apps.cli.add_common_konfai_apps()`.
-
-Use this when an app expects:
-
-- multiple input groups
-- multiple files per group
-- paired inputs such as image + mask
-
-## Fine-tuning
-
-Fine-tuning is available through:
+### Fine-tuning
 
 ```bash
-konfai-apps fine-tune <app> <name> -d ./Dataset --epochs 10 --gpu 0
-konfai-apps fine-tune <app> <name> -d ./Dataset --models CV_0 CV_1 --epochs 10 --gpu 0
+konfai-apps fine-tune APP NAME -d ./Dataset --epochs 10 --gpu 0
+konfai-apps fine-tune APP NAME -d ./Dataset --models CV_0 CV_1 --epochs 10 --gpu 0
 ```
 
-Under the hood, the app installs training assets, links the dataset, then, for each selected
-checkpoint, restarts training from its pretrained weights (fresh optimizer, learning-rate schedule
-and epoch counter) so that `--epochs` fine-tuning epochs actually run. Use `--models` to choose which
-checkpoint(s) to fine-tune (default: the first available); each is fine-tuned independently and
-written back into the output app, which is left as a ready-to-use app bundle.
+The app installs its training assets, links your dataset, then restarts training
+from each selected checkpoint's pretrained weights with a fresh optimizer,
+schedule and epoch counter, so `--epochs` epochs really run. `--models` picks
+which checkpoints, defaulting to the first; each is fine-tuned independently. The
+output is another app bundle, ready to run.
 
-## Remote execution
+## Running on another machine
 
-Any `konfai-apps` command becomes remote as soon as `--host` is provided — the
-CLI still looks the same; only the execution backend changes. The client then:
-
-1. uploads inputs
-2. schedules the job
-3. streams logs over SSE
-4. downloads the zipped result bundle
-
-On the server side, jobs are queued, optionally assigned GPUs, executed in
-isolated temporary workspaces, and cleaned up after a grace period.
-
-### Start the server
-
-The server requires a JSON file listing the available apps, and bearer-token
-authentication is on by default — without a token it exits before binding rather than
-serving unauthenticated:
+Any command becomes remote when you pass `--host`. The CLI is unchanged; the
+client uploads the inputs, schedules the job, streams the logs over SSE and
+downloads the result. Server side, jobs queue, get a GPU, run in an isolated
+workspace and are cleaned up after a grace period.
 
 ```bash
 export KONFAI_API_TOKEN="my-secret-token"
 konfai-apps-server --host 0.0.0.0 --port 8000 --apps konfai-apps/tests/assets/apps.json
-```
 
-Pass `--auth off` to drop authentication deliberately, or `--token` to supply the
-token inline (development only).
-
-See {doc}`../reference/cli` for the full `konfai-apps-server` flag reference.
-
-### Run a remote job
-
-```bash
-konfai-apps infer VBoussot/ImpactSynth:CBCT \
-  -i input.mha -o ./Output \
+konfai-apps infer VBoussot/ImpactSynth:CBCT -i input.mha -o ./Output \
   --host my.server.org --port 8000 --token "$KONFAI_API_TOKEN"
 ```
 
-The complete HTTP contract behind this — health, device, and app metadata
-endpoints plus job status, log, result, and kill endpoints — is documented in
+Bearer authentication is on by default: without a token the server exits before
+binding rather than serving unauthenticated. `--auth off` drops it deliberately,
+`--token` supplies one inline for development. The HTTP contract behind all this,
+health, device and app metadata, job status, log, result and kill, is in
 {doc}`../reference/app-server-api`.
 
-## Use the same App from 3D Slicer
+## From 3D Slicer
 
-[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI) is the external 3D
-Slicer client for KonfAI Apps. It lets a user select an App, map Slicer volumes
-to its declared inputs, launch local or remote execution, and load returned
-volumes or segmentations into the scene.
+[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI) is the external Slicer
+client. It lists apps, maps Slicer volumes onto their declared inputs, launches
+locally or remotely, and loads the returned volumes and segmentations back into
+the scene.
 
-Treat Slicer as another client of the validated App, not a separate model
-package: test the bundle with `konfai-apps infer` first, then configure the same
-identifier in SlicerKonfAI. The integration is currently external and its
-progress/output contract is less stable than the core Python API; pin compatible
-KonfAI Apps and SlicerKonfAI versions for clinical-facing installations.
-
-### The real SlicerKonfAI workflow
-
-These are official SlicerKonfAI interface captures, not mockups. The inference
-view exposes the selected App and its description, ensemble/TTA/MC-dropout
-controls, device and memory state, live KonfAI logs, and the returned medical
-result in the Slicer viewers.
+Slicer is another client of a validated app, not a separate package: test the
+bundle with `konfai-apps infer` first, then use the same identifier there. The
+integration is external and its progress contract is less stable than the Python
+API, so pin compatible versions for clinical-facing installs.
 
 <figure class="kf-visual kf-visual--app">
   <a class="kf-visual-frame" href="../_static/slicer/inference.webp" aria-label="Open the SlicerKonfAI inference screenshot at full resolution">
@@ -396,9 +167,6 @@ result in the Slicer viewers.
   </figcaption>
 </figure>
 
-The same module keeps QA attached to the App. Without a reference, it consumes
-the inference stack and loads the App's uncertainty image and summary metric:
-
 <figure class="kf-visual kf-visual--app">
   <a class="kf-visual-frame" href="../_static/slicer/uncertainty.png" aria-label="Open the SlicerKonfAI uncertainty screenshot at full resolution">
     <img src="../_static/slicer/uncertainty.png" alt="Official SlicerKonfAI reference-free uncertainty interface with uncertainty map and summary metric." width="1676" height="852" loading="lazy" decoding="async">
@@ -411,10 +179,6 @@ the inference stack and loads the App's uncertainty image and summary metric:
     <a class="kf-visual-inspect" href="../_static/slicer/uncertainty.png">Inspect 1676 × 852 <span aria-hidden="true">↗</span></a>
   </figcaption>
 </figure>
-
-When a reference exists, evaluation selects output/reference/mask nodes, runs
-the App's configured metrics, and returns both numeric values and inspectable
-error maps:
 
 <figure class="kf-visual kf-visual--app">
   <a class="kf-visual-frame" href="../_static/slicer/evaluation.png" aria-label="Open the SlicerKonfAI evaluation screenshot at full resolution">
@@ -429,13 +193,62 @@ error maps:
   </figcaption>
 </figure>
 
-Screenshots are vendored from
+Screenshots vendored from
 [`vboussot/SlicerKonfAI`](https://github.com/vboussot/SlicerKonfAI) at commit
-`4508683`, under that repository's Apache-2.0 license. They demonstrate the
-actual GUI contract at that revision; controls may evolve in later releases.
+`4508683`, under that repository's Apache-2.0 license.
+
+## Packaging your own workflow
+
+Once a workflow is stable, `bundle` is the handoff. It validates the metadata,
+copies the prediction and evaluation configs and the checkpoints, includes custom
+Python when needed, and writes the layout every resolver understands.
+
+An app is recognized by its `app.json`:
+
+```json
+{
+  "display_name": "My segmentation model",
+  "description": "Segments the target anatomy from CT.",
+  "short_description": "CT segmentation",
+  "tta": 0,
+  "mc_dropout": 0
+}
+```
+
+```bash
+konfai-apps bundle CT_SEG \
+  --out dist \
+  --app-json app.json \
+  --config Prediction.yml Evaluation.yml \
+  --checkpoint Checkpoints/SEG_BASELINE/*.pt \
+  --model-py Model.py
+```
+
+That writes `dist/CT_SEG/`, containing `app.json`, the configs, the checkpoints
+and any custom Python. `app.json.models` is filled from the checkpoint filenames
+when you omit it, and a missing `requirements.txt` is drafted from `Model.py`'s
+imports: review that draft, it is a convenience rather than an environment lock.
+Omit `--model-py` when the workflow uses no custom Python, and add `Uncertainty.yml`
+to `--config` when the app should expose an uncertainty workflow. `--onnx` exports
+an ONNX graph beside the checkpoints, which is experimental and not needed for
+normal execution.
+
+Validate before publishing, and look at the images rather than the exit code:
+
+```bash
+konfai-apps infer ./dist/CT_SEG -i input.mha -o ./Output --gpu 0
+konfai-apps eval ./dist/CT_SEG -i ./Output/<prediction>.mha --gt reference.mha
+```
+
+Once local inference matches the research workflow, upload `CT_SEG/` as a variant
+in a Hugging Face model repository and address it as `owner/repository:CT_SEG`.
+
+The YAML stays inside the bundle as the inspectable record, which is what lets
+the same app be evaluated, fine-tuned, served or automated later instead of being
+replaced by a deployment script.
 
 ## Next steps
 
-- {doc}`../reference/cli` — the full flag reference for `konfai-apps` and `konfai-apps-server`
-- {doc}`../reference/python-api` — the `KonfAIApp` / `KonfAIAppClient` Python API and the trust model
-- {doc}`../reference/app-server-api` — the HTTP endpoint contract of the server
+- {doc}`../reference/cli`: every flag of `konfai-apps` and `konfai-apps-server`.
+- {doc}`../reference/python-api`: the `KonfAIApp` and `KonfAIAppClient` API.
+- {doc}`../reference/app-server-api`: the server's HTTP contract.

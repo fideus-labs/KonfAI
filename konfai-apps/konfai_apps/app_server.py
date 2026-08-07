@@ -144,7 +144,7 @@ def save_upload_groups(
         paths = save_uploads(group, base / f"g{i}", max_file_bytes, max_total_bytes - total)
         saved.append(paths)
         # Charge the real content bytes: a directory-volume path is a directory whose inode st_size is a
-        # few dozen bytes, not the extracted store -- summing st_size of the paths would let a group of
+        # few dozen bytes, not the extracted store: summing st_size of the paths would let a group of
         # such volumes bypass max_total_bytes for every following group. Walk directories for their files.
         total += sum(f.stat().st_size for p in paths for f in ([p] if p.is_file() else p.rglob("*")) if f.is_file())
     return saved
@@ -297,7 +297,7 @@ def _extract_zip_bounded(archive_path: Path, dest: Path, max_file_bytes: int, ma
     limits on the EXTRACTED bytes.
 
     A zip bomb inflates far past its on-wire size, so a limit checked on the compressed upload is no limit at
-    all -- the guard has to count what actually lands on disk. Each member is zip-slip checked before any
+    all: the guard has to count what actually lands on disk. Each member is zip-slip checked before any
     write. Returns the total number of bytes written.
     """
     dest = dest.resolve()

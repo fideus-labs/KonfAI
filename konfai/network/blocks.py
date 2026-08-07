@@ -227,8 +227,8 @@ class ResidualBlockD(network.ModuleArgsDict):
     * **Skip path first** (matching ``BasicBlockD.forward``, which evaluates ``self.skip(x)``
       before the main path): when the block is strided, the residual is downsampled with an
       ``AvgPool`` of kernel = stride (never a strided conv); when the channel count changes, it is
-      then projected with a ``1x1`` conv whose ``bias`` is **always** ``False`` -- independent of
-      ``conv_bias`` -- followed by a norm. When neither applies the skip is the identity (no extra
+      then projected with a ``1x1`` conv whose ``bias`` is **always** ``False`` (independent of
+      ``conv_bias``) followed by a norm. When neither applies the skip is the identity (no extra
       module, the residual falls back to the block input branch).
     * **Main path** on branch ``0``: ``Conv(stride) -> Norm -> LeakyReLU -> Conv(stride 1) -> Norm``
       (the second conv carries no activation, exactly as ``BasicBlockD``).
@@ -401,7 +401,7 @@ class ResidualStage(network.ModuleArgsDict):
     **first** block carries ``stride`` and the ``in_channels -> out_channels`` change (nnU-Net strided-conv
     downsampling), and the remaining ``n_blocks - 1`` blocks are stride 1 at ``out_channels``. The blocks
     are wired sequentially (each on branch ``0``), so the whole stage is a drop-in single node with one
-    input and one output whose weighted leaves fire in the same order as the equivalent flat stack -- it
+    input and one output whose weighted leaves fire in the same order as the equivalent flat stack: it
     stays transparent to the execution-order weight bridge (``konfai.utils.pretrained``).
     """
 
@@ -440,10 +440,10 @@ class DecoderStage(network.ModuleArgsDict):
     """One U-Net decoder resolution stage as a single two-input node: upsample, concat skip, conv block.
 
     A generic, reusable building block for U-Net decoders (nnU-Net's ``UNetDecoder`` shares it between the
-    plain and residual encoders). It is a **two-input** node -- ``in_branch: [coarser, skip]`` -- that runs
+    plain and residual encoders). It is a **two-input** node (``in_branch: [coarser, skip]``), that runs
     ``ConvTranspose(in_channels -> skip_channels, kernel = stride = upsample_stride)`` on the coarser input,
     concatenates the encoder ``skip`` (transpose output first, then skip), then a :class:`ConvBlock` of
-    ``n_conv`` convs mapping ``2 * skip_channels -> skip_channels`` -- each Conv -> InstanceNorm(affine) ->
+    ``n_conv`` convs mapping ``2 * skip_channels -> skip_channels``: each Conv -> InstanceNorm(affine) ->
     LeakyReLU with same-padding. It yields one output. ``upsample_stride`` sets both the transpose kernel and
     stride so anisotropic plans (per-axis lists) upsample exactly the axes their encoder downsampled.
     """
@@ -477,7 +477,7 @@ class DecoderStage(network.ModuleArgsDict):
             in_branch=[0],
             out_branch=[0],
         )
-        # Concatenate the encoder skip (branch 1); transpose output FIRST, then skip -- nnU-Net order.
+        # Concatenate the encoder skip (branch 1); transpose output FIRST, then skip: nnU-Net order.
         self.add_module("Skip", Concat(), in_branch=[0, 1], out_branch=[0])
         # Conv block: 2 * skip_channels -> skip_channels, then skip_channels -> skip_channels for the rest.
         # ``kernel_size``/``padding`` pass through as Any so a per-axis (anisotropic) list is accepted.
@@ -509,13 +509,13 @@ class ResNetStage(network.ModuleArgsDict):
 
     A generic, reusable building block for the ResNet-18/34 encoders that ``segmentation_models_pytorch``
     stacks under its U-Net / UNet++ decoders (each is torchvision's ``ResNet`` ``layer1..layer4``). The
-    **first** block carries the stage ``stride`` and the ``in_channels -> out_channels`` change -- its ``1x1``
-    projection ``downsample`` skip is built automatically when the stride or the channel count changes -- and
+    **first** block carries the stage ``stride`` and the ``in_channels -> out_channels`` change (its ``1x1``
+    projection ``downsample`` skip is built automatically when the stride or the channel count changes) and
     the remaining ``n_blocks - 1`` blocks are stride 1 at ``out_channels`` with identity skips. The blocks run
     sequentially on branch ``0``, so the whole stage is a drop-in single node with one input and one output
     whose weighted leaves fire in the same order as the equivalent flat ``BasicBlock`` stack: it stays
     transparent to the execution-order weight bridge (``konfai.utils.pretrained``). ``conv_bias`` defaults to
-    ``False`` and the norm to ``BatchNorm`` -- the torchvision/timm ResNet convention.
+    ``False`` and the norm to ``BatchNorm``: the torchvision/timm ResNet convention.
     """
 
     def __init__(
@@ -550,7 +550,7 @@ class UNetPlusPlusNode(network.ModuleArgsDict):
 
     A generic, reusable building block for the nested (dense) UNet++ decoder of
     ``segmentation_models_pytorch`` (``UnetPlusPlusDecoder``). It is a **multi-input** node --
-    ``in_branch: [coarser, skip_0, skip_1, ...]`` -- that reproduces one grid node ``x_{d}_{l}``:
+    ``in_branch: [coarser, skip_0, skip_1, ...]``: that reproduces one grid node ``x_{d}_{l}``:
 
     * ``Upsample(scale_factor=2, mode='nearest')`` on the shallower-column predecessor (branch ``0``);
     * a :class:`Concat` of the upsampled feature FIRST, then every same-resolution dense skip and the matching

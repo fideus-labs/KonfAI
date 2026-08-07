@@ -292,14 +292,14 @@ def modeling_rules() -> dict[str, Any]:
                 "PREFER a shipped catalog architecture ('classpath: default|<Name>.yml', see "
                 "list_components(kind='model')) over authoring a model from scratch. Catalog entries are "
                 "pre-validated (weight-exact tests against their reference implementation, or a documented "
-                "structural check) and several load real pretrained weights -- they are known-good. Author a "
+                "structural check) and several load real pretrained weights: they are known-good. Author a "
                 "custom Python/YAML model only when no catalog entry and no installable class fits the task, "
                 "and then validate it before committing compute (see below)."
             ),
             "external_class": (
                 "Any installed nn.Module works as-is: 'classpath: monai.networks.nets:SegResNet' (or "
                 "torchvision, timm, segmentation_models_pytorch, ...). KonfAI wraps it in MinimalModel "
-                "automatically -- the simplest path when one loss on the final output is enough. But it is a "
+                "automatically: the simplest path when one loss on the final output is enough. But it is a "
                 "BLACK BOX: only its final output is visible; internal layers are NOT addressable in "
                 "outputs_criterions, the model cannot be edited without code, and the import runs that "
                 "library's code (trust)."
@@ -307,10 +307,10 @@ def modeling_rules() -> dict[str, Any]:
             "what_the_konfai_contract_buys": (
                 "Expressing a model under the KonfAI contract (a default|<Name>.yml graph, or a Network "
                 "subclass) instead of importing it as a MinimalModel black box buys four things the black box "
-                "cannot give: (1) EVERY internal layer is an addressable named output -- attach a loss to any "
+                "cannot give: (1) EVERY internal layer is an addressable named output: attach a loss to any "
                 "of them (deep supervision, feature/perceptual/IMPACT losses on intermediate features, "
                 "auxiliary heads); (2) no-code architecture edits (depth, norm, heads) via YAML params; "
-                "(3) safe-by-construction sharing -- a registry-only YAML runs no imported code; (4) uniform "
+                "(3) safe-by-construction sharing: a registry-only YAML runs no imported code; (4) uniform "
                 "checkpoint / alias / EMA / patch handling. You can still start from the reference's pretrained "
                 "weights: load them into the addressable KonfAI graph with konfai.utils.pretrained. Rule: need "
                 "only the final output + one loss -> import is fine; need internal supervision, editability, or "
@@ -331,12 +331,12 @@ def modeling_rules() -> dict[str, Any]:
             ),
             "how_to_check_an_authored_model": (
                 "inspect_object_signature reads a model's hyperparameters, loss-attachable outputs, and "
-                "(for YAML) full content WITHOUT building it -- use it to understand any of the three forms. "
+                "(for YAML) full content WITHOUT building it: use it to understand any of the three forms. "
                 "To confirm the architecture actually BUILDS and wires correctly, validate_config_semantics"
                 "(level='instantiate') constructs the model inside its config (catching channel/shape/output "
                 "mismatches), and describe_model_outputs lists the real outputs_criterions paths of the built "
                 "model. Both build the model as part of the workflow, so the config must be complete (dataset "
-                "mapped); a catalog entry needs no such check -- it is already validated."
+                "mapped); a catalog entry needs no such check: it is already validated."
             ),
         },
         "authoring_checks": [
@@ -867,7 +867,7 @@ def _yaml_terminal_outputs(module_specs: list[Any], prefix: str = "") -> tuple[l
     """Collect the ``out_branch: [-1]`` heads of a YAML modules tree.
 
     Returns ``(heads, leaves)``: the ':'-joined paths of the marked modules, and for each the full
-    path down to its producing leaf — the exact key a config puts under ``outputs_criterions``.
+    path down to its producing leaf: the exact key a config puts under ``outputs_criterions``.
     """
     heads: list[str] = []
     leaves: list[str] = []
@@ -1322,7 +1322,7 @@ def copy_template_subset(
     Model files referenced through ``classpath`` in the selected configs are treated as
     hard dependencies: declarative ``.yml`` models are always copied so the config can be
     built, while local ``.py`` models stay opt-in (``include_python``). Returns
-    ``(copied, skipped_python)`` — the referenced ``.py`` dependencies that were NOT copied;
+    ``(copied, skipped_python)``: the referenced ``.py`` dependencies that were NOT copied;
     the seeded configs cannot resolve without them, so callers must surface the list.
     """
     copied: list[str] = []

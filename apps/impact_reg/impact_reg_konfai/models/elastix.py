@@ -18,14 +18,14 @@
 
 ``RegistrationNet`` wires ``ElastixRegistration`` (fixed = branch 0, moving = branch 1, fixed/moving masks =
 2/3) and emits its ``DisplacementField`` on the fixed grid. This module owns
-the MAPPING — the per-resolution model matrix (``resolutions``) turned into IMPACT parameter-map lines, and
+the MAPPING: the per-resolution model matrix (``resolutions``) turned into IMPACT parameter-map lines, and
 the config schema (``ModelSpec`` / ``ResolutionSpec``). The elastix RUNTIME (binary install, model download,
 subprocess, progress) lives in ``elastix_engine.py`` and is imported only when the graph is built.
 
 A UI reads the tuning knobs straight from the TYPES below: ``Literal`` (a fixed set),
 ``Annotated[.., Range]`` (numeric bounds), ``Annotated[str, Choices(...)]`` (a resolver the app owns).
 
-NOTE: do NOT add ``from __future__ import annotations`` — KonfAI's config engine reads runtime annotations
+NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine reads runtime annotations
 (``get_origin``); PEP 563 stringized annotations break arg resolution.
 """
 
@@ -53,7 +53,7 @@ _FOV_RAMP_MAX_LAYER = 6
 
 
 def registry_choices() -> list[str]:
-    """The ``ref`` picker's values — model refs (``repo:path``) from the registry the engine already fetches
+    """The ``ref`` picker's values: model refs (``repo:path``) from the registry the engine already fetches
     (offline-first). A user may still point ``ref`` at a local model."""
     repo = _IMPACT_MODELS_REGISTRY.split(":", 1)[0]
     return [f"{repo}:{key}" for key in load_models_registry()]
@@ -67,8 +67,8 @@ def _num(x: object) -> str:
 @dataclass
 class ModelSpec:
     """One feature model at one resolution (several may share a resolution). ``ref`` picks the model; the
-    rest are its per-(resolution, model) knobs. Dimension / channels / FOV are intrinsic — from the registry
-    (``models.json``) keyed by ``ref`` — never tuned."""
+    rest are its per-(resolution, model) knobs. Dimension / channels / FOV are intrinsic (from the registry
+    (``models.json``) keyed by ``ref``), never tuned."""
 
     ref: Annotated[
         str,
@@ -135,13 +135,13 @@ def load_models_registry(ref: str = _IMPACT_MODELS_REGISTRY) -> dict:
     else:
         raise ValueError(
             f"models_registry '{ref}' must be a 'repo:file' Hugging Face reference (the registry is fetched "
-            f"from HF, not bundled) — or set KONFAI_IMPACT_MODELS_REGISTRY to a local file for offline use."
+            f"from HF, not bundled): or set KONFAI_IMPACT_MODELS_REGISTRY to a local file for offline use."
         )
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _is_local_ref(ref: str) -> bool:
-    """A model ref without a ``:`` is a local file — and so is a Windows drive-letter path
+    """A model ref without a ``:`` is a local file, and so is a Windows drive-letter path
     (``C:/models/m.pt``), whose ``:`` is not the ``repo:filename`` separator."""
     return ":" not in ref or bool(re.match(r"^[A-Za-z]:[\\/]", ref))
 
@@ -174,7 +174,7 @@ def _fov_value(fov: dict, layers_mask: str) -> int:
       ``2^l+3``    TotalSegmentator / MRSegmentator, ``l`` = deepest layer picked by ``layers_mask``, clamped
                    to the receptive-field plateau ``_FOV_RAMP_MAX_LAYER`` (layers 7-8 -> layer 6);
       a bare int   a fixed FOV (SAM2.1 -> 29, DINOv2 -> 14);
-      ``Global``   Anatomix — whole-image only (Static); no finite Jacobian patch -> error.
+      ``Global``   Anatomix: whole-image only (Static); no finite Jacobian patch -> error.
     An explicit ``value`` in the spec is honoured as a precomputed shortcut.
     """
     formula = str(fov.get("formula", "")).strip()
@@ -297,7 +297,7 @@ class RegistrationNet(network.Network):
         parameter_maps: Annotated[
             list[str],
             "elastix parameter-map preset template(s) run in sequence (e.g. rigid then bspline); at least one "
-            "is required — 'resolutions' regenerates a template's resolution-dependent lines, it does not "
+            "is required: 'resolutions' regenerates a template's resolution-dependent lines; it does not "
             "replace it.",
         ] = [],
         max_iterations: Annotated[
@@ -328,7 +328,7 @@ class RegistrationNet(network.Network):
         resolutions: dict[str, ResolutionSpec] = {},
         mode: Annotated[
             Literal["Static", "Jacobian"],
-            "IMPACT feature-extraction mode: 'Static' (whole-image features, computed once per resolution -- "
+            "IMPACT feature-extraction mode: 'Static' (whole-image features, computed once per resolution: "
             "fast, inference-only) or 'Jacobian' (patch-wise, differentiable, precise, slower). Suggested "
             "priors (not forced): early/downsampling layers -> 'Jacobian'; high-level layers -> 'Static'. "
             "Avoid 'Static' for large-stride/transformer models (SAM, DINOv2): frozen features lose local "

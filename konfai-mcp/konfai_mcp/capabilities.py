@@ -65,13 +65,13 @@ def describe_konfai_capabilities() -> dict[str, Any]:
             "inspect": "inspect_object_signature(classpath)",
         },
         "extension_model": {
-            "principle": "Subclass a base, reference it by classpath in YAML -- no core edits.",
+            "principle": "Subclass a base, reference it by classpath in YAML: no core edits.",
             "describe": "describe_extension_points(kind)",
             "external_libraries": "Reference an installed library class directly via `package.module:Class` "
             "(e.g. monai.losses:DiceLoss); vet it first with check_external_dependency.",
         },
         "apps": {
-            "principle": "When the user wants a RESULT, check published apps FIRST -- cheapest fit wins: "
+            "principle": "When the user wants a RESULT, check published apps FIRST: cheapest fit wins: "
             "use an app as-is, else fine-tune one, else train from scratch.",
             "use_dont_train": "list_apps -> describe_app -> list_app_parameters -> run_app_infer / run_app_pipeline "
             "(runs the app as published); import_app copies it into the session when it must be MODIFIED first",
@@ -85,7 +85,7 @@ def describe_konfai_capabilities() -> dict[str, Any]:
             "patch-based learning + overlap-blended reassembly",
             "test-time augmentation (TTA) and model ensembling (Predictor.outputs_dataset / combine)",
             "deep supervision / multi-head / intermediate-feature losses via named module outputs (outputs_criterions)",
-            "multi-model setups (GAN, teacher-student) -- requires a Network subclass, not a black-box wrap",
+            "multi-model setups (GAN, teacher-student): requires a Network subclass, not a black-box wrap",
         ],
         "safe_actions": [
             "inspect_dataset, list_components, describe_*, inspect_object_signature",
@@ -116,7 +116,7 @@ def _is_scalar(value: Any) -> bool:
 
 
 def _serialize(value: Any) -> Any:
-    # Surface scalar defaults AND flat containers of scalars -- patch_size=[128,128,128], channel lists,
+    # Surface scalar defaults AND flat containers of scalars: patch_size=[128,128,128], channel lists,
     # overlap windows, and scalar class maps are load-bearing tunables the agent must see. Nested @config
     # object defaults still carry volatile object reprs, so those return None (drill via nested_config_classpath).
     if _is_scalar(value):
@@ -138,7 +138,7 @@ def _unwrap_annotation(annotation: Any) -> Any:
     """Return the underlying class of an Optional/Union annotation, else the annotation unchanged.
 
     KonfAI declares nested config fields as e.g. ``patch: DatasetPatch | None = DatasetPatch()``, so the
-    raw annotation is a UnionType, not a class -- without unwrapping, every OPTIONAL nested @config
+    raw annotation is a UnionType, not a class, without unwrapping, every OPTIONAL nested @config
     (Patch, augmentations, EarlyStopping, ModelPatch, ...) would be reported as non-drillable even though
     the tool advertises drilling into them. Generic: works for both ``X | None`` and ``Optional[X]``.
     """
@@ -234,7 +234,7 @@ def describe_config_schema(workflow: str, path: str | None = None) -> dict[str, 
         "reference_hint": (
             f"These are the keys under {':'.join(yaml_path)}:. Each field's yaml_key is the literal key to write. "
             "Scalar and flat-list/dict defaults are shown in 'default'; a field with default_hidden=true HAS a "
-            "default that is just not JSON-serializable here (usually a nested config object) -- read it with "
+            "default that is just not JSON-serializable here (usually a nested config object): read it with "
             "inspect_object_signature on nested_config_classpath. Drill deeper with path='Dataset.Patch'-style "
             "tokens; see the example templates for full, working configs."
         ),

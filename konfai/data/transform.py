@@ -68,21 +68,21 @@ class LocalityKind(Enum):
     dispatcher (``konfai.data.patching``) reads the declaration and reads only the source region a
     target patch actually needs, instead of materialising the whole volume.
 
-    - ``POINTWISE``   -- output voxel depends only on the same voxel (and its channels): read the
+    - ``POINTWISE``: output voxel depends only on the same voxel (and its channels): read the
       exact patch.
-    - ``HALO``        -- bounded neighbourhood: read the patch enlarged by ``halo`` per axis, crop after.
-    - ``ORIENTATION`` -- flip/permute: read the index-remapped source region.
-    - ``CROP``        -- the source region is the target region TRANSLATED: reading it IS the answer,
+    - ``HALO``: bounded neighbourhood: read the patch enlarged by ``halo`` per axis, crop after.
+    - ``ORIENTATION``: flip/permute: read the index-remapped source region.
+    - ``CROP``: the source region is the target region TRANSLATED: reading it IS the answer,
       so the stage is not re-applied to it. Unlike a reorientation this drops the voxels outside the
       box, so it is no bijection and the stored volume's statistics are not its output's.
-    - ``GLOBAL_STAT`` -- needs whole-volume stats (``stat_keys`` subset of Min/Max/Mean/Std), obtained
+    - ``GLOBAL_STAT``: needs whole-volume stats (``stat_keys`` subset of Min/Max/Mean/Std), obtained
       once from disk and cached: read the exact patch + the cached stat.
-    - ``REGRID``      -- resample onto another grid: a change of sampling density, of placement, or
+    - ``REGRID``: resample onto another grid: a change of sampling density, of placement, or
       both, possibly through a map. The target is a grid in its own right, so part of it may read
       from outside the source altogether and the source region is no mere scaling of the target's.
       The stage owns both halves: it declares the source region a target region pulls
       (:meth:`Transform.stream_region_source`) and interpolates it (:meth:`Transform.stream_region`).
-    - ``SLAB``        -- per-voxel value map, plus a side effect that needs the slab's place in the
+    - ``SLAB``: per-voxel value map, plus a side effect that needs the slab's place in the
       volume (a per-region side write): the streamed-WRITE dispatcher runs it through
       :meth:`Transform.stream_slab` with region context; the read dispatcher has no such context and
       treats it as ``WHOLE_VOLUME``.
@@ -103,7 +103,7 @@ class LocalityKind(Enum):
         """Whether this kind leaves every whole-volume statistic of its input untouched.
 
         Only a reorientation does: a flip or a permute is a bijection on the voxels, so the multiset of
-        values -- and therefore Min/Max/Mean/Std over it -- is exactly the input's. Every other kind may
+        values (and therefore Min/Max/Mean/Std over it) is exactly the input's. Every other kind may
         map values (``POINTWISE``, ``GLOBAL_STAT``), mix neighbours (``HALO``) or interpolate
         (``REGRID``). This is what decides whether the statistics of the STORED volume are still those
         of a later transform's own input (see ``DatasetManager._plan_stream_region``).
@@ -118,7 +118,7 @@ class RegionContext:
     ``source`` is the part of the stage's INPUT the tensor covers, ``target`` the part of its OUTPUT
     it must produce; they differ whenever the stage moves or resizes data (a halo read, a resample,
     a warp onto another grid). ``source_shape`` and ``target_shape`` are the two whole extents those
-    regions are cut from -- a region alone cannot say how far it is from an edge.
+    regions are cut from: a region alone cannot say how far it is from an edge.
     """
 
     source: tuple[slice, ...]
@@ -168,7 +168,7 @@ class Transform(NeedDevice, ABC):
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         # Every stage records its constructor arguments as given, so konfai.api can write the
-        # config tree back from live objects -- the binder's mirror, declared once, on the base.
+        # config tree back from live objects: the binder's mirror, declared once, on the base.
         super().__init_subclass__(**kwargs)
         record_given_arguments(cls)
 
@@ -186,7 +186,7 @@ class Transform(NeedDevice, ABC):
         """Declare how this transform's output depends on its input, for patch streaming.
 
         Answered from the transform's own ``__init__`` config and, where the honest answer depends on
-        the image, from ``cache_attribute`` -- the case's SOURCE metadata, as the volume is stored.
+        the image, from ``cache_attribute``: the case's SOURCE metadata, as the volume is stored.
         The dispatcher reads the header before any voxel, so a transform whose contract the image
         decides (a reorientation that is only a flip when the direction cosines are axis-aligned, a
         resample whose halo is the case's own scale) can still declare it up front.
@@ -197,14 +197,14 @@ class Transform(NeedDevice, ABC):
         An override is bound by three rules:
 
         - **READ-ONLY.** Never write to ``cache_attribute``. A declaration is made once, for the whole
-          case, and what it wrote would be one patch's answer imposed on every other -- the
+          case, and what it wrote would be one patch's answer imposed on every other: the
           first-patch-wins bug the streamed paths are built to avoid. The dispatcher hands over a
           private copy, so a write cannot reach the case; it is simply lost.
         - **NO I/O.** Read the attribute already in hand, nothing else. Whether the outside world can
           honour the declaration (are the disk statistics readable, does a mask group exist) is the
           dispatcher's call, and it already makes it.
-        - **TOTAL.** Answer for ANY case. The metadata may be absent -- the config-time checks probe
-          with an empty ``Attribute``, and a group carries only what its writer stored -- so a missing
+        - **TOTAL.** Answer for ANY case. The metadata may be absent: the config-time checks probe
+          with an empty ``Attribute``, and a group carries only what its writer stored, so a missing
           key must return ``WHOLE_VOLUME``, never raise.
         """
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
@@ -218,7 +218,7 @@ class Transform(NeedDevice, ABC):
     ) -> list[slice]:
         """Map a target-patch's spatial slices to the source spatial region to read (region kinds).
 
-        Overridden by the kinds whose source region is an index remap of the target's -- ``ORIENTATION``
+        Overridden by the kinds whose source region is an index remap of the target's: ``ORIENTATION``
         maps it and reorients what it reads, ``CROP`` maps it and is done, ``REGRID`` maps it through
         its own geometry. ``HALO`` is handled generically by the dispatcher, so the base raises for
         any other transform that declares a region kind without providing the remap.
@@ -240,11 +240,11 @@ class Transform(NeedDevice, ABC):
         spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> torch.Tensor:
-        """Run this transform on one finalized slab — rows ``region`` of a ``spatial_shape`` volume.
+        """Run this transform on one finalized slab: rows ``region`` of a ``spatial_shape`` volume.
 
         The streamed-write dispatcher calls this instead of ``__call__`` for a ``SLAB`` declaration:
         the value map is per-voxel, so the default whole-volume call is exact on the slab, but the
-        stage's side effect needs to know where the slab sits — which is what a ``SLAB`` transform
+        stage's side effect needs to know where the slab sits, which is what a ``SLAB`` transform
         overrides this to read. Slabs arrive in order and tile the volume exactly once per case.
         """
         del region, spatial_shape
@@ -254,7 +254,7 @@ class Transform(NeedDevice, ABC):
         """Told where this stage's own configuration lives, once, right after it was built.
 
         The loader knows the subtree a stage read its arguments from; a stage that instantiates
-        something ELSE from configuration — an operator named by classpath — cannot know it, and
+        something ELSE from configuration (an operator named by classpath) cannot know it, and
         without this would have to build that object with no arguments at all. The base holds
         nothing: only a stage with a sub-object of its own overrides it.
         """
@@ -262,7 +262,7 @@ class Transform(NeedDevice, ABC):
     def plan_note(self, group_dest: str, name: str, shape: list[int], cache_attribute: Attribute) -> str | None:
         """Something about this case the plan should say, beyond its regime and its cost.
 
-        A stage can be correct, stream, fit the budget, and still surprise the reader — a cost the
+        A stage can be correct, stream, fit the budget, and still surprise the reader: a cost the
         plan has no column for. The plan is where a run is read before it is trusted, so that is
         where the sentence belongs, rather than in a viewer afterwards.
 
@@ -295,7 +295,7 @@ class Transform(NeedDevice, ABC):
         patch-local one it wrote on the way is dropped rather than persisted. The base is a no-op --
         a transform that leaves geometry alone has nothing to record.
 
-        ``name`` is the case the fold walks — what a per-case answer (a ``Resample`` whose
+        ``name`` is the case the fold walks: what a per-case answer (a ``Resample`` whose
         reference follows the case) resolves against; a stage whose answer is case-blind ignores it.
         """
 
@@ -308,7 +308,7 @@ class Transform(NeedDevice, ABC):
     ) -> torch.Tensor:
         """Apply this stage to a region, told WHERE that region sits in the volume.
 
-        The dispatcher already computes this position -- it has to, to know what to read -- and by
+        The dispatcher already computes this position (it has to, to know what to read), and by
         default throws it away, because almost nothing needs it: a value map gives the same answer
         wherever its input came from. Override this when the answer does depend on the place, which
         in practice means a stage reading a SECOND volume aligned with the first (a displacement
@@ -343,12 +343,12 @@ class TransformInverse(Transform, ABC):
 
         The write mirror of :meth:`patch_locality`: a prediction's finalize chain applies transforms
         INVERTED, so the streamed-write gate asks each one about its inverse. ``cache_attribute`` is the
-        finalize-time state — the case's attribute as ``inverse`` will receive it, with everything the
-        forward pass pushed still stacked on it — under the same three rules (read-only, no I/O, total).
+        finalize-time state (the case's attribute as ``inverse`` will receive it, with everything the
+        forward pass pushed still stacked on it) under the same three rules (read-only, no I/O, total).
 
         The default derives from the forward contract where the derivation is safe for any subclass: a
         per-voxel value map inverts to a per-voxel value map, and an index remap inverts to an index
-        remap. Every other kind falls to ``WHOLE_VOLUME`` — an inverse that is streamable anyway
+        remap. Every other kind falls to ``WHOLE_VOLUME``: an inverse that is streamable anyway
         (``Padding``'s crop, ``Resample``'s change of grid) declares itself.
         """
         forward = self.patch_locality(cache_attribute)
@@ -372,7 +372,7 @@ class TransformInverse(Transform, ABC):
         The write mirror of :meth:`write_stream_cache_attribute`, and it exists because the streamed-
         write dispatcher plans a pipe by walking a ONE-VOXEL probe through it: a stage whose inverse
         restores a whole volume cannot be run on that probe just to learn what it pops. The base is a
-        no-op -- an inverse that pops nothing has nothing to state, and one whose transition is cheap
+        no-op: an inverse that pops nothing has nothing to state, and one whose transition is cheap
         to perform is simply run.
         """
 
@@ -383,7 +383,7 @@ class TransformInverse(Transform, ABC):
         context: RegionContext,
         cache_attribute: Attribute,
     ) -> torch.Tensor:
-        """Apply ``inverse`` to a region, told WHERE that region sits — the mirror of
+        """Apply ``inverse`` to a region, told WHERE that region sits: the mirror of
         :meth:`Transform.stream_region`.
 
         ``context.target`` is the region of the inverse's OUTPUT being produced and ``context.source``
@@ -446,7 +446,7 @@ class TransformLoader:
         if not isinstance(factory, type):
             raise TransformError(
                 f"'{classpath}' names a {type(factory).__name__}, not a stage class.",
-                "A chain stage is a class -- a Transform, a DataAugmentation, or a foreign class to"
+                "A chain stage is a class: a Transform, a DataAugmentation, or a foreign class to"
                 " wrap. Name one, e.g. 'Clip' or 'monai.transforms:ScaleIntensity'.",
             )
         # A key is read as a dotted path, and a classpath naming its module carries dots of its own.
@@ -666,7 +666,7 @@ class Clip(Transform):
         # Fast path: one fused in-place clamp instead of two float()-copy + where-scatter passes.
         # Restricted to float32 (integer tensors reject float bounds; float16/float64 would compare
         # at a different precision than the float()-cast scatter in the else branch below) and to
-        # non-NaN bounds: a NaN bound — from a dynamic min/max/percentile over data containing NaN —
+        # non-NaN bounds: a NaN bound (from a dynamic min/max/percentile over data containing NaN)
         # makes clamp_ propagate NaN to the whole tensor, whereas the fallback scatter no-ops on it
         # (NaN comparisons are False). Every other case takes that fallback, unchanged.
         if tensor.dtype == torch.float32 and min_value == min_value and max_value == max_value:
@@ -876,7 +876,7 @@ class TensorCast(TransformInverse):
         # The promise is that the stored volume's Min/Max/Mean/Std are still a later GLOBAL_STAT's
         # input statistics, and a cast keeps them only where it keeps every value. The dtype a volume
         # is stored as is not on its header, so the target is what has to hold whatever that is:
-        # float32 holds an int16 or a float32 exactly, and float16 holds neither -- it runs out of
+        # float32 holds an int16 or a float32 exactly, and float16 holds neither, it runs out of
         # mantissa at 2048, where a CT reaches 3000. An integer cast truncates.
         return PatchLocality(
             LocalityKind.POINTWISE, preserves_statistics=self.dtype in TensorCast._VALUE_PRESERVING_DTYPES
@@ -964,7 +964,7 @@ class Squeeze(TransformInverse):
         self.dim = dim
 
     # WHOLE_VOLUME on purpose: squeeze/unsqueeze changes the tensor rank, and the streamed write sizes
-    # each slab from the pre-finalize accumulator grid -- a rank change past it cannot region-stream.
+    # each slab from the pre-finalize accumulator grid: a rank change past it cannot region-stream.
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         # ``shape`` is the channel-stripped spatial shape (patching strips [C, *spatial] before folding),
@@ -989,7 +989,7 @@ class Squeeze(TransformInverse):
 
 
 class _TargetGrid(ABC):
-    """Which grid a resample writes on — the ``to`` half of the question."""
+    """Which grid a resample writes on: the ``to`` half of the question."""
 
     #: The geometry keys this target cannot be built without. An extent change needs none; a
     #: density change needs the Spacing; adopting another grid needs a real physical space.
@@ -1019,7 +1019,7 @@ class _OwnGrid(_TargetGrid):
 
 
 class _DerivedGrid(_TargetGrid):
-    """The case's own grid at another density — a spacing, or a count, and where it sits."""
+    """The case's own grid at another density: a spacing, or a count, and where it sits."""
 
     def __init__(self, spacing: list[float] | None, shape: list[int] | None, align: str) -> None:
         # A value <= 0 is the KEEP-THIS-AXIS sentinel, normalised to 0 here: that axis takes the
@@ -1094,7 +1094,7 @@ class _ReferenceGrid(_TargetGrid):
         return [self.dataset] if self.dataset is not None else list(self.roots)
 
     def _group_in(self, dataset: Dataset) -> str:
-        """Which group of ``dataset`` holds the reference — the declared one, or its only one."""
+        """Which group of ``dataset`` holds the reference: the declared one, or its only one."""
         if self.group is not None:
             return self.group
         groups = [str(group) for group in dataset.get_group()]
@@ -1107,7 +1107,7 @@ class _ReferenceGrid(_TargetGrid):
         )
 
     def _entry_for(self, name: str) -> str:
-        """The entry to adopt for ``name`` — literal, or the case's own when it says ``{case}``."""
+        """The entry to adopt for ``name``: literal, or the case's own when it says ``{case}``."""
         if "{case}" not in self.entry:
             return self.entry
         if not name:
@@ -1122,7 +1122,7 @@ class _ReferenceGrid(_TargetGrid):
         """The reference's grid, read from its header once per distinct entry.
 
         Headers only, and memoized by ENTRY: a literal reference is one lookup for the whole
-        cohort, a per-case one is one per case -- never the same answer bought again.
+        cohort, a per-case one is one per case, never the same answer bought again.
         """
         entry = self._entry_for(name)
         cached = self._grids.get(entry)
@@ -1132,9 +1132,9 @@ class _ReferenceGrid(_TargetGrid):
         if not roots:
             raise TransformError(
                 f"'Resample' has no dataset to look reference '{entry}' up in.",
-                "Give the stage a root of its own -- Resample: {reference: "
+                "Give the stage a root of its own. Resample: {reference: "
                 + entry
-                + ", reference_dataset: ./Reference:omezarr} -- or run it in a workflow, which hands"
+                + ", reference_dataset: ./Reference:omezarr}: or run it in a workflow, which hands"
                 " its dataset_filenames to every stage.",
             )
         for dataset in roots:
@@ -1148,7 +1148,7 @@ class _ReferenceGrid(_TargetGrid):
             f"'Resample' cannot find reference '{entry}'"
             + (f" in group '{self.group}'" if self.group is not None else "")
             + f" in {', '.join(str(dataset.filename) for dataset in roots)}.",
-            "Check the entry name and its group. A literal reference is looked up by entry -- one"
+            "Check the entry name and its group. A literal reference is looked up by entry: one"
             " grid serves the whole cohort; a '{case}' reference expects every case to have its own"
             " entry in that group.",
         )
@@ -1168,26 +1168,26 @@ class _ReferenceGrid(_TargetGrid):
 
 
 class Resample(TransformInverse):
-    """Resample a case: onto another grid, through a stored map, or both — in one interpolation.
+    """Resample a case: onto another grid, through a stored map, or both, in one interpolation.
 
     Every resample in KonfAI is these two questions, and this is the only stage that answers them.
 
-    **Which grid to write on** — at most one of:
+    **Which grid to write on**: at most one of:
 
     - nothing (the default): the case's own grid. The map moves the anatomy; the voxels stay put.
     - ``spacing``: the same field of view at another density. A component left at ``0`` keeps its axis.
     - ``shape``: the same field of view at a given count. A component left at ``0`` keeps its axis.
-    - ``reference``: the grid of a stored image, adopted whole — extent, spacing, origin, direction.
+    - ``reference``: the grid of a stored image, adopted whole: extent, spacing, origin, direction.
       ``'{case}'`` in the entry follows the case: each case adopts the grid of its OWN entry in
-      ``reference_group`` — ``reference: '{case}', reference_group: DVF`` lands every moved image
+      ``reference_group``: ``reference: '{case}', reference_group: DVF`` lands every moved image
       on its own field's grid, which is where a displacement field is defined.
 
-    **What map to write it through** — any of, composed in this order:
+    **What map to write it through**: any of, composed in this order:
 
     - ``field``: a displacement field, read in world units at each TARGET voxel. Its own grid, its
       own spacing: a field solved at 120 um moves a volume stored at 30 um without being upsampled.
-    - ``transforms``: transforms stored beside the cases — rigid, affine, BSpline, dense field, or a
-      composite of them — mapping GROUP to whether to invert it. The LAST declared is applied first,
+    - ``transforms``: transforms stored beside the cases (rigid, affine, BSpline, dense field, or a
+      composite of them) mapping GROUP to whether to invert it. The LAST declared is applied first,
       which is SimpleITK's own composite order.
 
     Left out, the map is the identity and this is a change of grid and nothing else.
@@ -1195,20 +1195,20 @@ class Resample(TransformInverse):
     ONE INTERPOLATION, ALWAYS. A grid change and a warp asked for together are composed into a single
     coordinate per target voxel and the source is read once, at the displaced point. Doing it as two
     stages resamples twice, and a volume interpolated twice has lost detail the second pass invented
-    no more of -- which is the whole reason an atlas's appearance is rebuilt from native volumes.
+    no more of, which is the whole reason an atlas's appearance is rebuilt from native volumes.
 
     IT STREAMS, and what a region reads is known before a voxel of the SOURCE is touched. A rigid
     or affine map is an exact affine, so the source box of a target region is that region's box
     mapped through it. A BSpline and a dense field are values on a grid read through a non-negative
-    kernel that sums to one, so the sup-norm of those values bounds the displacement at EVERY point
-    -- a theorem, not a sample of the boundary. A field on disk is read region by region, and the
+    kernel that sums to one, so the sup-norm of those values bounds the displacement at EVERY point: a
+    theorem, not a sample of the boundary. A field on disk is read region by region, and the
     window a region samples is its own box: the sup of the values just read bounds that region's
-    pull, so each slab pays exactly the halo ITS displacements require -- measured at run, from a
+    pull, so each slab pays exactly the halo ITS displacements require: measured at run, from a
     read the sampler needs regardless. Nothing is declared and nothing is recorded: the plan
     prices the reads as if the field were zero, and says so.
 
     ``align`` decides where a ``spacing`` or a ``shape`` grid SITS, and it is the one silent choice
-    in the family -- a quarter of a voxel of anatomy, made differently by every library that offers
+    in the family: a quarter of a voxel of anatomy, made differently by every library that offers
     only one of them. ``extent`` keeps the field of view (the outer faces coincide); ``origin`` keeps
     voxel zero's centre where it is. A ``reference`` states its own placement and ignores this.
 
@@ -1221,17 +1221,17 @@ class Resample(TransformInverse):
     - ``invert: true`` on anything but a rigid or affine map: inverting a spline or a field is a
       dense solve over the whole grid, and a field solved per region is not the restriction of the
       field solved once. Store the inverse, or invert it where it is written;
-    - a case that does not meet the target grid anywhere -- judged THROUGH the declared map, so a
+    - a case that does not meet the target grid anywhere: judged THROUGH the declared map, so a
       stored rigid bridging two scanner frames is not mistaken for disjointness. The output would
       be ``fill`` from edge to edge, and an all-background member is a plausible, wrong
       contribution to a median.
 
-    A refusal the whole-volume path can serve -- a case with no geometry, an unreadable entry in
-    the field group -- declares ``WHOLE_VOLUME`` with its reason and the run proceeds assembled:
-    the chain only stops being bounded, and says so in the plan. One that no route can serve -- a
-    map that cannot be decoded, read or inverted, or a disjoint case -- refuses as the plan is
+    A refusal the whole-volume path can serve (a case with no geometry, an unreadable entry in
+    the field group) declares ``WHOLE_VOLUME`` with its reason and the run proceeds assembled:
+    the chain only stops being bounded, and says so in the plan. One that no route can serve (a
+    map that cannot be decoded, read or inverted, or a disjoint case) refuses as the plan is
     built, before a byte is written. A case reaching only PART of the target grid is legal and
-    common -- the rest takes ``fill`` -- and the plan prints how much of the grid it covers.
+    common (the rest takes ``fill``), and the plan prints how much of the grid it covers.
     """
 
     def __init__(
@@ -1262,7 +1262,7 @@ class Resample(TransformInverse):
         if transforms is not None and not transforms:
             raise TransformError(
                 "'Resample' was given an empty 'transforms'.",
-                "Name a group and say whether to invert it -- transforms: {reg: false} -- or drop the"
+                "Name a group and say whether to invert it (transforms: {reg: false}) or drop the"
                 " argument: without it the map is the identity and this is a change of grid alone.",
             )
         self.transforms = transforms
@@ -1297,7 +1297,7 @@ class Resample(TransformInverse):
             raise TransformError(
                 f"'Resample' was given {' and '.join(named)}, which are three ways to say the same thing.",
                 "A resample writes on one grid: give its density (spacing), its extent (shape) or the"
-                " image whose grid to adopt (reference) -- and only one of them.",
+                " image whose grid to adopt (reference): and only one of them.",
             )
         if reference and not str(reference).strip():
             raise TransformError(
@@ -1362,7 +1362,7 @@ class Resample(TransformInverse):
         return grid
 
     def _target_of(self, name: str) -> tuple[Grid, Grid]:
-        """``(source, target)`` — needs only what BUILDING the target grid needs.
+        """``(source, target)``: needs only what BUILDING the target grid needs.
 
         Split from :meth:`_grids_of` because the two questions have different answers: the output
         SHAPE of a warp on the case's own grid is the case's own shape, knowable with no geometry at
@@ -1440,12 +1440,12 @@ class Resample(TransformInverse):
         return self._stored[name]
 
     def _field_stage(self, name: str, region: Grid) -> DisplacementStage:
-        """The declared field over ``region``, read on its own grid and no wider — once.
+        """The declared field over ``region``, read on its own grid and no wider: once.
 
         The field is evaluated at the TARGET's world points, so the window it needs is that region's
-        own world box -- no halo, whatever the displacement is. What the halo sizes is the SOURCE
+        own world box: no halo, whatever the displacement is. What the halo sizes is the SOURCE
         read, which is a different question, answered from these very values
-        (:meth:`measured_region_source`) -- memoized here so sizing and sampling share one read.
+        (:meth:`measured_region_source`): memoized here so sizing and sampling share one read.
         """
         key = (tuple(int(extent) for extent in region.size_zyx), tuple(float(v) for v in np.ravel(region.origin_xyz)))
         cached = self._field_window
@@ -1475,7 +1475,7 @@ class Resample(TransformInverse):
         return tuple(stages)
 
     def _bound(self, name: str) -> TransformBound:
-        """What the map is guaranteed to do — from stored coefficients alone, no voxel read."""
+        """What the map is guaranteed to do, from stored coefficients alone, no voxel read."""
         rank = self._source_grid(name).rank
         folded = TransformBound.exact(AffineMap.identity(rank))
         if self.displacement is not None:
@@ -1487,7 +1487,7 @@ class Resample(TransformInverse):
         return folded
 
     def _pricing_bound(self, name: str) -> TransformBound:
-        """The map's bound as the PLAN prices it — headers and declarations, never a voxel.
+        """The map's bound as the PLAN prices it: headers and declarations, never a voxel.
 
         A field prices as zero displacement. The run never trusts this window: a field's
         regions are sized from the values it reads for sampling anyway
@@ -1515,7 +1515,7 @@ class Resample(TransformInverse):
     def _require_runnable(self, name: str) -> None:
         """Refuse AT PLAN TIME a map neither route can apply.
 
-        A refusal the whole-volume path can serve — a case with no geometry — stays a locality
+        A refusal the whole-volume path can serve (a case with no geometry) stays a locality
         answer, and the run proceeds assembled. A stored transform that cannot be decoded, read or
         inverted fails the streamed path and the whole-volume one at the same line, so declaring
         WHOLE_VOLUME for it would print a plan the run then contradicts by dying per case, after
@@ -1538,8 +1538,8 @@ class Resample(TransformInverse):
             ) from error
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # The geometry is judged on the attribute in hand -- the case's own header, as the base
-        # contract has it -- and not on what the cohort has been seen to carry: one case of a group
+        # The geometry is judged on the attribute in hand: the case's own header, as the base
+        # contract has it, and not on what the cohort has been seen to carry: one case of a group
         # may lack an Origin while the rest have one, and a declaration made per case is the honest
         # one. A config-time probe hands over an empty header, which reads as a case with none.
         lacking = [key for key in _GEOMETRY_KEYS if key in self._needs and key not in cache_attribute]
@@ -1565,7 +1565,7 @@ class Resample(TransformInverse):
         The COHORT's answer, not one case's: a locality is declared once for the stage while the
         cases are many, so a group whose entries are not uniformly decodable must fall back for all
         of them rather than for the ones that happen to be planned first. Exceptions are swallowed
-        into a reason -- this runs inside the plan, where a raise would take the run down instead of
+        into a reason: this runs inside the plan, where a raise would take the run down instead of
         costing it the whole-volume path. The GEOMETRY is not judged here; that is per case, and
         :meth:`patch_locality` reads it off the header it is handed.
         """
@@ -1574,7 +1574,7 @@ class Resample(TransformInverse):
                 "SimpleITK is not installed, and a stored transform is applied in physical space by"
                 " it. Install it (pip install konfai[itk]) to stream this stage"
             )
-        # The field group's HEADERS are the cohort's business here -- an unreadable entry anywhere
+        # The field group's HEADERS are the cohort's business here: an unreadable entry anywhere
         # under it fails both routes on whichever case reaches it. A field that merely records no
         # bound streams: its windows are sized from the values the run reads (measured_region_source).
         if self.displacement is not None:
@@ -1608,18 +1608,18 @@ class Resample(TransformInverse):
 
     @property
     def measures_at_run(self) -> bool:
-        """Whether the run sizes this stage's windows from the data it reads — any declared field."""
+        """Whether the run sizes this stage's windows from the data it reads: any declared field."""
         return self.displacement is not None
 
     def measured_region_source(
         self, name: str, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
     ) -> list[slice]:
-        """The region's source window, sized from the field itself — the read that samples also bounds.
+        """The region's source window, sized from the field itself: the read that samples also bounds.
 
         The field window a region needs is its own box, read for sampling regardless; the sup of
         the values just read bounds every interpolated displacement in the region (a convex
-        combination cannot exceed the lattice values it blends), so the window is exact per region
-        — a quiet slab pays a quiet halo.
+        combination cannot exceed the lattice values it blends), so the window is exact per region: a quiet
+        slab pays a quiet halo.
         """
         del source_spatial_shape, cache_attribute
         source, target = self._grids_of(name)
@@ -1656,7 +1656,7 @@ class Resample(TransformInverse):
         stages = self._stages(name, region)
         shape, mode = list(source.size_zyx), self._mode(sub_tensor)
         # A map that factorises is read one axis at a time, which is the same arithmetic without the
-        # terms that are zero and without a coordinate per voxel -- and it is most maps, because most
+        # terms that are zero and without a coordinate per voxel, and it is most maps, because most
         # volumes are stored axis-aligned. The general form is what a rotation or a displacement
         # needs, and the two are bit-identical wherever both apply.
         axes = separable_source_index(region, source, stages, sub_tensor.device)
@@ -1667,11 +1667,11 @@ class Resample(TransformInverse):
         return gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value)
 
     def _mode(self, tensor: torch.Tensor) -> str:
-        """``nearest`` or ``linear`` — what a sampler asks before it blends anything.
+        """``nearest`` or ``linear``: what a sampler asks before it blends anything.
 
         A dtype cannot settle this on its own: a CT is int16 and so is nothing else about it. The
         heuristic therefore claims ``uint8`` and nothing more, and ``interpolation`` answers for
-        everything it cannot know. Getting it wrong is silent -- two blended labels give a third
+        everything it cannot know. Getting it wrong is silent: two blended labels give a third
         that was in no input, in a volume that is still a label map.
         """
         declared = self.interpolation or ("nearest" if tensor.dtype == torch.uint8 else "linear")
@@ -1696,7 +1696,7 @@ class Resample(TransformInverse):
         for key in _GEOMETRY_KEYS:
             # Only over a geometry that was there: a case stored without an Origin is resampled by
             # ratio, and inventing one for it would be a header nobody measured. Key by key, and not
-            # all-or-nothing, because ``inverse`` pops exactly what is present -- so what is pushed
+            # all-or-nothing, because ``inverse`` pops exactly what is present, so what is pushed
             # and what is popped are the same condition, read at the two ends.
             if key not in missing:
                 cache_attribute[key] = written[key]
@@ -1723,7 +1723,7 @@ class Resample(TransformInverse):
     def _map_bound(self, name: str) -> TransformBound | None:
         """The declared map's bound, for a coverage judged where the samples actually land.
 
-        ``None`` when there is no map — or when nothing bounds it: a coverage that cannot be judged
+        ``None`` when there is no map: or when nothing bounds it: a coverage that cannot be judged
         must not refuse, and the unboundable configurations carry a fallback reason of their own.
         A field prices as zero displacement here (:meth:`_pricing_bound`), so a stored affine
         beside it still places the samples instead of the grids being judged bare.
@@ -1740,8 +1740,8 @@ class Resample(TransformInverse):
         """The fraction of ``target`` that reads from inside ``source``, from geometry alone.
 
         Judged THROUGH the declared map's affine part: a stored transform is what makes a
-        cross-frame pair meet — an MR and a CT in different scanner frames with a rigid bridging
-        them — and a coverage judged before applying it would call every such registration
+        cross-frame pair meet (an MR and a CT in different scanner frames with a rigid bridging
+        them), and a coverage judged before applying it would call every such registration
         disjoint. The residual (a spline's or a field's sup-norm) only ever moves a sample by a
         bounded amount, so it widens the inside band rather than moving the lattice. Counted on a
         capped lattice rather than solved, because the sampled set is a box only while the grids
@@ -1770,7 +1770,7 @@ class Resample(TransformInverse):
         """Refuse a case that does not meet the target grid anywhere.
 
         Its output would be ``fill`` from edge to edge. That is not an error the arithmetic can
-        find -- every voxel of it is exactly what was asked for -- so it is one nothing downstream
+        find (every voxel of it is exactly what was asked for), so it is one nothing downstream
         would report: a median over the cohort would simply be pulled toward the background by a
         member that contributed no anatomy. Counted from the headers, before a byte is read.
 
@@ -1789,12 +1789,12 @@ class Resample(TransformInverse):
         )
 
     def plan_note(self, group_dest: str, name: str, shape: list[int], cache_attribute: Attribute) -> str | None:
-        """What this case covers of the target grid — measured on the header HANDED OVER.
+        """What this case covers of the target grid: measured on the header HANDED OVER.
 
         Not on the grid recorded for the case: the plan asks a stage about its own input, which the
         stages before it decide, and a note answered from the stored header would describe a volume
         that no longer exists by the time this stage sees it. Nothing is recorded here either, for
-        the mirror reason -- a question must not move the state a region read depends on.
+        the mirror reason: a question must not move the state a region read depends on.
         """
         del group_dest
         notes: list[str] = []
@@ -1838,7 +1838,7 @@ class Resample(TransformInverse):
         return Grid.identity(shape)
 
     def _inverse_grids(self, cache_attribute: Attribute, shape: list[int]) -> tuple[Grid, Grid]:
-        """``(what the accumulator is on, what to write back onto)`` — both off the pushed stack.
+        """``(what the accumulator is on, what to write back onto)``: both off the pushed stack.
 
         The forward stacked the source geometry under the target's, so the inverse needs no memory
         of the case: it reads the grid it is holding, pops, and reads the grid it is restoring. A
@@ -1854,7 +1854,7 @@ class Resample(TransformInverse):
                 LocalityKind.WHOLE_VOLUME,
                 reason=(
                     "resampling through a map inverts to resampling through its inverse, and that"
-                    " inverse is not declared here -- so a prediction finalize through this stage"
+                    " inverse is not declared here, so a prediction finalize through this stage"
                     " assembles the volume. The forward direction streams"
                 ),
             )
@@ -1884,7 +1884,7 @@ class Resample(TransformInverse):
         if self._target_is_own and (self.transforms is not None or self.displacement is not None):
             raise TransformError(
                 "'Resample' has no inverse here: it changes no grid, so undoing it is undoing its"
-                " map -- which is applying a different map, not this one backwards.",
+                " map, which is applying a different map, not this one backwards.",
                 "Set 'inverse: false' on this stage, or declare a second Resample with the inverse"
                 " transforms in the chain that needs it.",
             )
@@ -2020,7 +2020,7 @@ class Dilate(Transform):
         # A cubic (box) structuring element is separable: dilating by a k**n box equals n successive
         # 1-D max-pools, one per spatial axis. This is bit-identical to a single k**n max-pool (max is
         # associative and the box is the Minkowski sum of 1-D segments) for ~k**(n-1)x fewer comparisons
-        # — the k**3 dense pool is the dominant cost of the whole-volume mask load.
+        #: the k**3 dense pool is the dominant cost of the whole-volume mask load.
         if spatial_dims == 2:
             data = F.max_pool2d(data, kernel_size=(k, 1), stride=1, padding=(d, 0))
             data = F.max_pool2d(data, kernel_size=(1, k), stride=1, padding=(0, d))
@@ -2069,8 +2069,8 @@ class MergeLabels(Transform):
     """Merge the per-model argmax label maps of a ``combine: Concat`` ensemble into one global map.
 
     Each model's ``Argmax`` produces a LOCAL class index (``0`` = background). A model's
-    non-background labels are shifted past every earlier model's foreground classes -- by the
-    CUMULATIVE sum of the earlier models' foreground counts (``nb_class - 1``) -- so the models'
+    non-background labels are shifted past every earlier model's foreground classes (by the
+    CUMULATIVE sum of the earlier models' foreground counts (``nb_class - 1``)), so the models'
     disjoint label ranges tile a single global label space.
 
     This is the label-space counterpart of ``InferenceStack`` (which averages *same-class*
@@ -2152,7 +2152,7 @@ class Argmax(Transform):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Pointwise ONLY when reducing the channel axis (dim 0). Over a spatial axis the argmax spans
-        # the whole extent, so a per-patch argmax would diverge -- fall back to the whole volume.
+        # the whole extent, so a per-patch argmax would diverge: fall back to the whole volume.
         if self.dim == 0:
             return PatchLocality(LocalityKind.POINTWISE)
         return PatchLocality(
@@ -2172,7 +2172,7 @@ class Softmax(Transform):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Pointwise ONLY when reducing the channel axis (dim 0). Over a spatial axis softmax normalises
-        # across the whole extent, so a per-patch softmax would diverge -- fall back to the whole volume.
+        # across the whole extent, so a per-patch softmax would diverge: fall back to the whole volume.
         if self.dim == 0:
             return PatchLocality(LocalityKind.POINTWISE)
         return PatchLocality(
@@ -2208,7 +2208,7 @@ class Save(Transform):
 
     ``scale_factors`` writes an OME-NGFF PYRAMID instead of a single level: ``[4]`` adds a level 1 at
     a quarter of the extent per axis, ``[4, 4]`` a level 2 at a sixteenth. Every reader indexes a
-    pyramid BY POSITION -- ``:omezarr@1`` is the second entry, not one named "1" -- so the order is
+    pyramid BY POSITION (``:omezarr@1`` is the second entry, not one named "1"), so the order is
     the contract, 0 finest. It applies on both write paths: assembled in memory, or region by region,
     where the levels are derived once the last region has landed.
 
@@ -2252,7 +2252,7 @@ class Write(Save):
     default, so a bare ``Write:`` fails at config time instead of silently writing into the source
     tree (a bare ``Save:`` binds ``dataset`` to nothing and falls back to the manager's own
     dataset). The TRANSFORM workflow plans, resumes and reports on its ``Write`` stages; a ``Save``
-    between them stays an opportunistic milestone — never written when a satisfied ``Write``
+    between them stays an opportunistic milestone, never written when a satisfied ``Write``
     downstream lets the boundary skip the whole prefix.
     """
 
@@ -2275,13 +2275,13 @@ class Write(Save):
 class _DisplacementSource:
     """A displacement field on disk: where it is, how far it reaches, and how to read a region of it.
 
-    :class:`Resample` is its one owner — the family's spellings all resolve to it — so every refusal
+    :class:`Resample` is its one owner (the family's spellings all resolve to it), so every refusal
     speaks as ``Resample`` and names ``field_group``, the argument the user declared.
     """
 
     def __init__(self, field: str | None, group: str | None) -> None:
         # A root of its own, or none: with no ``field`` path the fields are a GROUP of the run's own
-        # dataset_filenames, one entry per case — which is how a cohort registered in place stores
+        # dataset_filenames, one entry per case, which is how a cohort registered in place stores
         # them, beside the volumes they were solved on.
         self.dataset: Dataset | None = None
         if field is not None and str(field).strip():
@@ -2290,7 +2290,7 @@ class _DisplacementSource:
         elif group is None:
             raise TransformError(
                 "'Resample' has neither a 'field' path nor a group to find the fields in.",
-                "Name the store — Resample: {field: ./DVF:omezarr} — or, for fields stored beside"
+                "Name the store. Resample: {field: ./DVF:omezarr}: or, for fields stored beside"
                 " the cases, the group they are in: Resample: {field_group: DVF}.",
             )
         self.group = group
@@ -2300,7 +2300,7 @@ class _DisplacementSource:
         self._probed: set[str] = set()
 
     def headers_readable(self) -> bool:
-        """Whether every field entry's HEADER opens, memoized — the plan's one probe of the group.
+        """Whether every field entry's HEADER opens, memoized: the plan's one probe of the group.
 
         An unreadable entry fails both routes on whichever case reaches it, and a directory store
         lists its entries from the filesystem alone, so a corrupt one only surfaces at its header:
@@ -2357,7 +2357,7 @@ class _DisplacementSource:
         return self._root_for(name).get_infos(self.group_for(name), name)
 
     def probe(self, name: str) -> None:
-        """The case's own entry, proven present and readable — the per-case half of the scan.
+        """The case's own entry, proven present and readable: the per-case half of the scan.
 
         :meth:`headers_readable` walks what is on disk; it cannot know which cases the plan will
         ask for, so a missing entry would otherwise surface mid-run, after bytes are written.
@@ -2399,7 +2399,7 @@ class Reduce(Transform):
     The stage that changes a chain's CARDINALITY: everything before it runs once per case, this
     folds the cases together, everything after it runs once on the result. A chain carrying one is
     driven by the reduction engine rather than the per-case loop, so it is never applied as an
-    ordinary transform -- ``__call__`` says so rather than quietly reducing one case to itself.
+    ordinary transform: ``__call__`` says so rather than quietly reducing one case to itself.
 
     ``operator`` is a classpath resolved against :mod:`konfai.data.reduction` (``Mean``, ``Median``,
     ``Concat``, or your own :class:`~konfai.data.reduction.Reduction`). ``output`` is the entry name
@@ -2411,7 +2411,7 @@ class Reduce(Transform):
     ``shape_only`` compares extents alone, the honest escape hatch for volumes already resampled
     together but carrying approximate headers; ``reference:<case>`` adopts that member's geometry
     for the output and still demands equal extents. Nothing can verify that the members truly live
-    in a common space -- only that they claim to, which is why the claim is checked and printed.
+    in a common space: only that they claim to, which is why the claim is checked and printed.
     """
 
     def __init__(
@@ -2427,7 +2427,7 @@ class Reduce(Transform):
             raise TransformError(
                 "'Reduce' needs an 'output': the name its single result is written under.",
                 "Declare it, e.g. Reduce: {operator: Median, output: template}. A reduction has no"
-                " case name to inherit -- borrowing a member's would tie the deliverable to"
+                " case name to inherit: borrowing a member's would tie the deliverable to"
                 " iteration order.",
             )
         policy = str(grid)
@@ -2436,12 +2436,12 @@ class Reduce(Transform):
             raise TransformError(
                 f"'Reduce' has an unknown grid policy '{grid}'.",
                 "Use 'strict' (extents + geometry), 'shape_only' (extents only) or"
-                " 'reference:<case>' (adopt that member's geometry) -- 'reference:' alone names no"
+                " 'reference:<case>' (adopt that member's geometry): 'reference:' alone names no"
                 " case.",
             )
         self.operator_classpath = str(operator)
         # Where this stage was configured from, so its operator binds its own parameters from the
-        # same mapping -- None when the chain was built in Python, where there is no config to read.
+        # same mapping: None when the chain was built in Python, where there is no config to read.
         self.konfai_args: str | None = None
         self.output = str(output).strip()
         self.grid = f"reference:{reference}" if reference else policy
@@ -2454,7 +2454,7 @@ class Reduce(Transform):
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # A cardinality marker, not a per-case stage: the reduction engine SPLITS it out of the chain
         # before any manager is built, so this declaration is only the safety net for a chain that
-        # reached the ordinary planner by mistake -- where refusing to stream is the right answer.
+        # reached the ordinary planner by mistake, where refusing to stream is the right answer.
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -2466,7 +2466,7 @@ class Reduce(Transform):
 
 
 class Expand(Transform):
-    """Turn one case into ``nb`` copies, at a declared point of the chain — ``Reduce``'s mirror.
+    """Turn one case into ``nb`` copies, at a declared point of the chain: ``Reduce``'s mirror.
 
     The stage that changes a chain's cardinality the other way. Everything BEFORE it runs once per
     case (a ``Save`` there is a cache every copy shares); everything AFTER it runs once per copy,
@@ -2484,16 +2484,16 @@ class Expand(Transform):
           Write:  {dataset: ./Augmented:omezarr}
 
     Each draw is parameterised on the grid the stages before it leave, so a shape-changing draw hands
-    the next stage its own extent — a chain, exactly like the transforms it sits among.
+    the next stage its own extent: a chain, exactly like the transforms it sits among.
 
     ``pattern`` names each copy's entry: ``str.format`` over ``{name}`` (the case) and ``{a}`` (the
-    copy ordinal, 1-based). Both tokens are required — without ``{a}`` every copy of a case writes
+    copy ordinal, 1-based). Both tokens are required, without ``{a}`` every copy of a case writes
     over the previous one, without ``{name}`` every case does.
 
     Every draw after this marker is parameterised from ``(seed, case, which draw this is)`` rather
     than from a shared RNG, whose consumption order two chains cannot agree on. Left unset, ``seed``
-    is the run's ``manual_seed``, so an image chain and its mask chain produce matching copies —
-    copy ``k`` of the mask carries copy ``k`` of the image's rotation. Set it to decouple one chain
+    is the run's ``manual_seed``, so an image chain and its mask chain produce matching copies: copy ``k`` of
+    the mask carries copy ``k`` of the image's rotation. Set it to decouple one chain
     deliberately: that is the only way to ask two chains for DIFFERENT copies of the same cases.
     """
 
@@ -2681,7 +2681,7 @@ class Canonical(TransformInverse):
         """The map taking an output coordinate onto the input it comes from, in (x, y, z).
 
         A voxel sits at ``D @ (spacing * index) + origin``, so the map is ``D^-1 @ C`` (with the
-        target spacing carried along the permutation, see ``_carried``) -- NOT the rotation
+        target spacing carried along the permutation, see ``_carried``): NOT the rotation
         ``C @ D^-1``, which only agrees where the two commute.
         """
         initial_matrix = cache_attribute.get_tensor("Direction").reshape(3, 3).to(torch.double)
@@ -2715,7 +2715,7 @@ class Canonical(TransformInverse):
         """The exact index remap this case's reorientation is, or ``None`` where it is not one.
 
         Total: a case whose header carries no usable direction cosines has no remap to make, and an
-        oblique one has none to make either -- both answer ``None`` rather than raise, and the resample
+        oblique one has none to make either, both answer ``None`` rather than raise, and the resample
         is what answers for them.
         """
         if "Direction" not in cache_attribute or cache_attribute.get_np_array("Direction").size != 9:
@@ -2726,7 +2726,7 @@ class Canonical(TransformInverse):
     def _carried(per_physical_axis: torch.Tensor, remap: list[tuple[int, bool]] | None) -> torch.Tensor:
         """Carry a per-physical-axis quantity along a remap: output axis c takes the axis it reads.
 
-        A spacing and a half-extent travel with the axis they belong to -- what a reorientation
+        A spacing and a half-extent travel with the axis they belong to: what a reorientation
         preserves is the volume's physical extent, not which axis carries it. An oblique direction is
         resampled onto the input's own grid, so without a remap nothing moves.
         """
@@ -2761,7 +2761,7 @@ class Canonical(TransformInverse):
             mode = "bilinear"
         # Sample in the data's own device and float dtype: the model output is float16 on the GPU, and
         # affine_grid/grid_sample support float16 on CPU and CUDA. Building the grid on the data's device
-        # (instead of a CPU float32 grid) keeps the whole reorientation on-device — no host round-trip and
+        # (instead of a CPU float32 grid) keeps the whole reorientation on-device: no host round-trip and
         # no float32 upcast of the (channels x volume) tensor. Integer inputs still need a float grid.
         # Accepted trade-off: an fp16 grid quantizes the sampling coordinates (up to ~0.1 voxel at 512^3),
         # chosen over the ~2x transient memory of a float32 grid + volume upcast.
@@ -2793,7 +2793,7 @@ class Canonical(TransformInverse):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Only the case can say which reorientation this is, so only the header can answer. An orthogonal
-        # one -- mirroring or permuting -- remaps indices, which is what ORIENTATION streams; an oblique
+        # one (mirroring or permuting) remaps indices, which is what ORIENTATION streams; an oblique
         # one is resampled from the whole volume.
         if self._orthogonal_remap(cache_attribute) is None:
             return PatchLocality(
@@ -2810,7 +2810,7 @@ class Canonical(TransformInverse):
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        # Target axis k reads source axis ``source``, so the target slice IS the source's -- taken at the
+        # Target axis k reads source axis ``source``, so the target slice IS the source's: taken at the
         # far end ``[n - stop, n - start)`` where the remap reads that axis backwards. Flipping the region
         # read reproduces the patch: a flip restricted to a contiguous region is that region reversed.
         # Both the slices and the remap are in array order, and the remap covers every axis exactly once.
@@ -2844,7 +2844,7 @@ class Canonical(TransformInverse):
         cache_attribute["Direction"] = self.canonical_direction.flatten()
         cache_attribute["Spacing"] = Canonical._carried(spacing, remap)
         # The reorientation fixes the volume's centre, so the new origin is that centre stepped back by
-        # the canonical half-extent -- the TARGET grid's, which a permutation has carried onto other
+        # the canonical half-extent: the TARGET grid's, which a permutation has carried onto other
         # axes. The extent is the VOLUME's, never a patch's: it is an argument rather than the handed
         # tensor's shape.
         center = initial_matrix @ half_extent + initial_origin
@@ -2854,7 +2854,7 @@ class Canonical(TransformInverse):
         """The forward remap judged on the state ``inverse`` runs from: the popped-to source direction.
 
         The inverse pops the canonical geometry and reorients back through the SOURCE direction under
-        it, so its streamability is the popped state's — evaluated on a copy, since a declaration
+        it, so its streamability is the popped state's: evaluated on a copy, since a declaration
         never mutates the case. A matrix and its inverse are signed permutations together, so the
         forward remap answers for both; ``None`` where the case is oblique or carries no direction.
         """
@@ -2892,7 +2892,7 @@ class Canonical(TransformInverse):
         cache_attribute: Attribute,
     ) -> list[slice]:
         # Canonical axis k holds source axis ``source``'s content: a written region pulls, per input
-        # axis, the slice of the output axis it carries — taken mirrored within the input extent where
+        # axis, the slice of the output axis it carries: taken mirrored within the input extent where
         # the remap reads that axis backwards (a flip restricted to a region is that region reversed).
         remap = self._inverse_remap(cache_attribute)
         if remap is None:
@@ -2913,7 +2913,7 @@ class Canonical(TransformInverse):
         """Apply a reorientation: an exact index remap where it is one, a resample where it is not.
 
         An orthogonal reorientation is a bijection on the voxels, so it must reproduce the input's
-        multiset bit for bit -- which only a permute and a flip do.
+        multiset bit for bit, which only a permute and a flip do.
         """
         remap = Canonical._index_remap(reorientation)
         if remap is None:
@@ -3036,7 +3036,7 @@ class KonfAIInference(Transform):
         self.number_of_mc = number_of_mc
         self.per_channel = per_channel
         # Generic 'NAME=VALUE' overrides for the nested run's own config (the --set mechanism), so a caller
-        # can tune it without editing the bundle -- not a memory workaround (never shrink a trained
+        # can tune it without editing the bundle, not a memory workaround (never shrink a trained
         # segmentation's patch_size: it degrades the result; the allocator hint below keeps memory in check).
         self.config_overrides = config_overrides
 
@@ -3050,7 +3050,7 @@ class KonfAIInference(Transform):
     def infer_entry(self, dataset_path: Path, output_path: Path, gpu: list[int]):
         # Defragment the nested run's CUDA allocator: a heavy model (e.g. a 3D segmentation a metric relies
         # on) can OOM on a large volume purely from reserved-but-unallocated blocks even though the live
-        # footprint fits -- so it runs at its trained patch_size, not a shrunk one. setdefault so an
+        # footprint fits, so it runs at its trained patch_size, not a shrunk one. setdefault so an
         # explicit caller setting still wins.
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         try:
@@ -3176,7 +3176,7 @@ class InferenceStack(Transform):
         """The whole-volume call, region by region: reduce the members per voxel and write the slab's
         rows of the per-member stack into a region sink opened at the first slab. A destination that
         cannot serve region writes falls back to buffering the stack and writing it classically at
-        the last slab — the memory cost of the whole-volume path, never a lost stack."""
+        the last slab: the memory cost of the whole-volume path, never a lost stack."""
         if tensor.shape[0] == 1:
             return tensor.squeeze(0)
         stack = self._stack(tensor)
@@ -3214,7 +3214,7 @@ class Magnitude(Transform):
 
     :class:`Norm`'s channel-first sibling. ``Norm`` folds the trailing axis of a stacked ensemble
     and is whole-volume by construction (a rank change past the streamed write); a stored vector
-    volume — a displacement field read as a case — is channel-first, and its magnitude at a voxel
+    volume (a displacement field read as a case) is channel-first, and its magnitude at a voxel
     reads that voxel alone: POINTWISE, so it streams.
     """
 
@@ -3241,7 +3241,7 @@ class Norm(Transform):
         super().__init__()
 
     # WHOLE_VOLUME on purpose: the magnitude drops the trailing spatial axis, and the streamed write
-    # sizes each slab from the pre-finalize accumulator grid -- a rank change past it cannot region-stream.
+    # sizes each slab from the pre-finalize accumulator grid: a rank change past it cannot region-stream.
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Origin" in cache_attribute:
@@ -3263,7 +3263,7 @@ class Variance(Transform):
         super().__init__()
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Variance across the leading member axis at each voxel -- no spatial neighbour.
+        # Variance across the leading member axis at each voxel: no spatial neighbour.
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -3282,7 +3282,7 @@ class SegmentationDisagreement(Transform):
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Per-voxel majority disagreement across the members. The global torch.unique only widens the
         # label set with labels absent at a given voxel, which contribute zero counts there and never
-        # change that voxel's majority -- so the result is decided voxel by voxel.
+        # change that voxel's majority, so the result is decided voxel by voxel.
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -3332,7 +3332,7 @@ class StandardDeviation(Transform):
         super().__init__()
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Standard deviation across the leading member axis at each voxel -- no spatial neighbour.
+        # Standard deviation across the leading member axis at each voxel: no spatial neighbour.
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -3382,7 +3382,7 @@ class Crop(TransformInverse):
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Total: the box is a fact ``transform_shape`` puts on the case before the dispatcher reads any
         # declaration, but a group carries only what its writer stored, and without it there is no
-        # translation to make -- only the read that would find one.
+        # translation to make: only the read that would find one.
         if "box" not in cache_attribute:
             return PatchLocality(
                 LocalityKind.WHOLE_VOLUME,
@@ -3431,7 +3431,7 @@ class Crop(TransformInverse):
         # as a sidecar attribute, reuse it and skip the read; otherwise compute it once from the
         # volume. (A fully-lazy variant would require deferring patch planning past _load().)
         # ``shape`` is already the channel-stripped spatial shape (patching strips [C, *spatial]
-        # before calling transform_shape), so the crop box — one row per spatial axis — aligns with
+        # before calling transform_shape), so the crop box (one row per spatial axis) aligns with
         # ``shape`` directly, exactly like ``__call__`` aligns it with ``tensor.shape[1:]``.
         if "box" in cache_attribute:
             box = self._parse_box(cache_attribute["box"])

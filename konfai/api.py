@@ -14,26 +14,26 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""KonfAI in Python — the workflows as callables.
+"""KonfAI in Python: the workflows as callables.
 
 The four CLI commands, callable: :func:`transform` (with :func:`plan_transform`, its dry-run
 twin), :func:`evaluate`, :func:`predict` and :func:`train`. One engine, two spellings: everything
-here builds the same config tree the YAML file would hold and hands it to the same binder — a
+here builds the same config tree the YAML file would hold and hands it to the same binder: a
 chain is a list of live stage objects (their constructor arguments are recorded as given, see
 ``record_given_arguments``), or the equivalent mapping, or a whole tree loaded from an existing
 YAML and modified in place.
 
 The contract, and how it differs from the CLI:
 
-- **A designed refusal raises** ``KonfAIError`` — the message and the remedy are the exception;
+- **A designed refusal raises** ``KonfAIError``: the message and the remedy are the exception;
   the caller decides. Only the CLI catches and exits.
 - **Results come back structured**: what a run wrote and where, read from the run's own record
   (``outputs.json``, ``Metric_*.json``) instead of leaving the caller to fish files out.
 - **The process is left as found**: the ``KONFAI_*`` environment is restored around every call,
-  and one workflow runs at a time per process — a second concurrent call is refused with the
+  and one workflow runs at a time per process: a second concurrent call is refused with the
   remedy (subprocesses), not allowed to corrupt the first.
 - **The record remains.** Every call materializes the resolved YAML in the run's workspace: a
-  notebook run is promoted to a versioned experiment by copying ``result.config`` — nothing to
+  notebook run is promoted to a versioned experiment by copying ``result.config``: nothing to
   rewrite.
 """
 
@@ -57,7 +57,7 @@ from konfai.utils.errors import ConfigError
 if TYPE_CHECKING:
     from konfai.transformer import TransformPlan
 
-#: Where a bare stage name resolves, per stage family — the same rule the YAML loader applies.
+#: Where a bare stage name resolves, per stage family: the same rule the YAML loader applies.
 _STAGE_MODULES = ("konfai.data.transform", "konfai.data.augmentation")
 _CRITERION_MODULES = ("konfai.metric.measure",)
 
@@ -69,7 +69,7 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
     """Serialize workflows within the process and leave the environment as found.
 
     The engine keys its state on process-wide ``KONFAI_*`` variables, so two in-process runs would
-    corrupt each other — refused with the remedy rather than allowed. ``ranks`` is exported as
+    corrupt each other: refused with the remedy rather than allowed. ``ranks`` is exported as
     ``KONFAI_LOCAL_RANKS`` for build-time budget sizing, exactly as the CLI launcher does.
     """
     if not _ACTIVE.acquire(blocking=False):
@@ -92,7 +92,7 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
 
 
 def _yaml_safe(value: object, where: str) -> object:
-    """``value`` as the config file could hold it — or a refusal that names the argument."""
+    """``value`` as the config file could hold it: or a refusal that names the argument."""
     # Before the Python scalars: np.float64 IS a float subclass, and ruamel refuses it.
     if isinstance(value, np.generic):
         return value.item()
@@ -107,18 +107,18 @@ def _yaml_safe(value: object, where: str) -> object:
     raise ConfigError(
         f"'{where}' is a {type(value).__name__}, which a config tree cannot hold.",
         "A stage's constructor arguments must be YAML-spellable (numbers, strings, paths, lists,"
-        " mappings) -- the same rule the YAML file obeys.",
+        " mappings): the same rule the YAML file obeys.",
     )
 
 
 def _classpath(stage: object, default_modules: tuple[str, ...]) -> str:
-    """The name the config tree references ``stage`` by — bare for a shipped class, qualified else."""
+    """The name the config tree references ``stage`` by: bare for a shipped class, qualified else."""
     cls = type(stage)
     return cls.__name__ if cls.__module__ in default_modules else f"{cls.__module__}:{cls.__name__}"
 
 
 def _qualified_spelling(stage: object, name: str, default_modules: tuple[str, ...]) -> str:
-    """A repeated bare name's second spelling — module-qualified, resolved as the binder resolves it."""
+    """A repeated bare name's second spelling: module-qualified, resolved as the binder resolves it."""
     if not isinstance(stage, Mapping):
         return f"{type(stage).__module__}:{type(stage).__name__}"
     for module in default_modules:
@@ -136,7 +136,7 @@ def _stage_entry(stage: object, default_modules: tuple[str, ...], where: str) ->
         if len(stage) != 1:
             raise ConfigError(
                 f"'{where}' is a mapping of {len(stage)} stages; a chain entry holds exactly one.",
-                "Spell each stage as its own entry: [{'Clip': {...}}, {'Write': {...}}] -- or"
+                "Spell each stage as its own entry: [{'Clip': {...}}, {'Write': {...}}]: or"
                 " instantiate the classes and pass the objects.",
             )
         ((name, kwargs),) = stage.items()
@@ -145,8 +145,8 @@ def _stage_entry(stage: object, default_modules: tuple[str, ...], where: str) ->
     if given is None:
         raise ConfigError(
             f"'{where}' ({type(stage).__name__}) records no constructor arguments.",
-            "A chain stage is a Transform, DataAugmentation or Criterion subclass instance -- their"
-            " bases record what the constructor was given -- or a one-entry mapping"
+            "A chain stage is a Transform, DataAugmentation or Criterion subclass instance: their"
+            " bases record what the constructor was given: or a one-entry mapping"
             " {'Name': {...kwargs...}}.",
         )
     name = _classpath(stage, default_modules)
@@ -154,11 +154,11 @@ def _stage_entry(stage: object, default_modules: tuple[str, ...], where: str) ->
 
 
 def _chain_tree(stages: object, default_modules: tuple[str, ...], where: str) -> dict[str, object]:
-    """A chain — a sequence of stages — as the mapping the config tree holds, in order.
+    """A chain (a sequence of stages), as the mapping the config tree holds, in order.
 
     The tree is a mapping, so two stages of the same class need distinct spellings: the second
     occurrence is written module-qualified (which resolves to the same class); a third has no
-    spelling left and is refused — the YAML file has the same limit.
+    spelling left and is refused: the YAML file has the same limit.
     """
     if isinstance(stages, Mapping):  # a chain already spelled as its tree
         return {str(key): _yaml_safe(value, f"{where}.{key}") for key, value in stages.items()}
@@ -204,11 +204,11 @@ class TransformResult:
     """What a TRANSFORM run produced, in the run's own terms."""
 
     #: The run directory (``Transforms/<name>``): logs, ``plan.txt``, the resolved config,
-    #: ``outputs.json`` — never the deliverable, which each ``Write`` placed in the caller's tree.
+    #: ``outputs.json``: never the deliverable, which each ``Write`` placed in the caller's tree.
     workspace: Path
     #: Every chain's terminal ``Write``: ``{group_src, group_dest, dataset, group, format}``.
     outputs: list[dict[str, str]]
-    #: The resolved config the run kept — copy this file to version the experiment.
+    #: The resolved config the run kept: copy this file to version the experiment.
     config: Path
 
 
@@ -261,7 +261,7 @@ def transform(
 
     ``chains`` maps ``group_src -> group_dest -> chain``, where a chain is a list of stage objects
     (``[Resample(...), Write(dataset='./Out:mha')]``), of one-entry mappings, or the equivalent
-    mapping tree. Every chain ends in a ``Write`` — the same rule, message and plan as the CLI,
+    mapping tree. Every chain ends in a ``Write``: the same rule, message and plan as the CLI,
     which is this function with a YAML file. GPU is opt-in (``gpu=[0]``), as it is on the CLI.
     """
     tree = _transform_tree(name, datasets, chains, memory_budget, on_fallback, manual_seed, dataset_options)
@@ -290,7 +290,7 @@ def plan_transform(
     overwrite: bool = False,
     transforms_dir: Path | str = Path("./Transforms"),
 ) -> "TransformPlan":
-    """:func:`transform`'s dry-run twin: build, plan, print, return the plan — the run never starts.
+    """:func:`transform`'s dry-run twin: build, plan, print, return the plan: the run never starts.
 
     Same arguments, same verdicts: the returned ``TransformPlan`` is the run's own routing
     (STREAM/LOAD/WHOLE-VOLUME/SKIP/REDUCE), measured, not estimated.
@@ -333,7 +333,7 @@ def evaluate(
     ``metrics`` maps ``output_group -> target_group -> criteria``, where criteria is a list of
     :class:`~konfai.metric.measure.Criterion` instances (``[MAE(), Dice(labels=[1, 2])]``) or
     one-entry mappings. ``transforms`` optionally names a pre-metric chain per group (a cast, a
-    clip) — the groups themselves are derived from ``metrics``, declared once, not twice.
+    clip): the groups themselves are derived from ``metrics``, declared once, not twice.
     """
     # A composite target ("Seg;Mask") is one metric key over several dataset groups: split it here,
     # as the Evaluator does, so each named group is actually loaded.
@@ -380,7 +380,7 @@ def evaluate(
 def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, object] | Path":
     """The caller's config, in a form this call may consume.
 
-    Reading a KonfAI config resolves and REWRITES it -- the record the workspace keeps. A tree is
+    Reading a KonfAI config resolves and REWRITES it: the record the workspace keeps. A tree is
     passed through; a caller's FILE is not this call's to rewrite, so the write-back lands on a
     scratch copy instead (removed at exit, like :func:`_materialized_config`'s).
     """
@@ -407,7 +407,7 @@ def predict(
 ) -> Path:
     """Run a PREDICTION workflow; return its workspace (``Predictions/<name>``).
 
-    ``config`` is a ``Prediction.yml`` path or the same tree as a dict — a prediction's substance
+    ``config`` is a ``Prediction.yml`` path or the same tree as a dict: a prediction's substance
     (checkpoints, patching, TTA, ensembling) is wiring, and the tree is its honest spelling.
     """
     from konfai.predictor import build_predict
@@ -439,7 +439,7 @@ def train(
     """Run a TRAIN (or RESUME) workflow; return its checkpoint workspace.
 
     ``config`` is a ``Config.yml`` path or the same tree as a dict. The Python idiom for a sweep
-    is the tree: load the YAML once, change the keys under study, call this — the resolved config
+    is the tree: load the YAML once, change the keys under study, call this: the resolved config
     each run keeps IS the record of what was tried.
     """
     from konfai.trainer import build_train

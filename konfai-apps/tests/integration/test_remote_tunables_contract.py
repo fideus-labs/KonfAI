@@ -17,8 +17,7 @@
 """Contract tests for the remote tunables path (``REMOTE_OPTION_FIELDS``).
 
 Every spec'd tunable must travel client -> endpoint -> job command -> local op, and a tunable that
-cannot be honoured must fail loudly (HTTP 422 server-side, ``KonfAIAppClientError`` client-side) —
-never be silently dropped.
+cannot be honoured must fail loudly (HTTP 422 server-side, ``KonfAIAppClientError`` client-side): never be silently dropped.
 """
 
 import inspect
@@ -106,7 +105,7 @@ def remote_stack(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     def record_start_job(job, cmd, requested_gpus):  # type: ignore[no-untyped-def]
         # Runs synchronously inside asyncio.create_task(start_job(...)), so the cmd is captured
-        # before the submit response returns — no race with the event loop.
+        # before the submit response returns: no race with the event loop.
         recorded["cmds"].append(cmd)
         recorded["jobs"].append(job)
 

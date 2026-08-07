@@ -20,7 +20,7 @@ take the streamed writer (its hand-written MetaImage header is observable), and 
 when the gate refuses.
 
 The geometry variants exercise the write dispatcher end to end, one per region kind and then in
-composition: a ``Canonical`` inverse (ORIENTATION — in-slab mirrors), a ``Padding`` inverse (CROP), a
+composition: a ``Canonical`` inverse (ORIENTATION: in-slab mirrors), a ``Padding`` inverse (CROP), a
 a spacing ``Resample`` inverse on a uint8 chain (REGRID, streamed in nearest mode, byte-exact) and on
 a float chain (REGRID, streamed in linear mode, matching the reference to float-rounding), a
 two-inverse pipe, and the full three-inverse stack (crop + rescale + reorient composed, streamed
@@ -51,7 +51,7 @@ from konfai.trainer import train
 
 
 def run_prediction(prediction_file: Path, predictions_dir: Path, disable_streaming: bool = False) -> None:
-    # Streaming has no config knob -- it is automatic. The whole-volume reference is obtained through the
+    # Streaming has no config knob, it is automatic. The whole-volume reference is obtained through the
     # global ops kill-switch KONFAI_STREAMED_WRITES=0, pinned in both directions so an inherited
     # value cannot leak into either run. The worth gate would route these toy volumes whole-volume,
     # so zero its threshold to exercise the streamed machinery.
@@ -85,7 +85,7 @@ def main() -> None:
         checkpoints_dir=root / "Checkpoints",
         statistics_dir=root / "Statistics",
     )
-    # Same config both ways -- only the kill-switch differs -- so the outputs must match bit for bit.
+    # Same config both ways (only the kill-switch differs), so the outputs must match bit for bit.
     # TTA (in-plane flip) streams through the slab-synchronized reduce; TTAZ (slab-axis flip) must
     # refuse and complete whole-volume.
     for variant in [
@@ -106,7 +106,7 @@ if __name__ == "__main__":
 # One prediction config per write-dispatcher path: the transforms block goes on the INPUT group, so
 # the finalize chain carries its inverse. (YAML indentation matches tests/assets/Workflows/Prediction.yml.)
 _VARIANT_TRANSFORMS = {
-    # ORIENTATION: an identity-direction case reorients onto LPS by mirroring x and y — the inverse
+    # ORIENTATION: an identity-direction case reorients onto LPS by mirroring x and y: the inverse
     # mirrors them back inside each slab while the slab axis maps identically.
     "Canonical": """            transforms:
               Canonical:
@@ -135,7 +135,7 @@ _VARIANT_TRANSFORMS = {
               Flip:
                 dims: '0'
                 inverse: true""",
-    # The full stack the composition exists for — reorient + resample + pad forward, so the finalize
+    # The full stack the composition exists for: reorient + resample + pad forward, so the finalize
     # chain carries CROP + REGRID + ORIENTATION in sequence on a uint8 labelmap, streamed end to end.
     "GeometryStack": """            transforms:
               Canonical:
@@ -177,7 +177,7 @@ _VARIANT_USES_STREAMED_WRITER = {
 _ALL_VARIANTS = tuple(_VARIANT_USES_STREAMED_WRITER)
 
 # TTA copies concatenated, then InferenceStack (SLAB: per-voxel member mean + a per-region side write
-# of the stack) — the streamed prefix must feed it every slab's place and the stack must still match.
+# of the stack): the streamed prefix must feed it every slab's place and the stack must still match.
 _STACK_AFTER_REDUCTION_BLOCK = """\
         after_reduction_transforms:
           InferenceStack:
@@ -272,7 +272,7 @@ def test_streamed_prediction_is_voxel_identical_to_reference(
 def test_streamed_prediction_takes_the_expected_writer(streamed_experiment: dict[str, Path], variant: str) -> None:
     """SimpleITK always writes ``CenterOfRotation`` into a MetaImage header; the streamed region writer
     never does. Its absence proves the variant streamed to the sink (for TTA: the slab-synchronized
-    cross-copy reduce); its presence proves a refused variant (TTAZ — a slab-axis flip that cannot act
+    cross-copy reduce); its presence proves a refused variant (TTAZ: a slab-axis flip that cannot act
     slab by slab) assembled the whole volume and wrote it classically."""
     experiment_dir = streamed_experiment["experiment_dir"]
     case = _case_names(streamed_experiment["dataset_dir"])[0]

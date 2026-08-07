@@ -395,7 +395,7 @@ def test_the_mirror_folds_a_redrawing_bar_off_a_terminal(monkeypatch):
     mirrored = log._stdout_bak.written
     frames = [line for line in mirrored.splitlines() if line.startswith("Progress:")]
     # The throttle admits the first frame; every skipped one stays pending, so the final state is the
-    # second and last -- not 500 lines, and never a lost 499/500.
+    # second and last, not 500 lines, and never a lost 499/500.
     assert frames[0] == "Progress: 0/500"
     assert frames[-1] == "Progress: 499/500"
     assert len(frames) < 500 / 10, f"the animation was archived, not folded: {len(frames)} frames"
@@ -422,7 +422,7 @@ def test_the_mirror_stays_raw_on_a_terminal(monkeypatch):
 
 
 def test_a_crlf_line_is_a_message_not_a_bar_frame(monkeypatch):
-    """'warning\\r\\n' folds to the text after its last \\r — nothing. Classified as a redraw it would
+    """'warning\\r\\n' folds to the text after its last \\r: nothing. Classified as a redraw it would
     vanish from the mirror and the log file both; a CRLF terminator is not an animation."""
     monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
     monkeypatch.setattr(sys, "stderr", sys.stdout)

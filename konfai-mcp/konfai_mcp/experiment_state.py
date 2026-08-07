@@ -16,20 +16,20 @@
 
 """Where an experiment stands, read back from its workspace.
 
-Nothing here is accumulated. The stage is **derived** from what the runs actually wrote — the configs,
-the imported apps, the checkpoints, the predictions, the metric files, the job records — so it cannot
+Nothing here is accumulated. The stage is **derived** from what the runs actually wrote (the configs,
+the imported apps, the checkpoints, the predictions, the metric files, the job records), so it cannot
 drift from reality, it survives a restart or a crash, and it is the same answer whether the session was
 driven from KonfAI Studio, from Claude Code, or by hand.
 
 Three tables, one per question, keyed by the derived stage:
 
-* ``STAGE_FOCUS`` — what this stage owes, one line, for whoever is driving.
-* ``STAGE_ACTIONS`` — the tools that carry it forward, best first. Callers filter by readiness.
-* ``DIAGNOSES`` — how a failed run's log reads, so a client gets a cause and a correction rather than
+* ``STAGE_FOCUS``: what this stage owes, one line, for whoever is driving.
+* ``STAGE_ACTIONS``: the tools that carry it forward, best first. Callers filter by readiness.
+* ``DIAGNOSES``: how a failed run's log reads, so a client gets a cause and a correction rather than
   a traceback.
 
 Consumed by the session summary and the job payload here, and by KonfAI Studio for its own pre-prompt
-and action buttons — one definition, no second opinion.
+and action buttons, one definition, no second opinion.
 """
 
 from __future__ import annotations
@@ -59,20 +59,20 @@ Stage = Literal[
 
 STAGES: tuple[str, ...] = get_args(Stage)
 
-# What the current stage owes, in one line. This is the guidance an agent should act on *now* — the
+# What the current stage owes, in one line. This is the guidance an agent should act on *now*: the
 # standing rules belong in its system prompt, not here.
 STAGE_FOCUS: dict[str, str] = {
     # How a dataset is reported is a standing rule, not a stage instruction: by the time the groups are
     # known the stage has already moved on, so the shape lives in the system prompt where it applies
     # whenever a dataset is described.
     "dataset_inspection": (
-        "Inspect the dataset -- inspect_dataset; browse_dataset only if the root is still unknown -- and "
+        "Inspect the dataset: inspect_dataset; browse_dataset only if the root is still unknown, and "
         "report what it holds."
     ),
     "action_selection": (
         "The groups are known; inspect_dataset for what they do not give (shape/spacing, label classes, "
-        "incomplete cases). Then ASK which of the four routes they want -- train from scratch, fine-tune "
-        "a published app, predict with one as is, or evaluate one -- saying which the data actually "
+        "incomplete cases). Then ASK which of the four routes they want: train from scratch, fine-tune "
+        "a published app, predict with one as is, or evaluate one: saying which the data actually "
         "supports (training and evaluation need a target group; plenty of cases with targets favours "
         "training or fine-tuning, few or none favours predicting). Recommend one, in one line, and wait "
         "for their answer: the route is theirs to choose, not yours."
@@ -81,9 +81,7 @@ STAGE_FOCUS: dict[str, str] = {
         "Check the app's expected inputs against the dataset groups, say plainly whether it fits, then "
         "run it as published."
     ),
-    "configuration": (
-        "Validate the config at level 'train_step' — the default level runs no train step — then launch."
-    ),
+    "configuration": ("Validate the config at level 'train_step': the default level runs no train step, then launch."),
     "running": "A job is open: wait for it to reach a terminal state, then report the real outcome.",
     "failed": (
         "Diagnose it from the job log: the cause in one line, then the correction, or the single choice "
@@ -99,8 +97,8 @@ STAGE_FOCUS: dict[str, str] = {
     "completed": "Say what is genuinely left to do, or that the objective is met.",
 }
 
-# The tools that carry each stage forward, best first. A caller keeps the ones its readiness allows —
-# these are candidates, not a script.
+# The tools that carry each stage forward, best first. A caller keeps the ones its readiness allows: # these
+# are candidates, not a script.
 STAGE_ACTIONS: dict[str, list[str]] = {
     "dataset_inspection": ["inspect_dataset", "browse_dataset", "design_config_strategy", "initialize_session"],
     "action_selection": ["list_apps", "fine_tune_app", "design_config_strategy", "run_train"],
@@ -116,8 +114,8 @@ STAGE_ACTIONS: dict[str, list[str]] = {
 }
 
 # Which config file each launcher needs, so an action is never offered for a workflow this session has
-# not written. Without the gate, a session holding only a Transform.yml is told to "run train" -- an
-# action naming a file that is not there -- while the workflow it could run is offered by nothing.
+# not written. Without the gate, a session holding only a Transform.yml is told to "run train": an
+# action naming a file that is not there, while the workflow it could run is offered by nothing.
 _LAUNCHER_CONFIG: dict[str, str] = {
     "run_train": "Config.yml",
     "run_prediction": "Prediction.yml",
@@ -223,7 +221,7 @@ DIAGNOSES: tuple[tuple[Diagnosis, tuple[str, ...]], ...] = (
 
 CANCELLED = Diagnosis(
     "cancelled",
-    "the run was stopped on purpose (the user's Stop button, cancel_job, or a Ctrl-C) — not a failure",
+    "the run was stopped on purpose (the user's Stop button, cancel_job, or a Ctrl-C): not a failure",
     "nothing to fix; resume or relaunch it when the user is ready",
     False,
 )
@@ -251,7 +249,7 @@ def diagnose(text: str, *, status: str = "error") -> Diagnosis:
 ACTIVE_STATUS = frozenset({"queued", "running", "waiting"})
 FAILED_STATUS = frozenset({"error", "killed", "cancelled"})
 
-# A finished job of this kind leaves the experiment at this stage — the successor step, not "done".
+# A finished job of this kind leaves the experiment at this stage: the successor step, not "done".
 _JOB_KIND_STAGE: dict[str, str] = {
     "train": "checkpoint_selection",
     "finetune": "checkpoint_selection",
@@ -277,7 +275,7 @@ _EXPECTED_OUTPUT: dict[str, str] = {
 
 @dataclass(frozen=True)
 class Facts:
-    """What the workspace shows. Every field is read back from disk — none of it is remembered."""
+    """What the workspace shows. Every field is read back from disk: none of it is remembered."""
 
     session: str = ""
     workspace: str = ""
@@ -295,17 +293,17 @@ class Facts:
     job_kind: str = ""
     job_status: str = ""
     job_error: str = ""
-    attempts: int = 0  # consecutive failed jobs, newest first — the retry budget, counted not remembered
+    attempts: int = 0  # consecutive failed jobs, newest first: the retry budget, counted not remembered
 
     @property
     def has_reference(self) -> bool:
-        """Two or more groups per case means the data carries a target — a label map, or a paired
+        """Two or more groups per case means the data carries a target: a label map, or a paired
         modality. With a single group there is nothing to train against or score against."""
         return len(self.groups) >= 2
 
 
 def derive_stage(facts: Facts) -> str:
-    """The stage, from the facts alone — in precedence order, most recent evidence first.
+    """The stage, from the facts alone, in precedence order, most recent evidence first.
 
     Deliberately not a map from tool names: a client that drove the session with tools this server has
     never heard of, or a user who copied files in by hand, still lands on the right stage."""
@@ -314,7 +312,7 @@ def derive_stage(facts: Facts) -> str:
     if facts.job_status in FAILED_STATUS:
         return "failed"
     if facts.job_status == "done" and facts.job_kind in _JOB_KIND_STAGE:
-        # The newest evidence is a finished run — but only if it left what its kind must leave.
+        # The newest evidence is a finished run, but only if it left what its kind must leave.
         expected = _EXPECTED_OUTPUT.get(facts.job_kind)
         if expected is not None and not getattr(facts, expected):
             return "failed"
@@ -336,7 +334,7 @@ def derive_stage(facts: Facts) -> str:
 
 
 def stage_actions(stage: str, facts: Facts) -> list[str]:
-    """The stage's tools, minus the ones its own facts rule out — nothing to package without a
+    """The stage's tools, minus the ones its own facts rule out: nothing to package without a
     checkpoint, nothing to rank without a metric.
 
     Only *known* facts filter. An action is never dropped for something the workspace cannot tell yet
@@ -349,8 +347,8 @@ def stage_actions(stage: str, facts: Facts) -> list[str]:
     present = set(facts.configs)
     if stage in _LAUNCH_STAGES:
         # Only here does a launcher describe what the session HAS. Elsewhere it names the step that
-        # comes next -- `checkpoint_selection` offers `run_prediction` precisely because the
-        # Prediction.yml does not exist yet -- so the config a launcher needs is not a filter there.
+        # comes next: `checkpoint_selection` offers `run_prediction` precisely because the
+        # Prediction.yml does not exist yet, so the config a launcher needs is not a filter there.
         blocked |= {action for action, config in _LAUNCHER_CONFIG.items() if config not in present}
     kept = [action for action in STAGE_ACTIONS.get(stage, []) if action not in blocked]
     if stage in _LAUNCH_STAGES:
@@ -362,14 +360,14 @@ def stage_actions(stage: str, facts: Facts) -> list[str]:
 
 
 def _names(root: Path, pattern: str, *, dirs: bool = False) -> list[str]:
-    """Sorted names matching a glob under ``root`` — empty when the directory is not there yet."""
+    """Sorted names matching a glob under ``root``: empty when the directory is not there yet."""
     if not root.is_dir():
         return []
     found = {path.name for path in root.glob(pattern) if path.is_dir() == dirs}
     return sorted(found)[:50]
 
 
-# A dataset scan costs ~700ms on a few dozen cases — too much to repeat every turn, and pointless: the
+# A dataset scan costs ~700ms on a few dozen cases: too much to repeat every turn, and pointless: the
 # answer only changes when the data does. Keyed by the directory's own mtime, so adding a case re-derives.
 _SCANNED: dict[tuple[str, float], tuple[list[str], int]] = {}
 
@@ -377,7 +375,7 @@ _SCANNED: dict[tuple[str, float], tuple[list[str], int]] = {}
 def _scan_dataset(path: Path) -> tuple[list[str], int]:
     """The groups and case count of a dataset directory, read from the data itself.
 
-    The dataset lives outside the workspace, so it is the one fact the workspace cannot supply — and
+    The dataset lives outside the workspace, so it is the one fact the workspace cannot supply: and
     without it an agent is told to choose a route for data whose shape nobody has looked at. Structure
     only: no pixel is opened.
     """
@@ -397,7 +395,7 @@ def _scan_dataset(path: Path) -> tuple[list[str], int]:
 
 
 def _newest(*roots: Path) -> str:
-    """The most recently written run directory across these roots — which run an experiment with no job
+    """The most recently written run directory across these roots, which run an experiment with no job
     history is about. An imported workspace, or one whose records were cleaned, still names its run."""
     found = [path for root in roots if root.is_dir() for path in root.iterdir() if path.is_dir()]
     return max(found, key=lambda path: path.stat().st_mtime).name if found else ""
@@ -418,7 +416,7 @@ def _dataset_from_config(path: Path, workflow: str = "train") -> tuple[str, list
     if not isinstance(dataset, dict):
         return "", []
     entries = [e for e in dataset.get("dataset_filenames") or [] if isinstance(e, str) and e not in {"", "None"}]
-    # A dataset entry is "<path>:<flags>:<extension>" — the path is the part before those two fields.
+    # A dataset entry is "<path>:<flags>:<extension>": the path is the part before those two fields.
     first = entries[0].rsplit(":", 2)[0] if entries else ""
     groups = dataset.get("groups_src")
     return first, sorted(groups)[:12] if isinstance(groups, dict) else []
@@ -483,7 +481,7 @@ MAX_ATTEMPTS = 2  # consecutive failures the agent may correct on its own before
 
 
 def _failure_focus(facts: Facts, diagnosis: Diagnosis) -> str:
-    """What to do about a failure, said outright — the cause and the correction, so the next turn acts on
+    """What to do about a failure, said outright: the cause and the correction, so the next turn acts on
     it instead of re-deriving it from a traceback, and stops once the budget is spent."""
     run = facts.run or "the run"
     if facts.attempts >= MAX_ATTEMPTS:
@@ -493,7 +491,7 @@ def _failure_focus(facts: Facts, diagnosis: Diagnosis) -> str:
         )
     if not diagnosis.recoverable:
         return (
-            f"{run} failed: {diagnosis.summary}. This one is the user's call — offer the choice "
+            f"{run} failed: {diagnosis.summary}. This one is the user's call: offer the choice "
             f"({diagnosis.fix}) and do whichever they pick."
         )
     return (
@@ -533,13 +531,13 @@ def experiment_state(facts: Facts) -> dict[str, Any]:
     elif stage == "running":
         payload["focus"] = (
             f"Job {facts.job_id or facts.run} is still open: wait for it to reach a terminal state, then "
-            f"report the real outcome — status, where the outputs landed, the key numbers."
+            f"report the real outcome: status, where the outputs landed, the key numbers."
         )
     return payload
 
 
 def state_line(state: dict[str, Any]) -> str:
-    """The state as one line of structured identifiers — what a turn carries instead of a transcript."""
+    """The state as one line of structured identifiers: what a turn carries instead of a transcript."""
     parts = [f"stage={state.get('stage', '')}"]
     for key in ("dataset", "app", "run", "job_id"):
         if state.get(key):
@@ -556,7 +554,7 @@ def state_line(state: dict[str, Any]) -> str:
 
 
 def log_tail(path: Path, *, limit: int = 4000) -> str:
-    """The tail of a job log — enough to diagnose, never the whole file."""
+    """The tail of a job log: enough to diagnose, never the whole file."""
     try:
         size = path.stat().st_size
         with path.open(encoding="utf-8", errors="replace") as handle:

@@ -16,7 +16,7 @@
 
 """Helpers shared by the example notebooks, so each one shows the task and not the plumbing.
 
-Nothing here is part of KonfAI's API — it is notebook scaffolding: install the missing packages,
+Nothing here is part of KonfAI's API, it is notebook scaffolding: install the missing packages,
 run a CLI command with readable output, and draw a row of slices.
 """
 
@@ -83,7 +83,7 @@ def run(*command: str) -> None:
 
     KonfAI reports progress with a carriage-returned bar; printing it verbatim would bury the notebook
     under thousands of lines, so only a snapshot is shown, at a rate that backs off from two seconds
-    to thirty — frequent enough to see a short command move, sparse enough that a six-minute training
+    to thirty: frequent enough to see a short command move, sparse enough that a six-minute training
     stays a dozen lines. On failure the tail is raised instead.
     """
     print("$", " ".join(command), flush=True)
@@ -112,7 +112,7 @@ def latest_checkpoint(train_name: str) -> str:
     """Path of the newest checkpoint of a run, relative to the example directory."""
     checkpoints = sorted((_WORKDIR / "Checkpoints" / train_name).glob("*.pt"), key=lambda p: p.stat().st_mtime)
     if not checkpoints:
-        raise FileNotFoundError(f"no checkpoint under Checkpoints/{train_name} — did training run?")
+        raise FileNotFoundError(f"no checkpoint under Checkpoints/{train_name}: did training run?")
     return str(checkpoints[-1].relative_to(_WORKDIR))
 
 
@@ -127,8 +127,7 @@ def show(panels: list[tuple], label_max: int | None = None) -> None:
     """Draw a row of slices.
 
     A panel is `(title, image, cmap)`, optionally followed by a label map to overlay and/or a
-    `(vmin, vmax)` tuple. Give two panels the same `(vmin, vmax)` to make them comparable by eye —
-    matplotlib otherwise rescales each one to its own range, which hides the difference.
+    `(vmin, vmax)` tuple. Give two panels the same `(vmin, vmax)` to make them comparable by eye: matplotlib otherwise rescales each one to its own range, which hides the difference.
     """
     import matplotlib.pyplot as plt
     import numpy as np

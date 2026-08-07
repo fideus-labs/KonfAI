@@ -1,6 +1,6 @@
 # Environment variables
 
-This page catalogues the environment variables KonfAI reads or sets — the
+This page catalogues the environment variables KonfAI reads or sets: the
 user-facing ones you may set yourself, and the `KONFAI_*` runtime variables the
 CLI wrappers manage. Reach for it when a run behaves differently across shells
 or machines, or when you are debugging the runtime wrappers themselves.
@@ -24,7 +24,7 @@ Bearer token used by:
 
 Set to `0` to stop `konfai-apps` from pip-installing a resolved app's
 `requirements.txt` (installed by default; core packages are never touched).
-This is a **trust-model** switch — see the apps guide.
+This is a **trust-model** switch: see the apps guide.
 
 ### Streaming and write-path switches
 
@@ -37,7 +37,7 @@ path or to tune the gate.
 | `KONFAI_STREAMED_WRITES` | `0` disables streamed writes entirely (whole-volume reference path). |
 | `KONFAI_STREAM_WORTH_THRESHOLD` | Overrides the "worth streaming" accumulator-size threshold (fraction of the per-rank memory budget). Test harnesses set `0` to force the streamed machinery on toy volumes. |
 | `KONFAI_ASYNC_WRITES` | Controls the background writer for disjoint-file sinks. |
-| `KONFAI_INLINE_SINGLE_RANK` | Default on. `0` forces a single rank through the spawn path instead of running it in-process — useful when a host process must keep its own CUDA context. |
+| `KONFAI_INLINE_SINGLE_RANK` | Default on. `0` forces a single rank through the spawn path instead of running it in-process: useful when a host process must keep its own CUDA context. |
 
 ### Hugging Face authentication
 
@@ -69,14 +69,14 @@ be managed manually in day-to-day usage.**
 
 The codebase also references internal variables such as:
 
-- `KONFAI_CONFIG_MODE`, `KONFAI_CONFIG_PATH` — the config binder's mode machine
+- `KONFAI_CONFIG_MODE`, `KONFAI_CONFIG_PATH`: the config binder's mode machine
 - `KONFAI_APPS_CONFIG`
-- `KONFAI_DEBUG` — `1` re-attaches the framework traceback to a designed refusal (a
+- `KONFAI_DEBUG`: `1` re-attaches the framework traceback to a designed refusal (a
   `KonfAIError`), which otherwise prints its message and remedy alone
-- `KONFAI_DEBUG_LAST_LAYER` — set it (empty) before a run and the network appends each module
+- `KONFAI_DEBUG_LAST_LAYER`: set it (empty) before a run and the network appends each module
   it enters, so after a crash it names the last layer reached
-- `KONFAI_MASTER_PORT` — distributed rendezvous bookkeeping
-- `KONFAI_LOCAL_RANKS` — how many ranks share one node's RAM, published by the
+- `KONFAI_MASTER_PORT`: distributed rendezvous bookkeeping
+- `KONFAI_LOCAL_RANKS`: how many ranks share one node's RAM, published by the
   launcher so a node-scoped `memory_budget` is divided before the spawn. It changes
   the cache-versus-stream decision, so it is not mere bookkeeping.
 - `KONFAI_ATTR_KEY`, `KONFAI_DEPS`, `KONFAI_COMPONENT_BASES`, `KONFAI_VERSION`
@@ -103,7 +103,7 @@ when both are given.
 
 An invalid `KONFAI_MCP_TRANSPORT` is rejected at startup rather than passed
 through. A few further `KONFAI_MCP_*` names configure internals with no option of
-their own — the app catalog, the subprocess timeout, the validation root — and
+their own (the app catalog, the subprocess timeout, the validation root) and
 are covered in {doc}`../usage/mcp`.
 
 ## KonfAI Studio
@@ -115,7 +115,7 @@ refused unless you override it. See `studio/docs/REMOTE.md`.
 | Variable | Effect |
 | --- | --- |
 | `KONFAI_STUDIO_TOKEN` | Shared bearer token. **Unset means no authentication**, which is why a non-loopback bind is refused without it. |
-| `KONFAI_STUDIO_INSECURE_COOKIE` | Drops the `Secure` flag on the session cookie — for plain-HTTP testing only. |
+| `KONFAI_STUDIO_INSECURE_COOKIE` | Drops the `Secure` flag on the session cookie, for plain-HTTP testing only. |
 | `KONFAI_STUDIO_LLM` | Which backend drives the agent (for example `anthropic`, or an OpenAI-compatible server). |
 | `KONFAI_STUDIO_LLM_API_KEY` | Key for that backend. |
 | `KONFAI_STUDIO_LLM_BASE_URL` | Base URL of an OpenAI-compatible server (vLLM / Ollama / LM Studio). |
@@ -127,5 +127,5 @@ refused unless you override it. See `studio/docs/REMOTE.md`.
 
 ## Next steps
 
-- {doc}`cli` — the wrappers that set the `KONFAI_*` runtime variables
-- {doc}`../concepts/execution-flow` — where in the launch sequence they are set
+- {doc}`cli`: the wrappers that set the `KONFAI_*` runtime variables
+- {doc}`../concepts/execution-flow`: where in the launch sequence they are set

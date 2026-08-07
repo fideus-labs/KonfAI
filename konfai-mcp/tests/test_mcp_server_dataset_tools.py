@@ -453,12 +453,12 @@ def test_mcp_server_inspect_object_signature_isolates_library_import(
                 {"relative_path": "Loss.py", "content": "class MyLoss:\n    def __init__(self, a: float = 1.0): ...\n"},
             )
 
-            # Local File:Class is parsed statically -- it must NOT be routed to the subprocess.
+            # Local File:Class is parsed statically, it must NOT be routed to the subprocess.
             local = await client.call_tool("inspect_object_signature", {"classpath": "Loss:MyLoss"})
             assert local.structured_content["source"] == "local"
             assert subprocess_calls == []
 
-            # Installed-library classpath -- its import MUST be isolated in the subprocess.
+            # Installed-library classpath: its import MUST be isolated in the subprocess.
             imported = await client.call_tool("inspect_object_signature", {"classpath": "json.decoder.JSONDecoder"})
             assert imported.structured_content["source"] == "imported"
             assert imported.structured_content["ok"] is True

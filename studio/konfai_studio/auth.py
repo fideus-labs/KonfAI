@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Access gate for remote deployments — the ``_AuthGate`` ASGI middleware, the shared-token cookie
+"""Access gate for remote deployments: the ``_AuthGate`` ASGI middleware, the shared-token cookie
 scheme, and the login/logout endpoints.
 
-Studio drives konfai-mcp, which reads arbitrary host paths and runs jobs — arbitrary compute by
+Studio drives konfai-mcp, which reads arbitrary host paths and runs jobs: arbitrary compute by
 design. On loopback that is the operator's own machine; exposed on a network it is not. A single
 shared token (KONFAI_STUDIO_TOKEN) turns on authentication: unset, everything is open exactly as
 before (trusted-local); set, every request must carry a valid session cookie or bearer token. TLS
@@ -37,7 +37,7 @@ def _studio_token() -> str:
 
 
 def _session_cookie(token: str) -> str:
-    """A stable, non-reversible session value derived from the token — what the auth cookie carries, so
+    """A stable, non-reversible session value derived from the token: what the auth cookie carries, so
     the raw token never lives in the browser and a server restart keeps the user signed in."""
     return hmac.new(token.encode(), b"konfai-studio-session", hashlib.sha256).hexdigest()
 
@@ -56,7 +56,7 @@ def _authorised(scope: dict[str, Any]) -> bool:
     if not token:
         return True
     path = scope.get("path", "")
-    # Exact public paths, or a static asset — but never a dot-segment path, which a raw client could use to
+    # Exact public paths, or a static asset, but never a dot-segment path, which a raw client could use to
     # make the gate ("/assets/…", allowed) and the router disagree on the effective route. Fail closed.
     if path in _PUBLIC_PATHS or (path.startswith("/assets/") and "/.." not in path):
         return True
@@ -68,7 +68,7 @@ def _authorised(scope: dict[str, Any]) -> bool:
             jar.load(raw)
         morsel = jar.get(_COOKIE_NAME)
         # Compare as bytes: hmac.compare_digest raises TypeError on a non-ASCII str, and both the cookie
-        # value and the bearer token are attacker-controlled — bytes yield a constant-time False instead.
+        # value and the bearer token are attacker-controlled: bytes yield a constant-time False instead.
         if morsel and hmac.compare_digest(morsel.value.encode(), expected.encode()):
             return True
     auth = _scope_header(scope, b"authorization") or ""
@@ -79,7 +79,7 @@ def _authorised(scope: dict[str, Any]) -> bool:
 
 class _AuthGate:
     """Blanket access gate for remote deployments. A pure ASGI middleware (not ``BaseHTTPMiddleware``) so
-    it never wraps the SSE/stream responses — it inspects the request and either passes it through
+    it never wraps the SSE/stream responses: it inspects the request and either passes it through
     untouched or short-circuits with a 401 / WebSocket close. No-op when the token is unset."""
 
     def __init__(self, app: Any) -> None:
@@ -101,15 +101,14 @@ class LoginRequest(BaseModel):
 
 
 def _cookie_secure() -> bool:
-    """The session cookie is Secure by default — a remote deployment must run behind TLS. Opt out only
+    """The session cookie is Secure by default: a remote deployment must run behind TLS. Opt out only
     for local http testing of the auth flow with KONFAI_STUDIO_INSECURE_COOKIE=1."""
     return os.environ.get("KONFAI_STUDIO_INSECURE_COOKIE") != "1"
 
 
 @router.get("/api/auth")
 async def auth_state(request: Request) -> dict[str, bool]:
-    """Whether this deployment requires a token, and whether the browser already holds a valid session —
-    the front shows a lock screen when required and not yet authenticated."""
+    """Whether this deployment requires a token, and whether the browser already holds a valid session: the front shows a lock screen when required and not yet authenticated."""
     token = _studio_token()
     if not token:
         return {"required": False, "authenticated": True}
@@ -124,7 +123,7 @@ async def login(req: LoginRequest) -> Response:
     token is a flat 401 (the token's entropy, not rate-limiting, is the defence)."""
     token = _studio_token()
     if not token:
-        return JSONResponse({"ok": True})  # auth disabled — nothing to unlock
+        return JSONResponse({"ok": True})  # auth disabled: nothing to unlock
     if not hmac.compare_digest(req.token.strip().encode(), token.encode()):
         raise HTTPException(401, "invalid access token")
     resp = JSONResponse({"ok": True})

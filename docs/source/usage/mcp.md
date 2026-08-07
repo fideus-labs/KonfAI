@@ -1,8 +1,8 @@
 # Agent workflows (MCP server)
 
-Point an LLM agent at a folder of scans and ask in plain language — *"segment these CT
+Point an LLM agent at a folder of scans and ask in plain language: *"segment these CT
 volumes"*, *"train an MR-to-CT model on my dataset"*, *"register these two scans and
-tell me whether the alignment holds"* — and let it carry the request out **end to end**:
+tell me whether the alignment holds"*, and let it carry the request out **end to end**:
 read the data, choose the cheapest path that fits, write and validate the config, run
 train / predict / evaluate, and hand back metrics with a record you can reproduce.
 
@@ -11,29 +11,28 @@ That is **`konfai-mcp`**: a
 whole framework as structured, deterministic tools. The CLI is driven by a human
 editing YAML; the MCP server hands that same power to an agent, over a typed tool
 contract whose payloads carry `next_actions` hints that chain the steps. It is a
-separate package layered on KonfAI's public API — the core framework never depends
+separate package layered on KonfAI's public API: the core framework never depends
 on it.
 
 ## What it takes off your plate
 
 - **No config archaeology.** The agent writes the *same* YAML you would, and every run
-  leaves a fully-resolved config on disk — the experiment *is* the file, reproducible by
+  leaves a fully-resolved config on disk: the experiment *is* the file, reproducible by
   anyone who has it.
 - **The cheapest path, not always training.** Many requests are already solved by a
   published model. The agent checks that first (`list_apps` → `describe_app`), runs or
-  fine-tunes it on your data, and only trains from scratch when nothing fits — so a
+  fine-tunes it on your data, and only trains from scratch when nothing fits, so a
   request like *"segment this cohort"* is answered in one call, no training at all.
 - **Mistakes caught before the compute bill.** `validate_config_semantics` builds the
   workflow on a side-effect-free snapshot, so broken YAML, bad dataset mappings, and
-  wiring errors surface *before* a multi-hour job — and a prediction config missing
+  wiring errors surface *before* a multi-hour job, and a prediction config missing
   its checkpoint is flagged up front (with the static review attached) instead of
   failing at launch.
 - **Every run reproducible by construction.** Each job persists its exact command,
-  environment and package versions, launch-time config snapshots, logs, and metrics —
-  a methods-grade record, captured automatically rather than reconstructed later.
+  environment and package versions, launch-time config snapshots, logs, and metrics: a methods-grade record, captured automatically rather than reconstructed later.
 - **When something breaks, you can tell why.** Jobs run as tracked subprocesses whose
   full traceback reaches the log, so a failed run is diagnosed and retried from the same
-  tools — not from a shrug.
+  tools, not from a shrug.
 
 ## One request, three ways
 
@@ -41,27 +40,27 @@ The decisive idea: **training from scratch is only one option.** When a user arr
 with a dataset and a goal, the `solve_task` prompt frames a three-way decision and the
 agent takes the cheapest path that genuinely fits:
 
-1. **Use a published app as-is** — no training. `list_apps` → `describe_app` (judge fit
+1. **Use a published app as-is**: no training. `list_apps` → `describe_app` (judge fit
    from the app's own description and its declared inputs/outputs) → `run_app_infer`
    (or `run_app_pipeline` to also score it), which runs the app **as published** and takes a
-   local directory or a Hugging Face reference — a remote `host:port:name` server is driven
-   with `konfai-apps` directly, not through these tools — and
+   local directory or a Hugging Face reference: a remote `host:port:name` server is driven
+   with `konfai-apps` directly, not through these tools: and
    tracks it as a job. Tune per run by reading `list_app_parameters`, then passing
    `set_parameters`. Use `import_app` instead only when the app must be **modified**
    first: it copies the app into the session to run as a normal experiment.
-2. **Fine-tune a published app** — start from an existing model instead of a blank
+2. **Fine-tune a published app**: start from an existing model instead of a blank
    slate: `fine_tune_app` adapts it to the user's dataset and writes a runnable bundle
    (or `import_app` + `run_resume(weights_only=True)` when the config needs editing).
-3. **Train from scratch** — author a config and run the train loop.
+3. **Train from scratch**: author a config and run the train loop.
 
-Both training paths finish at the **same reusable artifact — a KonfAI app bundle**
+Both training paths finish at the **same reusable artifact: a KonfAI app bundle**
 (`package_app_from_session` packages a from-scratch model), which the agent can
 immediately re-run with `run_app_infer`, share, or snapshot with `export_app`. No submission service
 is involved: the bundle is the KonfAI-native deliverable.
 
 Apps resolve from a **local path, a HuggingFace repo, or a remote server**, read from a
 layered catalogue (a shipped default, an editable per-workspace file, and the
-`KONFAI_MCP_APP_CATALOG` env file — the same `{"apps": [...]}` shape the app server
+`KONFAI_MCP_APP_CATALOG` env file: the same `{"apps": [...]}` shape the app server
 consumes). Users pin their own sources with `register_app_source`.
 
 ```{admonition} Trust model
@@ -82,7 +81,7 @@ pip install "konfai[imaging]" konfai-apps konfai-mcp
 konfai-mcp            # stdio transport by default
 ```
 
-From a checkout instead — for development, or to expose edited core code to the
+From a checkout instead, for development, or to expose edited core code to the
 agent:
 
 ```bash

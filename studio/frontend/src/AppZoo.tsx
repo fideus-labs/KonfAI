@@ -13,7 +13,7 @@ export type StudioApp = {
   logo?: string;
 };
 
-// app.json short descriptions carry HTML (<b>, <br>, <cite>…) — show them as plain text.
+// app.json short descriptions carry HTML (<b>, <br>, <cite>…): show them as plain text.
 function plain(html: string | undefined): string {
   if (!html) return "";
   return html
@@ -52,7 +52,7 @@ function themeOf(a: StudioApp): string {
 
 const THEME_ORDER = ["Synthesis", "Registration", "Segmentation", "Other"];
 
-// The App Zoo — a model gallery in its own window. Browse by theme, register/remove sources, and
+// The App Zoo: a model gallery in its own window. Browse by theme, register/remove sources, and
 // start an experiment from an app (the agent then runs it on your dataset).
 export default function AppZoo({
   apps,
@@ -94,7 +94,7 @@ export default function AppZoo({
           <button
             className="zoo-addbtn"
             onClick={() => {
-              const r = window.prompt("Add an app source — a HuggingFace repo (owner/name[:app]) or a local path:");
+              const r = window.prompt("Add an app source: a HuggingFace repo (owner/name[:app]) or a local path:");
               if (r && r.trim()) onAdd(r.trim());
             }}
           >

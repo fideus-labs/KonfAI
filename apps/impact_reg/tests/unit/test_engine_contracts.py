@@ -49,7 +49,7 @@ def test_download_models_refuses_a_missing_local_file_at_build(tmp_path: Path) -
 
 
 def test_a_windows_drive_letter_is_a_local_path_not_an_hf_repo() -> None:
-    # 'C:/models/m.pt' contains ':' but is a path — splitting it as repo 'C' would send a Windows
+    # 'C:/models/m.pt' contains ':' but is a path: splitting it as repo 'C' would send a Windows
     # user's local ref to Hugging Face. The same rule keys the registry/staged name.
     from impact_reg_konfai.models.elastix import _is_local_ref, _model_key
 
@@ -79,7 +79,7 @@ def test_fireants_impact_metric_requires_a_feature_model() -> None:
 def test_fireants_linear_method_reaches_the_engine() -> None:
     # The knob is only useful if it survives the config binding: a value that stops at RegistrationNet
     # leaves the engine on its default, and a tiled pass would run the per-patch linear it asked to
-    # skip -- silently, because the run still produces a plausible field.
+    # skip: silently, because the run still produces a plausible field.
     from impact_reg_konfai.models.fireants import RegistrationNet
 
     for method in ("rigid_affine", "rigid", "none"):

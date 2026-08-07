@@ -1,42 +1,24 @@
 Quickstart
 ==========
 
-This quickstart takes you **from zero to a scored prediction** on the shipped
-``examples/Segmentation`` baseline: install the package, prepare the demo
-dataset, train a model, run prediction, then evaluate the saved outputs. Use it
-for your very first contact with KonfAI — each phase below ends with an
-explicit success signal so you always know whether to continue.
+In about seven minutes you will train a segmentation model on real pelvis CT
+scans, predict on them, and get a Dice score back. Everything runs from three
+YAML files that ship with the repository. You will not write a line of Python.
 
-``examples/Segmentation/Segmentation_demo.ipynb`` runs this entire page for you —
-download, train, predict, evaluate, and a plot of the prediction against the
-reference. Prefer it on a fresh machine or in Google Colab; run every cell.
+If you would rather watch it happen cell by cell, open
+``examples/Segmentation/Segmentation_demo.ipynb``, or its Colab badge, and run
+everything. Same run, same result.
 
-Prerequisites
--------------
+In a hurry, or without a GPU? :doc:`examples/transform` runs in about a minute on
+CPU and downloads nothing: it generates its own data, folds a cohort into one
+volume and draws augmented copies. No model is involved, so it is the shortest
+path to seeing KonfAI work.
 
-- Python 3.10 or newer
-- a KonfAI checkout (the install step below clones it)
-- a GPU is recommended; ``--cpu 1`` works everywhere the commands say ``--gpu 0``
+Install
+-------
 
-Runtime expectations
---------------------
-
-The maintained example is a real 41-class workflow, not a synthetic unit test.
-Its checked-in config is already sized for a first run: ``epochs: 5``, about seven
-minutes on a GPU for the whole train → predict → evaluate sequence. That validates
-the end-to-end path without implying the resulting checkpoint is useful — expect a
-mean Dice around ``0.19``, with the large structures recognisable and the small
-ones missing. Raise ``epochs`` to 100 or more for anything you intend to use;
-KonfAI does not currently expose an ``--epochs`` CLI override, so edit the config.
-
-Training optimises ``CrossEntropyLoss`` **and** ``Dice`` together. The overlap term
-matters: each of the 40 foreground labels covers under 3% of a volume, so cross
-entropy on its own is minimised by predicting background nearly everywhere.
-
-Install KonfAI
---------------
-
-The examples live in the repository, not in the published wheel:
+You need Python 3.10 or newer. A GPU makes it faster, and every command below
+works with ``--cpu 1`` instead of ``--gpu 0``.
 
 .. code-block:: bash
 
@@ -44,44 +26,25 @@ The examples live in the repository, not in the published wheel:
    cd KonfAI
    python -m pip install -e ".[imaging]"
 
-For your own project, once you no longer need the shipped examples,
-``python -m pip install "konfai[imaging]"`` from PyPI is all you need.
+The examples live in the repository, which is why you clone it. For your own
+project later, ``pip install "konfai[imaging]"`` is enough. Keep the
+``[imaging]`` part: it brings SimpleITK, and without it the first data read
+fails.
 
-.. note::
-
-   The ``[imaging]`` extra pulls in SimpleITK, which is **required to read the
-   ``.mha`` demo data** below. Plain ``pip install konfai`` will train-fail with
-   an import error on the first run.
-
-Verify the install:
+Check it worked:
 
 .. code-block:: bash
 
    konfai --help
 
-**Success signal:** ``konfai --help`` prints the CLI help. If it fails with an
-import error instead, revisit the install commands above.
+Get the data
+------------
 
-.. warning::
-
-   **KonfAI rewrites your config.** After any run, ``Config.yml`` will contain
-   the resolved default values that KonfAI materialised (this is expected and is
-   how a run leaves a fully-reproducible config on disk). ``None`` is written as
-   the literal string ``None``. If you see a git diff on your YAML after a run,
-   nothing is broken — see :doc:`concepts/configuration`.
-
-Download the demo dataset
--------------------------
-
-**From here on every command runs from the example directory itself** — its YAML
-references local modules and dataset paths relative to the working directory.
+Five pelvis CT cases with their reference segmentation, about 114 MB.
 
 .. code-block:: bash
 
    cd examples/Segmentation
-
-.. code-block:: bash
-
    python -m pip install -U "huggingface_hub[cli]"
    hf download VBoussot/konfai-demo \
      --repo-type dataset \
@@ -91,144 +54,68 @@ references local modules and dataset paths relative to the working directory.
    rmdir Dataset/Segmentation
    rm -rf Dataset/.cache
 
-After the download, the example expects this layout:
+You should end up with one folder per case, each holding ``CT.mha`` and
+``SEG.mha``. ``CT`` is what the model reads, ``SEG`` is what it has to
+reproduce.
 
-.. code-block:: text
+Stay in this directory for the rest of the page. KonfAI resolves paths from
+where you launch it.
 
-   examples/Segmentation/
-   ├── Dataset/
-   │   ├── 1PC006/
-   │   │   ├── CT.mha
-   │   │   └── SEG.mha
-   │   └── ...
-   ├── Config.yml
-   ├── Prediction.yml
-   └── Evaluation.yml
+Train, predict, evaluate
+------------------------
 
-**Success signal:** your ``Dataset/`` tree matches the layout above — one
-directory per case, each containing ``CT.mha`` and ``SEG.mha``.
+Three commands, one config file each.
 
-Train a baseline
+.. code-block:: bash
+
+   konfai TRAIN      -y --gpu 0 --config Config.yml
+   konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/*.pt
+   konfai EVALUATION -y          --config Evaluation.yml
+
+Training writes ``Checkpoints/SEG_BASELINE/`` and ``Statistics/SEG_BASELINE/``.
+Prediction writes ``Predictions/SEG_BASELINE/``. Evaluation writes
+``Evaluations/SEG_BASELINE/Metric_TRAIN.json``. If those folders appear, your
+install, your data and the whole pipeline agree with each other.
+
+The checkpoint is named after the moment it was written, so there is no fixed
+filename to type; the glob picks it up. Pass several checkpoints to ``--models``
+and they run as an ensemble.
+
+.. warning::
+
+   A run rewrites the config file you point it at, filling in every default it
+   resolved. That is how a run stays reproducible, but it means your YAML will
+   show a git diff afterwards. Work on a copy if you want the shipped template
+   untouched.
+
+Look at what you got
+--------------------
+
+Open ``Metric_TRAIN.json`` for the scores, and
+``Predictions/SEG_BASELINE/Dataset/`` for the segmentations themselves. The
+config KonfAI copied next to them is the exact recipe that produced them.
+
+The score will be low: five epochs prove the pipeline works, they do not train a
+model. Raise ``epochs`` in ``Config.yml`` and run again.
+
+When something goes wrong
+-------------------------
+
+Most first runs fail for one of five reasons.
+
+- ``--gpu`` refuses your device id: KonfAI checks it against
+  ``CUDA_VISIBLE_DEVICES``. Use ``--cpu 1``.
+- It asks before overwriting a previous run: add ``-y``.
+- It cannot find a group: every case folder needs ``CT.mha`` and ``SEG.mha``,
+  named exactly as ``groups_src`` says.
+- Evaluation finds no predictions: ``Prediction.yml`` and ``Evaluation.yml``
+  must carry the same ``train_name``.
+- A metric or output name is rejected: those names are module paths in the
+  model graph. Start from a shipped example before inventing your own.
+
+Where to go next
 ----------------
 
-At this stage, KonfAI reads ``Config.yml`` and builds a ``Trainer`` object from
-it.
-
-Run the checked-in configuration:
-
-.. code-block:: bash
-
-   konfai TRAIN -y --gpu 0 --config Config.yml
-
-To keep the shipped template pristine while you experiment, work on a copy — the
-run rewrites whichever file you point it at:
-
-.. code-block:: bash
-
-   cp Config.yml Config.mine.yml
-   konfai TRAIN -y --gpu 0 --config Config.mine.yml
-
-If you do not have a GPU available, use ``--cpu 1`` instead of ``--gpu 0``.
-
-**Success signal:** training creates, at minimum:
-
-- ``Checkpoints/SEG_BASELINE/``
-- ``Statistics/SEG_BASELINE/``
-
-This is the most important first milestone. If these folders are created, your
-installation, dataset layout, and training entrypoint are all working together.
-If you only want a first success today, it is reasonable to stop here.
-
-Run prediction
---------------
-
-``Prediction.yml`` defines which outputs are written and under which group names.
-
-A checkpoint is named after the moment it was written
-(``2026_08_03_02_36_00.pt``), so there is no fixed filename to type. This example
-keeps only the best one, so a glob resolves to exactly one file:
-
-.. code-block:: bash
-
-   konfai PREDICTION -y --gpu 0 --config Prediction.yml \
-     --models Checkpoints/SEG_BASELINE/*.pt
-
-``--models`` accepts several checkpoints and runs them as an ensemble — which is
-what the same glob does on its own once ``save_checkpoint_mode: ALL`` makes
-training keep every save.
-
-**Success signal:** prediction writes:
-
-- ``Predictions/SEG_BASELINE/``
-
-Run evaluation
---------------
-
-``Evaluation.yml`` does not run the model again. It compares saved prediction
-groups against reference groups on disk.
-
-.. code-block:: bash
-
-   konfai EVALUATION -y --config Evaluation.yml
-
-**Success signal:** evaluation writes:
-
-- ``Evaluations/SEG_BASELINE/Metric_TRAIN.json``
-
-What to inspect
----------------
-
-- The copied YAML files inside ``Statistics/``, ``Predictions/``, and
-  ``Evaluations/`` for reproducibility
-- The prediction dataset written under ``Predictions/SEG_BASELINE/Dataset/``
-- The aggregated metrics in ``Metric_TRAIN.json``
-
-Success checklist
------------------
-
-You can consider the onboarding successful if:
-
-- ``konfai --help`` works
-- the demo dataset matches the expected folder layout
-- ``konfai TRAIN`` creates ``Checkpoints/SEG_BASELINE/`` and ``Statistics/SEG_BASELINE/``
-- ``konfai PREDICTION`` creates ``Predictions/SEG_BASELINE/``
-- ``konfai EVALUATION`` creates ``Evaluations/SEG_BASELINE/Metric_TRAIN.json``
-
-Common first issues
--------------------
-
-- **``--gpu`` rejects your device id**
-
-  ``konfai`` validates GPU ids against ``CUDA_VISIBLE_DEVICES``. Use ``--cpu``
-  if no GPU is available, or check the visible devices with a small PyTorch
-  snippet.
-
-- **The command asks whether it should overwrite an existing run**
-
-  Add ``-y`` to skip the interactive confirmation.
-
-- **Dataset groups do not match the YAML**
-
-  KonfAI expects the group names used in ``groups_src`` to exist on disk. In
-  this example that means ``CT.mha`` and ``SEG.mha`` for every case directory.
-
-- **The workflow runs, but evaluation cannot find predictions**
-
-  Check that ``Prediction.yml`` and ``Evaluation.yml`` use the same
-  ``train_name`` and that evaluation points to the correct prediction dataset.
-
-- **A metric or output group name is rejected**
-
-  Output names in ``outputs_criterions`` and ``outputs_dataset`` must match real
-  model module paths. Start from the shipped examples before introducing custom
-  names.
-
-Next steps
-----------
-
-- :doc:`concepts/index` — understand the machinery you just ran: config
-  reflection, lazy patch-based datasets, and the model graph.
-- :doc:`config_guide/index` — the full key-by-key guide to ``Config.yml``,
-  ``Prediction.yml``, and ``Evaluation.yml``.
-- :doc:`examples/index` — the shipped segmentation and synthesis workflows to
-  adapt to your own data.
+- :doc:`examples/index` to adapt one of the shipped workflows to your own data.
+- :doc:`config_guide/index` for what every key in the three YAML files does.
+- :doc:`concepts/index` to understand the machinery you just ran.

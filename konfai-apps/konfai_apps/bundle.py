@@ -231,7 +231,7 @@ _PROGRAM_TRANSFORMS = {"Mask", "KonfAIInference", "Dilate", "Save", "InferenceSt
 
 
 def _input_group_transforms(config: dict[str, Any], root: str) -> dict[str, Any] | None:
-    """The transform chain of the ``is_input: true`` dest group -- the model's actual input pipeline.
+    """The transform chain of the ``is_input: true`` dest group: the model's actual input pipeline.
     A config may carry auxiliary groups (a mask, a conditioning image) whose transforms are NOT the
     model preprocessing; falls back to the first ``transforms`` block for single-group configs."""
     dataset = config.get(root, {}).get("Dataset", {})
@@ -479,7 +479,7 @@ def _derive_reduction(config: dict[str, Any], root: str) -> str | None:
 
 def _tta_passes(config: dict[str, Any], root: str) -> list[list[int]]:
     """Flip test-time-augmentation passes: identity plus each augmentation's ``nb`` random draws, matching
-    the config's pass count and per-axis Flip probabilities. Randomness is embraced -- the exact draw is
+    the config's pass count and per-axis Flip probabilities. Randomness is embraced: the exact draw is
     not KonfAI's (whose torch RNG is not reproducible here), so the result is CLOSE, not byte-identical --
     but it is reproducible from the config's ``manual_seed``. A non-Flip TTA augmentation is skipped (the
     runtime has no portable op for it yet), leaving the TTA lighter but never wrong. ``f_prob`` index ``i``
@@ -494,7 +494,7 @@ def _tta_passes(config: dict[str, Any], root: str) -> list[list[int]]:
     for aug in augmentations.values():
         chain = aug.get("data_augmentations") if isinstance(aug, dict) else None
         # Only Flip has a portable runtime op; other augmentations are skipped (the TTA is a bit lighter,
-        # never wrong) rather than blocking the export -- extend the runtime registry to add them.
+        # never wrong) rather than blocking the export: extend the runtime registry to add them.
         f_prob = next(
             (p.get("f_prob") for n, p in (chain or {}).items() if n.split("/", 1)[0] == "Flip" and isinstance(p, dict)),
             None,
@@ -667,7 +667,7 @@ def export_portable_into_bundle(
     One checkpoint -> ``model.onnx`` + ``manifest.json``. Several checkpoints combined by the ensemble
     reduction the config declares (``MergeLabels`` / ``InferenceStack``) -> one ``<fold>.onnx`` per
     checkpoint plus ``program.json``, the multi-model dataflow the konfai-rs runtime executes. The patch
-    geometry, transforms, blend, and reduction are all read from the config -- nothing is per-app. The
+    geometry, transforms, blend, and reduction are all read from the config: nothing is per-app. The
     config file is restored afterwards because reading it mutates it.
     """
     import torch

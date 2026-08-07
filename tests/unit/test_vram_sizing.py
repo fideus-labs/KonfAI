@@ -17,7 +17,7 @@
 """VRAM-driven patch sizing: one measured shrink step per OOM restart, verified fit.
 
 The pure kernel (:func:`next_patch_candidate`) is exercised through the same loop the workflows
-run -- try, measure, shrink, retry -- with synthetic probes (no GPU needed); the measurement
+run (try, measure, shrink, retry), with synthetic probes (no GPU needed); the measurement
 primitive itself runs on a real CUDA device when one is present.
 """
 
@@ -30,7 +30,7 @@ from konfai.utils.vram import measure_transient_bytes, next_patch_candidate, usa
 
 
 def _linear_probe(bytes_per_voxel: float):
-    """A probe whose transient scales linearly in voxels -- the conv-net regime."""
+    """A probe whose transient scales linearly in voxels: the conv-net regime."""
 
     def probe(patch_size):
         return int(np.prod(patch_size) * bytes_per_voxel)
@@ -123,7 +123,7 @@ class TestUsableVram:
         assert usable_vram(1000.0, resident_bytes=300.0) == pytest.approx(1000.0 * 0.8 - 300.0)
 
     def test_resident_exceeding_the_margin_goes_negative(self):
-        # The kernel then answers None -- the caller raises with its own context.
+        # The kernel then answers None: the caller raises with its own context.
         assert usable_vram(1000.0, resident_bytes=900.0) < 0
 
 
@@ -226,7 +226,7 @@ class TestMeasurementOnGpu:
         large = measure_transient_bytes(run_at([48, 48, 48]), device)
         assert small is not None and large is not None
         assert small > 0
-        # 27x the voxels must cost markedly more -- the measurement really tracks the activations.
+        # 27x the voxels must cost markedly more: the measurement really tracks the activations.
         assert large > small * 4
 
     def test_the_restart_loop_sizes_a_real_model_into_the_budget(self):

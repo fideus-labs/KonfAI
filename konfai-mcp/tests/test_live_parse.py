@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""The shared live-log parser — one source of truth for Studio's feed and read_live_metrics."""
+"""The shared live-log parser, one source of truth for Studio's feed and read_live_metrics."""
 
 from konfai_mcp.live_parse import parse_host_stats, parse_live_metric_line, parse_live_progress
 
@@ -39,7 +39,7 @@ def test_training_line_parses_metrics_lr_and_both_memories() -> None:
     assert entry["flat_metrics"]["UNetpp5:MAE"] == 0.012225
     assert entry["flat_metrics"]["UNetpp5:SAM_Perceptual"] == 0.080258
     assert entry["models"][0]["lr"] == 0.001
-    # GPU and process memory are distinct readouts on the same line — both must be picked up.
+    # GPU and process memory are distinct readouts on the same line, both must be picked up.
     assert entry["memory_gpu_gb"] == 19.55
     assert entry["memory_gpu_percent"] == 76.22
     assert entry["memory_gb"] == 33.96

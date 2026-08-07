@@ -12,8 +12,8 @@ cloned KonfAI checkout.**
 
 ## Prerequisites
 
-- **Python 3.10 or later** — the minimum version declared in `pyproject.toml`
-- **Pixi** — install once with:
+- **Python 3.10 or later**: the minimum version declared in `pyproject.toml`
+- **Pixi**: install once with:
 
   ```bash
   curl -fsSL https://pixi.sh/install.sh | bash
@@ -52,7 +52,7 @@ Where each part of the codebase lives:
 
 ```{note}
 `konfai_apps` and `konfai_mcp` each live in their own directory with their own
-`pyproject.toml`, dependencies, and tests — they are installed and tested
+`pyproject.toml`, dependencies, and tests, they are installed and tested
 separately from the core package (see below).
 ```
 
@@ -62,7 +62,8 @@ Run tasks with `pixi run <task>`:
 
 | Task | Command | Description |
 | --- | --- | --- |
-| `test` | `pytest -q tests/` | Run the full test suite |
+| `test` | `pytest -q tests/` | Run the full test suite (about 6 min) |
+| `test-fast` | `pytest -q -m "not slow and not integration" tests/` | The iteration loop: skips the slow oracle and integration tests (about 1 min 40) |
 | `test-cov` | `pytest --cov=konfai tests/` | Run tests with coverage report |
 | `lint` | `ruff check konfai konfai-apps/konfai_apps` | Lint the source tree |
 | `format` | `ruff format konfai konfai-apps/konfai_apps` | Auto-format source files |
@@ -70,7 +71,7 @@ Run tasks with `pixi run <task>`:
 | `typecheck` | `mypy konfai --ignore-missing-imports` | Static type checking |
 | `build` | `python -m build` | Build sdist and wheel |
 | `test-apps` | `pytest -q konfai-apps/tests` | Run the konfai-apps test suite |
-| `check` | lint + format-check + test + test-apps | Full pre-push gate — run before finishing any change (needs konfai-apps installed) |
+| `check` | lint + format-check + test + test-apps | Full pre-push gate; run it once before finishing any change (needs konfai-apps installed) |
 
 Always run `pixi run check` before pushing or opening a PR.
 
@@ -128,7 +129,7 @@ there:
 
 - one file per module under test (e.g. `tests/unit/test_config.py`)
 - use `pytest` fixtures and `monkeypatch` for environment variables
-- never import `SimpleITK` or `h5py` unconditionally — guard with `pytest.importorskip`
+- never import `SimpleITK` or `h5py` unconditionally: guard with `pytest.importorskip`
 
 Run a single test file:
 
@@ -143,9 +144,9 @@ across Python `3.10` to `3.13` on Linux, macOS, and Windows.
 
 ### The konfai-apps test suite
 
-The `konfai-apps` package carries its own tests — including an integration test
+The `konfai-apps` package carries its own tests, including an integration test
 for the `konfai-apps pipeline` flow in
-`konfai-apps/tests/integration/test_konfai_apps.py` — and they are **not** part
+`konfai-apps/tests/integration/test_konfai_apps.py`, and they are **not** part
 of `pixi run test`. Install the package first, then run its suite:
 
 ```bash
@@ -226,7 +227,7 @@ that builds a **9-package matrix**, all sharing a tag-derived version:
 
 - `konfai` (the core framework)
 - `konfai-apps`, `konfai-mcp` and `konfai-studio` (the standalone Apps, MCP and
-  Studio packages — Studio is wheel-only, and its build job runs `npm ci &&
+  Studio packages. Studio is wheel-only, and its build job runs `npm ci &&
   npm run build` first because the React front is not in git)
 - the five App bundles: `impact-synth-konfai`, `impact-seg-konfai`,
   `mrsegmentator-konfai`, `totalsegmentator-konfai`, `impact-reg-konfai`
@@ -237,12 +238,12 @@ the framework, the two sibling packages, and every published App.
 
 ### Cutting a release
 
-Versions are **tag-derived** — `setuptools_scm` reads the tag, so no *package*
+Versions are **tag-derived**: `setuptools_scm` reads the tag, so no *package*
 version is committed anywhere that could drift from it. `CHANGELOG.md` is drafted
 from the commit history and then edited, and the publish workflow takes the committed
 section for the tag it is running on **verbatim** as the GitHub Release body, so the
 file and the release page cannot describe a version differently. A tag whose section
-is missing — **or present but empty** — fails the job rather than publishing a release
+is missing (or present but empty) fails the job rather than publishing a release
 with nothing in it. A tag carrying a pre-release segment (`v1.8.0rc1`, `v1.8.0.dev1`)
 publishes as a pre-release and does not take `latest`; a post-release (`v1.8.0.post1`)
 is stable and does.
@@ -259,8 +260,7 @@ workflow publishes what the file already says.
 The generated draft is a starting point, not the answer. It sees commit subjects
 only, so a squash merge collapses to one line, a subject with no conventional
 prefix is dropped, and a subject written for a reviewer tells a reader nothing.
-Take the draft, then say what a *user* of the package gets that they did not have —
-and re-read it against anything that landed after you drafted it.
+Take the draft, then say what a *user* of the package gets that they did not have, and re-read it against anything that landed after you drafted it.
 
 ```bash
 # 1. Draft the section for the version you are about to cut, then edit it
@@ -269,7 +269,7 @@ uvx --from commitizen cz changelog --unreleased-version vX.Y.Z --start-rev v1.5.
 # 2. Commit it
 git commit -am "ci: changelog for vX.Y.Z"
 
-# 3. Sign, tag and push — this is what triggers the publish workflow
+# 3. Sign, tag and push: this is what triggers the publish workflow
 git tag -s vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
 ```
@@ -295,6 +295,6 @@ forbidden commit branding, coding norms, checks, and project-specific pitfalls.
 
 ## Next steps
 
-- {doc}`concepts/index` — how the config engine, data pipeline, and model graph fit together before you change them.
-- {doc}`examples/index` — the shipped workflows to run when validating a change end-to-end.
-- {doc}`reference/api/index` — the curated API surface your extensions and fixes build against.
+- {doc}`concepts/index`: how the config engine, data pipeline, and model graph fit together before you change them.
+- {doc}`examples/index`: the shipped workflows to run when validating a change end-to-end.
+- {doc}`reference/api/index`: the curated API surface your extensions and fixes build against.

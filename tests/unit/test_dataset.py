@@ -77,7 +77,7 @@ def test_attribute_built_from_a_store_sidecar_holds_text_a_writer_accepts() -> N
     """An OME-Zarr sidecar is JSON, so it hands back live lists, not their string form.
 
     Both doors normalize to text, construction included: a value deep-copied through construction
-    untouched reaches ``Image.SetMetaData``, which accepts only ``std::string`` -- a field that
+    untouched reaches ``Image.SetMetaData``, which accepts only ``std::string``: a field that
     can be written but never reopened.
     """
     attribute = Attribute({"WorldReach": [1.19, 2.39, 3.59], "Spacing": (1.5, 1.5, 2.0)})
@@ -105,7 +105,7 @@ def test_attribute_holding_a_long_array_round_trips_past_numpys_print_threshold(
 
 
 # --------------------------------------------------------------------------------------
-# HDF5 backend — directories, modes, and per-file locking
+# HDF5 backend: directories, modes, and per-file locking
 # --------------------------------------------------------------------------------------
 
 
@@ -277,7 +277,7 @@ def test_resolve_data_path_prefers_special_format_like_full_read(tmp_path: Path,
 
 def test_resolve_data_path_skips_a_crashed_writer_temporary(tmp_path: Path, image_attributes) -> None:
     # A hard-killed streamed write leaves a ``.tmp`` (header + zero-reserved pixels); the resolver must
-    # never hand it back as the volume when the final entry is absent -- glob would otherwise sort it first.
+    # never hand it back as the volume when the final entry is absent: glob would otherwise sort it first.
     root = tmp_path / "Dataset"
     (root / "CASE_000").mkdir(parents=True)
     (root / "CASE_000" / "Transf.mha.9999-0.tmp").write_bytes(b"leftover debris")
@@ -349,7 +349,7 @@ def test_sitkfile_get_infos_2d_matches_read_data(tmp_path: Path) -> None:
 
 def test_attribute_setitem_accepts_0d_and_autograd_tensors() -> None:
     # Finalize transforms (Normalize, Statistics) store stats computed from the prediction volume,
-    # which arrive as 0-d tensors — possibly CUDA-resident and/or still attached to a graph. The
+    # which arrive as 0-d tensors: possibly CUDA-resident and/or still attached to a graph. The
     # host-side string conversion must detach and move them itself.
     attribute = Attribute()
     attribute["ImageMin"] = torch.tensor(3.5)
@@ -414,7 +414,7 @@ def test_init_keeps_token_for_plain_file_dataset(tmp_path: Path) -> None:
 
 def test_a_statistics_chunk_is_budgeted_with_its_channels() -> None:
     # A chunk spans every other axis whole, the channels included, and is accumulated in float64. Cut
-    # on a plane alone, a 122-channel volume holds 122 times the budget -- 7 GiB where 0.06 was meant.
+    # on a plane alone, a 122-channel volume holds 122 times the budget: 7 GiB where 0.06 was meant.
     from konfai.utils.dataset import _STATISTICS_CHUNK_ELEMENTS, _statistics_chunk_length
 
     for channels in (1, 4, 122):
@@ -498,7 +498,7 @@ def test_a_group_written_through_another_dataset_object_is_seen(tmp_path: Path) 
     """A group can be produced through one Dataset and read through another over the same folder: a
     ``Save`` builds its own (data/patching.py:save_destination) while the reader keeps the DataManager's.
     Membership answered from the reader's memoised listing froze at its first lookup, so every case
-    written after it read as absent -- ImpactSynth masks its own output that way and raised
+    written after it read as absent. ImpactSynth masks its own output that way and raised
     ``NameError: Mask : MASK/P002 not found`` from the third case of a batch on."""
     root = tmp_path / "ds"
     root.mkdir()
@@ -517,7 +517,7 @@ def test_a_group_written_through_another_dataset_object_is_seen(tmp_path: Path) 
 
 def test_membership_is_asked_of_disk_not_of_the_listing(tmp_path: Path) -> None:
     """``get_names`` is a planning-time enumeration; asking it whether ONE case exists answers from a
-    snapshot. A hit may come from the memo -- an entry never disappears mid-run -- but a miss must be
+    snapshot. A hit may come from the memo (an entry never disappears mid-run), but a miss must be
     checked, or the listing's age becomes the answer."""
     root = tmp_path / "ds"
     root.mkdir()

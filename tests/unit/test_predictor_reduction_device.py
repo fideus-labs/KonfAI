@@ -75,7 +75,7 @@ class _FakeAccumulator:
 
 def test_accumulate_device_is_cpu_for_a_cpu_dataset() -> None:
     ds = _dataset(torch.device("cpu"))
-    # A CPU dataset (or a CPU patch) always blends on the CPU — no GPU accumulation.
+    # A CPU dataset (or a CPU patch) always blends on the CPU: no GPU accumulation.
     assert ds._accumulate_device(torch.zeros(4, 8, dtype=torch.float16), _FakeAccumulator([8])).type == "cpu"
 
 
@@ -108,7 +108,7 @@ def test_accumulate_device_uses_gpu_when_the_volume_fits_and_falls_back_when_it_
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU accumulation only applies on CUDA")
 def test_accumulate_device_falls_back_when_free_vram_is_low(monkeypatch: pytest.MonkeyPatch) -> None:
     # ``free`` is read after the first batch's forward, so little free VRAM is rejected even for a tiny
-    # accumulator -- exactly when the resident accumulator plus the remaining forwards would OOM mid-case.
+    # accumulator: exactly when the resident accumulator plus the remaining forwards would OOM mid-case.
     _no_transient(monkeypatch)
     ds = _dataset(0)
     patch = torch.zeros(4, 8, dtype=torch.float16, device="cuda")
@@ -125,8 +125,7 @@ def test_accumulate_device_falls_back_when_free_vram_is_low(monkeypatch: pytest.
 def test_accumulate_device_budgets_every_tta_augmentation(monkeypatch: pytest.MonkeyPatch) -> None:
     # All of a case's TTA accumulators are resident simultaneously (``is_done`` requires every
     # augmentation complete before ``get_output``), so the per-case decision budgets accumulator x T:
-    # a volume where one copy fits but T copies do not must take the CPU path for the WHOLE case —
-    # a per-augmentation flip would hand the reduction a mixed CPU/CUDA list and crash it.
+    # a volume where one copy fits but T copies do not must take the CPU path for the WHOLE case: # a per-augmentation flip would hand the reduction a mixed CPU/CUDA list and crash it.
     _no_transient(monkeypatch)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda *a, **k: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (5 * 1024**3, 25 * 1024**3))

@@ -70,7 +70,7 @@ Common fields:
 | --- | --- | --- |
 | `dataset_filenames` | list[str] | Pairs or merges the datasets needed for evaluation. |
 | `groups_src` | mapping | Defines how the compared tensors are loaded. |
-| `subset` | string / list / null | Restricts evaluated cases: a flat selector — a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
+| `subset` | string / list / null | Restricts evaluated cases: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `validation` | string / list / null | Optional validation selector for a separate JSON report. Supports a case-list file, a list of case names, or a list of case-list files. |
 
 ### `memory_budget`: memory-bounded evaluation
@@ -81,14 +81,14 @@ Evaluation bounds itself by default: an absent `memory_budget` means `auto`
 fits the budget is evaluated whole, and a case that does not is cut into the largest
 DISJOINT patches that fit. Metrics accumulate running partial sums per patch and
 combine them into the exact whole-case value (never a mean of per-patch values).
-MAE, MSE, ME, PSNR and Dice — masked or not — support this, and the SaveMap
+MAE, MSE, ME, PSNR and Dice (masked or not) support this, and the SaveMap
 error maps stream region by region into their `dataset` (mha, h5 or omezarr). One
 caveat on the first two: `MAE` and `MSE` are reducible only for `reduction: mean` or
 `sum`, so a `reduction: none` on either forces the whole-volume path for the whole
 run, by the same rule as a non-reducible metric below.
 One metric that cannot recombine (SSIM, LPIPS, or any custom metric that does
 not declare `reducible`) keeps the whole-volume path for the entire run: correct
-beats bounded. Evaluation streams its data whatever the budget says — one pass,
+beats bounded. Evaluation streams its data whatever the budget says, one pass,
 a cache is never re-read; in training the same budget also picks cache versus
 streaming.
 
@@ -104,7 +104,7 @@ The JSON structure contains:
 - per-case values under `case`
 - aggregated statistics under `aggregates`, such as mean, std, percentiles,
   min, max, and count
-- `directions` — per metric, `"max"` or `"min"`, emitted whenever a metric declares
+- `directions`: per metric, `"max"` or `"min"`, emitted whenever a metric declares
   one so a consumer can rank runs without guessing which way is better
 
 This behavior comes from `konfai.evaluator.Statistics.write()`.
@@ -125,6 +125,6 @@ Common evaluation mistakes:
 
 ## Next steps
 
-- {doc}`../concepts/datasets` — the `dataset_filenames` merge flags and the
+- {doc}`../concepts/datasets`: the `dataset_filenames` merge flags and the
   `validation` selector used here.
-- {doc}`prediction` — to produce the prediction dataset this file scores.
+- {doc}`prediction`: to produce the prediction dataset this file scores.

@@ -16,7 +16,7 @@
 
 """The body of a GitHub Release: the committed CHANGELOG section for a tag, verbatim.
 
-Commitizen drafts that section from the commits, but the file is edited afterwards -- a squash merge
+Commitizen drafts that section from the commits, but the file is edited afterwards: a squash merge
 collapses to one line, a subject with no conventional prefix is dropped entirely, and a subject
 written for a reviewer says nothing to a user. Rendering the commits again at release time would
 publish text nobody reviewed, and the file and the release page would then describe one version
@@ -37,7 +37,7 @@ def section_for(changelog: str, tag: str) -> str:
     """The body under ``## <tag>``, stripped, without its heading.
 
     The heading has to END where the tag does. A ``\\b`` would match at the dot too, so a ``v1.8``
-    tag would take ``v1.8.0``'s notes and publish them under its own release -- silently, since both
+    tag would take ``v1.8.0``'s notes and publish them under its own release: silently, since both
     are real versions and the text reads fine.
     """
     found = re.search(rf"^## {re.escape(tag)}(?=[ \t]|$)[^\n]*\n(.*?)(?=^## |\Z)", changelog, re.M | re.S)
@@ -58,7 +58,7 @@ _VERSION = re.compile(
 
 
 def is_prerelease(tag: str) -> bool:
-    """Whether ``tag`` names a pre-release — the versions ``latest`` must not follow.
+    """Whether ``tag`` names a pre-release: the versions ``latest`` must not follow.
 
     PEP 440 and not a numeric shape: a POST-release (``v1.8.0.post1``) is stable and must take
     ``latest``, while ``v1.8.0rc1`` and ``v1.8.0.dev1`` must not. A tag that does not parse counts as

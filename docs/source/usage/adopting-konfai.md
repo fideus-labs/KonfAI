@@ -69,7 +69,7 @@ is useful when graph names differ but execution structure and parameters match.
 
 This bridge is strict, not universal. It raises `ConfigError` on a different leaf
 count, a per-leaf key or shape mismatch, a target tensor no traced leaf owns, and a
-tensor the target ties across two leaves — and it fills every target tensor or
+tensor the target ties across two leaves, and it fills every target tensor or
 raises, never reporting a partial load as success. What it cannot detect is
 **ordering**: two identically-shaped leaves swapped would pair silently, since the
 pairing is execution order itself. Unreached *source* branches (an nnU-Net
@@ -121,7 +121,7 @@ registries and do not evaluate arbitrary imports.
 
 ## Next steps
 
-- {doc}`custom-models` — implementation contracts and complete examples
-- {doc}`../concepts/yaml-model-builder` — graph schema and compatibility table
-- {doc}`large-images` — regional I/O and memory trade-offs
-- {doc}`apps` — package a stable workflow
+- {doc}`custom-models`: implementation contracts and complete examples
+- {doc}`../concepts/yaml-model-builder`: graph schema and compatibility table
+- {doc}`large-images`: regional I/O and memory trade-offs
+- {doc}`apps`: package a stable workflow

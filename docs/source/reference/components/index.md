@@ -2,14 +2,12 @@
 
 Almost everything in a KonfAI config is a **component referenced by name**: a
 model, a loss, a metric, a transform, an augmentation, a scheduler, or a storage
-backend. This section is the catalogue of what ships in the box — **these names
+backend. This section is the catalogue of what ships in the box: **these names
 are exactly what you reference in YAML**: copy them into your config verbatim,
 with the constructor arguments listed alongside.
 
-```{note}
 These pages are generated from a source-level read of `konfai/`: class names,
 constructor signatures and defaults are taken directly from the code.
-```
 
 ## The pages
 
@@ -18,16 +16,12 @@ Start with {doc}`models` (the network you train), then {doc}`losses-metrics`
 {doc}`augmentations` cover the data pipeline, {doc}`schedulers` the loss-weight
 and learning-rate schedules, and {doc}`storage-backends` the on-disk formats.
 
-```{toctree}
-:maxdepth: 1
-
-models
-losses-metrics
-transforms
-augmentations
-schedulers
-storage-backends
-```
+- {doc}`models`
+- {doc}`losses-metrics`
+- {doc}`transforms`
+- {doc}`augmentations`
+- {doc}`schedulers`
+- {doc}`storage-backends`
 
 ## How a name is resolved
 
@@ -35,15 +29,15 @@ Most component names in a config are resolved by `konfai.utils.utils.get_module`
 one of two ways. Three kinds do **not** go through it: loss-weight schedulers and
 optimizers are looked up directly inside `konfai.metric.schedulers` and `torch.optim`
 (so `module:Class` is not accepted for them), and a storage backend is never named at
-all — you pick a format token in `dataset_filenames`.
+all, you pick a format token in `dataset_filenames`.
 
 | Form | Example | Resolves to |
 | --- | --- | --- |
 | **bare name** | `Dice`, `Standardize`, `Flip` | inside that kind's package (`konfai.metric.measure`, `konfai.data.transform`, `konfai.data.augmentation`, …) |
-| **`module:Class`** | `torch:nn:L1Loss`, `monai.losses:DiceLoss`, `Loss:MyWrapper` | *any* importable module — an installed library **or** a local `.py` file next to your config (the current working directory is on `sys.path`) |
+| **`module:Class`** | `torch:nn:L1Loss`, `monai.losses:DiceLoss`, `Loss:MyWrapper` | *any* importable module: an installed library **or** a local `.py` file next to your config (the current working directory is on `sys.path`) |
 
 So the tables below list the **bare name** for built-ins; you are never limited
-to them — any importable class that satisfies the same contract works via the
+to them: any importable class that satisfies the same contract works via the
 `module:Class` form. See {doc}`../../concepts/configuration` for the full
 resolution rules and {doc}`../../reference/api/extension-points` for how to write
 your own.
@@ -51,7 +45,7 @@ your own.
 ## How to discover a component's parameters
 
 The tables give the **key** constructor arguments and defaults, but the exact,
-always-current parameter set is whatever the class's `__init__` declares — the
+always-current parameter set is whatever the class's `__init__` declares: the
 reflection engine binds YAML keys directly to constructor parameter names. Two
 ways to get the exhaustive list for any component:
 
@@ -60,7 +54,7 @@ ways to get the exhaustive list for any component:
    every resolved default back into the YAML file, giving you a complete,
    fully-expanded subtree to edit. (This is the same
    [config-mutation behaviour](../../concepts/configuration.md) that surprises
-   new users — here it is a feature.)
+   new users: here it is a feature.)
 2. **Read the signature.** Where a bare name is looked up depends on the kind:
 
    | Kind | Bare name resolves in |
@@ -78,5 +72,5 @@ ways to get the exhaustive list for any component:
 
 ## Next steps
 
-- {doc}`../../concepts/configuration` — how names and `classpath` are resolved
-- {doc}`../api/extension-points` — writing your own model / loss / transform
+- {doc}`../../concepts/configuration`: how names and `classpath` are resolved
+- {doc}`../api/extension-points`: writing your own model / loss / transform

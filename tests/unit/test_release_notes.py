@@ -16,7 +16,7 @@
 
 """What a tag publishes as its release body.
 
-This runs once per release, on a tag, in the job that holds ``contents: write`` -- so its failures
+This runs once per release, on a tag, in the job that holds ``contents: write``: so its failures
 are expensive and rare, which is exactly the shape of code that goes unchecked. The `v1.8` case
 below is not hypothetical: the first version of this extraction used ``\\b`` and would have taken
 v1.8.0's notes for it, silently, because both are real versions and the text reads fine.
@@ -68,8 +68,7 @@ def test_it_takes_the_section_the_tag_names() -> None:
 
 @pytest.mark.parametrize("tag", ["v1.8", "v1", "v1.8.0rc1", "v9.9.9", ""])
 def test_a_tag_with_no_section_of_its_own_fails_the_job(tag: str) -> None:
-    """Refusing is the point: the alternative is an empty release, or -- for a prefix like ``v1.8``
-    -- a release carrying someone else's notes under its own name."""
+    """Refusing is the point: the alternative is an empty release, or (for a prefix like ``v1.8``) a release carrying someone else's notes under its own name."""
     with pytest.raises(SystemExit, match="carries no section"):
         _section_for()(_CHANGELOG_SAMPLE, tag)
 
@@ -110,7 +109,7 @@ def test_the_tag_classifier_follows_pep_440(tag: str, prerelease: bool) -> None:
     """What `latest` follows, on Docker Hub and on the releases page.
 
     Neither a substring search nor a numeric shape: `contains(tag, 'a')` calls `v1.9.0-backport` a
-    pre-release, and `^[0-9.]+$` calls the stable `v1.8.0.post1` one — which would then be published
+    pre-release, and `^[0-9.]+$` calls the stable `v1.8.0.post1` one, which would then be published
     as a pre-release and lose `latest` to nothing.
     """
     assert _is_prerelease()(tag) is prerelease

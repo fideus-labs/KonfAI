@@ -19,7 +19,7 @@
  * KonfAI landing design system (docs/source/index.rst)
  *
  * Two-hue discipline: the brand teal (sampled from the logo ink,
- * #0c7568) carries the page; steel blue — the CT-window blue — is the
+ * #0c7568) carries the page; steel blue (the CT-window blue) is the
  * machine voice and lives only inside code surfaces. Violet, coral and
  * amber are category hues: models/concepts, shipping/apps, workspace/
  * warnings. Shibuya stamps `html.dark` / `html.light`, so dark tokens
@@ -557,7 +557,7 @@ html.dark .kf-btn-primary { color: #06231e !important; }
 }
 
 /* ================================================================== *
- * Content pages — every regular page inherits the design system.
+ * Content pages, every regular page inherits the design system.
  * Scoped to shibuya's article container (article.yue) so the theme
  * chrome (header, sidebars) is left alone.
  * ================================================================== */
@@ -1526,7 +1526,7 @@ article.yue .kf-ecosystem-map > figcaption strong {
  * Landing-only layout fixes (scoped via :has so no other page moves):
  * - the landing has no in-page TOC, so drop the empty right column
  *   that squeezed the hero (RTD parks its ad there, mid-hero);
- * - hide the duplicated "KonfAI" H1 — the header wordmark already
+ * - hide the duplicated "KonfAI" H1: the header wordmark already
  *   names the site (the title is kept for the tab/sidebar).
  * ------------------------------------------------------------------ */
 .sy-page:has(.kf-landing) #rside,
@@ -1581,7 +1581,7 @@ html.dark {
 }
 
 /* -------------------------------------------------------------------------
-   Proof strip — real medical-imaging results surfaced right under the hero.
+   Proof strip: real medical-imaging results surfaced right under the hero.
    Three tiles (segmentation, synthesis, scale) linking to the gallery.
    ------------------------------------------------------------------------- */
 .kf-proofstrip {
@@ -1629,4 +1629,103 @@ html.dark {
 }
 @media (max-width: 720px) {
     .kf-proofstrip { grid-template-columns: 1fr; }
+}
+
+/* ---------------------------------------------------------------------------
+   Mermaid diagrams. Shapes come from mermaid, colour comes from here, so a
+   diagram follows the same light/dark tokens as the rest of the page.
+
+   The theme inverts diagram SVGs in dark mode, which assumes a light mermaid
+   theme underneath. These carry the site palette instead, so the inversion is
+   turned off and each token does its own dark side.
+   --------------------------------------------------------------------------- */
+html.dark pre.mermaid > svg,
+html.dark .mermaid > svg { filter: none !important; }
+.mermaid {
+    display: block;
+    text-align: center;
+    margin: 2rem 0 1.75rem;
+    overflow-x: auto;
+    background: none;
+    border: 0;
+    padding: 0;
+}
+/* Natural size at most: a narrow diagram is never blown up to fill the column,
+   and a wide one scales down instead of overflowing. */
+.mermaid > svg { display: inline-block; height: auto !important; }
+
+/* Labels read as page text, never as a chart legend. */
+.mermaid .nodeLabel, .mermaid .nodeLabel p,
+.mermaid .edgeLabel, .mermaid .edgeLabel p,
+.mermaid .cluster-label, .mermaid .cluster-label p,
+.mermaid span, .mermaid div, .mermaid p {
+    color: var(--kf-ink) !important;
+    fill: var(--kf-ink) !important;
+    line-height: 1.35;
+}
+.mermaid .edgeLabel, .mermaid .edgeLabel p {
+    color: var(--kf-ink-2) !important;
+    fill: var(--kf-ink-2) !important;
+    margin: 0;
+}
+/* The little yes/no tags sit on the line, so they take the page's own background. */
+.mermaid .edgeLabel rect,
+.mermaid .edgeLabel .labelBkg,
+.mermaid .edgeLabel foreignObject div,
+.mermaid .edgeLabel span { background: transparent !important; background-color: transparent !important; fill: transparent !important; }
+.mermaid .edgeLabel p {
+    background: var(--kf-surface) !important;
+    padding: 0 4px;
+    border-radius: 4px;
+}
+.mermaid .cluster-label { font-size: 0.8em; color: var(--kf-muted) !important; fill: var(--kf-muted) !important; }
+
+/* Edges: hairlines, not cables. */
+.mermaid .flowchart-link,
+.mermaid .edgePath .path { stroke: var(--kf-hair-strong, var(--kf-hair)); stroke-width: 1.4px; }
+.mermaid .marker,
+.mermaid marker path { fill: var(--kf-muted) !important; stroke: none !important; }
+
+/* One rule per role, mapped onto the category hues the cards already use. */
+.mermaid .node rect,
+.mermaid .node polygon,
+.mermaid .node circle,
+.mermaid .node path {
+    rx: 8px;
+    ry: 8px;
+    fill: var(--kf-surface-2);
+    stroke: var(--kf-hair);
+    stroke-width: 1.3px;
+}
+.mermaid .cfg   rect, .mermaid .cfg   path { fill: var(--kf-accent-soft) !important; stroke: var(--kf-accent-line) !important; }
+.mermaid .cmd   rect, .mermaid .cmd   path { fill: var(--kf-steel-soft)  !important; stroke: var(--kf-steel-line)  !important; }
+.mermaid .out   rect, .mermaid .out   path { fill: var(--kf-violet-soft) !important; stroke: var(--kf-violet-line) !important; }
+.mermaid .step  rect, .mermaid .step  path { fill: var(--kf-accent-soft) !important; stroke: var(--kf-accent-line) !important; }
+.mermaid .disk  rect, .mermaid .disk  path { fill: var(--kf-steel-soft)  !important; stroke: var(--kf-steel-line)  !important; }
+.mermaid .model rect, .mermaid .model path { fill: var(--kf-violet-soft) !important; stroke: var(--kf-violet-line) !important; }
+.mermaid .yaml  rect, .mermaid .yaml  path { fill: var(--kf-accent-soft) !important; stroke: var(--kf-accent-line) !important; }
+.mermaid .sig   rect, .mermaid .sig   path { fill: var(--kf-steel-soft)  !important; stroke: var(--kf-steel-line)  !important; }
+.mermaid .obj   rect, .mermaid .obj   path { fill: var(--kf-violet-soft) !important; stroke: var(--kf-violet-line) !important; }
+.mermaid .back  rect, .mermaid .back  path { fill: var(--kf-amber-soft)  !important; stroke: var(--kf-amber-line)  !important; }
+.mermaid .case  rect, .mermaid .case  path { fill: var(--kf-steel-soft)  !important; stroke: var(--kf-steel-line)  !important; }
+.mermaid .marker-node rect, .mermaid .marker-node polygon { fill: var(--kf-violet-soft) !important; stroke: var(--kf-violet-line) !important; }
+.mermaid .branch rect, .mermaid .branch path { fill: var(--kf-steel-soft) !important; stroke: var(--kf-steel-line) !important; }
+.mermaid .mod   rect, .mermaid .mod   path { fill: var(--kf-accent-soft) !important; stroke: var(--kf-accent-line) !important; }
+.mermaid .crit  rect, .mermaid .crit  path { fill: var(--kf-violet-soft) !important; stroke: var(--kf-violet-line) !important; }
+
+/* Verdicts carry the meaning of their colour: green streams, amber loads. */
+.mermaid .stream rect, .mermaid .stream path { fill: var(--kf-accent-soft) !important; stroke: var(--kf-accent-line) !important; }
+.mermaid .load   rect, .mermaid .load   path { fill: var(--kf-amber-soft)  !important; stroke: var(--kf-amber-line)  !important; }
+.mermaid .skip   rect, .mermaid .skip   path { fill: var(--kf-steel-soft)  !important; stroke: var(--kf-steel-line)  !important; }
+.mermaid .fold   rect, .mermaid .fold   path { fill: var(--kf-violet-soft) !important; stroke: var(--kf-violet-line) !important; }
+
+/* Decision diamonds stay quiet: they are questions, not answers. */
+.mermaid .node polygon { fill: var(--kf-surface-2) !important; stroke: var(--kf-hair) !important; }
+
+/* A subgraph is a grouping hint, so it whispers. */
+.mermaid .cluster rect {
+    fill: transparent !important;
+    stroke: var(--kf-hair) !important;
+    stroke-dasharray: 4 4 !important;
+    stroke-width: 1px !important;
 }

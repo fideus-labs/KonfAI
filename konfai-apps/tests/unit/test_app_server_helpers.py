@@ -749,7 +749,7 @@ def test_save_upload_groups_charges_extracted_directory_bytes(tmp_path: Path) ->
     # unrelated to the extracted store; charging that instead of the real content lets a group of such volumes
     # bypass max_total_bytes for every following group. The content is sized well above any directory inode so
     # the two behaviours diverge on every filesystem: the budget fits ONE store's real content but not two,
-    # yet comfortably clears two directory inodes -- so only content-charging rejects the second group.
+    # yet comfortably clears two directory inodes, so only content-charging rejects the second group.
     store_bytes = 64 * 1024
     first = _make_directory_volume_upload(tmp_path, "a.konfaidir.zip", chunk=b"\0" * store_bytes)
     second = _make_directory_volume_upload(tmp_path, "b.konfaidir.zip", chunk=b"\0" * store_bytes)

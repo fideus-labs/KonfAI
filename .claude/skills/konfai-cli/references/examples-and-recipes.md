@@ -1,10 +1,10 @@
 # Verified end-to-end recipes
 
 These are the exact command sequences from the runnable examples in `examples/`. Run every
-command **from inside the example directory** — KonfAI resolves relative paths (`Dataset/`,
+command **from inside the example directory**: KonfAI resolves relative paths (`Dataset/`,
 `Checkpoints/`, config files) against the current working directory.
 
-The `train_name` set inside each `Config.yml` is what keys every output folder — the
+The `train_name` set inside each `Config.yml` is what keys every output folder: the
 examples below use `SEG_BASELINE`, `TRAIN_01` and `REG_BASELINE`.
 
 Every example also ships a `*_demo.ipynb` that runs the whole sequence and plots the result;
@@ -15,7 +15,7 @@ minutes. Raise `epochs` before reading anything into the scores.
 
 2D slice-wise multiclass segmentation baseline; model graph declared in `UNet.yml`, and
 **`CrossEntropyLoss` + `Dice` together** for training, Dice for evaluation. The two losses read
-different outputs of the same head — `UNetBlock_0:Head:Conv` wants logits, `UNetBlock_0:Head:Softmax`
+different outputs of the same head: `UNetBlock_0:Head:Conv` wants logits, `UNetBlock_0:Head:Softmax`
 wants probabilities. CrossEntropy alone is minimised by predicting background almost everywhere when
 the 40 foreground labels each cover under 3% of a volume.
 
@@ -52,8 +52,7 @@ MR→CT synthesis with a **local custom model** (`Model.py` defines `UNetpp5`, `
 `classpath: Model:UNetpp5`. Dataset groups: `MR` (input), `CT` (target), `MASK` (masked
 evaluation).
 
-`Model.py` imports `segmentation_models_pytorch`, which the base install does not pull in —
-`pip install konfai[smp]` first.
+`Model.py` imports `segmentation_models_pytorch`, which the base install does not pull in: `pip install konfai[smp]` first.
 
 **The preprocessing in `Prediction.yml` must mirror `Config.yml` exactly.** Standardizing the MR
 inside the body mask at prediction time while training standardized on whole-volume statistics
@@ -84,12 +83,12 @@ konfai TRAIN -y --gpu 0 --config Config_GAN.yml     # -> Checkpoints/TRAIN_GAN_0
 ```
 
 **Important:** before predicting/evaluating a *different* checkpoint source, set `train_name`
-(and the prediction folder in `Evaluation.yml`) to match — e.g. `TRAIN_GAN_01` — so outputs
+(and the prediction folder in `Evaluation.yml`) to match (e.g. `TRAIN_GAN_01`), so outputs
 land in the right folder and evaluation reads the right predictions.
 
 ## Registration (`examples/Registration`)
 
-Two-input deformable registration with the built-in diffeomorphic `VoxelMorph` (Python-only — its
+Two-input deformable registration with the built-in diffeomorphic `VoxelMorph` (Python-only: its
 custom `forward` has no YAML twin). `make_dataset.py` builds 30 `FIXED`/`MOVING` pairs from real
 pelvis CT slices, `MOVING` being its `FIXED` pushed through a known smooth field, so the result is
 checkable. The order of the `is_input` groups is load-bearing: `FIXED` is branch `0`, `MOVING`
@@ -105,11 +104,11 @@ konfai EVALUATION -y --config Evaluation.yml  # MOVING:FIXED:* is the before, MO
 ```
 
 `VoxelMorph`'s `shape`, the training patch size, the prediction patch size and `CROP` in
-`make_dataset.py` must all agree — a mismatch surfaces as a `state_dict` load error at PREDICTION,
+`make_dataset.py` must all agree: a mismatch surfaces as a `state_dict` load error at PREDICTION,
 not as a config error.
 
-For registration between two *different patients* — a real anatomical difference with no
-ground-truth field, scored by propagating one patient's reference labels — see
+For registration between two *different patients* (a real anatomical difference with no
+ground-truth field, scored by propagating one patient's reference labels) see
 `examples/ImpactReg`, which drives the `impact-reg-konfai` app instead of training anything.
 
 ## The local-custom-code pattern
@@ -117,7 +116,7 @@ ground-truth field, scored by propagating one patient's reference labels — see
 The Synthesis example is the template for custom architectures/transforms:
 
 1. Put a `.py` next to the configs (e.g. `Model.py`, `UnNormalize.py`).
-2. Reference it from YAML by classpath — a local file uses `File:Class` (e.g. `Model:UNetpp5`,
+2. Reference it from YAML by classpath: a local file uses `File:Class` (e.g. `Model:UNetpp5`,
    `UnNormalize:UnNormalize`). KonfAI prepends the CWD to `sys.path`, so a module beside the
    config resolves.
 3. Run the normal `konfai TRAIN/PREDICTION/EVALUATION` commands unchanged.
@@ -135,10 +134,10 @@ mv Dataset/Segmentation/* Dataset/ && rmdir Dataset/Segmentation && rm -rf Datas
 
 Synthesis is the same two lines with `Synthesis` in place of `Segmentation`; Registration fetches its
 subset through `make_dataset.py` instead. The `*_demo.ipynb` notebooks automate clone + install +
-download + the whole workflow for a fresh machine or Colab — run every cell, nothing is gated behind
+download + the whole workflow for a fresh machine or Colab: run every cell, nothing is gated behind
 a flag.
 
 ## When to stop using raw YAML
 
 Once a workflow is mature, the next step is to package it as a **KonfAI App** (see
-`apps/impact_synth`) for a simpler user-facing interface — that is beyond this skill's scope.
+`apps/impact_synth`) for a simpler user-facing interface, that is beyond this skill's scope.

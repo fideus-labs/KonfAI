@@ -42,7 +42,7 @@ def main() -> int:
     print()
     if ok_core and ok_mcp and entrypoint:
         print("Ready. If the MCP tools still do not appear, the server is installed but")
-        print("not wired into your MCP client — add a `konfai` MCP server entry pointing")
+        print("not wired into your MCP client: add a `konfai` MCP server entry pointing")
         print("at the entrypoint above (see the skill's references/resources-and-clients.md).")
         return 0
 

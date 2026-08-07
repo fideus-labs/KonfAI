@@ -57,7 +57,7 @@ def _all_jobs(session: str) -> list[dict[str, Any]]:
 def _job_created(job: dict[str, Any]) -> float:
     """A job's creation time as an epoch float, from its recorded ``created_at`` (a float epoch or an ISO
     string, depending on which konfai-mcp wrote it). Used to order jobs by when they *started*, not by
-    file mtime — a terminal job's json can be rewritten later (status monitor), which mtime would misread
+    file mtime: a terminal job's json can be rewritten later (status monitor), which mtime would misread
     as 'newest' and make the feed follow a dead run over a fresh one."""
     created = job.get("created_at")
     if isinstance(created, (int, float)):
@@ -97,7 +97,7 @@ def _pid_alive(pid: Any) -> bool:
 
 
 def _live_status(job: dict[str, Any]) -> str:
-    """The job's status, but a still-'running' record whose process is gone reads as 'failed' — the MCP
+    """The job's status, but a still-'running' record whose process is gone reads as 'failed': the MCP
     monitor that would flip it may have died (e.g. a server restart), leaving the status stale."""
     status = str(job.get("status") or "")
     if status in {"running", "waiting", "queued"} and not _pid_alive(job.get("pid")):
@@ -135,7 +135,7 @@ def _tail_lines(path: Path, pos: int, buf: str) -> tuple[list[str], int, str]:
 
 
 def _phase_stage(label: str) -> str:
-    """The stage a tqdm phase belongs to, from its label — so the client never guesses. 'Caching Train' →
+    """The stage a tqdm phase belongs to, from its label, so the client never guesses. 'Caching Train' →
     caching, 'Training' → training, 'Metric VALIDATION' → evaluation, 'Prediction' → prediction."""
     head = label.split(maxsplit=1)[0].lower() if label else ""
     return {"metric": "evaluation"}.get(head, head or "caching")
@@ -182,7 +182,7 @@ def _runtime_events(line: str, run: str, kind: str, step: int) -> tuple[list[dic
         step += 1
         values = dict(entry["flat_metrics"])
         if entry["stage"] == "Training":
-            # learning rate is a training-only signal — never chart it under validation
+            # learning rate is a training-only signal, never chart it under validation
             values.update({f"{m['name']}:lr": m["lr"] for m in entry.get("models", []) if m.get("lr")})
         host = {k: entry[k] for k in _HOST_KEYS if k in entry}
         return [
@@ -219,7 +219,7 @@ def _runtime_events(line: str, run: str, kind: str, step: int) -> tuple[list[dic
 def _run_data_dir(session: str, base: str) -> str:
     """Where a run's DATA is, when that is not the run directory itself.
 
-    A transform's run directory holds a log, a plan and a config copy — the volumes land wherever each
+    A transform's run directory holds a log, a plan and a config copy: the volumes land wherever each
     ``Write`` pointed, which the workflow records in ``outputs.json``. Pointing Browse at the run
     directory would open a YAML file for someone who just asked to see what was produced. Answers ""
     for every kind whose data IS under its run directory, and the caller keeps its usual path.
@@ -243,13 +243,13 @@ def _run_data_dir(session: str, base: str) -> str:
 
 
 def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]]:
-    """Every run of the experiment as (log_path, run_name, kind, status, base) — one per runtime log.
+    """Every run of the experiment as (log_path, run_name, kind, status, base): one per runtime log.
 
     Workflow jobs write under the session roots (Statistics/Predictions/Evaluations); app jobs (infer /
     fine-tune / pipeline / uncertainty) write under an isolated ``output_path`` subtree, so EVERY app job's
     output_path is scanned (not only the newest), else an earlier isolated run vanishes the moment a newer
-    job exists. ``base`` is the run dir relative to the session root — "Statistics/<run>" for a session-root
-    run, "<app_output>-<hash>/Statistics/<run>" for an isolated app run — the one datum that lets the
+    job exists. ``base`` is the run dir relative to the session root ("Statistics/<run>" for a session-root
+    run, "<app_output>-<hash>/Statistics/<run>" for an isolated app run) the one datum that lets the
     previews / TensorBoard / Browse helpers resolve the real on-disk location. Status comes from the newest
     job that names the log (workflow) or owns the output_path (app), else from how recently the log was
     written. Newest first."""
@@ -307,7 +307,7 @@ def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]
             add(log, run_name, kind, entry[1] if entry else None)
     found.sort(key=lambda row: row[5], reverse=True)
     # Two runs of the same app share a name: its log directory is named after the app, so every re-run
-    # produces another `ImpactSynth`. They are different runs — different output directories — and left
+    # produces another `ImpactSynth`. They are different runs (different output directories), and left
     # sharing a name they collapse into one feed whose status is whichever was read last, which is how a
     # finished run comes to stand in for the one that is still going. Disambiguate by what differs.
     duplicated = {key for key, n in Counter((run, kind) for _, run, kind, _, _, _ in found).items() if n > 1}
@@ -326,13 +326,13 @@ def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]
 @router.get("/api/live")
 async def live(session: str = Query("default")) -> StreamingResponse:
     """Tail a task's most recent job in real time (SSE): the console log as raw text, and konfai's runtime
-    log as **structured** metrics + progress — parsed by konfai-mcp's own ``live_parse`` (one source of
+    log as **structured** metrics + progress: parsed by konfai-mcp's own ``live_parse`` (one source of
     truth, no re-implementation here).
 
     Two logs, two roles. The console wrapper log (header, warm-up prints, crash tracebacks) streams as
     ``log`` lines. konfai writes its per-iteration training tqdm to the runtime file, not stdout, so that
     file streams as ``metric`` events (a stage + flat metric values + the ``progress`` bar) and, for the
-    metric-less data-caching phase, ``progress`` events — never as raw log lines, which would bury the
+    metric-less data-caching phase, ``progress`` events, never as raw log lines, which would bury the
     console tail under thousands of tqdm frames.
 
     The connection is **persistent**: a job finishing is announced once (terminal status) but the stream
@@ -378,7 +378,7 @@ async def live(session: str = Query("default")) -> StreamingResponse:
 
         while True:
             # A quiet experiment sends nothing for minutes, so silence cannot be told from a stream that
-            # died — and one that dies is invisible: the page keeps showing the last thing it saw. A ping
+            # died, and one that dies is invisible: the page keeps showing the last thing it saw. A ping
             # gives the client something to miss, so it can reconnect on its own.
             if time.monotonic() - last_ping > _PING_EVERY:
                 last_ping = time.monotonic()
@@ -395,7 +395,7 @@ async def live(session: str = Query("default")) -> StreamingResponse:
             idle_sent = False
 
             # Console (raw text, tracebacks) follows the latest job only; a new job resets the tail. The
-            # `job` event names the active run so the client can default its tab to it — it never wipes.
+            # `job` event names the active run so the client can default its tab to it, it never wipes.
             if latest is not None and latest.get("log_path") and latest["log_path"] != console_key:
                 console_key = latest["log_path"]
                 cpath = Path(console_key)
@@ -417,7 +417,7 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                         continue
                     # [KonfAI] lines are framework chatter. Surface only genuine OOM/memory-pressure notices
                     # (the auto-patch recovery prints those on retry; hiding them makes a churning run look
-                    # silent) -- not the routine memory-budget / cache-plan line, which is a benign startup
+                    # silent): not the routine memory-budget / cache-plan line, which is a benign startup
                     # decision, not an alert.
                     if stripped.startswith("[KonfAI]") and not any(
                         k in stripped.lower() for k in ("out of memory", "oom", "re-plan", "replan", "retry", "reduc")
@@ -430,14 +430,14 @@ async def live(session: str = Query("default")) -> StreamingResponse:
             # before its first iteration. Discovering that same log later lands on the same (run, kind),
             # so it updates that tab rather than adding one.
             #
-            # An app job is NOT announced. It carries two names — its own (`app_MR`) and the one its log
-            # directory takes (`ImpactSynth`) — so anything announced for it would be a second tab under
+            # An app job is NOT announced. It carries two names: its own (`app_MR`) and the one its log
+            # directory takes (`ImpactSynth`): so anything announced for it would be a second tab under
             # the wrong name, and every metric would arrive in the other. Its run appears when it writes.
             if latest is not None and latest.get("runtime_log_path") and latest.get("run_name"):
                 for frame in state_of(latest["run_name"], latest.get("kind") or "", _live_status(latest)):
                     yield frame
 
-            # Every run of the experiment is followed as its own feed and kept — launching a prediction
+            # Every run of the experiment is followed as its own feed and kept: launching a prediction
             # adds a run, it never clears the training runs. A newly-seen log replays from 0 so its curves
             # rebuild on connect.
             for log, run_name, run_kind, status, base in runs:

@@ -163,7 +163,7 @@ async def _mcp_json(session: str, tool: str, args: dict[str, Any]) -> tuple[bool
 
 
 def _state(session: str) -> dict[str, Any]:
-    """Where this experiment stands — derived by konfai-mcp from the workspace, not remembered here.
+    """Where this experiment stands: derived by konfai-mcp from the workspace, not remembered here.
     Studio shares the filesystem with the MCP server, so this is the same answer its tools report."""
     jobs = sorted(_all_jobs(session), key=_job_created, reverse=True)
     for job in jobs:  # a 'running' record whose process is gone really failed; say so, do not wait on it
@@ -178,7 +178,7 @@ def _turn_moves(
 
     The ones the assistant wrote at the end of its own reply, alone. They are its answer: when the reply
     asked a question they ARE its options, and a generic tool-named button beside them is both a wrong
-    answer to that question and a step the reply just argued against — "Run train" under a config that
+    answer to that question and a step the reply just argued against: "Run train" under a config that
     failed validation launches it anyway.
 
     A turn cut short writes none, and the buttons from the last turn that did are a better answer than
@@ -230,7 +230,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             # happened, and the next browser to open this experiment deserves to see it.
             record_turn(_session_dir(name), req.message, parts)
         # Re-read the workspace: the tools have written to it, so this is what the turn actually achieved
-        # — not what it said it did. Even a turn that broke ends with a state and a move — including when
+        # (not what it said it did. Even a turn that broke ends with a state and a move) including when
         # deriving the state itself raises, or the bar would freeze on the previous turn.
         try:
             state = _state(name)
@@ -240,8 +240,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             yield _sse({"type": "error", "message": f"state unavailable: {exc}"})
             yield _sse({"type": "next_prompts", "prompts": written})
             return
-        # Machine-injected onboarding prompts (dataset inspection) don't describe the experiment —
-        # wait for the user's own first message so the title reflects the real task.
+        # Machine-injected onboarding prompts (dataset inspection) don't describe the experiment: # wait for
+        # the user's own first message so the title reflects the real task.
         if (
             not broke
             and _reg.is_untitled(name)
@@ -260,7 +260,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
 @app.get("/api/chat/history")
 async def chat_history(session: str) -> dict[str, Any]:
-    """The server-side transcript. The browser keeps its own in localStorage, per device — one that did
+    """The server-side transcript. The browser keeps its own in localStorage, per device, one that did
     not run these turns (another machine, a cleared profile) adopts this copy on open."""
     return {"messages": load_transcript(_session_dir(_sane_session(session)))}
 
@@ -337,7 +337,7 @@ async def delete_session(req: DeleteSession) -> dict[str, Any]:
 
 @app.post("/api/sessions/bundle")
 async def bundle_session(req: BundleRequest) -> dict[str, Any]:
-    """Package an experiment as a reusable app into a chosen folder — a direct MCP call, no LLM.
+    """Package an experiment as a reusable app into a chosen folder: a direct MCP call, no LLM.
 
     Checkpoints/configs are discovered from the session; name/description default to its title.
     """
@@ -350,11 +350,11 @@ async def bundle_session(req: BundleRequest) -> dict[str, Any]:
         {
             "name": slug,
             "display_name": title,
-            "description": f"{title} — packaged from KonfAI Studio.",
+            "description": f"{title}: packaged from KonfAI Studio.",
             "output": req.output,
         },
     )
-    # A fresh bundle is only useful if you can find it — register it into the KonfAI Apps catalogue.
+    # A fresh bundle is only useful if you can find it: register it into the KonfAI Apps catalogue.
     registered = False
     if ok:
         bundle = str(Path(req.output).expanduser() / slug)
@@ -364,8 +364,8 @@ async def bundle_session(req: BundleRequest) -> dict[str, Any]:
 
 @app.post("/api/sessions/export")
 async def export_session(req: ExportRequest) -> dict[str, Any]:
-    """Export an experiment as a self-contained copy of its workspace — config, code, checkpoints,
-    statistics and metrics — minus the input Dataset (the user's data, which lives outside) and the
+    """Export an experiment as a self-contained copy of its workspace (config, code, checkpoints,
+    statistics and metrics) minus the input Dataset (the user's data, which lives outside) and the
     Studio/MCP internals. A folder you can archive or share."""
     name = _sane_session(req.session)
     src = _session_dir(name).resolve()
@@ -402,7 +402,7 @@ async def stat(path: str = Query(...)) -> dict[str, bool]:
 async def browse(path: str = Query("")) -> dict[str, Any]:
     """List a host directory's sub-folders so the UI can pick a dataset.
 
-    Read-only, trusted-local: like konfai-mcp's dataset tools, any host path may be listed — the
+    Read-only, trusted-local: like konfai-mcp's dataset tools, any host path may be listed: the
     data never moves, the user only points Studio at where it already lives.
     """
     root = (Path(path).expanduser() if path else Path.home()).resolve()
@@ -455,7 +455,7 @@ _CLAUDE_MODELS = [
 
 
 def _brain_catalog() -> list[dict[str, Any]]:
-    """The pluggable LLM backends the UI can pick from — availability flag + that backend's models."""
+    """The pluggable LLM backends the UI can pick from: availability flag + that backend's models."""
     import importlib.util
 
     def installed(module: str) -> bool:
@@ -483,7 +483,7 @@ def _brain_catalog() -> list[dict[str, Any]]:
             "label": "Local model",
             "detail": base_url,
             "available": installed("openai"),
-            "models": [],  # whatever the local server hosts — free text in the UI
+            "models": [],  # whatever the local server hosts: free text in the UI
         },
     ]
 
@@ -540,7 +540,7 @@ with suppress(ImportError):
 
 
 def _gpu_utilisation() -> dict[int, int]:
-    """Compute load per GPU index, as NVML reports it — how busy the card is, which its VRAM does not
+    """Compute load per GPU index, as NVML reports it: how busy the card is, which its VRAM does not
     say: a job can hold 20 GB and compute nothing. Empty when NVML is absent or refuses."""
     try:
         import pynvml
@@ -559,7 +559,7 @@ def _gpu_utilisation() -> dict[int, int]:
 def _system_snapshot() -> dict[str, Any]:
     """Live RAM + per-GPU VRAM via KonfAI's own helpers, so the numbers match the MCP VRAM preflight.
 
-    KonfAI is imported lazily (it pulls torch) and every probe degrades on its own — a missing GPU
+    KonfAI is imported lazily (it pulls torch) and every probe degrades on its own: a missing GPU
     monitor leaves VRAM null rather than failing the whole snapshot.
     """
     import konfai
@@ -665,7 +665,7 @@ async def evaluations(session: str = Query("default")) -> dict[str, list[dict[st
 
 @app.get("/api/leaderboard")
 async def leaderboard(session: str = Query("default"), split: str = Query("TRAIN")) -> dict[str, Any]:
-    """Rank the experiment's runs by their evaluation metrics — proxies konfai-mcp's ``leaderboard`` (which
+    """Rank the experiment's runs by their evaluation metrics: proxies konfai-mcp's ``leaderboard`` (which
     reads the Metric_<SPLIT>.json files live; nothing extra is persisted). One ranking per metric."""
     ok, text, payload = await _mcp_json(_sane_session(session), "leaderboard", {"split": split})
     if not ok:
@@ -694,7 +694,7 @@ def _run_config_snapshot(session: str, run: str) -> Path | None:
 async def run_config_diff(
     session: str = Query("default"), run_a: str = Query(...), run_b: str = Query(...)
 ) -> dict[str, Any]:
-    """A unified diff of two runs' launch-time config snapshots (what actually differs between them — model,
+    """A unified diff of two runs' launch-time config snapshots (what actually differs between them: model,
     losses, optimizer, augmentations, and any live interventions). Reads the on-disk snapshots directly, so it
     works for every run in the leaderboard, not only ones with a live job record."""
     name = _sane_session(session)
@@ -711,8 +711,7 @@ async def run_config_diff(
 
 @app.get("/api/curves")
 async def curves(session: str = Query("default"), run: str = Query(...), q: str = Query("")) -> dict[str, Any]:
-    """A run's full training curves (the complete downsampled TensorBoard history, not the live tail) —
-    konfai-mcp's ``read_training_curves``, optionally filtered to tags containing ``q``. Powers clicking a
+    """A run's full training curves (the complete downsampled TensorBoard history, not the live tail): konfai-mcp's ``read_training_curves``, optionally filtered to tags containing ``q``. Powers clicking a
     live chart to expand it into its whole history."""
     args: dict[str, Any] = {"run_name": run, "max_points": 2000}
     if q:
@@ -729,7 +728,7 @@ class ConfigSave(BaseModel):
 
 @app.post("/api/config/save")
 async def save_config(req: ConfigSave) -> dict[str, bool]:
-    """Save an edited config YAML — jailed to the session workspace, existing .yml only, atomic
+    """Save an edited config YAML: jailed to the session workspace, existing .yml only, atomic
     write (temp + replace) so a reader never sees a truncated config."""
     target = _session_path(req.session, req.name)
     if target.suffix.lower() not in {".yml", ".yaml"}:
@@ -772,7 +771,7 @@ _FILE_VIEW_CAP = 400_000  # bytes shown in the experiment file viewer
 @app.get("/api/experiment/file")
 async def experiment_file(session: str = Query("default"), path: str = Query(...)) -> dict[str, Any]:
     """Read one workspace file as text for the experiment viewer. A file over the cap shows its **tail**
-    (the latest lines — what matters for a long training log), not a truncated head; such a file is
+    (the latest lines: what matters for a long training log), not a truncated head; such a file is
     read-only. Small files are returned whole and YAML stays editable."""
     target = _session_path(session, path)
     if not target.is_file():
@@ -792,7 +791,7 @@ async def experiment_file(session: str = Query("default"), path: str = Query(...
 
 
 def _experiment_info(session: str) -> dict[str, Any]:
-    """What an experiment contains — drives the UI's overview and greys out impossible actions."""
+    """What an experiment contains: drives the UI's overview and greys out impossible actions."""
     root = _session_dir(session)
     if not root.is_dir():
         return {"checkpoints": [], "predictions": [], "jobs": [], "bundlable": False, "exportable": False}
@@ -816,7 +815,7 @@ def _experiment_info(session: str) -> dict[str, Any]:
 
 @app.get("/api/experiment")
 async def experiment(session: str = Query("default")) -> dict[str, Any]:
-    """What the experiment holds, plus where it stands and the moves open from there — so a page reload
+    """What the experiment holds, plus where it stands and the moves open from there, so a page reload
     comes back with the same next actions instead of an empty bar."""
     name = _sane_session(session)
     state = _state(name)
@@ -836,7 +835,7 @@ def _parse_apps(data: Any) -> list[dict[str, Any]]:
 
 @app.get("/api/apps")
 async def apps(session: str = Query("apps")) -> dict[str, Any]:
-    """The konfai-mcp app catalogue (shipped + registered sources) — a direct MCP call, no LLM.
+    """The konfai-mcp app catalogue (shipped + registered sources): a direct MCP call, no LLM.
 
     Bundle metadata maps onto what the App Zoo renders: an app with its own ``icon.png`` gets a
     ``logo`` URL (served below), and its declared ``task`` becomes the grouping ``theme``.
@@ -888,14 +887,14 @@ async def quit_server(request: Request) -> dict[str, bool]:
     the same-host reverse proxy REMOTE.md documents, every request arrives from 127.0.0.1. Uvicorn
     rewrites the peer from ``X-Forwarded-For`` under ``--proxy-headers``, so a forwarding header
     arriving WITHOUT that flag means the peer belongs to the proxy and the loopback check answers a
-    question nobody asked — refuse instead.
+    question nobody asked: refuse instead.
 
     And it must send the header below: the loopback check only proves the TCP peer is local, which
     any page open in the user's browser also is, so without it a drive-by form POST to localhost
     would shut Studio down. A custom header is unforgeable from a form and, cross-origin, needs a
     preflight this server never grants.
 
-    Slicer's Studio button and the titlebar power button rely on this — the server runs detached,
+    Slicer's Studio button and the titlebar power button rely on this: the server runs detached,
     with no terminal to Ctrl+C.
     """
     import signal
@@ -910,7 +909,7 @@ async def quit_server(request: Request) -> dict[str, bool]:
             " so it cannot tell which machine it is from",
         )
     if request.headers.get("x-konfai-studio") != "quit":
-        raise HTTPException(403, "missing the X-KonfAI-Studio header — stop Studio from its own UI")
+        raise HTTPException(403, "missing the X-KonfAI-Studio header: stop Studio from its own UI")
 
     async def _after_reply() -> None:
         await asyncio.sleep(0.3)  # let this response leave before the shutdown begins
@@ -963,7 +962,7 @@ def _app_bundle_file(ref: str, filename: str) -> Path:
 
 @app.get("/api/apps/manifest")
 async def app_manifest(ref: str = Query(...)) -> dict[str, Any]:
-    """The deploy manifest of an app's ONNX bundle — the contract the in-tab runtime consumes."""
+    """The deploy manifest of an app's ONNX bundle: the contract the in-tab runtime consumes."""
     return json.loads(_app_bundle_file(ref, "manifest.json").read_text())
 
 
@@ -1005,7 +1004,7 @@ async def cancel_running_job(req: CancelJob) -> dict[str, Any]:
 
 @app.post("/api/run/delete")
 async def delete_run(req: DeleteRun) -> dict[str, Any]:
-    """Delete one run's outputs — proxies konfai-mcp's jailed ``delete_run`` (never leaves the workspace)."""
+    """Delete one run's outputs: proxies konfai-mcp's jailed ``delete_run`` (never leaves the workspace)."""
     return await _mcp_detail(_sane_session(req.session), "delete_run", {"run_name": req.run_name, "kind": req.kind})
 
 
@@ -1020,7 +1019,7 @@ def _require_train_job(name: str) -> tuple[str | None, dict[str, Any] | None]:
 
 @app.post("/api/job/validate")
 async def request_validation(req: CancelJob) -> dict[str, Any]:
-    """Ask a running training job to run a validation pass now — ``request_validation`` signals the job
+    """Ask a running training job to run a validation pass now: ``request_validation`` signals the job
     (SIGUSR1); the trainer validates at its next iteration boundary and the metrics stream into Live."""
     name = _sane_session(req.session)
     job_id, error = _require_train_job(name)
@@ -1031,7 +1030,7 @@ async def request_validation(req: CancelJob) -> dict[str, Any]:
 
 @app.post("/api/job/tunables")
 async def set_tunables(req: SetTunables) -> dict[str, Any]:
-    """Change a running training's lr / it_validation mid-run — proxies konfai-mcp's ``set_live_tunables``,
+    """Change a running training's lr / it_validation mid-run: proxies konfai-mcp's ``set_live_tunables``,
     which drops a jailed control file the trainer applies at its next poll boundary."""
     name = _sane_session(req.session)
     job_id, error = _require_train_job(name)
@@ -1047,7 +1046,7 @@ async def set_tunables(req: SetTunables) -> dict[str, Any]:
 
 @app.get("/assets/{file_path:path}")
 async def assets(file_path: str) -> FileResponse:
-    """Serve the built Vite assets (JS/CSS) from ``web/assets`` — jailed to that dir.
+    """Serve the built Vite assets (JS/CSS) from ``web/assets``: jailed to that dir.
 
     Vite fingerprints every asset name, so a given URL's bytes never change: cache it for a year and a
     warm reload fetches nothing. A new build produces new names, which ``index.html`` points at.
@@ -1063,7 +1062,7 @@ async def index() -> FileResponse:
     """The one file that must never be cached: it is what names the fingerprinted bundle.
 
     Served without cache headers the browser applies its own heuristic, keeps a stale index, and so
-    keeps loading the previous build's assets — an updated Studio silently serving the old front until
+    keeps loading the previous build's assets: an updated Studio silently serving the old front until
     someone thinks to hard-reload.
     """
     return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache, must-revalidate"})
@@ -1083,7 +1082,7 @@ async def volume(path: str = Query(..., description="Absolute host path of the v
     """Stream a medical volume to the browser (NiiVue) with HTTP range support.
 
     Trusted-local deployment only: like konfai-mcp's dataset tools, volumes may live anywhere
-    on the host and are served **read-only** — this never exposes a write path. Starlette's
+    on the host and are served **read-only**: this never exposes a write path. Starlette's
     FileResponse honours the ``Range`` header, so NiiVue can fetch a large volume in chunks.
     """
     p = Path(path).expanduser()

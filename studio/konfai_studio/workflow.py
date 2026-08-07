@@ -2,7 +2,7 @@
 """What a turn is told, and what it offers next.
 
 The experiment's state is **not** computed here. It is derived by ``konfai_mcp.experiment_state`` from
-the workspace on disk — the same answer the MCP server gives every other client — and Studio only turns
+the workspace on disk (the same answer the MCP server gives every other client), and Studio only turns
 it into two things the chat needs:
 
 * the **pre-prompt** (`[state]` + `[now]`): the identifiers and the one instruction the current stage
@@ -31,9 +31,9 @@ _FOLLOW_RUN = (
 )
 _FOLLOW_READ = "Report it in two lines, then the next step."
 _LAUNCHES = ("run_", "fine_tune_")
-# Stages reached before `initialize_session` has made a workspace — nothing there can be summarised yet.
+# Stages reached before `initialize_session` has made a workspace: nothing there can be summarised yet.
 _BEFORE_WORKSPACE = {"dataset_inspection", "action_selection", "app_selection"}
-# One ceiling for the whole chain — the assistant's own block, the derived fill-in, and the bar. Past
+# One ceiling for the whole chain: the assistant's own block, the derived fill-in, and the bar. Past
 # this a row of buttons stops being a choice and becomes a menu to read; below it, the count follows
 # what genuinely applies rather than a fixed number.
 MAX_MOVES = 9
@@ -41,13 +41,13 @@ MAX_MOVES = 9
 
 def state_for(workspace: Path, jobs: list[dict[str, Any]], dataset: str = "") -> dict[str, Any]:
     """The experiment's state, derived from its workspace by the MCP server's own code. ``jobs`` are its
-    job records newest first — they carry the run's outcome and, counted, the retry budget."""
+    job records newest first, they carry the run's outcome and, counted, the retry budget."""
     return experiment_state(collect_facts(workspace, jobs=jobs, dataset=dataset))
 
 
 def pre_prompt(state: dict[str, Any], device: str, message: str) -> str:
     """The user's message under the two lines a turn needs: where the experiment stands, and what this
-    stage owes. Standing rules live in the system prompt — only the line that applies now is paid for."""
+    stage owes. Standing rules live in the system prompt: only the line that applies now is paid for."""
     lines = [f"[state] {state_line(state)}"]
     if state.get("focus"):
         lines.append(f"[now] {state['focus']}")
@@ -57,7 +57,7 @@ def pre_prompt(state: dict[str, Any], device: str, message: str) -> str:
 
 
 def _subject(state: dict[str, Any]) -> str:
-    """What the next step acts on, named — so the prompt needs nothing from the conversation."""
+    """What the next step acts on, named, so the prompt needs nothing from the conversation."""
     for key, prefix in (("run", "run "), ("app", "app "), ("dataset", "the dataset at ")):
         if state.get(key):
             return f"{prefix}{state[key]}"
@@ -88,10 +88,10 @@ def moves(state: dict[str, Any], from_tools: list[str] | None = None) -> list[di
             continue
         seen.add(label)
         # The stage's own instruction is deliberately NOT repeated here: it describes what the experiment
-        # owes, which is often to ask the user a question — and a button that asks the assistant to ask is
+        # owes, which is often to ask the user a question, and a button that asks the assistant to ask is
         # a loop. A button says what clicking it does, to what.
         follow = _FOLLOW_RUN if action.startswith(_LAUNCHES) else _FOLLOW_READ
-        out.append({"label": label, "prompt": f"{label} — on {subject}. {follow}"})
+        out.append({"label": label, "prompt": f"{label}, on {subject}. {follow}"})
         if len(out) == MAX_MOVES:
             break
     return out

@@ -1,4 +1,4 @@
-# KonfAI Studio — Spec of the final result
+# KonfAI Studio. Spec of the final result
 
 > What a user will be able to do. Grounded in the actual `konfai-mcp` surface (56 tools),
 > the `konfai-apps` remote server, and the `konfai-rs`/`konfai-web` deploy work.
@@ -14,10 +14,10 @@ compares → keeps & reproduces → deploys. The UI is a façade over `konfai-mc
 maps 1:1 onto a real MCP tool.
 
 Two goal layers:
-- **Mission** — collapse the distance between a clinical question and a deployed, private,
+- **Mission**: collapse the distance between a clinical question and a deployed, private,
   reproducible model, from months of ML engineering to a conversation. The person who owns the
   problem owns the whole loop, on data that never leaves the institution.
-- **Strategy (Fideus)** — the open-core product surface: the open engine drives adoption; the
+- **Strategy (Fideus)**: the open-core product surface: the open engine drives adoption; the
   Studio layer + private-deployment story are what an institution pays for. It widens the audience
   from "engineers who write configs" to "anyone with a dataset and a question".
 
@@ -28,7 +28,7 @@ Status legend: **[MCP]** already drivable on today's MCP API · **[build]** UI/e
 | # | Capability | What happens | Tools behind it | Status |
 |---|---|---|---|---|
 | 1 | **Bring a dataset** | Point at a folder; agent reads geometry, channels, classes, splits, ambiguities | `inspect_dataset`, `browse_dataset`, `read_dataset_file`, `preview_volume`, `prepare_dataset_aliases` | **[MCP]** |
-| 2 | **Just describe the task** | The user picks a dataset and prompts — nothing else. The **agent** decides the route (reuse a published app · fine-tune it · train from scratch) and proposes it transparently ("a close liver app exists → I'll fine-tune it, ~15 min, instead of 6 h from scratch"); the user can override in conversation. Not a menu. | `solve_task` prompt routes → `import_app` → `run_prediction` / `run_resume(weights_only=True)` / (`design_config_strategy` → `write_workflow_config` → `run_train`) | **[MCP]** |
+| 2 | **Just describe the task** | The user picks a dataset and prompts: nothing else. The **agent** decides the route (reuse a published app · fine-tune it · train from scratch) and proposes it transparently ("a close liver app exists → I'll fine-tune it, ~15 min, instead of 6 h from scratch"); the user can override in conversation. Not a menu. | `solve_task` prompt routes → `import_app` → `run_prediction` / `run_resume(weights_only=True)` / (`design_config_strategy` → `write_workflow_config` → `run_train`) | **[MCP]** |
 | 3 | **Author by conversation** | Agent writes the YAML, validates it, can run a real forward+backward before spending GPU hours | `write_workflow_config`, `review_config_semantics`, `validate_config_semantics(level='train_step')`, `describe_model_outputs` | **[MCP]** |
 | 4 | **Train / predict / evaluate** | Launch jobs on the GPU (local or on-prem server), resume interrupted runs, sweep CV folds | `run_train`, `run_prediction`, `run_evaluation`, `run_resume`, `run_batch`, `generate_folds` | **[MCP]** |
 | 5 | **Watch it live** | Live metrics + full TensorBoard curves in the tab; cancel anytime (whole process group reaped) | `read_live_metrics`, `read_training_curves`, `get_job_status`, `read_job_log`, `cancel_job` | **[MCP]** |
@@ -61,7 +61,7 @@ UI should expose as top-level choices: *use an app as-is*, *fine-tune an app*, *
   (reflection may have rewritten it); the authoritative launch-time truth is `config_snapshots` /
   `diff_run_configs`.
 
-## 4. Where it runs — three topologies
+## 4. Where it runs: three topologies
 
 The interface is always a browser; what sits behind it changes. Data leaves the site only where the
 topology keeps compute on-prem or in the tab.
@@ -76,25 +76,25 @@ topology keeps compute on-prem or in the tab.
 `/apps/{app}/infer|evaluate|uncertainty|pipeline|fine_tune`, async jobs with `GET /jobs/{id}`,
 `/jobs/{id}/logs` (SSE), `/result`, `/kill`; bearer-token auth; dataset upload (zip, zip-slip +
 size guards); one job per GPU (semaphores). Client: `RemoteServer(host, port, token)`,
-`AppRepositoryInfoFromRemoteServer` — the surface SlicerKonfAI already imports.
-**Two caveats:** (a) it runs/fine-tunes **already-packaged apps only** — fresh agentic authoring
+`AppRepositoryInfoFromRemoteServer` (the surface SlicerKonfAI already imports.
+**Two caveats:** (a) it runs/fine-tunes **already-packaged apps only**) fresh agentic authoring
 (inspect new dataset → author new config → train from scratch) is `konfai-mcp`'s job, not this
 server; (b) remote = the data is **uploaded to the server**, so "nothing leaves the site" holds
 only if that server is on-prem (default bind is loopback `127.0.0.1`; transport is plain HTTP +
-bearer — a non-loopback deployment needs TLS).
+bearer: a non-loopback deployment needs TLS).
 
-## 5. Deploy pillar — scope and gate
+## 5. Deploy pillar: scope and gate
 
 - **Portable subset only:** frozen **feed-forward** models (segmentation / synthesis). **3D
-  registration stays Python** — Burn's `grid_sample` is 2D-only, so VoxelMorph-style models can't run
+  registration stays Python**: Burn's `grid_sample` is 2D-only, so VoxelMorph-style models can't run
   on Burn. TTA/ensemble/MC-dropout/diffusion also stay Python (MVP = single deterministic forward).
 - **Spike GO** (`konfai-rs`, 2026-06-29): `KonfAI → ONNX(dynamo) → burn-onnx → Burn` runs with
-  near bit-exact parity — MAE **6.3e-6** (CPU) / **5.5e-6** (WGPU) on `impact_synth` (UNet++ resnet34,
+  near bit-exact parity. MAE **6.3e-6** (CPU) / **5.5e-6** (WGPU) on `impact_synth` (UNet++ resnet34,
   2.5D, 26M params) vs ONNX Runtime. WGPU is the backend that compiles to WASM/WebGPU.
-- **Two runtimes:** `konfai-web` (ONNX-Runtime-Web + WebGPU, generic — any bundle, no per-model
+- **Two runtimes:** `konfai-web` (ONNX-Runtime-Web + WebGPU, generic: any bundle, no per-model
   build; JS runtime complete, testable via `onnxruntime-node`) and `konfai-rs` (native Burn, one
   artifact per architecture; CPU+WGPU proven natively).
-- **Hard gate — Phase 1 `konfai export`:** both runtimes consume `model.onnx` + `manifest.json`;
+- **Hard gate. Phase 1 `konfai export`:** both runtimes consume `model.onnx` + `manifest.json`;
   neither ships one (konfai-rs `build.rs` *panics* without it). Phase 1 = a pure-Python
   `konfai/export/onnx.py` + an `EXPORT` CLI state, folding pre/post into the graph, keeping the
   runtimes thin (file parse + geometry + tiling only). Manifest = input/output `{name,group,channels,
@@ -102,7 +102,7 @@ bearer — a non-loopback deployment needs TLS).
 - **Still to prove/build:** real browser WebGPU run, volume tiling + overlap-blend + geometry-aware
   NIfTI/MHA I/O, full-volume parity vs the Python `Predictor`.
 - **NiiVue** = the intended client-side WebGL2 viewer (native NIfTI + MHA, segmentation overlays,
-  MIT). **Not yet integrated** — zero references in the codebase today.
+  MIT). **Not yet integrated**: zero references in the codebase today.
 
 ## 6. Roadmap
 
@@ -111,27 +111,27 @@ bearer — a non-loopback deployment needs TLS).
 | Foundation | done | konfai-mcp (v1.6.0) + config-by-reflection + konfai-rs spike (GO) |
 | **M0** | ~1–2 d | BFF FastAPI holding the MCP session + a static front on localhost |
 | **M1** | ~1–2 w | Demo-able core: dataset (NiiVue) → chat/config → `run_train` → live curves → prediction-vs-GT overlay |
-| **Phase 1** | ~3–5 d | `konfai export → model.onnx + manifest.json` (Python) — unlocks browser deploy |
+| **Phase 1** | ~3–5 d | `konfai export → model.onnx + manifest.json` (Python): unlocks browser deploy |
 | **M3** | ~2–3 w | In-tab deployment: konfai-rs/web infers client-side → NiiVue renders; volume tiling + geometry |
 
-M0/M1 need **no new core code** — only today's MCP API.
+M0/M1 need **no new core code**: only today's MCP API.
 
 ## 7. Open decisions
 
-1. **The chatbot's brain is a pluggable, user-chosen LLM** — the MCP is LLM-agnostic, so the BFF can
+1. **The chatbot's brain is a pluggable, user-chosen LLM**: the MCP is LLM-agnostic, so the BFF can
    connect any backend. Make it a setting, not a hardcoded choice: the Claude API (best tool-use /
    quality), a local model (100% on-prem, nothing leaves), or the institution's own LLM endpoint
-   (Azure / on-prem). **Two privacy planes** — the *data plane* (volumes) is always local: MCP tools
+   (Azure / on-prem). **Two privacy planes**: the *data plane* (volumes) is always local: MCP tools
    run on the GPU node and return only text (paths, stats, metrics, YAML), so **the imaging data never
    reaches the LLM**; only the *reasoning plane* (chat + tool-call args/results) goes to the chosen
    LLM. A cloud brain does not upload any voxel. Remaining decision = which backends to ship first and
    the default.
-2. **Studio's status** — demonstrator first (optimize the M1 video) or Fideus product from day one
+2. **Studio's status**: demonstrator first (optimize the M1 video) or Fideus product from day one
    (invest clinician UX / Slicer)? Same M0/M1, different priorities after.
-3. **BFF packaging** — a separate `konfai-studio` package depending on `konfai-mcp` (consistent with
+3. **BFF packaging**: a separate `konfai-studio` package depending on `konfai-mcp` (consistent with
    the 3-package model), vs a submodule of `konfai-mcp`. Leaning separate package.
 
-## 8. Live results — how the browser gets it in real time
+## 8. Live results: how the browser gets it in real time
 
 The tension: `konfai-mcp` is request/response (poll); jobs run in spawn subprocesses that write to
 disk (`Statistics/<name>/tb` tfevents, console log, `Checkpoints/`, `Predictions/`). The browser
@@ -142,8 +142,7 @@ and bridges poll → push.
 `Statistics/<train_name>/tb` (`konfai/trainer.py:224`) and writes scalars every train/val step
 (`:540-580`); `konfai/utils/runtime.py:421-430` can additionally log **image summaries**
 (`add_image`/`add_images`) for any output marked for it. So **live curves are free**, and **live
-validation images** are emitted into the same tfevents stream when the config enables image logging
-— no extra inference needed to "watch the model learn".
+validation images** are emitted into the same tfevents stream when the config enables image logging: no extra inference needed to "watch the model learn".
 
 Four live streams:
 
@@ -160,7 +159,7 @@ metric points, log lines, status, "new image" pings) + plain HTTP for heavy bina
 
 **Sourcing = watch-triggered MCP reads:** the BFF uses a filesystem watch as the *trigger* (log
 mtime, new tfevents event, job.json rewrite), then calls the structured MCP reader
-(`read_live_metrics`, `get_job_status`) for the parsed truth — event-driven latency without fixed
+(`read_live_metrics`, `get_job_status`) for the parsed truth: event-driven latency without fixed
 polling, MCP stays the semantic source. Raw log lines are tailed directly (no semantics needed).
 
 **Reconcile-on-load:** page load / reconnect rebuilds durable state from `summarize_session` +

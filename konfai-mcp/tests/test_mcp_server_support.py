@@ -120,7 +120,7 @@ def test_copy_template_subset_keeps_python_models_opt_in(tmp_path: Path) -> None
     )
 
     # Synthesis references a local ``Model.py``; Python models stay opt-in, but the omission
-    # must be REPORTED -- the seeded config cannot resolve without them.
+    # must be REPORTED: the seeded config cannot resolve without them.
     assert "Config.yml" in copied
     assert "Model.py" not in copied
     assert not (tmp_path / "Model.py").exists()

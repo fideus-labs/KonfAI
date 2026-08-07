@@ -211,7 +211,7 @@ def test_a_foreign_gate_is_the_only_one(tmp_path, monkeypatch) -> None:
 @pytest.mark.parametrize("cls", [GlobalNoise, OwnStateNoise], ids=["global-state", "own-state"])
 def test_foreign_gives_the_process_back_the_random_state_it_had(cls: type) -> None:
     # The global state belongs to the run. Seeded and left where the class stopped, the two groups of
-    # one case leave it in the same place, and whatever draws next draws twice the same -- the model
+    # one case leave it in the same place, and whatever draws next draws twice the same: the model
     # included, since torch's seed reaches the devices.
     augmentation = _foreign(cls, std=5.0)
     _draw(augmentation)

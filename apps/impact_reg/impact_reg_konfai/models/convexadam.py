@@ -27,9 +27,9 @@ the elastix binary:
       -> ImpactFineRegistration                     [Adam instance optimisation, IMPACT features]
 
 The IMPACT feature models (e.g. MIND) are TorchScript ``.pt`` files fetched from Hugging Face
-and wrapped as ``itk.ModelConfiguration`` — the same models the elastix presets use.
+and wrapped as ``itk.ModelConfiguration``: the same models the elastix presets use.
 
-NOTE: do NOT add ``from __future__ import annotations`` — KonfAI's config engine relies on
+NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine relies on
 runtime-evaluated annotations (``get_origin``); PEP 563 stringized annotations break binding.
 """
 
@@ -54,12 +54,12 @@ from .elastix import _is_local_ref
 
 DIM = 3
 # The feature model's input channel count is an intrinsic property of the pretrained model (grayscale
-# medical images), not a tunable — so it's fixed here, never a config/signature parameter.
+# medical images), not a tunable, so it's fixed here, never a config/signature parameter.
 NUM_CHANNELS = 1
 
 # A UI reads the tuning knobs straight from the TYPES on ``RegistrationNet.__init__`` and ``ModelSpec``:
 # ``Annotated[.., Range]`` gives numeric spin bounds; ``Literal`` / ``Annotated[str, Choices]`` a dropdown.
-# ``models`` is a dict-of-objects (one ``ModelSpec`` per feature model) — the same shape as the elastix presets,
+# ``models`` is a dict-of-objects (one ``ModelSpec`` per feature model): the same shape as the elastix presets,
 # so SlicerKonfAI renders each model as a repeatable block with a ``ref`` / ``distance`` combo box.
 _IMAGE_F = itk.Image[itk.F, DIM]
 
@@ -67,7 +67,7 @@ _IMPACT_MODELS_REGISTRY = "VBoussot/impact-torchscript-models:models.json"
 
 
 def registry_choices() -> list[str]:
-    """The per-model ``ref`` picker's values — model refs (``repo:path``) from the feature-model registry the
+    """The per-model ``ref`` picker's values: model refs (``repo:path``) from the feature-model registry the
     engine already fetches (offline-first). A user may still point ``ref`` at a local model path."""
     repo = _IMPACT_MODELS_REGISTRY.split(":", 1)[0]
     return [f"{repo}:{key}" for key in load_models_registry()]
@@ -86,7 +86,7 @@ def load_models_registry(ref: str = _IMPACT_MODELS_REGISTRY) -> dict:
     else:
         raise ValueError(
             f"models_registry '{ref}' must be a 'repo:file' Hugging Face reference (fetched from HF, not "
-            "bundled) — or set KONFAI_IMPACT_MODELS_REGISTRY to a local file for offline use."
+            "bundled): or set KONFAI_IMPACT_MODELS_REGISTRY to a local file for offline use."
         )
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -142,7 +142,7 @@ def _no_texpr_fuser():
     """Disable ONLY torch's TensorExpr (NNC) fuser for the block. The TS feature-model graphs have a direction/
     orientation branch whose shape ops (aten::dim / aten::size) crash the fuser's alias analysis under itk-impact
     ("INTERNAL ASSERT ... We don't have an op for aten::size" in FuseTensorExprs). It cannot be fixed model-side:
-    itk-impact passes an *undefined* direction, so guarding it needs a shape op — the very fuser trigger. The
+    itk-impact passes an *undefined* direction, so guarding it needs a shape op: the very fuser trigger. The
     modern profiling executor stays on (NOT the legacy executor); measured cost ~1% of a registration (the fuser
     only touches the few feature forwards, not the C++ optimisation loop). The caller's setting is restored."""
     prev = torch._C._jit_texpr_fuser_enabled()
@@ -276,7 +276,7 @@ class ConvexAdamEngine:
         Constructing an ``itk.ModelConfiguration`` loads the TorchScript module from disk on the C++ side, so
         it is built lazily and cached. The coarse/fine filters copy each configuration by value in
         ``AddModelConfiguration`` and the copy shares the loaded module through the configuration's internal
-        ``shared_ptr`` — so a single build is reused everywhere without any reload.
+        ``shared_ptr``: so a single build is reused everywhere without any reload.
         """
         if self._configurations is None:
             self._configurations = [
@@ -369,7 +369,7 @@ class ConvexAdamEngine:
         # Optional terminal progress over the Adam iterations, driven from the metric trace. ``disable=None``
         # auto-hides it when stderr is not a TTY (e.g. under KonfAI/Slicer, where the outer "Prediction" bar
         # already reports progress), so captured logs stay clean; ``leave=False`` avoids stacking one bar per
-        # patch. The observer is best-effort — if the filter emits no IterationEvent the bar just fills at the end.
+        # patch. The observer is best-effort: if the filter emits no IterationEvent the bar just fills at the end.
         progress = tqdm.tqdm(total=self._iterations or None, desc="Registration", ncols=0, leave=False, disable=None)
 
         def _update(*_: object) -> None:

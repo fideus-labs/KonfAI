@@ -31,7 +31,7 @@ def _resolve_mcp_command(command: str) -> str:
 
     Studio may be started by its bare binary, which does not put the env's ``bin`` dir on ``PATH``;
     the SDK/transport then fails to spawn ``konfai-mcp`` by name. The script sits beside this
-    interpreter, so prefer that, then ``PATH``, then the bare name — the agent finds its tools
+    interpreter, so prefer that, then ``PATH``, then the bare name: the agent finds its tools
     regardless of how Studio was launched.
     """
     if os.path.isabs(command) or command != "konfai-mcp":
@@ -54,7 +54,7 @@ def _require_claude_code() -> None:
             f"The Claude Code brain needs claude-agent-sdk (pip install konfai-studio), {switch}."
         ) from exc
     if shutil.which("claude") is None:
-        raise RuntimeError(f"The Claude Code brain needs the 'claude' CLI on PATH — install Claude Code, {switch}.")
+        raise RuntimeError(f"The Claude Code brain needs the 'claude' CLI on PATH: install Claude Code, {switch}.")
 
 
 DEFAULT_MODEL = os.environ.get("KONFAI_STUDIO_MODEL", "claude-opus-4-8")
@@ -62,67 +62,67 @@ MAX_TOKENS = int(os.environ.get("KONFAI_STUDIO_MAX_TOKENS", "16000"))
 MAX_TURNS = int(os.environ.get("KONFAI_STUDIO_MAX_TURNS", "30"))
 
 # Standing rules only: who you are, and what holds on every turn. What the experiment owes RIGHT NOW is
-# sent per turn as [state]/[now], derived from the workspace by konfai_mcp.experiment_state -- so no
+# sent per turn as [state]/[now], derived from the workspace by konfai_mcp.experiment_state, so no
 # stage's instruction can arrive at the wrong stage, and none of it is paid for twice.
 SYSTEM_PROMPT = (
-    "You drive KonfAI -- config-driven deep learning for medical imaging -- through its MCP tools, for a "
+    "You drive KonfAI: config-driven deep learning for medical imaging: through its MCP tools, for a "
     "clinician-researcher who knows their data, not the framework.\n\n"
     "Act, do not offer. When the next step only reads, take it and report what you found. Ask only for "
     "what you cannot derive, one question at a time. Never state a tool result you did not get.\n\n"
     "A turn may open with three lines:\n"
     "  [state] where the experiment stands, read from its workspace. Authoritative: never ask for what is "
     "already there, never redo a step it shows as done.\n"
-    "  [now] the step the experiment is waiting on. Do it -- unless the user's message asks for something "
+    "  [now] the step the experiment is waiting on. Do it: unless the user's message asks for something "
     "else, which always wins.\n"
     "  [constraint] a compute restriction to respect exactly.\n\n"
     "NEVER start training, fine-tuning, prediction, evaluation or a dataset transform without asking first. Say in one line "
-    "what it will cost -- how many cases, on which device, roughly how long -- and wait for a yes. The "
+    "what it will cost: how many cases, on which device, roughly how long, and wait for a yes. The "
     "only exception is relaunching a run you just corrected after a failure.\n\n"
     "A run is a result only when its job says so. After any run_* or fine_tune_app, wait for the job to "
     "reach a terminal state, then open what it produced and report THAT. A launch that returned cleanly is "
     "not a success and must never be presented as one.\n\n"
     "When a run fails: the cause in one line, never a traceback, then the correction. A correction may be "
     "relaunched straight away; anything else that costs GPU time is asked first. Two failed attempts is the "
-    "limit -- past it, lay out the options and ask. Never settle a scientific choice yourself (loss, "
+    "limit: past it, lay out the options and ask. Never settle a scientific choice yourself (loss, "
     "architecture, split, label mapping, which data is the right one): those are the user's.\n\n"
-    "A job whose status is 'killed' was stopped ON PURPOSE -- usually the user pressing Stop in the panel "
+    "A job whose status is 'killed' was stopped ON PURPOSE: usually the user pressing Stop in the panel "
     "beside you ('cancel_requested': true marks it). It is not a failure, not an external anomaly, and "
     "nothing to investigate or apologise for: say in one line where the run stood (epoch/iteration, last "
     "loss), then offer to resume or relaunch. A deliberate stop never counts toward the two-attempt limit, "
     "and you never invent a watchdog, supervisor or OOM to explain it.\n\n"
-    "Reply in the user's own language -- French to French, English to English -- and keep tool names, "
+    "Reply in the user's own language. French to French, English to English, and keep tool names, "
     "config keys and paths verbatim whatever the language.\n\n"
     "Reply in a few sentences: what you did, what it showed, what is next. No preamble, no lists of what "
-    "you could do, no restating [state], no thinking out loud, no log dumps -- the failing lines only.\n\n"
+    "you could do, no restating [state], no thinking out loud, no log dumps: the failing lines only.\n\n"
     "WHENEVER you describe a dataset, use exactly this shape so two datasets can be compared without "
     "re-reading either:\n"
-    "one line -- <N> cases | <layout> | <ext> | spacing <x>x<y>x<z> mm | shape <X>x<Y>x<Z>\n"
+    "one line: <N> cases | <layout> | <ext> | spacing <x>x<y>x<z> mm | shape <X>x<Y>x<Z>\n"
     "then a markdown table, one row per group, these columns and no others:\n"
     "| Group | Cases | Range / classes | Role |\n"
     "Role is one short clause: what it is, and whether it can serve as input or as target.\n"
     "then, each on its own line and only when it applies:\n"
-    "**Incomplete** — <GROUP> missing in <n>/<N> cases (<a few case ids>)\n"
-    "**dataset_entry** — `<value>`\n"
+    "**Incomplete**: <GROUP> missing in <n>/<N> cases (<a few case ids>)\n"
+    "**dataset_entry**: `<value>`\n"
     "Every number comes from the tool, never from memory; group names verbatim. When groups differ in "
     "geometry, say so in their Role rather than averaging them into the header line.\n\n"
     "END EVERY REPLY with the next moves, after a line containing only <<NEXT>>:\n"
     "<<NEXT>>\n"
     "Short Label :: the whole message the user would send to take that step\n"
     "Short Label :: ...\n"
-    "As many as genuinely apply, one to ten -- not a fixed number, and never one invented to reach a "
+    "As many as genuinely apply, one to ten, not a fixed number, and never one invented to reach a "
     "count. If your reply asks a question or offers a choice, the moves ARE its answers: one per option "
-    "you raised, all of them, in the user's voice ('Do MR to CT synthesis'), and nothing else -- "
+    "you raised, all of them, in the user's voice ('Do MR to CT synthesis'), and nothing else: "
     "answering is the only thing they owe you. Otherwise they are the next steps, best first.\n"
     "The label is 2-4 words. The prompt is written as the USER, names its subject (the dataset path, the "
     "app, the run) and says what to do; when it starts a run it also says to wait for the job and open "
     "what it produced. Never a vague 'Continue' or 'Run it'. This block is stripped before the user sees "
     "it: it becomes the buttons under your reply.\n\n"
     "A NiiVue viewer sits beside the chat: any .nii/.nii.gz/.mha/.mhd/.nrrd path you surface loads there by "
-    "itself. To compare two volumes -- a synthetic CT against the real one, a prediction against its label "
+    "itself. To compare two volumes: a synthetic CT against the real one, a prediction against its label "
     "-- surface BOTH paths in the same step: exactly two opens them side by side, crosshairs linked. It is "
     "never unavailable, and you must never invent an image.\n\n"
     "Given a paper, extract task, architecture, losses and augmentations, reproduce it as a config, "
-    "validate it -- and stop there until the user confirms training."
+    "validate it, and stop there until the user confirms training."
 )
 
 # A tool executor: given (name, arguments) run the MCP tool, return (ok, text_preview).
@@ -145,7 +145,7 @@ def _detect_volumes(text: str) -> list[str]:
 
 
 def _next_actions(text: str) -> list[str]:
-    """The MCP tool's own ``next_actions`` (registered tool names) — the ground truth for what to
+    """The MCP tool's own ``next_actions`` (registered tool names): the ground truth for what to
     suggest next. Best-effort: a non-JSON or unshaped result simply yields no suggestions."""
     try:
         payload = json.loads(text)
@@ -178,7 +178,7 @@ class _NextMoves:
     the buttons.
 
     Text arrives in chunks that can cut the marker in half, so the last few characters are held back
-    until they cannot start one — the user never sees the marker appear and vanish.
+    until they cannot start one: the user never sees the marker appear and vanish.
     """
 
     def __init__(self) -> None:
@@ -188,7 +188,7 @@ class _NextMoves:
 
     @staticmethod
     def _partial_marker(text: str) -> int:
-        """How many trailing characters could still grow into the marker — 0 when none can. Holding back
+        """How many trailing characters could still grow into the marker: 0 when none can. Holding back
         a fixed count instead would cut the visible text mid-word every time a tool call interrupts it."""
         for size in range(min(len(text), len(_NEXT_MARKER) - 1), 0, -1):
             if _NEXT_MARKER.startswith(text[-size:]):
@@ -216,7 +216,7 @@ class _NextMoves:
         return visible
 
     def moves(self) -> list[dict[str, str]]:
-        """The parsed moves — ``Label :: prompt`` per line. A malformed line is dropped, not guessed at."""
+        """The parsed moves: ``Label :: prompt`` per line. A malformed line is dropped, not guessed at."""
         out: list[dict[str, str]] = []
         for line in self._block.splitlines():
             label, _, prompt = line.partition("::")
@@ -232,12 +232,12 @@ async def with_volume_events(events: AsyncIterator[dict[str, Any]]) -> AsyncIter
     the reply's trailing next-moves block, which is stripped from the text and emitted as
     ``next_prompts``. Backends stay free of any UI concern; the preview is trimmed here.
 
-    The viewer follows the volumes the assistant NAMES — in a tool's arguments, or in its own prose, which
+    The viewer follows the volumes the assistant NAMES, in a tool's arguments, or in its own prose, which
     is what the system prompt promises the user. A tool *result* is not a choice: an inventory names one
     file per group to prove the group exists, and reading the viewer off those opened whichever group
     sorted first instead of the images the assistant had just previewed."""
     next_moves = _NextMoves()
-    named: list[str] = []  # what the assistant pointed at, in order — the last two are the comparison
+    named: list[str] = []  # what the assistant pointed at, in order: the last two are the comparison
     shown: tuple[str, str | None] | None = None  # the pair on screen, so the same one is not re-sent
     async for event in events:
         volumes: list[str] = []
@@ -261,7 +261,7 @@ async def with_volume_events(events: AsyncIterator[dict[str, Any]]) -> AsyncIter
                 yield {"type": "next_prompts", "prompts": moves}
         yield event
         # The pane follows what the assistant last pointed at: the last two volumes it named are the
-        # comparison, whether they arrive together or one step apart -- a reply naming the moved image
+        # comparison, whether they arrive together or one step apart: a reply naming the moved image
         # beside the reference is streamed in chunks, so "the same step" is not something this side can
         # recognise. Naming is not deduplicated over the turn: a run names its inputs in its own arguments
         # and then cites one of them again as half of a comparison, and dropping the repeat left the pane
@@ -309,7 +309,7 @@ def _mcp_tools_to_openai(mcp_tools: list[Any]) -> list[dict[str, Any]]:
 
 
 # A tool result headed for a model is capped: one oversized payload would crowd out the conversation.
-# A result Studio parses itself is NOT — a JSON document cut at any length stops being JSON, and the
+# A result Studio parses itself is NOT: a JSON document cut at any length stops being JSON, and the
 # caller cannot tell a truncated payload from an empty one. The leaderboard reached 64 328 characters
 # with 65 metrics and came back as "no evaluations yet" over two runs that had been scored.
 _MODEL_RESULT_LIMIT = 60000
@@ -589,7 +589,7 @@ class ClaudeCodeAgent:
             # and Task have to go with it, or the restriction is decorative.
             #
             # ToolSearch pages in tools held back from the prompt; konfai-mcp's are all present, so every
-            # search returns nothing — enabled, the model spends its turns searching instead of calling
+            # search returns nothing: enabled, the model spends its turns searching instead of calling
             # the tools it already has.
             disallowed_tools=["Bash", "Write", "Edit", "NotebookEdit", "ToolSearch", "Agent", "Task"],
             system_prompt=SYSTEM_PROMPT,
@@ -605,7 +605,7 @@ class ClaudeCodeAgent:
 
     # The stdio MCP server takes about two seconds to hand over its tool list, and `connect()` returns
     # before that. A turn started in the window sees no konfai tools at all: the first call comes back
-    # "no such tool", whatever name it used, and the assistant retries — one wasted call, in the open,
+    # "no such tool", whatever name it used, and the assistant retries, one wasted call, in the open,
     # on the very first thing the user asks.
     _MCP_READY_TIMEOUT = 15.0
     _MCP_POLL = 0.25
@@ -646,7 +646,7 @@ class ClaudeCodeAgent:
     async def interrupt(self) -> bool:
         """Cut the turn short so the user's correction is acted on now, not after it finishes.
 
-        Verified against the SDK from both states — mid-text and with a tool in flight: the turn ends
+        Verified against the SDK from both states: mid-text and with a tool in flight: the turn ends
         flagged as an error, and the *next* turn on the same session works. So the flag below only stops
         that expected error from reading as a failure. A job the tool already launched keeps running;
         interrupting the agent is not cancelling the work it started.
@@ -727,7 +727,7 @@ SIDE_MODEL = os.environ.get("KONFAI_STUDIO_SIDE_MODEL", "claude-haiku-4-5")
 
 
 async def _one_shot_claude(prompt: str) -> str:
-    """One isolated Claude Code query (no MCP tools, no task history) — its joined text, '' on failure."""
+    """One isolated Claude Code query (no MCP tools, no task history): its joined text, '' on failure."""
     try:
         from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
 
@@ -756,7 +756,7 @@ async def suggest_title(text: str, brain: str | None = None) -> str:
 
 
 async def call_mcp_tool(session: str, tool: str, args: dict[str, Any] | None = None) -> tuple[bool, str]:
-    """One-shot konfai-mcp tool call for a session — deterministic, no LLM in the loop.
+    """One-shot konfai-mcp tool call for a session: deterministic, no LLM in the loop.
 
     Used for plain actions (bundle, export) the UI triggers by button rather than by prompting the
     model. Spawns a short-lived stdio client against the same konfai-mcp session workspace.

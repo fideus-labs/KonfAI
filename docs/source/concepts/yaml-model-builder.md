@@ -1,6 +1,6 @@
 # Declarative YAML model graphs
 
-This page documents the YAML model builder — how to describe a complete
+This page documents the YAML model builder: how to describe a complete
 network as a `.yml` file instead of a Python class. Read it when you want a
 model that lives entirely in configuration, with the same named outputs and
 routing as code-defined models.
@@ -43,7 +43,7 @@ modules:
 
 `build_model_from_yaml(yaml_path="model.yml")` returns a `YamlNetwork`, not a
 `torch.nn.Sequential`. `ModelLoader` also accepts `.yml` and `.yaml` paths.
-**Relative paths are resolved next to the active `KONFAI_config_file`** — the
+**Relative paths are resolved next to the active `KONFAI_config_file`**: the
 model `.yml` is looked up relative to the config file that references it, not
 the current working directory.
 
@@ -122,7 +122,7 @@ Built-ins, grouped:
 - **Routing leaves:** `Concat`, `Add`, `Multiply`.
 - **Composite blocks:** `ConvBlock`, `ResBlock`, `Attention`.
 - **Transformer:** `MultiHeadSelfAttention`, `PositionalEmbedding` (with `LayerNorm`,
-  `Linear`, `GELU`) — enough to express a ViT encoder.
+  `Linear`, `GELU`): enough to express a ViT encoder.
 
 Call `list_registered_modules()` for the authoritative, up-to-date list. Applications
 may add a trusted `torch.nn.Module` subclass with `register_module(name, cls)`.
@@ -133,8 +133,7 @@ Duplicate names and non-module classes raise `ConfigError`.
 `konfai/models/` is split by form: `python/` holds the builtin Python model classes
 (referenced as `classpath: segmentation.UNet.UNet`), `yaml/` the declarative catalog.
 KonfAI ships a catalog of common medical-imaging architectures as declarative YAML
-under `konfai/models/yaml/`. Reference one from any config with a `default|` marker —
-the declarative counterpart of a Python model classpath:
+under `konfai/models/yaml/`. Reference one from any config with a `default|` marker: the declarative counterpart of a Python model classpath:
 
 ```yaml
 Model:
@@ -142,7 +141,7 @@ Model:
 ```
 
 Every catalog entry is built from the curated registry (no code execution) and is
-locked by a test at the strongest available level — weight-exact graph equivalence
+locked by a test at the strongest available level: weight-exact graph equivalence
 against a reference implementation where one exists, otherwise a structural check
 (builds, forward on 2-D and 3-D inputs, correct output shape, deep-supervision heads)
 with any divergence from the reference documented in the file header:
@@ -154,15 +153,15 @@ with any divergence from the reference documented in the file header:
 | `ResNet18` | weight-exact vs torchvision ResNet-18 | torchvision ImageNet (via the bridge) |
 | `PlainConvUNet` | weight-exact vs nnU-Net `dynamic_network_architectures.PlainConvUNet` | nnU-Net / TotalSegmentator / MRSeg checkpoints (via the bridge) |
 | `VGG16` | weight-exact vs torchvision (all 5 feature maps exact) | torchvision ImageNet (via the bridge) |
-| `ViT` | structural + encoder token-features allclose vs MONAI | — (encoder maths verified) |
-| `AttentionUNet`, `UNETR` | structural-strict (graph differs from MONAI, documented) | — |
+| `ViT` | structural + encoder token-features allclose vs MONAI |: (encoder maths verified) |
+| `AttentionUNet`, `UNETR` | structural-strict (graph differs from MONAI, documented) |: |
 | `ResidualEncoderUNet` *(parametric)* | weight-exact vs nnU-Net `dynamic_network_architectures.ResidualEncoderUNet` (`deep_supervision` toggle) | nnU-Net ResEnc / ImpactSeg checkpoints (via the bridge) |
 | `UNetPlusPlus` *(parametric)* | weight-exact vs `segmentation_models_pytorch.UnetPlusPlus` (ResNet-18/34 encoder, `activation` configurable) | smp / ImpactSynth checkpoints (via the bridge) |
 
 `PlainConvUNet`, `ResidualEncoderUNet` and `UNetPlusPlus` ship **both** ways: as a
 fixed-topology entry in the catalog above, and as a **parametric** Python class
 (`konfai/models/python/segmentation/`). Reference the class when you want one model to
-cover any depth / width / class count and declare the architecture inline — e.g.
+cover any depth / width / class count and declare the architecture inline: e.g.
 
 ```yaml
 Model:
@@ -179,7 +178,7 @@ Model:
 ```
 
 `VGG16` is the feature-extractor entry: it exposes five named multi-layer outputs
-(`Block_0:Out` … `Block_4:Out`, channels 64/128/256/512/512 — the torchvision
+(`Block_0:Out` … `Block_4:Out`, channels 64/128/256/512/512: the torchvision
 `features` slices `[0:4]/[4:9]/[9:16]/[16:23]/[23:30]`) so a perceptual / feature /
 IMPACT-style loss can be attached to any of them through `outputs_criterions`.
 
@@ -189,16 +188,16 @@ Python model classes.
 ## Which form should I use?
 
 There are three ways to put a common architecture into a KonfAI config, and they are
-not redundant — pick by what you need:
+not redundant: pick by what you need:
 
 | You want to… | Use | Why |
 |---|---|---|
-| Train/run the vanilla model as-is, one output, one loss | `classpath: monai.networks.nets:SegResNet` (or any installed class) | KonfAI wraps any `nn.Module` in `MinimalModel` automatically — no rebuild needed. Simplest path. |
+| Train/run the vanilla model as-is, one output, one loss | `classpath: monai.networks.nets:SegResNet` (or any installed class) | KonfAI wraps any `nn.Module` in `MinimalModel` automatically: no rebuild needed. Simplest path. |
 | Supervise **internal** layers (deep supervision, feature/perceptual losses), edit the architecture without code, or share it safely | `classpath: default\|SegResNet.yml` | The YAML builds a KonfAI `Network` whose every submodule is addressable in `outputs_criterions`, editable in YAML, and safe by construction (registry-only, no imported code). |
 | Do the above **and** start from someone's pretrained weights | `default\|<Name>.yml` + the pretrained bridge (below) | You get the reference's trained weights inside the addressable KonfAI graph. |
 
 An imported `nn.Module` is a black box: only its final output is visible to KonfAI's
-loss/evaluation machinery. The YAML form is what unlocks per-node supervision — that is
+loss/evaluation machinery. The YAML form is what unlocks per-node supervision, that is
 the reason to rebuild an architecture rather than import it.
 
 ## Loading pretrained weights
@@ -255,5 +254,5 @@ skip connections and nested heads.
 
 ## Next steps
 
-- {doc}`model-graph` — how named module paths are addressed by `outputs_criterions` and `outputs_dataset`.
-- {doc}`../examples/segmentation` — a complete training run driven by `UNet.yml`.
+- {doc}`model-graph`: how named module paths are addressed by `outputs_criterions` and `outputs_dataset`.
+- {doc}`../examples/segmentation`: a complete training run driven by `UNet.yml`.

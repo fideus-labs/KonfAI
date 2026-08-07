@@ -17,7 +17,7 @@
 """Tests for ``konfai.data.transform.Foreign``: a transform from another framework.
 
 The stand-ins here carry the calling convention torchvision, MONAI's array transforms and TorchIO
-share -- a class callable on one tensor -- rather than any one of those libraries, none of which
+share (a class callable on one tensor) rather than any one of those libraries, none of which
 KonfAI depends on.
 """
 

@@ -20,8 +20,8 @@ A transform chain streams patches straight from disk when every stage declares i
 (``patch_locality``) and, for region stages, how a target patch pulls back through it
 (``stream_region_source``): the planner folds the region stages into one bounded read, runs the
 chain on that window, seeds GLOBAL_STAT stages from the stored statistics, and refuses the chains
-those declarations cannot honour. The generic per-stage guarantee -- every built-in transform and
-augmentation, streamed patch == whole-volume pass on the same grid -- is enumerated and proven in
+those declarations cannot honour. The generic per-stage guarantee (every built-in transform and
+augmentation, streamed patch == whole-volume pass on the same grid) is enumerated and proven in
 ``test_transform_locality_contract.py``; this file keeps the dispatcher-specific properties: how
 the fold composes region stages into one plan, the planner's classification and state (epoch
 re-draws, augmented copies, statistics seeded from disk instead of a full read), its refusals, and
@@ -168,7 +168,7 @@ def test_stream_composed_rescale_and_orientation_matches_whole_volume(assert_str
 
 
 def test_stream_composed_triple_region_chain_matches_whole_volume(assert_stream_matches_whole_volume) -> None:
-    # Three region stages in one chain — flip, resample, permute — folded into one bounded read.
+    # Three region stages in one chain (flip, resample, permute) folded into one bounded read.
     rng = np.random.default_rng(11)
     volume = (rng.standard_normal((1, 8, 6)).astype(np.float32)) * 100.0
     manager = assert_stream_matches_whole_volume(
@@ -201,7 +201,7 @@ def _geometry_manager(
     spacing: np.ndarray,
     direction: np.ndarray,
 ) -> DatasetManager:
-    """A manager over the streaming stub with a REAL header — the identity geometry the stub answers
+    """A manager over the streaming stub with a REAL header: the identity geometry the stub answers
     would make every landing fold below trivially right."""
 
     class _WithGeometry(stub_class):
@@ -225,7 +225,7 @@ def _geometry_manager(
 
 
 def _fresh_chain_reference(volume: np.ndarray, transforms: list[Transform], attribute: Attribute) -> torch.Tensor:
-    """The chain run stage by stage on the live header — the semantics every route must reproduce."""
+    """The chain run stage by stage on the live header: the semantics every route must reproduce."""
     reference = torch.from_numpy(volume.copy())
     for stage in transforms:
         reference = stage("CASE_000", reference, attribute)
@@ -236,7 +236,7 @@ def test_a_resample_behind_a_canonical_lands_on_the_reoriented_grid(streaming_da
     """The landing fold evolves the case state, so a Resample is judged on what Canonical left.
 
     The regression this pins: the fold used to hand every stage the STORED header, so the Resample
-    recorded the pre-Canonical grid — the whole-volume path then resampled the wrong axis (silently:
+    recorded the pre-Canonical grid: the whole-volume path then resampled the wrong axis (silently:
     every voxel real, the anatomy at the wrong density), and the patched routes crashed or refused
     with the blame on the stage. The chain is the shipped TotalSegmentator prediction prefix.
     """
@@ -268,10 +268,10 @@ def test_a_resample_behind_a_canonical_lands_on_the_reoriented_grid(streaming_da
 
 
 def test_a_second_resample_reads_the_first_ones_grid(streaming_dataset_stub) -> None:
-    """[Resample(3), Resample(1.5)] downsamples then upsamples — the second stage is not a no-op.
+    """[Resample(3), Resample(1.5)] downsamples then upsamples: the second stage is not a no-op.
 
     The regression this pins: both stages used to record their grid from the stored header, so the
-    second saw the ORIGINAL spacing, concluded nothing changes, and handed its input through — the
+    second saw the ORIGINAL spacing, concluded nothing changes, and handed its input through: the
     run then wrote a volume at half the asked density with a header claiming otherwise.
     """
     rng = np.random.default_rng(5)
@@ -318,7 +318,7 @@ def test_stream_clip_fixed_bounds_is_pointwise_and_matches_whole_volume(assert_s
 
 
 def test_stream_clip_min_max_is_global_stat_and_matches_whole_volume(streaming_dataset_stub) -> None:
-    # 'min'/'max' bounds clip to the volume extremum -- a no-op on that bound -- so the streamed
+    # 'min'/'max' bounds clip to the volume extremum (a no-op on that bound), so the streamed
     # per-patch result is byte-identical to the whole-volume pass, and the dispatcher seeds the
     # global stat from a single read_data_statistics call instead of loading the full volume.
     rng = np.random.default_rng(1)
@@ -350,7 +350,7 @@ def test_stream_clip_min_max_is_global_stat_and_matches_whole_volume(streaming_d
 
 
 def test_a_saved_clip_bound_is_the_cases_statistic_not_the_regions(streaming_dataset_stub) -> None:
-    """``save_clip_min``/``save_clip_max`` record the bound that was applied — the CASE's.
+    """``save_clip_min``/``save_clip_max`` record the bound that was applied: the CASE's.
 
     On a streamed path the dispatcher seeds the case statistic and the tensor in hand is one
     region of it: a bound computed from that region records the region's own extremum on the
@@ -447,7 +447,7 @@ def test_clip_percentile_and_mask_bounds_fall_back_to_whole_volume(build_streami
 def test_stream_resample_nearest_strong_downsampling_matches_whole_volume(build_streaming_manager) -> None:
     # Strong downsampling of a uint8 label map (nearest mode): the nearest voxel of the first output
     # column (floor(o*scale)) falls BELOW the linear tap window's start, so the source read must widen
-    # to include it -- otherwise the gather indexes a negative local offset and wraps onto the far
+    # to include it: otherwise the gather indexes a negative local offset and wraps onto the far
     # edge, silently returning a wrong label. A regular ratio (a plain integer scale) hides the bug;
     # 40 -> 6 (scale 6.67) exposes the sub-pixel offset that pushes the linear start past voxel 0.
     volume = (np.arange(1 * 40 * 40).reshape(1, 40, 40) % 7).astype(np.uint8)
@@ -531,8 +531,8 @@ def test_augmented_copy_consumes_the_volume_statistic(build_streaming_manager) -
 def test_replanning_after_epoch_redraw_keeps_the_stored_geometry(build_streaming_manager, transform_case: str) -> None:
     """Epoch 2 must stream the same bytes as epoch 1, with no attribute stack growth.
 
-    Replanning must not read the live case attribute -- it already carries epoch 1's target
-    Spacing/Direction -- or a streamed Resample degrades to identity and a streamed Canonical stops
+    Replanning must not read the live case attribute (it already carries epoch 1's target
+    Spacing/Direction) or a streamed Resample degrades to identity and a streamed Canonical stops
     reorienting from the second epoch on, while the geometry keys stack once more per epoch.
     """
     volume = np.arange(1 * 8 * 8 * 8, dtype=np.float32).reshape(1, 8, 8, 8)
@@ -589,7 +589,7 @@ def test_a_region_stage_recording_geometry_nowhere_the_case_reads_is_refused(bui
 
 
 def test_statistics_streams_off_the_seeded_case_numbers(streaming_dataset_stub) -> None:
-    """``Statistics`` records the CASE's four numbers — the disk scan already computes them.
+    """``Statistics`` records the CASE's four numbers: the disk scan already computes them.
 
     Whole-volume was the default it never needed: seeded, each region restates the case's answer,
     and the recorded ``Image*`` keys equal the volume's own statistics rather than a region's.
@@ -619,7 +619,7 @@ def test_statistics_streams_off_the_seeded_case_numbers(streaming_dataset_stub) 
 
 
 def test_the_read_factor_grows_as_the_budget_cuts_finer_slabs(streaming_dataset_stub) -> None:
-    """Streaming finer never reads less — the monotonicity the route's pricing rests on.
+    """Streaming finer never reads less: the monotonicity the route's pricing rests on.
 
     A halo chain re-reads its overlap at every slab boundary, so the factor sits near 1 when one
     slab covers the volume and grows as the budget shrinks the slabs. This restates, on the

@@ -308,7 +308,7 @@ class _Trainer:
         Triggers early stopping and resets data augmentations between epochs.
         """
         # SIGUSR1 requests an on-demand validation pass (KonfAI Studio's "Validate now"); the handler only
-        # flips a flag — the loop consumes it at a poll boundary, DDP-safe (see _requested_validation).
+        # flips a flag: the loop consumes it at a poll boundary, DDP-safe (see _requested_validation).
         sigusr1 = getattr(signal, "SIGUSR1", None)  # absent on Windows
         if sigusr1 is not None:
             with suppress(ValueError, OSError):  # signals only install on the main thread
@@ -444,7 +444,7 @@ class _Trainer:
 
     def _broadcast_from_master(self, value: Any) -> Any:
         """Share rank 0's value with every rank, so the loop stays synchronized under DDP. Any picklable
-        object rides through (synchronize_data uses all_gather_object) — callers cast as they need."""
+        object rides through (synchronize_data uses all_gather_object): callers cast as they need."""
         outputs = synchronize_data(
             self.world_size,
             self.local_rank * self.size + self.size - 1,
@@ -703,7 +703,7 @@ class _Trainer:
                     loss.update(losses)
                     loss.update({k: v[1] for k, v in measures[name][1].items()})
             # Remember which keys are losses (always minimise) vs metrics (direction varies), so
-            # default checkpoint/early-stop selection scores on the losses only -- summing a
+            # default checkpoint/early-stop selection scores on the losses only: summing a
             # maximise-metric (e.g. Dice) into a minimised score would keep the worst model.
             self._loss_keys = loss_keys
             return loss
@@ -725,7 +725,7 @@ def _agreed_patch(gathered: list, template: list[int]) -> list[int] | None:
     proposed one (every rank is at its floor: the OOM is not recoverable).
 
     A gathered entry that is not a patch candidate means another rank was still training and its own
-    collective crossed this rendezvous -- an asymmetric OOM. That is not recoverable either, but it
+    collective crossed this rendezvous: an asymmetric OOM. That is not recoverable either, but it
     must fail as a diagnosis, not as an opaque ``TypeError`` from ``min``.
     """
     proposals = [proposal for proposal in gathered if proposal is not None]
@@ -798,7 +798,7 @@ class Trainer(DistributedObject):
         self.manual_seed = manual_seed
         self.dataset = dataset
         # Auto-patching (VRAM): a per-axis 0 in the user's patch_size marks a FREE axis and opts into
-        # the OOM restart loop -- captured before any re-plan materialises concrete sizes over it.
+        # the OOM restart loop: captured before any re-plan materialises concrete sizes over it.
         patch = dataset.patch
         self._vram_patch_template: list[int] | None = (
             [int(size) for size in patch.patch_size]
@@ -830,11 +830,11 @@ class Trainer(DistributedObject):
 
         state = State[konfai_state()]
         # Cut the grids with the model's downsampling multiple already known, so each case's free axis
-        # rounds up to a valid input size (the graph -- hence the factor -- is final before init()).
+        # rounds up to a valid input size (the graph (hence the factor) is final before init()).
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
         if self.manual_seed is not None:
             # The train/validation split is drawn inside prepare() here on the launcher, before spawn.
-            # Without seeding, the global RNG is unseeded, so every run -- a fresh TRAIN or a RESUME --
+            # Without seeding, the global RNG is unseeded, so every run: a fresh TRAIN or a RESUME --
             # redraws a different split and leaks validation cases into training. Per-rank seeding for the
             # actual training happens later in the distributed runtime.
             random.seed(self.manual_seed)
@@ -954,7 +954,7 @@ class Trainer(DistributedObject):
         Wraps model with DDP or CPU fallback, attaches EMA, and starts training.
 
         Args:
-            world_size (int): Number of model replicas sharding the data -- the spawned process count
+            world_size (int): Number of model replicas sharding the data: the spawned process count
                 already divided by the model-parallel size (``gpu_checkpoints``), NOT the GPU count.
             global_rank (int): Global rank of the current process.
             local_rank (int): Local rank within the node.
@@ -1019,7 +1019,7 @@ class Trainer(DistributedObject):
                 # failing rank proposes its own candidate and all adopt the per-axis MIN. A rank that
                 # did NOT run out never reaches this all-gather; the job then dies at the collective
                 # timeout, exactly as an unhandled OOM kills it. Ranks failing together recover
-                # together when they fail at the same collective offset (the common case -- they
+                # together when they fail at the same collective offset (the common case: they
                 # share the patch size); an offset mismatch pairs foreign payloads, caught below.
                 if world_size > 1:
                     print(

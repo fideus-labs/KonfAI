@@ -148,7 +148,7 @@ def _read_cgroup_memory_limit() -> int | None:
     """Return this process's cgroup memory ceiling in bytes, or ``None`` when unbounded or absent.
 
     Tries cgroup v2 first, then v1. A missing file (non-Linux host, or cgroups disabled), the ``"max"``
-    keyword, the v1 sentinel, or an unparseable value all resolve to ``None`` -- "no cgroup limit".
+    keyword, the v1 sentinel, or an unparseable value all resolve to ``None``: "no cgroup limit".
     """
     try:
         raw = Path(_CGROUP_V2_MEMORY_MAX).read_text().strip()
@@ -183,10 +183,10 @@ def available_memory_bytes() -> tuple[int, str]:
 
 
 def _materialized_config(tree: dict, root: str) -> Path:
-    """A config TREE written where a workflow expects a file — the Python front door.
+    """A config TREE written where a workflow expects a file: the Python front door.
 
-    The caller hands the same tree the YAML file would hold — ``{root: {...}}``, the very kwargs
-    the binder feeds each ``__init__`` — and never touches YAML: it is written once here, under a
+    The caller hands the same tree the YAML file would hold (``{root: {...}}``, the very kwargs
+    the binder feeds each ``__init__``), and never touches YAML: it is written once here, under a
     scratch directory of its own, and everything downstream (reflection binding, resolution
     write-back, the workspace copy, resume) sees an ordinary config file. The workspace keeps the
     resolved copy, as it does for every run.
@@ -221,7 +221,7 @@ def configure_workflow_environment(
     Parameters
     ----------
     config_path : Path | str | dict
-        YAML configuration file used by the workflow — or the config TREE itself, as a dict, for
+        YAML configuration file used by the workflow: or the config TREE itself, as a dict, for
         a Python caller that writes no YAML (see :func:`_materialized_config`). Every workflow
         entry point accepts either, since they all pass through here.
     root : str
@@ -405,7 +405,7 @@ def clear_directory_except_logs(path: Path) -> None:
 
     The rank-0 ``Log`` opens ``<dir>/log_0.txt`` before the workflow's overwrite branch runs, so an
     ``rmtree`` of the directory unlinks the open file: every parent-process line (config binding,
-    dataset scan, a crash traceback) is written to an unlinked inode and lost -- and Windows refuses
+    dataset scan, a crash traceback) is written to an unlinked inode and lost, and Windows refuses
     to delete a directory holding an open file. Clearing around the live logs preserves them.
     """
     for child in path.iterdir():
@@ -530,7 +530,7 @@ class MinimalLog:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         # A run's last writes are often throttled frames: emitted here, so the sink ends on the bar's
-        # final state. flush() cannot carry this — the bars flush after every frame, which would empty
+        # final state. flush() cannot carry this: the bars flush after every frame, which would empty
         # the throttle each time.
         self._mirror_emit_pending()
         sys.stdout = self._stdout_bak
@@ -540,8 +540,8 @@ class MinimalLog:
         if not msg:
             return
         msg_clean = ANSI_ESCAPE_RE.sub("", msg)
-        # A CRLF line ending is not a redraw: "warning\r\n" folds to the text after its last \r — nothing
-        # — and the message would vanish from the mirror and the log file both.
+        # A CRLF line ending is not a redraw: "warning\r\n" folds to the text after its last \r,
+        # which is nothing, and the message would vanish from the mirror and the log file both.
         redraw = "\r" in msg_clean.replace("\r\n", "\n") or "[A" in msg
         if redraw:
             self._buffered_line = msg_clean.split("\r")[-1].strip()
@@ -554,7 +554,7 @@ class MinimalLog:
     def _mirror(self, msg: str, redraw: bool) -> None:
         # A terminal overwrites a redrawn bar; a file appends every frame, so a mirrored animation is
         # megabytes per run in an MCP job log or a slurm-*.out. Off a terminal the mirror sends the
-        # folded line instead, throttled — a log tail still shows live progress — and a skipped frame
+        # folded line instead, throttled (a log tail still shows live progress), and a skipped frame
         # is kept pending so a bar's final state lands before whatever message follows it.
         if not self._mirror_is_tty:
             if redraw:
@@ -568,7 +568,7 @@ class MinimalLog:
             else:
                 msg = f"{self._mirror_take_pending()}{msg}"
         # Best-effort: if the mirror's reader is gone (an interactive launcher exited, a server
-        # restarted), the pipe is broken — keep running and keep writing to the log file rather than
+        # restarted), the pipe is broken: keep running and keep writing to the log file rather than
         # crashing the job.
         try:
             self._stdout_bak.write(msg)
@@ -645,7 +645,7 @@ class Log(MinimalLog):
         super().write(msg)
         # Consecutive identical lines are one fact said twice: a progress bar arrives as several
         # write() calls per frame and a case line rides beside its own counter frame, which used to
-        # multiply the file by ~4x against the console. Only CONSECUTIVE repeats fold -- a fact that
+        # multiply the file by ~4x against the console. Only CONSECUTIVE repeats fold: a fact that
         # genuinely recurs later still lands.
         if self._buffered_line and self._buffered_line != self._last_logged:
             self._last_logged = self._buffered_line
@@ -808,7 +808,7 @@ def run_distributed_app(
         bound.apply_defaults()
         is_cluster = "resubmit" in kwargs
         # The auto memory budget is a NODE budget, but build-time sizing (the evaluation auto-patch)
-        # runs while ``func(...)`` constructs the workflow -- before the spawn where world_size exists.
+        # runs while ``func(...)`` constructs the workflow: before the spawn where world_size exists.
         # The launcher therefore leaves the per-node rank count in the environment, and restores it
         # after: a leak would silently shrink a later in-process run (tests, embedded Python).
         local_ranks = len(list(bound.arguments.get("gpu") or [])) or int(bound.arguments.get("cpu") or 1)
@@ -838,7 +838,7 @@ def run_distributed_app(
             print("\n[KonfAI] Manual interruption (Ctrl+C)")
         except KonfAIError as error:
             # A designed refusal: the message says what is wrong and the remedy what to change.
-            # The traceback under it is framework internals -- 28 lines burying the 3 that matter --
+            # The traceback under it is framework internals: 28 lines burying the 3 that matter --
             # so it is shown only to a reader who asked (KONFAI_DEBUG=1).
             if env_flag("KONFAI_DEBUG", False):
                 raise
@@ -857,12 +857,12 @@ def _runs_inline(world_size: int) -> bool:
     """Whether the single rank runs here instead of in a spawned child.
 
     A spawned child is a fresh interpreter: it re-imports torch, re-initialises CUDA and unpickles the
-    whole payload before doing any work — measured at ~3 s, which a short prediction pays in full. With
+    whole payload before doing any work: measured at ~3 s, which a short prediction pays in full. With
     one rank there is nothing to parallelise, so that cost buys only isolation.
 
     Isolation is worth keeping where the caller outlives the run: an embedded interpreter (Slicer, the
     apps server) would inherit this process's CUDA context and its memory. ``KONFAI_INLINE_SINGLE_RANK``
-    is the switch — default on for a CLI run, set it to 0 to force the child back.
+    is the switch: default on for a CLI run, set it to 0 to force the child back.
     """
     if world_size != 1:
         return False

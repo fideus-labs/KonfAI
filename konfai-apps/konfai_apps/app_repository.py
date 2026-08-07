@@ -58,7 +58,7 @@ def _plain(value: Any) -> Any:
 def _constraint_of_annotation(annotation: Any) -> dict[str, Any] | None:
     """UI/agent constraint for one type: ``Literal`` -> ``{choices}``, ``Annotated[.., Range|Choices]`` ->
     ``{min,max}`` / ``{choices}``, ``dict[str, <class>]`` -> ``{"*": <class constraints>}``. A bare string in
-    ``Annotated[T, .., "text"]`` adds ``{"description": text}`` -- the human meaning of the knob, for any base
+    ``Annotated[T, .., "text"]`` adds ``{"description": text}``: the human meaning of the knob, for any base
     type including ``Annotated[Literal[...], "text"]``, so an agent tuning it knows WHAT it does, not only its
     bounds. ``{min,max}`` / ``{choices}`` carry no description key when none is given. Else ``None``."""
     metadata = getattr(annotation, "__metadata__", ())  # Annotated[base, *metadata]
@@ -163,7 +163,7 @@ def is_app_repo(filenames: list[str]) -> bool:
 
 
 def current_free_vram(devices: list[int], remote_server: RemoteServer | None = None) -> float | None:
-    """Free VRAM (GB) available on ``devices`` — the minimum across them, mirroring how inference picks
+    """Free VRAM (GB) available on ``devices``: the minimum across them, mirroring how inference picks
     its VRAM plan. Returns ``None`` on CPU (no devices) or when VRAM cannot be read; a device whose VRAM
     query fails is skipped rather than failing the whole measurement. UIs pair it with
     :meth:`AppRepositoryInfo.resolve_vram_plan` to preview the plan for the current machine."""
@@ -208,7 +208,7 @@ def _parse_input_default(key: str, default: Any, required: bool = False) -> str 
     """Validate an input's ``default`` field from app.json (one of ``INPUT_DEFAULTS`` or omitted).
 
     ``default`` is optional-input-only: it tells konfai-apps how to synthesise the volume when the caller
-    omits it, which is meaningless for a required input -- a required input is never auto-filled (see
+    omits it, which is meaningless for a required input: a required input is never auto-filled (see
     KonfAIApp._fill_optional_inputs, which skips ``entry.required``). Reject the contradiction at load time
     instead of silently dropping the author's declared default.
     """
@@ -633,7 +633,7 @@ class LocalAppRepository(AppRepositoryInfo):
         A bare ``NAME`` is a **model parameter** (the common case): it resolves inside
         ``Predictor.Model.<ClassName>``, so ``--set iterations=300`` tunes the model directly. A dotted
         ``NAME`` (e.g. ``Predictor.Dataset.batch_size``) is a full path from the config root, for any other
-        key. Either way the key must already exist — the resolved config lists every parameter, so a typo
+        key. Either way the key must already exist: the resolved config lists every parameter, so a typo
         raises here instead of silently adding a dead key. ``VALUE`` is parsed as YAML: ``300`` is an int,
         ``2.0`` a float, ``true`` a bool, ``[1, 2, 3]`` a list, and ``L1`` a string (KonfAI's literal ``None``
         string is preserved). This is the generic override the UI (SlicerKonfAI) drives to tune a preset.
@@ -682,11 +682,11 @@ class LocalAppRepository(AppRepositoryInfo):
             yaml.dump(data, file)
 
     def get_parameters(self, prediction_file: str = "Prediction.yml") -> dict[str, Any]:
-        """The model's configurable parameters + their constraints — the single reader a UI needs.
+        """The model's configurable parameters + their constraints: the single reader a UI needs.
 
         Returns ``{"values": <nested dict>, "constraints": <parallel sparse dict>}``. ``values`` is the model
         block of the resolved config (scalars / lists / nested dicts / dict-of-objects) minus structural
-        wiring — a clean tree the CLI edits directly via ``--set``. ``constraints`` is read from the model's
+        wiring: a clean tree the CLI edits directly via ``--set``. ``constraints`` is read from the model's
         TYPES: ``Literal`` / ``Annotated[.., Choices]`` -> ``{"choices"}`` (a ``Choices`` resolver is run by
         the app, so nothing is fetched here), ``Annotated[.., Range]`` -> ``{"min","max"}``. It mirrors
         ``values``; ``"*"`` holds the per-entry constraints of a ``dict[str, <@config>]``. Interpreting the
@@ -709,13 +709,13 @@ class LocalAppRepository(AppRepositoryInfo):
             stem, class_name = (part.strip() for part in classpath.split(":", 1))
             try:
                 constraints = _constraints_of_class(self._import_model_class(stem, class_name, filenames))
-            except Exception:  # constraints are an optional UI hint — a load/inspect failure just omits them
+            except Exception:  # constraints are an optional UI hint: a load/inspect failure just omits them
                 constraints = {}
         return {"values": values, "constraints": constraints}
 
     def _import_model_class(self, module_stem: str, class_name: str, filenames: list[str]) -> type:
         """Import the app's model module (the ``classpath`` stem) and return the CLASS without instantiating
-        it — only its typed signature is read.
+        it: only its typed signature is read.
 
         The stem is either a bundle-local ``.py`` file (``model:MyNet`` -> ``model.py`` next to the config, the
         bundle dir on ``sys.path`` so its sibling imports load) OR an installed package module
@@ -760,11 +760,11 @@ class LocalAppRepository(AppRepositoryInfo):
 
         Only local-directory apps support this (their config file is edited in place). An app resolved from a
         shared source such as the Hugging Face cache raises, because edits there are overwritten on refresh
-        and shared across every user of the cache — copy it into a local folder to keep tuned defaults.
+        and shared across every user of the cache: copy it into a local folder to keep tuned defaults.
         """
         raise AppRepositoryError(
             f"Saving parameters as defaults is only supported for local-directory apps. App '{self._app_name}' "
-            "is resolved from a shared source (e.g. the Hugging Face cache), where edits are not durable — "
+            "is resolved from a shared source (e.g. the Hugging Face cache), where edits are not durable: "
             "copy it into a local folder and run against that to keep tuned defaults."
         )
 
@@ -780,7 +780,7 @@ class LocalAppRepository(AppRepositoryInfo):
         Every app file (config, code, checkpoints, ``app.json``, ``requirements.txt``) is copied into
         ``path``, so it can be reopened as a :class:`LocalAppRepositoryFromDirectory`. With
         ``config_overrides`` the tuned ``--set`` values are written into the copied ``prediction_file`` so the
-        new local app runs with them as its defaults — the inference-side "save as a local app" that mirrors
+        new local app runs with them as its defaults: the inference-side "save as a local app" that mirrors
         :meth:`install_fine_tune`. ``display_name`` renames the copy in ``app.json``.
         """
         filenames = self._get_filenames()
@@ -851,7 +851,7 @@ class LocalAppRepository(AppRepositoryInfo):
 
         For a Hugging Face repo the local snapshot is populated lazily (one file per ``hf_hub_download``),
         so a snapshot-derived listing can omit bundle assets not pulled yet (e.g. elastix parameter maps).
-        Refresh it from the Hub tree once — a lightweight metadata call, no file transfer — so every asset
+        Refresh it from the Hub tree once (a lightweight metadata call, no file transfer), so every asset
         is known; the per-file downloads still hit the local cache, and it falls back to the local snapshot
         when offline.
         """
@@ -870,8 +870,8 @@ class LocalAppRepository(AppRepositoryInfo):
         return inference_support, evaluation_support, uncertainty_support
 
     def is_finetunable(self) -> bool:
-        """True when the app bundles a root-level train ``Config.yml`` -- the exact path the default
-        ``install_fine_tune`` invocation resolves (``path / config_file``) -- so a Prediction-only
+        """True when the app bundles a root-level train ``Config.yml`` (the exact path the default
+        ``install_fine_tune`` invocation resolves (``path / config_file``)), so a Prediction-only
         inference app reports False. Root-level membership on purpose: a nested ``x/Config.yml`` would
         match the basename fallback but fail fine-tune's flat lookup. Best-effort on error."""
         try:
@@ -934,11 +934,11 @@ class LocalAppRepository(AppRepositoryInfo):
         """Install missing/outdated packages listed in the app's requirements.txt.
 
         Runs on every local app resolution: resolving an app pip-installs the extra dependencies
-        its custom code needs (the documented trust model — only resolve apps you trust). Set
+        its custom code needs (the documented trust model: only resolve apps you trust). Set
         ``KONFAI_APPS_INSTALL_REQUIREMENTS=0`` to opt out (offline / CI / reproducible
         environments). Only missing or version-mismatched packages are installed, so repeat runs
         are a no-op. Core packages (torch, konfai, …) are never installed or altered when named
-        directly -- pip may still move them to satisfy another requirement's transitive dependency,
+        directly: pip may still move them to satisfy another requirement's transitive dependency,
         which this filter does not police. Lines that are not PEP 508 requirements (``-r``,
         ``--extra-index-url``, ``git+https``…) are skipped.
         """

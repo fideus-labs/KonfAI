@@ -19,7 +19,7 @@
 KonfAI references most components by class name (criteria/transforms/augmentations/schedulers)
 or by a dotted path under ``konfai.models`` (models), and YAML-model-builder blocks by registry
 key. ``inspect_object_signature`` can then reveal a component's constructor, but only if the agent
-already knows the classpath -- this module supplies that missing discovery step.
+already knows the classpath: this module supplies that missing discovery step.
 
 Heavy ``konfai`` imports happen inside the functions (lazily), so importing this module is cheap.
 """
@@ -59,7 +59,7 @@ _REFERENCE_HINTS = {
     "criterion": (
         "Reference by name under a criterion's criterions_loader (losses) or under metrics. "
         "Whether a Criterion behaves as a loss or a metric depends on its constructor "
-        "(is_loss) / return type -- call inspect_object_signature for the exact contract."
+        "(is_loss) / return type: call inspect_object_signature for the exact contract."
     ),
     "transform": "Reference by name under a group's 'transforms' or 'patch_transforms'.",
     "augmentation": "Reference by name under a DataAugmentation_* 'data_augmentations' block.",
@@ -95,7 +95,7 @@ def normalize_kind(kind: str) -> str:
 def _requires_callable_argument(cls: Any) -> bool:
     """True if the class needs a non-defaulted Callable argument, so it cannot be built from YAML.
 
-    Base helpers like MaskedLoss take an injected ``loss: Callable`` -- listing them as usable components
+    Base helpers like MaskedLoss take an injected ``loss: Callable``: listing them as usable components
     misleads an agent into referencing something the reflection engine can never instantiate.
     """
     try:
@@ -215,7 +215,7 @@ def _list_models() -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
 def _list_yaml_catalog_models() -> list[dict[str, Any]]:
     """Enumerate the shipped declarative model catalog (konfai/models/yaml/*.yml).
 
-    Each entry is referenced as ``classpath: default|<Name>.yml`` — the declarative counterpart of a
+    Each entry is referenced as ``classpath: default|<Name>.yml``: the declarative counterpart of a
     Python model classpath. The leading comment lines of the file are surfaced as its doc so an agent
     can pick an architecture without opening the file.
     """

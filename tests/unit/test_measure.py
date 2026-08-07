@@ -62,7 +62,7 @@ def test_a_criterion_accepts_the_integer_label_map_a_segmentation_target_is(crit
     """A segmentation target comes off disk as integer labels, not as floats.
 
     Both criteria resample the target onto the output grid, and nearest-neighbour interpolation has
-    no integer kernel -- so the dtype the dataset actually produces reached torch as an unsupported
+    no integer kernel, so the dtype the dataset actually produces reached torch as an unsupported
     one. Every other test here hands a float, which is why the training path was the first to meet it.
     """
     output = torch.rand(1, 3, 8, 8)
@@ -319,7 +319,7 @@ class TestImpactRegPCA:
 def test_accuracy_reports_per_batch_not_a_lifetime_running_fraction() -> None:
     # Accuracy must report the current batch (the logging window means and resets it): accumulating
     # n/corrects on the instance forever blends every epoch and both splits into one fraction. An
-    # all-correct batch is 1.0 and a following all-wrong batch is 0.0 -- not 0.5.
+    # all-correct batch is 1.0 and a following all-wrong batch is 0.0, not 0.5.
     from konfai.metric.measure import Accuracy
 
     accuracy = Accuracy()
@@ -462,7 +462,7 @@ class TestMaskedFeatureLoss:
 # --------------------------------------------------------------------------- #
 def test_accepts_init_flag_lives_on_the_criterion_not_the_attr() -> None:
     # Measure.init must read the capability flag from the criterion (the dict key), not from the
-    # CriterionsAttr value (which never carries it) — otherwise CriterionWithInit.init() is skipped
+    # CriterionsAttr value (which never carries it): otherwise CriterionWithInit.init() is skipped
     # and graph-rewiring criteria such as KLDivergence train against the wrong channels silently.
     criterion = KLDivergence(shape=[16, 16])
     assert getattr(criterion, "accepts_init", False) is True

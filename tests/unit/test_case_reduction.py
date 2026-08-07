@@ -16,7 +16,7 @@
 
 """The cases engine: N cases folded into one entry, one region at a time.
 
-What matters here is not that the median is right -- it is that it is right while the volumes are
+What matters here is not that the median is right, it is that it is right while the volumes are
 never assembled, that a cases which does not agree on its grid is refused before anything is read,
 and that a chain continues after the reduction."""
 
@@ -138,7 +138,7 @@ def test_a_non_incremental_operator_holds_the_whole_cohort_per_region(tmp_path: 
     """One region per case, plus the output's, plus what the operator allocates over its buffer.
 
     ``Median`` stacks the buffer into a new tensor and sorts a copy of that, so the buffer alone
-    under-states its peak threefold — and it is the operator a bare ``Reduce`` gets.
+    under-states its peak threefold, and it is the operator a bare ``Reduce`` gets.
     """
     engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Median", output="t"), [])
     plan = engine.plan()
@@ -246,7 +246,7 @@ def test_a_named_reference_adopts_its_geometry_instead_of_demanding_agreement(tm
     """``reference:<case>`` is how a cohort says its members disagree and which one to believe.
 
     Its contract is exactly two checks: equal extents across the cohort, and the NAMED member's
-    geometry on the output -- no strict header comparison, whichever case happens to come first.
+    geometry on the output: no strict header comparison, whichever case happens to come first.
     """
     engine, destination, volumes = _run(
         tmp_path,
@@ -280,7 +280,7 @@ def test_concat_plans_the_channel_count_it_will_actually_write(tmp_path: Path) -
     """A ``Concat`` writes ``cases x channels``, and only the operator can say so.
 
     ``transform_shape`` maps spatial extents and says nothing about the leading axis, so the planner
-    took the source's channel count -- which sized the regions at a quarter of what a four-case
+    took the source's channel count, which sized the regions at a quarter of what a four-case
     Concat holds, and had the write probe validate a shape the run never opens.
     """
     engine, destination, volumes = _run(tmp_path, [], Reduce(operator="Concat", output="stacked"), [])
@@ -330,7 +330,7 @@ def test_a_second_run_skips_the_finished_reduction(tmp_path: Path) -> None:
 
 
 def test_a_region_stage_after_the_reduction_is_refused_not_seamed(tmp_path: Path) -> None:
-    """A halo applied to one region at a time would seam at every boundary -- plausible and wrong.
+    """A halo applied to one region at a time would seam at every boundary: plausible and wrong.
 
     It is deferred, not forbidden: materialize the reduction and read it back in a second chain."""
     dataset, _volumes = _cohort(tmp_path)
@@ -349,7 +349,7 @@ def test_a_region_stage_after_the_reduction_is_refused_not_seamed(tmp_path: Path
 
 
 class _Weighted(Reduction):
-    """A custom operator with a parameter — the extension point, exercised."""
+    """A custom operator with a parameter: the extension point, exercised."""
 
     voxel_local = True
 
@@ -396,7 +396,7 @@ def test_an_operator_shadowing_a_reduce_key_is_refused() -> None:
 def test_vote_picks_a_label_where_median_would_invent_one() -> None:
     """The reason Vote exists. Two label maps have no middle value that is a label.
 
-    Median averages the middle pair, so folding structures 1 and 5 answers 3 -- a third structure,
+    Median averages the middle pair, so folding structures 1 and 5 answers 3: a third structure,
     in a volume that is still a valid label map, which is why nothing downstream reports it.
     """
     labels = [torch.full((1, 1, 2, 2), value, dtype=torch.uint8) for value in (1, 5)]
@@ -415,7 +415,7 @@ def test_vote_takes_the_label_the_majority_agrees_on() -> None:
 
 
 def test_vote_answers_per_voxel_not_per_volume() -> None:
-    """Each voxel is its own ballot -- a majority somewhere else must not carry it."""
+    """Each voxel is its own ballot: a majority somewhere else must not carry it."""
     cases = [
         torch.tensor([[[[1, 2]]]], dtype=torch.uint8),
         torch.tensor([[[[1, 3]]]], dtype=torch.uint8),
@@ -445,7 +445,7 @@ def test_the_peak_is_charged_at_each_side_s_own_width(
 ) -> None:
     """Members are measured at THEIR channel count, the output at its own.
 
-    Only ``Concat`` tells the two apart -- it writes ``N x C`` where each member holds ``C`` -- and
+    Only ``Concat`` tells the two apart (it writes ``N x C`` where each member holds ``C``) and
     charging the cohort at the output's width over-states its peak by the cohort's size, which either
     shrinks the slab for nothing or refuses a reduction that fits.
     """

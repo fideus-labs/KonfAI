@@ -36,6 +36,7 @@ extensions = [
     "sphinx_copybutton",
     "sphinx_togglebutton",
     "sphinx_tabs.tabs",
+    "sphinxcontrib.mermaid",
 ]
 
 templates_path = ["_templates"]
@@ -46,6 +47,7 @@ html_theme = "shibuya"
 html_title = "KonfAI documentation"
 html_favicon = os.path.abspath("../../logo.png")
 html_css_files = ["custom.css"]
+html_js_files = ["mermaid-fit.js"]
 
 # The KonfAI logo is a full wordmark (mark + "KonfAI"). We use transparent-
 # background versions of it derived from logo.png: the original mint art for the
@@ -56,7 +58,20 @@ html_css_files = ["custom.css"]
 html_theme_options = {
     "light_logo": "_static/konfai-logo-light.png",
     "dark_logo": "_static/konfai-logo-dark.png",
+    # Persistent header links: the five pages a reader comes back to from anywhere.
+    "nav_links": [
+        {"title": "Quickstart", "url": "quickstart"},
+        {"title": "Config guide", "url": "config_guide/index"},
+        {"title": "Components", "url": "reference/components/index"},
+        {"title": "CLI", "url": "reference/cli"},
+        {"title": "Apps", "url": "usage/apps"},
+    ],
 }
+
+# Mermaid draws the shapes; the palette comes from _static/custom.css, so a diagram
+# follows the light/dark tokens the rest of the site uses.
+mermaid_version = "11.12.1"
+mermaid_d3_zoom = False
 
 myst_enable_extensions = [
     "deflist",

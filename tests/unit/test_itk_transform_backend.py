@@ -17,8 +17,8 @@
 """The ``:itktransform`` backend: a displacement field written as an ITK transform file, by regions.
 
 ``sitk.WriteTransform`` needs the whole field resident in float64; the FILE is three HDF5 datasets
-that write by regions. Both write paths must be the same file to ITK's reader — same type, fixed
-parameters and parameters, exactly — and an entry must read back through ``Dataset.read_transform``
+that write by regions. Both write paths must be the same file to ITK's reader (same type, fixed
+parameters and parameters, exactly), and an entry must read back through ``Dataset.read_transform``
 as the transform it stores."""
 
 from pathlib import Path
@@ -68,7 +68,7 @@ def test_the_whole_write_is_the_file_sitk_would_have_written(tmp_path: Path) -> 
 
 
 def test_the_streamed_write_is_the_same_file(tmp_path: Path) -> None:
-    """Region by region, without the field ever whole in RAM — and the same bytes of parameters."""
+    """Region by region, without the field ever whole in RAM, and the same bytes of parameters."""
     field = _field(1)
     dataset = Dataset(tmp_path / "out", "itktransform")
     stream = dataset.open_data_stream("Transform", "P000", [3, 4, 5, 6], np.dtype("float32"), _attributes())
@@ -159,7 +159,7 @@ def test_rewriting_a_tfm_entry_lands_on_the_h5_name(tmp_path: Path) -> None:
 
 
 def test_a_stepped_region_read_honours_the_leading_axis_step(tmp_path: Path) -> None:
-    """The row span is read whole and the step subsamples it — same values as slicing the whole."""
+    """The row span is read whole and the step subsamples it: same values as slicing the whole."""
     field = _field(5)
     dataset = Dataset(tmp_path / "out", "itktransform")
     dataset.write("Transform", "P000", field, _attributes())
@@ -171,7 +171,7 @@ def test_a_stepped_region_read_honours_the_leading_axis_step(tmp_path: Path) -> 
 
 
 def test_a_region_read_decodes_only_its_rows_and_matches_the_whole(tmp_path: Path) -> None:
-    """The parameters are HDF5, so a slab reads the span it maps to — same values as the whole."""
+    """The parameters are HDF5, so a slab reads the span it maps to: same values as the whole."""
     field = _field(3)
     dataset = Dataset(tmp_path / "out", "itktransform")
     dataset.write("Transform", "P000", field, _attributes())
@@ -186,7 +186,7 @@ def test_a_region_read_decodes_only_its_rows_and_matches_the_whole(tmp_path: Pat
 def test_a_transform_dataset_resolves_as_a_run_input(tmp_path: Path) -> None:
     """What a run writes, a run can read back.
 
-    ``itktransform`` is a backend token, not a suffix — an entry is ``<group>.h5``, and no path is
+    ``itktransform`` is a backend token, not a suffix: an entry is ``<group>.h5``, and no path is
     ever named ``.itktransform``. Validating a spec against the extensions alone rejected the very
     format the write side had just produced.
     """
@@ -209,7 +209,7 @@ def test_a_transform_dataset_resolves_as_a_run_input(tmp_path: Path) -> None:
 def test_without_h5py_the_backend_names_the_extra_to_install(tmp_path: Path, monkeypatch) -> None:
     """The parameters are touched region by region through h5py, so it is a requirement, not a
     preference: a peak memory that turns on whether an optional import succeeded is one nobody can
-    size. The ``h5`` backend has always demanded it — this says so out loud."""
+    size. The ``h5`` backend has always demanded it: this says so out loud."""
     monkeypatch.setattr("konfai.utils.dataset.h5py", None)
 
     with pytest.raises(DatasetManagerError, match="h5py"):

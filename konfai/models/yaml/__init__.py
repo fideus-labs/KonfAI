@@ -17,7 +17,7 @@
 """Shipped YAML architecture catalog.
 
 Each ``.yml`` here is a declarative KonfAI model built by ``utils/model_builder`` (curated
-registry only — no code execution). Reference one from any config with
+registry only: no code execution). Reference one from any config with
 ``classpath: default|<Name>.yml``. Every catalog entry is locked by a structural test
 (state_dict keys/shapes, routing table, forward behaviour).
 """

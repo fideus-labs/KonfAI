@@ -1,7 +1,7 @@
 # Schedulers
 
 KonfAI has **two distinct scheduler families**, resolved by different loaders.
-Don't confuse them. Use this page when filling in a `schedulers:` block — first
+Don't confuse them. Use this page when filling in a `schedulers:` block: first
 check *which* of the two blocks you are in, then pick a name from the matching
 table.
 
@@ -22,11 +22,9 @@ CrossEntropyLoss:
 | `Constant` | Fixed weight for all iterations. | `value=1` (+ `nb_step`) |
 | `CosineAnnealing` | Cosine anneal from `start_value` to `eta_min` over `t_max`. | `start_value=1, eta_min=1e-5, t_max=100` (+ `nb_step`) |
 
-```{note}
 Each entry carries an `nb_step` (window width). Multiple schedulers can be
 **chained** into consecutive iteration windows; an `nb_step: 0` (or `None`)
 window is the terminal, always-on schedule.
-```
 
 ## B. Learning-rate schedulers
 
@@ -45,12 +43,10 @@ schedulers:
 | `Warmup` | Linear LR warmup wrapper (`LambdaLR`). | `warmup_steps=10, last_epoch=-1` (+ `nb_step`) |
 | `PolyLRScheduler` | nnU-Net-style polynomial LR decay `lr = initial_lr·(1 − step/max_steps)^exponent`. | `initial_lr` (**required**), `max_steps` (**required**), `exponent=0.9` (+ `nb_step`) |
 
-```{note}
-The `optimizer` itself is injected by the framework — you do not write it under
+The `optimizer` itself is injected by the framework, you do not write it under
 `schedulers:`.
-```
 
 ## Next steps
 
-- {doc}`losses-metrics` — where the weight schedulers live
-- {doc}`../../config_guide/training` — the `optimizer:` / `schedulers:` blocks
+- {doc}`losses-metrics`: where the weight schedulers live
+- {doc}`../../config_guide/training`: the `optimizer:` / `schedulers:` blocks

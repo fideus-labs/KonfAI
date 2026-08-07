@@ -58,7 +58,7 @@ from konfai.utils.errors import TransformError
 
 
 def test_onehot_inverse_argmaxes_the_class_axis_batched_and_unbatched() -> None:
-    # The inverse must argmax the axis sized num_classes -- the channel axis -- never a batch or spatial
+    # The inverse must argmax the axis sized num_classes (the channel axis), never a batch or spatial
     # axis. The predictor feeds a per-sample [num_classes, *spatial] (output[i]); a batched
     # [B, num_classes, *spatial] must work too.
     one_hot = OneHot(num_classes=4)
@@ -128,7 +128,7 @@ def _dense_cube_dilation(tensor: torch.Tensor, dilate: int) -> torch.Tensor:
 @pytest.mark.parametrize("shape", [(1, 24, 30), (2, 12, 20, 18)])
 def test_dilate_separable_matches_dense_cube(shape: tuple[int, ...], dilate: int) -> None:
     # The separable 1-D max-pool implementation must be bit-identical to the dense k**n cube it replaces,
-    # for both [C,H,W] and [C,D,H,W] inputs and several radii — this is the correctness guarantee that
+    # for both [C,H,W] and [C,D,H,W] inputs and several radii: this is the correctness guarantee that
     # lets the ~14x speedup ship as a transparent optimization.
     torch.manual_seed(0)
     mask = (torch.rand(shape) > 0.7).to(torch.uint8)
@@ -195,7 +195,7 @@ def test_norm_transform_shape_drops_trailing_axis() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# Squeeze — transform_shape must track which axis squeeze() drops, so the patch grid folds it
+# Squeeze: transform_shape must track which axis squeeze() drops, so the patch grid folds it
 # --------------------------------------------------------------------------------------
 
 
@@ -218,7 +218,7 @@ def test_squeeze_non_singleton_axis_is_a_no_op() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# Crop — transform_shape predicts the spatial crop exactly (patch planning depends on it)
+# Crop: transform_shape predicts the spatial crop exactly (patch planning depends on it)
 # --------------------------------------------------------------------------------------
 
 
@@ -230,7 +230,7 @@ def test_crop_transform_shape_matches_spatial_crop() -> None:
 
     out = Crop().transform_shape("CT", "CASE_001", [10, 20, 30], attribute)
 
-    # 10-2-3, 20-1-1, 30-4-2 — each spatial axis cropped by its own box row.
+    # 10-2-3, 20-1-1, 30-4-2, each spatial axis cropped by its own box row.
     assert out == [5, 18, 24]
 
 
@@ -258,7 +258,7 @@ def test_standardize_explicit_per_channel_stats():
 
 
 # --------------------------------------------------------------------------------------
-# Padding — origin bookkeeping
+# Padding: origin bookkeeping
 # --------------------------------------------------------------------------------------
 
 
@@ -487,7 +487,7 @@ def test_konfai_inference_raises_clear_error_inside_daemon_workers(monkeypatch: 
 
 def test_konfai_inference_forwards_config_overrides_to_the_nested_run(monkeypatch: pytest.MonkeyPatch) -> None:
     # The nested run is tunable from the calling code via the generic --set mechanism (not for shrinking a
-    # trained patch_size -- that hurts the result -- but for any legitimate config knob).
+    # trained patch_size (that hurts the result), but for any legitimate config knob).
     konfai_apps = pytest.importorskip("konfai_apps")
     recorded: dict[str, object] = {}
 
@@ -606,7 +606,7 @@ _OBLIQUE = np.asarray(
     ]
 )
 # A direction is orthonormal by definition, not by construction. None of these is, so none of them
-# is a bijection on the voxels -- and each wears one half of a signed permutation's disguise.
+# is a bijection on the voxels, and each wears one half of a signed permutation's disguise.
 # Mixes two axes at unit weight: the column sums to 1 exactly as a permutation's does, and only its
 # flattened peak refuses it.
 _SHEARING = _LPS @ np.linalg.inv(np.asarray([[0.5, 0.0, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 1.0]]))
@@ -660,7 +660,7 @@ def test_canonical_is_the_exact_index_remap_bit_for_bit(direction: np.ndarray, e
 def test_canonical_is_a_bijection_on_the_voxels(direction: np.ndarray) -> None:
     # The whole claim, stated as strongly as it can be: reorienting only moves values, so the sorted
     # multiset of them is bit-for-bit the input's. This is what LocalityKind.preserves_statistics lets a
-    # later GLOBAL_STAT trust, and it is strictly stronger than comparing statistics -- a sampled
+    # later GLOBAL_STAT trust, and it is strictly stronger than comparing statistics: a sampled
     # reorientation can leave a statistic looking right while having moved the values under it.
     volume = _ct_like_volume()
 
@@ -673,7 +673,7 @@ def test_canonical_is_a_bijection_on_the_voxels(direction: np.ndarray) -> None:
     assert torch.std(out) == torch.std(volume)
     # A mean does depend on it: float addition is not associative, so summing the SAME multiset along a
     # mirrored axis can land an ulp from summing it along the original one. That is the reduction's
-    # traversal, not the remap -- reduced in one order, or in a width the order cannot reach, it is 0.
+    # traversal, not the remap: reduced in one order, or in a width the order cannot reach, it is 0.
     assert torch.mean(out.double()) == torch.mean(volume.double())
 
 
@@ -681,7 +681,7 @@ def test_canonical_is_a_bijection_on_the_voxels(direction: np.ndarray) -> None:
 def test_canonical_round_trips_exactly(direction: np.ndarray) -> None:
     # inverse() undoes a remap with a remap: an exact forward paired with a sampled inverse would put
     # the interpolation error back at prediction time, where the inverse is what the user is handed.
-    # It restores the source EXTENT as well as the values -- a permutation transposed it on the way out.
+    # It restores the source EXTENT as well as the values: a permutation transposed it on the way out.
     volume = _ct_like_volume()
     attributes = _canonical_attributes(direction)
     transform = Canonical()
@@ -714,8 +714,8 @@ def test_canonical_records_the_canonical_geometry_from_the_volume_extent() -> No
 
 def test_canonical_permuting_records_the_grid_the_remap_lands_on() -> None:
     # An extent and a spacing travel with the axis they belong to, so swapping physical x and z carries
-    # the z spacing onto x. What the reorientation preserves is the physical extent -- the volume's
-    # centre is fixed -- so the origin is that centre stepped back by the TARGET half-extent.
+    # the z spacing onto x. What the reorientation preserves is the physical extent: the volume's
+    # centre is fixed, so the origin is that centre stepped back by the TARGET half-extent.
     attributes = _canonical_attributes(_PERMUTING)
 
     Canonical()("case", _ct_like_volume(), attributes)
@@ -742,7 +742,7 @@ def test_canonical_permuting_records_the_grid_the_remap_lands_on() -> None:
 )
 def test_canonical_folds_the_patch_grid_onto_the_extent_it_produces(direction: np.ndarray, expected: list[int]) -> None:
     # The patch grid is folded from transform_shape, so a permuting case's patches are cut on the grid
-    # this returns -- which is only the right grid if it is the extent __call__ actually produces.
+    # this returns, which is only the right grid if it is the extent __call__ actually produces.
     transform = Canonical()
     attributes = _canonical_attributes(direction)
 
@@ -769,7 +769,7 @@ def test_canonical_shape_fold_leaves_the_case_metadata_alone() -> None:
     [
         (_RAS, LocalityKind.ORIENTATION),
         (_LPS, LocalityKind.ORIENTATION),
-        # Permuting is an exact remap too -- onto a grid of its own, which the patch grid is folded onto.
+        # Permuting is an exact remap too: onto a grid of its own, which the patch grid is folded onto.
         (_PERMUTING, LocalityKind.ORIENTATION),
         # Genuinely mixes axes: no remap reproduces it, so it is resampled from the whole volume.
         (_OBLIQUE, LocalityKind.WHOLE_VOLUME),
@@ -815,8 +815,8 @@ def test_a_half_cast_moves_a_ct_value() -> None:
 def test_reduce_refuses_a_grid_policy_that_names_nothing(grid: str) -> None:
     """``reference:`` alone passes a prefix test and names no case.
 
-    Accepted, it is diagnosed much later by the reduction engine -- as a case that is not being
-    reduced, which is not what went wrong -- after every member's manager has been built.
+    Accepted, it is diagnosed much later by the reduction engine (as a case that is not being
+    reduced, which is not what went wrong) after every member's manager has been built.
     """
     with pytest.raises(TransformError, match="grid policy"):
         Reduce(operator="konfai.data.reduction:Mean", output="template", grid=grid)

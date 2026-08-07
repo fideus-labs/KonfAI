@@ -29,10 +29,10 @@ export default function Login({ onAuthed }: { onAuthed: () => void }) {
           onAuthed();
           return;
         }
-        setErr("Signed in, but the session cookie wasn't stored — are you on HTTPS? (see studio/docs/REMOTE.md)");
+        setErr("Signed in, but the session cookie wasn't stored: are you on HTTPS? (see studio/docs/REMOTE.md)");
         return;
       }
-      setErr(r.status === 401 ? "That access token isn't right." : "Sign-in failed — try again.");
+      setErr(r.status === 401 ? "That access token isn't right." : "Sign-in failed: try again.");
     } catch {
       setErr("Can't reach the server.");
     } finally {

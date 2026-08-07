@@ -19,7 +19,7 @@ type Msg =
 let nextId = 1;
 
 // Chat transcripts persist per task so a page reload keeps the conversation (the agent, still running
-// server-side, keeps its own context). Local, single-user — localStorage is enough.
+// server-side, keeps its own context). Local, single-user: localStorage is enough.
 const storeKey = (session: string) => `konfai-studio:chat:${session}`;
 
 // Experiment ids are reused (a deleted experiment-1 frees the id), and the draft always reuses "__new__",
@@ -28,7 +28,7 @@ export function clearChat(session: string): void {
   try {
     localStorage.removeItem(storeKey(session));
   } catch {
-    /* localStorage unavailable — nothing persisted anyway */
+    /* localStorage unavailable: nothing persisted anyway */
   }
 }
 
@@ -116,7 +116,7 @@ function DevicePicker({ device, gpus, onDevice }: { device: string; gpus: number
 }
 
 const attachPrompt = (ref: string) =>
-  `I'm attaching the file at ${ref} as context for this experiment. Read it and tell me what it contains and how it applies to my task. If it's a research paper, reproduce its method as a KonfAI experiment — author the config and explain your choices, validate it, but don't launch training until I confirm.`;
+  `I'm attaching the file at ${ref} as context for this experiment. Read it and tell me what it contains and how it applies to my task. If it's a research paper, reproduce its method as a KonfAI experiment: author the config and explain your choices, validate it, but don't launch training until I confirm.`;
 
 export default function Chat({
   session,
@@ -185,7 +185,7 @@ export default function Chat({
   useEffect(() => () => ctrlRef.current?.abort(), []);
 
   // The transcript in localStorage is per device: an experiment driven in another browser shows empty
-  // here. The server records every turn it streams — more turns than this browser has seen means its
+  // here. The server records every turn it streams: more turns than this browser has seen means its
   // copy wins; otherwise the local one is at least as complete and richer.
   useEffect(() => {
     let stale = false;
@@ -222,7 +222,7 @@ export default function Chat({
     try {
       localStorage.setItem(storeKey(session), JSON.stringify(messages.slice(-200)));
     } catch {
-      /* quota / private mode — degrade silently */
+      /* quota / private mode: degrade silently */
     }
   }, [session, messages]);
 
@@ -237,7 +237,7 @@ export default function Chat({
         if (d.moves?.length) setNextPrompts(d.moves);
       })
       .catch(() => {
-        /* a task with no workspace yet — the starters cover it */
+        /* a task with no workspace yet: the starters cover it */
       });
     return () => {
       cancelled = true;
@@ -262,14 +262,14 @@ export default function Chat({
     const text = (override ?? input).trim();
     if (!text) return;
     if (busyRef.current) {
-      // Typing while it works is a correction — "not that checkpoint", "stop after this one" — so the
+      // Typing while it works is a correction ("not that checkpoint", "stop after this one"), so the
       // turn is cut short and the correction goes in as the next one. A tool already in flight still
       // finishes; if the backend cannot interrupt, this simply waits for the turn to end.
       queued.current.push(text);
       if (override === undefined) setInput("");
       setMessages((prev) => [...prev, { id: nextId++, role: "user", text }]);
       postJson("/api/chat/interrupt", { session }).catch(() => {
-        /* nothing to interrupt, or a backend without the channel — the queue covers it */
+        /* nothing to interrupt, or a backend without the channel: the queue covers it */
       });
       return;
     }
@@ -335,7 +335,7 @@ export default function Chat({
       onVolume?.(ev.path as string, (ev.compare as string | null) ?? null);
     } else if (type === "done") {
       // The agent has finished; what still comes down this stream (the title) is a side call nobody is
-      // waiting on. Both flags clear together — releasing only the visible one left the composer open
+      // waiting on. Both flags clear together: releasing only the visible one left the composer open
       // while `send` still believed a turn was running, so a message typed here was queued behind the
       // side call AND fired an interrupt at an agent that had already stopped.
       busyRef.current = false;
@@ -363,7 +363,7 @@ export default function Chat({
 
   // Accept anything dropped and route it to the LLM. A local folder becomes a dataset; a local file
   // (paper, config) is attached; a URL / arXiv id goes through the read-and-reproduce flow; any other
-  // text — a link, a note, a snippet — is dropped into the composer so it rides the next message.
+  // text (a link, a note, a snippet) is dropped into the composer so it rides the next message.
   async function stat(path: string): Promise<{ exists: boolean; is_dir: boolean }> {
     try {
       return await getJson<{ exists: boolean; is_dir: boolean }>(`/api/stat?path=${encodeURIComponent(path)}`);
@@ -392,12 +392,12 @@ export default function Chat({
     setInput((v) => (v ? `${v}\n${raw}` : raw));
   }
 
-  // Voice dictation via the browser's Web Speech API — no dependency, nothing leaves the device
+  // Voice dictation via the browser's Web Speech API: no dependency, nothing leaves the device
   // beyond the browser's own speech service. Absent on unsupported browsers, so the mic is hidden.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const SpeechRecognition = (typeof window !== "undefined" && ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)) || null;
   // Browsers grant the microphone only on secure origins (https or localhost). Over plain http on a
-  // LAN IP the API is present and the permission auto-denied — a clickable mic that silently fails.
+  // LAN IP the API is present and the permission auto-denied: a clickable mic that silently fails.
   const micUsable = Boolean(SpeechRecognition) && typeof window !== "undefined" && window.isSecureContext;
 
   function toggleDictation() {
@@ -421,7 +421,7 @@ export default function Chat({
       rec.onerror = (e: any) => {
         setListening(false);
         if (e?.error === "not-allowed" || e?.error === "service-not-allowed")
-          setInput((v) => v || "(microphone blocked — allow mic access for this page)");
+          setInput((v) => v || "(microphone blocked: allow mic access for this page)");
       };
       rec.onend = () => setListening(false);
       recRef.current = rec;
@@ -512,7 +512,7 @@ export default function Chat({
           // the prompt (hover shows it).
           // `done` releases the composer before the server has finished the turn and sent the moves, so
           // for that moment there are none. On an experiment that has already answered, the starters are
-          // not what comes next — an empty bar for an instant beats two wrong buttons.
+          // not what comes next: an empty bar for an instant beats two wrong buttons.
           const shown = nextPrompts.length ? nextPrompts : messages.length ? [] : STARTERS;
           return (
             <div className="suggest">
@@ -547,12 +547,12 @@ export default function Chat({
           }}
           placeholder="Describe a task…  (Enter to send, Shift+Enter for newline)"
         />
-        {dragOver && <div className="drag-hint">Drop anything — a dataset, a paper, a link or notes</div>}
+        {dragOver && <div className="drag-hint">Drop anything: a dataset, a paper, a link or notes</div>}
         <div className="composer-bar">
           <button
             className="cbtn"
             onClick={() => setAttaching((a) => !a)}
-            title="Add files — paper, config, notes"
+            title="Add files: paper, config, notes"
             aria-label="Add files"
           >
             +
@@ -568,7 +568,7 @@ export default function Chat({
                 {llm.brains.map((b) => (
                   <option key={b.id} value={b.id} disabled={!b.available}>
                     {b.label}
-                    {b.available ? "" : " — unavailable"}
+                    {b.available ? "" : ": unavailable"}
                   </option>
                 ))}
               </select>
@@ -605,8 +605,8 @@ export default function Chat({
                     ? "Stop dictation"
                     : "Dictate"
                   : SpeechRecognition
-                    ? "The browser only allows the microphone on https or localhost — open Studio as localhost (an SSH tunnel does) to dictate"
-                    : "Dictation needs the Web Speech API — use Chrome, Chromium or Edge"
+                    ? "The browser only allows the microphone on https or localhost: open Studio as localhost (an SSH tunnel does) to dictate"
+                    : "Dictation needs the Web Speech API: use Chrome, Chromium or Edge"
               }
               aria-label="Dictate"
             >

@@ -62,7 +62,7 @@ def test_debug_exit_block_raises_runtime_error() -> None:
 def test_clip_normalize_is_the_identity_until_a_checkpoint_states_it() -> None:
     # A checkpoint fills the four scalars and a model is built before one is loaded. Left as
     # uninitialised memory they can hold clip_min above clip_max, so the clamp flattens every input
-    # onto one value and the node returns zeros for anything -- silently, with no NaN to notice.
+    # onto one value and the node returns zeros for anything: silently, with no NaN to notice.
     from konfai.network.blocks import ClipNormalize
 
     volume = torch.tensor([[-1000.0, 0.0, 1000.0]])
@@ -94,7 +94,7 @@ def test_multi_head_self_attention_rejects_zero_heads() -> None:
 
 def test_resnet_basic_block_rejects_a_downsample_it_cannot_honour() -> None:
     # Disabling the projection while the block changes channel count leaves the residual Add two
-    # tensors of different shapes -- a graph built to crash, caught here at construction instead.
+    # tensors of different shapes: a graph built to crash, caught here at construction instead.
     with pytest.raises(ValueError, match="downsample=False"):
         ResNetBasicBlock(8, 16, dim=2, downsample=False)
 

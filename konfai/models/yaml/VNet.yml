@@ -14,7 +14,7 @@
 #
 # This file is assembled from the curated KonfAI model-builder registry only
 # (Conv / ConvTranspose / BatchNorm / PReLU / Dropout / Concat / Add / ConvBlock
-# / Softmax / ArgMax) — it executes no arbitrary Python.
+# / Softmax / ArgMax): it executes no arbitrary Python.
 #
 # Use it as a model classpath:  `classpath: default|VNet.yml`  (or VNet.yml).
 #

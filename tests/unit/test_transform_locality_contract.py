@@ -19,13 +19,13 @@
 Patch streaming is an optimisation, so it must be semantically invisible: a stage DECLARES how its
 output depends on its input (``patch_locality``) and the dispatcher reads only the source region that
 declaration allows. For every stage declaring a streamable kind, the streamed patch must therefore equal
-the whole-volume result cut on the same grid -- proven here for EVERY built-in transform AND every
+the whole-volume result cut on the same grid: proven here for EVERY built-in transform AND every
 built-in augmentation, on a real on-disk dataset, over the full patch grid.
 
 Both are ENUMERATED from their module and selected by their own declaration, so a newly declared
 streamable stage is covered the day it lands. The case tables never decide coverage: they supply
 constructor arguments, and a fixture group, where a stage's defaults are not a meaningful streaming
-case, and -- for an augmentation, whose declaration is about a draw rather than a config -- the kind
+case, and (for an augmentation, whose declaration is about a draw rather than a config) the kind
 that draw must produce.
 
 The declaration is handed the case's metadata, so it is asked here exactly as the dispatcher asks it --
@@ -108,7 +108,7 @@ _PEAK = 450.0
 # reads and does the same arithmetic on them. Two kinds legitimately round differently:
 #
 # - the seeded statistic: streaming seeds Mean/Std from `read_data_statistics` (a numpy pass over the
-#   stored volume) while the whole-volume path recomputes them with torch over the loaded tensor -- the
+#   stored volume) while the whole-volume path recomputes them with torch over the loaded tensor: the
 #   same values summed in a different order, so a standardized (unit-scale) voxel may land a few
 #   float32 ulps away. Data-dependent: this fixture happens to agree exactly, a smooth field showed
 #   1.5e-8 (0.13 ulp), so the bound is stated rather than observed.
@@ -116,7 +116,7 @@ _STAT_ATOL = 8 * float(np.finfo(np.float32).eps)
 # - a streamed regrid through a map that does NOT factorise (a field, a rotation): its blend goes to
 #   grid_sample, which takes normalised coordinates and so expresses them in the read sub-region's
 #   frame rather than the whole volume's. Both round to float32, so a weight lands ~ulp(coordinate)
-#   off and the interpolated voxel lands `neighbour gap * ulp(coordinate)` off -- the deviation
+#   off and the interpolated voxel lands `neighbour gap * ulp(coordinate)` off: the deviation
 #   scales with the local GRADIENT, not with the voxel's own magnitude. The fixture's gap is its
 #   2*_PEAK bone/air step, which puts the bound at ulps of _PEAK; 64 of them is ~8x the measured max
 #   and stays far below one part per million of the range. A map that DOES factorise is read one axis
@@ -181,7 +181,7 @@ _CASES: dict[str, list[_Case]] = {
         # bit for bit or not at all.
         _Case(Resample(reference=_CASE_NAME, reference_group="Reference")),
         _Case(Resample(reference=_CASE_NAME, reference_group="Reference"), group="Labels"),
-        # Through a field the map does not factorise, so the blend goes to grid_sample -- which
+        # Through a field the map does not factorise, so the blend goes to grid_sample: which
         # normalises by the extent it is handed, and a patch is handed a window. That is the one
         # place a streamed answer is not bit-identical to the whole-volume one, and the atol says so.
         _Case(
@@ -191,7 +191,7 @@ _CASES: dict[str, list[_Case]] = {
         # A stored map never factorises: the grid_sample path again.
         _Case(Resample(transforms={"transform": True}), atol=_REGRID_ATOL),
         # A field on disk this registry cannot build: the streamed-equals-whole proof lives in
-        # test_warp.py, where a field exists -- including the measured, bound-less windows.
+        # test_warp.py, where a field exists: including the measured, bound-less windows.
         _Case(Resample(field="Dataset:h5", field_group="DVF"), sweep=False),
     ],
     "Save": [_Case(Save("Dataset"))],
@@ -212,8 +212,8 @@ _CASES: dict[str, list[_Case]] = {
 }
 
 
-# An axis-aligned direction, one that permutes physical x and z -- what a sagittal acquisition carries
-# -- and a rotated one; all orthonormal (a stored volume has no other kind). The first two make a
+# An axis-aligned direction, one that permutes physical x and z (what a sagittal acquisition carries)
+# and a rotated one; all orthonormal (a stored volume has no other kind). The first two make a
 # reorientation an exact index remap, which is what an image-dependent declaration keys on; the third
 # does not. The permuting one transposes the extents it swaps, so it also moves the patch grid.
 _AXIS_ALIGNED = np.eye(len(_SPATIAL))
@@ -257,7 +257,7 @@ def _volumes() -> dict[str, np.ndarray]:
         # Stored with the foreground box already on it, which is how a crop is a translation rather
         # than a question about the voxels.
         "Boxed": intensity.astype(np.float32)[None],
-        # A grid of its OWN -- other extent, other spacing, other origin -- for a stage that resamples
+        # A grid of its OWN (other extent, other spacing, other origin), for a stage that resamples
         # onto a reference rather than about the case's own extent. Only its header is ever read.
         "Reference": rng.standard_normal(_REFERENCE_SPATIAL).astype(np.float32)[None],
         # A displacement field, component-first in physical (x, y, z), each component a different
@@ -273,7 +273,7 @@ def _volumes() -> dict[str, np.ndarray]:
 
 
 def _attributes(group: str) -> Attribute:
-    """The metadata a group is stored with -- and so what a declaration about it is handed."""
+    """The metadata a group is stored with, and so what a declaration about it is handed."""
     attributes = Attribute()
     origins = {"Reference": [-1.0, 6.0, 12.0], "Field": [-4.0, 4.0, 10.0]}
     spacings = {"Reference": _REFERENCE_SPACING, "Field": _FIELD_SPACING}
@@ -286,7 +286,7 @@ def _attributes(group: str) -> Attribute:
         attributes["number_of_channels_per_model"] = np.asarray([3, 3, 3])
     if group == "Boxed":
         # What Crop.transform_shape leaves on the case: [start, after] margins per spatial axis.
-        # Both margins differ on every axis -- a box symmetric anywhere is one a wrong sign or a
+        # Both margins differ on every axis: a box symmetric anywhere is one a wrong sign or a
         # reversed axis order would still land on.
         attributes["box"] = _BOX
     return attributes
@@ -336,14 +336,14 @@ def _cases_of(cls: type[Transform]) -> list[_Case]:
     except TransformError:
         # A transform can carry a default for every parameter and still refuse the combination:
         # `Reduce` defaults `output` to "" and rejects it, because a reduction has no case name to
-        # inherit. Such a transform cannot be exercised from its defaults -- it belongs in the table
+        # inherit. Such a transform cannot be exercised from its defaults, it belongs in the table
         # above, or nowhere. Enumerating it here turned that refusal into a collection error, which
         # takes the whole file down rather than skipping one transform.
         return []
 
 
 def _kind_of(case: _Case) -> LocalityKind:
-    """What a case declares about the group it consumes -- asked exactly as the dispatcher asks it."""
+    """What a case declares about the group it consumes: asked exactly as the dispatcher asks it."""
     return case.transform.patch_locality(_attributes(case.group)).kind
 
 
@@ -363,7 +363,7 @@ def _streamable_cases() -> list[_Case]:
 
 def _manager(dataset: Dataset, case: _Case) -> DatasetManager:
     # What a run does before it builds a manager (Data.prepare): a stage that reads a SECOND entry --
-    # a mask, a field, a reference grid -- is handed the roots to find it in.
+    # a mask, a field, a reference grid: is handed the roots to find it in.
     case.transform.set_datasets([dataset])
     return DatasetManager(
         index=0,
@@ -378,7 +378,7 @@ def _manager(dataset: Dataset, case: _Case) -> DatasetManager:
 
 
 def test_every_builtin_transform_is_covered() -> None:
-    # A transform this file cannot construct is skipped silently -- and a skipped WHOLE_VOLUME
+    # A transform this file cannot construct is skipped silently, and a skipped WHOLE_VOLUME
     # declaration is exactly how a wrong one would hide. Give it a _CASES entry instead.
     uncovered = [cls.__name__ for cls in _builtin_transforms() if not _cases_of(cls)]
     assert uncovered == []
@@ -387,7 +387,7 @@ def test_every_builtin_transform_is_covered() -> None:
 def test_no_declaration_writes_to_the_case_metadata() -> None:
     # READ-ONLY, checked. A declaration is made once for the whole case, so a value it wrote would be
     # one patch's answer imposed on every other. The dispatcher hands over a copy, which contains the
-    # damage but also hides it -- so the rule is worth stating where it can actually be seen.
+    # damage but also hides it, so the rule is worth stating where it can actually be seen.
     for cls in _builtin_transforms():
         for case in _cases_of(cls):
             attribute = _attributes(case.group)
@@ -420,7 +420,7 @@ def test_streamed_patch_equals_whole_volume(case: _Case, dataset: Dataset) -> No
     streamed = _manager(dataset, case)
     reference = _manager(dataset, case)
     # `load` runs the transform over the whole volume; `get_data` then cuts the patch out of the result.
-    # The other manager never loads, so the same `get_data` call streams instead -- same public entry
+    # The other manager never loads, so the same `get_data` call streams instead: same public entry
     # point, same patch grid, and the declaration alone decides which path runs.
     reference.load([case.transform], [])
     assert reference.loaded
@@ -435,7 +435,7 @@ def test_streamed_patch_equals_whole_volume(case: _Case, dataset: Dataset) -> No
 
 
 class _FlipIfAxisAligned(Flip):
-    """A reorientation that is a flip only when the case says so -- the declaration no config can make.
+    """A reorientation that is a flip only when the case says so: the declaration no config can make.
 
     Whether reorienting to canonical is a flip (streamable) or a resample (not) is decided by the
     direction cosines the case was stored with, so it can only be answered from ``cache_attribute``.
@@ -465,7 +465,7 @@ def test_a_declaration_is_total_on_absent_metadata() -> None:
     """A declaration must answer for any case, including one whose metadata it cannot find.
 
     The config-time patch_transform checks probe with exactly this, and a group carries only what its
-    writer stored -- so the missing key has to fall to the safe kind rather than raise.
+    writer stored, so the missing key has to fall to the safe kind rather than raise.
     """
     assert _FlipIfAxisAligned("0").patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
 
@@ -475,7 +475,7 @@ def test_the_dispatcher_honours_an_image_dependent_declaration(dataset: Dataset,
     """End to end: the same transform streams, or falls back, on the METADATA of the case it is given.
 
     Both groups hold the same voxels and the same config, and differ only in the Direction they are
-    stored with -- so nothing but the declaration can decide the path, and the dispatcher must be
+    stored with, so nothing but the declaration can decide the path, and the dispatcher must be
     reading it from the case rather than from the transform.
     """
     assert _manager(dataset, _Case(_FlipIfAxisAligned("0"), group=group)).can_stream_patch(0) is streams
@@ -496,7 +496,7 @@ def test_an_image_dependent_stream_equals_the_whole_volume(dataset: Dataset) -> 
 def test_a_streamed_region_records_the_whole_volume_geometry(dataset: Dataset, group: str) -> None:
     """Streaming is invisible in the METADATA too, not only in the voxels.
 
-    A reorientation rewrites the case's geometry onto the grid it lands on -- a fact about the VOLUME's
+    A reorientation rewrites the case's geometry onto the grid it lands on: a fact about the VOLUME's
     extent, while a streamed stage is only ever handed a patch. The case must come out of the streamed
     path with the geometry the whole-volume pass computes, never with the first patch's own corner
     frozen onto it, and with the same stack depth so ``inverse()`` pops what was pushed.
@@ -514,13 +514,13 @@ def test_a_streamed_region_records_the_whole_volume_geometry(dataset: Dataset, g
 
 
 # --------------------------------------------------------------------------------------
-# The augmentations. Same contract, same property -- asked of a draw rather than a config.
+# The augmentations. Same contract, same property: asked of a draw rather than a config.
 # --------------------------------------------------------------------------------------
 
 # A HALO draw is sampled by grid_sample from coordinates expressed in the halo'd read extent's frame
 # rather than the whole volume's: the same disagreement, for the same reason and with the same
 # gradient- and coordinate-scaling, that _REGRID_ATOL bounds for the streamed resample. It is bitwise
-# on neither, and grows with the extent -- a 160^3 case at patch 64 lands at 2e-5 of its range.
+# on neither, and grows with the extent: a 160^3 case at patch 64 lands at 2e-5 of its range.
 _AUGMENTATION_ATOL = _REGRID_ATOL
 
 
@@ -542,7 +542,7 @@ class _AugmentationCase:
 
 # Every augmentation KonfAI ships, at a draw that is a meaningful streaming case: probabilities are
 # pinned so the draw always fires (a copy no draw selected is the identity, which proves nothing), and
-# a required constructor argument is given a value. The kind is what THIS draw must declare -- so a
+# a required constructor argument is given a value. The kind is what THIS draw must declare, so a
 # declaration silently retreating to WHOLE_VOLUME fails here rather than passing vacuously.
 _AUGMENTATION_CASES: dict[str, list[_AugmentationCase]] = {
     "Brightness": [_AugmentationCase(augmentation_module.Brightness(0.5), LocalityKind.POINTWISE, True)],
@@ -573,7 +573,7 @@ _AUGMENTATION_CASES: dict[str, list[_AugmentationCase]] = {
     "Rotate": [
         _AugmentationCase(augmentation_module.Rotate(a_min=10.0, a_max=10.0), LocalityKind.WHOLE_VOLUME, False),
         # A quarter draw is a signed permutation of the axes, so it is an exact remap whichever multiple
-        # of 90 degrees it lands on -- the declaration holds for every draw, not for the seed this
+        # of 90 degrees it lands on: the declaration holds for every draw, not for the seed this
         # happens to run on. The fixture is non-cubic, so 26 of its 27 draws transpose extents and cut
         # the copy on a grid the stored volume does not have.
         _AugmentationCase(augmentation_module.Rotate(is_quarter=True), LocalityKind.ORIENTATION, True),
@@ -634,7 +634,7 @@ def _augmentation_cases() -> list[_AugmentationCase]:
 
 
 def test_every_builtin_augmentation_is_covered() -> None:
-    # An augmentation absent from the table is never asked anything -- and an unasked declaration is
+    # An augmentation absent from the table is never asked anything, and an unasked declaration is
     # exactly how a wrong one would hide. Give it an entry, empty only if no draw of it can stream.
     uncovered = [cls.__name__ for cls in _builtin_augmentations() if cls.__name__ not in _AUGMENTATION_CASES]
     assert uncovered == []
@@ -653,7 +653,7 @@ def test_an_augmentation_declares_the_kind_its_draw_makes_it(case: _Augmentation
 
 
 def test_no_augmentation_declaration_writes_to_the_case_metadata(dataset: Dataset) -> None:
-    # READ-ONLY, checked -- the same rule, and the same reason, as for a transform.
+    # READ-ONLY, checked: the same rule, and the same reason, as for a transform.
     for case in _augmentation_cases():
         _augmentation_managers(dataset, case)
         attribute = _attributes(case.group)
@@ -670,7 +670,7 @@ def test_no_augmentation_declaration_writes_to_the_case_metadata(dataset: Datase
 def test_streamed_augmented_patch_equals_whole_volume(case: _AugmentationCase, dataset: Dataset) -> None:
     streamed, reference = _augmentation_managers(dataset, case)
     # `load` runs the draw over the whole volume; `get_data` then cuts the patch out of the result. The
-    # other manager never loads, so the same `get_data` call streams instead -- same public entry point,
+    # other manager never loads, so the same `get_data` call streams instead: same public entry point,
     # same patch grid, same draw, and the declaration alone decides which path runs.
     reference.load([], reference.data_augmentations_list)
     assert reference.loaded
@@ -688,7 +688,7 @@ def test_a_pointwise_augmentation_streams_the_whole_grid_after_a_transform(datas
     """A copy is its transforms AND its draw: the dispatcher plans them as one chain.
 
     A pointwise draw behind a region transform is still one region, so it streams; a region draw
-    behind a region transform makes two — and region stages compose, each pulling through the one
+    behind a region transform makes two, and region stages compose, each pulling through the one
     before it, so the pair streams too and must match the loaded copy patch for patch.
     """
     torch.manual_seed(0)
@@ -711,7 +711,7 @@ def test_a_pointwise_augmentation_streams_the_whole_grid_after_a_transform(datas
 
     resample = Resample([2.0, 1.0, 3.0])
     assert manager(resample).can_stream_patch(1) is True
-    # Two regions in one chain — the resample's, then the flip draw's — composed into one pull.
+    # Two regions in one chain (the resample's, then the flip draw's) composed into one pull.
     flip = FlipAugmentation(f_prob=[1.0, 1.0, 1.0])
     flip.load(1.0)
     augmentations.data_augmentations = [flip]

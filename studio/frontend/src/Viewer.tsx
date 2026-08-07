@@ -86,7 +86,7 @@ export default function Viewer({
     setField2(comparePath ?? "");
   }, [comparePath]);
 
-  // Escape leaves fullscreen — the whole app is covered while it's on.
+  // Escape leaves fullscreen: the whole app is covered while it's on.
   useEffect(() => {
     if (!full) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setFull(false);
@@ -131,7 +131,7 @@ export default function Viewer({
             value={field2}
             onChange={(e) => setField2(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && onComparePathChange?.(field2)}
-            placeholder="compare volume — or click one in the tree"
+            placeholder="compare volume: or click one in the tree"
           />
           <button onClick={() => onComparePathChange?.(field2)}>Load</button>
           {dims2 && <span className="v-dims">{dims2}</span>}

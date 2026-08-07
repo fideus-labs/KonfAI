@@ -45,7 +45,7 @@ class SMP(network.Network):
     """Any ``segmentation_models_pytorch`` architecture/encoder pair as a KonfAI model.
 
     ``load`` never re-initialises: SMP performs its own initialisation and the encoder may
-    carry pretrained weights (``encoder_weights='imagenet'``) — the trainer's
+    carry pretrained weights (``encoder_weights='imagenet'``): the trainer's
     ``load(init=True)`` would silently destroy them. Checkpoint loading is unaffected.
     """
 

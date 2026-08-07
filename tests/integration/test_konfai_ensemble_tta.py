@@ -211,7 +211,7 @@ def test_tta_branches_are_materialized_by_concat_sum_reduction(ensemble_experime
 
     Each TTA branch equals the model-combined mean ``(A + B) / 2``; the ``Concat`` reduction
     followed by the ``Sum`` transform therefore yields ``A + B``. If the augmented branch
-    were silently dropped (T=1), the output would be ``(A + B) / 2`` instead — off by a
+    were silently dropped (T=1), the output would be ``(A + B) / 2`` instead: off by a
     factor of two, far outside the tolerance.
     """
     for case in _case_names(ensemble_experiment["dataset_dir"]):

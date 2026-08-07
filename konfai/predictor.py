@@ -101,7 +101,7 @@ class _AsyncWriter:
     two forwards; submitting them here overlaps that tail with the next batch. The queue is bounded,
     so a slow destination back-pressures the loop instead of buffering the run; the first failure is
     kept, later operations drain unexecuted, and the failure re-raises at the next submission and at
-    ``close`` — a run never ends with a write silently missing.
+    ``close``: a run never ends with a write silently missing.
     """
 
     _CAPACITY = 4
@@ -179,7 +179,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self._attributes = dict(entry.split("=", 1) for entry in attributes or [])
         self.reduction_classpath = reduction
         self.reduction: Reduction
-        #: The per-rank budget the streamed-vs-assembled route is priced against — the config's
+        #: The per-rank budget the streamed-vs-assembled route is priced against: the config's
         #: number, pushed by the predictor, so the route is a function of configuration and data
         #: rather than of the machine's free memory at the moment a case finalizes.
         self._per_rank_budget_bytes: float | None = None
@@ -208,9 +208,9 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self._reduce_device: dict[int, torch.device] = {}
         # Disk writes go to a background writer when the destination serves disjoint files per entry
         # (see ``Dataset.concurrent_write_safe``) AND the output runs on a GPU: the device-to-host
-        # copy and the write then overlap the next forward, byte-identically — same operations, same
+        # copy and the write then overlap the next forward, byte-identically: same operations, same
         # order. A single-store destination stays inline, so nothing ever writes one store from two
-        # threads; a CPU-only loop stays inline too — its blend shares the memory bandwidth the
+        # threads; a CPU-only loop stays inline too: its blend shares the memory bandwidth the
         # writer would consume, so there is nothing to overlap and something to lose.
         # ``KONFAI_ASYNC_WRITES`` is tri-state: unset = automatic, ``0`` kills, ``1`` forces (tests).
         raw = os.environ.get("KONFAI_ASYNC_WRITES", "").lower()
@@ -306,7 +306,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
                     transform_type.append(transform)
 
         # A patch grid overlaps whether or not a combine is declared, and an undeclared one used to
-        # leave the overlap to whichever patch wrote last -- an arbitrary winner, possibly holding that
+        # leave the overlap to whichever patch wrote last: an arbitrary winner, possibly holding that
         # voxel on its own border with no context behind it, which is what a seam is. Trim keeps each
         # patch's central band instead: the bands tile the volume exactly, so the default is a seamless
         # selection that still never averages (a label map survives it).
@@ -344,7 +344,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         nb_data_augmentation: int,
     ) -> None:
         # EMPTY, not just missing: the caller drops the axes of extent 1, so a case with nothing tiled
-        # arrives as []. That is a single patch covering the volume — no combine applies, and a blend
+        # arrives as []. That is a single patch covering the volume: no combine applies, and a blend
         # window built on no axis leaves max() nothing to take.
         if patch_size and overlap is not None:
             if self.patch_combine is not None:
@@ -462,14 +462,14 @@ class _FinalizeStage:
 @dataclass(frozen=True)
 class _StreamPlan:
     """How one case streams: the post-reduction stages, split into a per-slab pointwise prefix, a
-    streamed pipe of region and pointwise stages, and — past what streaming can honour — a
+    streamed pipe of region and pointwise stages, and (past what streaming can honour) a
     whole-volume tail.
 
     ``to_sink`` streams straight into a region-write ``DataStream``; ``pipe_start`` is the first
     region stage (``None`` when the chain is pointwise throughout), and the pipe runs from there to
-    the end — region stages compose, so their number is not limited. Without ``to_sink`` the prefix
+    the end: region stages compose, so their number is not limited. Without ``to_sink`` the prefix
     streams into a post-reduction buffer and ``stages[tail_start:]`` runs once on it (the chain
-    split). The invariants: ``to_sink`` implies no tail, and a pipe implies ``to_sink`` — a tail
+    split). The invariants: ``to_sink`` implies no tail, and a pipe implies ``to_sink``: a tail
     swallows the region stages, so the buffer always sits on the accumulator grid.
     """
 
@@ -554,7 +554,7 @@ class OutSameAsGroupDataset(OutputDataset):
         self._reported_paths: set[str] = set()
         # One aligner per streamed case: the copies' accumulators emit slabs at their own pace, and
         # the finalize needs every copy's rows together (the cross-copy reduction). A single copy is
-        # simply a one-stream aligner — same path, no special case.
+        # simply a one-stream aligner: same path, no special case.
         self._aligners: dict[int, SlabAligner] = {}
 
     def add_layer(
@@ -577,7 +577,7 @@ class OutSameAsGroupDataset(OutputDataset):
             )
             # What the output declares about itself, applied over what it inherited from its input.
             # Inheritance carries the geometry, which is right, but it also carries whatever the source
-            # entry said it WAS -- and that describes the source, not this. Declared last, so the
+            # entry said it WAS, and that describes the source, not this. Declared last, so the
             # config always wins; declare a key empty to drop an inherited one.
             for key, value in self._attributes.items():
                 if value == "":
@@ -691,7 +691,7 @@ class OutSameAsGroupDataset(OutputDataset):
     @staticmethod
     def _voxel_local(locality: PatchLocality, attribute: Attribute) -> bool:
         """Whether a finalize stage is a per-voxel map here: POINTWISE, or GLOBAL_STAT whose statistic
-        the case already carries — the finalize attribute holds what the forward pass pushed, and there
+        the case already carries: the finalize attribute holds what the forward pass pushed, and there
         is no stored volume left to derive a missing one from."""
         if locality.kind is LocalityKind.POINTWISE:
             return True
@@ -706,12 +706,12 @@ class OutSameAsGroupDataset(OutputDataset):
     def _worth_streaming(self, dataset: DatasetIter, index: int, layer: torch.Tensor) -> bool:
         """Whether this case's accumulators are heavy enough for the per-slab machinery to pay:
         every copy holds a volume-sized accumulator, and when all of them together are a sliver of
-        allocatable memory (a 2.5D case) the assembled path costs nothing to hold — streaming it
+        allocatable memory (a 2.5D case) the assembled path costs nothing to hold: streaming it
         would spend pipe traversals and region writes to save nothing.
 
         ``layer`` carries the accumulator's channel count and dtype whatever the ensemble combine is
         (a Concat layer arrives already concatenated); the estimate is taken before the patch-level
-        inverses, so a dtype-widening inverse under-counts by at most 2x — inside the threshold's
+        inverses, so a dtype-widening inverse under-counts by at most 2x: inside the threshold's
         margin."""
         spatial = dataset.get_dataset_from_index(self.group_dest, index).shapes[0]
         assembled = int(layer.shape[0]) * int(np.prod(spatial)) * layer.element_size() * self.nb_data_augmentation
@@ -743,15 +743,15 @@ class OutSameAsGroupDataset(OutputDataset):
         """The streaming plan for this case, or ``None`` for the whole-volume path.
 
         The streamed part of the finalize chain is ``[pointwise*][region and pointwise stages]``:
-        region stages compose — each pulls through the one before it — so any number of geometry
-        inverses streams to the write. What streaming cannot honour — a WHOLE_VOLUME stage, a
-        statistic nothing seeded — becomes a whole-volume TAIL: the prefix still streams slab by slab
+        region stages compose (each pulls through the one before it), so any number of geometry
+        inverses streams to the write. What streaming cannot honour (a WHOLE_VOLUME stage, a
+        statistic nothing seeded) becomes a whole-volume TAIL: the prefix still streams slab by slab
         into a light post-reduction buffer and the tail runs once on that buffer. A destination that
         cannot serve region writes buffers too, and writes classically. Only a non-streamable start
         refuses outright: a reduction that is not voxel-local, a non-voxel-local before-reduction
         transform (it runs per model chunk inside the slab prefix), a TTA copy whose un-augment does
         not act slab by slab (see ``_tta_streamable``), or a case too light for the per-slab
-        machinery to pay (``_worth_streaming`` — gauged from ``layer`` when the caller has one).
+        machinery to pay (``_worth_streaming``: gauged from ``layer`` when the caller has one).
         """
         if self.nb_data_augmentation < 1:
             return None
@@ -785,8 +785,8 @@ class OutSameAsGroupDataset(OutputDataset):
             if self._voxel_local(locality, attribute):
                 continue
             if locality.kind is LocalityKind.SLAB and not stage.inverted and pipe_start is None:
-                # A per-voxel stage with a per-region side effect streams through ``stream_slab`` —
-                # but only on the accumulator grid: past a region stage the emissions are regions of
+                # A per-voxel stage with a per-region side effect streams through ``stream_slab``: # but only
+                # on the accumulator grid: past a region stage the emissions are regions of
                 # ANOTHER space, so there it falls to the tail (whose whole-volume call is its
                 # classic behaviour).
                 slab_stages.add(position)
@@ -799,7 +799,7 @@ class OutSameAsGroupDataset(OutputDataset):
             break
         if tail_start < len(stages) or not self.can_stream_data(attribute):
             # A whole-volume tail swallows the region stages too: the buffer sits on the accumulator
-            # grid, and the tail runs the true whole-volume operators on it — byte-identical for free.
+            # grid, and the tail runs the true whole-volume operators on it: byte-identical for free.
             if pipe_start is not None:
                 tail_start = min(tail_start, pipe_start)
             return _StreamPlan(stages, None, tail_start, to_sink=False, slab_stages=frozenset(slab_stages))
@@ -821,7 +821,7 @@ class OutSameAsGroupDataset(OutputDataset):
     def _unaugment(
         self, dataset: DatasetIter, index: int, index_augmentation: int, tensor: torch.Tensor
     ) -> torch.Tensor:
-        """Undo copy ``index_augmentation``'s draw on ``tensor`` — the augmentations applied in
+        """Undo copy ``index_augmentation``'s draw on ``tensor``: the augmentations applied in
         reverse, bound by the case index the draw was made under (the manager's own)."""
         draw = self._copy_draw(dataset, index_augmentation)
         if draw is None:
@@ -839,7 +839,7 @@ class OutSameAsGroupDataset(OutputDataset):
         which equals the whole-volume inverse restricted to that slab exactly when the draw maps every
         slab onto itself: a POINTWISE draw does (a per-voxel map inverts per voxel), and an
         ORIENTATION draw does when its declared region remap fixes the slab axis row for row and its
-        shape fold keeps the slab extent — probed here against ``stream_region_source``, never by
+        shape fold keeps the slab extent: probed here against ``stream_region_source``, never by
         running patches. A z-flip mirrors the rows (row 0 pulls the last), a z-moving permute
         relocates them: both fail the probe and the case falls back to the whole-volume path. Any
         other kind (a halo'd translate, a whole-volume draw) refuses outright.
@@ -930,18 +930,18 @@ class OutSameAsGroupDataset(OutputDataset):
     def _make_pipe_state(
         self, index: int, plan: _StreamPlan, in_shape: list[int], block: torch.Tensor
     ) -> _RegionState | None:
-        """Wire the case's streamed pipe into one :class:`SlabRegionStream` — or answer ``None`` for
+        """Wire the case's streamed pipe into one :class:`SlabRegionStream`: or answer ``None`` for
         the buffered tail where streaming would not be exact.
 
-        Region stages compose: the pull map folds each stage's own declaration backward — a written
+        Region stages compose: the pull map folds each stage's own declaration backward: a written
         region pulls through the last stage, whose region pulls through the one before it, down to
-        the accumulator — and ``produce`` walks the pipe forward over the pulled window, handing each
+        the accumulator, and ``produce`` walks the pipe forward over the pulled window, handing each
         stage the region pair the same fold computed for it. Pointwise stages ride along unchanged.
 
         The fold is planned by walking a one-voxel corner of the real first slab through the pipe
         with one evolving attribute: each stage declares against, and remaps from, the state the
-        stages before it left — a second resample pops the Size stack the first one already popped,
-        a reorientation after a permute reads the moved axes — and the walk carries the dtype.
+        stages before it left (a second resample pops the Size stack the first one already popped,
+        a reorientation after a permute reads the moved axes), and the walk carries the dtype.
         ``produce`` then replays the same transitions on a fresh copy per emission (the same
         slab-local scoping as the prefix).
         """
@@ -1039,7 +1039,7 @@ class OutSameAsGroupDataset(OutputDataset):
         attribute: Attribute,
         name: str,
     ) -> torch.Tensor:
-        """Run one pipe stage on its pulled block, by declared kind — never by stage name."""
+        """Run one pipe stage on its pulled block, by declared kind, never by stage name."""
         if kind is LocalityKind.CROP:
             # The pull already translated the region, so the block IS the answer. The stage still runs
             # for its attribute transition (a crop restores the origin it recorded); its tensor answer
@@ -1061,7 +1061,7 @@ class OutSameAsGroupDataset(OutputDataset):
         if kind is LocalityKind.ORIENTATION and not stage.inverted:
             # A forward orientation writes the case origin/direction from the extent it is handed; run
             # the tensor action on a throwaway scope so it does not record the SLAB's extent, then write
-            # the case geometry from the full ``in_shape`` (its documented contract) -- as REGRID does.
+            # the case geometry from the full ``in_shape`` (its documented contract): as REGRID does.
             result = stage(name, block, Attribute(attribute))
             cast(TransformInverse, stage.transform).write_stream_cache_attribute(attribute, in_shape, name)
             return result
@@ -1078,7 +1078,7 @@ class OutSameAsGroupDataset(OutputDataset):
         """Write one finalized output block into the case's sink (opened at the first block, once the
         chain has fixed the output's shape, channel count and dtype).
 
-        The whole write — device-to-host copy, lazy sink open, region write — is one submitted
+        The whole write (device-to-host copy, lazy sink open, region write) is one submitted
         operation, so ``_stream_sinks`` is only ever touched in submission order; the attribute is
         snapshotted because the region state's evolves with later emissions."""
         state = self._region_states.get(index)
@@ -1135,7 +1135,7 @@ class OutSameAsGroupDataset(OutputDataset):
         spatial: list[int],
     ) -> torch.Tensor:
         """One copy's slab through the per-copy head of ``_get_output``: un-augment it (exact on a
-        slab — the gate admitted only slab-parallel draws), split the model chunks, run
+        slab: the gate admitted only slab-parallel draws), split the model chunks, run
         before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block. A SLAB
         before-reduction transform learns where the slab sits through ``stream_slab`` (the accumulator
         grid, where before_reduction runs), so it reads its slab region instead of the whole volume."""
@@ -1169,7 +1169,7 @@ class OutSameAsGroupDataset(OutputDataset):
 
         Every prefix stage passed the gate as voxel-local (a SLAB stage additionally learns where the
         slab sits, through ``stream_slab``) and every copy as slab-parallel, so each step is the
-        whole-volume computation restricted to the slab — same ops, same order, same reduction call —
+        whole-volume computation restricted to the slab (same ops, same order, same reduction call)
         which is what makes the streamed output byte-identical. Each slab gets its own copy of the
         case attribute (transform writes stay slab-local, and case-level pops repeat identically per
         slab).
@@ -1251,7 +1251,7 @@ class OutSameAsGroupDataset(OutputDataset):
         return [layer]
 
     def _reduce_copies(self, copies: list[torch.Tensor]) -> torch.Tensor:
-        """The cross-copy reduction, identical for a slab and a whole volume — the streamed path's
+        """The cross-copy reduction, identical for a slab and a whole volume: the streamed path's
         byte-identity rests on the two staying in lockstep.
 
         Mixed devices can only come from a mid-case OOM fallback: reconcile on the host. Reduce, then
@@ -1276,7 +1276,7 @@ class OutSameAsGroupDataset(OutputDataset):
         # multi-class output) materialises a working volume on top of the resident accumulator. Decide
         # once per case whether it fits free VRAM, with the accumulator already resident whatever device
         # it sits on: if it fits, reduce on the GPU (a no-op move when the volume is already there); else
-        # move the finalize to the host. One decision per case -- deciding per augmentation would let free
+        # move the finalize to the host. One decision per case: deciding per augmentation would let free
         # VRAM shrinking between augmentations flip the device mid-case and hand the reduction a
         # mixed-device list.
         if index not in self._reduce_device:
@@ -1336,7 +1336,7 @@ class OutSameAsGroupDataset(OutputDataset):
             free, _ = torch.cuda.mem_get_info(device)
             # A forward's transient footprint above the resident set, measured on the batch that just ran
             # (its activations are already freed). ``max_memory_allocated`` is a high-water mark, so this
-            # bounds the next forward from above -- the gate errs toward the CPU, never toward an OOM.
+            # bounds the next forward from above: the gate errs toward the CPU, never toward an OOM.
             transient = torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device)
         except Exception:  # nosec B110 - any CUDA query failure keeps the blend on CPU
             return torch.device("cpu")
@@ -1350,8 +1350,8 @@ class OutSameAsGroupDataset(OutputDataset):
         needed = accumulator_bytes + transient
         if isinstance(accumulator, StreamingAccumulator):
             # Transients on top of the resident window (``voxels`` is the window footprint): the advance
-            # clone of the retained rows, the emission slab and its weight clamp, and — when the
-            # background writer engages — up to ``_AsyncWriter._CAPACITY`` emitted blocks alive on the
+            # clone of the retained rows, the emission slab and its weight clamp, and, when the
+            # background writer engages: up to ``_AsyncWriter._CAPACITY`` emitted blocks alive on the
             # device until their device-to-host copy runs. Two window footprints bound the sum.
             needed += 2 * layer.shape[0] * voxels * layer.element_size()
             if self.nb_data_augmentation > 1:
@@ -1544,7 +1544,7 @@ class _Predictor:
         try:
             self._run_batches()
         finally:
-            # Every submitted write must be on disk before the run returns — including on the error
+            # Every submitted write must be on disk before the run returns: including on the error
             # path, where the drain also closes the sinks the abort operations enqueued.
             for output_dataset in self.outputs_dataset.values():
                 output_dataset.finalize_writes()
@@ -1680,7 +1680,7 @@ def _colocate_loaded_modules(model: torch.nn.Module) -> None:
     """Move any still-CPU leaf module onto the model's device.
 
     A custom :meth:`Network.load` may append modules after the model was already placed on its
-    device — e.g. a head sized from the checkpoint's class count — and those default to CPU, which
+    device (e.g. a head sized from the checkpoint's class count), and those default to CPU, which
     then raises a device mismatch on the forward pass. This re-homes any fully-CPU leaf onto the
     device the rest of the model already lives on. Modules already on a device (including
     model-parallel splits across several GPUs) are left untouched.
@@ -1776,8 +1776,8 @@ class ModelComposite(Network):
 
     def _model_for_index(self, index: int) -> Network:
         # With no checkpoint sources the model is weightless (0 parameters, e.g. a classical/optimisation
-        # engine): run it as constructed, once. The Predictor guards this -- it only reaches here with empty
-        # sources when the model has no parameters to load -- so there is nothing to stream.
+        # engine): run it as constructed, once. The Predictor guards this, it only reaches here with empty
+        # sources when the model has no parameters to load, so there is nothing to stream.
         if not self._state_sources:
             return self._get_model()
         return self._ensure_model_loaded(index)
@@ -1899,7 +1899,7 @@ class Predictor(DistributedObject):
         self.manual_seed = manual_seed
         self.dataset = dataset
         # Auto-patching (VRAM): a per-axis 0 in the user's patch_size marks a FREE axis and opts into
-        # the OOM restart loop -- captured before any re-plan materialises concrete sizes over it.
+        # the OOM restart loop: captured before any re-plan materialises concrete sizes over it.
         patch = dataset.patch
         self._vram_patch_template: list[int] | None = (
             [int(size) for size in patch.patch_size]
@@ -1951,7 +1951,7 @@ class Predictor(DistributedObject):
 
         self.gpu_checkpoints = gpu_checkpoints
         # Cut the grids with the model's downsampling multiple already known, so each case's free axis
-        # rounds up to a valid input size (the graph -- hence the factor -- is final before init()).
+        # rounds up to a valid input size (the graph (hence the factor) is final before init()).
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
         self.dataset.prepare()
         self.model.init(self.autocast, State.PREDICTION, self.dataset.get_groups_dest())
@@ -2017,7 +2017,7 @@ class Predictor(DistributedObject):
         self.model_composite = ModelComposite(self.model, self.combine)
         if not self.path_to_models and any(parameter.numel() for parameter in self.model.parameters()):
             # A model WITH weights but no checkpoint would run with random weights and silently produce
-            # garbage -- refuse it. A WEIGHTLESS model (0 parameters, e.g. a classical/optimisation engine
+            # garbage: refuse it. A WEIGHTLESS model (0 parameters, e.g. a classical/optimisation engine
             # such as registration) is legitimate with no checkpoint: it is run once as constructed.
             raise PredictorError(
                 "No model checkpoint available for prediction.",
@@ -2077,7 +2077,7 @@ class Predictor(DistributedObject):
         Launch prediction on the given process rank.
 
         Args:
-            world_size (int): Number of model replicas sharding the data -- the spawned process count
+            world_size (int): Number of model replicas sharding the data: the spawned process count
                 already divided by the model-parallel size (``gpu_checkpoints``), NOT the GPU count.
             global_rank (int): Rank of the current process.
             local_rank (int): Local device rank.
@@ -2127,8 +2127,8 @@ class Predictor(DistributedObject):
                 # The restart loop IS the sizing iteration (no probe phase): the run that just OOMed
                 # already measured the step's transient for free. Read it BEFORE the reset (the peak
                 # still includes the resident accumulators on both sides of the difference), free the
-                # in-flight state -- open streamed sinks abort and remove their partial entries, so a
-                # reader never sees a half-written volume even when the OOM is fatal -- then read the
+                # in-flight state: open streamed sinks abort and remove their partial entries, so a
+                # reader never sees a half-written volume even when the OOM is fatal, then read the
                 # honest free VRAM.
                 measured = self._transient_at_oom(device)
                 for output_dataset in self.outputs_dataset.values():
@@ -2154,7 +2154,7 @@ class Predictor(DistributedObject):
         effectively ran); later ones shrink the current candidate further. When the framework picks
         the size, it must also leave the blend on the GPU: the accumulation footprint is RESERVED
         beside the forward, so the sized patch passes the accumulation gate. Only when that reserve
-        fits at no size (or cannot be priced) is the forward sized alone -- the gate's memory-safe
+        fits at no size (or cannot be priced) is the forward sized alone: the gate's memory-safe
         CPU blend absorbs that case.
         """
         if self._vram_patch_template is None:
@@ -2177,7 +2177,7 @@ class Predictor(DistributedObject):
     def _accumulation_reserve(self, candidate: list[int], worst: list[int]) -> float | None:
         """Bytes each case keeps resident while its patches accumulate, per output writer: the
         streamed window (one patch extent x the cross-section) when the writer will stream --
-        single augmentation, voxel-local reduction -- the assembled volume otherwise. ``None``
+        single augmentation, voxel-local reduction: the assembled volume otherwise. ``None``
         when a writer's channels cannot be read off the model trace (no reserve, gate decides).
         """
         trace = {name: args.out_channels for name, _, args in self.model.named_module_args_dict()}
@@ -2200,7 +2200,7 @@ class Predictor(DistributedObject):
         """Drop the failed attempt's high-water mark so the rerun measures its own steps.
 
         ``max_memory_allocated`` only rises: left in place, the full-extent attempt's peak would
-        overstate every later transient -- a second shrink would overshoot, and the accumulation
+        overstate every later transient: a second shrink would overshoot, and the accumulation
         gate would keep the rerun's blend on the CPU.
         """
         if device is None:

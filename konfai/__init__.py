@@ -390,7 +390,7 @@ def assert_konfai_install() -> None:
 
 
 #: The Python workflow API (:mod:`konfai.api`), re-exported lazily: ``konfai.transform(...)``
-#: works, and ``import konfai`` stays light -- torch and the engines load on first use only.
+#: works, and ``import konfai`` stays light: torch and the engines load on first use only.
 _API_EXPORTS = (
     "transform",
     "plan_transform",

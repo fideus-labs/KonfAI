@@ -23,7 +23,7 @@ debugging or advanced setups.
 | `KONFAI_MASTER_PORT` / `KONFAI_TENSORBOARD_PORT` | DDP rendezvous / TensorBoard port | |
 | `KONFAI_VERBOSE` / `KONFAI_CLUSTER` | from `--quiet` / SLURM submission | verbosity and per-rank logging |
 
-## Workspace layout — keyed by `train_name`
+## Workspace layout: keyed by `train_name`
 
 Every output directory is namespaced by the `train_name` set in the config (default
 `TRAIN_01`; the Segmentation example uses `SEG_BASELINE`). A full train→predict→evaluate
@@ -36,7 +36,7 @@ Predictions/<train_name>/    # the Prediction.yml snapshot + one output-dataset 
 Evaluations/<train_name>/    # the Evaluation.yml snapshot + Metric_<split>.json (e.g. Metric_TRAIN.json)
 ```
 
-The **resolved-config snapshot** written next to each run is the reproducible record — it is
+The **resolved-config snapshot** written next to each run is the reproducible record, it is
 the config after defaults were materialised. (Prediction and evaluation write their snapshot
 into `Predictions/` and `Evaluations/`; there is no separate top-level snapshot directory.)
 
@@ -49,18 +49,18 @@ consume, or evaluation won't find its inputs.
 Workflows always run in `KONFAI_CONFIG_MODE='Done'` (resolve + write back, no prompts). Other
 modes exist in the engine and are worth knowing so you don't trip on them:
 
-- `default` — materialise defaults non-interactively; may create a missing config file.
-- `interactive` — prompt for every `default`-marked field.
-- `remove` — **deletes** the config file on context exit (destructive).
-- `Import` — suppresses config reading (used internally around imports).
+- `default`: materialise defaults non-interactively; may create a missing config file.
+- `interactive`: prompt for every `default`-marked field.
+- `remove`: **deletes** the config file on context exit (destructive).
+- `Import`: suppresses config reading (used internally around imports).
 
-Practical consequence: **there is no read-only path** — entering and exiting any `Config`
+Practical consequence: **there is no read-only path**: entering and exiting any `Config`
 context rewrites the file (materialising defaults; `None` round-trips as the literal string
 `"None"`). Keep configs under version control and expect a post-run diff.
 
 ## Parallelism and clusters
 
-- **DDP — one process per GPU.** The runtime computes `world_size = len(gpu_ids)` (or the CPU
+- **DDP, one process per GPU.** The runtime computes `world_size = len(gpu_ids)` (or the CPU
   worker count when no GPU) and `mp.spawn`s that many processes; each runs one rank.
   Disk/log side effects are gated on `global_rank == 0`.
 - **SLURM.** `konfai-cluster` submits the same subcommands to a scheduler via `submitit`
@@ -69,6 +69,6 @@ context rewrites the file (materialising defaults; `None` round-trips as the lit
 
 ## Install note
 
-Reading the `.mha` demo data needs SimpleITK — install the imaging extra:
+Reading the `.mha` demo data needs SimpleITK: install the imaging extra:
 `pip install "konfai[imaging]"` (a bare `pip install konfai` fails on first read). Other
 extras: `itk`, `hdf5`, `dicom`, `omezarr`, `tensorboard`, `lpips`, `ssim`, `fid`, `cluster`.

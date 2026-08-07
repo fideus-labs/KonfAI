@@ -17,10 +17,10 @@
 """The 1-to-N cardinality: ``Expand`` as a declared point of the chain, and the engine behind it.
 
 A draw is a stage. It is declared in the chain, where it applies, and it composes with the
-transforms and the other draws around it — ``T, draw, T, draw`` means exactly what it reads like.
+transforms and the other draws around it: ``T, draw, T, draw`` means exactly what it reads like.
 The properties that would fail without any of this: the copies carry their draw and land under
 their own names; a streamed copy equals the whole-volume one; and the copies that can share a read
-pass do share it — the optimisation the engine exists for — while the ones that cannot say why.
+pass do share it: the optimisation the engine exists for, while the ones that cannot say why.
 """
 
 from pathlib import Path
@@ -59,7 +59,7 @@ def _draw(augmentation):
 
 
 def _drawn_scales(augmentation: Scale, index: int = 0) -> list[torch.Tensor]:
-    """The matrices a ``Scale`` actually drew for one case's copies — the draw itself, not its
+    """The matrices a ``Scale`` actually drew for one case's copies: the draw itself, not its
     effect: a scale keeps the grid, so comparing shapes would compare nothing."""
     return list(augmentation.matrix[index])
 
@@ -112,7 +112,7 @@ def test_split_expand_is_the_chain_around_its_marker() -> None:
 def test_copies_are_written_under_their_own_names_and_carry_their_draw(tmp_path: Path) -> None:
     """With the draw declared after the marker, what lands on disk is AUGMENTED.
 
-    Draws declared in a separate section would apply after the whole chain — after the Write —
+    Draws declared in a separate section would apply after the whole chain (after the Write)
     and every copy's entry would hold the un-augmented volume.
     """
     source = _source(tmp_path)
@@ -168,7 +168,7 @@ def test_two_chains_of_one_case_draw_the_same_copies(tmp_path: Path) -> None:
     for mine, theirs in zip(drawn, _drawn_scales(mask_draw), strict=True):
         assert torch.equal(mine, theirs)
 
-    # A different seed is a different set of copies -- otherwise "the same" would prove nothing.
+    # A different seed is a different set of copies: otherwise "the same" would prove nothing.
     other_draw = _draw(Scale(0.2))
     _manager(source, [Expand(nb=4, seed=1), other_draw], name="CASE_000")
     assert not torch.equal(_drawn_scales(other_draw)[0], drawn[0])
@@ -190,7 +190,7 @@ def test_an_unrelated_draw_in_one_chain_does_not_shift_the_shared_ones(tmp_path:
 
 
 def test_a_draw_is_a_stage_that_chains_with_the_transforms_around_it(tmp_path: Path) -> None:
-    """``T, draw, T, draw`` — the order is the declared one, and it is planned as ONE chain.
+    """``T, draw, T, draw``: the order is the declared one, and it is planned as ONE chain.
 
     The streamed result must equal applying exactly that order by hand on the whole volume.
     """
@@ -229,7 +229,7 @@ def test_a_draw_is_a_stage_that_chains_with_the_transforms_around_it(tmp_path: P
 
 
 def test_a_transform_after_a_shape_changing_draw_folds_on_the_copys_grid(tmp_path: Path) -> None:
-    """A draw that reorders axes hands the NEXT stage its own extent — the chain, both ways."""
+    """A draw that reorders axes hands the NEXT stage its own extent: the chain, both ways."""
     source = _source(tmp_path)
     manager = _manager(
         source,
@@ -330,7 +330,7 @@ def test_the_shared_pass_reads_the_source_once_for_every_copy(tmp_path: Path) ->
 
 
 def test_a_region_draw_takes_its_own_pass_and_the_plan_names_the_draw(tmp_path: Path) -> None:
-    """A draw reading elsewhere than its target slab cannot ride the shared slab — and says so."""
+    """A draw reading elsewhere than its target slab cannot ride the shared slab, and says so."""
     source = _source(tmp_path)
     manager = _manager(
         source,
@@ -394,7 +394,7 @@ def test_a_written_copy_is_not_rewritten_and_overwrite_forces_it(
     """Resume is per copy: the entry already on disk is the one that is skipped.
 
     Counted at the store's own door rather than read off the file, because both of those proxies
-    lie in one direction each -- a timestamp two writes share within a tick reads as 'skipped', and
+    lie in one direction each: a timestamp two writes share within a tick reads as 'skipped', and
     so do identical bytes for a draw that is reproducible, which is what this codebase aims at.
     """
     source = _source(tmp_path)
@@ -461,7 +461,7 @@ def test_a_shared_cache_before_the_marker_is_swept_once_for_every_copy(tmp_path:
 def test_interleaved_patch_reads_of_two_copies_each_keep_their_own_grid(tmp_path: Path) -> None:
     """Reading copy 1, copy 2, then copy 1 again returns the same bytes every time.
 
-    A stage keys its per-case records by the CASE name — a stored transform is looked up by it —
+    A stage keys its per-case records by the CASE name (a stored transform is looked up by it)
     so the copies of an Expand share one key and the last planned copy's grids would win: with
     per-copy Permute draws, ``Resample(shape=[6,6,6])`` folds a DIFFERENT index map per copy, and
     a re-read of copy 1 after copy 2's plan silently returned copy 2's sampling of copy 1's data.

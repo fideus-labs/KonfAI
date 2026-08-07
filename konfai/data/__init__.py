@@ -16,7 +16,7 @@
 
 """Data loading, patching, transform, and augmentation utilities for KonfAI.
 
-This is the surface for driving KonfAI's data machinery from plain Python — no YAML, no environment
+This is the surface for driving KonfAI's data machinery from plain Python: no YAML, no environment
 variables, no workflow. A chain of transforms applied to a dataset, out-of-core, is::
 
     from konfai.data import Dataset, DatasetManager, Write

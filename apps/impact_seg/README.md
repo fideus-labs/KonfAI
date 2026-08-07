@@ -107,14 +107,14 @@ impact-seg-konfai pipeline body -i image.nii.gz --gt reference_mask.nii.gz --mas
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `MODEL` | Model name on `VBoussot/ImpactSeg` (e.g. `body`) — determines what is predicted | *required* |
+| `MODEL` | Model name on `VBoussot/ImpactSeg` (e.g. `body`), which determines what is predicted | *required* |
 | `-i`, `--inputs` | Input file(s) or a dataset directory | *required* |
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--ensemble` | Number of models to ensemble (`segment` / `pipeline`) | `0` |
 | `--tta` | Number of test-time augmentations (`segment` / `pipeline`) | `0` |
 | `--mc` | Monte Carlo dropout samples (`segment` / `pipeline`) | `0` |
 | `-uncertainty` | Also write the inference stack (`segment` / `pipeline`) | `False` |
-| `--gt` | Reference labels — required by `eval`, optional in `pipeline` | *unset* |
+| `--gt` | Reference labels: required by `eval`, optional in `pipeline` | *unset* |
 | `--mask` | Evaluation mask(s) (`eval` / `pipeline`) | *unset* |
 | `--gpu` | GPU id(s), e.g. `0` or `0 1` | CPU if unset |
 | `--cpu` | Number of CPU worker processes | *unset* |
@@ -147,8 +147,8 @@ Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body C
 
 | Free VRAM | Batch (auto) | Peak VRAM | Time / case |
 |:--|:--|:--|:--|
-| 8 GB  | 160 | ~7 GB  | — |
-| 16 GB | 320 | ~14 GB | — |
+| 8 GB  | 160 | ~7 GB  | n/a |
+| 16 GB | 320 | ~14 GB | n/a |
 | 24 GB | 512 | ~10 GB | **~7 s** |
 
 Single-model body segmentation keeps **system RAM ~1.6 GB**. The thin 2-D patches never fill the card, so inference stays compute-bound (~7 s, largely batch-independent). Inference scales with the case size.

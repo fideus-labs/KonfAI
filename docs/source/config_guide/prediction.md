@@ -83,7 +83,7 @@ Key fields:
 | `groups_src` | mapping | Input groups and preprocessing transforms. |
 | `augmentations` | mapping | Test-time augmentation definitions. |
 | `Patch` | mapping | Sliding-window or slice-wise inference setup. |
-| `subset` | string / list / null | Restricts which cases are predicted: a flat selector — a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
+| `subset` | string / list / null | Restricts which cases are predicted: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `batch_size` | int | Number of patches per inference batch. |
 
 Use `Dataset.Patch` when:
@@ -95,8 +95,8 @@ Use `Dataset.Patch` when:
 ### Free patch axes: sizing by measurement
 
 A `patch_size` entry of `0` declares a FREE axis the framework sizes itself. The
-patch starts at the axis's full extent — the whole volume when every axis is
-free — and shrinks only if the device actually runs out of memory:
+patch starts at the axis's full extent (the whole volume when every axis is
+free), and shrinks only if the device actually runs out of memory:
 
 ```yaml
 Patch:
@@ -106,8 +106,8 @@ Patch:
 
 There is no budget key: the budget is the GPU's measured free VRAM. On a CUDA
 out-of-memory the run reads what the failed forward cost (the measurement is
-free — it already ran), shrinks the free axes by that ratio (pinned axes never
-move), re-plans the patch grid and re-runs the rank's cases — typically one
+free (it already ran), shrinks the free axes by that ratio (pinned axes never
+move), re-plans the patch grid and re-runs the rank's cases) typically one
 restart. The chosen size also reserves room for the accumulation, so the blend
 stays on the GPU; when that reservation cannot fit (or cannot be measured), the
 forward is sized alone and the writer blends on the host instead. `overlap`
@@ -115,13 +115,11 @@ accepts a voxel count (`8`), a percent string (`"20%"`), or `null` (a 20%
 default), resolved after the size; an axis a single patch spans gets none. A
 `patch_size` without a `0` is never resized: the OOM propagates.
 
-```{note}
 `overlap` accepts four forms and the binder keeps each one's type: a voxel count
 (`16`), a fraction (`0.2`), a percent string (`"20%"`), and a per-axis list
 (`[10, 20, 0]`). Declaration-order coercion once turned `overlap: 0.25` into
-`int(0.25) == 0` — silent no-overlap; that is fixed and pinned by
+`int(0.25) == 0`: silent no-overlap; that is fixed and pinned by
 `tests/unit/test_config.py::test_apply_config_union_keeps_the_value_type_over_lossy_coercion`.
-```
 
 ## `outputs_dataset`
 
@@ -152,13 +150,10 @@ Important nested fields:
 | `reduction` | Combines multiple predictions, usually `Mean` or `Median`. |
 | `patch_combine` | Optional patch reassembly strategy. |
 
-```{note}
 One `Prediction.yml` can be shared between different checkpoints as long as
 the exported output name stays consistent.
-```
 
-```{note}
-**Streamed writes are automatic — there is no config key.** When an output can be finalized slab by slab
+**Streamed writes are automatic: there is no config key.** When an output can be finalized slab by slab
 identically to the assembled volume (a single augmentation, a voxel-local reduction, and an
 `mha`/`h5`/`omezarr` destination), each slab is written to disk as its patches complete, bounding RAM at
 one patch window instead of the whole volume. Geometry inverses stream too, composed in any number
@@ -169,7 +164,6 @@ runs the rest whole-volume on it. Streamed outputs match the assembled path voxe
 device; only a transcendental-terminated float chain (Softmax/Sigmoid) can differ by ~1 ULP between a
 GPU window and a CPU whole-volume run. Set `KONFAI_STREAMED_WRITES=0` to force the whole-volume path
 globally (ops/debug or exact bit-reproducibility against a CPU run).
-```
 
 ## Examples
 
@@ -185,8 +179,8 @@ See:
 
 ## Next steps
 
-- {doc}`evaluation` — to score the written predictions against ground truth.
-- {doc}`../concepts/datasets` — the shared `dataset_filenames`, `groups_src`,
+- {doc}`evaluation`: to score the written predictions against ground truth.
+- {doc}`../concepts/datasets`: the shared `dataset_filenames`, `groups_src`,
   and `subset` conventions.
-- {doc}`../concepts/model-graph` — how the model output paths referenced by
+- {doc}`../concepts/model-graph`: how the model output paths referenced by
   `outputs_dataset` are named.

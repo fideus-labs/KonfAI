@@ -143,7 +143,7 @@ def test_the_streamed_slabs_agree_with_the_whole_volume(device: torch.device, ro
 
     A stored transform never factorises, so this is the general path: the blend goes to
     ``grid_sample``, one fused kernel worth 4x, which takes NORMALISED coordinates and so divides by
-    the extent of the tensor handed to it -- and a slab is handed a window. That single region-local
+    the extent of the tensor handed to it, and a slab is handed a window. That single region-local
     number is the whole of the disagreement. Everything else in the path is global, which is why it
     stays at rounding instead of moving a sample.
 
@@ -191,7 +191,7 @@ def test_a_slab_pulls_a_bounded_source_window():
 
 
 def test_an_oblique_map_does_not_bound_and_the_numbers_say_so():
-    # Not a defect of the bound -- the bound is exact here. A thin slab rotated against the storage
+    # Not a defect of the bound: the bound is exact here. A thin slab rotated against the storage
     # axes genuinely has an axis-aligned source box covering most of the volume, and it gets worse
     # the finer the decomposition. This is the measurement a cost model exists to report, and the
     # reason streaming this map is not automatically worth it.
@@ -237,7 +237,7 @@ class TestLocality:
 
         The refusal has to happen where the plan is built, not where the value is finally sampled:
         a stage that decodes such a spline without complaint passes the plan and raises on the
-        first region -- halfway through a run, per case, after bytes are already written -- and the
+        first region (halfway through a run, per case, after bytes are already written), and the
         whole-volume path raises the identical error, so there is no fallback to declare.
         """
         image = _image()
@@ -313,7 +313,7 @@ class TestCompositeOrder:
     def test_two_groups_compose_as_they_always_did(self):
         # Declaration order has always meant SimpleITK's composite order (last declared applied
         # first), because this stage built a CompositeTransform from the declared list. Decoding
-        # normalizes to application order, so the reversal has to be reinstated -- and pinned.
+        # normalizes to application order, so the reversal has to be reinstated, and pinned.
         image = _image(oblique=False)
         first = sitk.TranslationTransform(3, (4.0, 0.0, 0.0))
         second = sitk.ScaleTransform(3, (1.5, 1.5, 1.5))
@@ -363,8 +363,8 @@ def test_a_stored_map_bridging_disjoint_frames_is_not_refused_as_disjoint():
     """An MR and a CT can sit 1000 mm apart in stage coordinates with a rigid bridging them.
 
     The all-fill refusal gates on coverage, and coverage must be judged THROUGH the declared map:
-    judged before applying it, every cross-frame registration apply — the situation the stage
-    exists to serve — is refused as disjoint. The counter-assert keeps the gate alive: a map that
+    judged before applying it, every cross-frame registration apply (the situation the stage
+    exists to serve) is refused as disjoint. The counter-assert keeps the gate alive: a map that
     leads nowhere still refuses.
     """
     from konfai.data.transform import Resample

@@ -318,7 +318,7 @@ def install_fake_konfai_runtime(
 def write_on_native_stdio(marker: str) -> None:
     """Test job target: write to fds 1 and 2 natively, from this process AND from a grandchild.
 
-    Stands in for what a CUDA/PyTorch banner, a C extension or a DDP worker does -- writes that bypass
+    Stands in for what a CUDA/PyTorch banner, a C extension or a DDP worker does: writes that bypass
     sys.stdout entirely. Everything here must land in the job log and nothing on the descriptors the job
     inherited from the server, which for a stdio MCP server carry the JSON-RPC stream.
     """
@@ -357,7 +357,7 @@ def noisy_runner_api(marker: str = "RUNNER") -> dict[str, str]:
 
     Mirrors what validation really does: KonfAI's own progress bars, a pip install during app resolution,
     a library banner at import. None of it may reach the descriptors the child inherited from the server.
-    The first write has no trailing newline on purpose — that is the shape that swallows a JSON-RPC frame.
+    The first write has no trailing newline on purpose, that is the shape that swallows a JSON-RPC frame.
     """
     import os
     import subprocess
@@ -371,7 +371,7 @@ def noisy_runner_api(marker: str = "RUNNER") -> dict[str, str]:
 
 
 def failing_runner_api(marker: str = "RUNNER") -> None:
-    """``run_api_in_subprocess`` target that says something, then dies — the diagnostic must survive."""
+    """``run_api_in_subprocess`` target that says something, then dies: the diagnostic must survive."""
     import os
 
     os.write(1, f"{marker}-said-this-before-dying\n".encode())
@@ -379,7 +379,7 @@ def failing_runner_api(marker: str = "RUNNER") -> None:
 
 
 def entry_with_broken_dup2(queue: Any, sink_path: str) -> None:
-    """``_subprocess_entry`` in a child whose ``dup2`` always refuses — only there: patching it in the
+    """``_subprocess_entry`` in a child whose ``dup2`` always refuses: only there: patching it in the
     test process would break pytest's own capture, which restores streams with the same call."""
     import os
 

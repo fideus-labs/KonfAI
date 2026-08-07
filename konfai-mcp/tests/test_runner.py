@@ -122,7 +122,7 @@ def test_plan_transform_is_covered_by_that_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
 ) -> None:
     """The tool builds a Transformer from the agent's own config, so it needs the guard the validate
-    path already had -- otherwise a plan slower than the timeout returns the config KonfAI-rewritten."""
+    path already had: otherwise a plan slower than the timeout returns the config KonfAI-rewritten."""
     monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     server = load_mcp_server()
     config_path = Path(server.SESSION.config_path("transform"))

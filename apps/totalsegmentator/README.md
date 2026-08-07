@@ -42,11 +42,11 @@ resident set; peak VRAM = over baseline.
 
 | Case (voxels) | Tool | Time | Peak RAM | Peak VRAM |
 |---|---|---|---|---|
-| **S** — 240 × 220 × 200 | **KonfAI** | **12 s** | **6.0 GB** | 12.0 GB |
+| **S** (240 × 220 × 200) | **KonfAI** | **12 s** | **6.0 GB** | 12.0 GB |
 | | Original | 35 s | 21 GB | 3.7 GB |
-| **M** — 533 × 390 × 177 | **KonfAI** | **17 s** | **6.5 GB** | 12.9 GB |
+| **M** (533 × 390 × 177) | **KonfAI** | **17 s** | **6.5 GB** | 12.9 GB |
 | | Original | 61 s | 26.5 GB | 5.1 GB |
-| **L** — 512 × 512 × 531 | **KonfAI** | **314 s** | **19.3 GB** | **10.4 GB** |
+| **L** (512 × 512 × 531) | **KonfAI** | **314 s** | **19.3 GB** | **10.4 GB** |
 | | Original | 459 s | 51.8 GB | 23.3 GB |
 
 ### 📈 Key observations
@@ -55,7 +55,7 @@ resident set; peak VRAM = over baseline.
 - KonfAI trades **more VRAM on small/medium cases** (larger patches, GPU accumulation)
   for the speed-up, while it stays inside a 24 GB card.
 - On **large** cases the streaming reassembly **bounds VRAM** (10.4 GB) where the
-  original nears the card limit (23.3 GB / 24 GB) — KonfAI is then lighter on **both**
+  original nears the card limit (23.3 GB / 24 GB), so KonfAI is then lighter on **both**
   RAM and VRAM.
 
 ---
@@ -112,11 +112,11 @@ totalsegmentator-konfai pipeline total -i image.nii.gz --gt reference.nii.gz --g
 
 | Flag | Description | Default |
 |------|--------------|----------|
-| `TASK` | Model on Hugging Face (`total`, `total_mr`, `total-3mm`, `total_mr-3mm`) — determines what is predicted | *required* |
+| `TASK` | Model on Hugging Face (`total`, `total_mr`, `total-3mm`, `total_mr-3mm`), which determines what is predicted | *required* |
 | `-i`, `--inputs` | Input medical image(s) or a dataset directory | *required* |
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--models` | Explicit model identifiers/paths to ensemble (`segment` / `pipeline`) | *unset* |
-| `--gt` | Reference segmentation(s) — required by `eval`, optional in `pipeline` | *unset* |
+| `--gt` | Reference segmentation(s): required by `eval`, optional in `pipeline` | *unset* |
 | `--mask` | Evaluation mask(s) (`eval` / `pipeline`) | *unset* |
 | `--gpu` | GPU id(s), e.g. `0` or `0 1` | CPU if unset |
 | `--cpu` | Number of CPU worker processes | *unset* |
@@ -150,11 +150,11 @@ Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body C
 
 | Free VRAM | Batch (auto) | Peak VRAM | Time / case |
 |:--|:--|:--|:--|
-| 8 GB  | 2 | — | — |
-| 16 GB | 4 | — | — |
+| 8 GB  | 2 | n/a | n/a |
+| 16 GB | 4 | n/a | n/a |
 | 24 GB | 4 | ~20 GB | **~42 s** |
 
-The 5-model `total` head (117 classes) needs **~20 GB** for its forward, so the ensemble targets a **24 GB card** — on smaller cards use **`total-3mm`** (1 model, 3 mm). Its whole-volume accumulator is too large for the GPU, so reassembly runs on the host (~19 GB RAM). A larger batch saturates the card and *slows* inference. Inference scales with the case size.
+The 5-model `total` head (117 classes) needs **~20 GB** for its forward, so the ensemble targets a **24 GB card**; on smaller cards use **`total-3mm`** (1 model, 3 mm). Its whole-volume accumulator is too large for the GPU, so reassembly runs on the host (~19 GB RAM). A larger batch saturates the card and *slows* inference. Inference scales with the case size.
 
 ---
 

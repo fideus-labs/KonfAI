@@ -21,8 +21,8 @@ Each case is one **real** axial slice from the public pelvis CT demo subset
 pushed through a smooth displacement field that this script chooses, so the deformation the
 network has to recover is known exactly and the registered output can be checked numerically.
 
-Real anatomy, known answer. Inter-patient registration — where the deformation is a genuine
-anatomical difference and there is no ground-truth field at all — is what ``examples/ImpactReg``
+Real anatomy, known answer. Inter-patient registration (where the deformation is a genuine
+anatomical difference and there is no ground-truth field at all) is what ``examples/ImpactReg``
 does, scored on the reference segmentations.
 
 Run from this directory with the KonfAI env:

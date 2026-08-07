@@ -16,8 +16,8 @@
 
 """The pretrained bridge: load an external checkpoint into a KonfAI catalog graph by execution order.
 
-This proves the end-to-end story behind the YAML catalog — a MONAI-trained SegResNet checkpoint drives
-the KonfAI ``SegResNet.yml`` graph WITHOUT a hand-written key map — and that the bridge fails loudly on
+This proves the end-to-end story behind the YAML catalog (a MONAI-trained SegResNet checkpoint drives
+the KonfAI ``SegResNet.yml`` graph WITHOUT a hand-written key map), and that the bridge fails loudly on
 a non-equivalent pair.
 """
 
@@ -72,7 +72,7 @@ def test_monai_pretrained_weights_drive_the_konfai_graph(dim: int, input_shape: 
     torch.manual_seed(0)
     inputs = torch.randn(*input_shape)
 
-    # The bridge pairs leaves by forward-execution order — no MONAI->KonfAI key map is supplied.
+    # The bridge pairs leaves by forward-execution order: no MONAI->KonfAI key map is supplied.
     transferred = transfer_weights_by_execution_order(
         target=net,
         source=reference,

@@ -16,7 +16,7 @@
 
 """One ``Resample``: which grid to write on, what map to write it through, and what that fixed.
 
-One stage, one sampler, one idea of where a voxel is -- the tests here are for what is only
+One stage, one sampler, one idea of where a voxel is: the tests here are for what is only
 checkable because there is a single answer to check.
 """
 
@@ -60,7 +60,7 @@ def _as_image(volume: np.ndarray, attribute: Attribute) -> sitk.Image:
 
 
 def test_an_axis_the_map_leaves_alone_is_left_alone() -> None:
-    """A resample of one axis reads the other two, it does not blend them — and says so in the values.
+    """A resample of one axis reads the other two, it does not blend them, and says so in the values.
 
     ``spacing: [-1, -1, 3]`` keeps x and y exactly. Blending them anyway would be two gathers and a
     lerp over the largest tensor in flight, for a result equal to the input; skipping them has to be

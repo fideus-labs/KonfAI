@@ -23,7 +23,7 @@ it writes, and the name every stage is handed. A reduction has no case name, so 
 The loop is the per-case loop turned inside out. Instead of walking cases and, within a case, its
 regions, it walks the OUTPUT's regions and, within a region, the cases: each reads that region
 through its own chain (:meth:`~konfai.data.patching.DatasetManager.read_region`) and the operator
-folds them. Peak memory is N regions, never N volumes -- and two regions, whatever N, once the
+folds them. Peak memory is N regions, never N volumes, and two regions, whatever N, once the
 operator can accumulate.
 """
 
@@ -98,7 +98,7 @@ class ReductionPlan:
         """Regions held at the peak, counted in MEMBER regions plus the output's own.
 
         ``Median`` stacks the buffer into a new tensor and sorts a copy of that, so counting the
-        buffer alone under-states its peak threefold -- and it is what a bare ``Reduce`` gets.
+        buffer alone under-states its peak threefold, and it is what a bare ``Reduce`` gets.
         """
         return self.buffered_regions * (1 + self.working_multiple) + 1
 
@@ -113,7 +113,7 @@ class ReductionPlan:
     @property
     def peak_bytes(self) -> int:
         # Members at their own width, the output at its, and whatever the operator builds over the
-        # buffer it is handed -- which is member-sized, since that is what it was handed.
+        # buffer it is handed, which is member-sized, since that is what it was handed.
         #
         # A statistics pass is a second traversal, not a second working set: it holds exactly what
         # one region holds, so the peak is the same whether there are one or two passes.
@@ -122,7 +122,7 @@ class ReductionPlan:
 
     def describe(self) -> str:
         verdict = "STREAM" if self.streams else "REFUSED"
-        lines = [f"REDUCE {len(self.cases)} case(s) -> 1 output '{self.output}' -- {verdict}"]
+        lines = [f"REDUCE {len(self.cases)} case(s) -> 1 output '{self.output}': {verdict}"]
         if not self.streams:
             lines.append(f"    refused: {self.refusal}")
             return "\n".join(lines)
@@ -222,8 +222,8 @@ def resolve_operator(reduce: Reduce) -> Reduction:
 def check_post_stages(post: list[Transform], output: str) -> None:
     """What may follow a ``Reduce`` in the same chain.
 
-    Each stage after the reduction is handed ONE REGION of the result. A stage reading across space
-    -- a halo, a resample, a reorientation -- would take that region for the whole volume and seam
+    Each stage after the reduction is handed ONE REGION of the result. A stage reading across space (a halo, a
+    resample, a reorientation) would take that region for the whole volume and seam
     at every boundary: a plausible result, and a wrong one. Those are deferred, not forbidden:
     end the chain, and read the written volume back in a second chain where the ordinary planner can
     pull regions through it.
@@ -240,7 +240,7 @@ def check_post_stages(post: list[Transform], output: str) -> None:
         if kind not in _POST_KINDS:
             raise ReductionError(
                 f"stage {index} '{name}' follows the Reduce into '{output}' and declares {kind.name},"
-                " which reads across space -- applied one region at a time it would seam at every"
+                " which reads across space: applied one region at a time it would seam at every"
                 " region boundary.",
                 f"Only voxel-local stages can follow a reduction. End this chain, and put '{name}' in a"
                 f" second chain that reads '{output}' back.",
@@ -248,7 +248,7 @@ def check_post_stages(post: list[Transform], output: str) -> None:
         if kind is LocalityKind.GLOBAL_STAT and not all(previous.statistics_preserving for previous in localities):
             raise ReductionError(
                 f"stage {index} '{name}' follows the Reduce into '{output}' and needs whole-volume"
-                " statistics, but an earlier stage after the Reduce changes the values -- the"
+                " statistics, but an earlier stage after the Reduce changes the values: the"
                 " statistic is measured on the fold, so it would not be this stage's input.",
                 f"End this chain after the value-changing stage, and put '{name}' in a second chain"
                 f" that reads '{output}' back, where its statistic is measured on what it receives.",
@@ -260,8 +260,8 @@ def check_post_stages(post: list[Transform], output: str) -> None:
 class CaseReduction:
     """Fold every case of a group into one entry, region by region.
 
-    It uses only the public read side of each case's manager -- the streaming machinery already
-    planned, accepted or refused per case -- and owns the write side itself, under the output name
+    It uses only the public read side of each case's manager (the streaming machinery already
+    planned, accepted or refused per case), and owns the write side itself, under the output name
     the chain declared.
     """
 
@@ -290,7 +290,7 @@ class CaseReduction:
         PER CASE, so the constant that bounds a per-case sweep is off by the number of cases here.
         Half the budget, because the operator's own output and the write buffer live alongside.
         Below one row nothing fits; the plan then reports a peak above the budget and the workflow
-        refuses, which is the only honest answer -- there is no whole-volume path to fall back to.
+        refuses, which is the only honest answer: there is no whole-volume path to fall back to.
 
         The budget also goes to the cases' own managers, because a chain crossing a ``Save`` sweeps
         that cache when first read, and ``read_region`` carries no budget of its own.
@@ -324,8 +324,8 @@ class CaseReduction:
     def check_grid(self) -> str | None:
         """Whether the cases agree enough to be folded, or why they do not.
 
-        Compared on the grid each case's chain LANDS on — the folded shape and the plan-evolved
-        geometry — not the stored one: the chain exists precisely to bring disagreeing members onto
+        Compared on the grid each case's chain LANDS on (the folded shape and the plan-evolved
+        geometry), not the stored one: the chain exists precisely to bring disagreeing members onto
         one grid (a ``Resample`` before the ``Reduce``), and comparing what is on disk would refuse
         the very cohorts the reduction is for. Read from headers and plans alone, so it costs
         nothing and happens before the first byte. Nothing anywhere can verify that the members
@@ -385,7 +385,7 @@ class CaseReduction:
     def _needs_stat_pass(self) -> bool:
         """Whether a stage after the reduction wants whole-volume statistics OF THE RESULT.
 
-        Those cannot be seeded from disk the usual way -- the reduced volume is stored nowhere yet --
+        Those cannot be seeded from disk the usual way: the reduced volume is stored nowhere yet --
         so the engine computes them with a pass of its own. Twice the reads, no intermediate volume,
         and the reduction is deterministic so both passes see the same values.
         """
@@ -421,8 +421,8 @@ class CaseReduction:
     def _fold(self, region: tuple[slice, ...]) -> torch.Tensor:
         """One region of the reduced volume: every case reads that region, the operator folds them.
 
-        Each region is presented as ``[1, C, *spatial]`` -- the stack-axis layout every operator is
-        written against (see :class:`~konfai.data.reduction.Reduction`) -- and the result comes back
+        Each region is presented as ``[1, C, *spatial]`` (the stack-axis layout every operator is
+        written against (see :class:`~konfai.data.reduction.Reduction`)), and the result comes back
         without it. The axis matters to any operator that places things side by side.
         """
         self.operator.start()
@@ -451,7 +451,7 @@ class CaseReduction:
         attribute = self.reference.landed_attributes()
         if self.reduce.provenance:
             # The deliverable carries its own recipe. A set of cases that changed between two runs
-            # would otherwise write a different volume under the same name -- the worst way this can
+            # would otherwise write a different volume under the same name: the worst way this can
             # fail, because nothing about the output looks wrong.
             attribute["konfai_reduce_operator"] = self.reduce.operator_classpath
             attribute["konfai_reduce_cases"] = "|".join(plan.cases)

@@ -247,7 +247,7 @@ def test_parse_input_default_rejects_unknown_value() -> None:
 
 def test_parse_input_default_rejects_default_on_required_input() -> None:
     # `default` is optional-input-only (a required input is never auto-filled), so declaring both is a
-    # contradiction that _fill_optional_inputs would silently drop -- reject it at load time instead.
+    # contradiction that _fill_optional_inputs would silently drop: reject it at load time instead.
     with pytest.raises(AppMetadataError, match="only valid for optional inputs"):
         _parse_input_default("Fixed", "ones", required=True)
 
