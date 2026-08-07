@@ -16,20 +16,46 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
-## v1.8.0 (2026-08-04)
+## v1.8.0 (2026-08-07)
+
+### 💥 Breaking changes
+
+Three, and each one names what to change.
+
+- **One `Resample`, and no other spelling.** `ResampleToResolution`, `ResampleToShape`,
+  `ResampleToReference`, `ResampleTransform` and `Warp` are gone: five names for one stage. A config
+  now names `Resample` and says which grid it targets (`spacing`, `shape` or `reference`) and which
+  map it goes through (`field`, `transforms`). So `ResampleToResolution: {spacing: [...]}` becomes
+  `Resample: {spacing: [...]}`, and `Warp: {field: ...}` becomes `Resample: {field: ...}`. Two
+  `Resample` stages in one chain spell the second module-qualified,
+  `konfai.data.transform:Resample`. The Hugging Face bundle configs move with the `konfai` version
+  they pin, so a published app keeps working.
+- **A field carries no recorded bound.** `DISPLACEMENT_BOUND_ATTRIBUTE`, `displacement_bound` and
+  `MaxDisplacement` are removed from `konfai.utils.ome_zarr`. A store that still carries the
+  attribute is read fine; the value is ignored. The run now sizes each region's pull from the field
+  values it actually reads, and the plan says it prices those reads as a zero field.
+- **A backend token is not an extension, and `h5py` is no longer optional for it.** `:itktransform`
+  writes `<group>.h5`, so nothing on disk is ever named `.itktransform`; validating a spec against
+  the extension list used to reject the format the write side had just produced, which meant a run
+  could write a transform it could not read back. Backend tokens live in
+  `SUPPORTED_BACKEND_FORMATS` now, and a `path[:flag]:format` spec is checked against the union.
+  The backend also stops degrading in silence when `h5py` is missing: it used to hold the whole
+  field in float64, so peak memory turned on whether an optional import had succeeded. Install
+  `konfai[hdf5]`.
 
 ### ✨ Features
 
 - **transform**: resample a case onto the grid of a declared reference
+- **data**: cubic interpolation for `Resample`, beside nearest and linear
+- **impact-reg**: a preset declares only its field; the moved image and the ensemble are derived
 - **transform**: compose the grid change and the warp into one pass
 - **data**: give a chain a per-component statistic
-- **transform**: let Warp read the bound the fields recorded, with max_displacement: auto
 - **studio**: show a transform run, and point Browse at the data rather than its log
 - **mcp**: let an agent plan and run a transform, and read the table for what it accepts
 - **transform**: a fifth workflow that reads a dataset, applies a chain, and writes it
-- **transform**: give ResampleToReference an `interpolation`, as Warp already had
+- **transform**: give a reference resample an `interpolation`, as the warped path already had
 - **data**: Vote, the reduction operator that folds segmentations without inventing a label
-- **data**: declare an OME-Zarr pyramid from a Write, and let a field carry its own bound
+- **data**: declare an OME-Zarr pyramid from a Write
 - **impact-reg**: seed the rigid from the centre of mass, not only the frame
 - **studio**: bundle icons through the app interface, and a way to stop Studio (#75)
 - **examples**: a Transform example -- a template folded out of a cohort, and drawn copies of a case
@@ -37,8 +63,12 @@ written replaces it.
 ### 🐛 Bug Fixes
 
 - **transform**: sample a label map by nearest on the warped path too, instead of blending labels
-- **transform**: check Warp's declared bound on the whole-volume path, not only the streamed one
-- **transform**: build Warp's grid on the volume's device, so a GPU-resident case does not raise
+- **api**: spell numpy scalars into the config tree, and copy a caller's config file rather than rewriting it
+- **data**: a text transform and a stepped region read reach the backend that serves them
+- **data**: the backend rewrite lands on `.h5`, and `Std` prices the buffers it allocates
+- **impact-reg**: order cases numerically past P999, and refuse an output name that collides with the derived one
+- **cli**: the `--gpu` help shows the space-separated form argparse accepts, not `0,1,2`
+- **transform**: build the resample grid on the volume's device, so a GPU-resident case does not raise
 - **data**: cap an OME-Zarr chunk instead of taking the writer's whole trailing plane
 - **data**: keep the store's chunking when a Write appends pyramid levels
 - **data**: refuse a statistic after a Reduce that an earlier post stage invalidates
@@ -52,7 +82,7 @@ written replaces it.
 - **konfai-mcp**: require the konfai that has the module it imports at load
 - **studio**: refuse /api/quit when a proxy header arrives and the peer cannot be trusted
 - **examples**: install scikit-image where SSIM is evaluated, and ask for a GPU that exists
-- **transform**: hold the auto bound to the cohort, and plan a resampled case on the grid it lands on
+- **transform**: plan a resampled case on the grid it lands on
 - **transform**: refuse a stage key that names something not a class
 - **transform**: print the plan's reduction and dropped lines once
 - **transform**: give refusals their true remedy and name
@@ -62,14 +92,13 @@ written replaces it.
 - **mcp**: offer the workflow a session actually wrote, not the one the stage table names
 - **data**: refuse two chains that name the same destination group
 - **studio**: actually carry a transform's data directory to the panel
-- **transform**: keep the auto bound scan's header reads inside its own guard
 - **mcp**: guard plan_transform's config from a child that never returns
 - **transform**: report the dtype the plan probed with, not a constant beside it
 - **transform**: refuse two chains that share an intermediate Save
 - **budget**: size the transform plan against the node's ranks, not the cluster's
 - **patching**: drop a recorded sweep failure when the Save boundary flips
 - **budget**: split a node-scoped auto budget across the node's ranks, not the cluster's
-- **transform**: let a WHOLE_VOLUME declaration say why, and make Warp use it
+- **transform**: let a WHOLE_VOLUME declaration say why, and make the resample use it
 - **data**: make a read plan's pull maps picklable, so a plan can cross the spawn
 - **data**: bind a group's chain once, however often prepare is called
 - **metric**: let Dice and FocalLoss take the integer label map a segmentation target is
@@ -88,6 +117,8 @@ written replaces it.
 
 ### ♻️ Refactoring
 
+- one home for what was written several times: the region-kind set, the statistics-seed rule, the entry resolver, the plan's verdict cascade, the workflow launcher and the CLI builders
+
 - **data**: share the fallback constants and the Welford kernel
 - **data**: move the reduction operators out of the predictor, into one shared vocabulary
 - **data**: give the resolved memory budget a type that knows its own scope
@@ -97,9 +128,8 @@ written replaces it.
 
 ### ⚠️ Behaviour changes
 
-No YAML key, class or default was renamed, but the following answer differently for a config that
-was not touched. Several are new refusals: what they refuse was being done before, silently and
-wrongly.
+Beyond the renames above, the following answer differently for a config that was not touched.
+Several are new refusals: what they refuse was being done before, silently and wrongly.
 
 - **`reduction: Median` returns a different number on an even count.** `torch.median` hands back the
   lower of the two middle values, which over two tensors is the element-wise minimum; it now averages
