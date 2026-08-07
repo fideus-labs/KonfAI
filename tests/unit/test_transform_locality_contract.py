@@ -190,6 +190,11 @@ _CASES: dict[str, list[_Case]] = {
         ),
         # A stored map never factorises: the grid_sample path again.
         _Case(Resample(transforms={"transform": True}), atol=_REGRID_ATOL),
+        # Keys' cubic: the separable axis walk and the corner walk both keep GLOBAL coordinates, so
+        # streamed and whole agree exactly on floats; int16 rounds the blend once, hence the LSB.
+        _Case(Resample(spacing=[2.0, 1.0, 3.0], interpolation="cubic")),
+        _Case(Resample(spacing=[2.0, 1.0, 3.0], interpolation="cubic"), group="Int16", atol=_LSB_ATOL),
+        _Case(Resample(transforms={"transform": True}, interpolation="cubic")),
         # A field on disk this registry cannot build: the streamed-equals-whole proof lives in
         # test_warp.py, where a field exists: including the measured, bound-less windows.
         _Case(Resample(field="Dataset:h5", field_group="DVF"), sweep=False),

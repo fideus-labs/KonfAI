@@ -675,10 +675,11 @@ def test_an_explicit_interpolation_is_honoured_on_both_paths(tmp_path: Path, war
 
     assert not resample(interpolation="nearest") - {0, 100}, "nearest picks a label, it does not blend"
     assert resample(interpolation="linear") - {0, 100}, "asking for linear must actually interpolate"
+    assert resample(interpolation="cubic") - {0, 100}, "cubic blends too, on both paths"
     assert resample() - {0, 100}, "int16 is not a label map the dtype can claim"
 
     with pytest.raises(TransformError, match="unknown interpolation"):
-        _warping(images, fields, interpolation="cubic")
+        _warping(images, fields, interpolation="quadratic")
 
 
 def test_it_warps_onto_the_reference_where_simpleitk_does(warped: tuple[Dataset, Dataset, np.ndarray]) -> None:

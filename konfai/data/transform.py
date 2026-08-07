@@ -1196,8 +1196,11 @@ class Resample(TransformInverse):
     **Which grid to write on**: at most one of:
 
     - nothing (the default): the case's own grid. The map moves the anatomy; the voxels stay put.
-    - ``spacing``: the same field of view at another density. A component left at ``0`` keeps its axis.
-    - ``shape``: the same field of view at a given count. A component left at ``0`` keeps its axis.
+    - ``spacing``: the same field of view at another density, in physical order ``(x, y, z)``. A
+      component left at ``0`` keeps its axis.
+    - ``shape``: the same field of view at a given count, in array order ``(Z, Y, X)``. A component
+      left at ``0`` keeps its axis. The two orders differ on purpose: a spacing is geometry, a
+      shape is an array extent, and each is written in its own convention.
     - ``reference``: the grid of a stored image, adopted whole: extent, spacing, origin, direction.
       ``'{case}'`` in the entry follows the case: each case adopts the grid of its OWN entry in
       ``reference_group``: ``reference: '{case}', reference_group: DVF`` lands every moved image
@@ -1217,6 +1220,12 @@ class Resample(TransformInverse):
     coordinate per target voxel and the source is read once, at the displaced point. Doing it as two
     stages resamples twice, and a volume interpolated twice has lost detail the second pass invented
     no more of, which is the whole reason an atlas's appearance is rebuilt from native volumes.
+
+    ``interpolation`` is ``nearest``, ``linear`` (the default; ``uint8`` defaults to ``nearest``) or
+    ``cubic``: Keys' cubic convolution (Catmull-Rom, a = -1/2), interpolating and patch-local (four
+    taps per axis, one extra voxel of streamed halo). It is NOT a prefiltered B-spline: scipy's
+    ``order=3`` (nnU-Net's resampling) runs a global prefilter this stage does not, so a spline-3
+    recipe is approximated, not reproduced.
 
     IT STREAMS, and what a region reads is known before a voxel of the SOURCE is touched. A rigid
     or affine map is an exact affine, so the source box of a target region is that region's box
@@ -1271,11 +1280,12 @@ class Resample(TransformInverse):
         inverse: bool = True,
     ) -> None:
         super().__init__(inverse)
-        if interpolation is not None and interpolation not in ("linear", "nearest"):
+        if interpolation is not None and interpolation not in ("linear", "nearest", "cubic"):
             raise TransformError(
                 f"'Resample' has an unknown interpolation '{interpolation}'.",
-                "Use 'linear' for an image or 'nearest' for a label map. Left unset, uint8 is taken"
-                " for a label map and everything else is interpolated.",
+                "Use 'linear' for an image, 'nearest' for a label map, or 'cubic' (Keys/Catmull-Rom)"
+                " for a sharper image blend. Left unset, uint8 is taken for a label map and"
+                " everything else is interpolated linearly.",
             )
         self.interpolation = interpolation
         self.fill_value = float(fill)
@@ -1625,7 +1635,9 @@ class Resample(TransformInverse):
     ) -> list[slice]:
         del source_spatial_shape, cache_attribute
         source, target = self._grids_of(name)
-        return list(source_window(target.sub_grid(tuple(target_slices)), source, self._pricing_bound(name)))
+        return list(
+            source_window(target.sub_grid(tuple(target_slices)), source, self._pricing_bound(name), self._tap_margin)
+        )
 
     @property
     def measures_at_run(self) -> bool:
@@ -1645,7 +1657,7 @@ class Resample(TransformInverse):
         del source_spatial_shape, cache_attribute
         source, target = self._grids_of(name)
         region = target.sub_grid(tuple(target_slices))
-        return list(source_window(region, source, bound_of(self._stages(name, region), source.rank)))
+        return list(source_window(region, source, bound_of(self._stages(name, region), source.rank), self._tap_margin))
 
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
@@ -1688,15 +1700,19 @@ class Resample(TransformInverse):
         return gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value)
 
     def _mode(self, tensor: torch.Tensor) -> str:
-        """``nearest`` or ``linear``: what a sampler asks before it blends anything.
+        """``nearest``, ``linear`` or ``cubic``: what a sampler asks before it blends anything.
 
         A dtype cannot settle this on its own: a CT is int16 and so is nothing else about it. The
         heuristic therefore claims ``uint8`` and nothing more, and ``interpolation`` answers for
         everything it cannot know. Getting it wrong is silent: two blended labels give a third
         that was in no input, in a volume that is still a label map.
         """
-        declared = self.interpolation or ("nearest" if tensor.dtype == torch.uint8 else "linear")
-        return "nearest" if declared == "nearest" else "linear"
+        return self.interpolation or ("nearest" if tensor.dtype == torch.uint8 else "linear")
+
+    @property
+    def _tap_margin(self) -> int:
+        """Cubic reads four taps per axis (floor-1 .. floor+2): one more voxel of window each way."""
+        return 2 if self.interpolation == "cubic" else 1
 
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
@@ -1928,7 +1944,7 @@ class Resample(TransformInverse):
         del name
         held, restored = self._inverse_grids(Attribute(cache_attribute), [int(e) for e in source_spatial_shape])
         identity = TransformBound.exact(AffineMap.identity(restored.rank))
-        return list(source_window(restored.sub_grid(tuple(target_slices)), held, identity))
+        return list(source_window(restored.sub_grid(tuple(target_slices)), held, identity, self._tap_margin))
 
     def _resample_between(
         self,
