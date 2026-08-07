@@ -16,8 +16,8 @@
 
 """Grids, boxes and affine maps in world coordinates: the value vocabulary a resample shares.
 
-Two axis orders coexist in every KonfAI header, and every geometry bug this file's history records
-is a confusion between them: array data is ``(Z, Y, X)``, physical geometry (``Origin``,
+Two axis orders coexist in every KonfAI header, and the classic failure is a confusion between
+them: array data is ``(Z, Y, X)``, physical geometry (``Origin``,
 ``Spacing``, ``Direction``) is ``(x, y, z)``. The types here carry the order in the field name (``size_zyx``,
 ``origin_xyz``), so a mixed expression reads as wrong at the call site instead of
 resampling perfectly onto the wrong place.

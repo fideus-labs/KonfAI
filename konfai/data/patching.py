@@ -40,6 +40,7 @@ from konfai.data.transform import (
     Save,
     Transform,
     split_expand,
+    stat_seed_valid,
 )
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
@@ -231,15 +232,6 @@ class AugmentedStage:
         return self.augmentation.compute(name, self.index, self.a, tensor)
 
 
-# The region kinds a composed streamed read (or write) carries between its pointwise stages.
-_REGION_KINDS = (
-    LocalityKind.HALO,
-    LocalityKind.ORIENTATION,
-    LocalityKind.CROP,
-    LocalityKind.REGRID,
-)
-
-
 # The pull maps are callable dataclasses, not closures, because a plan crosses a process boundary:
 # the launcher plans every case, `mp.spawn` then pickles the workflow object whole, and a local
 # function cannot be pickled. Everything a plan memoizes must survive that trip.
@@ -348,7 +340,7 @@ class _PatchStreamSource:
     def region_index(self) -> int | None:
         """The first region stage, or ``None`` for an exact-patch chain."""
         for index, plan in enumerate(self.stage_plans):
-            if plan.kind in _REGION_KINDS:
+            if plan.kind.is_region:
                 return index
         return None
 
@@ -1787,10 +1779,9 @@ class DatasetManager:
                 # the reader is told what to change instead of what happened.
                 return refuse(f"{label} declares {loc.kind.name}: {loc.reason or 'it needs the whole volume'}.")
             if loc.kind is LocalityKind.GLOBAL_STAT:
-                # The seed is the STORED volume's statistic, which is this transform's input only when
-                # every earlier stage preserves it; otherwise ([Clip(-200, 400), Standardize()]) every
-                # patch would be standardized by the pre-Clip statistic: fall back to the whole volume.
-                if not all(previous.statistics_preserving for previous in localities[:-1]):
+                # The seed is the STORED volume's statistic; otherwise ([Clip(-200, 400), Standardize()])
+                # every patch would be standardized by the pre-Clip statistic: fall back to the whole volume.
+                if not stat_seed_valid(localities[:-1]):
                     return refuse(
                         f"{label} needs whole-volume statistics, but an earlier stage changes the values"
                         ": the stored volume's statistic is not this stage's input."
@@ -1825,7 +1816,7 @@ class DatasetManager:
     ) -> "_ReadStagePlan":
         """One stage's slot in the composed plan: its shapes, its pull map, and (for a region stage)
         the geometry it leaves for the stages after it (``write_stream_cache_attribute``)."""
-        if loc.kind not in _REGION_KINDS:
+        if not loc.kind.is_region:
             return _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), None)
         if loc.kind is LocalityKind.HALO:
             return _ReadStagePlan(
@@ -2491,6 +2482,52 @@ class DatasetManager:
                 )
         return "the copy's plan is incomplete; it sweeps its own pass."
 
+    @staticmethod
+    def _sweep_targets(spatial: list[int], rows: int) -> Iterator[tuple[slice, ...]]:
+        """The sweep's slabs: whole rows of the landing's first axis, full extent on the rest."""
+        for start in range(0, spatial[0], rows):
+            yield (slice(start, min(start + rows, spatial[0])), *(slice(0, extent) for extent in spatial[1:]))
+
+    @staticmethod
+    def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -> Attribute:
+        """The header a sweep publishes: the plan-time case state, completed by what the chain's
+        stages added in ``__call__``: the same keys the whole-volume pass would leave at the Save."""
+        attributes = Attribute(evolved)
+        for key in scope.keys():
+            if key not in keys_before and key not in attributes:
+                attributes[key] = scope[key]
+        return attributes
+
+    @staticmethod
+    def _require_channel_first(block: np.ndarray, spatial: list[int], what: str) -> None:
+        """Refuse a slab that lost the channel-first layout. Writing it anyway is the worst outcome
+        available: the header would take the slab's first spatial extent for a channel count and
+        publish a store of that many "channels", raising nothing, while the whole-volume path
+        returns the right rank: the two would silently disagree."""
+        if block.ndim != len(spatial) + 1:
+            raise PatchError(
+                f"{what} returned a rank-{block.ndim} slab where the channel-first layout needs rank"
+                f" {len(spatial) + 1} (C, {', '.join(str(extent) for extent in spatial)}).",
+                "A transform that reduces the leading axis must keep it (`keepdim=True`), so a slab"
+                " stays C[Z]YX; only then does a region write mean the same thing as the"
+                " whole-volume pass.",
+            )
+
+    @staticmethod
+    def _open_sweep_stream(
+        sweep: _PendingSweep, block: np.ndarray, spatial: list[int], rows: int, attributes: Attribute
+    ) -> DataStream | None:
+        """One region-write stream shaped for the sweep: the store chunks on whole slabs (channels
+        included), so no region write ever pays a read-modify-write."""
+        return sweep.destination.open_data_stream(
+            sweep.group,
+            sweep.entry,
+            [int(block.shape[0]), *spatial],
+            block.dtype,
+            attributes,
+            region_shape=[int(block.shape[0]), rows, *spatial[1:]],
+        )
+
     def _materialize_shared_pass(self, shared: list[tuple[int, _PendingSweep]]) -> set[int]:
         """One read pass, N write streams: the optimal regime of the expansion engine.
 
@@ -2559,13 +2596,12 @@ class DatasetManager:
         rows = self._sweep_rows(spatial, int(reference.source_shape[0]))
         streams: dict[int, DataStream] = {}
         try:
-            for start in range(0, spatial[0], rows):
-                target = (slice(start, min(start + rows, spatial[0])), *(slice(0, e) for e in spatial[1:]))
+            for slab_index, target in enumerate(self._sweep_targets(spatial, rows)):
                 tensor, slab_attribute, keys_before = self._replay_streamed_region(
                     source,
                     target,
                     Attribute(reference.base_attributes),
-                    Attribute(prefix_evolved) if start == 0 else None,
+                    Attribute(prefix_evolved) if slab_index == 0 else None,
                 )
                 for a, sweep, tail, evolved in active:
                     copy_tensor = tensor.clone() if len(active) > 1 else tensor
@@ -2573,25 +2609,10 @@ class DatasetManager:
                     for stage in tail:
                         copy_tensor = stage(self.name, copy_tensor, scope)
                     block = copy_tensor.numpy()
-                    if block.ndim != len(spatial) + 1:
-                        raise PatchError(
-                            f"A per-copy stage of '{sweep.group}/{sweep.entry}' returned a rank-{block.ndim}"
-                            f" slab where the channel-first layout needs rank {len(spatial) + 1}.",
-                            "A transform that reduces the leading axis must keep it (`keepdim=True`).",
-                        )
+                    self._require_channel_first(block, spatial, f"A per-copy stage of '{sweep.group}/{sweep.entry}'")
                     if a not in streams:
-                        attributes = Attribute(evolved)
-                        for key in scope.keys():
-                            if key not in keys_before and key not in attributes:
-                                attributes[key] = scope[key]
-                        stream = sweep.destination.open_data_stream(
-                            sweep.group,
-                            sweep.entry,
-                            [int(block.shape[0]), *spatial],
-                            block.dtype,
-                            attributes,
-                            region_shape=[int(block.shape[0]), rows, *spatial[1:]],
-                        )
+                        attributes = self._sweep_header(evolved, scope, keys_before)
+                        stream = self._open_sweep_stream(sweep, block, spatial, rows, attributes)
                         if stream is None:
                             raise PatchError(
                                 f"destination '{sweep.destination.filename}' refused the region write"
@@ -2701,46 +2722,20 @@ class DatasetManager:
         rows = self._sweep_rows(spatial, int(sweep.source_shape[0]))
         stream: DataStream | None = None
         try:
-            for start in range(0, spatial[0], rows):
-                target = (slice(start, min(start + rows, spatial[0])), *(slice(0, e) for e in spatial[1:]))
+            for slab_index, target in enumerate(self._sweep_targets(spatial, rows)):
                 # The first slab hands a throwaway case scope to the replay so the region-geometry
                 # check runs: a region stage recording geometry nowhere the case can read refuses the
                 # sweep (PatchError -> whole-volume fallback), exactly as the patch path refuses it.
                 tensor, slab_attribute, keys_before = self._replay_streamed_region(
-                    source, target, Attribute(sweep.base_attributes), Attribute(evolved) if start == 0 else None
+                    source, target, Attribute(sweep.base_attributes), Attribute(evolved) if slab_index == 0 else None
                 )
                 block = tensor.numpy()
-                if block.ndim != len(spatial) + 1:
-                    # The chain dropped (or added) a leading axis, so this slab is not C[Z]YX. Writing
-                    # it anyway is the worst outcome available: the header would take this slab's
-                    # FIRST spatial extent for a channel count, publish a store of that many
-                    # "channels" each holding a broadcast copy, and raise nothing: the whole-volume
-                    # path meanwhile returns the right rank, so the two silently disagree. A rank is
-                    # not something a slab can carry an opinion about: refuse, and let the caller's
-                    # handler fall back to the whole volume, which reduces correctly.
-                    raise PatchError(
-                        f"A stage of the chain writing '{sweep.group}/{sweep.entry}' returned a rank-{block.ndim}"
-                        f" slab where the channel-first layout needs rank {len(spatial) + 1}"
-                        f" (C, {', '.join(str(e) for e in spatial)}).",
-                        "A transform that reduces the leading axis must keep it (`keepdim=True`), so a"
-                        " slab stays C[Z]YX; only then does a region write mean the same thing as the"
-                        " whole-volume pass.",
-                    )
+                self._require_channel_first(
+                    block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
+                )
                 if stream is None:
-                    # The header is the plan-time case state, completed by what the chain's stages
-                    # add in __call__: the same keys the whole-volume pass would leave at the Save.
-                    attributes = Attribute(evolved)
-                    for key in slab_attribute.keys():
-                        if key not in keys_before and key not in attributes:
-                            attributes[key] = slab_attribute[key]
-                    stream = sweep.destination.open_data_stream(
-                        sweep.group,
-                        sweep.entry,
-                        [int(block.shape[0]), *spatial],
-                        block.dtype,
-                        attributes,
-                        region_shape=[int(block.shape[0]), rows, *spatial[1:]],
-                    )
+                    attributes = self._sweep_header(evolved, slab_attribute, keys_before)
+                    stream = self._open_sweep_stream(sweep, block, spatial, rows, attributes)
                     if stream is None:
                         return self._sweep_failed_because(
                             sweep,
@@ -2948,7 +2943,7 @@ class DatasetManager:
         keys_before = set(cache_attribute.keys())
 
         for stage, plan, source, target in zip(stages, plans, spans[:-1], spans[1:], strict=True):
-            if plan.kind not in _REGION_KINDS:
+            if not plan.kind.is_region:
                 # The span is handed over rather than dropped: a stage reading a second aligned
                 # volume needs to know WHICH part of it lines up with this region, and the
                 # dispatcher is the only thing that knows. The default hook ignores it.

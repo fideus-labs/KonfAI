@@ -25,6 +25,7 @@ import konfai.evaluator as evaluator_module
 import konfai.main as main_module
 import konfai.predictor as predictor_module
 import konfai.trainer as trainer_module
+import konfai.transformer as transformer_module
 import pytest
 
 
@@ -97,6 +98,78 @@ def test_konfai_eval_dispatches_correctly(monkeypatch: pytest.MonkeyPatch) -> No
     main_module.main()
 
     assert captured["evaluations_file"] == "Evaluation.yml"
+
+
+def test_konfai_resume_dispatches_model_and_lr(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_train(**kwargs) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(trainer_module, "train", fake_train)
+    monkeypatch.setattr(sys, "argv", ["konfai", "RESUME", "-c", "Config.yml", "--model", "ckpt.pt", "--lr", "0.001"])
+
+    main_module.main()
+
+    assert captured["command"] == "RESUME"
+    assert captured["config"] == "Config.yml"
+    assert captured["model"] == "ckpt.pt"
+    assert captured["lr"] == 0.001
+
+
+@pytest.mark.parametrize("flag", ["--checkpoints-dir", "-checkpoints-dir"])
+def test_konfai_resume_accepts_both_checkpoints_dir_spellings(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
+    """RESUME once declared its dir flags with a single dash where every other command uses two;
+    the double-dash form is now the real one and the single-dash form stays as a hidden alias."""
+    captured: dict[str, object] = {}
+
+    def fake_train(**kwargs) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(trainer_module, "train", fake_train)
+    monkeypatch.setattr(sys, "argv", ["konfai", "RESUME", "-c", "Config.yml", "--model", "ckpt.pt", flag, "/elsewhere"])
+
+    main_module.main()
+
+    assert captured["checkpoints_dir"] == "/elsewhere"
+
+
+def test_konfai_transform_dispatches_config_as_transform_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_transform(**kwargs) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(transformer_module, "transform", fake_transform)
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRANSFORM", "-c", "Transform.yml"])
+
+    main_module.main()
+
+    assert captured["transform_file"] == "Transform.yml"
+    assert "config" not in captured
+    assert "plan" not in captured
+
+
+def test_konfai_transform_plan_short_circuits_to_plan_transform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--plan must dispatch to plan_transform, never transform: the distributed wrapper filters
+    kwargs by the entrypoint's signature, so a 'plan' kwarg passed through would be silently
+    dropped and the run would proceed as if the flag had never been given."""
+    planned: dict[str, object] = {}
+
+    def fake_plan_transform(**kwargs) -> None:
+        planned.update(kwargs)
+
+    def fail_transform(**kwargs) -> None:
+        raise AssertionError("--plan must not start the transform run")
+
+    monkeypatch.setattr(transformer_module, "plan_transform", fake_plan_transform)
+    monkeypatch.setattr(transformer_module, "transform", fail_transform)
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRANSFORM", "-c", "Transform.yml", "--plan"])
+
+    main_module.main()
+
+    assert planned["transform_file"] == "Transform.yml"
+    assert "plan" not in planned
 
 
 def test_predict_evaluate_expose_tensorboard_param():

@@ -33,8 +33,9 @@ import threading
 import time
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple, TypeVar, cast
 
 import numpy as np
 import torch
@@ -983,6 +984,9 @@ class _OmeZarrDataStream(DataStream):
         clear_ome_zarr_cache()
 
 
+_T = TypeVar("_T")
+
+
 class Dataset:
     """Filesystem or HDF5-backed dataset abstraction used across KonfAI."""
 
@@ -1901,6 +1905,10 @@ class Dataset:
             attributes["Direction"] = direction
             return data, attributes
 
+        def bounded_region_reads(self, name: str) -> bool:
+            del name
+            return True  # one file per slice: a region decodes the slices it covers and nothing else
+
         def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
             from konfai.utils.dicom import get_dicom_info, read_dicom_series_slice
 
@@ -2379,45 +2387,42 @@ class Dataset:
         stream._file = file
         return stream
 
-    def read_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
+    def _case_path(self, sub_directory: str, name: str) -> str | None:
+        """The file a directory dataset stores case ``name`` under, or ``None`` if absent on disk.
+
+        The returned path omits the implicit ``.h5`` suffix h5 case files carry: ``H5File``
+        re-appends it on open.
+        """
+        path = f"{self.filename}{sub_directory}{name}"
+        return path if os.path.exists(f"{path}{'.h5' if self.file_format == 'h5' else ''}") else None
+
+    def _resolve_entry(self, groups: str, name: str, action: Callable[[Dataset.AbstractFile, str, str], _T]) -> _T:
+        """Run ``action`` on the open file holding ``(groups, name)``: THE place entry resolution lives.
+
+        ``action`` receives the backend and the entry's coordinates INSIDE that file: a directory
+        dataset stores one case per file, addressed by ``name``, with the entry keyed by the group
+        path's last component, so the coordinates are ``("", group)`` there and ``(groups, name)``
+        on a single-file dataset. Raises ``NameError`` when the dataset or the entry is missing.
+        """
         if not self._exists_on_disk():
             raise NameError(f"Dataset {self.filename} not found")
         if self.is_directory:
             for sub_directory in self._get_sub_directories(groups):
-                group = groups.split("/")[-1]
-                if os.path.exists(f"{self.filename}{sub_directory}{name}{'.h5' if self.file_format == 'h5' else ''}"):
-                    with Dataset.File(
-                        f"{self.filename}{sub_directory}{name}",
-                        True,
-                        self.file_format,
-                        self.level,
-                    ) as file:
-                        return file.file_to_data("", group)
-        else:
-            with Dataset.File(self.filename, True, self.file_format, self.level) as file:
-                return file.file_to_data(groups, name)
-        raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
+                path = self._case_path(sub_directory, name)
+                if path is not None:
+                    with Dataset.File(path, True, self.file_format, self.level) as file:
+                        return action(file, "", groups.split("/")[-1])
+            raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
+        with Dataset.File(self.filename, True, self.file_format, self.level) as file:
+            return action(file, groups, name)
+
+    def read_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
+        return self._resolve_entry(groups, name, lambda file, group, entry: file.file_to_data(group, entry))
 
     def read_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
-        if not self._exists_on_disk():
-            raise NameError(f"Dataset {self.filename} not found")
-        if self.is_directory:
-            for sub_directory in self._get_sub_directories(groups):
-                group = groups.split("/")[-1]
-                if os.path.exists(f"{self.filename}{sub_directory}{name}{'.h5' if self.file_format == 'h5' else ''}"):
-                    with Dataset.File(
-                        f"{self.filename}{sub_directory}{name}",
-                        True,
-                        self.file_format,
-                        self.level,
-                    ) as file:
-                        result = file.file_to_data_slice("", group, slices)
-                        return result
-        else:
-            with Dataset.File(self.filename, True, self.file_format, self.level) as file:
-                return file.file_to_data_slice(groups, name, slices)
-
-        raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
+        return self._resolve_entry(
+            groups, name, lambda file, group, entry: file.file_to_data_slice(group, entry, slices)
+        )
 
     def bounded_region_reads(self, groups: str, name: str) -> bool:
         """Whether a region read of this entry decodes only the region, or the whole volume.
@@ -2427,19 +2432,10 @@ class Dataset:
         times over, where loading reads it once. ``False`` for a missing entry: pessimistic, and
         only ever costing speed.
         """
-        if not self._exists_on_disk():
+        try:
+            return self._resolve_entry(groups, name, lambda file, _, entry: file.bounded_region_reads(entry))
+        except NameError:
             return False
-        if self.is_directory:
-            for sub_directory in self._get_sub_directories(groups):
-                group = groups.split("/")[-1]
-                if os.path.exists(f"{self.filename}{sub_directory}{name}{'.h5' if self.file_format == 'h5' else ''}"):
-                    with Dataset.File(
-                        f"{self.filename}{sub_directory}{name}", True, self.file_format, self.level
-                    ) as file:
-                        return file.bounded_region_reads(group)
-            return False
-        with Dataset.File(self.filename, True, self.file_format, self.level) as file:
-            return file.bounded_region_reads(name)
 
     def read_data_statistics(
         self,
@@ -2447,24 +2443,9 @@ class Dataset:
         name: str,
         channels: list[int] | None = None,
     ) -> dict[str, Any]:
-        if not self._exists_on_disk():
-            raise NameError(f"Dataset {self.filename} not found")
-        if self.is_directory:
-            for sub_directory in self._get_sub_directories(groups):
-                group = groups.split("/")[-1]
-                if os.path.exists(f"{self.filename}{sub_directory}{name}{'.h5' if self.file_format == 'h5' else ''}"):
-                    with Dataset.File(
-                        f"{self.filename}{sub_directory}{name}",
-                        True,
-                        self.file_format,
-                        self.level,
-                    ) as file:
-                        return file.file_to_data_statistics("", group, channels)
-        else:
-            with Dataset.File(self.filename, True, self.file_format, self.level) as file:
-                return file.file_to_data_statistics(groups, name, channels)
-
-        raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
+        return self._resolve_entry(
+            groups, name, lambda file, group, entry: file.file_to_data_statistics(group, entry, channels)
+        )
 
     def read_transform(self, group: str, name: str) -> sitk.Transform:
         if not self._exists_on_disk():
@@ -2509,12 +2490,14 @@ class Dataset:
             # destination, which a single-file backend would otherwise turn into an open error.
             return False
         if self.is_directory:
+            # Not _resolve_entry: membership keeps scanning past a case file whose group is absent,
+            # and answers False instead of raising.
             entry_group = group.split("/")[-1]
             for sub_directory in self._get_sub_directories(group):
-                base = f"{self.filename}{sub_directory}{name}"
-                if not os.path.exists(f"{base}{'.h5' if self.file_format == 'h5' else ''}"):
+                path = self._case_path(sub_directory, name)
+                if path is None:
                     continue
-                with Dataset.File(base, True, self.file_format, self.level) as file:
+                with Dataset.File(path, True, self.file_format, self.level) as file:
                     if file.is_exist(entry_group):
                         return True
             return False
@@ -2607,25 +2590,9 @@ class Dataset:
         if cached is not None:
             shape, attr = cached
             return list(shape), Attribute(attr)
-        if self.is_directory:
-            for sub_directory in self._get_sub_directories(groups):
-                group = groups.split("/")[-1]
-                if os.path.exists(f"{self.filename}{sub_directory}{name}{'.h5' if self.file_format == 'h5' else ''}"):
-                    with Dataset.File(
-                        f"{self.filename}{sub_directory}{name}",
-                        True,
-                        self.file_format,
-                        self.level,
-                    ) as file:
-                        result = file.get_infos("", group)
-                        self._infos_cache[cache_key] = (list(result[0]), Attribute(result[1]))
-                        return result
-        else:
-            with Dataset.File(self.filename, True, self.file_format, self.level) as file:
-                result = file.get_infos(groups, name)
-                self._infos_cache[cache_key] = (list(result[0]), Attribute(result[1]))
-                return result
-        raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
+        result = self._resolve_entry(groups, name, lambda file, group, entry: file.get_infos(group, entry))
+        self._infos_cache[cache_key] = (list(result[0]), Attribute(result[1]))
+        return result
 
     def get_statistics(self, groups: str) -> dict[str, dict[str, dict[str, float | list[float]]]]:
         names = self.get_names(groups)

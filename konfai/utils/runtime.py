@@ -644,7 +644,7 @@ class Log(MinimalLog):
     def write(self, msg: str):
         super().write(msg)
         # Consecutive identical lines are one fact said twice: a progress bar arrives as several
-        # write() calls per frame and a case line rides beside its own counter frame, which used to
+        # write() calls per frame and a case line rides beside its own counter frame, which would
         # multiply the file by ~4x against the console. Only CONSECUTIVE repeats fold: a fact that
         # genuinely recurs later still lands.
         if self._buffered_line and self._buffered_line != self._last_logged:
