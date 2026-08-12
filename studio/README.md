@@ -22,7 +22,7 @@ validates the config, and asks before spending GPU time. Training runs with live
 validation samples, then the held-out cases are predicted, evaluated, and opened in the viewer
 next to the ground truth.
 
-<!-- drop clip1_train_from_your_dataset.mp4 here -->
+https://github.com/user-attachments/assets/541ba05d-a4c0-4b20-b51a-1fa134293858
 
 ### Iterate and steer, live
 
@@ -30,7 +30,7 @@ Launch one more run and steer it while it trains. Change the learning rate mid-r
 job when you decide, evaluate the same held-out cases, and compare every run on a leaderboard
 that flags optimistic numbers.
 
-<!-- drop clip2_iterate_steer_compare.mp4 here -->
+https://github.com/user-attachments/assets/af68ab7d-c26f-45b5-9fca-1938058a129c
 
 ### Use a published model
 
@@ -38,7 +38,7 @@ Pick an app from the zoo and run its published weights on your own cases. GPU in
 seconds per case, the result is scored against your reference mask, and the segmentation opens
 over its CT in the viewer.
 
-<!-- drop clip3_use_a_published_model.mp4 here -->
+https://github.com/user-attachments/assets/91310a7f-973e-4098-a23d-ef6cab072c00
 
 ### Fit a challenge task
 
@@ -47,7 +47,7 @@ writes it as a real PyTorch module, smoke tests it before any GPU hour, and plug
 config by classpath. It trains under a time budget, scores the result the way the challenge
 does, and claims nothing without a fair baseline.
 
-<!-- drop clip4_fit_a_challenge_task.mp4 here -->
+https://github.com/user-attachments/assets/1c5e299e-8321-43f5-bc0e-fc5d0700bfcd
 
 ### Prepare a whole dataset
 
@@ -55,7 +55,7 @@ The TRANSFORM workflow processes 75 volumes under a 512 MiB memory cap. The plan
 by case, what will stream in slabs and what simply fits in memory. The whole dataset goes
 through in about a minute and comes back verified.
 
-<!-- drop clip5_prepare_a_dataset.mp4 here -->
+https://github.com/user-attachments/assets/b9b4c01f-7bf0-4f61-86f6-5ae8ce784534
 
 ## Layout
 
