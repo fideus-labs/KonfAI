@@ -534,3 +534,34 @@ def test_the_inline_path_is_the_default(monkeypatch) -> None:
 
     assert ran_here == [0]
     assert spawned == []
+
+
+def _budget_applied(monkeypatch, cores: int, ranks: str | None, omp: str | None) -> list[int]:
+    calls: list[int] = []
+    monkeypatch.setattr(rt.os, "cpu_count", lambda: cores)
+    monkeypatch.setattr(rt.torch, "set_num_threads", calls.append)
+    for key, value in (("KONFAI_LOCAL_RANKS", ranks), ("OMP_NUM_THREADS", omp)):
+        monkeypatch.delenv(key, raising=False)
+        if value is not None:
+            monkeypatch.setenv(key, value)
+    rt.apply_cpu_thread_budget()
+    return calls
+
+
+def test_cpu_thread_budget_caps_torchs_every_core_default(monkeypatch) -> None:
+    """torch defaults to one intraop thread per core; past bus saturation that only adds barrier
+    contention (measured 0.7 s at 12 threads vs 67 s at 24 for the same gather)."""
+    assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None) == [12]
+
+
+def test_cpu_thread_budget_splits_the_node_between_ranks(monkeypatch) -> None:
+    assert _budget_applied(monkeypatch, cores=24, ranks="4", omp=None) == [6]
+
+
+def test_cpu_thread_budget_never_rounds_to_zero(monkeypatch) -> None:
+    assert _budget_applied(monkeypatch, cores=2, ranks="4", omp=None) == [1]
+
+
+def test_an_explicit_omp_setting_keeps_authority(monkeypatch) -> None:
+    """torch honors OMP_NUM_THREADS at init; the budget must not override the user's choice."""
+    assert _budget_applied(monkeypatch, cores=24, ranks="4", omp="20") == []
