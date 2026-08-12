@@ -1414,6 +1414,7 @@ class DatasetManager:
         self._rewrite_saves = False
         # The per-rank budget the sweeps size their slabs against (None = the fixed _SWEEP_SLAB_ROWS).
         self._sweep_budget_bytes: float | None = None
+        self._chain_device: torch.device | None = None
         self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None], dict[str, float]] = {}
         # Save caches already swept by THIS run, keyed by (store, group, entry): under --overwrite the
         # existence probe answers "not written", and without this ledger every copy of an Expand chain
@@ -1543,6 +1544,8 @@ class DatasetManager:
             data, _ = self.dataset.read_data(self.group_src, self.name)
 
         data = torch.from_numpy(data)
+        if self._chain_device is not None:
+            data = data.to(self._chain_device)
 
         if len(pre_transform):
             data = self._apply_chain(data, pre_transform[i:], self.cache_attributes[0], self.name)
@@ -1565,7 +1568,7 @@ class DatasetManager:
             tensor = transform_function(self.name, tensor, attribute)
             if isinstance(transform_function, Save):
                 dataset, group_dest = save_destination(transform_function, self.dataset, self.group_dest)
-                dataset.write(group_dest, entry, tensor.numpy(), attribute)
+                dataset.write(group_dest, entry, tensor.cpu().numpy(), attribute)
         return tensor
 
     def _load_augmentation(self, data_augmentations_list: list[DataAugmentationsList]) -> None:
@@ -2167,6 +2170,7 @@ class DatasetManager:
         fallback_budget_bytes: float | None = None,
         allow_fallback: bool = True,
         prefer_whole: bool = False,
+        device: "torch.device | None" = None,
     ) -> bool:
         """Write this case's chain to disk by the cheapest path that can, and say which one it took.
 
@@ -2190,6 +2194,10 @@ class DatasetManager:
         """
         self._set_rewrite(rewrite)
         self.set_memory_budget(fallback_budget_bytes)
+        # Opt-in only, and only here: this same machinery loads training cases inside DataLoader
+        # workers, where a CUDA default would be wrong. The transformer's rank is the one caller
+        # that knows its device.
+        self._chain_device = device if device is not None and device.type != "cpu" else None
         # A chain with an Expand materializes a COPY, whose draw must be part of the plan; without
         # one it materializes the case itself, and augmentations have nothing to do with writing.
         apply_augmentations = self._expand is not None and a > 0
@@ -2354,6 +2362,7 @@ class DatasetManager:
         rewrite: bool = False,
         fallback_budget_bytes: float | None = None,
         allow_fallback: bool = True,
+        device: "torch.device | None" = None,
     ) -> dict[int, str]:
         """Write the :class:`Expand` copies of this case by the cheapest regime each can take.
 
@@ -2373,6 +2382,7 @@ class DatasetManager:
             )
         self._set_rewrite(rewrite)
         self.set_memory_budget(fallback_budget_bytes)
+        self._chain_device = device if device is not None and device.type != "cpu" else None
         verdicts: dict[int, str] = {}
         if not copies:
             return verdicts
@@ -2608,7 +2618,7 @@ class DatasetManager:
                     scope = Attribute(slab_attribute)
                     for stage in tail:
                         copy_tensor = stage(self.name, copy_tensor, scope)
-                    block = copy_tensor.numpy()
+                    block = copy_tensor.cpu().numpy()
                     self._require_channel_first(block, spatial, f"A per-copy stage of '{sweep.group}/{sweep.entry}'")
                     if a not in streams:
                         attributes = self._sweep_header(evolved, scope, keys_before)
@@ -2729,7 +2739,7 @@ class DatasetManager:
                 tensor, slab_attribute, keys_before = self._replay_streamed_region(
                     source, target, Attribute(sweep.base_attributes), Attribute(evolved) if slab_index == 0 else None
                 )
-                block = tensor.numpy()
+                block = tensor.cpu().numpy()
                 self._require_channel_first(
                     block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
                 )
@@ -2937,6 +2947,8 @@ class DatasetManager:
         data_slices = tuple([slice(None)] * n_prefix + spans[0])
         data, attributes = stream_source.dataset.read_data_slice(stream_source.group, stream_source.entry, data_slices)
         tensor = torch.from_numpy(data)
+        if self._chain_device is not None:
+            tensor = tensor.to(self._chain_device)
 
         cache_attribute.update(attributes)
         cache_attribute["StatisticsSeeded"] = 1.0  # same contract as the pointwise route above

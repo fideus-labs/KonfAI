@@ -61,6 +61,7 @@ from konfai.utils.runtime import (
     State,
     _materialized_config,
     configure_workflow_environment,
+    get_device,
     run_distributed_app,
 )
 from konfai.utils.utils import get_module
@@ -801,7 +802,12 @@ class Transformer(DistributedObject):
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders):
         """Materialize this rank's cases. The plan already said what will happen: the console gets
         the deviations from it, the live counter, and one final line that says how it went."""
-        del world_size, local_rank, dataloaders
+        del world_size, dataloaders
+        # The one caller that knows its device: cuda:<rank> when the launch requested GPUs (the
+        # runtime narrowed CUDA_VISIBLE_DEVICES to them), CPU otherwise. The chain then runs where
+        # the rank runs; regions still land on the host for every write.
+        device = get_device(local_rank)
+        chain_device = torch.device(f"cuda:{device}") if isinstance(device, int) else device
         started = time.monotonic()
         managers = self._managers()
         shard = self._shards[global_rank]
@@ -850,6 +856,7 @@ class Transformer(DistributedObject):
                             rewrite=self._overwrite,
                             fallback_budget_bytes=self._budget_bytes,
                             allow_fallback=allow_fallback,
+                            device=chain_device,
                         )
                         shared = sum(1 for regime in regimes.values() if regime == "stream-shared")
                         own = sum(1 for regime in regimes.values() if regime == "stream")
@@ -871,6 +878,7 @@ class Transformer(DistributedObject):
                             fallback_budget_bytes=self._budget_bytes,
                             allow_fallback=allow_fallback,
                             prefer_whole=planned == "LOAD",
+                            device=chain_device,
                         )
                         verdict = "STREAM" if streamed else ("LOAD" if planned == "LOAD" else "WHOLE-VOLUME")
                         counts[verdict] += 1
