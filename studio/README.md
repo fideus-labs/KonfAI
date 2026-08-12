@@ -13,48 +13,47 @@ compares, keeps & reproduces experiments, then deploys the frozen model privatel
 
 ## See it work
 
-Five real sessions, filmed as single continuous takes (only sped up, never cut). Real data,
-real GPU runs, real numbers.
+Five real sessions on real data. Each video is one continuous take, sped up but never cut.
 
 ### Train from your dataset
 
-Browse to a dataset, Studio inspects it on its own, then one plain sentence trains an MR to CT
-synthesis model: config authored and validated, GPU spend confirmed before launch, live curves
-with a validation pass every 200 iterations, prediction and evaluation of held-out cases, and
-the synthetic CT next to the real one in the viewer.
+Point Studio at your images and ask in plain words. The agent inspects the dataset, writes and
+validates the config, and asks before spending GPU time. Training runs with live curves and
+validation samples, then the held-out cases are predicted, evaluated, and opened in the viewer
+next to the ground truth.
 
 <!-- drop clip1_train_from_your_dataset.mp4 here -->
 
 ### Iterate and steer, live
 
-One more run, steered while it trains: change the learning rate mid-run with the Tune control,
-stop the job when it stops earning, evaluate the same held-out cases, and read an honest
-leaderboard where runs that saw the test cases are flagged.
+Launch one more run and steer it while it trains. Change the learning rate mid-run, stop the
+job when you decide, evaluate the same held-out cases, and compare every run on a leaderboard
+that flags optimistic numbers.
 
 <!-- drop clip2_iterate_steer_compare.mp4 here -->
 
 ### Use a published model
 
-Pick an app from the zoo, run its published weights on your own cases in seconds of GPU
-inference, evaluate the Dice against your reference mask, and review the segmentation over its
-CT in the viewer.
+Pick an app from the zoo and run its published weights on your own cases. GPU inference takes
+seconds per case, the result is scored against your reference mask, and the segmentation opens
+over its CT in the viewer.
 
 <!-- drop clip3_use_a_published_model.mp4 here -->
 
 ### Fit a challenge task
 
-The way KonfAI is used in challenge season: the agent shapes a custom loss for the task's
-score, writes it as a real PyTorch module, smoke tests it before any GPU hour, wires it into
-the config by classpath, trains under a time budget, and scores it the way the challenge
-scores. It claims nothing without a fair baseline.
+How KonfAI is used in challenge season. The agent designs a loss shaped for the task's score,
+writes it as a real PyTorch module, smoke tests it before any GPU hour, and plugs it into the
+config by classpath. It trains under a time budget, scores the result the way the challenge
+does, and claims nothing without a fair baseline.
 
 <!-- drop clip4_fit_a_challenge_task.mp4 here -->
 
 ### Prepare a whole dataset
 
-The TRANSFORM workflow batch-processes 75 chunked MR volumes under a 512 MiB memory cap:
-the plan states, case by case, what will stream in slabs and what fits and simply loads,
-then the whole dataset flies through in about a minute and comes back verified.
+The TRANSFORM workflow processes 75 volumes under a 512 MiB memory cap. The plan states, case
+by case, what will stream in slabs and what simply fits in memory. The whole dataset goes
+through in about a minute and comes back verified.
 
 <!-- drop clip5_prepare_a_dataset.mp4 here -->
 
