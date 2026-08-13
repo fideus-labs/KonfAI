@@ -57,6 +57,14 @@ through in about a minute and comes back verified.
 
 https://github.com/user-attachments/assets/b9b4c01f-7bf0-4f61-86f6-5ae8ce784534
 
+### Everything is config
+
+Open any experiment and its config is right there: the resolved YAML is the complete record of
+what ran. Diff two runs to see exactly what changed, then ship the best model as a verified
+bundle with its checkpoint, configs, and custom code.
+
+<!-- drop clip6_everything_is_config.mp4 here -->
+
 ## Layout
 
 - `konfai_studio/`: the Python package (the BFF)
