@@ -102,6 +102,40 @@ KONFAI_MCP_WORKSPACES_ROOT = "/path/to/workspaces"
 KONFAI_MCP_APP_CATALOG = "/path/to/my_apps.json"   # optional: your own app sources
 ```
 
+### Remote and stateless deployments
+
+Beyond stdio, the server speaks the MCP *streamable HTTP* transport
+(specification revision 2025-03-26, which replaced the deprecated HTTP+SSE
+transport). Sessions are optional in that revision: with `--stateless-http`
+the server never issues an `Mcp-Session-Id` header, every request is
+self-contained, and replicas can run behind a load balancer or on serverless
+platforms without session affinity. `--json-response` additionally returns
+plain `application/json` bodies instead of opening a Server-Sent Events
+stream per request, which suits proxies that buffer streaming responses.
+
+```bash
+# Stateful streamable HTTP (default): sessions pinned to this process
+konfai-mcp --transport streamable-http --host 0.0.0.0 --port 8123 --bearer-token "$TOKEN"
+
+# Stateless streamable HTTP: safe behind a load balancer, no session affinity
+konfai-mcp --transport streamable-http --stateless-http --json-response \
+    --host 0.0.0.0 --port 8123 --bearer-token "$TOKEN"
+```
+
+Both flags can also be set through the environment
+(`KONFAI_MCP_STATELESS_HTTP=1`, `KONFAI_MCP_JSON_RESPONSE=1`). They apply
+only to `streamable-http`; stdio is inherently per-process and the
+deprecated SSE transport requires sessions.
+
+```{warning}
+Stateless mode removes MCP *protocol* session state, not KonfAI's own
+experiment state. Experiment workspaces live on disk under
+`KONFAI_MCP_WORKSPACES_ROOT` and survive across requests and restarts, but
+the in-memory job registry is per-process: when scaling to multiple
+replicas, point them at a shared workspaces root and route job-monitoring
+calls consistently, or run a single replica for job-heavy workflows.
+```
+
 ## Tool surface at a glance
 
 | Stage | Tools |

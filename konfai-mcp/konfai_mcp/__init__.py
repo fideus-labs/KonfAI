@@ -25,6 +25,13 @@ from typing import Any
 
 _TRANSPORT_CHOICES = ("stdio", "sse", "streamable-http")
 
+_ENV_FLAG_TRUE = {"1", "true", "yes", "on"}
+
+
+def _env_flag(name: str) -> bool:
+    """Interpret an environment variable as a boolean flag."""
+    return os.environ.get(name, "").strip().lower() in _ENV_FLAG_TRUE
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the KonfAI MCP server.")
@@ -72,6 +79,25 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("KONFAI_MCP_BEARER_TOKEN"),
         help="Optional bearer token required for SSE or streamable HTTP transports.",
     )
+    parser.add_argument(
+        "--stateless-http",
+        action="store_true",
+        default=_env_flag("KONFAI_MCP_STATELESS_HTTP"),
+        help=(
+            "Serve streamable HTTP without MCP session state: no Mcp-Session-Id header is issued and every "
+            "request is self-contained, so replicas can sit behind a load balancer or serverless platform "
+            "without session affinity. Streamable HTTP only."
+        ),
+    )
+    parser.add_argument(
+        "--json-response",
+        action="store_true",
+        default=_env_flag("KONFAI_MCP_JSON_RESPONSE"),
+        help=(
+            "Return plain application/json bodies instead of opening a Server-Sent Events stream per request; "
+            "pairs well with --stateless-http behind buffering proxies. Streamable HTTP only."
+        ),
+    )
     return parser
 
 
@@ -86,6 +112,10 @@ def _apply_cli_environment(args: argparse.Namespace) -> None:
         "KONFAI_MCP_PATH": args.path,
         "KONFAI_MCP_LOG_LEVEL": args.log_level,
         "KONFAI_MCP_BEARER_TOKEN": args.bearer_token,
+        # Only propagate truthy flags: a plain `False` means "not requested", and clobbering the
+        # variable with "False" would surprise anyone who exported it before launching.
+        "KONFAI_MCP_STATELESS_HTTP": "1" if args.stateless_http else None,
+        "KONFAI_MCP_JSON_RESPONSE": "1" if args.json_response else None,
     }
     for key, value in updates.items():
         if value is None:
@@ -104,6 +134,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"KONFAI_MCP_TRANSPORT={args.transport!r} is not a valid transport; "
             f"choose from {', '.join(_TRANSPORT_CHOICES)}."
         )
+    if (args.stateless_http or args.json_response) and args.transport != "streamable-http":
+        parser.error(
+            "--stateless-http and --json-response only apply to the 'streamable-http' transport "
+            "(stdio is inherently per-process and the deprecated SSE transport requires sessions)."
+        )
     _apply_cli_environment(args)
 
     from .server import main as server_main
@@ -115,6 +150,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         path=args.path,
         log_level=args.log_level,
         bearer_token=args.bearer_token,
+        stateless_http=args.stateless_http,
+        json_response=args.json_response,
     )
 
 

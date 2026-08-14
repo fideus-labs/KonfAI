@@ -43,6 +43,8 @@ def test_cli_sets_environment_and_forwards_transport(monkeypatch) -> None:
     monkeypatch.delenv("KONFAI_MCP_WORKSPACES_ROOT", raising=False)
     monkeypatch.delenv("KONFAI_MCP_PORT", raising=False)
     monkeypatch.delenv("KONFAI_MCP_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("KONFAI_MCP_STATELESS_HTTP", raising=False)
+    monkeypatch.delenv("KONFAI_MCP_JSON_RESPONSE", raising=False)
 
     previous = {
         key: os.environ.get(key)
@@ -85,6 +87,8 @@ def test_cli_sets_environment_and_forwards_transport(monkeypatch) -> None:
             "path": "/mcp",
             "log_level": "warning",
             "bearer_token": "dev-token",
+            "stateless_http": False,
+            "json_response": False,
         }
         assert os.environ["KONFAI_MCP_TRANSPORT"] == "sse"
         assert os.environ["KONFAI_MCP_SESSION"] == "challenge round 1"
@@ -109,3 +113,45 @@ def test_parser_default_accepts_valid_transport_env(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("KONFAI_MCP_TRANSPORT", "streamable-http")
     args = konfai_mcp._build_parser().parse_args([])
     assert args.transport == "streamable-http"
+
+
+def test_cli_forwards_stateless_http_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_server_main(**kwargs):
+        captured.update(kwargs)
+
+    fake_server = ModuleType("konfai_mcp.server")
+    fake_server.main = fake_server_main  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "konfai_mcp.server", fake_server)
+
+    for key in ("KONFAI_MCP_TRANSPORT", "KONFAI_MCP_STATELESS_HTTP", "KONFAI_MCP_JSON_RESPONSE"):
+        monkeypatch.delenv(key, raising=False)
+
+    konfai_mcp.main(["--transport", "streamable-http", "--stateless-http", "--json-response"])
+
+    assert captured["transport"] == "streamable-http"
+    assert captured["stateless_http"] is True
+    assert captured["json_response"] is True
+    assert os.environ["KONFAI_MCP_STATELESS_HTTP"] == "1"
+    assert os.environ["KONFAI_MCP_JSON_RESPONSE"] == "1"
+    monkeypatch.delenv("KONFAI_MCP_STATELESS_HTTP", raising=False)
+    monkeypatch.delenv("KONFAI_MCP_JSON_RESPONSE", raising=False)
+
+
+def test_parser_reads_stateless_http_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KONFAI_MCP_STATELESS_HTTP", "true")
+    monkeypatch.delenv("KONFAI_MCP_JSON_RESPONSE", raising=False)
+    args = konfai_mcp._build_parser().parse_args([])
+    assert args.stateless_http is True
+    assert args.json_response is False
+
+
+@pytest.mark.parametrize("transport", ["stdio", "sse"])
+def test_cli_rejects_stateless_http_on_session_transports(
+    monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    monkeypatch.delenv("KONFAI_MCP_TRANSPORT", raising=False)
+    monkeypatch.delenv("KONFAI_MCP_STATELESS_HTTP", raising=False)
+    with pytest.raises(SystemExit):
+        konfai_mcp.main(["--transport", transport, "--stateless-http"])
