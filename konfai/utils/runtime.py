@@ -657,6 +657,21 @@ class Log(MinimalLog):
         self.file.flush()
 
 
+def record(message: str) -> Path | None:
+    """Keep ``message`` in the run's log without printing it, and answer where it went.
+
+    For detail that belongs beside the run but not on a console every other workflow keeps to a
+    progress bar (the TRANSFORM plan). Answers None when no ``Log`` is installed, which is every
+    context that has no run directory to keep it in.
+    """
+    sink = sys.stdout
+    if not isinstance(sink, Log):
+        return None
+    sink.file.write(message if message.endswith("\n") else message + "\n")
+    sink.file.flush()
+    return Path(sink.file.name)
+
+
 class TensorBoard:
     """Lifecycle helper that optionally starts a TensorBoard side process."""
 
@@ -981,15 +996,26 @@ def execute_distributed_object(
                 os.environ[key] = value
 
 
+_cpu_budget_applied = False
+
+
 def apply_cpu_thread_budget() -> None:
     """Give each rank a bounded share of the node's cores instead of torch's every-core default.
 
     Past memory-bus saturation more intraop threads only add barrier contention; on a hybrid
     24-core CPU the 498^3 separable gather measures 0.7 s at 12 threads and 67 s at 24. An
     explicit ``OMP_NUM_THREADS`` keeps authority (torch already honors it at init).
+
+    Applied once per process, and never on macOS: torch documents ``set_num_threads`` as to be
+    called before any parallel work, and the Python API runs several workflows in one process.
+    On macOS the call intermittently crashes libomp with SIGSEGV once any parallel region ran,
+    whichever call is the first; the saturation this bounds was measured on many-core Linux
+    nodes, so macOS keeps torch's default.
     """
-    if os.environ.get("OMP_NUM_THREADS"):
+    global _cpu_budget_applied
+    if sys.platform == "darwin" or _cpu_budget_applied or os.environ.get("OMP_NUM_THREADS"):
         return
+    _cpu_budget_applied = True
     local_ranks = max(1, int(os.environ.get("KONFAI_LOCAL_RANKS") or 1))
     torch.set_num_threads(max(1, min((os.cpu_count() or 1) // local_ranks, 12)))
 
