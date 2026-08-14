@@ -814,6 +814,7 @@ class AppService:
         it_validation: int = 1000,
         models: list[str] | None = None,
         lr: float | None = None,
+        batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         gpu: list[int] | None = None,
         cpu: int | None = None,
@@ -832,13 +833,18 @@ class AppService:
             raise ValueError(f"dataset must be an existing directory: {dataset}")
         if epochs <= 0:
             raise ValueError("epochs must be a positive integer.")
+        if batch_size is not None and batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer.")
         self._require_local_app(ref, "Fine-tuning", allow_untrusted_code)
 
         if cpu is not None and gpu is None:
             gpu = []
 
+        # First-class knobs join the label the same way --set overrides do, so two fine-tunes differing
+        # only by batch size still read apart on the leaderboard.
+        labelled_params = ([f"batch_size={batch_size}"] if batch_size is not None else []) + (config_overrides or [])
         label = self.workspace_layout.sanitize_name(
-            f"finetune_{self._app_label(ref)}{self._param_label_suffix(config_overrides)}"
+            f"finetune_{self._app_label(ref)}{self._param_label_suffix(labelled_params)}"
         )
         resolved_output = (
             str(Path(output).expanduser().resolve()) if output else self._default_output("AppBundles", label)
@@ -853,6 +859,7 @@ class AppService:
             "it_validation": it_validation,
             "models": models or [],
             "lr": lr,
+            "batch_size": batch_size,
             "config_overrides": config_overrides,
             "gpu": gpu,
             "cpu": cpu,

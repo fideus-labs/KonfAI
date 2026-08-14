@@ -421,6 +421,7 @@ def run_finetune_api(
     it_validation: int = 1000,
     models: list[str] | None = None,
     lr: float | None = None,
+    batch_size: int | None = None,
     config_overrides: list[str] | None = None,
     gpu: list[int] | None = None,
     cpu: int | None = None,
@@ -447,6 +448,7 @@ def run_finetune_api(
             "it_validation": it_validation,
             "models": models or [],
             "lr": lr,
+            "batch_size": batch_size,
             "config_file": config_file,
             "quiet": quiet,
         }

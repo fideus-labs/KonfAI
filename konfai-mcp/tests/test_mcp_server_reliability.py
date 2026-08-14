@@ -234,8 +234,15 @@ def test_mcp_server_timeout_cancel_and_live_metrics_are_stable(
             )
             assert live_metrics["flat_metrics"]
 
-            with pytest.raises(Exception, match="Timed out while waiting for job"):
-                await client.call_tool("wait_for_job", {"job_id": job_id, "timeout_s": 0.1, "poll_interval_s": 0.05})
+            # A wait outlived by a healthy job is a report, not an error: a raise here painted a red
+            # error card over every long training in the Studio chat.
+            waited = await client.call_tool(
+                "wait_for_job", {"job_id": job_id, "timeout_s": 0.1, "poll_interval_s": 0.05}
+            )
+            waited_data = waited.structured_content
+            assert waited_data["timed_out"] is True
+            assert waited_data["status"] in ("running", "pending")
+            assert "wait_for_job" in waited_data["next_actions"]
 
             canceled = await client.call_tool("cancel_job", {"job_id": job_id, "wait_s": 0.5})
             assert canceled.structured_content["status"] == "killed"

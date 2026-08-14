@@ -55,6 +55,7 @@ from .guide import (
     SOLVE_TASK_PROMPT,
     TOOL_DESCRIPTIONS,
 )
+from .metrics_service import top_level_metrics
 from .runner import preserved_config
 from .runner import run_api_in_subprocess as _run_api_in_subprocess
 from .server_apps import AppService
@@ -1589,11 +1590,20 @@ def fine_tune_app(
     lr: Annotated[
         float | None, Field(description="Learning-rate override; omit to keep the app config's value.")
     ] = None,
+    batch_size: Annotated[
+        int | None,
+        Field(
+            description="Training batch-size override (written to Trainer.Dataset.batch_size); "
+            "omit to keep the app config's value."
+        ),
+    ] = None,
     set_parameters: Annotated[
         dict[str, Any] | None,
         Field(
-            description="Model/config tuning NAME->VALUE overrides baked into the training config before fine-tuning "
-            "(e.g. {'iterations': 300})."
+            description="NAME->VALUE overrides baked into the training config before fine-tuning. A bare NAME "
+            "is a model parameter (see list_app_parameters, e.g. {'iterations': 300}); any other config key "
+            "needs its full dotted path from the config root (e.g. {'Trainer.Dataset.num_workers': 2}). "
+            "For batch size, prefer the batch_size parameter."
         ),
     ] = None,
     gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
@@ -1615,6 +1625,7 @@ def fine_tune_app(
             it_validation=it_validation,
             models=models,
             lr=lr,
+            batch_size=batch_size,
             config_overrides=_config_overrides(set_parameters),
             gpu=gpu,
             cpu=cpu,
@@ -1878,6 +1889,19 @@ def initialize_session(
     return payload
 
 
+def _refuse_if_session_pinned(action: str) -> None:
+    """Refuse session management when a host (e.g. KonfAI Studio) pinned this server's session.
+
+    With KONFAI_MCP_SESSION set, the host owns the session<->UI binding: a session created or
+    switched here would run jobs in a workspace the host's panels never look at.
+    """
+    if os.environ.get("KONFAI_MCP_SESSION"):
+        raise ValueError(
+            f"This server is pinned to session '{WORKSPACE_LAYOUT.current_session}' by its host "
+            f"(KONFAI_MCP_SESSION): {action} is managed by the host UI. Keep working in the current session."
+        )
+
+
 @mcp.tool(description=(TOOL_DESCRIPTIONS["create_session"]))
 def create_session(
     name: Annotated[str, Field(description="Session name (sanitized to a filesystem-safe form).")],
@@ -1886,6 +1910,7 @@ def create_session(
     ] = True,
 ) -> dict[str, Any]:
     """Create a named session workspace and (by default) switch the server onto it."""
+    _refuse_if_session_pinned("create_session")
     safe = WORKSPACE_LAYOUT.sanitize_name(name)
     session_dir = WORKSPACE_LAYOUT.session_dir(safe)
     created = not session_dir.exists()
@@ -1911,6 +1936,7 @@ def switch_session(
     ],
 ) -> dict[str, Any]:
     """Switch the current session workspace (job history reloads from that session's disk state)."""
+    _refuse_if_session_pinned("switch_session")
     safe = WORKSPACE_LAYOUT.sanitize_name(name)
     if safe not in WORKSPACE_LAYOUT.available_sessions():
         raise ValueError(
@@ -2304,6 +2330,7 @@ def delete_session(
     ] = False,
 ) -> dict[str, Any]:
     """Delete the current session workspace and optionally cancel active jobs first."""
+    _refuse_if_session_pinned("delete_session")
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace_exists()
     active_jobs = SESSION.active_jobs()
     if active_jobs and not force:
@@ -2480,7 +2507,8 @@ def summarize_session(
             else None
         ),
         "active_jobs": summary["active_jobs"],
-        "metrics_summary": metrics_payload["summary"],
+        # Whole metrics only: the per-label rows behind them are what get_run_metrics is for.
+        "metrics_summary": top_level_metrics(metrics_payload["summary"] or {}) or None,
         "metrics_path": metrics_payload["path"],
         "next_actions": summary["next_actions"],
     }
@@ -2501,6 +2529,7 @@ def summarize_session(
             # (the standalone leaderboard tool keeps both keys).
             if isinstance(board.get("leaderboards"), dict) and not board.get("leaderboard"):
                 board.pop("leaderboard", None)
+                board["leaderboards"] = top_level_metrics(board["leaderboards"])
             payload["leaderboard"] = board
         except ValueError:
             payload["leaderboard"] = None
@@ -3050,6 +3079,10 @@ def run_evaluation(
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_transform"]))
 def run_transform(
+    gpu: Annotated[
+        int | list[int] | None,
+        Field(description="GPU index or indices to run the chain on; omit for CPU (excludes cpu)."),
+    ] = None,
     cpu: Annotated[int | None, Field(description="Shard the cases over N worker processes (default 1).")] = None,
     overwrite: Annotated[
         bool, Field(description="Recompute cases whose output already exists (KonfAI --overwrite).")
@@ -3057,7 +3090,7 @@ def run_transform(
     quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
     single_process: Annotated[bool, Field(description="Inline, one process (no spawn).")] = False,
 ) -> dict[str, Any]:
-    """Launch a dataset transform job from the current session `Transform.yml`. No model involved."""
+    """Launch a dataset transform job from the current session `Transform.yml`."""
     config_path = SESSION.config_path("transform")
     if not config_path.exists():
         raise ValueError("Transform.yml not found. Write a transform config first.")
@@ -3067,8 +3100,7 @@ def run_transform(
     job_spec = _runtime_job_spec(
         kind="transform",
         config_path=config_path,
-        # No GPU: the read transforms run on CPU, so reserving devices would misreport the resource.
-        gpu=None,
+        gpu=gpu,
         cpu=cpu,
         overwrite=overwrite,
         quiet=quiet,
@@ -3301,7 +3333,8 @@ def wait_for_job(
     timeout_s: Annotated[
         float | None,
         Field(
-            description="Maximum seconds to wait (raises TimeoutError on expiry); omit/None to wait until the job finishes."
+            description="Maximum seconds to wait; on expiry the job's CURRENT status is returned with timed_out=true "
+            "(a long training outliving one wait is normal, not an error). Omit/None to wait until the job finishes."
         ),
     ] = None,
     poll_interval_s: Annotated[float, Field(description="Seconds between status polls (min 0.05; default 0.5).")] = 0.5,
@@ -3309,12 +3342,22 @@ def wait_for_job(
     """Block until a job becomes terminal, then return its final status payload (timeout semantics: see description)."""
     deadline = None if timeout_s is None else time.time() + max(timeout_s, 0.0)
     interval = max(poll_interval_s, 0.05)
-    while deadline is None or time.time() < deadline:
+    while True:
         payload = _job_payload(JOB_REGISTRY.get(job_id))
         if payload["status"] not in ACTIVE_JOB_STATES:
             return payload
+        if deadline is not None and time.time() >= deadline:
+            # A healthy 2h training outlives any single wait: that is a fact to report, not a failure
+            # to raise (an exception paints a red error card over a job that is doing fine).
+            payload["timed_out"] = True
+            payload["waited_s"] = round(float(timeout_s or 0.0), 1)
+            payload["note"] = (
+                f"Job still {payload['status']} after {timeout_s:.1f}s of waiting: not a failure. "
+                "Call wait_for_job again, or read_live_metrics to watch progress."
+            )
+            payload["next_actions"] = ["wait_for_job", "read_live_metrics", "read_job_log"]
+            return payload
         time.sleep(interval)
-    raise TimeoutError(f"Timed out while waiting for job '{job_id}' after {timeout_s:.1f}s.")
 
 
 def main(

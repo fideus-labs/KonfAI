@@ -59,6 +59,95 @@ def read_text_range(path: Path, max_chars: int = 20000, offset: int = 0) -> dict
 
 _BINARY_SNIFF_BYTES = 4096
 _DELIMITED_SUFFIXES = {".csv": ",", ".tsv": "\t"}
+# Linear ITK transforms carry at most 12 parameters (3x3 matrix + offset); anything larger is a
+# grid (BSpline coefficients / displacement field) and is summarised instead of dumped.
+_LINEAR_TRANSFORM_MAX_PARAMS = 16
+# Whole 3-vectors per read of a dense grid (~24 MiB of float64): a displacement field can outweigh
+# the server's RAM, so its summary never materializes the dataset.
+_DENSE_CHUNK_ELEMENTS = 3 * 2**20
+
+
+def _dense_displacement_summary(dataset: Any) -> dict[str, Any]:
+    """Per-axis mean/std and magnitude stats of a dense 1-D parameter grid, in bounded slices."""
+    import numpy as np
+
+    total = int(dataset.size)
+    count = total // 3
+    sum_xyz = np.zeros(3)
+    sumsq_xyz = np.zeros(3)
+    sum_magnitude = 0.0
+    max_magnitude = 0.0
+    for start in range(0, count * 3, _DENSE_CHUNK_ELEMENTS):
+        block = np.asarray(dataset[start : min(start + _DENSE_CHUNK_ELEMENTS, count * 3)], dtype=float)
+        vectors = block.reshape(-1, 3)
+        magnitudes = np.linalg.norm(vectors, axis=1)
+        sum_xyz += vectors.sum(axis=0)
+        sumsq_xyz += np.square(vectors).sum(axis=0)
+        sum_magnitude += float(magnitudes.sum())
+        max_magnitude = max(max_magnitude, float(magnitudes.max()))
+    mean_xyz = sum_xyz / count
+    std_xyz = np.sqrt(np.maximum(sumsq_xyz / count - np.square(mean_xyz), 0.0))
+    return {
+        "vectors": count,
+        "mean_xyz": [round(float(v), 4) for v in mean_xyz],
+        "std_xyz": [round(float(v), 4) for v in std_xyz],
+        "mean_magnitude": round(sum_magnitude / count, 4),
+        "max_magnitude": round(max_magnitude, 4),
+    }
+
+
+def _itk_transform_summary(path: Path) -> dict[str, Any] | None:
+    """A structured summary of an ITK transform HDF5 (KonfAI's ``:itktransform`` backend), else None.
+
+    Registration apps write their result as ``Transform.h5``; without this reader the number an
+    agent is asked for (how far did the registration move?) sits in a file none of its tools can
+    open. Linear transforms return their full parameters; dense grids return per-axis mean/std and
+    displacement magnitudes, which is what a sanity check against a known shift needs.
+    """
+    try:
+        import h5py
+    except ImportError:
+        raise ValueError(
+            f"'{path.name}' is an HDF5 file but the 'h5py' package is not installed: "
+            "install konfai[hdf5] to read ITK transforms."
+        ) from None
+    try:
+        handle = h5py.File(path, "r")
+    except OSError:
+        return None
+    with handle:
+        if "TransformGroup" not in handle:
+            return None
+        transforms: list[dict[str, Any]] = []
+        for index in sorted(handle["TransformGroup"], key=lambda name: int(name) if name.isdigit() else 0):
+            group = handle[f"TransformGroup/{index}"]
+            entry: dict[str, Any] = {"index": index}
+            if "TransformType" in group:
+                raw = group["TransformType"][()]
+                first = raw[0] if getattr(raw, "shape", None) else raw
+                entry["type"] = first.decode() if isinstance(first, bytes) else str(first)
+            if "TransformFixedParameters" in group:
+                entry["fixed_parameters"] = [round(float(v), 6) for v in group["TransformFixedParameters"][()]]
+            if "TransformParameters" in group:
+                dataset = group["TransformParameters"]
+                if dataset.size <= _LINEAR_TRANSFORM_MAX_PARAMS:
+                    entry["parameters"] = [round(float(v), 6) for v in dataset[()]]
+                else:
+                    # A dense grid is summarised without ever being loaded whole: [()] on a
+                    # displacement field materializes gigabytes before the stats run.
+                    entry["parameter_count"] = int(dataset.size)
+                    if dataset.ndim == 1 and dataset.size % 3 == 0:
+                        entry["displacement_summary"] = _dense_displacement_summary(dataset)
+            transforms.append(entry)
+    return {
+        "ok": True,
+        "path": str(path),
+        "kind": "itk_transform",
+        "total_bytes": path.stat().st_size,
+        "transforms": transforms,
+        "note": "Parameters are in the transform's own (ITK, physical-space) convention, fixed->moving.",
+        "next_actions": ["inspect_dataset", "read_job_log"],
+    }
 
 
 def read_dataset_sidecar(path: Path, max_lines: int = 200, max_chars: int = 65536) -> dict[str, Any]:
@@ -72,6 +161,10 @@ def read_dataset_sidecar(path: Path, max_lines: int = 200, max_chars: int = 6553
     """
     if not path.is_file():
         raise ValueError(f"Not a readable file: {path}")
+    if path.suffix.lower() in {".h5", ".hdf5"}:
+        transform = _itk_transform_summary(path)
+        if transform is not None:
+            return transform
     with path.open("rb") as handle:
         head = handle.read(_BINARY_SNIFF_BYTES)
     if b"\x00" in head:

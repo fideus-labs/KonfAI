@@ -750,6 +750,23 @@ def test_prepare_finetune_bakes_set_parameters(tmp_path: Path) -> None:
     assert "finetune_TinyLocalApp__iterations_300" in spec["output"]
 
 
+def test_prepare_finetune_carries_the_batch_size_as_a_training_knob(tmp_path: Path) -> None:
+    """batch_size is a first-class training knob like epochs, NOT an app tunable: routed through
+    set_parameters it was refused ('batch_size' is no model parameter) and the job died at launch."""
+    app_dir = _write_local_app(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+    service = _service(tmp_path)
+
+    spec = service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), allow_untrusted_code=True, batch_size=4)
+    assert spec["kwargs"]["batch_size"] == 4
+    # The knob still labels the trial's output dir, so the leaderboard names what produced the score.
+    assert "finetune_TinyLocalApp__batch_size_4" in spec["output"]
+
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), allow_untrusted_code=True, batch_size=0)
+
+
 def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The tool -> prepare_* -> job-registry wiring: kind, runner target, devices, manifest and the
     tuned parameters that gate the refine loop (the launch itself is stubbed: no subprocess)."""

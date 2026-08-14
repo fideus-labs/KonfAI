@@ -451,6 +451,11 @@ def collect_facts(
     if not dataset:
         train_config = workspace / WORKFLOW_CONFIG_FILES.get("train", "Config.yml")
         dataset, config_groups = _dataset_from_config(train_config)
+        # A config writes the dataset for the cwd the job runs in, which is the workspace ("./Dataset").
+        # Kept relative it resolves against whoever is asking instead: the scan below found nothing, so
+        # the state reported 0 cases, and the path it handed on opened for no tool that received it.
+        if dataset and not Path(dataset).expanduser().is_absolute():
+            dataset = str((workspace / dataset).resolve())
         groups = groups or config_groups
     if dataset and not groups:  # a path is not knowledge of the data: read its structure
         groups, scanned_cases = _scan_dataset(Path(dataset).expanduser())

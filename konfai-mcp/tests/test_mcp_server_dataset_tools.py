@@ -715,6 +715,80 @@ def test_mcp_server_read_dataset_file_previews_text_and_refuses_binary(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
+def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
+    tmp_path: Path,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """A registration's Transform.h5 returns a structured summary instead of a binary refusal.
+
+    Seen live: an agent asked to verify a known 5-voxel shift had the number in Transform.h5 and no
+    tool that could open it. Linear transforms expose their parameters; dense fields a displacement
+    summary."""
+    h5py = pytest.importorskip("h5py")
+    np = pytest.importorskip("numpy")
+
+    transform = tmp_path / "Transform.h5"
+    field = np.zeros((4 * 4 * 2, 3))
+    field[:, 1] = 5.0
+    with h5py.File(transform, "w") as handle:
+        group = handle.create_group("TransformGroup/0")
+        group.create_dataset("TransformType", data=[b"DisplacementFieldTransform_double_3_3"])
+        group.create_dataset("TransformFixedParameters", data=np.array([4.0, 4.0, 2.0]))
+        group.create_dataset("TransformParameters", data=field.reshape(-1))
+        rigid = handle.create_group("TransformGroup/1")
+        rigid.create_dataset("TransformType", data=[b"Euler3DTransform_double_3_3"])
+        rigid.create_dataset("TransformParameters", data=np.array([0.0, 0.0, 0.0, 0.0, 5.0, 0.0]))
+    plain = tmp_path / "features.h5"
+    with h5py.File(plain, "w") as handle:
+        handle.create_dataset("data", data=np.ones(8))
+
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            read = await client.call_tool("read_dataset_file", {"path": str(transform)})
+            data = read.structured_content
+            assert data["kind"] == "itk_transform"
+            dense, linear = data["transforms"]
+            assert dense["type"] == "DisplacementFieldTransform_double_3_3"
+            assert dense["displacement_summary"]["mean_xyz"] == [0.0, 5.0, 0.0]
+            assert dense["displacement_summary"]["max_magnitude"] == 5.0
+            assert linear["parameters"] == [0.0, 0.0, 0.0, 0.0, 5.0, 0.0]
+
+            # An HDF5 that is NOT an ITK transform keeps the binary refusal.
+            with pytest.raises(Exception, match="binary"):
+                await client.call_tool("read_dataset_file", {"path": str(plain)})
+
+    asyncio.run(scenario())
+
+
+def test_a_dense_field_summary_is_computed_in_bounded_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The summary of a displacement field never loads it whole: sliced accumulation must equal
+    the single-pass numbers, or a bounded read would be a wrong read."""
+    h5py = pytest.importorskip("h5py")
+    np = pytest.importorskip("numpy")
+    from konfai_mcp import file_io
+
+    rng = np.random.default_rng(7)
+    field = rng.normal(size=(50, 3))
+    transform = tmp_path / "Transform.h5"
+    with h5py.File(transform, "w") as handle:
+        group = handle.create_group("TransformGroup/0")
+        group.create_dataset("TransformType", data=[b"DisplacementFieldTransform_double_3_3"])
+        group.create_dataset("TransformParameters", data=field.reshape(-1))
+
+    monkeypatch.setattr(file_io, "_DENSE_CHUNK_ELEMENTS", 9)  # 3 vectors per slice: many chunks
+    summary = file_io._itk_transform_summary(transform)["transforms"][0]["displacement_summary"]
+
+    magnitudes = np.linalg.norm(field, axis=1)
+    assert summary["vectors"] == 50
+    assert summary["mean_xyz"] == [round(float(v), 4) for v in field.mean(axis=0)]
+    assert summary["std_xyz"] == [round(float(v), 4) for v in field.std(axis=0)]
+    assert summary["mean_magnitude"] == round(float(magnitudes.mean()), 4)
+    assert summary["max_magnitude"] == round(float(magnitudes.max()), 4)
+
+
 def test_design_config_strategy_uses_per_root_extension(tmp_path: Path) -> None:
     mha_case = tmp_path / "MhaDataset" / "case_001"
     nii_case = tmp_path / "NiiDataset" / "case_001"

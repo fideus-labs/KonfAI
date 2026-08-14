@@ -267,6 +267,35 @@ def test_sessions_create_switch_and_cross_session_metrics(
 
 
 @pytest.mark.usefixtures("workspace_root")
+def test_session_management_refused_when_host_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """With KONFAI_MCP_SESSION set (a host UI pinned the workspace), session tools are refused.
+
+    A session created or switched behind the host's back runs jobs in a workspace its panels
+    never look at (seen live: a Studio chat whose runs landed in an invisible sibling session).
+    """
+    monkeypatch.setenv("KONFAI_MCP_SESSION", "pinned-exp")
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            assert mcp_server.WORKSPACE_LAYOUT.current_session == "pinned-exp"
+            for tool, args in (
+                ("create_session", {"name": "elsewhere"}),
+                ("switch_session", {"name": "default"}),
+                ("delete_session", {}),
+            ):
+                with pytest.raises(Exception, match="pinned"):
+                    await client.call_tool(tool, args)
+            # Nothing was created behind the host's back.
+            assert "elsewhere" not in mcp_server.WORKSPACE_LAYOUT.available_sessions()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("workspace_root")
 def test_run_train_accepts_single_gpu_int(
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
