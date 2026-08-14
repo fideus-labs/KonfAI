@@ -42,6 +42,7 @@ except ImportError as exc:  # pragma: no cover - depends on optional install
         "KonfAI MCP requires 'fastmcp'. Install the MCP server with: pip install -e ./konfai-mcp"
     ) from exc
 
+from . import _env_flag
 from .capabilities import describe_config_schema as _describe_config_schema
 from .capabilities import describe_konfai_capabilities as _describe_konfai_capabilities
 from .catalog import COMPONENT_KINDS
@@ -683,6 +684,10 @@ def server_info() -> dict[str, Any]:
         "name": "KonfAI MCP",
         "konfai_version": KONFAI_VERSION,
         "transport": transport,
+        "transport_options": {
+            "stateless_http": _env_flag("KONFAI_MCP_STATELESS_HTTP"),
+            "json_response": _env_flag("KONFAI_MCP_JSON_RESPONSE"),
+        },
         "workspace_root": str(WORKSPACES_ROOT),
         "current_session": WORKSPACE_LAYOUT.current_session,
         "session_root": str(WORKSPACE_LAYOUT.workspace_dir()),
@@ -3367,7 +3372,22 @@ def main(
     path: str | None = None,
     log_level: str | None = None,
     bearer_token: str | None = None,
+    stateless_http: bool | None = None,
+    json_response: bool | None = None,
 ) -> None:
+    # MCP specification revision 2025-03-26 made HTTP sessions optional: a streamable HTTP
+    # server MAY skip issuing an Mcp-Session-Id header, in which case every request is
+    # self-contained and replicas need no session affinity. FastMCP exposes this as
+    # stateless_http (and json_response for plain JSON bodies instead of per-request SSE).
+    if stateless_http is None:
+        stateless_http = _env_flag("KONFAI_MCP_STATELESS_HTTP")
+    if json_response is None:
+        json_response = _env_flag("KONFAI_MCP_JSON_RESPONSE")
+    if (stateless_http or json_response) and transport != "streamable-http":
+        raise ValueError(
+            "stateless_http and json_response only apply to the 'streamable-http' transport "
+            "(stdio is inherently per-process and the deprecated SSE transport requires sessions)."
+        )
     _configure_transport_auth(
         transport,
         host=host,
@@ -3387,6 +3407,9 @@ def main(
             transport_kwargs["path"] = path
         if log_level is not None:
             transport_kwargs["log_level"] = log_level
+        if transport == "streamable-http":
+            transport_kwargs["stateless_http"] = stateless_http
+            transport_kwargs["json_response"] = json_response
     # MCP stdio transports must keep stdout protocol-clean for the client.
     mcp.run(transport, show_banner=False, **transport_kwargs)
 
