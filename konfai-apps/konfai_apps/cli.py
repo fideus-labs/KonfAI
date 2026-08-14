@@ -646,6 +646,14 @@ def main_apps() -> None:
         help="Override the learning rate. If omitted, the checkpoint learning rate is resumed and the "
         "scheduler continues; if set, the learning rate restarts from this value.",
     )
+    ft_p.add_argument(
+        "--batch-size",
+        "--batch_size",
+        dest="batch_size",
+        type=int,
+        default=None,
+        help="Override the training batch size (Trainer.Dataset.batch_size). Default: the app config's value.",
+    )
     _add_config_overrides(ft_p)
 
     bundle_p = subparsers.add_parser(

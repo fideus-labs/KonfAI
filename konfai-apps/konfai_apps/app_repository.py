@@ -203,6 +203,18 @@ class TerminologyEntry:
 # volume when the caller omits it (all-ones = whole-image, e.g. a no-restriction mask; all-zeros = empty).
 INPUT_DEFAULTS = ("ones", "zeros")
 
+# Training knobs a caller names directly, and the config key each one writes. Sugar over ``--set``:
+# one path applies them, so a knob costs a row here rather than its own YAML-writing branch.
+_TRAINING_KNOBS = {"batch_size": "Trainer.Dataset.batch_size"}
+
+# A bare ``--set`` name resolves inside the model block only; every other key needs its full path.
+# The same overrides engine writes inference and fine-tune configs, so the hint names both roots.
+_DOTTED_PATH_HINT = (
+    "A bare name is a model parameter; a config key needs its full dotted path from the config root,"
+    " e.g. 'Predictor.Dataset.batch_size=4' in an inference config or 'Trainer.Dataset.batch_size=4'"
+    " in a fine-tune one."
+)
+
 
 def _parse_input_default(key: str, default: Any, required: bool = False) -> str | None:
     """Validate an input's ``default`` field from app.json (one of ``INPUT_DEFAULTS`` or omitted).
@@ -668,13 +680,13 @@ class LocalAppRepository(AppRepositoryInfo):
                 # A bare name is a model parameter: resolve it in Predictor.Model.<ClassName>.
                 if model_params is None:
                     raise AppRepositoryError(
-                        f"Cannot apply --set '{override}': the config has no model parameter block "
-                        "(use a full dotted path for non-model keys)."
+                        f"Cannot apply --set '{override}': the config has no model parameter block. {_DOTTED_PATH_HINT}"
                     )
                 target, leaf = model_params, key_path
             if not isinstance(target, dict) or leaf not in target:
+                hint = "" if "." in key_path else f" {_DOTTED_PATH_HINT}"
                 raise AppRepositoryError(
-                    f"Cannot apply --set '{override}': parameter '{key_path}' does not exist in the config."
+                    f"Cannot apply --set '{override}': parameter '{key_path}' does not exist in the config.{hint}"
                 )
             target[leaf] = value_parser.load(raw_value)
 
@@ -1115,6 +1127,7 @@ class LocalAppRepository(AppRepositoryInfo):
         it_validation: int | None,
         name_of_models: list[str],
         overrides: list[str] | None = None,
+        batch_size: int | None = None,
     ) -> list[tuple[str, Path]]:
         """
         Install the app assets needed for fine-tuning and resolve the selected checkpoint(s).
@@ -1122,10 +1135,15 @@ class LocalAppRepository(AppRepositoryInfo):
         Shared assets (config, code, ``app.json``, ``requirements.txt``) are installed into
         ``path``; ``app.json`` is rewritten with the new ``display_name`` and a ``models`` list
         limited to the selected checkpoints, and the training config's ``epochs``/``it_validation``
-        are updated. ``overrides`` are ``--set NAME=VALUE`` model/config tweaks baked into the training
-        config before training (same syntax as :meth:`_apply_config_overrides`). Only the selected ``.pt``
-        checkpoints are downloaded. Returns ``(basename, source_path)`` pairs for the checkpoints to fine-tune.
+        (and ``batch_size``, when given) are updated. ``overrides`` are ``--set NAME=VALUE`` model/config
+        tweaks baked into the training config before training (same syntax as
+        :meth:`_apply_config_overrides`). Only the selected ``.pt`` checkpoints are downloaded. Returns
+        ``(basename, source_path)`` pairs for the checkpoints to fine-tune.
         """
+        # Refused before anything is installed: a zero or negative value would be written into the
+        # training config and only fail once the trainer builds its DataLoader.
+        if batch_size is not None and batch_size <= 0:
+            raise AppRepositoryError(f"batch_size must be a positive integer, got {batch_size}.")
         filenames = self._get_filenames()
         models = self._resolve_fine_tune_models(filenames, name_of_models)
 
@@ -1170,9 +1188,11 @@ class LocalAppRepository(AppRepositoryInfo):
         with open(config_file_path, "w") as file:
             yaml.dump(data, file)
 
-        # Apply the model/config --set tweaks after the epochs/it_validation rewrite so both land in the
+        # A first-class knob is sugar over --set: one path writes config keys, one refusal explains a
+        # key that is not there. Applied after the epochs/it_validation rewrite so both land in the
         # same training config the fine-tune then trains on.
-        self._apply_config_overrides(str(config_file_path), overrides)
+        knobs = [f"{_TRAINING_KNOBS['batch_size']}={batch_size}"] if batch_size is not None else []
+        self._apply_config_overrides(str(config_file_path), knobs + list(overrides or []))
 
         return models
 

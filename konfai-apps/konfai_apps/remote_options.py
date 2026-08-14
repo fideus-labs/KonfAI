@@ -33,7 +33,7 @@ REMOTE_OPTION_FIELDS: dict[str, tuple[str, ...]] = {
     "evaluate": (),
     "uncertainty": (),
     "pipeline": ("patch_size", "batch_size", "config_overrides"),
-    "fine_tune": ("config_overrides",),
+    "fine_tune": ("batch_size", "config_overrides"),
 }
 
 
