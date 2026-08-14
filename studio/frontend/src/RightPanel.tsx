@@ -507,6 +507,7 @@ function ExperimentView({
   refresh,
   dataset: picked,
   live,
+  visible,
   focusDir,
   focusOpen,
   comparePath,
@@ -518,6 +519,7 @@ function ExperimentView({
   refresh?: number;
   dataset?: string; // re-read the experiment when one is picked: it mounts the input tree and a chip
   live?: boolean;
+  visible?: boolean; // the Workspace pane is on screen: keep its tree fresh even with no job running
   focusDir?: string; // a workspace dir to reveal/expand in the tree (from a run's "Browse files")
   focusOpen?: string; // what to auto-open there: "config" | "volume" | "metric" | "first"
   comparePath?: string | null;
@@ -601,10 +603,13 @@ function ExperimentView({
   }, [refresh, picked, session]);
 
   useEffect(() => {
-    if (!live) return;
+    // Not only while a job runs: the agent writes configs and code between jobs (a turn's
+    // write_session_file), and a tree that only refreshes on job life left those files invisible
+    // for minutes. Listing a local directory every 4s while the pane is on screen costs nothing.
+    if (!live && !visible) return;
     const id = setInterval(() => setRefreshKey((k) => k + 1), 4000);
     return () => clearInterval(id);
-  }, [live]);
+  }, [live, visible]);
 
   // A volume becoming focused (tree click routes through onVolumePathChange, or the agent loads one)
   // brings the inline viewer forward.
@@ -1376,6 +1381,14 @@ export default function RightPanel({
   // The session's job itself: true while it starts up and while an isolated app run has not been
   // discovered yet, so Stop never depends on a run being found (or selected).
   const jobRunning = isRunning(stream.status);
+  // A job LAUNCH re-arms the auto-follow: the user just asked for this run (through the agent or
+  // a button), so bringing its tab forward is delivering, not stealing. A manual tab pick holds
+  // again once this job is over.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (jobRunning && !wasRunning.current) setAuto(true);
+    wasRunning.current = jobRunning;
+  }, [jobRunning]);
   const stage = active?.live?.stage ?? "";
   // An app job carries two names: its own (`app_MR`) and the one its run takes from the log directory
   // (`ImpactSynth`). While the run is unknown, a synthetic tab under the job's name shows the console;
@@ -1748,6 +1761,7 @@ export default function RightPanel({
           refresh={stream.doneNonce}
           dataset={dataset}
           live={jobState(stream.status) === "run"}
+          visible={tab === "config"}
           focusDir={browsePath}
           focusOpen={browseOpen}
         />
