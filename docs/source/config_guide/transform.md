@@ -48,13 +48,24 @@ workflow emits no scalars.
 
 ## Read the plan before you read anything else
 
-Every run prints its plan first, and a run that proceeds writes it to
-`./Transforms/<name>/plan.txt`, next to an `outputs.json` naming where each
-chain's deliverable lands. No *data* is written until the plan is accepted, and
-`--plan` prints and stops without leaving either file behind.
+Every run plans first, and a run that proceeds opens its log with that plan,
+in `./Transforms/<name>/`, next to an `outputs.json` declaring each chain's
+configured destination. No *data* is written until the plan is accepted.
+
+The console gets one line, because the plan's detail grows with the cohort:
+what it will do, and where to read the rest. Nothing is dropped in silence,
+what it folds away it counts.
 
 ```text
-[Transformer] plan over 1 rank(s) | per-rank budget 7.45 GiB ('8G') | fallback working set
+[KonfAI] plan over 1 rank(s) | 120 entr(ies): 2 WHOLE-VOLUME, 118 STREAM | per-rank
+budget 7.45 GiB ('8G') | 2 note(s) -> full plan in ./Transforms/CT_ISO/log_0.txt
+```
+
+The log holds the same plan in full, one line per chain and per reason.
+`--plan` prints that full form and stops, without running anything:
+
+```text
+[KonfAI] plan over 1 rank(s) | per-rank budget 7.45 GiB ('8G') | fallback working set
 = case x 4 B x 2 (in-flight copy), headers-only estimate | output dtype/channels assumed
 float32 / source channels until the first slab
   CT -> CT_iso: 120 case(s) -- 118 STREAM, 2 WHOLE-VOLUME, 0 SKIP (output already written)

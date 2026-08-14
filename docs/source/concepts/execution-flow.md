@@ -24,7 +24,7 @@ flowchart LR
     T --> TO[Checkpoints/&lt;train_name&gt;<br/>Statistics/&lt;train_name&gt;]:::out
     R --> RO[Predictions/&lt;train_name&gt;]:::out
     V --> VO[Evaluations/&lt;train_name&gt;<br/>Metric_*.json]:::out
-    W --> WO[wherever each Write: points<br/>Transforms/&lt;name&gt;/plan.txt]:::out
+    W --> WO[wherever each Write: points<br/>Transforms/&lt;name&gt;/outputs.json]:::out
 
 ```
 
@@ -116,7 +116,7 @@ Outputs are written to:
 Outputs are written to:
 
 - wherever each `Write: {dataset: ...}` points
-- `Transforms/<name>/plan.txt`, `outputs.json`, the copied config, and the logs
+- `Transforms/<name>/outputs.json`, the copied config, and the logs (the plan opens them)
 
 ## Programmatic vs CLI entrypoints
 

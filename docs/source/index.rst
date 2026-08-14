@@ -111,7 +111,7 @@ KonfAI
            <span class="kf-larrow">&rarr;</span>
            <span class="kf-lcmd"><span class="p">$</span> konfai TRANSFORM</span>
            <span class="kf-larrow">&rarr;</span>
-           <div class="kf-lout">wherever each <b>Write:</b> says &middot; <b>Transforms/</b>&lt;name&gt;/plan.txt</div>
+           <div class="kf-lout">wherever each <b>Write:</b> says &middot; <b>Transforms/</b>&lt;name&gt;/outputs.json</div>
          </div>
          <div class="kf-lfoot">
            <span>Same engine underneath: reflection reads the root key and builds
