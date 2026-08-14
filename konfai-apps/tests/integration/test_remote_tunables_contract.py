@@ -190,19 +190,22 @@ def test_pipeline_tunables_reach_the_local_op(
         assert kwargs[name] == value, name
 
 
-def test_fine_tune_config_overrides_reach_the_local_op(
+def test_fine_tune_tunables_reach_the_local_op(
     remote_stack: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     dataset = tmp_path / "cohort"
     (dataset / "P000").mkdir(parents=True)
     _write_volume(dataset / "P000" / "Volume_0.mha")
-    overrides = ["lr_decay=0.5", "Trainer.Dataset.batch_size=2"]
+    overrides = ["lr_decay=0.5", "Trainer.Model.UNet.dropout=0.1"]
 
-    _make_client().fine_tune(dataset=dataset, name="Tune", output=tmp_path / "out", cpu=1, config_overrides=overrides)
+    _make_client().fine_tune(
+        dataset=dataset, name="Tune", output=tmp_path / "out", cpu=1, batch_size=2, config_overrides=overrides
+    )
 
-    assert remote_stack["posts"][0]["response"].json()["accepted_options"] == ["config_overrides"]
+    assert remote_stack["posts"][0]["response"].json()["accepted_options"] == ["batch_size", "config_overrides"]
     op, kwargs = _dispatch_cmd_to_local_op(monkeypatch, remote_stack["cmds"][0])
     assert op == "fine_tune"
+    assert kwargs["batch_size"] == 2
     assert kwargs["config_overrides"] == overrides
 
 

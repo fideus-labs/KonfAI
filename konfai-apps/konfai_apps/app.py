@@ -728,6 +728,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         quiet: bool = False,
         config_file: str = "Config.yml",
         lr: float | None = None,
+        batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
     ) -> None:
@@ -1459,6 +1460,7 @@ class KonfAIApp(AbstractKonfAIApp):
         quiet: bool = False,
         config_file: str = "Config.yml",
         lr: float | None = None,
+        batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
         keep_training_artifacts: bool = False,
@@ -1492,7 +1494,7 @@ class KonfAIApp(AbstractKonfAIApp):
         import torch
 
         selected_models = self.app_repository.install_fine_tune(
-            config_file, Path("./"), name, epochs, it_validation, models, config_overrides
+            config_file, Path("./"), name, epochs, it_validation, models, config_overrides, batch_size=batch_size
         )
         KonfAIApp.symlink(dataset, Path("./Dataset").absolute())
 

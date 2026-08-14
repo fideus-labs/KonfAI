@@ -512,7 +512,11 @@ def _write_two_checkpoint_app(app_root: Path) -> None:
 
 
 def _install_fine_tune(
-    app_root: Path, workspace: Path, name_of_models: list[str], overrides: list[str] | None = None
+    app_root: Path,
+    workspace: Path,
+    name_of_models: list[str],
+    overrides: list[str] | None = None,
+    batch_size: int | None = None,
 ) -> list[tuple[str, Path]]:
     workspace.mkdir(parents=True, exist_ok=True)
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
@@ -524,6 +528,7 @@ def _install_fine_tune(
         it_validation=5,
         name_of_models=name_of_models,
         overrides=overrides,
+        batch_size=batch_size,
     )
 
 
@@ -586,6 +591,74 @@ def test_install_fine_tune_applies_model_and_dotted_overrides(tmp_path: Path) ->
     assert config["Trainer"]["it_validation"] == 5
 
 
+def test_install_fine_tune_writes_the_batch_size_beside_epochs(tmp_path: Path) -> None:
+    """The batch size is a training knob like epochs, not a model tunable: it is first-class, and it
+    lands under Trainer.Dataset where the trainer reads it."""
+    from ruamel.yaml import YAML
+
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    (app_root / "Config.yml").write_text(
+        "Trainer:\n  epochs: 100\n  it_validation: 2500\n  train_name: FT_0\n  Dataset:\n    batch_size: 32\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+
+    _install_fine_tune(app_root, workspace, [], batch_size=4)
+
+    with open(workspace / "Config.yml") as file:
+        config = YAML().load(file)
+    assert config["Trainer"]["Dataset"]["batch_size"] == 4
+
+
+@pytest.mark.parametrize("batch_size", [0, -2])
+def test_install_fine_tune_refuses_a_non_positive_batch_size(tmp_path: Path, batch_size: int) -> None:
+    """Zero and negative values reach here from the CLI, the remote transport, and the Python API
+    alike: refuse before anything is installed, not once the trainer builds its DataLoader."""
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    workspace = tmp_path / "workspace"
+
+    with pytest.raises(AppRepositoryError, match="positive"):
+        _install_fine_tune(app_root, workspace, [], batch_size=batch_size)
+    assert not workspace.exists() or not any(workspace.iterdir())
+
+
+def test_install_fine_tune_refuses_a_batch_size_with_no_dataset_block(tmp_path: Path) -> None:
+    """A config with no Trainer.Dataset cannot take a batch size: refuse and name the block, instead of
+    silently adding a key the trainer never reads."""
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)  # its Config.yml has no Dataset block
+    workspace = tmp_path / "workspace"
+
+    with pytest.raises(AppRepositoryError, match=r"Trainer\.Dataset"):
+        _install_fine_tune(app_root, workspace, [], batch_size=4)
+
+
+def test_a_bare_set_name_that_is_not_a_model_parameter_points_at_the_dotted_form(tmp_path: Path) -> None:
+    """`--set batch_size=4` failed a real fine-tune with a message that never said which spelling would
+    have worked: the error must name the dotted-path form."""
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    (app_root / "Config.yml").write_text(
+        "Trainer:\n"
+        "  epochs: 100\n"
+        "  it_validation: 2500\n"
+        "  train_name: FT_0\n"
+        "  Model:\n"
+        "    classpath: net:UNet\n"
+        "    UNet:\n"
+        "      iterations: 100\n"
+        "  Dataset:\n"
+        "    batch_size: 1\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+
+    with pytest.raises(AppRepositoryError, match="dotted path"):
+        _install_fine_tune(app_root, workspace, [], overrides=["batch_size=4"])
+
+
 def test_install_fine_tune_selects_requested_checkpoint(tmp_path: Path) -> None:
     app_root = tmp_path / "repo" / "demo_app"
     _write_two_checkpoint_app(app_root)
@@ -615,7 +688,7 @@ def test_install_fine_tune_rejects_unknown_checkpoint(tmp_path: Path) -> None:
     _write_two_checkpoint_app(app_root)
     workspace = tmp_path / "workspace"
 
-    with pytest.raises(app_repository_module.AppRepositoryError):
+    with pytest.raises(AppRepositoryError):
         _install_fine_tune(app_root, workspace, ["CV_9"])
 
 
@@ -896,7 +969,9 @@ def test_get_parameters_constraints_from_an_installed_package_classpath(tmp_path
     pkg_dir = tmp_path / "site"
     pkg_dir.mkdir()
     (pkg_dir / f"{module_name}.py").write_text(_TYPED_MODEL_PY, encoding="utf-8")
-    config = _TYPED_MODEL_CONFIG.replace("classpath: Model:RegistrationNet", f"classpath: {module_name}:RegistrationNet")
+    config = _TYPED_MODEL_CONFIG.replace(
+        "classpath: Model:RegistrationNet", f"classpath: {module_name}:RegistrationNet"
+    )
 
     sys.path.insert(0, str(pkg_dir))
     importlib.invalidate_caches()
