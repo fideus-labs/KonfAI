@@ -244,10 +244,11 @@ or a whole-volume statistic read once from disk (`Normalize`). On the stream
 path, a 16 GiB uncompressed `.mha` trains at patch 64³ under an 8 GiB memory cap
 with a peak resident set of 0.46 GiB.
 
-`konfai TRANSFORM` prints that decision per case *before* it writes a byte
-(STREAM, WHOLE-VOLUME, REDUCE or SKIP, naming the stage that refused to stream),
-and keeps the report at `./Transforms/<name>/plan.txt`. `--plan` prints the same
-report and stops without transforming.
+`konfai TRANSFORM` decides that per case *before* it writes a byte: STREAM or
+LOAD, WHOLE-VOLUME naming the stage that refused to stream, REDUCE or REFUSED
+for a reduction, SKIP when the output already exists. The console gets a
+one-line summary; the run's log opens with the plan in full.
+`--plan` prints that full report and stops without transforming.
 
 → [**Patch streaming**](https://konfai.readthedocs.io/en/latest/concepts/streaming.html): what streams, what does not, and why.
 

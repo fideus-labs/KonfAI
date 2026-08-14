@@ -180,14 +180,16 @@ the full signature.
 - `--epochs`
 - `--it-validation`
 - `--lr`: override the learning rate; omitted, the checkpoint's is resumed
+- `--batch-size`: override the training batch size (`Trainer.Dataset.batch_size`)
 - `--set`: the same config overrides as `infer` (see below)
 - `--config` (aliases: `--config-file`, `--config_file`)
 
 ### Tuning a preset (`--set`, `--patch-size`, `--batch-size`)
 
 `infer` and `pipeline` accept all three overrides below; `fine-tune` accepts
-`--set` (plus its own `--lr`, `--epochs` and `--it-validation`). They let you adapt
-a published App without editing its bundled config:
+`--set` and `--batch-size` (plus its own `--lr`, `--epochs` and `--it-validation`,
+with `--batch-size` writing the training `Trainer.Dataset.batch_size`). They let
+you adapt a published App without editing its bundled config:
 
 | Option | Meaning |
 | --- | --- |
@@ -199,7 +201,8 @@ These are the same knobs SlicerKonfAI drives through its ⚙ **Advanced** dialog
 
 These overrides work in remote mode too (`--host …`). Each operation declares
 which tunables the server must carry: `infer` and `pipeline` forward `patch_size`,
-`batch_size` and `config_overrides`, `fine-tune` forwards `config_overrides`. The
+`batch_size` and `config_overrides`, `fine-tune` forwards `batch_size` and
+`config_overrides`. The
 client refuses the submission when the server does not echo them back in
 `accepted_options`, so a server too old to honour a tunable fails loudly instead
 of ignoring it.

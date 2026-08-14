@@ -147,12 +147,12 @@ flowchart TB
 
 ```
 
-`SKIP` means the run resumes, `REDUCE` folds the cohort, `WHOLE-VOLUME` names the
-stage that refused to stream, `STREAM` reads region by region.
+`SKIP` means the output already exists, so the run resumes, `REDUCE` folds the
+cohort, `WHOLE-VOLUME` names the stage that refused to stream, `STREAM` reads
+region by region.
 `LOAD` is a cost decision, not a failure: past a threshold, reading the case once
-beats reading regions of it many times. A run writes its plan to
-`Transforms/<name>/plan.txt` next to an `outputs.json` saying where each
-deliverable landed.
+beats reading regions of it many times. A run's log opens with its plan, next to an
+`outputs.json` declaring each configured `Write` destination.
 
 ## In Python
 

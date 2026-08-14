@@ -87,9 +87,10 @@ group-size lists used to re-split the flat file list into per-group folders):
   `models` (CSV), `config_file` (`Config.yml`), `lr` (optional), `gpu`/`cpu`/`quiet`.
 
 Every one of the five also takes **`options`** (a JSON object, default `"{}"`): the
-only channel for the tunables the plain form fields cannot carry: `patch_size` and
-`batch_size` on `infer`/`pipeline`, and `config_overrides` on those two plus
-`fine_tune`. An unknown key, or a malformed value, is rejected with **422**.
+only channel for the tunables the plain form fields cannot carry: `patch_size` on
+`infer`/`pipeline`, `batch_size` on those two and on `fine_tune` (where it writes the
+training `Trainer.Dataset.batch_size`), and `config_overrides` on all three. An
+unknown key, or a malformed value, is rejected with **422**.
 
 ### Job control
 
