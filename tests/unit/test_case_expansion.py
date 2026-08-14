@@ -349,6 +349,32 @@ def test_a_region_draw_takes_its_own_pass_and_the_plan_names_the_draw(tmp_path: 
     assert out.is_dataset_exist("CT", "CASE_000_r01") and out.is_dataset_exist("CT", "CASE_000_r02")
 
 
+def test_a_solo_copy_sweeps_on_the_requested_device(tmp_path: Path, monkeypatch) -> None:
+    """A copy that sweeps its own pass runs where the shared pass runs: the copies engine must
+    hand its device down, or solo copies silently fall back to CPU."""
+    source = _source(tmp_path)
+    manager = _manager(
+        source,
+        [
+            Clip(0.0, 50.0),
+            Expand(nb=2, pattern="{name}_r{a:02d}"),
+            _draw(Flip(f_prob=[0.0, 1.0, 1.0])),  # a region draw: every copy takes its own pass
+            Write(f"{tmp_path / 'out'}:h5"),
+        ],
+    )
+    seen: list[torch.device | None] = []
+
+    def spy(self, a=0, *args, **kwargs):
+        seen.append(kwargs.get("device"))
+        return True  # the sweep itself is not the point, the handed-down device is
+
+    monkeypatch.setattr(DatasetManager, "materialize", spy)
+    device = torch.device("cuda", 0)
+    manager.materialize_copies([1, 2], device=device)
+    assert seen == [device, device]
+    assert manager._chain_device is None
+
+
 def test_a_whole_volume_draw_falls_back_per_copy_and_still_writes(tmp_path: Path) -> None:
     source = _source(tmp_path)
     manager = _manager(

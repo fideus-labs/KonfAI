@@ -19,7 +19,8 @@
 The engine is :meth:`DatasetManager.materialize` (the streamed Save sweep with its whole-volume
 fallback), and the product is the plan: before a byte is written, every (case, chain) is planned on
 the launcher, each output destination is probed with a real region-write open (created then
-removed, so the printed verdict is the run's own), and the whole thing is printed and kept on disk.
+removed, so the verdict is the run's own), and the whole thing opens the run's log, the console
+getting the one-line summary of it.
 Nothing here falls back silently: a chain that cannot stream says which stage refused and why, and
 ``on_fallback`` decides whether that is information, a warning, or an error.
 """
@@ -30,6 +31,7 @@ import json
 import os
 import shutil
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
@@ -61,6 +63,8 @@ from konfai.utils.runtime import (
     State,
     _materialized_config,
     configure_workflow_environment,
+    get_device,
+    record,
     run_distributed_app,
 )
 from konfai.utils.utils import get_module
@@ -142,30 +146,39 @@ class TransformPlan:
         candidates = [entry for entry in self.entries if entry.verdict in ("WHOLE-VOLUME", "LOAD", "REDUCE")]
         return [entry for entry in candidates if entry.working_set_bytes > self.budget_bytes]
 
-    def report(self, verbose: bool = True) -> str:
-        """The plan as text. ``verbose`` is the plan.txt form; the console gets the same facts with
-        the estimator caveat only where an estimate actually gates something."""
-        estimated = bool(
-            self.fallback_entries or any(entry.reduced or entry.verdict == "LOAD" for entry in self.entries)
+    def summary(self) -> str:
+        """The plan in one line: what the run will do, and where to read the rest.
+
+        The console form, bounded: the full plan's notes and case lists grow with the cohort, so it
+        stays in the run's log (and ``--plan`` prints it on demand). What is folded away is counted here,
+        so nothing goes missing in silence."""
+        counts = Counter(entry.verdict for entry in self.entries)
+        verdicts = ", ".join(f"{count} {verdict}" for verdict, count in sorted(counts.items())) or "nothing to do"
+        dropped = sum(self.dropped_cases.values())
+        return (
+            f"[KonfAI] plan over {self.world_size} rank(s) | {len(self.entries)} entr(ies): {verdicts}"
+            f" | per-rank budget {_format_gib(self.budget_bytes)} ({self.budget_desc})"
+            + (f" | {len(self.notes)} note(s)" if self.notes else "")
+            + (f" | {dropped} case(s) dropped" if dropped else "")
         )
+
+    def report(self) -> str:
+        """The full plan as text: what opens the run's log, and what ``--plan`` prints on demand."""
         header = (
-            f"[Transformer] plan over {self.world_size} rank(s) | per-rank budget"
+            f"[KonfAI] plan over {self.world_size} rank(s) | per-rank budget"
             f" {_format_gib(self.budget_bytes)} ({self.budget_desc})"
+            f" | fallback working set = case x {CASE_ELEMENT_BYTES} B x {FALLBACK_INFLIGHT_FACTOR}"
+            f" (in-flight copy), headers-only estimate | output dtype/channels assumed"
+            f" {self.dtype_hypothesis} until the first slab"
         )
-        if verbose or estimated:
-            header += (
-                f" | fallback working set = case x {CASE_ELEMENT_BYTES} B x {FALLBACK_INFLIGHT_FACTOR}"
-                f" (in-flight copy), headers-only estimate | output dtype/channels assumed"
-                f" {self.dtype_hypothesis} until the first slab"
-            )
         lines = [header]
         for group_src, dropped in sorted(self.dropped_cases.items()):
             if dropped:
                 lines.append(
-                    f"[Transformer] {dropped} case(s) of '{group_src}' are DROPPED: the run keeps"
+                    f"[KonfAI] {dropped} case(s) of '{group_src}' are DROPPED: the run keeps"
                     " the cases every groups_src shares, minus what 'subset' excludes."
                 )
-        lines.extend(f"[Transformer] NOTE: {note}" for note in self.notes)
+        lines.extend(f"[KonfAI] NOTE: {note}" for note in self.notes)
         by_chain: dict[tuple[str, str], list[TransformPlanEntry]] = {}
         for entry in self.entries:
             by_chain.setdefault((entry.group_src, entry.group_dest), []).append(entry)
@@ -671,7 +684,7 @@ class Transformer(DistributedObject):
 
     def setup(self, world_size: int):
         """Plan, print, enforce, shard: before any spawn, before any byte."""
-        # No overwrite prompt on the run folder: it holds logs, the plan and a config copy, all
+        # No overwrite prompt on the run folder: it holds the logs and a config copy, both
         # rewritten in place, and prompting here would break the default per-case resume (a second
         # run would refuse because the first one left its config copy behind).
         os.makedirs(self.transform_path, exist_ok=True)
@@ -679,10 +692,11 @@ class Transformer(DistributedObject):
 
         self._overwrite = os.environ.get("KONFAI_OVERWRITE", "False") == "True"
         plan = self.compute_plan(world_size, self._overwrite)
-        print(plan.report(verbose=False))
-        # The plan is an artifact, not a log line: Studio filters routine startup lines from the
-        # console stream, and a plan that only ever existed as one is a plan nobody can re-read.
-        (self.transform_path / "plan.txt").write_text(plan.report() + "\n")
+        # The full plan opens the run's log, where a run is read after the fact; the console gets the
+        # one-line summary of it. One artifact, not two: the log is already the record of the run,
+        # and a second file holding the same text is one more thing to know about.
+        kept = record(plan.report())
+        print(f"{plan.summary()}" + (f" -> full plan in {kept}" if kept else ""))
         # Where the data went, machine-readable beside the human-readable plan. This run directory
         # holds a log, a plan and a config copy, never the deliverable, which lands wherever each
         # Write pointed. Without this, the one thing a reader wants after the run is the one thing
@@ -777,8 +791,9 @@ class Transformer(DistributedObject):
             )
         if self.on_fallback == "warn" and plan.fallback_entries:
             print(
-                f"[Transformer] WARNING: {len(plan.fallback_entries)} case(s) take the whole-volume"
-                " path (reasons above). They fit the budget; set on_fallback: error to refuse them."
+                f"[KonfAI] WARNING: {len(plan.fallback_entries)} case(s) take the whole-volume"
+                " path (which stage refused, and why, is in the plan this run wrote to its log). They"
+                " fit the budget; set on_fallback: error to refuse them."
             )
 
     def _shard_work(self, world_size: int) -> None:
@@ -801,7 +816,12 @@ class Transformer(DistributedObject):
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders):
         """Materialize this rank's cases. The plan already said what will happen: the console gets
         the deviations from it, the live counter, and one final line that says how it went."""
-        del world_size, local_rank, dataloaders
+        del world_size, dataloaders
+        # The one caller that knows its device: cuda:<rank> when the launch requested GPUs (the
+        # runtime narrowed CUDA_VISIBLE_DEVICES to them), CPU otherwise. The chain then runs where
+        # the rank runs; regions still land on the host for every write.
+        device = get_device(local_rank)
+        chain_device = torch.device(f"cuda:{device}") if isinstance(device, int) else device
         started = time.monotonic()
         managers = self._managers()
         shard = self._shards[global_rank]
@@ -850,6 +870,7 @@ class Transformer(DistributedObject):
                             rewrite=self._overwrite,
                             fallback_budget_bytes=self._budget_bytes,
                             allow_fallback=allow_fallback,
+                            device=chain_device,
                         )
                         shared = sum(1 for regime in regimes.values() if regime == "stream-shared")
                         own = sum(1 for regime in regimes.values() if regime == "stream")
@@ -858,7 +879,7 @@ class Transformer(DistributedObject):
                         counts["WHOLE-VOLUME"] += whole
                         if whole:
                             progress.write(
-                                f"[Transformer] case '{manager.name}' ({group_dest}):"
+                                f"[KonfAI] case '{manager.name}' ({group_dest}):"
                                 f" {whole} of {len(copies)} cop(ies) took the whole-volume path"
                             )
                     elif not self._overwrite and destination.is_dataset_exist(group, manager.name):
@@ -871,13 +892,14 @@ class Transformer(DistributedObject):
                             fallback_budget_bytes=self._budget_bytes,
                             allow_fallback=allow_fallback,
                             prefer_whole=planned == "LOAD",
+                            device=chain_device,
                         )
                         verdict = "STREAM" if streamed else ("LOAD" if planned == "LOAD" else "WHOLE-VOLUME")
                         counts[verdict] += 1
                         if planned not in (None, verdict):
                             # The one thing worth a line: the run did NOT do what the plan said.
                             progress.write(
-                                f"[Transformer] case '{manager.name}' ({group_dest}): {verdict}"
+                                f"[KonfAI] case '{manager.name}' ({group_dest}): {verdict}"
                                 f" (planned {planned}: {manager.stream_refusal(0) or 'see the log'})"
                             )
                 progress.set_description(description())
@@ -894,7 +916,7 @@ class Transformer(DistributedObject):
             written = totals["STREAM"] + totals["LOAD"] + totals["WHOLE-VOLUME"] + totals["REDUCE"]
             resume = f", {totals['SKIP']} already written (--overwrite recomputes)" if totals["SKIP"] else ""
             print(
-                f"[Transformer] done in {time.monotonic() - started:.1f} s: {written} written"
+                f"[KonfAI] done in {time.monotonic() - started:.1f} s: {written} written"
                 f" ({totals['STREAM']} streamed, {totals['LOAD']} loaded,"
                 f" {totals['WHOLE-VOLUME']} whole-volume, {totals['REDUCE']} reduced){resume}"
                 f" -> outputs in {self.transform_path / 'outputs.json'}"

@@ -754,3 +754,49 @@ def test_two_groups_share_one_construction_draw(streaming_dataset_stub) -> None:
             for group in ("CT", "SEG")
         )
         assert image_manager.shapes == label_manager.shapes, f"seed {seed}"
+
+
+def test_chain_device_is_opt_in_and_cpu_is_a_no_op(streaming_dataset_stub) -> None:
+    """This same machinery loads training cases inside DataLoader workers: only an explicit
+    non-CPU device handed to materialize() may ever move the chain."""
+    volume = np.zeros((1, 4, 6, 8), dtype=np.float32)
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, streaming_dataset_stub(volume)),
+        patch=None,
+        transforms=[],
+        data_augmentations_list=[],
+    )
+    assert manager._chain_device is None
+    manager.materialize(rewrite=True, device=torch.device("cpu"))
+    assert manager._chain_device is None
+
+
+def test_chain_device_lives_only_for_the_materialize_call(streaming_dataset_stub, monkeypatch) -> None:
+    """The rank's device routes the chain during the call only: one that outlived it would move a
+    later get_data() onto CUDA inside a DataLoader worker."""
+    volume = np.zeros((1, 4, 6, 8), dtype=np.float32)
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, streaming_dataset_stub(volume)),
+        patch=None,
+        transforms=[],
+        data_augmentations_list=[],
+    )
+    seen: list[torch.device | None] = []
+    original = manager._stream_ready
+
+    def spy(*args, **kwargs):
+        seen.append(manager._chain_device)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_stream_ready", spy)
+    manager.materialize(rewrite=True, device=torch.device("cuda", 0))
+    assert seen == [torch.device("cuda", 0)]
+    assert manager._chain_device is None
