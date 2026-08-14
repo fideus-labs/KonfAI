@@ -29,6 +29,61 @@ from .live_parse import parse_live_metric_line
 from .server_jobs import Job
 from .server_support import WorkspaceLayout, read_text_tail
 
+# How to read a KonfAI metric file: what a row means, what a metric's direction is, and which run
+# wrote it. Module level because two packages ask the same questions of the same files: konfai-mcp's
+# leaderboard and KonfAI Studio's scores table, which must name and rank a run identically.
+
+# App evaluate/pipeline runs write their metric trees under these workspace subdirs; every trial's
+# inner run dir repeats the bundle's train_name, so a trial's IDENTITY is its top-level trial dir.
+APP_TRIAL_SUBDIRS = ("AppEvaluations", "AppPipelines")
+_MAXIMIZE_TOKENS = ("dice", "iou", "accuracy", "acc", "auc", "f1", "ssim", "psnr")
+_MINIMIZE_TOKENS = ("mae", "mse", "rmse", "loss", "hausdorff", "hd")
+
+
+def top_level_metrics(rows: dict[str, Any]) -> dict[str, Any]:
+    """``rows`` (keyed by metric name) without the per-component ones.
+
+    KonfAI reports a multi-label metric both as a whole and per label (``out:tgt:Dice`` beside
+    ``out:tgt:Dice:12``), so a 117-label segmentation contributes 117 rows whose parent already
+    carries their mean: detail a snapshot has no use for, and enough to push a payload past the
+    result-size limit."""
+    kept: dict[str, Any] = {}
+    for name, row in rows.items():
+        parent, separator, _ = name.rpartition(":")
+        if separator and parent in rows:
+            continue
+        kept[name] = row
+    return kept
+
+
+def metric_direction(metric_name: str, declared: str | None = None) -> tuple[Literal["min", "max"], str]:
+    """Which way a metric is better, and where that answer came from.
+
+    A direction declared by the criterion itself (the evaluation JSON's ``directions`` block, sourced
+    from each ``Criterion.maximize``) is authoritative; the name is only read when nothing declared it."""
+    if declared in ("min", "max"):
+        return declared, "declared"  # type: ignore[return-value]
+    lowered = metric_name.lower()
+    if "loss" in lowered:  # a criterion named DiceLoss is still minimized
+        return "min", "heuristic:min"
+    if any(token in lowered for token in _MAXIMIZE_TOKENS):
+        return "max", "heuristic:max"
+    if any(token in lowered for token in _MINIMIZE_TOKENS):
+        return "min", "heuristic:min"
+    return "min", "default:min"
+
+
+def metric_run_name(metrics_path: Path, workspace: Path) -> str:
+    """The run a metric file belongs to: its run directory's name, except for an app trial
+    (``AppEvaluations/<label>-<uuid>/…/Metric_*.json``), identified by its parameter-suffixed trial
+    directory because every trial's inner run dir repeats the same bundle train_name."""
+    for subdir in APP_TRIAL_SUBDIRS:
+        try:
+            return metrics_path.relative_to(workspace / subdir).parts[0]
+        except ValueError:
+            continue
+    return metrics_path.parent.name
+
 
 class MetricsServiceMixin:
     """Metrics/leaderboard methods mixed into ``SessionService``."""
@@ -47,12 +102,6 @@ class MetricsServiceMixin:
 
         def session_name(self) -> str: ...
 
-    # App evaluate/pipeline runs write their metric trees under these workspace subdirs; every trial's
-    # inner run dir repeats the bundle's train_name, so a trial's IDENTITY is its top-level trial dir.
-    # One constant feeds both the search roots and the identity rule: a root added to only one of them
-    # would silently reintroduce the shared-inner-name ambiguity.
-    _APP_TRIAL_SUBDIRS = ("AppEvaluations", "AppPipelines")
-
     def _metric_search_roots(self, layout: WorkspaceLayout | None = None) -> list[Path]:
         layout = layout or self.workspace_layout
         workspace = layout.workspace_dir()
@@ -61,21 +110,11 @@ class MetricsServiceMixin:
         return [
             layout.evaluations_dir(),
             workspace / "Evaluation",
-            *(workspace / subdir for subdir in self._APP_TRIAL_SUBDIRS),
+            *(workspace / subdir for subdir in APP_TRIAL_SUBDIRS),
         ]
 
     def _metric_run_name(self, metrics_path: Path, layout: WorkspaceLayout | None = None) -> str:
-        """The run identifier of a metric file: its run directory's name: except an app trial
-        (``AppEvaluations/<label>-<uuid>/…/Metric_*.json``), identified by its parameter-suffixed trial
-        directory, because every trial's inner run dir repeats the same bundle train_name."""
-        layout = layout or self.workspace_layout
-        workspace = layout.workspace_dir()
-        for subdir in self._APP_TRIAL_SUBDIRS:
-            try:
-                return metrics_path.relative_to(workspace / subdir).parts[0]
-            except ValueError:
-                continue
-        return metrics_path.parent.name
+        return metric_run_name(metrics_path, (layout or self.workspace_layout).workspace_dir())
 
     def _resolve_session_layout(self, session: str | None) -> WorkspaceLayout:
         """Resolve a metrics-lookup layout: the current session, or another named one."""
@@ -132,21 +171,7 @@ class MetricsServiceMixin:
         return prefix.rstrip(":") or None
 
     def _metric_direction(self, metric_name: str, declared: str | None = None) -> tuple[Literal["min", "max"], str]:
-        # A direction declared by the criterion itself (via the evaluation JSON 'directions' block,
-        # sourced from each Criterion's `maximize` property) is authoritative: no guessing.
-        if declared in ("min", "max"):
-            return declared, "declared"  # type: ignore[return-value]
-        lowered = metric_name.lower()
-        maximize_tokens = ("dice", "iou", "accuracy", "acc", "auc", "f1", "ssim", "psnr")
-        minimize_tokens = ("mae", "mse", "rmse", "loss", "hausdorff", "hd")
-        # 'loss' wins over any maximize token: a criterion named DiceLoss is still minimized.
-        if "loss" in lowered:
-            return "min", "heuristic:min"
-        if any(token in lowered for token in maximize_tokens):
-            return "max", "heuristic:max"
-        if any(token in lowered for token in minimize_tokens):
-            return "min", "heuristic:min"
-        return "min", "default:min"
+        return metric_direction(metric_name, declared)
 
     @staticmethod
     def _declared_directions(payload: dict[str, Any]) -> dict[str, str]:
@@ -224,9 +249,13 @@ class MetricsServiceMixin:
                     for path in root.rglob(pattern)
                 }
             )
+            # A run is named after the directory it wrote, which for an app job is NOT the job's own
+            # name ('app_MR' launches a run called 'ImpactSynth'): say so, or the caller reads the
+            # refusal as "this session has no metrics".
             raise ValueError(
                 f"No metrics found for run '{run_name}' and split '{split_name}' in session "
-                f"'{layout.current_session}'. Available runs: {available_runs or 'none'}. "
+                f"'{layout.current_session}'. A run is named after its output directory, which for an "
+                f"app job differs from the job's own name. Available runs: {available_runs or 'none'}. "
                 f"Available splits: {self._available_metric_splits(layout) or 'none'}."
             )
         return {

@@ -320,3 +320,20 @@ def test_the_job_records_are_read_defensively(tmp_path: Path) -> None:
     (root / "broken.json").write_text("{not json", encoding="utf-8")
     assert state(root, [{"status": "done"}, {}])["stage"] in STAGES
     assert json.loads("{}") == {}
+
+
+def test_a_config_dataset_is_read_against_the_workspace(tmp_path: Path) -> None:
+    """A config names its dataset for the cwd the job runs in, which is the workspace: `./Dataset`. Read
+    against the asking process instead, the scan found nothing (0 cases) and the path handed to the
+    agent opened for no tool that received it: asking "how many cases?" answered "directory not found"."""
+    workspace = tmp_path / "sessions" / "exp"
+    (workspace / "Dataset" / "CASE_000").mkdir(parents=True)
+    (workspace / "Dataset" / "CASE_000" / "CT.mha").write_bytes(b"")
+    (workspace / "Config.yml").write_text(
+        "Trainer:\n  Dataset:\n    dataset_filenames:\n    - ./Dataset:a:mha\n", encoding="utf-8"
+    )
+
+    facts = collect_facts(workspace, jobs=[])
+
+    assert facts.dataset == str(workspace / "Dataset")
+    assert facts.cases == 1

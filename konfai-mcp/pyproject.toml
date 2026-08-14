@@ -18,9 +18,11 @@ authors = [
 # satisfies a bare name, and the server then dies on import -- all of it, not just the transform
 # tools. Spelled `>1.7.0` and not `>=1.8.0` so a source checkout satisfies it: setuptools_scm builds
 # the unreleased tree as 1.7.1.devN, which PEP 440 sorts BELOW 1.7.1 and above 1.7.0.
+# konfai-apps carries the same bound: its imports are lazy, so an older one does not break the server on
+# import, it breaks one app tool at the call with an ImportError naming a symbol instead of a version.
 dependencies = [
   "konfai>1.7.0",
-  "konfai-apps",
+  "konfai-apps>1.7.0",
   "fastmcp",
   "ruamel.yaml",
   "numpy"

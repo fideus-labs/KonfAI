@@ -35,6 +35,7 @@ def workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point KONFAI_MCP_WORKSPACES_ROOT at a per-test directory and return it."""
     root = tmp_path / "workspaces"
     monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(root))
+    monkeypatch.delenv("KONFAI_MCP_SESSION", raising=False)  # a host pin in the caller's shell must not leak in
     return root
 
 

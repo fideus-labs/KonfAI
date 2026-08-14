@@ -36,6 +36,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "sidecar, a case-list txt, or a text header (.mhd/.nhdr). "
         "SAFE: bounded read-only preview (it streams at most max_chars characters); binary files are "
         "refused with a pointer to inspect_dataset/preview_volume. "
+        "Exception: an ITK transform .h5 (a registration's Transform.h5) returns a structured summary "
+        "instead: transform type + full parameters when linear, per-axis mean/std and displacement "
+        "magnitudes when a dense field. "
         "It does not parse image volumes and does not modify anything. "
         "Outputs: content (bounded), total_bytes, truncated; CSV/TSV additionally get columns + rows. "
         "Next: inspect_dataset or design_config_strategy."
@@ -241,6 +244,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so pass "
         "allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only. "
         "It does not author a config or adapt the dataset layout for you. "
+        "Training knobs are first-class parameters (epochs, it_validation, lr, batch_size); set_parameters is for "
+        "the app's MODEL tunables (bare names) or any config key by its full dotted path. "
         "Outputs: a job payload (status, resources, next_actions) plus the bundle output path. "
         "Next: wait_for_job, then run_app_infer on the produced bundle (then run_app_evaluate to score and rank "
         "this fine-tune against other training trials via leaderboard / compare_runs)."
@@ -280,14 +285,16 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "This creates sessions/<name> under the workspace root and makes it the current session. "
         "It does not seed configs (initialize_session does) and refuses to switch while a job is active. "
         "Outputs: session, created, switched, sessions, next_actions. "
-        "Next: initialize_session or import_experiment in the new session."
+        "Next: initialize_session or import_experiment in the new session. "
+        "Refused when a host UI pinned the session (KONFAI_MCP_SESSION): work in the current session instead."
     ),
     "switch_session": (
         "Use to SWITCH the server onto another existing session workspace (create_session makes new ones). "
         "All session-scoped tools and resources then operate on that workspace; its persisted job history is "
         "reloaded. It refuses to switch while a job is active in the current session. "
         "Outputs: session, sessions, summary, next_actions. "
-        "Next: summarize_session, or leaderboard(session=...) to compare without switching."
+        "Next: summarize_session, or leaderboard(session=...) to compare without switching. "
+        "Refused when a host UI pinned the session (KONFAI_MCP_SESSION): work in the current session instead."
     ),
     "import_experiment": (
         "Use to ADOPT an existing on-disk KonfAI experiment (its Config/Prediction/Evaluation.yml, custom .py and "
@@ -390,7 +397,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "This deletes the workspace and can cancel active jobs when forced. "
         "It does not preserve artifacts. "
         "Outputs: deleted session name and path. "
-        "Next: none unless you want to reinitialize the session."
+        "Next: none unless you want to reinitialize the session. "
+        "Refused when a host UI pinned the session (KONFAI_MCP_SESSION): deletion belongs to the host UI."
     ),
     "delete_run": (
         "Use to remove ONE run's outputs from the current session, leaving the rest of the workspace intact. "
@@ -518,9 +526,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Next: fix what needs_attention names, or run_transform."
     ),
     "run_transform": (
-        "Use to apply a transform chain to a dataset with NO model: read, transform, write. "
+        "Use to batch-process a dataset with a transform chain: read, transform, write. "
         "Read plan_transform first: this writes a dataset, and the plan is what says how much and how. "
         "This launches a transform job from the session Transform.yml and returns structured job resources. "
+        "Pass gpu to run the chain on a GPU (the resample and intensity stages move with it; every write "
+        "still lands on the host). "
         "The run replans, stores the plan, and refuses outright when a case can neither stream nor fit "
         "memory_budget. A case whose output already exists is skipped, so an interrupted run resumes; pass "
         "overwrite to recompute. "
@@ -567,7 +577,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Use after launching a job when you want to block until it finishes. "
         "This polls job state until the job reaches a terminal status. "
         "It does not stream logs. "
-        "Outputs: final job payload. "
+        "A timeout_s expiry is NOT an error: the job's current status comes back with timed_out=true; "
+        "wait again or read_live_metrics between waits on a long training. "
+        "Outputs: final job payload (or the current one with timed_out=true). "
         "Next: summarize_session or leaderboard."
     ),
 }
