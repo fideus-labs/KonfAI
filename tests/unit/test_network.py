@@ -726,3 +726,42 @@ def test_composite_criteria_are_scheduled_on_the_owning_networks_counter() -> No
 
     assert seen_its == [0, 1, 2], f"criteria must see the owner's advancing counter, got {seen_its}"
     assert root._it == 0  # the composite root still owns no optimizer and never steps
+
+
+def test_measure_update_moves_the_criterion_onto_the_outputs_device_once() -> None:
+    """Criteria live outside the model's module tree, so ``network.to(device)`` never reaches them.
+
+    A criterion with its own tensors (``CrossEntropyLoss(weight=...)``) stayed on CPU while the batch
+    trained on cuda:0 and every step raised 'Expected all tensors to be on the same device'. Measure
+    must move the criterion onto the output's device, and only when the device changes."""
+    from konfai.metric.schedulers import Constant
+    from konfai.network.network import CriterionsAttr, Measure
+
+    class Net(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Head", torch.nn.Conv2d(1, 3, 1))
+
+    model = Net()
+    criterion = torch.nn.CrossEntropyLoss(weight=torch.tensor([1.0, 5.0, 10.0]))
+    attr = CriterionsAttr()
+    attr.schedulers = {Constant(): None}
+    measure = Measure("Net", {})
+    measure.outputs_criterions = {"Head": {"SEG": {criterion: attr}}}
+    measure.init(model, ["SEG"])
+
+    moved_to: list[torch.device] = []
+    original_to = criterion.to
+
+    def recording_to(*args: Any, **kwargs: Any) -> torch.nn.Module:
+        moved_to.append(args[0])
+        return original_to(*args, **kwargs)
+
+    criterion.to = recording_to  # type: ignore[method-assign]
+
+    output = torch.randn(2, 3, 4, 4)
+    batch = {"SEG": (torch.randint(0, 3, (2, 4, 4)), [Attribute()])}
+    measure.update("Head", output, batch, it=0, nb_patch=1, training=True)
+    measure.update("Head", output, batch, it=1, nb_patch=1, training=True)
+
+    assert moved_to == [output.device], "one move onto the output's device, not one per step"
