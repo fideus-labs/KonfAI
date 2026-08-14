@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import socket
 import subprocess
 import sys
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -117,11 +119,22 @@ async def preview_image(
 
 
 def _free_port() -> int:
-    import socket
-
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def _answers(proc: subprocess.Popen[bytes], port: int, timeout: float = 20.0) -> bool:
+    """Whether the server accepts a connection before it exits or ``timeout`` passes.
+
+    Popen returns well before the port listens, and a URL handed over early opens a browser error
+    page that only a manual reload clears."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and proc.poll() is None:
+        with suppress(OSError), socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+        time.sleep(0.1)
+    return False
 
 
 @router.get("/api/tensorboard")
@@ -150,6 +163,9 @@ async def tensorboard_link(session: str = Query("default")) -> dict[str, Any]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    if not await asyncio.to_thread(_answers, proc, port):
+        proc.terminate()
+        return {"ok": False, "detail": "TensorBoard did not start in time"}
     url = f"http://127.0.0.1:{port}/"
     _TB_SERVERS[name] = {"proc": proc, "url": url}
     return {"ok": True, "url": url}

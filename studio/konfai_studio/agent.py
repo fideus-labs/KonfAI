@@ -69,6 +69,9 @@ SYSTEM_PROMPT = (
     "clinician-researcher who knows their data, not the framework.\n\n"
     "Act, do not offer. When the next step only reads, take it and report what you found. Ask only for "
     "what you cannot derive, one question at a time. Never state a tool result you did not get.\n\n"
+    "THIS experiment IS the current session workspace, bound to the panels beside the chat. Never "
+    "create_session, switch_session or delete_session: a run started in another session is invisible "
+    "here. Everything: initialize_session, configs, runs, happens in the current session.\n\n"
     "A turn may open with three lines:\n"
     "  [state] where the experiment stands, read from its workspace. Authoritative: never ask for what is "
     "already there, never redo a step it shows as done.\n"
@@ -85,6 +88,11 @@ SYSTEM_PROMPT = (
     "relaunched straight away; anything else that costs GPU time is asked first. Two failed attempts is the "
     "limit: past it, lay out the options and ask. Never settle a scientific choice yourself (loss, "
     "architecture, split, label mapping, which data is the right one): those are the user's.\n\n"
+    "Tuning an app run: training knobs (epochs, it_validation, lr, batch_size) are fine_tune_app's OWN "
+    "parameters, never set_parameters entries. set_parameters takes the app's model tunables by their bare "
+    "name (list_app_parameters shows them); any OTHER config key needs its full dotted path from the config "
+    "root ({'Trainer.Dataset.num_workers': 2}): a bare config key is refused as an unknown model "
+    "parameter.\n\n"
     "A job whose status is 'killed' was stopped ON PURPOSE: usually the user pressing Stop in the panel "
     "beside you ('cancel_requested': true marks it). It is not a failure, not an external anomaly, and "
     "nothing to investigate or apologise for: say in one line where the run stood (epoch/iteration, last "
@@ -463,6 +471,22 @@ class OpenAIBackend:
         yield {"type": "error", "message": f"stopped after {MAX_TURNS} turns"}
 
 
+def _saved_history(path: Path | None, kind: str) -> list[Any] | None:
+    """The transcript at ``path``, but only for the backend that wrote it.
+
+    The two backends speak different message schemas (Anthropic content blocks vs OpenAI
+    ``tool_calls``/``tool`` roles), so handing one the other's transcript fails its next turn. Switching
+    brain therefore starts a fresh conversation rather than a broken one."""
+    if not (path and path.is_file()):
+        return None
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    messages = saved.get("messages") if isinstance(saved, dict) and saved.get("backend") == kind else None
+    return messages if isinstance(messages, list) and messages else None
+
+
 class StudioAgent:
     """Holds one MCP session and delegates the chat/tool loop to the chosen LLM backend."""
 
@@ -483,6 +507,7 @@ class StudioAgent:
         self._brain = brain
         self._model = model
         self._history_file = history_file  # persist the transcript so a restart resumes it
+        self._kind = ""  # which backend wrote that transcript: the two message schemas do not mix
         self._backend: AnthropicBackend | OpenAIBackend | None = None
 
     async def _call_tool(self, name: str, args: dict[str, Any]) -> tuple[bool, str]:
@@ -498,16 +523,12 @@ class StudioAgent:
         backend = (self._brain or os.environ.get("KONFAI_STUDIO_LLM") or "anthropic").lower()
         model = self._model or os.environ.get("KONFAI_STUDIO_MODEL") or DEFAULT_MODEL
         if backend in {"openai", "local", "vllm", "ollama"}:
-            self._backend = OpenAIBackend(mcp_tools, self._call_tool, model)
+            self._kind, self._backend = "openai", OpenAIBackend(mcp_tools, self._call_tool, model)
         else:
-            self._backend = AnthropicBackend(mcp_tools, self._call_tool, model)
-        if self._history_file and self._history_file.is_file():
-            try:
-                saved = json.loads(self._history_file.read_text(encoding="utf-8"))
-                if isinstance(saved, list) and saved:
-                    self._backend._history = saved  # resume the prior conversation
-            except (OSError, ValueError):
-                pass
+            self._kind, self._backend = "anthropic", AnthropicBackend(mcp_tools, self._call_tool, model)
+        resumed = _saved_history(self._history_file, self._kind)
+        if resumed is not None:
+            self._backend._history = resumed
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -520,7 +541,8 @@ class StudioAgent:
         if self._history_file:  # persist after each turn so a restart continues the conversation
             try:
                 self._history_file.parent.mkdir(parents=True, exist_ok=True)
-                self._history_file.write_text(json.dumps(self._backend._history, default=str), encoding="utf-8")
+                payload = {"backend": self._kind, "messages": self._backend._history}
+                self._history_file.write_text(json.dumps(payload, default=str), encoding="utf-8")
             except OSError:
                 pass
 

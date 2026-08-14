@@ -297,10 +297,14 @@ function Studio({ remote }: { remote: boolean }) {
   const startRailDrag = drag((x) => setRailWidth(Math.min(420, Math.max(150, x))));
   const [pick, setPick] = useState<{ session: string; action: "bundle" | "export" } | null>(null);
   const [toast, setToast] = useState("");
+  const [tools, setTools] = useState(0);
 
   useEffect(() => {
     getJson("/api/health")
-      .then((d) => setStatus(d.agent === "ready" ? "ready" : "starting…"))
+      .then((d) => {
+        setStatus(d.agent === "ready" ? "ready" : "starting…");
+        setTools(d.tools ?? 0);
+      })
       .catch(() => setStatus("offline"));
     getJson("/api/sessions")
       .then((d) => {
@@ -426,6 +430,15 @@ function Studio({ remote }: { remote: boolean }) {
     }
   }, [gpus, defaultDevice]);
 
+  // Plug in a backend's credentials from the UI: they persist server-side and every live agent is
+  // rebuilt, so the next message uses them without restarting Studio.
+  function connectLlm(fields: Record<string, string>) {
+    return postJson("/api/llm", fields).then((d) => {
+      setBrains(d.options ?? []);
+      return (d.options ?? []).find((b: Brain) => b.id === brain)?.available ?? false;
+    });
+  }
+
   const llmProps = {
     brains,
     brain,
@@ -434,6 +447,7 @@ function Studio({ remote }: { remote: boolean }) {
     onBrain: chooseBrain,
     onModel: chooseModel,
     onModelText: setModelText,
+    onConnect: connectLlm,
   };
 
   // Remember a task's dataset server-side (persists, and the Experiment tree mounts it).
@@ -578,6 +592,9 @@ function Studio({ remote }: { remote: boolean }) {
   // One live subscription for the active task, shared by the feed (right) and the console (bottom).
   const stream = useJobStream(active, ui[active]?.runNonce ?? 0);
 
+  // A task's latest job status: the live stream for the task in front, the rail's poll for the others.
+  const statusOf = (s: string) => (s === active && stream.status ? stream.status : ui[s]?.status) ?? "";
+
   // Stopping the server is a LOCAL privilege: never offered on a remote (token-gated) session,
   // and the endpoint refuses non-loopback clients anyway.
   const stoppable = !remote && ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
@@ -705,9 +722,7 @@ function Studio({ remote }: { remote: boolean }) {
             {sessions
               .filter((s) => !railSearch || (ui[s]?.title ?? s).toLowerCase().includes(railSearch.toLowerCase()))
               .map((s) => {
-              // The active task's live stream is the freshest signal; others use the polled status.
-              const status = s === active && stream.status ? stream.status : ui[s]?.status;
-              const state = jobState(status);
+              const state = jobState(statusOf(s));
               const spinning = ui[s]?.busy || state === "run";
               return (
                 <button
@@ -766,6 +781,7 @@ function Studio({ remote }: { remote: boolean }) {
                     onChooseDataset={chooseDataset}
                     onOpenZoo={openZoo}
                     llm={llmProps}
+                    runStatus={statusOf(s)}
                     device={deviceOf(s)}
                     gpus={gpus.map((g) => g.index)}
                     onDevice={(v) => chooseDevice(s, v)}
@@ -802,6 +818,7 @@ function Studio({ remote }: { remote: boolean }) {
               comparePath={ui[active]?.compareVol ?? null}
               onComparePathChange={(p) => setUi((u) => patchSession(u, active, { compareVol: p || null }))}
               stream={stream}
+              dataset={ui[active]?.dataset ?? ""}
               onReload={() => bumpRun(active)}
             />
           </div>
@@ -814,7 +831,7 @@ function Studio({ remote }: { remote: boolean }) {
           <span className="dot" />
           {status}
         </span>
-        <span className="seg dim">konfai-mcp · 56 tools</span>
+        <span className="seg dim">konfai-mcp{tools ? ` · ${tools} tools` : ""}</span>
         <span className="seg dim">
           {sessions.length} experiment{sessions.length === 1 ? "" : "s"}
         </span>
@@ -828,7 +845,10 @@ function Studio({ remote }: { remote: boolean }) {
             </button>
           </>
         ) : (
-          <span className="seg dim">local · offline · nothing leaves the machine</span>
+          <span className="seg dim">
+            {/* No offline claim per backend: the openai-compatible base_url may point anywhere. */}
+            local · your imaging data stays on this machine
+          </span>
         )}
       </div>
 

@@ -9,7 +9,7 @@ compares, keeps & reproduces experiments, then deploys the frozen model privatel
 100% in the browser). The compute stays on the user's site; nothing is uploaded to a third party.
 
 **This is a product surface, not a new engine.** Every capability maps 1:1 onto an existing
-`konfai-mcp` tool (56 today). The build is the web UI + a thin bridge (BFF), plus the ONNX export.
+`konfai-mcp` tool. The build is the web UI + a thin bridge (BFF), plus the ONNX export.
 
 ## See it work
 
@@ -78,6 +78,9 @@ The published wheel already ships the built front. The default brain uses your
 **Claude Code subscription** (no API key); `konfai-studio[openai]` and
 `konfai-studio[anthropic]` add the alternatives. For a local model:
 `KONFAI_STUDIO_LLM=openai KONFAI_STUDIO_LLM_BASE_URL=http://localhost:11434/v1 KONFAI_STUDIO_MODEL=qwen2.5:14b konfai-studio`.
+
+The same choice is in the interface: pick the backend beside the composer and **Connect…** takes its
+server URL and key, stored `0600` under the workspaces root. The environment wins on start-up.
 
 ## Develop from a checkout
 

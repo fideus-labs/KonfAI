@@ -24,6 +24,7 @@ a turn, what is derived from what the turn actually achieved, and what comes bac
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ pytest.importorskip("fastapi")
 from konfai_studio import server as bff
 from konfai_studio.agent import with_volume_events
 from konfai_studio.registry import _Registry
+from konfai_studio.workflow import state_line
 from starlette.testclient import TestClient
 
 CONFIG = """
@@ -430,6 +432,32 @@ def test_the_transcript_is_served_to_a_browser_that_missed_the_turns(
     assert history[-1]["parts"] == [{"kind": "text", "text": "bonjour toi"}]
 
 
+def test_the_transcript_survives_the_agent_resetting_the_workspace(
+    studio: tuple[TestClient, _ScriptedAgent, Path],
+) -> None:
+    """initialize_session(overwrite=True) legitimately rmtrees the konfai-mcp workspace. The chat
+    history lives outside it, so a turn whose tools reset the workspace no longer erases the
+    conversation that led there (seen live: every experiment lost its opening turns this way), and a
+    fresh workspace no longer looks non-empty because of a transcript."""
+    client, agent, session = studio
+    agent.script = [{"type": "text", "text": "inspected"}, {"type": "done"}]
+    turn(client, "inspect my dataset")
+    assert not (session / "transcript.json").exists(), "the transcript must not sit in the mcp workspace"
+
+    shutil.rmtree(session)  # what initialize_session(overwrite=True) does mid-turn
+    session.mkdir(parents=True)
+    agent.script = [{"type": "text", "text": "trained"}, {"type": "done"}]
+    turn(client, "now train")
+
+    history = client.get("/api/chat/history", params={"session": "exp"}).json()["messages"]
+    assert [m.get("text") or m["parts"][0]["text"] for m in history] == [
+        "inspect my dataset",
+        "inspected",
+        "now train",
+        "trained",
+    ]
+
+
 def test_an_interrupted_tool_is_recorded_as_cut_not_left_running(
     studio: tuple[TestClient, _ScriptedAgent, Path],
 ) -> None:
@@ -459,3 +487,40 @@ def test_a_jobless_experiment_still_appears_in_the_status_poll(
     statuses = client.get("/api/sessions/status").json()["statuses"]
 
     assert statuses == {"exp": ""}
+
+
+def test_the_bar_keeps_the_assistants_own_buttons_until_the_experiment_moves(
+    studio: tuple[TestClient, _ScriptedAgent, Path],
+) -> None:
+    """The bar re-reads this endpoint on a reload, and now also when a job starts or ends. Its answer has
+    to be the one a turn would give: the assistant's own buttons name what it just described, and the
+    derived list is the fill-in for when they no longer describe where the experiment stands."""
+    client, _agent, _session = studio
+    own = [{"label": "Look at the sCT", "prompt": "Open the synthetic CT next to the real one."}]
+
+    bff._reg.remember_moves("exp", own, state_line(bff._state("exp")))
+    assert [move["label"] for move in client.get("/api/experiment", params={"session": "exp"}).json()["moves"]] == [
+        "Look at the sCT"
+    ]
+
+    bff._reg.remember_moves("exp", own, "a state this experiment has left")
+    labels = [move["label"] for move in client.get("/api/experiment", params={"session": "exp"}).json()["moves"]]
+    assert labels and "Look at the sCT" not in labels
+
+
+def test_a_transcript_is_resumed_only_by_the_backend_that_wrote_it(tmp_path: Path) -> None:
+    """Switching brain rebuilds the agent, which reloads the saved conversation. The Anthropic and
+    OpenAI backends do not share a message schema, so resuming across a switch would fail the next turn
+    rather than continue it: the transcript carries the backend that wrote it, and only it resumes."""
+    from konfai_studio.agent import _saved_history
+
+    path = tmp_path / "history.json"
+    messages = [{"role": "user", "content": "segment these CT volumes"}]
+    path.write_text(json.dumps({"backend": "anthropic", "messages": messages}), encoding="utf-8")
+
+    assert _saved_history(path, "anthropic") == messages
+    assert _saved_history(path, "openai") is None
+    assert _saved_history(tmp_path / "absent.json", "anthropic") is None
+
+    path.write_text("{ not json", encoding="utf-8")
+    assert _saved_history(path, "anthropic") is None

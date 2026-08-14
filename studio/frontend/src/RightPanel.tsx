@@ -38,8 +38,13 @@ function fmt(v: number | undefined): string {
   return typeof v === "number" ? v.toFixed(4) : ": ";
 }
 
+// The last segment names the metric ("PRED:SEG:Dice" -> "Dice"), unless it is an index: a bare number
+// on its own titles a chart with nothing, so it keeps the metric it indexes ("PRED:SEG:Dice:1" -> "Dice:1").
 function shortMetric(name: string): string {
-  return name.split(/[:/]/).pop() || name;
+  const parts = name.split(/[:/]/).filter(Boolean);
+  const last = parts[parts.length - 1];
+  if (last === undefined) return name;
+  return parts.length > 1 && /^\d+$/.test(last) ? `${parts[parts.length - 2]}:${last}` : last;
 }
 
 // Close a modal on Escape.
@@ -86,7 +91,8 @@ function ZoomChart({ series }: { series: Series }) {
   const VW = 1000;
   const VH = 420;
   const pts = series.points;
-  const xUnit = series.stage === "training" || series.stage === "validation" ? "iteration" : "case";
+  const perCase = !(series.stage === "training" || series.stage === "validation"); // markers only: see MetricChart
+  const xUnit = perCase ? "case" : "iteration";
   if (pts.length === 0) return null;
   const xs = pts.map((p) => p.x);
   const [xmin, xmax] = range ?? [Math.min(...xs), Math.max(...xs)];
@@ -136,8 +142,10 @@ function ZoomChart({ series }: { series: Series }) {
         {[0.25, 0.5, 0.75].map((f) => (
           <line key={f} className="grid" x1="0" x2={VW} y1={VH * f} y2={VH * f} vectorEffect="non-scaling-stroke" />
         ))}
-        <polyline className="line" points={line} vectorEffect="non-scaling-stroke" style={{ stroke: color }} />
-        {vis.length <= 80 &&
+        {!perCase && (
+          <polyline className="line" points={line} vectorEffect="non-scaling-stroke" style={{ stroke: color }} />
+        )}
+        {(perCase || vis.length <= 80) &&
           vis.map((p, i) => <circle key={i} cx={X(p.x)} cy={Y(p.y)} r="3" style={{ fill: color }} vectorEffect="non-scaling-stroke" />)}
         {sel && <rect className="zoom-sel" x={Math.min(sel.a, sel.b)} y="0" width={Math.abs(sel.b - sel.a)} height={VH} />}
         {hover && <line className="zoom-cross" x1={hover.px} x2={hover.px} y1="0" y2={VH} vectorEffect="non-scaling-stroke" />}
@@ -497,6 +505,7 @@ function ExperimentView({
   volumePath,
   onVolumePathChange,
   refresh,
+  dataset: picked,
   live,
   focusDir,
   focusOpen,
@@ -507,6 +516,7 @@ function ExperimentView({
   volumePath: string | null;
   onVolumePathChange: (p: string) => void;
   refresh?: number;
+  dataset?: string; // re-read the experiment when one is picked: it mounts the input tree and a chip
   live?: boolean;
   focusDir?: string; // a workspace dir to reveal/expand in the tree (from a run's "Browse files")
   focusOpen?: string; // what to auto-open there: "config" | "volume" | "metric" | "first"
@@ -519,6 +529,7 @@ function ExperimentView({
   const [doc, setDoc] = useState<{ name: string; content: string; editable: boolean } | null>(null);
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [stale, setStale] = useState(false); // the open file changed on disk; saving over it was refused
   const [note, setNote] = useState("");
   const [treeKey, setTreeKey] = useState(0);
   const [showVolume, setShowVolume] = useState(false);
@@ -579,14 +590,15 @@ function ExperimentView({
   }, [session]);
 
   // Refresh the overview + re-list open dirs when a job milestone fires or a live tick elapses, so
-  // new checkpoints / statistics / logs appear in the tree without collapsing it.
+  // new checkpoints / statistics / logs appear in the tree without collapsing it. Picking a dataset
+  // counts: it is what mounts the input tree beside the workspace, and the overview names it.
   useEffect(() => {
-    if (refresh === undefined) return;
+    if (refresh === undefined && !picked) return;
     setRefreshKey((k) => k + 1);
     getJson(`/api/experiment?session=${encodeURIComponent(session)}`)
       .then(setInfo)
       .catch(() => {});
-  }, [refresh, session]);
+  }, [refresh, picked, session]);
 
   useEffect(() => {
     if (!live) return;
@@ -635,6 +647,19 @@ function ExperimentView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusDir, focusOpen]);
 
+  function load(rel: string) {
+    setNote("");
+    setStale(false);
+    fetch(`/api/experiment/file?session=${encodeURIComponent(session)}&path=${encodeURIComponent(rel)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("unreadable file"))))
+      .then((d) => {
+        setDoc(d);
+        setDraft(d.content);
+        setDirty(false);
+      })
+      .catch((e) => setNote(String(e.message || e)));
+  }
+
   function openFile(rel: string, abs: string) {
     if (VOLUME_FILE_RE.test(rel)) {
       setSel(rel);
@@ -647,33 +672,29 @@ function ExperimentView({
     }
     if (dirty && !window.confirm("Discard unsaved changes to this file?")) return;
     setSel(rel);
-    setNote("");
     setShowVolume(false);
-    fetch(`/api/experiment/file?session=${encodeURIComponent(session)}&path=${encodeURIComponent(rel)}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("unreadable file"))))
-      .then((d) => {
-        setDoc(d);
-        setDraft(d.content);
-        setDirty(false);
-      })
-      .catch((e) => setNote(String(e.message || e)));
+    load(rel);
   }
 
-  function save() {
+  // The agent and every workflow write configs too, so the save carries the text the editor opened and
+  // the server refuses it when the file no longer holds it. Reload is then the only honest way forward.
+  async function save() {
     if (!doc) return;
     setNote("saving…");
-    fetch("/api/config/save", {
+    const r = await fetch("/api/config/save", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, name: doc.name, content: draft }),
-    })
-      .then((r) => (r.ok ? r.json() : r.json().then((e) => Promise.reject(new Error(e.detail || "save failed")))))
-      .then(() => {
-        setDoc((d) => (d ? { ...d, content: draft } : d));
-        setDirty(false);
-        setNote("saved ✓");
-      })
-      .catch((e) => setNote(String(e.message || e)));
+      body: JSON.stringify({ session, name: doc.name, content: draft, base: doc.content }),
+    }).catch(() => null);
+    if (r?.ok) {
+      setDoc((d) => (d ? { ...d, content: draft } : d));
+      setDirty(false);
+      setNote("saved ✓");
+      return;
+    }
+    const detail = r ? await r.json().then((e) => e.detail).catch(() => "") : "";
+    setStale(r?.status === 409);
+    setNote(detail || "save failed");
   }
 
   return (
@@ -753,6 +774,14 @@ function ExperimentView({
                 <span className="cfg-note">
                   {note || (dirty ? "unsaved changes" : doc.editable ? doc.name : `${doc.name} · read-only`)}
                 </span>
+                {stale && (
+                  <button
+                    className="cfg-save"
+                    onClick={() => (!dirty || window.confirm("Discard your edits and read the file again?")) && load(sel)}
+                  >
+                    Reload
+                  </button>
+                )}
                 {doc.editable && (
                   <button className="cfg-save" onClick={save} disabled={!dirty}>
                     Save
@@ -776,6 +805,11 @@ function ExperimentView({
 // glance (orange = validation, the one comparison that matters on a training chart).
 // The workflow order runs happen in: drives the sub-tab order (train first, evaluation last).
 const KIND_ORDER: Record<string, number> = { train: 0, finetune: 1, prediction: 2, uncertainty: 3, evaluation: 4, transform: 5 };
+
+// Delete removes `<root>/<run>` at the session root. An app run lives in its own trial subtree, where
+// that path names a DIFFERENT run that happens to share its name, so it is not offered there.
+const SESSION_ROOTS = ["Statistics", "Predictions", "Evaluations", "Uncertainties", "Transforms"];
+const deletable = (base: string) => SESSION_ROOTS.includes(base.split("/")[0]);
 
 const SAGE = "var(--sage)";
 const AMBER = "var(--working)";
@@ -819,11 +853,13 @@ function MetricChart({
   const ymin = Math.min(...ys);
   const ymax = Math.max(...ys);
   const yr = ymax - ymin || 1;
-  const px = (p: Point) => (((p.x - xmin) / xr) * W).toFixed(1);
+  const alone = Math.max(...xs) === xmin; // one case measured: centre it rather than pin it to the left edge
+  const px = (p: Point) => (alone ? W / 2 : ((p.x - xmin) / xr) * W).toFixed(1);
   const py = (p: Point) => (H - ((p.y - ymin) / yr) * H).toFixed(1);
   const gid = "grad_" + id.replace(/[^a-z0-9]/gi, "");
   // Evaluation and prediction advance one point per case, not per training iteration: label the axis so.
-  const xUnit = stage === "training" || stage === "validation" ? "iteration" : "case";
+  const perCase = !(stage === "training" || stage === "validation");
+  const xUnit = perCase ? "case" : "iteration";
   return (
     <div
       className={onExpand ? "mcard clickable" : "mcard"}
@@ -864,21 +900,31 @@ function MetricChart({
             if (l.points.length === 0) return null;
             const pts = l.points.map((p) => `${px(p)},${py(p)}`).join(" ");
             const color = lineColor(l.label);
-            const sparse = l.points.length <= 32; // dots only when few (validation/eval); dense curves stay a clean line
+            // A case is not a step in a series. Which cases reach the log is decided by the progress
+            // bar's own flushing (a four-case evaluation logs the first and the last), and cases have no
+            // order anyway, so a line between them draws a trend across cases nobody measured. Per case:
+            // markers only. The complete per-case values are in the evaluation table, from the metric file.
+            const sparse = perCase || l.points.length <= 32; // dots when few; a dense curve stays a clean line
             const last = l.points[l.points.length - 1];
             return (
               <g key={l.key} style={{ color }}>
-                {color === SAGE && <polyline className="area" points={`${pts} ${W},${H} 0,${H}`} fill={`url(#${gid})`} />}
-                <polyline className="line" points={pts} vectorEffect="non-scaling-stroke" style={{ stroke: color }} />
+                {!perCase && color === SAGE && (
+                  <polyline className="area" points={`${pts} ${W},${H} 0,${H}`} fill={`url(#${gid})`} />
+                )}
+                {!perCase && (
+                  <polyline className="line" points={pts} vectorEffect="non-scaling-stroke" style={{ stroke: color }} />
+                )}
                 {sparse && l.points.map((p, i) => <circle key={i} className="mk-dot" cx={px(p)} cy={py(p)} r="2.4" style={{ fill: color }} />)}
                 <circle className="dot" cx={px(last)} cy={py(last)} r="3.2" vectorEffect="non-scaling-stroke" style={{ fill: color }} />
               </g>
             );
           })}
         </svg>
-        <span className="yhi">{yTick(ymax)}</span>
+        {/* One point, or a metric that never moved: a scale needs two ends to mean anything, and three
+            copies of the same number is not a scale. Keep the value alone. */}
+        {ymax !== ymin && <span className="yhi">{yTick(ymax)}</span>}
         <span className="ymid">{yTick((ymax + ymin) / 2)}</span>
-        <span className="ylo">{yTick(ymin)}</span>
+        {ymax !== ymin && <span className="ylo">{yTick(ymin)}</span>}
       </div>
       <div className="mcard-foot">
         <span className="mstep">
@@ -886,6 +932,25 @@ function MetricChart({
         </span>
         {at ? <span className="mtime">{fmtClock(at)}</span> : null}
       </div>
+    </div>
+  );
+}
+
+// The tail of a run's console, scrolled to its end. A traceback's last line is the one that names the
+// cause, and anchored at the top the box showed the framework's inner frames and clipped it.
+function ConsoleTail({ lines, failed }: { lines: string[]; failed: boolean }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = box.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [lines]);
+  return (
+    <div className={failed ? "feed-log error" : "feed-log"} ref={box}>
+      {lines.map((line, i) => (
+        <div key={i} className="ln">
+          {line}
+        </div>
+      ))}
     </div>
   );
 }
@@ -905,9 +970,11 @@ function LiveStrip({ live, active }: { live: LiveStatus; active: boolean }) {
         <span className="live-phase">{live.label}</span>
         <span className="live-time">{fmtClock(live.at)}</span>
         {p && (
+          // Rate and ETA describe a run that is still moving. On a stopped one they are the last frame's
+          // guess at a future that never happened; the counter still says where it got to.
           <span className="live-prog">
-            {p.step}/{p.total} · {p.rate}
-            {p.rate_unit} · ETA {p.remaining}
+            {p.step}/{p.total}
+            {active && ` · ${p.rate}${p.rate_unit} · ETA ${p.remaining}`}
           </span>
         )}
         {res.length > 0 && <span className="live-res">{res.join(" · ")}</span>}
@@ -990,7 +1057,11 @@ function RunSection({
           ))}
         </div>
       ) : (
-        !run.live && <div className="feed-sub">waiting for the first metric…</div>
+        // A run that is over and has no curves has nothing coming: its outputs were deleted, or it died
+        // before its first metric. Saying "waiting" there describes an arrival that will never happen.
+        !run.live && (
+          <div className="feed-sub">{active ? "waiting for the first metric…" : "no metrics for this run"}</div>
+        )
       )}
     </section>
   );
@@ -1059,6 +1130,7 @@ function LbDiff({ session, runs }: { session: string; runs: string[] }) {
   const [b, setB] = useState(runs[1] ?? runs[0] ?? "");
   const [diff, setDiff] = useState<{ identical: boolean; text: string } | null>(null);
   const [loading, setLoading] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
   async function run() {
     if (!a || !b || a === b) return;
     setLoading(true);
@@ -1072,10 +1144,12 @@ function LbDiff({ session, runs }: { session: string; runs: string[] }) {
       setDiff({ identical: false, text: "diff failed" });
     } finally {
       setLoading(false);
+      // The diff renders at the bottom of the leaderboard, usually below the fold: bring it in.
+      requestAnimationFrame(() => box.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
     }
   }
   return (
-    <div className="lb-diff">
+    <div className="lb-diff" ref={box}>
       <div className="lb-diff-head">
         <span className="feed-label">Config diff</span>
         <select className="lb-sel" value={a} onChange={(e) => setA(e.target.value)}>
@@ -1148,10 +1222,19 @@ function Leaderboard({ session }: { session: string }) {
           </span>
         )}
       </div>
-      {metrics.length === 0 ? (
-        <div className="empty">
-          {loaded ? `No ${split} evaluations yet: evaluate two or more runs to rank them here.` : "Loading…"}
+      {!loaded && metrics.length === 0 ? (
+        // The board's own shape, greyed: a skeleton promises what is coming where "Loading…" promises nothing.
+        <div className="lb-grid" aria-hidden="true">
+          {[0, 1].map((k) => (
+            <div key={k} className="lb-card sk-card">
+              <div className="sk-line sk-w40" />
+              <div className="sk-line sk-w90" />
+              <div className="sk-line sk-w80" />
+            </div>
+          ))}
         </div>
+      ) : metrics.length === 0 ? (
+        <div className="empty">{`No ${split} evaluations yet: evaluate two or more runs to rank them here.`}</div>
       ) : (
         <div className="lb-grid">
           {metrics.map((m) => (
@@ -1236,6 +1319,7 @@ export default function RightPanel({
   comparePath,
   onComparePathChange,
   stream,
+  dataset,
   onReload,
 }: {
   session: string;
@@ -1245,6 +1329,8 @@ export default function RightPanel({
   comparePath: string | null;
   onComparePathChange: (p: string) => void;
   stream: JobStream;
+  dataset?: string; // the experiment's dataset: picking one has to reach the overview and the tree
+
   onReload?: () => void; // reconnect the live stream (e.g. after deleting a run) so state rebuilds from disk
 }) {
   const [tab, setTab] = useState<string>("config"); // "config" (Workspace) or a run name
@@ -1260,11 +1346,13 @@ export default function RightPanel({
   const [stopping, setStopping] = useState(false);
   const [expand, setExpand] = useState<{ runKey: string; seriesKey: string } | null>(null); // curve-zoom modal
   const [validating, setValidating] = useState(false);
+  const [note, setNote] = useState(""); // a refused action says why, instead of looking like a no-op
 
   useEffect(() => {
     setHasEval(false);
     setStopping(false);
     setValidating(false);
+    setNote(""); // a refusal belongs to the session it happened in
     setTab("config");
     // Closed tabs are a view choice on THIS experiment's runs: carried across, a same-named run in the
     // next experiment would arrive silently hidden, under a phantom "+n closed" chip.
@@ -1289,6 +1377,11 @@ export default function RightPanel({
   // discovered yet, so Stop never depends on a run being found (or selected).
   const jobRunning = isRunning(stream.status);
   const stage = active?.live?.stage ?? "";
+  // An app job carries two names: its own (`app_MR`) and the one its run takes from the log directory
+  // (`ImpactSynth`). While the run is unknown, a synthetic tab under the job's name shows the console;
+  // once the run is discovered AND live, it is the one to watch (progress bar, curves), and the
+  // synthetic tab has nothing more to say.
+  const handover = jobRunning && active && active.run !== stream.run && isRunning(active.status) ? active : null;
 
   // Once nothing is live any more, drop the transient "Stopping…"/"Validating…" labels: the Stop control
   // gives way to Delete, and a one-way flag must never outlive the run it described.
@@ -1299,19 +1392,31 @@ export default function RightPanel({
 
   async function stopJob() {
     setStopping(true);
+    // A refusal ("no running job", a reaper that could not signal) is an answer, not a no-op: without
+    // it the button sits on "Stopping…" over a run that never stops, explaining nothing.
     try {
-      await postJson("/api/job/cancel", { session });
+      const d = await postJson("/api/job/cancel", { session });
+      if (d && d.ok === false) {
+        setStopping(false);
+        setNote(d.detail || "the job could not be stopped");
+      }
     } catch {
-      /* the status stream reflects the outcome either way */
+      setStopping(false);
+      setNote("the job could not be stopped");
     }
   }
 
   async function deleteRun(runName: string, kind: string, what: string) {
     if (!window.confirm(`Delete ${what} of ${runName}? This removes its output folders on disk.`)) return;
     try {
-      await postJson("/api/run/delete", { session, run_name: runName, kind });
+      const d = await postJson("/api/run/delete", { session, run_name: runName, kind });
+      if (d && d.ok === false) {
+        setNote(d.detail || "the run could not be deleted");
+        return;
+      }
     } catch {
-      /* the reload reflects whatever actually happened on disk */
+      setNote("the run could not be deleted");
+      return;
     }
     setTab("config");
     onReload?.(); // reconnect so the run list rebuilds from disk (the deleted run drops out)
@@ -1410,6 +1515,17 @@ export default function RightPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobRunning, stream.run]);
 
+  // The moment the job's real run comes alive, the view sitting on the synthetic tab follows it: the
+  // user was already watching this job, so handing over to its run (progress bar included) is not
+  // stealing focus, and staying would leave them on raw console lines for the whole prediction.
+  useEffect(() => {
+    if (handover && tab === stream.run) {
+      setTab(handover.run);
+      setSubKey(handover.key);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handover?.key, tab]);
+
   // A closed tab whose run starts working again reopens itself: hiding is about clutter, and a
   // running job must stay reachable from the bar.
   useEffect(() => {
@@ -1427,18 +1543,24 @@ export default function RightPanel({
             Leaderboard
           </button>
         )}
-        {/* A job with no run of its own yet: an app fetching its bundle, or one that died during warm-up.
-            It gets a tab of its own so it is reachable at all; the run's tab appears beside it when it
-            starts writing, and this one goes as soon as the job settles. */}
-        {jobRunning && stream.run && !runNames.includes(stream.run) && (
-          <button
-            className={tab === stream.run ? "rtab on" : "rtab"}
-            onClick={() => show(stream.run)}
-            title={`${stream.kind || "job"} · starting`}
-          >
-            {stream.run}
-          </button>
-        )}
+        {/* A job with no run of its own: an app fetching its bundle, or one that died during warm-up.
+            It gets a tab of its own so it is reachable at all; it goes as soon as its real run comes
+            alive under another name (the handover above follows it) or the job ends well. A job that
+            DIED here keeps its tab: its console holds the only explanation of what went wrong, and
+            dropping the tab on settle left the user in front of a bar with nothing to click. */}
+        {stream.run &&
+          !runNames.includes(stream.run) &&
+          !handover &&
+          (jobRunning || jobState(stream.status) === "err") && (
+            <button
+              className={tab === stream.run ? "rtab on" : "rtab"}
+              onClick={() => show(stream.run)}
+              title={`${stream.kind || "job"} · ${jobRunning ? "starting" : stream.status}`}
+            >
+              {stream.status && <StatusMark status={stream.status} />}
+              {stream.run}
+            </button>
+          )}
         {runNames
           .filter((name) => !hiddenTabs.includes(name))
           .map((name) => {
@@ -1450,7 +1572,7 @@ export default function RightPanel({
                 onClick={() => show(name)}
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  deleteRun(name, "all", "the whole run (all outputs)");
+                  if (newest && deletable(newest.base)) deleteRun(name, "all", "the whole run (all outputs)");
                 }}
                 title={`${name}: ✕ closes the tab only; right-click deletes the whole run`}
               >
@@ -1487,6 +1609,11 @@ export default function RightPanel({
             {stopping ? "Stopping…" : "Stop job"}
           </button>
         )}
+        {note && (
+          <span className="rtab-note" onClick={() => setNote("")} title="Dismiss">
+            {note}
+          </span>
+        )}
       </div>
 
       {/* Both panes stay mounted (hidden when inactive) so NiiVue keeps its volume and the workspace tree
@@ -1510,7 +1637,7 @@ export default function RightPanel({
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      deleteRun(r.run, r.kind, `the ${r.kind} outputs`);
+                      if (deletable(r.base)) deleteRun(r.run, r.kind, `the ${r.kind} outputs`);
                     }}
                     title={`${r.kind} · ${r.status}: right-click to delete`}
                   >
@@ -1540,7 +1667,7 @@ export default function RightPanel({
                   </>
                 )}
                 {/* Stopping is session-scoped (it cancels the job), so it lives once in the panel header. */}
-                {!running && (
+                {!running && deletable(sel.base) && (
                   <button
                     className="delete-run"
                     onClick={() => deleteRun(sel.run, sel.kind, `the ${sel.kind} outputs`)}
@@ -1560,13 +1687,7 @@ export default function RightPanel({
                 onExpand={(runKey, seriesKey) => setExpand({ runKey, seriesKey })}
               />
               {sel.status === "error" && isActiveSel && stream.lines.length > 0 && (
-                <div className="feed-log error">
-                  {stream.lines.slice(-16).map((l, i) => (
-                    <div key={i} className="ln">
-                      {l}
-                    </div>
-                  ))}
-                </div>
+                <ConsoleTail lines={stream.lines.slice(-16)} failed />
               )}
               {(sel.kind === "train" || sel.kind === "finetune") && (
                 <Samples session={session} base={sel.base} refresh={stream.metricNonce + stream.doneNonce} onOpen={setLight} />
@@ -1602,7 +1723,7 @@ export default function RightPanel({
                 {stream.kind || "job"}
                 {stream.run ? ` · ${stream.run}` : ""}
               </span>
-              <span className="feed-note">{jobRunning ? "starting: no output yet" : "finished"}</span>
+              <span className="feed-note">{jobRunning ? "starting: no output yet" : stream.status || "finished"}</span>
             </div>
             <div className="feed-log">
               {stream.lines.slice(-60).map((line, i) => (
@@ -1625,6 +1746,7 @@ export default function RightPanel({
           comparePath={comparePath}
           onComparePathChange={onComparePathChange}
           refresh={stream.doneNonce}
+          dataset={dataset}
           live={jobState(stream.status) === "run"}
           focusDir={browsePath}
           focusOpen={browseOpen}

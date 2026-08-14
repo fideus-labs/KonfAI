@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
@@ -28,6 +29,10 @@ _TERMINAL_STATUS = {"done", "error", "killed", "cancelled"}
 _LOG_BACKFILL = 32_000  # bytes: on connect, replay only the recent tail of a large log, not its full history
 _HOST_KEYS = ("memory_gb", "memory_percent", "memory_gpu_gb", "memory_gpu_percent", "cpu_percent")
 _MTIME_LIVE_WINDOW = 8.0  # a run log written this recently reads as live when no job record claims it
+#: Lowercase substrings that mark a ``[KonfAI]`` console line as routine startup chatter. A denylist,
+#: not an allowlist: everything the framework says is worth a watcher's attention unless it is one of
+#: these, and an allowlist silently swallowed each new line nobody thought to add to it.
+_KONFAI_ROUTINE = ("memory_budget:", "compute displacement field", "compute in progress")
 _PING_EVERY = 10.0  # seconds between keep-alives, so a client can tell a quiet stream from a dead one
 _RUN_ROOT_KIND = {
     "Statistics": "train",
@@ -36,10 +41,30 @@ _RUN_ROOT_KIND = {
     "Uncertainties": "uncertainty",
     "Transforms": "transform",
 }
+# App job kinds → the workflow vocabulary the client speaks: an `infer` job runs a prediction, an
+# `evaluate` job an evaluation. Announced under the app vocabulary, a run sits outside every panel the
+# client gates on kind (the evaluation table, the prediction browse target, the sub-tab order).
+_APP_RUN_KIND = {"infer": "prediction", "evaluate": "evaluation"}
+
+
+def _finite(value: Any) -> Any:
+    """The same value, with non-finite floats replaced by null.
+
+    A metric can be NaN for ordinary reasons: a Dice against an empty prediction is 0/0, and a diverged
+    loss is inf. ``json.dumps`` spells those ``NaN`` / ``Infinity``, which JSON does not define and
+    ``JSON.parse`` refuses: the browser throws on that frame and loses every frame behind it, so one NaN
+    took the whole live feed down. Null is what the value actually is: absent."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _finite(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_finite(item) for item in value]
+    return value
 
 
 def _sse(event: dict[str, Any]) -> str:
-    return f"data: {json.dumps(event)}\n\n"
+    return f"data: {json.dumps(_finite(event))}\n\n"
 
 
 def _all_jobs(session: str) -> list[dict[str, Any]]:
@@ -54,18 +79,21 @@ def _all_jobs(session: str) -> list[dict[str, Any]]:
     return out
 
 
-def _job_created(job: dict[str, Any]) -> float:
-    """A job's creation time as an epoch float, from its recorded ``created_at`` (a float epoch or an ISO
-    string, depending on which konfai-mcp wrote it). Used to order jobs by when they *started*, not by
-    file mtime: a terminal job's json can be rewritten later (status monitor), which mtime would misread
-    as 'newest' and make the feed follow a dead run over a fresh one."""
-    created = job.get("created_at")
-    if isinstance(created, (int, float)):
-        return float(created)
-    if isinstance(created, str):
+def _epoch(stamp: Any) -> float | None:
+    """A job record's timestamp as an epoch float: konfai-mcp writes either a float or an ISO string."""
+    if isinstance(stamp, (int, float)):
+        return float(stamp)
+    if isinstance(stamp, str):
         with suppress(ValueError):
-            return datetime.fromisoformat(created).timestamp()
-    return 0.0
+            return datetime.fromisoformat(stamp).timestamp()
+    return None
+
+
+def _job_created(job: dict[str, Any]) -> float:
+    """When a job started. Jobs are ordered by this, not by file mtime: a terminal job's json can be
+    rewritten later (status monitor), which mtime would misread as 'newest', making the feed follow a
+    dead run over a fresh one."""
+    return _epoch(job.get("created_at")) or 0.0
 
 
 def _latest_job(session: str) -> dict[str, Any] | None:
@@ -94,6 +122,80 @@ def _pid_alive(pid: Any) -> bool:
     except PermissionError:
         return True
     return True
+
+
+class _Claim(NamedTuple):
+    """What a job record says about the log it owns: a status, and when it stopped owning it.
+
+    ``ended`` is None when the record does not date its end, and an undated claim is taken at its word."""
+
+    status: str
+    ended: float | None
+
+    def status_at(self, mtime: float) -> str:
+        """This claim's status, unless a log written since it ended says the run is going again.
+
+        A terminal record describes the run it ended, not the one writing the file now: relaunching
+        from the terminal Studio itself offers appends to the same log."""
+        outlived = (
+            self.status in _TERMINAL_STATUS
+            and self.ended is not None
+            and mtime > self.ended + 1.0
+            and (time.time() - mtime) < _MTIME_LIVE_WINDOW
+        )
+        return "running" if outlived else self.status
+
+
+def _claim_of(job: dict[str, Any]) -> _Claim:
+    return _Claim(_live_status(job), _epoch(job.get("finished_at")))
+
+
+def _runtime_log(job: dict[str, Any]) -> Path | None:
+    """The runtime log a workflow job names, if it names one."""
+    runtime = job.get("runtime_log_path")
+    return Path(runtime) if runtime else None
+
+
+def _job_kind(job: dict[str, Any]) -> str:
+    """A job's kind in the workflow vocabulary the client speaks, normalised once for every emitter."""
+    kind = str(job.get("kind") or "")
+    return _APP_RUN_KIND.get(kind, kind)
+
+
+def _log_key(job: dict[str, Any]) -> str | None:
+    log = _runtime_log(job)
+    return str(log) if log else None
+
+
+def _output_key(job: dict[str, Any]) -> str | None:
+    """The output subtree an app job owns. A job that names its own log is claimed by that log instead."""
+    output = job.get("output_path")
+    return str(Path(output)) if output and not job.get("runtime_log_path") else None
+
+
+def _newest_claims(jobs: list[dict[str, Any]], key_of: Callable[[dict[str, Any]], str | None]) -> dict[str, _Claim]:
+    """The claim of the newest job under each key: one run directory is often written by several jobs
+    (re-runs share one ``log_0.txt``), and a fresh run must win over an old one."""
+    newest: dict[str, tuple[float, dict[str, Any]]] = {}
+    for job in jobs:
+        key = key_of(job)
+        if key is None:
+            continue
+        created = _job_created(job)
+        if created >= newest.get(key, (float("-inf"), {}))[0]:
+            newest[key] = (created, job)
+    return {key: _claim_of(job) for key, (_, job) in newest.items()}
+
+
+def _status_for(job: dict[str, Any], log: Path | None) -> str:
+    """A job's status, read against the log it owns: the single reading every block of the feed makes."""
+    claim = _claim_of(job)
+    if log is not None and log.is_file():
+        try:
+            return claim.status_at(log.stat().st_mtime)
+        except OSError:
+            pass  # gone between the check and the read: initialize_session(overwrite=True) rmtrees
+    return claim.status
 
 
 def _live_status(job: dict[str, Any]) -> str:
@@ -153,7 +255,7 @@ def _discover_run_logs(job: dict[str, Any]) -> list[tuple[Path, str, str]]:
     if not output:
         return []
     base = Path(output)
-    job_kind = str(job.get("kind") or "")
+    job_kind = _job_kind(job)
     found: list[tuple[Path, str, str]] = []
     seen: set[Path] = set()
     for pattern in (
@@ -216,14 +318,18 @@ def _runtime_events(line: str, run: str, kind: str, step: int) -> tuple[list[dic
     return [], step
 
 
-def _run_data_dir(session: str, base: str) -> str:
+def _run_data_dir(session: str, base: str, kind: str) -> str:
     """Where a run's DATA is, when that is not the run directory itself.
 
     A transform's run directory holds a log, a plan and a config copy: the volumes land wherever each
-    ``Write`` pointed, which the workflow records in ``outputs.json``. Pointing Browse at the run
-    directory would open a YAML file for someone who just asked to see what was produced. Answers ""
-    for every kind whose data IS under its run directory, and the caller keeps its usual path.
+    ``Write`` pointed, which the workflow records in ``outputs.json``. An app prediction writes its
+    volumes under ``<run>/Output`` (the session-root layout uses ``Predictions/<run>/Dataset``, which
+    the client already knows how to browse). Pointing Browse at the run directory would open a YAML
+    file for someone who just asked to see what was produced. Answers "" for every kind whose data IS
+    under its run directory, and the caller keeps its usual path.
     """
+    if kind == "prediction" and (_session_dir(session) / base / "Output").is_dir():
+        return f"{base}/Output"
     manifest = _session_dir(session) / base / "outputs.json"
     if not manifest.is_file():
         return ""
@@ -242,7 +348,9 @@ def _run_data_dir(session: str, base: str) -> str:
     return dataset
 
 
-def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]]:
+def _discover_session_runs(
+    session: str, jobs: list[dict[str, Any]] | None = None
+) -> list[tuple[Path, str, str, str, str]]:
     """Every run of the experiment as (log_path, run_name, kind, status, base): one per runtime log.
 
     Workflow jobs write under the session roots (Statistics/Predictions/Evaluations); app jobs (infer /
@@ -254,39 +362,30 @@ def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]
     job that names the log (workflow) or owns the output_path (app), else from how recently the log was
     written. Newest first."""
     base_root = _session_dir(session)
-    # A run dir is often written by several jobs (re-runs share one log_0.txt); its status must come from the
-    # NEWEST job that names it (workflow) or owns its output subtree (app), so a fresh run wins over an old one.
-    jobs = _all_jobs(session)
-    status_by_log: dict[str, str] = {}
-    newest_by_log: dict[str, float] = {}
-    app_status_by_output: dict[str, tuple[float, str]] = {}
-    for job in jobs:
-        created = _job_created(job)
-        runtime = job.get("runtime_log_path")
-        if runtime:
-            key = str(Path(runtime))
-            if created >= newest_by_log.get(key, float("-inf")):
-                newest_by_log[key] = created
-                status_by_log[key] = _live_status(job)
-        elif job.get("output_path"):
-            out = str(Path(job["output_path"]))
-            if created >= app_status_by_output.get(out, (float("-inf"), ""))[0]:
-                app_status_by_output[out] = (created, _live_status(job))
+    jobs = _all_jobs(session) if jobs is None else jobs
+    by_log = _newest_claims(jobs, _log_key)
+    by_output = _newest_claims(jobs, _output_key)
     found: list[tuple[Path, str, str, str, str, float]] = []
     seen: set[Path] = set()
 
-    def add(log: Path, run_name: str, kind: str, app_status: str | None) -> None:
+    def add(log: Path, run_name: str, kind: str, app_claim: _Claim | None) -> None:
         if log in seen or not log.is_file():
             return
         seen.add(log)
-        status = status_by_log.get(str(log)) or app_status
-        if status is None:
-            status = "running" if (time.time() - log.stat().st_mtime) < _MTIME_LIVE_WINDOW else "done"
+        try:
+            mtime = log.stat().st_mtime
+        except OSError:
+            return  # gone between the check and the read: initialize_session(overwrite=True) rmtrees
+        claim = by_log.get(str(log)) or app_claim
+        if claim is not None:
+            status = claim.status_at(mtime)
+        else:  # nothing claims this log: how recently it was written is all there is to go on
+            status = "running" if (time.time() - mtime) < _MTIME_LIVE_WINDOW else "done"
         try:
             base = str(log.parent.relative_to(base_root))
         except ValueError:
             base = log.parent.name
-        found.append((log, run_name, kind, status, base, log.stat().st_mtime))
+        found.append((log, run_name, kind, status, base, mtime))
 
     for root, kind in (
         ("Statistics", "train"),
@@ -302,9 +401,8 @@ def _discover_session_runs(session: str) -> list[tuple[Path, str, str, str, str]
         out_path = job.get("output_path")
         if not out_path:
             continue
-        entry = app_status_by_output.get(str(Path(out_path)))
         for log, run_name, kind in _discover_run_logs(job):
-            add(log, run_name, kind, entry[1] if entry else None)
+            add(log, run_name, kind, by_output.get(str(Path(out_path))))
     found.sort(key=lambda row: row[5], reverse=True)
     # Two runs of the same app share a name: its log directory is named after the app, so every re-run
     # produces another `ImpactSynth`. They are different runs (different output directories), and left
@@ -343,11 +441,12 @@ async def live(session: str = Query("default")) -> StreamingResponse:
     async def gen() -> AsyncIterator[str]:
         last_ping = time.monotonic()
         console_key: str | None = None  # which job's console log is being followed
+        job_status: str | None = None  # last status announced for it, so only changes go out
         cpath: Path | None = None
         cpos = 0
         cbuf = ""
         feeds: dict[str, dict[str, Any]] = {}  # log-path -> {run, kind, path, pos, buf, step}: one per run, kept
-        announced: dict[str, str] = {}  # run key -> the status last emitted for it (so each fires once)
+        announced: dict[str, tuple[str, str]] = {}  # run key -> the (status, base) last emitted for it
         idle_sent = False
 
         def state_of(run: str, kind: str, status: str, base: str = "") -> list[str]:
@@ -355,9 +454,17 @@ async def live(session: str = Query("default")) -> StreamingResponse:
             and released by the ``status`` event; emitting them from two blocks let the first mark the
             transition as seen and the second skip it, leaving Stop on screen over a finished run."""
             key = f"{kind}:{run}"
-            if announced.get(key) == status:
+            was = announced.get(key)
+            # Keyed on what the frame carries, not on the status alone: the announce block speaks first
+            # with no base, and a status-keyed guard then swallowed the discovery frame that knows where
+            # the run writes. The client kept an empty base, so Browse opened a config and Delete hid.
+            # An empty base is "I do not know where this run writes", not a second answer: keeping the
+            # one already announced is what stops the two emitters alternating and re-announcing the
+            # same run on every pass of the loop.
+            base = base or (was[1] if was else "")
+            if was == (status, base):
                 return []
-            announced[key] = status
+            announced[key] = (status, base)
             out = [
                 _sse(
                     {
@@ -368,11 +475,11 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                         "base": base,
                         # Empty unless the run's data lives outside its run directory; the client then
                         # browses the run directory as it does for every other kind.
-                        "data": _run_data_dir(name, base) if base else "",
+                        "data": _run_data_dir(name, base, kind) if base else "",
                     }
                 )
             ]
-            if status in _TERMINAL_STATUS:
+            if status in _TERMINAL_STATUS and (was is None or was[0] != status):
                 out.append(_sse({"type": "status", "run": run, "kind": kind, "status": status}))
             return out
 
@@ -384,8 +491,9 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                 last_ping = time.monotonic()
                 yield _sse({"type": "ping"})
 
-            latest = _latest_job(name)
-            runs = _discover_session_runs(name)
+            jobs = _all_jobs(name)  # read once: discovery, the console and the announce all ask of it
+            latest = max(jobs, key=_job_created, default=None)
+            runs = _discover_session_runs(name, jobs)
             if not runs and latest is None:
                 if not idle_sent:
                     yield _sse({"type": "idle"})
@@ -396,32 +504,39 @@ async def live(session: str = Query("default")) -> StreamingResponse:
 
             # Console (raw text, tracebacks) follows the latest job only; a new job resets the tail. The
             # `job` event names the active run so the client can default its tab to it, it never wipes.
-            if latest is not None and latest.get("log_path") and latest["log_path"] != console_key:
-                console_key = latest["log_path"]
-                cpath = Path(console_key)
-                cpos = _tail_start(cpath)
-                cbuf = ""
-                yield _sse(
-                    {
-                        "type": "job",
-                        "run": latest.get("run_name") or latest.get("kind") or "job",
-                        "kind": latest.get("kind") or "",
-                        "status": _live_status(latest),
-                    }
-                )
+            # Re-sent whenever that job's status moves: the client gates its Stop control and its tab
+            # keeping on this value, which a one-shot event would freeze at whatever it was on connect.
+            if latest is not None and latest.get("log_path"):
+                fresh_console = latest["log_path"] != console_key
+                if fresh_console:
+                    console_key = latest["log_path"]
+                    cpath = Path(console_key)
+                    cpos = _tail_start(cpath)
+                    cbuf = ""
+                    job_status = None
+                status = _status_for(latest, _runtime_log(latest))
+                if status != job_status:
+                    job_status = status
+                    yield _sse(
+                        {
+                            "type": "job",
+                            "run": latest.get("run_name") or latest.get("kind") or "job",
+                            "kind": _job_kind(latest),
+                            "status": status,
+                            # Only a new job's console starts empty. Clearing on a status change too
+                            # would drop a crashed run's traceback the instant it turned red.
+                            "console_reset": fresh_console,
+                        }
+                    )
             if cpath is not None:
                 lines, cpos, cbuf = _tail_lines(cpath, cpos, cbuf)
                 for line in lines:
                     stripped = line.lstrip()
                     if not stripped or stripped[0] == "#" or stripped.startswith("[konfai-mcp]"):
                         continue
-                    # [KonfAI] lines are framework chatter. Surface only genuine OOM/memory-pressure notices
-                    # (the auto-patch recovery prints those on retry; hiding them makes a churning run look
-                    # silent): not the routine memory-budget / cache-plan line, which is a benign startup
-                    # decision, not an alert.
-                    if stripped.startswith("[KonfAI]") and not any(
-                        k in stripped.lower() for k in ("out of memory", "oom", "re-plan", "replan", "retry", "reduc")
-                    ):
+                    # Startup chatter is hidden; everything else the framework says is shown, so a
+                    # new warning is never swallowed by an allowlist nobody updated.
+                    if stripped.startswith("[KonfAI]") and any(k in stripped.lower() for k in _KONFAI_ROUTINE):
                         continue
                     yield _sse({"type": "log", "line": line})
 
@@ -434,7 +549,10 @@ async def live(session: str = Query("default")) -> StreamingResponse:
             # directory takes (`ImpactSynth`): so anything announced for it would be a second tab under
             # the wrong name, and every metric would arrive in the other. Its run appears when it writes.
             if latest is not None and latest.get("runtime_log_path") and latest.get("run_name"):
-                for frame in state_of(latest["run_name"], latest.get("kind") or "", _live_status(latest)):
+                # Through the same freshness rule as discovery: two blocks announcing the same run from
+                # two readings of one record made its tab flip between 'done' and 'running' every poll.
+                latest_status = _status_for(latest, Path(latest["runtime_log_path"]))
+                for frame in state_of(latest["run_name"], latest.get("kind") or "", latest_status):
                     yield frame
 
             # Every run of the experiment is followed as its own feed and kept: launching a prediction

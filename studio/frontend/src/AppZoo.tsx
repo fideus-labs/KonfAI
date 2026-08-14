@@ -110,7 +110,11 @@ export default function AppZoo({
               <span className="zoo-spin" /> Loading apps…
             </div>
           )}
-          {!loading && matches.length === 0 && <div className="zoo-empty">No apps match “{q}”.</div>}
+          {!loading && matches.length === 0 && (
+            <div className="zoo-empty">
+              {apps.length === 0 ? "No app sources yet. Add one to browse published models." : `No apps match “${q}”.`}
+            </div>
+          )}
           {themes.map((t) => (
             <section key={t} className="zoo-theme">
               <div className="zoo-theme-head">

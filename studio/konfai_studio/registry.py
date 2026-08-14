@@ -7,12 +7,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
 from .agent import make_agent
-from .paths import _delete_workspace, _session_dir, _sessions_file, _sessions_root
+from .paths import _delete_workspace, _sane_session, _sessions_file, _sessions_root, _studio_session_dir
 
 
 def _valid_device(value: str) -> str:
@@ -56,8 +57,22 @@ class _Registry:
         self._model = os.environ.get("KONFAI_STUDIO_MODEL", "")
         self._device = "auto"  # default compute device for a fresh experiment
 
+    def adopt_workspaces(self) -> None:
+        """Take in any konfai-mcp workspace directory not already tracked.
+
+        Run on load AND on every listing: a workspace created outside Studio (konfai-mcp on the command
+        line, a colleague's copy dropped in) otherwise stayed invisible until the next restart, which is
+        not a state a user can guess their way out of."""
+        sessions_dir = _sessions_root()
+        if not sessions_dir.is_dir():
+            return
+        for child in sorted(sessions_dir.iterdir()):
+            if child.is_dir() and not child.name.startswith(".") and child.name not in self._sessions:
+                self._sessions[child.name] = SessionState()
+
     def names(self) -> list[str]:
         """Experiments newest-first (creation order reversed); any untracked ids trail, sorted."""
+        self.adopt_workspaces()
         ordered = [n for n in reversed(self._order) if n in self._sessions]
         rest = sorted(n for n in self._sessions if n not in set(self._order))
         return ordered + rest
@@ -123,7 +138,8 @@ class _Registry:
         return self._model
 
     def set_model(self, model: str) -> None:
-        """Pin the LLM model ('' = the backend's default). Same lazy-rebuild as a brain switch: conversation continuity survives it (SDK resume / persisted history)."""
+        """Pin the LLM model ('' = the backend's default). Same lazy-rebuild as a brain switch, and the
+        conversation survives it: the model changes, the backend that holds the transcript does not."""
         if model != self._model:
             self._model = model
             for state in self._sessions.values():
@@ -211,7 +227,7 @@ class _Registry:
                     model=self._model or None,
                     resume=state.sdk_id,
                     on_session_id=partial(self._set_sdk_id, name),
-                    history_file=_session_dir(name) / ".konfai_studio" / "history.json",
+                    history_file=_studio_session_dir(name) / "history.json",
                 ).__aenter__()
         return state.agent
 
@@ -228,20 +244,28 @@ class _Registry:
                     await agent.__aexit__(None, None, None)
                 except Exception:
                     pass
+        if not _delete_workspace(name):
+            return False  # still on disk: the next listing would adopt it straight back
         self._sessions.pop(name, None)
         if name in self._order:
             self._order.remove(name)
-        _delete_workspace(name)
         self._save()
         return True
 
+    async def close_agents(self) -> None:
+        """Drop every live agent, keeping the tasks. Each captured its brain and credentials when it was
+        built, so a changed LLM only takes effect once they are rebuilt."""
+        # Under the lock agent() builds with, over a snapshot: a registration landing during one of
+        # the awaits would resize the dict mid-iteration and leave the remaining agents undropped.
+        async with self._create:
+            for state in list(self._sessions.values()):
+                agent, state.agent = state.agent, None
+                if agent is not None:
+                    with suppress(Exception):
+                        await agent.__aexit__(None, None, None)
+
     async def close(self) -> None:
-        for state in self._sessions.values():
-            if state.agent is not None:
-                try:
-                    await state.agent.__aexit__(None, None, None)
-                except Exception:
-                    pass
+        await self.close_agents()
 
     def load(self) -> None:
         """Restore the session list + titles from disk and surface any konfai-mcp workspace dirs, so
@@ -254,7 +278,9 @@ class _Registry:
             data = {}
 
         def state(name: str) -> SessionState:
-            return self._sessions.setdefault(name, SessionState())
+            # Normalized on the way in: _session_dir() sanitizes, so an unsanitized key restored
+            # from sessions.json would name a workspace no other path ever touches.
+            return self._sessions.setdefault(_sane_session(name), SessionState())
 
         titles = data.get("titles")
         if isinstance(titles, dict):
@@ -291,14 +317,11 @@ class _Registry:
         model = data.get("model")
         if isinstance(model, str):
             self._model = model
-        sessions_dir = _sessions_root()
-        if sessions_dir.is_dir():
-            for child in sessions_dir.iterdir():
-                if child.is_dir() and not child.name.startswith("."):
-                    state(child.name)
+        self.adopt_workspaces()
         order = data.get("order")
         if isinstance(order, list):
-            self._order = [n for n in order if isinstance(n, str) and n]
+            names = [_sane_session(n) for n in order if isinstance(n, str) and n]
+            self._order = list(dict.fromkeys(names))  # two raw names may sanitize to one
         for name in sorted(self._sessions):  # append any workspace dir not in the persisted order
             if name not in self._order:
                 self._order.append(name)

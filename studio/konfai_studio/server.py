@@ -19,20 +19,23 @@ import re
 import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from konfai_mcp.metrics_service import metric_direction, metric_run_name, top_level_metrics
 from pydantic import BaseModel
 
 from .agent import call_mcp_tool, suggest_title
 from .auth import _AuthGate
 from .auth import router as auth_router
-from .jobs import _all_jobs, _job_created, _latest_job, _live_status, _sse
+from .jobs import _all_jobs, _job_created, _latest_job, _runtime_log, _sse, _status_for
 from .jobs import router as jobs_router
 from .paths import (
+    _credentials_file,
     _dataset_history_file,
     _files_history_file,
     _history_add,
@@ -41,6 +44,7 @@ from .paths import (
     _sane_session,
     _session_dir,
     _session_path,
+    _studio_session_dir,
 )
 from .registry import _Registry
 from .tensorboard import reap_tb_servers
@@ -56,6 +60,7 @@ _reg = _Registry()
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    _load_credentials()  # a brain configured from the UI stays configured across restarts
     _reg.load()  # restore tasks + titles from a previous run; agents spin up lazily per task
     try:
         yield
@@ -88,6 +93,9 @@ class DatasetPath(BaseModel):
 class LLMChoice(BaseModel):
     brain: str = ""
     model: str | None = None
+    anthropic_api_key: str | None = None  # for the Anthropic API brain
+    base_url: str | None = None  # for any OpenAI-compatible server (vLLM / Ollama / LM Studio)
+    local_api_key: str | None = None
 
 
 class DeviceChoice(BaseModel):
@@ -166,8 +174,8 @@ def _state(session: str) -> dict[str, Any]:
     """Where this experiment stands: derived by konfai-mcp from the workspace, not remembered here.
     Studio shares the filesystem with the MCP server, so this is the same answer its tools report."""
     jobs = sorted(_all_jobs(session), key=_job_created, reverse=True)
-    for job in jobs:  # a 'running' record whose process is gone really failed; say so, do not wait on it
-        job["status"] = _live_status(job)
+    for job in jobs:  # the reading the live feed makes: a dead process is not running, a written log is
+        job["status"] = _status_for(job, _runtime_log(job))
     return state_for(_session_dir(session), jobs, _reg.dataset(session))
 
 
@@ -228,7 +236,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         finally:
             # Recorded even when the browser walks away mid-stream (interrupt, closed tab): the turn
             # happened, and the next browser to open this experiment deserves to see it.
-            record_turn(_session_dir(name), req.message, parts)
+            record_turn(_studio_session_dir(name), req.message, parts)
         # Re-read the workspace: the tools have written to it, so this is what the turn actually achieved
         # (not what it said it did. Even a turn that broke ends with a state and a move) including when
         # deriving the state itself raises, or the bar would freeze on the previous turn.
@@ -262,7 +270,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 async def chat_history(session: str) -> dict[str, Any]:
     """The server-side transcript. The browser keeps its own in localStorage, per device, one that did
     not run these turns (another machine, a cleared profile) adopts this copy on open."""
-    return {"messages": load_transcript(_session_dir(_sane_session(session)))}
+    return {"messages": load_transcript(_studio_session_dir(session))}
 
 
 @app.post("/api/chat/interrupt")
@@ -273,9 +281,24 @@ async def interrupt_chat(req: CancelJob) -> dict[str, bool]:
     return {"ok": await _reg.interrupt(_sane_session(req.session))}
 
 
+@lru_cache(maxsize=1)
+def _tool_count() -> int:
+    """How many tools konfai-mcp registers, or 0 if it cannot be asked.
+
+    Read from the registry rather than written down (the status bar carried a literal six tools
+    behind), but never at the cost of the health check: the front paints the whole bar 'offline' on
+    any failure of it, and the tool count is a caption."""
+    try:
+        from konfai_mcp.server import mcp
+
+        return len(asyncio.run(mcp.list_tools()))
+    except Exception:
+        return 0
+
+
 @app.get("/api/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "agent": "ready"}
+async def health() -> dict[str, Any]:
+    return {"status": "ok", "agent": "ready", "tools": await asyncio.to_thread(_tool_count)}
 
 
 @app.get("/api/sessions")
@@ -285,14 +308,15 @@ async def list_sessions() -> dict[str, Any]:
 
 @app.get("/api/sessions/status")
 async def sessions_status() -> dict[str, Any]:
-    """Latest job status per experiment, so the rail can colour each dot by its state."""
+    """Latest job status per experiment, so the rail can colour each dot by its state. Read against the
+    run's log like the live feed does, or a dot would contradict the panel it sits next to."""
     statuses: dict[str, str] = {}
     # Every session is listed, jobless ones with an empty status: the rail's poll is also how a browser
     # discovers an experiment created elsewhere, and a discovery gated on "has run a job" would hide a
     # freshly created one exactly while the other user is still configuring it.
     for name in _reg.names():
         job = _latest_job(name)
-        statuses[name] = _live_status(job) if job and job.get("status") else ""
+        statuses[name] = _status_for(job, _runtime_log(job)) if job and job.get("status") else ""
     return {"statuses": statuses}
 
 
@@ -372,6 +396,11 @@ async def export_session(req: ExportRequest) -> dict[str, Any]:
     if not src.is_dir():
         return {"ok": False, "result": "This experiment has no workspace yet."}
     dest = Path(req.output).expanduser() / _sane_session(_reg.title(name) or name)
+    # The bundle writes to a folder of the same name under a chosen parent, so pointing both at one place
+    # merges an export INTO an app bundle: it keeps working as neither. Re-exporting over an older export
+    # of the same experiment stays allowed, which is the one merge a user means.
+    if (dest / "app.json").is_file():
+        return {"ok": False, "result": f"{dest} already holds an app bundle. Export somewhere else."}
     # Dataset is the user's input (often a symlink to data outside the workspace); .konfai_mcp holds job
     # bookkeeping. Everything else IS the experiment. ignore_patterns drops these at any nesting level.
     skip = {"Dataset", ".konfai_mcp", "__pycache__"}
@@ -454,6 +483,45 @@ _CLAUDE_MODELS = [
 ]
 
 
+#: What the LLM panel can set, and the variable each brain already reads. Saved credentials are put
+#: back into the environment on start, so a brain is configured once and survives a restart.
+_CREDENTIALS = {
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "base_url": "KONFAI_STUDIO_LLM_BASE_URL",
+    "local_api_key": "KONFAI_STUDIO_LLM_API_KEY",
+}
+
+
+def _load_credentials() -> None:
+    try:
+        saved = json.loads(_credentials_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    for field, variable in _CREDENTIALS.items():
+        value = saved.get(field)
+        if isinstance(value, str) and value and not os.environ.get(variable):
+            os.environ[variable] = value  # the environment Studio was started with wins
+
+
+def _save_credentials(values: dict[str, str]) -> None:
+    """Persist what the user typed and apply it now. Created 0600: it holds API keys, and a write
+    followed by chmod would leave them readable under the umask in between."""
+    path = _credentials_file()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+    saved.update(values)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(saved))
+    path.chmod(0o600)  # a file created by an older version may still carry the umask mode
+    for field, variable in _CREDENTIALS.items():
+        if field in values:
+            os.environ[variable] = values[field]
+
+
 def _brain_catalog() -> list[dict[str, Any]]:
     """The pluggable LLM backends the UI can pick from: availability flag + that backend's models."""
     import importlib.util
@@ -474,14 +542,17 @@ def _brain_catalog() -> list[dict[str, Any]]:
         {
             "id": "anthropic",
             "label": "Anthropic API",
-            "detail": "API key set" if has_key else "set ANTHROPIC_API_KEY",
+            # What is actually missing, so "unavailable" never sits beside "API key set".
+            "detail": ("API key set" if has_key else "add an API key")
+            if installed("anthropic")
+            else "pip install anthropic",
             "available": installed("anthropic") and has_key,
             "models": _CLAUDE_MODELS,
         },
         {
             "id": "openai",
             "label": "Local model",
-            "detail": base_url,
+            "detail": base_url if installed("openai") else "pip install openai",
             "available": installed("openai"),
             "models": [],  # whatever the local server hosts: free text in the UI
         },
@@ -499,12 +570,21 @@ async def get_llm() -> dict[str, Any]:
 
 @app.post("/api/llm")
 async def set_llm(req: LLMChoice) -> dict[str, Any]:
+    """Pick a brain and, for the ones that need it, plug in its credentials.
+
+    A live agent captured the old environment at construction, so every one is dropped: the next turn
+    builds its brain from what was just saved rather than from what Studio started with."""
     if req.brain:
         if req.brain not in {b["id"] for b in _brain_catalog()}:
             raise HTTPException(400, "unknown LLM backend")
         _reg.set_brain(req.brain)
     if req.model is not None:
         _reg.set_model(req.model.strip())
+    typed = {field: getattr(req, field).strip() for field in _CREDENTIALS if getattr(req, field) is not None}
+    if typed:
+        _save_credentials(typed)
+    if req.brain or typed:
+        await _reg.close_agents()
     return _llm_state()
 
 
@@ -603,19 +683,28 @@ async def system() -> dict[str, Any]:
 
 
 _STAT_KEYS = ("mean", "std", "min", "max", "median")
+_EVAL_RUNS_SHOWN = 20
 
 
 def _read_eval_metrics(session: str) -> list[dict[str, Any]]:
     """Aggregate metrics from every ``Metric_<SPLIT>.json`` a task has produced (newest first).
 
-    Mirrors konfai's evaluator JSON: ``{case, aggregates:{metric:{mean,std,…}}, directions}``. Keeps
-    only top-level metrics (drops the per-component ``a:b:Metric:comp`` rows), like ``get_run_metrics``.
+    Mirrors konfai's evaluator JSON: ``{case, aggregates:{metric:{mean,std,…}}, directions}``. How a
+    metric file is read is konfai-mcp's to define, so this borrows its rules rather than restating
+    them: a run's identity, which rows are whole metrics, and which way each one is better. The
+    leaderboard beside this table is that same service, and the two must name and rank a run alike.
+
+    A direction belongs to the criterion, not to the run: it is resolved once per metric, from the
+    newest run that declares it, so runs predating a criterion's ``maximize`` flag cannot have the
+    same PSNR read "↓" on one card and "↑" on the next.
     """
     root = _session_dir(session)
     if not root.is_dir():
         return []
     runs: list[dict[str, Any]] = []
-    for path in sorted(root.rglob("Metric_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    declared: dict[str, str] = {}
+    files = sorted(root.rglob("Metric_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files[:_EVAL_RUNS_SHOWN]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -623,13 +712,14 @@ def _read_eval_metrics(session: str) -> list[dict[str, Any]]:
         aggregates = payload.get("aggregates")
         if not isinstance(aggregates, dict):
             continue
-        directions = payload.get("directions") if isinstance(payload.get("directions"), dict) else {}
+        directions = payload.get("directions")
+        if isinstance(directions, dict):
+            for name, value in directions.items():  # newest declaration of a metric wins
+                declared.setdefault(name, value)
         metrics: list[dict[str, Any]] = []
-        for name, stats in aggregates.items():
-            if name.rsplit(":", 1)[0] in aggregates:  # per-component row, folded into its parent
-                continue
+        for name, stats in top_level_metrics(aggregates).items():
             if isinstance(stats, dict) and isinstance(stats.get("mean"), (int, float)):
-                row: dict[str, Any] = {"name": name, "direction": directions.get(name, "")}
+                row: dict[str, Any] = {"name": name}
                 row.update({k: stats[k] for k in _STAT_KEYS if isinstance(stats.get(k), (int, float))})
                 metrics.append(row)
         if not metrics:
@@ -647,7 +737,7 @@ def _read_eval_metrics(session: str) -> list[dict[str, Any]]:
         split = path.stem.split("_", 1)[1] if "_" in path.stem else path.stem
         runs.append(
             {
-                "run": path.parent.name,
+                "run": metric_run_name(path, root),
                 "split": split,
                 "metrics": metrics,
                 "cases": len(case_rows),
@@ -655,7 +745,10 @@ def _read_eval_metrics(session: str) -> list[dict[str, Any]]:
                 "case_rows": case_rows,
             }
         )
-    return runs[:20]
+    for run in runs:  # every card reads one direction per metric, resolved across the session
+        for row in run["metrics"]:
+            row["direction"] = metric_direction(row["name"], declared.get(row["name"]))[0]
+    return runs
 
 
 @app.get("/api/evaluations")
@@ -673,21 +766,44 @@ async def leaderboard(session: str = Query("default"), split: str = Query("TRAIN
     return {"ok": True, **payload} if isinstance(payload, dict) else {"ok": True}
 
 
+#: Where a run directory sits, relative to the session root: at the root of an output bucket
+#: (``Statistics/<run>``, ``AppEvaluations/<run>``) or inside an isolated app subtree.
+_RUN_DIR_PATTERNS = ("{run}", "*/{run}", "*/*/{run}")
+
+
 def _run_config_snapshot(session: str, run: str) -> Path | None:
-    """The newest launch-time config snapshot for a run (its Statistics/<run>/*.yml), searched at the session
-    root and in any isolated app-output subtree. Jailed: a run with a path separator is refused."""
-    if not run or "/" in run or "\\" in run or ".." in run:
+    """The newest launch-time config snapshot for a run, wherever its kind writes one.
+
+    A run's config sits in the directory that bears its name: ``Statistics/<run>/Config_0.yml`` for a
+    training, ``AppEvaluations/<run>/<app>/Evaluation.yml`` for an app evaluation. Looking under
+    ``Statistics/`` alone answered "no config snapshot" for every run the leaderboard ranks, which is
+    exactly what it offers to compare. So: find the run's directory within three levels of the session
+    root, then take the newest config in it. Jailed: a run with a path separator is refused, and every
+    hit is re-checked against the root."""
+    # The name goes into a glob pattern, so wildcards are refused alongside separators: '*' would
+    # match every run in the session and diff whichever happened to be newest.
+    if not run or any(char in run for char in "/\\*?[]") or ".." in run:
         return None
     base = _session_dir(session).resolve()
     if not base.is_dir():
         return None
+    run_dirs = [d for pattern in _RUN_DIR_PATTERNS for d in base.glob(pattern.format(run=run)) if d.is_dir()]
     snaps = [
-        p
-        for pattern in (f"Statistics/{run}/*.yml", f"*/Statistics/{run}/*.yml")
-        for p in base.glob(pattern)
-        if p.is_file() and _jail(base, str(p.relative_to(base))) is not None
+        config
+        for run_dir in run_dirs
+        for config in (*run_dir.glob("*.yml"), *run_dir.glob("*/*.yml"))
+        if config.is_file() and _jail(base, str(config.relative_to(base))) is not None
     ]
-    return max(snaps, key=lambda p: p.stat().st_mtime) if snaps else None
+
+    def rank(config: Path) -> tuple[int, float]:
+        """The training's resolved config first, newest otherwise.
+
+        A finished run leaves one config per kind, and its evaluation config is always the newest: taken
+        on mtime alone, two runs were compared on their Evaluation.yml, which holds neither the model nor
+        the losses nor the optimizer, so the panel showed everything except what was changed."""
+        return (1 if config.relative_to(base).parts[0] == "Statistics" else 0, config.stat().st_mtime)
+
+    return max(snaps, key=rank) if snaps else None
 
 
 @app.get("/api/run/config_diff")
@@ -724,17 +840,23 @@ class ConfigSave(BaseModel):
     session: str
     name: str
     content: str
+    base: str | None = None  # the text the editor opened, to detect a file that moved under it
 
 
 @app.post("/api/config/save")
 async def save_config(req: ConfigSave) -> dict[str, bool]:
     """Save an edited config YAML: jailed to the session workspace, existing .yml only, atomic
-    write (temp + replace) so a reader never sees a truncated config."""
+    write (temp + replace) so a reader never sees a truncated config.
+
+    The agent and every workflow write configs too (KonfAI resolves defaults back into the file), so a
+    save carrying the text it started from is refused when the file no longer holds it."""
     target = _session_path(req.session, req.name)
     if target.suffix.lower() not in {".yml", ".yaml"}:
         raise HTTPException(415, "only YAML configs are editable")
     if not target.is_file():
         raise HTTPException(404, "config not found")
+    if req.base is not None and target.read_text(encoding="utf-8", errors="replace") != req.base:
+        raise HTTPException(409, "this file changed on disk since you opened it")
     tmp = target.with_name(target.name + ".tmp")
     try:
         tmp.write_text(req.content, encoding="utf-8")
@@ -753,7 +875,8 @@ async def experiment_ls(session: str = Query("default"), path: str = Query("")) 
     dirs: list[str] = []
     files: list[dict[str, Any]] = []
     for entry in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-        if entry.name.startswith("."):
+        # Python's cache directories are machinery, not experiment content: noise in a clinician's tree.
+        if entry.name.startswith(".") or entry.name == "__pycache__":
             continue
         if entry.is_dir():
             dirs.append(entry.name)
@@ -801,7 +924,11 @@ def _experiment_info(session: str) -> dict[str, Any]:
         {p.name for pred in root.glob("**/Predictions") if pred.is_dir() for p in pred.iterdir() if p.is_dir()}
     )
     jobs = [
-        {"run": payload.get("run_name"), "kind": payload.get("kind"), "status": _live_status(payload)}
+        {
+            "run": payload.get("run_name"),
+            "kind": payload.get("kind"),
+            "status": _status_for(payload, _runtime_log(payload)),
+        }
         for payload in sorted(_all_jobs(session), key=_job_created, reverse=True)[:10]
     ]
     return {
@@ -816,10 +943,16 @@ def _experiment_info(session: str) -> dict[str, Any]:
 @app.get("/api/experiment")
 async def experiment(session: str = Query("default")) -> dict[str, Any]:
     """What the experiment holds, plus where it stands and the moves open from there, so a page reload
-    comes back with the same next actions instead of an empty bar."""
+    comes back with the same next actions instead of an empty bar. The moves are the ones a turn would
+    offer: the assistant's own while they still describe this state, the derived ones otherwise."""
     name = _sane_session(session)
     state = _state(name)
-    return {**_experiment_info(name), "dataset": _reg.dataset(name), "workflow": state, "moves": moves(state)}
+    return {
+        **_experiment_info(name),
+        "dataset": _reg.dataset(name),
+        "workflow": state,
+        "moves": _turn_moves(name, [], state, None),
+    }
 
 
 class AppRef(BaseModel):
@@ -1077,6 +1210,19 @@ async def logo() -> FileResponse:
 _VOLUME_SUFFIXES = {".nii", ".nii.gz", ".mha", ".mhd", ".nrrd", ".gz"}
 
 
+def _volume_path(path: str) -> Path:
+    """A readable volume at ``path``, or the refusal saying why not.
+
+    One gate for both ways out of Studio (the browser viewer and the 3D Slicer hand-over), so a volume
+    one opens is never a volume the other rejects."""
+    volume = Path(path).expanduser()
+    if not volume.is_file():
+        raise HTTPException(404, f"volume not found: {path}")
+    if volume.suffix.lower() not in _VOLUME_SUFFIXES:
+        raise HTTPException(415, f"unsupported volume type: {volume.suffix}")
+    return volume
+
+
 @app.get("/files/volume")
 async def volume(path: str = Query(..., description="Absolute host path of the volume to stream")) -> FileResponse:
     """Stream a medical volume to the browser (NiiVue) with HTTP range support.
@@ -1085,9 +1231,70 @@ async def volume(path: str = Query(..., description="Absolute host path of the v
     on the host and are served **read-only**: this never exposes a write path. Starlette's
     FileResponse honours the ``Range`` header, so NiiVue can fetch a large volume in chunks.
     """
-    p = Path(path).expanduser()
-    if not p.is_file():
-        raise HTTPException(404, "volume not found")
-    if p.suffix.lower() not in _VOLUME_SUFFIXES:
-        raise HTTPException(415, f"unsupported volume type: {p.suffix}")
-    return FileResponse(str(p), media_type="application/octet-stream", filename=p.name)
+    found = _volume_path(path)
+    return FileResponse(str(found), media_type="application/octet-stream", filename=found.name)
+
+
+class SlicerOpen(BaseModel):
+    paths: list[str]
+
+
+_SLICER_WEBSERVER_PORT = 2016  # the Web Server module's default port
+
+
+def _slicer_exec(code: str) -> bool:
+    """Run Python in an already-open 3D Slicer via its Web Server module, if one listens locally.
+
+    The module's ``/slicer/exec`` endpoint only answers when the user started the server AND ticked
+    "enable exec"; any other outcome (nothing listening, exec disabled) is a plain False so the
+    caller falls back to launching Slicer itself."""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{_SLICER_WEBSERVER_PORT}/slicer/exec", data=code.encode(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            response.read()
+        return True
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def _slicer_executable() -> str | None:
+    configured = os.environ.get("KONFAI_STUDIO_SLICER")
+    if configured:
+        return configured if Path(configured).is_file() else None
+    return shutil.which("Slicer") or shutil.which("slicer")
+
+
+@app.post("/api/slicer/open")
+async def slicer_open(req: SlicerOpen) -> dict[str, Any]:
+    """Hand volumes over to 3D Slicer on this machine: into the running instance when its Web Server
+    module listens (``/slicer/exec``), else by launching Slicer on them.
+
+    Trusted-local, like ``/files/volume``: Slicer runs beside the Studio server and reads the same
+    paths, so nothing is copied or exposed. The JSON body doubles as the CSRF guard (a cross-origin
+    form cannot send ``application/json`` without a preflight this server never grants)."""
+    volumes = [_volume_path(raw) for raw in req.paths]
+    if not volumes:
+        raise HTTPException(400, "no volume to open")
+    code = "\n".join(f"slicer.util.loadVolume({str(p)!r})" for p in volumes)
+    if await asyncio.to_thread(_slicer_exec, code):
+        return {"ok": True, "via": "webserver"}
+    executable = _slicer_executable()
+    if executable is None:
+        return {
+            "ok": False,
+            "detail": "3D Slicer not found: put `Slicer` on PATH or set KONFAI_STUDIO_SLICER to the executable.",
+        }
+    import subprocess
+
+    subprocess.Popen(
+        [executable, *map(str, volumes)],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return {"ok": True, "via": "launch"}

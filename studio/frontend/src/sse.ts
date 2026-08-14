@@ -15,7 +15,16 @@ export async function* readSSE(resp: Response): AsyncGenerator<any> {
       const chunk = buf.slice(0, idx);
       buf = buf.slice(idx + 2);
       if (!chunk.startsWith("data: ")) continue;
-      yield JSON.parse(chunk.slice(6));
+      let event: any;
+      try {
+        event = JSON.parse(chunk.slice(6));
+      } catch {
+        // One frame the parser cannot read must not take the rest of the stream with it: throwing here
+        // ends the generator, the consumer reconnects, replays the same frame and throws again, so the
+        // feed dies on the spot and never recovers. Drop the frame, keep reading.
+        continue;
+      }
+      yield event;
     }
   }
 }

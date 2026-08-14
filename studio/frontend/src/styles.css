@@ -8,8 +8,11 @@
   --inset: #161615; /* inputs, console, canvas letterbox */
   --ink: #e7e6e1; /* primary text, warm off-white */
   --ink-2: #c4c3bc;
-  --muted: #908f86; /* secondary text / labels */
-  --faint: #63625b;
+  /* Four readable steps, not two readable ones and two decorative. Measured against the raised surface
+     (--panel-2), the worst ground: ink 11.5, ink-2 8.1, muted 6.6, faint 4.6. The old muted sat at 4.4
+     and faint at 2.4, so labels, chart ticks and every timestamp were below the floor for their size. */
+  --muted: #b2b0a5; /* secondary text / labels */
+  --faint: #949288; /* quietest text, and the idle dots */
   --line: #322f2b; /* hairline borders */
   --line-2: #403d38;
   --accent: #d6d5cf; /* near-white: buttons, focus (the green stays in the logo) */
@@ -18,10 +21,18 @@
   --accent-solid: #3a3a37; /* filled buttons: raised neutral */
   --sage: #52b89b; /* KonfAI sage: micro-signals only (status dots) */
   --working: #d6a24f; /* amber: a tool is running */
+  /* What you are looking at: the open tab, the selected split. Sage carried this and also carried
+     "done", so the same green meant two things; amber is the interface's live signal, and selection
+     is a live thing. Same value as --working today, named apart so they can part ways. */
+  --current: #d6a24f;
   --good: #6bc38d; /* ready / done */
   --err: #e07b62; /* soft red: errors only */
   --fsans: system-ui, -apple-system, "Segoe UI", "Roboto", "Helvetica", "Arial", sans-serif;
   --fmono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", monospace;
+  /* One clock for the whole interface: state changes settle in 150ms with a hard ease-out.
+     Anything slower reads as choreography, anything linear reads as mechanical. */
+  --dur: 0.15s;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 * {
@@ -40,8 +51,105 @@ body {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
+/* Selection carries the interface's amber: at 8% neutral it was invisible, and finding your own
+   selection is not a puzzle a user should solve. */
 ::selection {
-  background: var(--accent-t);
+  background: color-mix(in srgb, var(--current) 30%, transparent);
+}
+
+/* ---- craft layer: scrollbars, keyboard focus, shared motion ---- */
+
+/* The default scrollbar is the one element no dark theme survives. Thin, quiet, brighter in hand. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--faint);
+}
+
+/* Keyboard focus gets the same amber the selection vocabulary already owns; mouse focus stays quiet. */
+:focus-visible {
+  outline: 1px solid var(--current);
+  outline-offset: 2px;
+}
+
+/* Every interactive surface settles on the same clock. Individual rules may add properties;
+   none should invent another duration. */
+.task,
+.rtab,
+.ctab,
+.run-tab,
+.lb-split,
+.ghost,
+.primary,
+.csend,
+.chip-prompt,
+.welcome-cta,
+.welcome-zoo,
+.welcome-recent-item,
+.dir,
+.file,
+.tool .th,
+.stop-job {
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease),
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+/* Press feedback: buttons that do something give one pixel back. */
+.primary:active,
+.csend:active,
+.welcome-cta:active,
+.chip-prompt:active,
+.ghost:active {
+  transform: translateY(1px);
+}
+
+/* Overlays arrive instead of appearing: the backdrop fades, the panel settles into place. */
+@media (prefers-reduced-motion: no-preference) {
+  .modal-back {
+    animation: overlay-fade 0.12s var(--ease);
+  }
+  .modal,
+  .zoo {
+    animation: panel-settle var(--dur) var(--ease);
+  }
+  .toast {
+    animation: toast-rise 0.18s var(--ease);
+  }
+}
+@keyframes overlay-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes panel-settle {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+}
+@keyframes toast-rise {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
 }
 
 .app {
@@ -140,7 +248,7 @@ body {
   font-size: 13px;
   text-align: left;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .rail-new-btn:hover,
 .rail-new-btn.on {
@@ -290,15 +398,23 @@ body {
   border-bottom: 1px solid var(--line);
 }
 .modal-path {
+  display: block;
+  width: 100%;
   padding: 9px 16px;
   font-family: var(--fmono);
   font-size: 11.5px;
   color: var(--accent-ink);
   background: var(--inset);
+  border: none;
   border-bottom: 1px solid var(--line);
+  border-radius: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.modal-path:focus {
+  outline: none;
+  border-bottom-color: var(--accent);
 }
 .modal-err {
   padding: 8px 16px;
@@ -644,7 +760,6 @@ body {
   font-family: var(--fsans);
   font-size: 12px;
   cursor: pointer;
-  transition: border-color 0.12s;
 }
 .chip-prompt:hover {
   border-color: var(--sage);
@@ -663,8 +778,11 @@ body {
   flex-direction: column;
   gap: 6px;
 }
+/* Focused, the composer is where the whole interface is pointing, and a grey hairline on a dark ground
+   said nothing. The same amber the armed send button carries, so the two read as one control. */
 .composer:focus-within {
-  border-color: var(--faint);
+  border-color: var(--current);
+  box-shadow: 0 0 0 1px var(--current);
 }
 .composer > textarea {
   flex: none;
@@ -703,7 +821,7 @@ body {
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
-  transition: color 0.12s, border-color 0.12s;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 .composer-bar .cbtn:hover {
   color: var(--ink);
@@ -736,22 +854,24 @@ body {
   justify-content: center;
   cursor: pointer;
   flex: none;
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .composer-bar .csend:hover:not(:disabled) {
   border-color: var(--faint);
   color: var(--ink-2);
 }
-/* Armed the moment there's something to send */
+/* Armed the moment there's something to send. Amber, not --err: this is the primary action of the
+   whole interface, and it was wearing the colour that means a run failed. The glyph is the ground
+   colour rather than white, which reads at 7.5:1 against the amber instead of 2.3:1. */
 .composer-bar .csend.ready {
-  background: var(--err);
-  border-color: var(--err);
-  color: #fff;
+  background: var(--current);
+  border-color: var(--current);
+  color: var(--bg);
 }
 .composer-bar .csend.ready:hover {
-  background: #d16a50;
-  border-color: #d16a50;
-  color: #fff;
+  background: #e3b163;
+  border-color: #e3b163;
+  color: var(--bg);
 }
 .composer-bar .csend:disabled {
   opacity: 0.45;
@@ -845,6 +965,22 @@ body {
   height: 100%;
   display: block;
 }
+.v-failed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 24px;
+  background: var(--inset);
+}
+.v-failed p {
+  max-width: 44ch;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
 /* ---- NiiVue viewer: dimensions readout, fullscreen, side-by-side compare ---- */
 .v-single,
 .v-split {
@@ -920,6 +1056,24 @@ body {
   color: var(--muted);
   align-self: center;
 }
+.v-tools .v-note {
+  font-family: var(--fmono);
+  font-size: 10.5px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+  align-self: center;
+}
+.v-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.v-btn .v-mark {
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+  margin-right: 5px;
+}
 
 /* ---- console panel (live job logs) ---- */
 .console {
@@ -956,10 +1110,11 @@ body {
 }
 .ctab:hover {
   color: var(--ink-2);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
 }
 .ctab.on {
   color: var(--ink);
-  border-bottom-color: var(--sage);
+  border-bottom-color: var(--current);
 }
 .console-head .run {
   color: var(--accent-ink);
@@ -1186,8 +1341,8 @@ body {
   cursor: pointer;
 }
 .lb-split.on {
-  border-color: var(--sage);
-  color: var(--sage);
+  border-color: var(--current);
+  color: var(--current);
 }
 .lb-grid {
   display: grid;
@@ -1251,6 +1406,39 @@ body {
   border-radius: 10px;
   background: var(--panel-2);
   padding: 11px 12px;
+}
+/* Loading skeleton: the board's own silhouette, breathing quietly until the data lands. */
+.sk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sk-line {
+  height: 11px;
+  border-radius: 4px;
+  background: var(--line-2);
+}
+.sk-w40 {
+  width: 40%;
+}
+.sk-w80 {
+  width: 80%;
+}
+.sk-w90 {
+  width: 90%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .sk-line {
+    animation: sk-breathe 1.1s ease-in-out infinite alternate;
+  }
+}
+@keyframes sk-breathe {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.45;
+  }
 }
 .lb-metric {
   display: flex;
@@ -1500,10 +1688,11 @@ body {
 }
 .rtab:hover {
   color: var(--ink-2);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
 }
 .rtab.on {
   color: var(--ink);
-  border-bottom-color: var(--sage);
+  border-bottom-color: var(--current);
 }
 .rtabs .run {
   margin-left: 10px;
@@ -1815,7 +2004,7 @@ body {
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
-  transition: color 0.12s, border-color 0.12s;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 .attach-btn:hover {
   color: var(--ink);
@@ -2389,20 +2578,23 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 11px;
+  /* Two tempos, not one: identity (logo/title/sub) sits tight, the actions below breathe. */
+  gap: 10px;
   text-align: center;
   padding: 24px;
 }
 .welcome-logo {
-  height: 28px;
+  height: 32px;
   width: auto;
   opacity: 0.9;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 .welcome-title {
-  font-size: 22px;
+  font-size: 23px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--ink);
+  text-wrap: balance;
 }
 .welcome-sub {
   color: var(--muted);
@@ -2411,7 +2603,7 @@ body {
   line-height: 1.5;
 }
 .welcome-cta {
-  margin-top: 8px;
+  margin-top: 14px;
   background: var(--accent-solid);
   color: var(--ink);
   border: 1px solid var(--line-2);
@@ -2420,7 +2612,6 @@ body {
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
 }
 .welcome-cta:hover {
   border-color: var(--sage);
@@ -2523,7 +2714,7 @@ body {
   border: 1px solid var(--line-2);
   border-radius: 10px;
   cursor: pointer;
-  transition: border-color 0.12s, transform 0.08s;
+  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 .app-tile:hover {
   border-color: var(--sage);
@@ -2872,7 +3063,7 @@ body {
 .col-divider {
   cursor: col-resize;
   background: transparent;
-  transition: background 0.1s;
+  transition: background var(--dur) var(--ease);
 }
 .col-divider:hover {
   background: var(--sage);
@@ -2925,7 +3116,7 @@ body {
 .rail-divider {
   cursor: col-resize;
   background: transparent;
-  transition: background 0.1s;
+  transition: background var(--dur) var(--ease);
 }
 .rail-divider:hover {
   background: var(--sage);
@@ -3036,6 +3227,14 @@ body {
 .rtabs .tb-link,
 .rtabs .stop-job {
   margin-left: auto; /* push it to the far right of the tab bar */
+}
+/* The bar scrolls once there are several runs, and `margin-left: auto` puts this at the end of the
+   scrolled CONTENT, not of the view: Stop left the screen exactly when a job was running. Pinned to the
+   visible edge, and opaque so the tabs pass behind it. */
+.rtabs .stop-job {
+  position: sticky;
+  right: 0;
+  background: color-mix(in srgb, var(--err) 10%, var(--chrome));
 }
 .tb-link {
   border: 1px solid var(--line-2);
@@ -3151,7 +3350,7 @@ body {
 }
 .run-tab.on {
   background: var(--panel-2);
-  border-color: var(--sage);
+  border-color: var(--current);
   color: var(--ink);
 }
 .run-tab-kind {
@@ -3356,7 +3555,7 @@ body {
   padding: 4px 9px;
   font-size: 12px;
   font-family: inherit;
-  max-width: 150px;
+  max-width: 180px; /* fits the longest option ("Anthropic API: unavailable"), which read as "unavailab" */
   cursor: pointer;
 }
 .cbar-sel:hover {
@@ -3721,4 +3920,51 @@ body {
 }
 .stopped-wrap p {
   color: var(--ink-2);
+}
+
+/* ---- plugging in an LLM backend ---- */
+.cbar-sel.warn {
+  border-color: var(--working);
+  color: var(--working);
+}
+.llm-pop {
+  min-width: 260px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.llm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.llm-field input {
+  background: var(--bg);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  color: var(--ink);
+  font-family: var(--fmono);
+  font-size: 11.5px;
+  padding: 5px 7px;
+}
+.llm-field input:focus {
+  outline: none;
+  border-color: var(--sage);
+}
+.llm-note {
+  font-family: var(--fmono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.rtab-note {
+  align-self: center;
+  margin-left: 8px;
+  font-family: var(--fmono);
+  font-size: 10.5px;
+  color: var(--working);
+  cursor: pointer;
 }

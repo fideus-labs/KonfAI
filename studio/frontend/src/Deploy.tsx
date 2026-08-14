@@ -30,23 +30,38 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
   const title = app.display_name || app.app_name || app.ref.split("/").pop();
 
   useEffect(() => {
-    const nv = new Niivue({ backColor: [0.035, 0.08, 0.09, 1], show3Dcrosshair: true });
+    // No loading text: this canvas waits for a file the user has not picked yet, and NiiVue's default
+    // paints "loading ..." across it, which reads as a pane that is stuck.
+    const nv = new Niivue({ backColor: [0.035, 0.08, 0.09, 1], show3Dcrosshair: true, loadingText: "" });
     nv.attachToCanvas(canvasRef.current!);
     nvRef.current = nv;
   }, []);
 
+  // Escape leaves: this pane covers the whole app, and an app with no ONNX bundle offers nothing to
+  // do in it, so a small ✕ was the only way back out.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   // The app must have been exported with an ONNX bundle; fetch its manifest to confirm it is deployable.
   useEffect(() => {
     fetch(`/api/apps/manifest?ref=${encodeURIComponent(app.ref)}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("no ONNX bundle for this app"))))
+      // 404 is the app simply not being an ONNX bundle; any other status is a failure worth naming.
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status === 404 ? "" : `the server said ${r.status}`))))
       .then((m) => {
         setManifest(m);
         setStage("ready");
         setMessage("pick a volume and run: nothing leaves your machine.");
       })
-      .catch((e) => {
+      .catch((e: Error) => {
         setStage("undeployable");
-        setMessage(`This app has no portable ONNX bundle yet (${e.message}). Export one with \`konfai-apps bundle --onnx\`.`);
+        setMessage(
+          e.message
+            ? `Could not read this app's ONNX bundle: ${e.message}.`
+            : "This app has no portable ONNX bundle yet. Export one with `konfai-apps bundle --onnx`.",
+        );
       });
   }, [app.ref]);
 
@@ -105,6 +120,9 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
   }
 
   const busy = stage === "inferring" || stage === "loading";
+  // An app with no ONNX bundle has nothing to run: it gets the reason and the way back, not a file
+  // picker and a Run button that cannot do anything.
+  const undeployable = stage === "undeployable";
   return (
     <div className="deploy-full">
       <header>
@@ -116,22 +134,30 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
       <div className="deploy-body">
         <aside className="deploy-side">
           <div className="deploy-ref">{app.ref}</div>
-          <label className="deploy-drop">
-            <span>{volume ? volume.name : "Choose a volume (NIfTI / MHA / NRRD)"}</span>
-            <input
-              type="file"
-              accept=".nii,.nii.gz,.mha,.mhd,.nrrd"
-              disabled={stage === "undeployable"}
-              onChange={(e) => setVolume(e.target.files?.[0] ?? null)}
-            />
-          </label>
-          <button className="deploy-run" disabled={!manifest || !volume || busy} onClick={run}>
-            {stage === "inferring" ? "Inferring…" : "Run inference"}
-          </button>
+          {!undeployable && (
+            <>
+              <label className="deploy-drop">
+                <span>{volume ? volume.name : "Choose a volume (NIfTI / MHA / NRRD)"}</span>
+                <input
+                  type="file"
+                  accept=".nii,.nii.gz,.mha,.mhd,.nrrd"
+                  onChange={(e) => setVolume(e.target.files?.[0] ?? null)}
+                />
+              </label>
+              <button className="deploy-run" disabled={!manifest || !volume || busy} onClick={run}>
+                {stage === "inferring" ? "Inferring…" : "Run inference"}
+              </button>
+            </>
+          )}
           <div className={`deploy-status ${stage}`}>
             {backend && <span className="backend">{backend}</span>}
             {message}
           </div>
+          {undeployable && (
+            <button className="deploy-run" onClick={onClose}>
+              Back to the apps
+            </button>
+          )}
         </aside>
         <canvas ref={canvasRef} className="deploy-canvas" />
       </div>
