@@ -230,7 +230,7 @@ def _dataset_filenames(datasets: str | Path | Sequence[str | Path]) -> list[str]
 class TransformResult:
     """What a TRANSFORM run produced, in the run's own terms."""
 
-    #: The run directory (``Transforms/<name>``): logs, ``plan.txt``, the resolved config,
+    #: The run directory (``Transforms/<name>``): logs (the plan opens them), the resolved config,
     #: ``outputs.json``: never the deliverable, which each ``Write`` placed in the caller's tree.
     workspace: Path
     #: Every chain's terminal ``Write``: ``{group_src, group_dest, dataset, group, format}``.

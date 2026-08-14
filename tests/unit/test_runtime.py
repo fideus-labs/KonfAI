@@ -468,6 +468,29 @@ def test_interleaved_bars_each_keep_their_final_state(monkeypatch):
     assert "Train: 49/50" in lines and "Val: 49/50" in lines
 
 
+def test_record_keeps_detail_in_the_log_without_printing_it(tmp_path, monkeypatch):
+    """The run's log is where a run is read after the fact, so detail too long for a console belongs
+    there (the TRANSFORM plan). Without a Log installed there is no run directory to keep it in, and
+    recording is a no-op rather than a print that would land on the console it exists to spare."""
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+    mirror = sys.stdout
+
+    rt.record("nothing is installed: this goes nowhere")
+    with rt.Log("RUN", 0) as log:
+        rt.record("line one\nline two")
+        log.write("printed\n")
+
+    assert "goes nowhere" not in mirror.written
+    assert "line one" not in mirror.written, "recorded detail must not reach the console"
+    assert "printed" in mirror.written
+    assert (tmp_path / "RUN" / "log_0.txt").read_text() == "line one\nline two\nprinted\n"
+
+
 # ---------------------------------------------------------------------------
 # A single rank runs in this process; more than one still spawns
 # ---------------------------------------------------------------------------
@@ -534,3 +557,50 @@ def test_the_inline_path_is_the_default(monkeypatch) -> None:
 
     assert ran_here == [0]
     assert spawned == []
+
+
+def _budget_applied(monkeypatch, cores: int, ranks: str | None, omp: str | None, platform: str = "linux") -> list[int]:
+    calls: list[int] = []
+    monkeypatch.setattr(rt, "_cpu_budget_applied", False)
+    monkeypatch.setattr(rt.sys, "platform", platform)
+    monkeypatch.setattr(rt.os, "cpu_count", lambda: cores)
+    monkeypatch.setattr(rt.torch, "set_num_threads", calls.append)
+    for key, value in (("KONFAI_LOCAL_RANKS", ranks), ("OMP_NUM_THREADS", omp)):
+        monkeypatch.delenv(key, raising=False)
+        if value is not None:
+            monkeypatch.setenv(key, value)
+    rt.apply_cpu_thread_budget()
+    return calls
+
+
+def test_cpu_thread_budget_caps_torchs_every_core_default(monkeypatch) -> None:
+    """torch defaults to one intraop thread per core; past bus saturation that only adds barrier
+    contention (measured 0.7 s at 12 threads vs 67 s at 24 for the same gather)."""
+    assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None) == [12]
+
+
+def test_cpu_thread_budget_splits_the_node_between_ranks(monkeypatch) -> None:
+    assert _budget_applied(monkeypatch, cores=24, ranks="4", omp=None) == [6]
+
+
+def test_cpu_thread_budget_never_rounds_to_zero(monkeypatch) -> None:
+    assert _budget_applied(monkeypatch, cores=2, ranks="4", omp=None) == [1]
+
+
+def test_an_explicit_omp_setting_keeps_authority(monkeypatch) -> None:
+    """torch honors OMP_NUM_THREADS at init; the budget must not override the user's choice."""
+    assert _budget_applied(monkeypatch, cores=24, ranks="4", omp="20") == []
+
+
+def test_cpu_thread_budget_is_applied_once_per_process(monkeypatch) -> None:
+    """set_num_threads is documented as pre-parallel-work only, and the Python API runs several
+    workflows in one process: a second application mid-process can crash the OpenMP runtime."""
+    calls = _budget_applied(monkeypatch, cores=24, ranks=None, omp=None)
+    rt.apply_cpu_thread_budget()
+    assert calls == [12]
+
+
+def test_cpu_thread_budget_skips_macos(monkeypatch) -> None:
+    """On macOS set_num_threads intermittently crashes libomp once any parallel region ran (CI
+    SIGSEGV, whichever workflow called it first); the default stays."""
+    assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None, platform="darwin") == []

@@ -124,7 +124,7 @@ def test_streamable_chain_plans_streams_and_writes(tmp_path: Path) -> None:
     workflow.run_process(1, 0, 0, [])
     assert out.is_dataset_exist("CT_out", "CASE_000")
     assert out.is_dataset_exist("CT_out", "CASE_001")
-    assert (tmp_path / "Transforms" / "TEST" / "plan.txt").read_text().count("STREAM")
+    assert plan.report().count("STREAM")
 
 
 _REGION_CHAIN = """\
@@ -557,6 +557,34 @@ def test_streamed_run_never_reads_a_whole_volume(tmp_path: Path, monkeypatch: py
     assert Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "CASE_000")
 
 
+def test_the_console_says_the_plan_in_one_line_whatever_the_cohort_size(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TRANSFORM is the one workflow that plans, and it printed the whole plan: its per-case notes
+    and case lists grow with the cohort, so a startup that should read like every other workflow's
+    (a line, then the bar) became a page. The console gets a summary that counts what it folds, and
+    the full plan opens the run's log."""
+    _write_source(tmp_path, cases=12)
+    _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"))
+    workflow = _build(tmp_path)
+    recorded: list[str] = []
+
+    def keep(message: str) -> Path:
+        recorded.append(message)
+        return tmp_path / "Transforms" / "TEST" / "log_0.txt"
+
+    monkeypatch.setattr("konfai.transformer.record", keep)
+
+    workflow.setup(1)
+
+    printed = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(printed) == 1, printed
+    assert "12 entr(ies): 12 STREAM" in printed[0]
+    assert "log_0.txt" in printed[0]
+    # Folded, not dropped: the line points at a plan the log actually holds.
+    assert len(recorded) == 1 and recorded[0].count("STREAM") >= 1
+
+
 def test_a_reduction_declared_in_yaml_folds_every_case_into_one_output(tmp_path: Path) -> None:
     """The whole point of the wiring: N cases -> 1 entry, declared in YAML, planned and run."""
     _write_source(tmp_path, cases=4)
@@ -934,10 +962,15 @@ def test_the_strict_grammar_knows_every_key_the_binder_can_read() -> None:
     assert dataset_params == set(dataset_grammar)
 
 
-def test_two_ranks_partition_the_cases_and_every_output_is_written_once(tmp_path: Path) -> None:
+def test_two_ranks_partition_the_cases_and_every_output_is_written_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The DDP contract, executed: the shards partition the work items, and running each rank's
     shard writes every case exactly once: a case in no shard (or in two) is a wrong dataset
     delivered with exit code 0."""
+    import konfai.transformer as transformer_module
+    import torch
+
     _write_source(tmp_path, cases=3)
     _write_config(
         tmp_path,
@@ -949,6 +982,10 @@ def test_two_ranks_partition_the_cases_and_every_output_is_written_once(tmp_path
     workflow.setup(2)
     flattened = sorted(index for shard in workflow._shards for index in shard)
     assert flattened == list(range(3)), "the shards must partition the work items exactly"
+    # Both ranks run in THIS process, without the launcher that narrows CUDA_VISIBLE_DEVICES to
+    # one GPU each: on a machine with fewer GPUs than ranks, rank 1 would name cuda:1. The
+    # contract under test is the sharding, so the chain stays on CPU.
+    monkeypatch.setattr(transformer_module, "get_device", lambda _rank: torch.device("cpu"))
     workflow.run_process(2, 0, 0, [])
     workflow.run_process(2, 1, 1, [])
     out = Dataset(f"{tmp_path / 'out_dir'}/", "omezarr")

@@ -1414,6 +1414,7 @@ class DatasetManager:
         self._rewrite_saves = False
         # The per-rank budget the sweeps size their slabs against (None = the fixed _SWEEP_SLAB_ROWS).
         self._sweep_budget_bytes: float | None = None
+        self._chain_device: torch.device | None = None
         self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None], dict[str, float]] = {}
         # Save caches already swept by THIS run, keyed by (store, group, entry): under --overwrite the
         # existence probe answers "not written", and without this ledger every copy of an Expand chain
@@ -1543,6 +1544,8 @@ class DatasetManager:
             data, _ = self.dataset.read_data(self.group_src, self.name)
 
         data = torch.from_numpy(data)
+        if self._chain_device is not None:
+            data = data.to(self._chain_device)
 
         if len(pre_transform):
             data = self._apply_chain(data, pre_transform[i:], self.cache_attributes[0], self.name)
@@ -1565,7 +1568,7 @@ class DatasetManager:
             tensor = transform_function(self.name, tensor, attribute)
             if isinstance(transform_function, Save):
                 dataset, group_dest = save_destination(transform_function, self.dataset, self.group_dest)
-                dataset.write(group_dest, entry, tensor.numpy(), attribute)
+                dataset.write(group_dest, entry, tensor.cpu().numpy(), attribute)
         return tensor
 
     def _load_augmentation(self, data_augmentations_list: list[DataAugmentationsList]) -> None:
@@ -2160,6 +2163,18 @@ class DatasetManager:
         tensor, _attribute, _keys = self._replay_streamed_region(source, target, self.stored_attributes, None)
         return tensor
 
+    @contextlib.contextmanager
+    def _chain_device_scope(self, device: "torch.device | None") -> Iterator[None]:
+        """Route the chain onto ``device`` for one materialization, restored on every exit path:
+        a device that outlived the call would move a later ``get_data()`` onto CUDA inside a
+        DataLoader worker."""
+        previous = self._chain_device
+        self._chain_device = device if device is not None and device.type != "cpu" else None
+        try:
+            yield
+        finally:
+            self._chain_device = previous
+
     def materialize(
         self,
         a: int = 0,
@@ -2167,6 +2182,7 @@ class DatasetManager:
         fallback_budget_bytes: float | None = None,
         allow_fallback: bool = True,
         prefer_whole: bool = False,
+        device: "torch.device | None" = None,
     ) -> bool:
         """Write this case's chain to disk by the cheapest path that can, and say which one it took.
 
@@ -2190,29 +2206,34 @@ class DatasetManager:
         """
         self._set_rewrite(rewrite)
         self.set_memory_budget(fallback_budget_bytes)
-        # A chain with an Expand materializes a COPY, whose draw must be part of the plan; without
-        # one it materializes the case itself, and augmentations have nothing to do with writing.
-        apply_augmentations = self._expand is not None and a > 0
-        if prefer_whole:
-            # The plan chose to LOAD: the case fits its budget and streaming would re-read the
-            # source (:meth:`predicted_stream_read_factor`). A choice, not a fallback: nothing
-            # failed, so ``allow_fallback`` is not consulted; the budget check stays as the belt.
+        # Opt-in only, and only here: this same machinery loads training cases inside DataLoader
+        # workers, where a CUDA default would be wrong. The transformer's rank is the one caller
+        # that knows its device.
+        with self._chain_device_scope(device):
+            # A chain with an Expand materializes a COPY, whose draw must be part of the plan;
+            # without one it materializes the case itself, and augmentations have nothing to do
+            # with writing.
+            apply_augmentations = self._expand is not None and a > 0
+            if prefer_whole:
+                # The plan chose to LOAD: the case fits its budget and streaming would re-read the
+                # source (:meth:`predicted_stream_read_factor`). A choice, not a fallback: nothing
+                # failed, so ``allow_fallback`` is not consulted; the budget check stays as the belt.
+                self._enforce_fallback_budget(fallback_budget_bytes)
+                self._assemble_and_write(a)
+                self.unload()
+                return False
+            if self._stream_ready(a, apply_augmentations=apply_augmentations):
+                return True
+            if not allow_fallback:
+                raise PatchError(
+                    f"Case '{self.name}' would take the whole-volume path at run time.",
+                    self.stream_refusal(a, apply_augmentations) or self._sweep_failure or "the chain cannot stream.",
+                    "Nothing was written for this case; the caller forbids the whole-volume fallback.",
+                )
             self._enforce_fallback_budget(fallback_budget_bytes)
             self._assemble_and_write(a)
             self.unload()
             return False
-        if self._stream_ready(a, apply_augmentations=apply_augmentations):
-            return True
-        if not allow_fallback:
-            raise PatchError(
-                f"Case '{self.name}' would take the whole-volume path at run time.",
-                self.stream_refusal(a, apply_augmentations) or self._sweep_failure or "the chain cannot stream.",
-                "Nothing was written for this case; the caller forbids the whole-volume fallback.",
-            )
-        self._enforce_fallback_budget(fallback_budget_bytes)
-        self._assemble_and_write(a)
-        self.unload()
-        return False
 
     def set_memory_budget(self, budget_bytes: float | None) -> None:
         """The per-rank budget this case's streamed sweeps size their slabs against.
@@ -2354,6 +2375,7 @@ class DatasetManager:
         rewrite: bool = False,
         fallback_budget_bytes: float | None = None,
         allow_fallback: bool = True,
+        device: "torch.device | None" = None,
     ) -> dict[int, str]:
         """Write the :class:`Expand` copies of this case by the cheapest regime each can take.
 
@@ -2373,77 +2395,86 @@ class DatasetManager:
             )
         self._set_rewrite(rewrite)
         self.set_memory_budget(fallback_budget_bytes)
-        verdicts: dict[int, str] = {}
-        if not copies:
-            return verdicts
+        with self._chain_device_scope(device):
+            verdicts: dict[int, str] = {}
+            if not copies:
+                return verdicts
 
-        # The caches the copies share (pre-Expand Saves) are swept once, first: every copy's plan
-        # reads through them, and sweeping them inside each copy's own pass would redo the work.
-        first = self._resolve_patch_stream_source(copies[0], apply_augmentations=True)
-        if first is not None:
-            shared_pending = [sweep for sweep in first.pending_sweeps if sweep.entry == self.name]
-            if shared_pending:
-                for sweep in shared_pending:
-                    # Chained here as on the per-case path: past a failure the next sweep reads a
-                    # cache nobody wrote and overwrites the recorded reason with its own symptom.
-                    if not self._materialize_save(sweep):
-                        break
-                self._invalidate_stream_plans()
+            # The caches the copies share (pre-Expand Saves) are swept once, first: every copy's
+            # plan reads through them, and sweeping them inside each copy's own pass would redo
+            # the work.
+            first = self._resolve_patch_stream_source(copies[0], apply_augmentations=True)
+            if first is not None:
+                shared_pending = [sweep for sweep in first.pending_sweeps if sweep.entry == self.name]
+                if shared_pending:
+                    for sweep in shared_pending:
+                        # Chained here as on the per-case path: past a failure the next sweep reads
+                        # a cache nobody wrote and overwrites the recorded reason with its own
+                        # symptom.
+                        if not self._materialize_save(sweep):
+                            break
+                    self._invalidate_stream_plans()
 
-        shared: list[tuple[int, _PendingSweep]] = []
-        solo: list[int] = []
-        fallback: list[int] = []
-        for a in copies:
-            source = self._resolve_patch_stream_source(a, apply_augmentations=True)
-            if source is None:
-                fallback.append(a)
-                continue
-            per_copy = [sweep for sweep in source.pending_sweeps if sweep.entry != self.name]
-            if len(per_copy) != len(source.pending_sweeps):
-                # A shared cache is still pending (its sweep failed): the per-copy path will retry
-                # and fall back on its own terms.
-                solo.append(a)
-            elif not per_copy:
-                verdicts[a] = "stream"  # everything this copy writes is already on disk
-            elif len(per_copy) == 1 and self._pointwise_tail(per_copy[0]):
-                shared.append((a, per_copy[0]))
-            else:
-                solo.append(a)
-
-        if len(shared) == 1:
-            # One copy shares with nobody: its own sweep is the same work without the extra clone.
-            solo.append(shared.pop()[0])
-        if shared:
-            written = self._materialize_shared_pass(shared)
-            for a, _sweep in shared:
-                if a in written:
-                    verdicts[a] = "stream-shared"
+            shared: list[tuple[int, _PendingSweep]] = []
+            solo: list[int] = []
+            fallback: list[int] = []
+            for a in copies:
+                source = self._resolve_patch_stream_source(a, apply_augmentations=True)
+                if source is None:
+                    fallback.append(a)
+                    continue
+                per_copy = [sweep for sweep in source.pending_sweeps if sweep.entry != self.name]
+                if len(per_copy) != len(source.pending_sweeps):
+                    # A shared cache is still pending (its sweep failed): the per-copy path will
+                    # retry and fall back on its own terms.
+                    solo.append(a)
+                elif not per_copy:
+                    verdicts[a] = "stream"  # everything this copy writes is already on disk
+                elif len(per_copy) == 1 and self._pointwise_tail(per_copy[0]):
+                    shared.append((a, per_copy[0]))
                 else:
                     solo.append(a)
-            if written:
-                self._invalidate_stream_plans()
 
-        for a in sorted(solo):
-            verdicts[a] = (
-                "stream"
-                if self.materialize(
-                    a, rewrite, fallback_budget_bytes=fallback_budget_bytes, allow_fallback=allow_fallback
+            if len(shared) == 1:
+                # One copy shares with nobody: its own sweep is the same work without the extra
+                # clone.
+                solo.append(shared.pop()[0])
+            if shared:
+                written = self._materialize_shared_pass(shared)
+                for a, _sweep in shared:
+                    if a in written:
+                        verdicts[a] = "stream-shared"
+                    else:
+                        solo.append(a)
+                if written:
+                    self._invalidate_stream_plans()
+
+            for a in sorted(solo):
+                verdicts[a] = (
+                    "stream"
+                    if self.materialize(
+                        a,
+                        rewrite,
+                        fallback_budget_bytes=fallback_budget_bytes,
+                        allow_fallback=allow_fallback,
+                        device=device,
+                    )
+                    else "whole-volume"
                 )
-                else "whole-volume"
-            )
-        if fallback:
-            if not allow_fallback:
-                raise PatchError(
-                    f"{len(fallback)} cop(ies) of case '{self.name}' would take the whole-volume path at run time.",
-                    self.stream_refusal(fallback[0], apply_augmentations=True) or "the copies' chains cannot stream.",
-                    "Nothing was written for these copies; the caller forbids the whole-volume fallback.",
-                )
-            self._enforce_fallback_budget(fallback_budget_bytes)
-            for a in fallback:
-                self._assemble_and_write(a)
-                verdicts[a] = "whole-volume"
-        self.unload()
-        return verdicts
+            if fallback:
+                if not allow_fallback:
+                    raise PatchError(
+                        f"{len(fallback)} cop(ies) of case '{self.name}' would take the whole-volume path at run time.",
+                        self.stream_refusal(fallback[0], apply_augmentations=True)
+                        or "the copies' chains cannot stream.",
+                        "Nothing was written for these copies; the caller forbids the whole-volume fallback.",
+                    )
+                self._enforce_fallback_budget(fallback_budget_bytes)
+                for a in fallback:
+                    self._assemble_and_write(a)
+                    verdicts[a] = "whole-volume"
+            self.unload()
+            return verdicts
 
     def _pointwise_tail(self, sweep: _PendingSweep) -> bool:
         """Whether everything per-copy in this sweep is a pure value map on its slab.
@@ -2608,7 +2639,7 @@ class DatasetManager:
                     scope = Attribute(slab_attribute)
                     for stage in tail:
                         copy_tensor = stage(self.name, copy_tensor, scope)
-                    block = copy_tensor.numpy()
+                    block = copy_tensor.cpu().numpy()
                     self._require_channel_first(block, spatial, f"A per-copy stage of '{sweep.group}/{sweep.entry}'")
                     if a not in streams:
                         attributes = self._sweep_header(evolved, scope, keys_before)
@@ -2729,7 +2760,7 @@ class DatasetManager:
                 tensor, slab_attribute, keys_before = self._replay_streamed_region(
                     source, target, Attribute(sweep.base_attributes), Attribute(evolved) if slab_index == 0 else None
                 )
-                block = tensor.numpy()
+                block = tensor.cpu().numpy()
                 self._require_channel_first(
                     block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
                 )
@@ -2937,6 +2968,8 @@ class DatasetManager:
         data_slices = tuple([slice(None)] * n_prefix + spans[0])
         data, attributes = stream_source.dataset.read_data_slice(stream_source.group, stream_source.entry, data_slices)
         tensor = torch.from_numpy(data)
+        if self._chain_device is not None:
+            tensor = tensor.to(self._chain_device)
 
         cache_attribute.update(attributes)
         cache_attribute["StatisticsSeeded"] = 1.0  # same contract as the pointwise route above
