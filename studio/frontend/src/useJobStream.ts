@@ -190,7 +190,9 @@ export function useJobStream(session: string, runNonce: number): JobStream {
           setRun(ev.run);
           setKind(ev.kind || "");
           setStatus(ev.status || "running");
-          setLines([]); // console is per-job
+          // The console is per-job, and this event also carries later status changes of the SAME job:
+          // clearing on every one of them would wipe a crashed run's traceback the moment it died.
+          if (ev.console_reset) setLines([]);
         } else if (ev.type === "run") {
           // A run of the experiment was announced or discovered: make sure its tab exists, even before
           // it has produced a single metric.
@@ -239,7 +241,10 @@ export function useJobStream(session: string, runNonce: number): JobStream {
             const shown: Record<string, number> = {};
             withRun(ev.run || "", ev.kind || "", (r) => {
               const series = { ...r.series };
-              for (const [name, val] of Object.entries(ev.values as Record<string, number>)) {
+              for (const [name, val] of Object.entries(ev.values as Record<string, unknown>)) {
+                // A metric with no value at this step (a Dice of 0/0 arrives as null): no point to plot,
+                // and no number to format in the readout beside it.
+                if (typeof val !== "number" || !Number.isFinite(val)) continue;
                 const seriesKey = `${label}/${name}`;
                 series[seriesKey] = { label, stage, points: appendPoint(series[seriesKey]?.points ?? [], x, val), at: Date.now() };
                 if (!name.endsWith(":lr")) shown[name] = val;

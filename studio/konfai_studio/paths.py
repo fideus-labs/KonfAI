@@ -34,6 +34,11 @@ def _sessions_file() -> Path:
     return _workspace_root() / ".konfai_studio" / "sessions.json"
 
 
+def _credentials_file() -> Path:
+    """Where the LLM credentials set from the UI live: outside sessions.json, and readable by nobody else."""
+    return _workspace_root() / ".konfai_studio" / "credentials.json"
+
+
 def _dataset_history_file() -> Path:
     return _workspace_root() / ".konfai_studio" / "datasets.json"
 
@@ -51,17 +56,47 @@ def _session_dir(session: str) -> Path:
     return _sessions_root() / _sane_session(session)
 
 
+def _studio_session_dir(session: str) -> Path:
+    """Studio's own per-session files (transcript, brain history), OUTSIDE the konfai-mcp workspace.
+
+    The workspace belongs to konfai-mcp: initialize_session(overwrite=True) legitimately rmtrees it.
+    Studio files stored inside were deleted with it (a whole chat history, silently), and their mere
+    presence made a pristine workspace look non-empty, forcing the agent onto that destructive path.
+    Legacy files are adopted from the workspace on first touch."""
+    home = _workspace_root() / ".konfai_studio" / "sessions" / _sane_session(session)
+    for name in ("transcript.json", "history.json"):
+        legacy = _session_dir(session) / (name if name == "transcript.json" else f".konfai_studio/{name}")
+        target = home / name
+        if legacy.is_file() and not target.exists():
+            home.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy), target)
+    legacy_nest = _session_dir(session) / ".konfai_studio"
+    if legacy_nest.is_dir() and not any(legacy_nest.iterdir()):
+        legacy_nest.rmdir()
+    return home
+
+
 def _session_jobs_dir(session: str) -> Path:
     """Where konfai-mcp records that session's jobs."""
     return _session_dir(session) / ".konfai_mcp" / "jobs"
 
 
-def _delete_workspace(name: str) -> None:
-    """Delete a task's konfai-mcp workspace, jailed under ``sessions/`` (the name is already sanitized,
-    so this never escapes the workspace root)."""
+def _delete_workspace(name: str) -> bool:
+    """Delete a task's konfai-mcp workspace, jailed under ``sessions/``; whether it is gone afterwards.
+
+    A directory that survives is adopted back into the rail on the next listing, so the caller must
+    know rather than forget a session that is about to reappear."""
+    # Sanitized like every path that WROTE under sessions/: an unsanitized name would jail-resolve
+    # to a directory that does not exist, report success, and leave the real workspace behind.
+    name = _sane_session(name)
     target = _jail(_sessions_root(), name)
-    if target is not None and target.is_dir():
-        shutil.rmtree(target, ignore_errors=True)
+    if target is None:
+        return False
+    shutil.rmtree(target, ignore_errors=True)
+    studio_side = _jail(_workspace_root() / ".konfai_studio" / "sessions", name)
+    if studio_side is not None:
+        shutil.rmtree(studio_side, ignore_errors=True)
+    return not target.exists()
 
 
 def _session_path(session: str, rel: str) -> Path:

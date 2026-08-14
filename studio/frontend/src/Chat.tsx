@@ -72,6 +72,14 @@ function deviceLabel(device: string): string {
   return `GPU ${gs.join(",")}`;
 }
 
+// Recent-dataset chip label. KonfAI datasets conventionally END in a directory named "Dataset",
+// so the basename alone made every chip read the same; the parent is what tells them apart.
+function datasetLabel(path: string): string {
+  const segs = path.split("/").filter(Boolean);
+  const last = segs[segs.length - 1] || path;
+  return last === "Dataset" && segs.length > 1 ? `${segs[segs.length - 2]}/${last}` : last;
+}
+
 // Compute-device picker for the composer: Auto / CPU are exclusive; GPUs multi-select (DDP).
 function DevicePicker({ device, gpus, onDevice }: { device: string; gpus: number[]; onDevice: (v: string) => void }) {
   const [open, setOpen] = useState(false);
@@ -115,6 +123,82 @@ function DevicePicker({ device, gpus, onDevice }: { device: string; gpus: number
   );
 }
 
+// What each backend needs before it can answer. Claude Code authenticates through its own CLI, so it
+// asks for nothing; the other two are plugged in here rather than through the environment Studio was
+// started with, which meant restarting the server to change a key.
+const LLM_FIELDS: Record<string, { name: string; label: string; placeholder: string; secret?: boolean }[]> = {
+  anthropic: [{ name: "anthropic_api_key", label: "API key", placeholder: "sk-ant-…", secret: true }],
+  openai: [
+    { name: "base_url", label: "Server URL", placeholder: "http://localhost:8000/v1" },
+    { name: "local_api_key", label: "API key", placeholder: "optional", secret: true },
+  ],
+};
+
+// Plug in the selected backend: type its credentials, save, and the answer says whether it is usable.
+function LlmConnect({
+  brain,
+  available,
+  detail,
+  onConnect,
+}: {
+  brain: string;
+  available: boolean;
+  detail: string; // what this backend still needs, e.g. "pip install openai": credentials are not always it
+  onConnect: (fields: Record<string, string>) => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [note, setNote] = useState("");
+  const fields = LLM_FIELDS[brain] ?? [];
+  if (fields.length === 0) return null;
+
+  async function save() {
+    setNote("saving…");
+    try {
+      setNote((await onConnect(values)) ? "connected ✓" : "saved: the backend still reports unavailable");
+    } catch {
+      setNote("could not save");
+    }
+  }
+
+  return (
+    <div className="cbar-dev">
+      <button
+        type="button"
+        className={available ? "cbar-sel" : "cbar-sel warn"}
+        title={available ? "Change this backend's credentials" : detail || "This backend cannot answer yet"}
+        onClick={() => setOpen((o) => !o)}
+      >
+        {available ? "⚙" : "Connect…"}
+      </button>
+      {open && (
+        <>
+          <div className="attach-back" onClick={() => setOpen(false)} />
+          <div className="dev-pop llm-pop">
+            {!available && detail && <div className="llm-note">{detail}</div>}
+            {fields.map((f) => (
+              <label key={f.name} className="llm-field">
+                <span>{f.label}</span>
+                <input
+                  type={f.secret ? "password" : "text"}
+                  placeholder={f.placeholder}
+                  value={values[f.name] ?? ""}
+                  onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
+                  onKeyDown={(e) => e.key === "Enter" && save()}
+                />
+              </label>
+            ))}
+            <button className="dev-opt" onClick={save}>
+              Save and connect
+            </button>
+            {note && <div className="llm-note">{note}</div>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 const attachPrompt = (ref: string) =>
   `I'm attaching the file at ${ref} as context for this experiment. Read it and tell me what it contains and how it applies to my task. If it's a research paper, reproduce its method as a KonfAI experiment: author the config and explain your choices, validate it, but don't launch training until I confirm.`;
 
@@ -133,6 +217,7 @@ export default function Chat({
   onChooseDataset,
   onOpenZoo,
   llm,
+  runStatus,
   device,
   gpus,
   onDevice,
@@ -151,14 +236,16 @@ export default function Chat({
   onChooseDataset?: (path: string) => void; // pick a recent dataset directly
   onOpenZoo?: () => void; // open the App Zoo window
   llm?: {
-    brains: { id: string; label: string; available: boolean; models?: { id: string; label: string }[] }[];
+    brains: { id: string; label: string; detail?: string; available: boolean; models?: { id: string; label: string }[] }[];
     brain: string;
     model: string;
     modelText: string;
     onBrain: (id: string) => void;
     onModel: (id: string) => void;
     onModelText: (s: string) => void;
+    onConnect: (fields: Record<string, string>) => Promise<boolean>;
   };
+  runStatus?: string; // the latest job's status: a run starting or ending moves the experiment on
   device?: string; // 'auto' | 'cpu' | GPU indices '0'/'0,1'
   gpus?: number[]; // available GPU indices
   onDevice?: (val: string) => void;
@@ -227,7 +314,8 @@ export default function Chat({
   }, [session, messages]);
 
   // On (re)load the workflow state lives server-side, so the next moves come back with it instead of the
-  // bar resetting to the generic starters.
+  // bar resetting to the generic starters. Re-read on a job starting or ending too: that is the experiment
+  // moving stage without a turn, and the bar would otherwise offer the previous stage's actions.
   useEffect(() => {
     let cancelled = false;
     getJson<{ workflow?: { stage?: string }; moves?: Move[] }>(`/api/experiment?session=${encodeURIComponent(session)}`)
@@ -242,7 +330,7 @@ export default function Chat({
     return () => {
       cancelled = true;
     };
-  }, [session]);
+  }, [session, runStatus]);
 
   // A dataset chosen for this task injects an "inspect it" message into the conversation.
   useEffect(() => {
@@ -254,6 +342,15 @@ export default function Chat({
     setMessages((prev) =>
       prev.map((m) => (m.id === id && m.role === "assistant" ? { ...m, parts: fn(m.parts) } : m)),
     );
+  }
+
+  // Stop asks the AGENT to stop, it does not just hang up on it. Aborting the fetch left the turn
+  // running server-side: its tools kept firing, the stream died with a CancelledError the handler
+  // never sees, and the next question was answered by the leftovers of this one.
+  function stop() {
+    postJson("/api/chat/interrupt", { session }).catch(() => {
+      /* a backend without the channel: the turn ends on its own */
+    });
   }
 
   // `shown` marks a message already in the transcript: one queued while the agent was working, and sent
@@ -452,7 +549,7 @@ export default function Chat({
                 <span className="welcome-recent-lead">Recent</span>
                 {datasetRecent.slice(0, 4).map((d) => (
                   <button key={d} className="welcome-recent-item" onClick={() => onChooseDataset?.(d)} title={d}>
-                    {d.split("/").pop() || d}
+                    {datasetLabel(d)}
                   </button>
                 ))}
               </div>
@@ -565,8 +662,10 @@ export default function Chat({
                 onChange={(e) => llm.onBrain(e.target.value)}
                 title="Which model runs the assistant"
               >
+                {/* An unavailable backend stays selectable: selecting it is how its Connect…
+                    control is reached to add the missing credentials. */}
                 {llm.brains.map((b) => (
-                  <option key={b.id} value={b.id} disabled={!b.available}>
+                  <option key={b.id} value={b.id}>
                     {b.label}
                     {b.available ? "" : ": unavailable"}
                   </option>
@@ -590,6 +689,12 @@ export default function Chat({
                   onBlur={() => llm.modelText.trim() !== llm.model && llm.onModel(llm.modelText.trim())}
                 />
               )}
+              <LlmConnect
+                brain={llm.brain}
+                available={llm.brains.find((b) => b.id === llm.brain)?.available ?? false}
+                detail={llm.brains.find((b) => b.id === llm.brain)?.detail ?? ""}
+                onConnect={llm.onConnect}
+              />
             </div>
           )}
           {onDevice && <DevicePicker device={device ?? "auto"} gpus={gpus ?? []} onDevice={onDevice} />}
@@ -618,7 +723,7 @@ export default function Chat({
             </button>
           }
           {busy ? (
-            <button className="csend stop" onClick={() => ctrlRef.current?.abort()} title="Stop this response" aria-label="Stop">
+            <button className="csend stop" onClick={stop} title="Stop this response" aria-label="Stop">
               <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
                 <rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" />
               </svg>

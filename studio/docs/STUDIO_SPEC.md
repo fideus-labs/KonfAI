@@ -1,6 +1,6 @@
 # KonfAI Studio. Spec of the final result
 
-> What a user will be able to do. Grounded in the actual `konfai-mcp` surface (56 tools),
+> What a user will be able to do. Grounded in the actual `konfai-mcp` surface,
 > the `konfai-apps` remote server, and the `konfai-rs`/`konfai-web` deploy work.
 > Visual version with UI mockups: [`spec-visual.html`](spec-visual.html). Strategy brief: [`brief-for-matt.html`](brief-for-matt.html).
 
@@ -37,7 +37,7 @@ Status legend: **[MCP]** already drivable on today's MCP API · **[build]** UI/e
 | 8 | **Keep & reproduce** | Every run is frozen (exact command + environment + config); export a Methods-grade record; a colleague re-imports and re-runs it | `export_run_record`, `import_experiment` (+ auto config-snapshots & manifest) | **[MCP]** |
 | 9 | **Package & deploy** | Turn a trained model into a shareable app; run it in Slicer, on an on-prem server, or export to ONNX to run 100% in a browser tab, offline | `package_app_from_session`, `export_app`; `konfai export` → `konfai-web`/`konfai-rs` | **[spike]** export = Phase 1 |
 
-The MCP surface is **56 tools + 4 prompts + 23 read-only resources** (`konfai-mcp/konfai_mcp/server.py`;
+The MCP surface is **the tools + prompts + read-only resources** (`konfai-mcp/konfai_mcp/server.py`;
 generated reference `konfai-mcp/scripts/generate_tool_reference.py`). Three modeling entry points the
 UI should expose as top-level choices: *use an app as-is*, *fine-tune an app*, *train from scratch*.
 

@@ -140,6 +140,14 @@ command line (it would show up in `ps`).
 | `KONFAI_STUDIO_INSECURE_COOKIE` | *(unset)* | `1` drops the cookie `Secure` flag: **local http testing only**, never in production. |
 | `KONFAI_MCP_WORKSPACES_ROOT` | `~/KonfAI_Workspaces` | Where experiments/jobs are stored. |
 | `KONFAI_STUDIO_LLM` | `claude-code` | The brain backend (see the README). |
+| `KONFAI_STUDIO_MODEL` | *(backend default)* | Pin the model the brain runs. |
+| `KONFAI_STUDIO_LLM_BASE_URL` | *(unset)* | OpenAI-compatible endpoint for the `openai` brain (Ollama, vLLM, a gateway). |
+| `KONFAI_STUDIO_LLM_API_KEY` | *(unset)* | Its key, when that endpoint wants one. |
+| `KONFAI_STUDIO_SLICER` | *(`slicer` on `PATH`)* | The 3D Slicer executable the viewer launches when no Slicer is listening. |
+
+The brain, its model and the two keys are all settable from the interface (**Connect an LLM**): keys are
+stored `0600` under the workspaces root, brain and model in `sessions.json`. A variable already set in the
+environment wins on start-up.
 
 ## Threat model: what this does and does not do
 

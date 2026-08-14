@@ -56,6 +56,21 @@ def test_serves_the_built_frontend() -> None:
     assert "text/html" in response.headers.get("content-type", "")
 
 
+def test_a_workspace_created_outside_studio_joins_the_rail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """konfai-mcp creates workspaces from the command line too. Adopted only at startup, one appeared
+    nowhere in a running Studio, and no amount of clicking would reveal it."""
+    from konfai_studio.registry import _Registry
+
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path))
+    registry = _Registry()
+    registry.load()
+    assert registry.names() == []
+
+    (tmp_path / "sessions" / "made-elsewhere").mkdir(parents=True)
+
+    assert registry.names() == ["made-elsewhere"]
+
+
 def test_a_certfile_without_its_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """Half a TLS pair cannot serve; uvicorn would fail after the sockets are already claimed: refuse
     at the CLI, where the message can still name the missing flag."""

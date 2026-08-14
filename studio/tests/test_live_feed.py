@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -135,7 +136,10 @@ def test_an_app_job_is_not_announced_under_a_name_it_will_not_keep(
 
 
 def test_an_app_run_appears_once_it_has_written_its_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """...and it appears under the name it actually has, the moment there is something to follow."""
+    """...and it appears under the name it actually has, the moment there is something to follow.
+
+    Its kind arrives in the workflow vocabulary (`infer` runs a prediction): announced as `infer`,
+    the run would sit outside every panel the client gates on kind."""
     session = tmp_path / "sessions" / "exp"
     output = session / "AppOutputs" / "app_MR-a1b2" / "ImpactSynth"
     output.mkdir(parents=True)
@@ -144,7 +148,35 @@ def test_an_app_run_appears_once_it_has_written_its_log(tmp_path: Path, monkeypa
 
     runs = announced_runs(session, monkeypatch, tmp_path)
 
-    assert [(run["run"], run["kind"]) for run in runs] == [("ImpactSynth", "infer")]
+    assert [(run["run"], run["kind"]) for run in runs] == [("ImpactSynth", "prediction")]
+
+
+def test_an_app_evaluation_is_announced_as_an_evaluation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The evaluation table is gated on kind == "evaluation": an app `evaluate` run announced under the
+    app vocabulary showed a tab with no scores under it."""
+    session = tmp_path / "sessions" / "exp"
+    output = session / "AppEvaluations" / "eval_MR-a1b2" / "ImpactSynth"
+    output.mkdir(parents=True)
+    (output / "log_0.txt").write_text("Metric TRAIN : 0% 0/8 [00:00<?, ?it/s]\n", encoding="utf-8")
+    job_record(session, kind="evaluate", run_name="eval_MR", output_path=str(session / "AppEvaluations/eval_MR-a1b2"))
+
+    runs = announced_runs(session, monkeypatch, tmp_path)
+
+    assert [(run["run"], run["kind"]) for run in runs] == [("ImpactSynth", "evaluation")]
+
+
+def test_an_app_prediction_says_where_its_volumes_are(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An app prediction writes its volumes under `<run>/Output`, not the `Predictions/<run>/Dataset`
+    layout the client knows: without the `data` field, Browse would open the run's YAML config."""
+    session = tmp_path / "sessions" / "exp"
+    run = session / "AppOutputs" / "app_MR-a1b2" / "ImpactSynth"
+    (run / "Output").mkdir(parents=True)
+    (run / "log_0.txt").write_text("Prediction : 0% 0/13 [00:00<?, ?it/s]\n", encoding="utf-8")
+    job_record(session, kind="infer", run_name="app_MR", output_path=str(session / "AppOutputs/app_MR-a1b2"))
+
+    runs = announced_runs(session, monkeypatch, tmp_path)
+
+    assert [run["data"] for run in runs] == ["AppOutputs/app_MR-a1b2/ImpactSynth/Output"]
 
 
 def test_a_run_that_died_says_so_even_though_it_was_announced_first(
@@ -163,6 +195,76 @@ def test_a_run_that_died_says_so_even_though_it_was_announced_first(
 
     terminal = [event for event in events if event.get("type") == "status"]
     assert [(event["run"], event["status"]) for event in terminal] == [("MR2CT", "error")]
+
+
+def test_a_run_relaunched_outside_studio_reads_as_live_not_as_the_job_that_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Studio offers a terminal, so a run is often relaunched outside it, appending to the same log.
+    The old job record still claims that log, and taken at its word it painted a green 'done' over a
+    progress bar at 30%, with no Stop control."""
+    session = tmp_path / "sessions" / "exp"
+    log = session / "Predictions" / "ImpactSynth" / "log_0.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text("Prediction : 30% 499/1682 [00:40<03:11, 6.17it/s]\n", encoding="utf-8")
+    job_record(
+        session,
+        kind="prediction",
+        run_name="ImpactSynth",
+        runtime_log_path=str(log),
+        status="done",
+        created_at=1000.0,
+        finished_at=1100.0,  # long over; the log above was written just now
+    )
+
+    assert {run["status"] for run in announced_runs(session, monkeypatch, tmp_path)} == {"running"}
+
+
+def test_a_job_that_just_finished_still_reads_as_finished(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mirror case, and the one that must not regress: a run ends, its last line lands, and the
+    record is stamped at that moment. Rewarming it on mtime alone would flip every finished run back
+    to 'running' for the next few seconds."""
+    session = tmp_path / "sessions" / "exp"
+    log = session / "Predictions" / "ImpactSynth" / "log_0.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text("Prediction : 100% 1682/1682\n", encoding="utf-8")
+    job_record(
+        session,
+        kind="prediction",
+        run_name="ImpactSynth",
+        runtime_log_path=str(log),
+        status="done",
+        created_at=time.time() - 60,
+        finished_at=time.time(),
+    )
+
+    assert {run["status"] for run in announced_runs(session, monkeypatch, tmp_path)} == {"done"}
+
+
+def test_the_console_keeps_a_workflows_milestones_and_drops_its_startup_chatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every workflow speaks as [KonfAI], so the console filter is what decides which of those lines
+    a watcher sees: memory pressure and a workflow's own milestones, never the startup decisions."""
+    session = tmp_path / "sessions" / "exp"
+    log = session / "console.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "[KonfAI] memory_budget: dataset ~= 4.20 GiB over 75 cases\n"
+        "[KonfAI] plan over 1 rank(s) | 75 entr(ies): 75 STREAM -> Transforms/CT/plan.txt\n"
+        "[KonfAI] VRAM: rank 0 ran out of memory -> re-planning the free patch axes\n"
+        "[KonfAI] done in 31.2 s: 75 written (75 streamed) -> outputs in outputs.json\n",
+        encoding="utf-8",
+    )
+    job_record(session, kind="transform", run_name="CT", log_path=str(log))
+
+    shown = [event["line"] for event in feed_events(session, monkeypatch, tmp_path) if event.get("type") == "log"]
+
+    assert [line.split(":")[0] for line in shown] == [
+        "[KonfAI] plan over 1 rank(s) | 75 entr(ies)",
+        "[KonfAI] VRAM",
+        "[KonfAI] done in 31.2 s",
+    ]
 
 
 # --- what the turn tells the viewer ------------------------------------------------------------------
@@ -384,3 +486,95 @@ def test_a_run_input_can_be_half_of_the_comparison_that_follows(tmp_path: Path) 
     )
 
     assert (events[-1]["path"], events[-1]["compare"]) == (str(moved), str(ct))
+
+
+def test_a_run_launched_from_studio_still_says_where_it_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workflow job is announced before its log exists, with no base yet; the discovery pass that knows
+    the base came second and was swallowed as a duplicate status. The client kept an empty base, so
+    Browse opened a config instead of the volumes and Delete hid itself."""
+    session = tmp_path / "sessions" / "exp"
+    log = session / "Statistics" / "MR2CT" / "log_0.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text("Training : 0% 0/75 [00:00<?, ?it/s]\n", encoding="utf-8")
+    job_record(session, kind="train", run_name="MR2CT", runtime_log_path=str(log), status="running")
+
+    bases = [run["base"] for run in announced_runs(session, monkeypatch, tmp_path)]
+
+    assert "Statistics/MR2CT" in bases, bases
+
+
+def test_a_status_change_re_announces_the_job_without_wiping_its_console(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client gates its Stop control on the `job` event, so the feed re-sends it when the status
+    moves. That second event must not carry a console reset: the run turning red is exactly when its
+    traceback is on screen, and clearing it would leave the user with a red tab and nothing to read."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path))
+    from konfai_studio.jobs import live
+
+    session = tmp_path / "sessions" / "exp"
+    log = session / "Statistics" / "MR2CT" / "log_0.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text("Traceback (most recent call last):\n", encoding="utf-8")
+    running = {"kind": "train", "run_name": "MR2CT", "log_path": str(log), "runtime_log_path": str(log)}
+    job_record(session, **running, status="running")
+
+    async def collect() -> list[dict[str, Any]]:
+        response = await live(session="exp")
+        stream = response.body_iterator
+        announcements: list[dict[str, Any]] = []
+
+        async def drain() -> None:
+            async for chunk in stream:
+                text = chunk if isinstance(chunk, str) else chunk.decode()
+                for line in text.splitlines():
+                    if line.startswith("data: ") and json.loads(line[6:]).get("type") == "job":
+                        announcements.append(json.loads(line[6:]))
+                if len(announcements) == 1:  # the run dies, on the log the console is already following
+                    job_record(session, **running, status="error", finished_at=time.time())
+                elif len(announcements) >= 2:
+                    break
+
+        try:
+            await asyncio.wait_for(drain(), timeout=3)
+        except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        finally:
+            await stream.aclose()
+        return announcements
+
+    announcements = asyncio.run(collect())
+
+    assert [event["status"] for event in announcements] == ["running", "error"]
+    assert [event["console_reset"] for event in announcements] == [True, False]
+
+
+def test_a_metric_that_is_not_a_number_still_leaves_valid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NaN metric is ordinary: Dice against an empty prediction is 0/0. `json.dumps` writes it as the
+    bare token NaN, which JSON does not define, so the browser throws on that frame AND on every frame
+    behind it: one undefined Dice took the whole live feed down until the page was reloaded."""
+    session = tmp_path / "sessions" / "exp"
+    log = session / "Statistics" / "MR2CT" / "log_0.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "Training : Loss (UNet(0.001000) : CrossEntropyLoss(1.00) : 3.703673 Dice(1.00) : nan) "
+        "Memory (16.41G (13.30 %)):  50% 1/2 [00:15<00:10, 10.27s/it]\n",
+        encoding="utf-8",
+    )
+    job_record(session, kind="train", run_name="MR2CT", runtime_log_path=str(log), status="running")
+
+    events = feed_events(session, monkeypatch, tmp_path)  # parsed as strict JSON by the helper
+
+    values = [event["values"] for event in events if event.get("type") == "metric"]
+    assert values, "the training line produced no metric event"
+    assert any(v.get("UNet:Dice") is None for v in values), values  # absent, not a token no parser reads
+    assert any(v.get("UNet:CrossEntropyLoss") == 3.703673 for v in values), values
+
+
+def test_the_sse_encoder_never_emits_a_token_json_does_not_define(tmp_path: Path) -> None:
+    from konfai_studio.jobs import _sse
+
+    frame = _sse({"values": {"a": float("nan"), "b": float("inf"), "c": 1.5}, "list": [float("-inf"), 2]})
+
+    assert "NaN" not in frame and "Infinity" not in frame
+    assert json.loads(frame[6:]) == {"values": {"a": None, "b": None, "c": 1.5}, "list": [None, 2]}
