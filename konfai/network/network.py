@@ -385,6 +385,12 @@ class Measure:
 
             for criterion, criterions_attr in self.outputs_criterions[output_group][target_group].items():
                 if it >= criterions_attr.start and (criterions_attr.stop is None or it <= criterions_attr.stop):
+                    # Criteria live outside the model's module tree, so ``network.to(device)`` never
+                    # reaches them: a criterion with its own tensors (``CrossEntropyLoss(weight=...)``)
+                    # would stay on CPU while the batch is on the GPU.
+                    if getattr(criterion, "_konfai_device", None) != output.device:
+                        criterion.to(output.device)
+                        setattr(criterion, "_konfai_device", output.device)  # noqa: B010 -- Module.__setattr__ is Tensor-typed
                     scheduler = self.update_scheduler(criterions_attr.schedulers, it)
                     if getattr(criterion, "accepts_attributes", False):
                         loss = criterion(output, *target_data, attributes=target_attribute)
