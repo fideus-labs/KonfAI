@@ -2078,17 +2078,37 @@ class Mask(Transform):
         return tensor
 
     def _cached_mha(self) -> torch.Tensor:
+        """The whole ``.mha`` mask, read once: the whole-volume path's, never a region's."""
         _require_simpleitk()
         if self._cached_mask is None:
             self._cached_mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
         return self._cached_mask
 
+    def _mha_extent(self) -> tuple[int, ...]:
+        """The ``.mha`` mask's spatial extent, channel-first order, from its header alone."""
+        _require_simpleitk()
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(self.path)
+        reader.ReadImageInformation()
+        return tuple(int(extent) for extent in reversed(reader.GetSize()))
+
+    def _mha_region(self, slices: tuple[slice, ...]) -> torch.Tensor:
+        """One region of the ``.mha`` mask, read as a region: the whole mask is never held on the
+        streamed path (bounded on disk for an uncompressed file, transient for a compressed one)."""
+        _require_simpleitk()
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(self.path)
+        reader.ReadImageInformation()
+        spatial = list(slices[1:])
+        reader.SetExtractIndex([int(part.start or 0) for part in reversed(spatial)])
+        reader.SetExtractSize([int(part.stop - (part.start or 0)) for part in reversed(spatial)])
+        return torch.as_tensor(sitk.GetArrayFromImage(reader.Execute())).unsqueeze(0)
+
     def _mask(self, name: str, slices: tuple[slice, ...] | None) -> torch.Tensor | np.ndarray:
-        """The case's mask, or the ``slices`` region of it: a ``.mha`` mask is sliced from the one
-        cached copy, a dataset mask is read whole or by region."""
+        """The case's mask, or the ``slices`` region of it: a ``.mha`` mask is read whole for the
+        whole-volume path and by region for a region, a dataset mask likewise."""
         if self.path.endswith(".mha"):
-            mask = self._cached_mha()
-            return mask if slices is None else mask[slices]
+            return self._cached_mha() if slices is None else self._mha_region(slices)
         for dataset in self.datasets:
             if dataset.is_dataset_exist(self.path, name):
                 if slices is None:
@@ -2107,7 +2127,7 @@ class Mask(Transform):
         expected = tuple(int(extent) for extent in context.source_shape)
         stored: tuple[int, ...] | None = None
         if self.path.endswith(".mha"):
-            stored = tuple(int(extent) for extent in self._cached_mha().shape[1:])
+            stored = self._mha_extent()
         else:
             for dataset in self.datasets:
                 if dataset.is_dataset_exist(self.path, name):
