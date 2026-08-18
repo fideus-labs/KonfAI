@@ -808,224 +808,51 @@ class PredictionSubset(Subset):
         super().__init__(subset, False, None)
 
 
-class Data(ABC):
-    """Abstract base class shared by training, prediction, and evaluation datasets."""
+class DataSources(ABC):
+    """The source resolution the four workflow datasets share.
 
-    @staticmethod
-    def _configured_transform_requires_single_process(classpath: str) -> bool:
-        for transform_name in classpath.split("|"):
-            candidate = transform_name.split(":")[-1].split(".")[-1].split("/")[0]
-            if candidate == "KonfAIInference":
-                return True
-        return False
-
-    @classmethod
-    def _groups_require_single_process_loading(cls, groups_src: Mapping[str, Group | GroupMetric | GroupOut]) -> bool:
-        for group in groups_src.values():
-            for group_transform in group.values():
-                for configured_transforms in (group_transform._transforms, group_transform._patch_transforms):
-                    if configured_transforms is None:
-                        continue
-                    if any(
-                        cls._configured_transform_requires_single_process(classpath)
-                        for classpath in configured_transforms
-                    ):
-                        return True
-        return False
-
-    @staticmethod
-    def _read_names_from_file(filename: str) -> list[str]:
-        with open(filename) as f:
-            return [name.strip() for name in f if name.strip()]
-
-    @classmethod
-    def _resolve_name_selectors(cls, selectors: list[str]) -> set[str]:
-        resolved_names: set[str] = set()
-        for selector in selectors:
-            if os.path.exists(selector):
-                resolved_names.update(cls._read_names_from_file(selector))
-            else:
-                resolved_names.add(selector)
-        return resolved_names
+    Which cases, from which file, under which destination group: the ``dataset_filenames`` roots,
+    the case names common to every source group and kept by ``subset``, and one
+    :class:`~konfai.data.patching.DatasetManager` per (destination group, case), all resolved by
+    :meth:`prepare`. :class:`Data` adds the batch-loading mechanics; :class:`DataTransform` builds
+    on this alone.
+    """
 
     @abstractmethod
     def __init__(
         self,
         dataset_filenames: list[str],
         groups_src: Mapping[str, Group | GroupMetric | GroupOut],
-        patch: DatasetPatch | None,
-        use_cache: bool,
         subset: Subset,
-        batch_size: int,
-        validation: float | str | list[int] | list[str] | None,
-        validation_augmentations: bool,
-        inline_augmentations: bool,
-        data_augmentations_list: dict[str, DataAugmentationsList],
-        num_workers: int | None,
-        pin_memory: bool,
-        prefetch_factor: int | None,
-        persistent_workers: bool | None,
         memory_budget: str | float | None,
     ) -> None:
         self.dataset_filenames = dataset_filenames
-        self.subset = subset
         self.groups_src = groups_src
-        self.patch = patch
-        self.validation = validation
-        self.validation_augmentations = validation_augmentations
-        self.data_augmentations_list = data_augmentations_list
-        self.batch_size = batch_size
-        self.inline_augmentations = inline_augmentations
+        self.subset = subset
         self.memory_budget = memory_budget
-        self.requires_single_process_loading = self._groups_require_single_process_loading(groups_src)
-
-        # A window keeps ``shuffle_window`` cases resident, so the FIFO buffer must be at least that
-        # large or a window would evict its own cases before their patches are consumed. Unwindowed,
-        # one batch plus the case being read is all a loader ever holds at once.
-        window = subset.shuffle_window
-        self._buffer_size = batch_size + 1 if window is None else max(batch_size + 1, window)
-        self._num_workers = num_workers
-        self._pin_memory = pin_memory
-        self._prefetch_factor = prefetch_factor
-        self._persistent_workers = persistent_workers
-        # ``memory_budget`` may later override ``use_cache`` (once the dataset size is known, in
-        # ``get_data``), which reshapes the loader; both paths funnel through the same builder.
-        self._configure_data_loading(use_cache)
-        self.data: list[list[dict[str, list[DatasetManager]]]] = []
-        self.mapping: list[list[list[tuple[int, int, int]]]] = []
         self.datasets: dict[str, Dataset] = {}
-        self._prepared_data: dict[str, list[DatasetManager]] | None = None
-        self._prepared_validation_data: dict[str, list[DatasetManager]] | None = None
-        self._prepared_mapping: list[tuple[int, int, int]] = []
-        self._prepared_validation_mapping: list[tuple[int, int, int]] = []
-        self._prepared_train_names: list[str] = []
-        self._prepared_validation_names: list[str] = []
+        #: The selected case names in run order; filled by :meth:`prepare`.
+        self.case_names: list[str] = []
+        self._managers: dict[str, list[DatasetManager]] | None = None
+
+    @property
+    def managers(self) -> dict[str, list[DatasetManager]]:
+        """One manager per case of every destination group, in ``case_names`` order, keyed by
+        destination group; built by :meth:`prepare`."""
+        if self._managers is None:
+            raise DatasetManagerError("The dataset was not prepared.", "Call prepare() before reading its managers.")
+        return self._managers
 
     def resolved_budget(self) -> MemoryBudget:
         """The configured memory budget as an object that knows its own scope (``resolve_memory_budget``)."""
         return resolve_memory_budget(self.memory_budget)
 
-    def _configure_data_loading(self, use_cache: bool) -> None:
-        """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
-
-        Called once from ``__init__`` with the declared ``use_cache`` and, when a ``memory_budget``
-        overrides it, again from ``get_data`` with the derived value. Caching preloads every case up
-        front, so it defaults to zero DataLoader workers; the streaming/buffer path spins workers up.
-        """
-        self.use_cache = use_cache
-        self.datasetIter = partial(
-            DatasetIter,
-            groups_src=self.groups_src,
-            inline_augmentations=self.inline_augmentations,
-            patch_size=self.patch.patch_size if self.patch is not None else None,
-            overlap=self.patch.overlap if self.patch is not None else None,
-            buffer_size=self._buffer_size,
-            use_cache=use_cache,
-        )
-        resolved_num_workers = self._num_workers
-        if self.requires_single_process_loading:
-            resolved_num_workers = 0
-        elif resolved_num_workers is None:
-            resolved_num_workers = max(1, min(os.cpu_count() or 1, 4)) if not use_cache else 0
-        self.resolved_num_workers: int = resolved_num_workers
-        self.dataLoader_args: dict[str, object] = {
-            "num_workers": resolved_num_workers,
-            "pin_memory": self._pin_memory,
-            "collate_fn": collate_konfai,
-        }
-        if resolved_num_workers > 0:
-            self.dataLoader_args["prefetch_factor"] = 2 if self._prefetch_factor is None else self._prefetch_factor
-            # Persistent workers keep a fork-time copy of the dataset and never see the main process's
-            # per-epoch reset_augmentation redraw, so inline augmentations freeze at their first-epoch draw.
-            # An explicit persistent_workers=True cannot override that: correctness wins over the request.
-            inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
-            if inline_augmentation_active:
-                persistent_workers = False
-            elif self._persistent_workers is not None:
-                persistent_workers = self._persistent_workers
-            else:
-                persistent_workers = True
-            self.dataLoader_args["persistent_workers"] = persistent_workers
-
-    def _estimate_cached_bytes(self) -> int:
-        """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read).
-
-        Sums ``prod(shape) x 4`` over every case of every source group, once per COPY the cache holds:
-        a cached case is its base tensor PLUS one per augmentation draw, which validation only makes
-        when ``validation_augmentations``. See ``_CACHE_ELEMENT_BYTES``: this is an honest header-only
-        estimate that ignores size-changing transforms (an augmentation's ``Mask`` included). It also
-        counts the tensors themselves, not the allocator's arenas around them: those settle about a
-        third higher (measured), which is over the "auto" safety fraction, so a dataset landing within
-        a few percent of an "auto" budget can still be caching more than the budget names.
-        """
-        total = 0
-        for prepared, copies in (
-            (self._prepared_data, Data._get_nb_augmentation(self._get_data_augmentations(True))),
-            (
-                self._prepared_validation_data,
-                Data._get_nb_augmentation(self._get_data_augmentations(self.validation_augmentations)),
-            ),
-        ):
-            for managers in (prepared or {}).values():
-                for manager in managers:
-                    total += int(np.prod(manager.base_shape, dtype=np.int64)) * _CACHE_ELEMENT_BYTES * copies
-        return total
-
-    #: Whether a ``memory_budget`` that fits may choose the cache. True for training (epochs
-    #: re-read every case); overridden False by the one-pass workflows, where a cache is never
-    #: re-read and the regime is always stream/buffer.
-    _budget_caches_when_fit = True
-
-    def _resolve_cache_regime(self, world_size: int) -> None:
-        """Derive ``use_cache`` from ``memory_budget``. ``None`` means ``"auto"``.
-
-        The cache is chosen iff the per-rank dataset (``dataset / world_size``: ``Data._split``
-        shards cases across ranks) fits the per-rank budget: an explicit budget is taken as declared
-        per rank; ``"auto"``: also what an absent key means: divides the detected node memory
-        (cgroup-capped) by the ranks sharing THAT node, so on a single node the two divisions cancel
-        and the test reduces to "does the whole dataset fit the node". The decision is logged once
-        here: ``get_data`` runs on the launcher alone, before any worker is spawned.
-        """
-        if not self._budget_caches_when_fit:
-            # One-pass workflows (prediction, evaluation) read each case exactly once: a cache is
-            # never re-read, so the regime is always stream/buffer and there is nothing to derive.
-            return
-        world_size = max(1, world_size)
-        n_cases = len(self._prepared_train_names) + len(self._prepared_validation_names)
-        dataset_bytes = self._estimate_cached_bytes()
-        per_rank_bytes = dataset_bytes / world_size
-
-        budget = self.resolved_budget()
-        per_rank_budget = budget.per_rank_bytes(node_local_ranks(world_size))
-        budget_desc = f"{budget.description}, per-rank"
-
-        use_cache = per_rank_bytes <= per_rank_budget
-        self._configure_data_loading(use_cache)
-
-        decision = f"CACHE the whole dataset in RAM ({self.resolved_num_workers} loader workers)"
-        if not use_cache:
-            case_bytes = dataset_bytes / max(1, n_cases)
-            decision = (
-                f"STREAM/BUFFER, no cache; FIFO working set ~= {self._buffer_size} cases x "
-                f"{format_bytes(case_bytes)} = {format_bytes(self._buffer_size * case_bytes)} per worker"
-            )
-        print(
-            f"[KonfAI] memory_budget: dataset ~= {format_bytes(dataset_bytes)} over {n_cases} cases | "
-            f"per-rank ~= {format_bytes(per_rank_bytes)} across {world_size} rank(s) | "
-            f"budget {format_bytes(per_rank_budget)} ({budget_desc}) -> {decision}"
-        )
-
-    def _get_data_augmentations(self, apply_augmentations: bool = True) -> list[DataAugmentationsList]:
-        return list(self.data_augmentations_list.values()) if apply_augmentations else []
-
-    @staticmethod
-    def _get_nb_augmentation(data_augmentations_list: list[DataAugmentationsList]) -> int:
-        return max(int(np.sum([data_augmentation.nb for data_augmentation in data_augmentations_list]) + 1), 1)
-
-    def _get_validation_mapping(self) -> list[tuple[int, int, int]]:
-        if self.validation_augmentations:
-            return self._prepared_validation_mapping
-        return [entry for entry in self._prepared_validation_mapping if entry[1] == 0]
+    def get_groups_dest(self):
+        groups_dest = []
+        for group_src in self.groups_src:
+            for group_dest in self.groups_src[group_src]:
+                groups_dest.append(group_dest)
+        return groups_dest
 
     def _check_destination_groups_are_unique(self) -> None:
         """A destination group names ONE chain, whatever source group it reads.
@@ -1049,8 +876,8 @@ class Data(ABC):
             owner[group_dest] = group_src
 
     def prepare(self) -> None:
-        """Instantiate config-driven transforms and augmentations before runtime."""
-        if self._prepared_data is not None and self._prepared_validation_data is not None:
+        """Bind the chains, resolve the sources and build the managers. Idempotent."""
+        if self._managers is not None:
             return
 
         self._check_destination_groups_are_unique()
@@ -1059,73 +886,28 @@ class Data(ABC):
             chain.prepare(group_src, group_dest)
             model_have_input |= chain.is_input
 
-        if self.patch is not None:
-            self.patch.init()
-
         if not model_have_input:
             raise DatasetManagerError(
                 "At least one group must be defined with 'is_input: true' to provide input to the network."
             )
 
-        for key, data_augmentations in self.data_augmentations_list.items():
-            data_augmentations.prepare(key)
         self._prepare_datasets()
 
-    def worst_case_shape(self) -> list[int] | None:
-        """Per-axis maximum spatial extent over every prepared case and augmentation copy.
+    def _prepare_datasets(self) -> None:
+        """Resolve the sources, select the cases and build their managers."""
+        names, dataset_name = self._select_cases()
+        self.case_names = names
+        self._managers = self._build_managers(names, dataset_name, patch=None, data_augmentations_list=[])
 
-        A provisional auto-patch grid starts from this worst case at full extent: one GLOBAL patch
-        size, which smaller cases clamp to fewer (or single whole-volume) patches for free.
-        """
-        shapes = [
-            shape
-            for prepared in (self._prepared_data, self._prepared_validation_data)
-            for managers in (prepared or {}).values()
-            for manager in managers
-            for shape in manager.shapes
-        ]
-        if not shapes:
-            return None
-        return [max(int(shape[axis]) for shape in shapes) for axis in range(len(shapes[0]))]
-
-    def set_free_axis_multiple(self, multiple: list[int] | None) -> None:
-        """Record the model's per-axis downsampling factor on the shared patch BEFORE ``prepare()`` cuts
-        the grids, so every case's free (``0``) axis rounds up to a valid model input. A no-op without a
-        patch (evaluation) or without a free axis; harmless once a re-plan has made the sizes concrete.
-        """
-        if self.patch is not None:
-            self.patch.free_axis_multiple = multiple
-
-    def replan_patch(self, patch_size: list[int]) -> None:
-        """Re-cut every prepared grid for a new GLOBAL patch size (the OOM-restart path).
-
-        The managers are rebuilt against the already-resolved sources and the SAME case lists --
-        NOT through ``prepare()`` (its idempotence guard would skip the rebuild): so a later
-        ``get_data`` shards cases identically across the restart: only the grids and the patch mapping change.
-        Each manager copies the shared ``DatasetPatch`` (with ``pad_to_patch``) at construction,
-        which is why the new sizes are written into that shared list IN PLACE: the loader factory
-        holds a reference to it too.
-        """
-        if self.patch is None or self._prepared_data is None or self._prepared_validation_data is None:
-            raise DatasetManagerError(
-                "replan_patch requires a prepared dataset with a patch definition.",
-                "Call prepare() first; a dataset without 'patch' has no grid to re-cut.",
-            )
-        self.patch.patch_size[:] = [int(size) for size in patch_size]
+    def _select_cases(self) -> tuple[list[str], dict[str, dict[str, list[str]]]]:
+        """The case names common to every group and kept by ``subset``, in run order (sorted, or
+        drawn once when ``subset.shuffle``), with the names each root holds per group."""
         datasets = self._resolve_dataset_sources()
-        dataset_name = {
-            group: {filename: self.datasets[filename].get_names(group) for filename, _ in entries}
-            for group, entries in datasets.items()
-        }
-        self._prepared_data, self._prepared_mapping = self._get_datasets(
-            self._prepared_train_names, dataset_name, self._get_data_augmentations(True)
-        )
-        self._prepared_validation_data, self._prepared_validation_mapping = self._get_datasets(
-            self._prepared_validation_names,
-            dataset_name,
-            self._get_data_augmentations(self.validation_augmentations),
-            index_offset=len(self._prepared_train_names),
-        )
+        dataset_name, subset_names = self._resolve_common_names(datasets)
+        names = sorted(subset_names)
+        if self.subset.shuffle:
+            names = random.sample(names, len(names))  # nosec B311
+        return names, dataset_name
 
     def _resolve_dataset_sources(self) -> dict[str, list[tuple[str, bool]]]:
         datasets: dict[str, list[tuple[str, bool]]] = {}
@@ -1172,11 +954,6 @@ class Data(ABC):
 
             for group_dest in self.groups_src[group_src]:
                 self.groups_src[group_src][group_dest].set_datasets(list(self.datasets.values()))
-
-        for _group_src, entries in datasets.items():
-            for _key, data_augmentations in self.data_augmentations_list.items():
-                data_augmentations.set_datasets([self.datasets[filename] for filename, _ in entries])
-            break
         return datasets
 
     def _resolve_common_names(
@@ -1269,36 +1046,363 @@ class Data(ABC):
                         )
         return source_filename_by_group
 
+    def _build_managers(
+        self,
+        names: list[str],
+        dataset_name: dict[str, dict[str, list[str]]],
+        patch: DatasetPatch | None,
+        data_augmentations_list: list[DataAugmentationsList],
+        index_offset: int = 0,
+    ) -> dict[str, list[DatasetManager]]:
+        """One manager per (destination group, case), the case read from the first declared root
+        that holds it. ``index_offset`` keeps the manager index unique across the partitions
+        :class:`Data` builds: the augmentations they share cache a case's draw by index."""
+        source_filename_by_group = self._get_source_filename_by_group(dataset_name)
+        return {
+            group_dest: [
+                DatasetManager(
+                    index_offset + i,
+                    group_src,
+                    group_dest,
+                    name,
+                    self.datasets[source_filename_by_group[group_src][name]],
+                    patch=patch,
+                    transforms=self.groups_src[group_src][group_dest].transforms,
+                    data_augmentations_list=data_augmentations_list,
+                )
+                for i, name in enumerate(names)
+            ]
+            for group_src in self.groups_src
+            for group_dest in self.groups_src[group_src]
+        }
+
+    def _params(self) -> dict[str, object]:
+        return {
+            "dataset_filenames": self.dataset_filenames,
+            "groups_src": self.groups_src,
+            "memory_budget": self.memory_budget,
+            "subset": self.subset,
+        }
+
+    def __str__(self) -> str:
+        return str(self._params())
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
+class Data(DataSources):
+    """The batch-loading layer over :class:`DataSources`, shared by training, prediction and
+    evaluation: a patch grid, an optional RAM cache, a train/validation split, augmentation copies,
+    and one torch DataLoader per rank and partition (:meth:`get_data`).
+
+    ``case_names``/``managers`` hold the first partition (the training cases); the validation split
+    has its own.
+    """
+
+    @staticmethod
+    def _configured_transform_requires_single_process(classpath: str) -> bool:
+        for transform_name in classpath.split("|"):
+            candidate = transform_name.split(":")[-1].split(".")[-1].split("/")[0]
+            if candidate == "KonfAIInference":
+                return True
+        return False
+
+    @classmethod
+    def _groups_require_single_process_loading(cls, groups_src: Mapping[str, Group | GroupMetric | GroupOut]) -> bool:
+        for group in groups_src.values():
+            for group_transform in group.values():
+                for configured_transforms in (group_transform._transforms, group_transform._patch_transforms):
+                    if configured_transforms is None:
+                        continue
+                    if any(
+                        cls._configured_transform_requires_single_process(classpath)
+                        for classpath in configured_transforms
+                    ):
+                        return True
+        return False
+
+    @staticmethod
+    def _read_names_from_file(filename: str) -> list[str]:
+        with open(filename) as f:
+            return [name.strip() for name in f if name.strip()]
+
+    @classmethod
+    def _resolve_name_selectors(cls, selectors: list[str]) -> set[str]:
+        resolved_names: set[str] = set()
+        for selector in selectors:
+            if os.path.exists(selector):
+                resolved_names.update(cls._read_names_from_file(selector))
+            else:
+                resolved_names.add(selector)
+        return resolved_names
+
+    @abstractmethod
+    def __init__(
+        self,
+        dataset_filenames: list[str],
+        groups_src: Mapping[str, Group | GroupMetric | GroupOut],
+        subset: Subset,
+        memory_budget: str | float | None,
+        patch: DatasetPatch | None,
+        use_cache: bool,
+        batch_size: int,
+        validation: float | str | list[int] | list[str] | None,
+        num_workers: int | None,
+        pin_memory: bool,
+        prefetch_factor: int | None,
+        persistent_workers: bool | None,
+        data_augmentations_list: dict[str, DataAugmentationsList] | None = None,
+        inline_augmentations: bool = False,
+        validation_augmentations: bool = True,
+    ) -> None:
+        super().__init__(dataset_filenames, groups_src, subset, memory_budget)
+        self.patch = patch
+        self.validation = validation
+        self.validation_augmentations = validation_augmentations
+        self.data_augmentations_list = data_augmentations_list or {}
+        self.batch_size = batch_size
+        self.inline_augmentations = inline_augmentations
+        self.requires_single_process_loading = self._groups_require_single_process_loading(groups_src)
+
+        # A window keeps ``shuffle_window`` cases resident, so the FIFO buffer must be at least that
+        # large or a window would evict its own cases before their patches are consumed. Unwindowed,
+        # one batch plus the case being read is all a loader ever holds at once.
+        window = subset.shuffle_window
+        self._buffer_size = batch_size + 1 if window is None else max(batch_size + 1, window)
+        self._num_workers = num_workers
+        self._pin_memory = pin_memory
+        self._prefetch_factor = prefetch_factor
+        self._persistent_workers = persistent_workers
+        # ``memory_budget`` may later override ``use_cache`` (once the dataset size is known, in
+        # ``get_data``), which reshapes the loader; both paths funnel through the same builder.
+        self._configure_data_loading(use_cache)
+        self.data: list[list[dict[str, list[DatasetManager]]]] = []
+        self.mapping: list[list[list[tuple[int, int, int]]]] = []
+        self._validation_managers: dict[str, list[DatasetManager]] = {}
+        self._prepared_mapping: list[tuple[int, int, int]] = []
+        self._prepared_validation_mapping: list[tuple[int, int, int]] = []
+        self._validation_names: list[str] = []
+
+    def _configure_data_loading(self, use_cache: bool) -> None:
+        """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
+
+        Called once from ``__init__`` with the declared ``use_cache`` and, when a ``memory_budget``
+        overrides it, again from ``get_data`` with the derived value. Caching preloads every case up
+        front, so it defaults to zero DataLoader workers; the streaming/buffer path spins workers up.
+        """
+        self.use_cache = use_cache
+        self.datasetIter = partial(
+            DatasetIter,
+            groups_src=self.groups_src,
+            inline_augmentations=self.inline_augmentations,
+            patch_size=self.patch.patch_size if self.patch is not None else None,
+            overlap=self.patch.overlap if self.patch is not None else None,
+            buffer_size=self._buffer_size,
+            use_cache=use_cache,
+        )
+        resolved_num_workers = self._num_workers
+        if self.requires_single_process_loading:
+            resolved_num_workers = 0
+        elif resolved_num_workers is None:
+            resolved_num_workers = max(1, min(os.cpu_count() or 1, 4)) if not use_cache else 0
+        self.resolved_num_workers: int = resolved_num_workers
+        self.dataLoader_args: dict[str, object] = {
+            "num_workers": resolved_num_workers,
+            "pin_memory": self._pin_memory,
+            "collate_fn": collate_konfai,
+        }
+        if resolved_num_workers > 0:
+            self.dataLoader_args["prefetch_factor"] = 2 if self._prefetch_factor is None else self._prefetch_factor
+            # Persistent workers keep a fork-time copy of the dataset and never see the main process's
+            # per-epoch reset_augmentation redraw, so inline augmentations freeze at their first-epoch draw.
+            # An explicit persistent_workers=True cannot override that: correctness wins over the request.
+            inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
+            if inline_augmentation_active:
+                persistent_workers = False
+            elif self._persistent_workers is not None:
+                persistent_workers = self._persistent_workers
+            else:
+                persistent_workers = True
+            self.dataLoader_args["persistent_workers"] = persistent_workers
+
+    def _estimate_cached_bytes(self) -> int:
+        """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read).
+
+        Sums ``prod(shape) x 4`` over every case of every source group, once per COPY the cache holds:
+        a cached case is its base tensor PLUS one per augmentation draw, which validation only makes
+        when ``validation_augmentations``. See ``_CACHE_ELEMENT_BYTES``: this is an honest header-only
+        estimate that ignores size-changing transforms (an augmentation's ``Mask`` included). It also
+        counts the tensors themselves, not the allocator's arenas around them: those settle about a
+        third higher (measured), which is over the "auto" safety fraction, so a dataset landing within
+        a few percent of an "auto" budget can still be caching more than the budget names.
+        """
+        total = 0
+        for prepared, copies in (
+            (self._managers, Data._get_nb_augmentation(self._get_data_augmentations(True))),
+            (
+                self._validation_managers,
+                Data._get_nb_augmentation(self._get_data_augmentations(self.validation_augmentations)),
+            ),
+        ):
+            for managers in (prepared or {}).values():
+                for manager in managers:
+                    total += int(np.prod(manager.base_shape, dtype=np.int64)) * _CACHE_ELEMENT_BYTES * copies
+        return total
+
+    #: Whether a ``memory_budget`` that fits may choose the cache. True for training (epochs
+    #: re-read every case); overridden False by the one-pass workflows, where a cache is never
+    #: re-read and the regime is always stream/buffer.
+    _budget_caches_when_fit = True
+
+    def _resolve_cache_regime(self, world_size: int) -> None:
+        """Derive ``use_cache`` from ``memory_budget``. ``None`` means ``"auto"``.
+
+        The cache is chosen iff the per-rank dataset (``dataset / world_size``: ``Data._split``
+        shards cases across ranks) fits the per-rank budget: an explicit budget is taken as declared
+        per rank; ``"auto"``: also what an absent key means: divides the detected node memory
+        (cgroup-capped) by the ranks sharing THAT node, so on a single node the two divisions cancel
+        and the test reduces to "does the whole dataset fit the node". The decision is logged once
+        here: ``get_data`` runs on the launcher alone, before any worker is spawned.
+        """
+        if not self._budget_caches_when_fit:
+            # One-pass workflows (prediction, evaluation) read each case exactly once: a cache is
+            # never re-read, so the regime is always stream/buffer and there is nothing to derive.
+            return
+        world_size = max(1, world_size)
+        n_cases = len(self.case_names) + len(self._validation_names)
+        dataset_bytes = self._estimate_cached_bytes()
+        per_rank_bytes = dataset_bytes / world_size
+
+        budget = self.resolved_budget()
+        per_rank_budget = budget.per_rank_bytes(node_local_ranks(world_size))
+        budget_desc = f"{budget.description}, per-rank"
+
+        use_cache = per_rank_bytes <= per_rank_budget
+        self._configure_data_loading(use_cache)
+
+        decision = f"CACHE the whole dataset in RAM ({self.resolved_num_workers} loader workers)"
+        if not use_cache:
+            case_bytes = dataset_bytes / max(1, n_cases)
+            decision = (
+                f"STREAM/BUFFER, no cache; FIFO working set ~= {self._buffer_size} cases x "
+                f"{format_bytes(case_bytes)} = {format_bytes(self._buffer_size * case_bytes)} per worker"
+            )
+        print(
+            f"[KonfAI] memory_budget: dataset ~= {format_bytes(dataset_bytes)} over {n_cases} cases | "
+            f"per-rank ~= {format_bytes(per_rank_bytes)} across {world_size} rank(s) | "
+            f"budget {format_bytes(per_rank_budget)} ({budget_desc}) -> {decision}"
+        )
+
+    def _get_data_augmentations(self, apply_augmentations: bool = True) -> list[DataAugmentationsList]:
+        return list(self.data_augmentations_list.values()) if apply_augmentations else []
+
+    @staticmethod
+    def _get_nb_augmentation(data_augmentations_list: list[DataAugmentationsList]) -> int:
+        return max(int(np.sum([data_augmentation.nb for data_augmentation in data_augmentations_list]) + 1), 1)
+
+    def _get_validation_mapping(self) -> list[tuple[int, int, int]]:
+        if self.validation_augmentations:
+            return self._prepared_validation_mapping
+        return [entry for entry in self._prepared_validation_mapping if entry[1] == 0]
+
+    def _resolve_dataset_sources(self) -> dict[str, list[tuple[str, bool]]]:
+        datasets = super()._resolve_dataset_sources()
+        # The augmentations get the roots of the first group resolved.
+        for entries in datasets.values():
+            for data_augmentations in self.data_augmentations_list.values():
+                data_augmentations.set_datasets([self.datasets[filename] for filename, _ in entries])
+            break
+        return datasets
+
+    def _prepare_datasets(self) -> None:
+        """Bind the patch and the augmentations, then split the selected cases and build both
+        partitions: a manager copies the patch and counts the draws at construction."""
+        if self.patch is not None:
+            self.patch.init()
+        for key, data_augmentations in self.data_augmentations_list.items():
+            data_augmentations.prepare(key)
+        names, dataset_name = self._select_cases()
+        self.case_names, self._validation_names = self._split_train_validation_names(names, dataset_name)
+        self._build_partitions(dataset_name)
+
+    def _build_partitions(self, dataset_name: dict[str, dict[str, list[str]]]) -> None:
+        """(Re)build the managers and patch mappings of both partitions from ``case_names`` and
+        ``_validation_names``; the validation indices continue the training ones. Nothing is
+        assigned until both are built, so a failure leaves the dataset unprepared."""
+        managers, mapping = self._get_datasets(self.case_names, dataset_name, self._get_data_augmentations(True))
+        validation_managers, validation_mapping = self._get_datasets(
+            self._validation_names,
+            dataset_name,
+            self._get_data_augmentations(self.validation_augmentations),
+            index_offset=len(self.case_names),
+        )
+        self._managers, self._prepared_mapping = managers, mapping
+        self._validation_managers, self._prepared_validation_mapping = validation_managers, validation_mapping
+
+    def worst_case_shape(self) -> list[int] | None:
+        """Per-axis maximum spatial extent over every prepared case and augmentation copy.
+
+        A provisional auto-patch grid starts from this worst case at full extent: one GLOBAL patch
+        size, which smaller cases clamp to fewer (or single whole-volume) patches for free.
+        """
+        shapes = [
+            shape
+            for prepared in (self._managers, self._validation_managers)
+            for managers in (prepared or {}).values()
+            for manager in managers
+            for shape in manager.shapes
+        ]
+        if not shapes:
+            return None
+        return [max(int(shape[axis]) for shape in shapes) for axis in range(len(shapes[0]))]
+
+    def set_free_axis_multiple(self, multiple: list[int] | None) -> None:
+        """Record the model's per-axis downsampling factor on the shared patch BEFORE ``prepare()`` cuts
+        the grids, so every case's free (``0``) axis rounds up to a valid model input. A no-op without a
+        patch (evaluation) or without a free axis; harmless once a re-plan has made the sizes concrete.
+        """
+        if self.patch is not None:
+            self.patch.free_axis_multiple = multiple
+
+    def replan_patch(self, patch_size: list[int]) -> None:
+        """Re-cut every prepared grid for a new GLOBAL patch size (the OOM-restart path).
+
+        The managers are rebuilt against the already-resolved sources and the SAME case lists --
+        NOT through ``prepare()`` (its idempotence guard would skip the rebuild): so a later
+        ``get_data`` shards cases identically across the restart: only the grids and the patch mapping change.
+        Each manager copies the shared ``DatasetPatch`` (with ``pad_to_patch``) at construction,
+        which is why the new sizes are written into that shared list IN PLACE: the loader factory
+        holds a reference to it too.
+        """
+        if self.patch is None or self._managers is None:
+            raise DatasetManagerError(
+                "replan_patch requires a prepared dataset with a patch definition.",
+                "Call prepare() first; a dataset without 'patch' has no grid to re-cut.",
+            )
+        self.patch.patch_size[:] = [int(size) for size in patch_size]
+        datasets = self._resolve_dataset_sources()
+        dataset_name = {
+            group: {filename: self.datasets[filename].get_names(group) for filename, _ in entries}
+            for group, entries in datasets.items()
+        }
+        self._build_partitions(dataset_name)
+
+    @staticmethod
+    def _patch_counts(managers: dict[str, list[DatasetManager]], nb_augmentation: int) -> list[list[int]]:
+        """Per case, per copy, the number of patches, counted on the last destination group."""
+        last = next(reversed(managers.values()), [])
+        return [[manager.get_size(a) for a in range(nb_augmentation)] for manager in last]
+
     def _get_case_entry_counts(
         self,
         names: list[str],
         dataset_name: dict[str, dict[str, list[str]]],
         data_augmentations_list: list[DataAugmentationsList],
     ) -> list[int]:
-        if len(names) == 0:
-            return []
-
-        source_filename_by_group = self._get_source_filename_by_group(dataset_name)
+        managers = self._build_managers(names, dataset_name, self.patch, data_augmentations_list)
         nb_augmentation = self._get_nb_augmentation(data_augmentations_list)
-        nb_patch = [[0] * nb_augmentation for _ in names]
-
-        for group_src, group_dest, chain in _chains(self.groups_src):
-            datasets = [
-                DatasetManager(
-                    i,
-                    group_src,
-                    group_dest,
-                    name,
-                    self.datasets[source_filename_by_group[group_src][name]],
-                    patch=self.patch,
-                    transforms=chain.transforms,
-                    data_augmentations_list=data_augmentations_list,
-                )
-                for i, name in enumerate(names)
-            ]
-            nb_patch = [[dataset.get_size(a) for a in range(nb_augmentation)] for dataset in datasets]
-
-        return [int(np.sum(case_patch_counts)) for case_patch_counts in nb_patch]
+        return [int(sum(counts)) for counts in self._patch_counts(managers, nb_augmentation)]
 
     def _resolve_validation_indices(
         self,
@@ -1401,36 +1505,6 @@ class Data(ABC):
 
         return train_names, validation_names
 
-    def _prepare_datasets(self) -> None:
-        """Resolve dataset files, validate subsets, and precompute train/validation mappings."""
-        datasets = self._resolve_dataset_sources()
-        dataset_name, subset_names = self._resolve_common_names(datasets)
-        subset_names_list = sorted(subset_names)
-        if self.subset.shuffle:
-            subset_names_list = random.sample(subset_names_list, len(subset_names_list))  # nosec B311
-        train_names, validation_names = self._split_train_validation_names(
-            subset_names_list,
-            dataset_name,
-        )
-        train_data, train_mapping = self._get_datasets(
-            train_names,
-            dataset_name,
-            self._get_data_augmentations(True),
-        )
-        validation_data, validate_mapping = self._get_datasets(
-            validation_names,
-            dataset_name,
-            self._get_data_augmentations(self.validation_augmentations),
-            index_offset=len(train_names),
-        )
-
-        self._prepared_data = train_data
-        self._prepared_validation_data = validation_data
-        self._prepared_mapping = train_mapping
-        self._prepared_validation_mapping = validate_mapping
-        self._prepared_train_names = train_names
-        self._prepared_validation_names = validation_names
-
     def _get_datasets(
         self,
         names: list[str],
@@ -1438,45 +1512,21 @@ class Data(ABC):
         data_augmentations_list: list[DataAugmentationsList],
         index_offset: int = 0,
     ) -> tuple[dict[str, list[DatasetManager]], list[tuple[int, int, int]]]:
-        nb_dataset = len(names)
-        nb_patch: list[list[int]]
-        data = {}
-        mapping: list[tuple[int, int, int]] = []
-        source_filename_by_group = self._get_source_filename_by_group(dataset_name)
+        """A partition: its managers and its ``(case, copy, patch)`` mapping in loader order."""
+        managers = self._build_managers(names, dataset_name, self.patch, data_augmentations_list, index_offset)
         nb_augmentation = self._get_nb_augmentation(data_augmentations_list)
-
-        for group_src, group_dest, chain in _chains(self.groups_src):
-            data[group_dest] = [
-                DatasetManager(
-                    # A globally-unique augmentation index (offset for validation) so the shared
-                    # augmentation objects do not collide train and validation draws in their cache.
-                    index_offset + i,
-                    group_src,
-                    group_dest,
-                    name,
-                    self.datasets[source_filename_by_group[group_src][name]],
-                    patch=self.patch,
-                    transforms=chain.transforms,
-                    data_augmentations_list=data_augmentations_list,
-                )
-                for i, name in enumerate(names)
-            ]
-            nb_patch = [[dataset.get_size(a) for a in range(nb_augmentation)] for dataset in data[group_dest]]
-
+        mapping: list[tuple[int, int, int]] = []
         # PREDICTION walks the mapping in order, and the copies of a TTA case must advance together
         # along the slab axis for the streamed write to hold a bounded window (see
         # ``_interleaved_case_entries``). TRAIN shuffles the mapping anyway and keeps the plain
         # order, as does a dataset prepared outside any workflow, where no state is set at all.
         interleave = nb_augmentation > 1 and os.environ.get("KONFAI_STATE") == str(State.PREDICTION)
-        for x in range(nb_dataset):
-            entries = [(y, z) for y in range(nb_augmentation) for z in range(nb_patch[x][y])]
+        for x, counts in enumerate(self._patch_counts(managers, nb_augmentation)):
+            entries = [(y, z) for y in range(nb_augmentation) for z in range(counts[y])]
             if interleave:
-                entries = _interleaved_case_entries([managers[x].patch for managers in data.values()], entries)
+                entries = _interleaved_case_entries([group[x].patch for group in managers.values()], entries)
             mapping.extend((x, y, z) for y, z in entries)
-        return data, mapping
-
-    def get_groups_dest(self):
-        return [group_dest for _group_src, group_dest, _chain in _chains(self.groups_src)]
+        return managers, mapping
 
     @staticmethod
     def _split(mapping: list[tuple[int, int, int]], world_size: int) -> list[list[tuple[int, int, int]]]:
@@ -1533,7 +1583,7 @@ class Data(ABC):
         return local_indices, remapped_mapping
 
     def get_data(self, world_size: int) -> tuple[list[list[DataLoader]], list[str], list[str]]:
-        if self._prepared_data is None or self._prepared_validation_data is None:
+        if self._managers is None:
             raise DatasetManagerError("Dataset configuration was not prepared before runtime data loading.")
 
         self._resolve_cache_regime(world_size)
@@ -1545,12 +1595,12 @@ class Data(ABC):
             self.data.append([])
             self.mapping.append([])
             train_indices, train_remapped_mapping = self._remap_dataset_indices(train_mapping)
-            self.data[i].append({k: [v[it] for it in train_indices] for k, v in self._prepared_data.items()})
+            self.data[i].append({k: [v[it] for it in train_indices] for k, v in self._managers.items()})
             self.mapping[i].append(train_remapped_mapping)
             if len(validate_mapping):
                 validation_indices, validation_remapped_mapping = self._remap_dataset_indices(validate_mapping)
                 self.data[i].append(
-                    {k: [v[it] for it in validation_indices] for k, v in self._prepared_validation_data.items()}
+                    {k: [v[it] for it in validation_indices] for k, v in self._validation_managers.items()}
                 )
                 self.mapping[i].append(validation_remapped_mapping)
 
@@ -1584,26 +1634,19 @@ class Data(ABC):
                         **self.dataLoader_args,
                     )
                 )
-        return data_loaders, self._prepared_train_names, self._prepared_validation_names
+        return data_loaders, self.case_names, self._validation_names
 
-    def __str__(self) -> str:
-        params = {
-            "dataset_filenames": self.dataset_filenames,
-            "groups_src": self.groups_src,
+    def _params(self) -> dict[str, object]:
+        return {
+            **super()._params(),
             "patch": self.patch,
             "use_cache": self.use_cache,
-            "memory_budget": self.memory_budget,
-            "subset": self.subset,
             "batch_size": self.batch_size,
             "validation": self.validation,
             "validation_augmentations": self.validation_augmentations,
             "inline_augmentations": self.inline_augmentations,
             "data_augmentations_list": self.data_augmentations_list,
         }
-        return str(params)
-
-    def __repr__(self) -> str:
-        return str(self)
 
 
 @config("Dataset")
@@ -1630,21 +1673,21 @@ class DataTrain(Data):
         super().__init__(
             dataset_filenames,
             groups_src,
-            patch,
+            subset,
+            memory_budget,
+            patch=patch,
             # Training re-reads every case each epoch: cache when the dataset fits the
             # 'memory_budget' fit-test, stream when it does not.
-            True,
-            subset,
-            batch_size,
-            validation,
-            validation_augmentations,
-            inline_augmentations,
-            augmentations if augmentations else {},
-            num_workers,
-            pin_memory,
-            prefetch_factor,
-            persistent_workers,
-            memory_budget,
+            use_cache=True,
+            batch_size=batch_size,
+            validation=validation,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            data_augmentations_list=augmentations,
+            inline_augmentations=inline_augmentations,
+            validation_augmentations=validation_augmentations,
         )
 
 
@@ -1671,21 +1714,19 @@ class DataPrediction(Data):
     ) -> None:
 
         super().__init__(
-            dataset_filenames=dataset_filenames,
-            groups_src=groups_src,
+            dataset_filenames,
+            groups_src,
+            subset,
+            memory_budget,
             patch=patch,
             use_cache=False,
-            subset=subset,
             batch_size=batch_size,
             validation=None,
-            validation_augmentations=True,
-            inline_augmentations=False,
-            data_augmentations_list=augmentations if augmentations else {},
             num_workers=num_workers,
             pin_memory=pin_memory,
             prefetch_factor=prefetch_factor,
             persistent_workers=False if persistent_workers is None else persistent_workers,
-            memory_budget=memory_budget,
+            data_augmentations_list=augmentations,
         )
 
 
@@ -1777,42 +1818,36 @@ class DataMetric(Data):
     ) -> None:
 
         super().__init__(
-            dataset_filenames=dataset_filenames,
-            groups_src=groups_src,
+            dataset_filenames,
+            groups_src,
+            subset,
+            memory_budget,
             patch=None,
             # Evaluation reads each case exactly once (no augmentations, one pass): a cache is never
             # re-read, it only fronts the whole dataset's RAM. Stream.
             use_cache=False,
-            subset=subset,
             batch_size=1,
             validation=validation,
-            validation_augmentations=True,
-            data_augmentations_list={},
-            inline_augmentations=False,
             num_workers=num_workers,
             pin_memory=pin_memory,
             prefetch_factor=prefetch_factor,
             # One pass: workers are never reused across epochs, and persistent workers race the
             # process teardown (the terminated worker trips torch's failure handler at exit).
             persistent_workers=False if persistent_workers is None else persistent_workers,
-            memory_budget=memory_budget,
         )
 
 
 @config("Dataset")
-class DataTransform(Data):
+class DataTransform(DataSources):
     """Dataset configuration used by the transform workflow.
 
-    The amputated grammar, on the DataMetric precedent: no patch (the planner cuts slabs, never the
-    user), no batch, no validation split, no shuffle, and no ``augmentations`` section: a draw is a
-    stage, so it is declared IN the chain, at the place it applies, after an
-    :class:`~konfai.data.transform.Expand` marker. What remains is what the workflow is: sources,
-    chains, a budget. Everything decidable from the config alone is refused here, before a single
-    byte is read.
+    Sources, chains, a budget: the workflow reads :class:`DataSources` alone, its engine being
+    :class:`~konfai.data.materialize.CaseMaterializer` over the managers, never a DataLoader. So no
+    patch (the planner cuts slabs, never the user), no batch, no validation split, no shuffle, and
+    no ``augmentations`` section: a draw is a stage, declared IN the chain, at the place it applies,
+    after an :class:`~konfai.data.transform.Expand` marker. Everything decidable from the config
+    alone is refused here, before a single byte is read.
     """
-
-    # One pass: each case is read once, a cache is never re-read, always stream/buffer.
-    _budget_caches_when_fit = False
 
     def __init__(
         self,
@@ -1821,24 +1856,7 @@ class DataTransform(Data):
         memory_budget: str | float = "auto",
         subset: PredictionSubset = PredictionSubset(),
     ) -> None:
-        super().__init__(
-            dataset_filenames=dataset_filenames,
-            groups_src=groups_src,
-            patch=None,
-            use_cache=False,
-            subset=subset,
-            batch_size=1,
-            validation=None,
-            validation_augmentations=False,
-            inline_augmentations=False,
-            data_augmentations_list={},
-            # The engine is materialize(), never a DataLoader: no torch workers, no FIFO.
-            num_workers=0,
-            pin_memory=False,
-            prefetch_factor=None,
-            persistent_workers=False,
-            memory_budget=memory_budget,
-        )
+        super().__init__(dataset_filenames, groups_src, subset, memory_budget)
         #: The run's seed, set by the workflow before :meth:`prepare`. Stamped onto every ``Expand``
         #: below, which is where the only randomness of a transform run lives.
         self.manual_seed = 0

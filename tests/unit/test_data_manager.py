@@ -166,8 +166,8 @@ data._resolve_common_names = lambda datasets: ({}, set(names))
 data._get_datasets = lambda case_names, dataset_name, augmentations, index_offset=0: ({}, [])
 random.seed(1234)
 data._prepare_datasets()
-print(";".join(data._prepared_train_names))
-print(";".join(data._prepared_validation_names))
+print(";".join(data.case_names))
+print(";".join(data._validation_names))
 """
 
 
@@ -210,8 +210,8 @@ def test_train_split_shuffle_draws_from_sorted_names(monkeypatch):
     data._prepare_datasets()
 
     assert captured["population"] == sorted(names)
-    assert data._prepared_validation_names == ["CASE_010", "CASE_005"]
-    assert data._prepared_train_names == ["CASE_003", "CASE_002", "CASE_001"]
+    assert data._validation_names == ["CASE_010", "CASE_005"]
+    assert data.case_names == ["CASE_003", "CASE_002", "CASE_001"]
 
 
 def test_data_train_validation_accepts_mixed_case_names_and_case_files(tmp_path: Path) -> None:
@@ -279,10 +279,10 @@ def test_data_train_prepare_skips_validation_augmentation_layout_when_disabled(t
 
     dataset.prepare()
 
-    assert dataset._prepared_data is not None
-    assert dataset._prepared_validation_data is not None
-    assert dataset._prepared_data["CT"][0].total_augmentations == 1
-    assert dataset._prepared_validation_data["CT"][0].total_augmentations == 0
+    assert dataset.managers is not None
+    assert dataset._validation_managers is not None
+    assert dataset.managers["CT"][0].total_augmentations == 1
+    assert dataset._validation_managers["CT"][0].total_augmentations == 0
 
 
 # --------------------------------------------------------------------------------------
