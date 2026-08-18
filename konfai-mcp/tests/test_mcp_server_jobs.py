@@ -245,6 +245,13 @@ class _ProcDone:
         return self._returncode
 
 
+class _ProcRunning:
+    pid = 124
+
+    def poll(self) -> None:
+        return None
+
+
 def _isoformat(value: float | None) -> str | None:
     return None if value is None else f"ts:{value}"
 
@@ -298,6 +305,34 @@ def test_a_finished_transform_job_carries_where_its_data_went(tmp_path: Path) ->
     assert payload["status"] == "done"
     assert payload["outputs"] == outputs
     assert "inspect_dataset" in payload["next_actions"]
+
+
+def test_a_running_transform_job_does_not_report_a_previous_runs_outputs(tmp_path: Path) -> None:
+    # The run directory is reused across runs of one name: while the job is still running, the
+    # outputs.json there is a previous run's manifest, not this job's.
+    registry = JobRegistry({"queued", "running"})
+    run_dir = tmp_path / "Transforms" / "PREP"
+    run_dir.mkdir(parents=True)
+    stale = [{"group_src": "CT", "group_dest": "CT_out", "dataset": str(tmp_path / "Old"), "format": "h5"}]
+    (run_dir / "outputs.json").write_text(json.dumps(stale), encoding="utf-8")
+    job = Job(
+        job_id="job3",
+        session="default",
+        kind="transform",
+        command=["sleep", "1"],
+        cwd=tmp_path,
+        log_path=tmp_path / "job.log",
+        config_path=tmp_path / "Transform.yml",
+        runtime_log_path=run_dir / "log_0.txt",
+        status="running",
+    )
+    job.proc = cast(Any, _ProcRunning())
+    registry.jobs[job.job_id] = job
+
+    payload = registry.payload(job, _isoformat)
+
+    assert payload["status"] == "running"
+    assert "outputs" not in payload
 
 
 def test_declared_output_but_empty_result_becomes_error(tmp_path: Path) -> None:

@@ -345,7 +345,9 @@ def _transform_outputs(session: str, base: str) -> list[dict[str, str]]:
         dataset = entry.get("dataset")
         if not isinstance(dataset, str) or not dataset:
             continue
-        path = entry.get("path") or dataset
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:  # a manifest is data: a non-string path is not one
+            path = dataset
         with suppress(ValueError):
             path = str(Path(path).relative_to(_session_dir(session)))
         found.append(

@@ -654,6 +654,14 @@ def test_read_data_quantile_is_numpys_without_holding_the_volume(
             got = dataset.read_data_quantile("G", name, q)
             expected = np.quantile(volume, q)
             assert got == expected and type(got) is type(expected), (name, q, got, expected)
+    # A NaN anywhere makes numpy's quantile NaN; the scan answers the same instead of narrowing a
+    # histogram no bin of which can hold the NaN.
+    holed = volumes["f32"].copy()
+    holed[0, 3, 4, 5] = np.nan
+    dataset.write("G", "holed", holed, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    kept = any(np.isnan(block).any() for block in dataset.iter_data_blocks("G", "holed")())
+    if kept:  # a NIfTI writer sanitises non-finite values; where the NaN survives, so does numpy's answer
+        assert np.isnan(dataset.read_data_quantile("G", "holed", 0.05))
 
 
 def test_a_transform_file_the_h5_pool_holds_stays_readable_as_a_transform(tmp_path: Path) -> None:

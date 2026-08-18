@@ -257,8 +257,9 @@ def test_h5_replace_keeps_the_old_entry_until_the_new_one_is_in_place(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """HDF5 has no rename-over. Deleting the old entry and then moving the new one in leaves a
-    window where a crash loses both; the old entry is moved aside instead, and survives a crash in
-    that window (recoverable under its .replaced-<pid> key, which no listing shows as a case)."""
+    window where a crash loses both; the old entry is moved aside instead, and a publish that fails
+    puts it back where it was (a crash inside that window leaves it recoverable under its
+    .replaced-<pid> key, which no listing shows as a case)."""
     h5py = pytest.importorskip("h5py")
     first = _volume()
     dataset = Dataset(tmp_path / "streamed", "h5")
@@ -266,22 +267,27 @@ def test_h5_replace_keeps_the_old_entry_until_the_new_one_is_in_place(
     stream = dataset.open_data_stream("CT", "CASE_000", list(first.shape), first.dtype, _image_attributes())
     assert stream is not None
     real_move = h5py.Group.move
+    failed_publishes: list[str] = []
 
-    def crash_on_publish(self, source, dest):
-        if dest == "CASE_000":
-            raise OSError("crash between the two moves")
+    def fail_the_publish(self, source, dest):
+        # The publish (the temporary onto the final name) fails once; the restore that follows
+        # (the backup onto the final name) goes through.
+        if dest == "CASE_000" and not failed_publishes:
+            failed_publishes.append(source)
+            raise OSError("the publish failed")
         return real_move(self, source, dest)
 
-    monkeypatch.setattr(h5py.Group, "move", crash_on_publish)
-    with pytest.raises(OSError, match="crash"):
+    monkeypatch.setattr(h5py.Group, "move", fail_the_publish)
+    with pytest.raises(OSError, match="publish failed"):
         with stream:
             slices = (slice(0, first.shape[0]), *(slice(0, extent) for extent in first.shape[1:]))
             stream.write_slice(slices, first + 1)
     monkeypatch.undo()
+    assert failed_publishes and ".tmp" in failed_publishes[0]
     with h5py.File(tmp_path / "streamed.h5", "r", locking=False) as handle:
         keys = list(handle["CT"].keys())
-    assert any(".replaced-" in key for key in keys), keys
-    assert "CASE_000" not in Dataset(tmp_path / "streamed", "h5").get_names("CT")
+    assert not any(".replaced-" in key for key in keys), keys
+    np.testing.assert_array_equal(dataset.read_data("CT", "CASE_000")[0], first)  # the old entry, back
 
     # The nominal replace: new data in, no .replaced- key left behind (the crashed stream's own
     # .tmp is that crash's debris, invisible to listings, and not this replace's to clean).

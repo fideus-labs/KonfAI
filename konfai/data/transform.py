@@ -2063,8 +2063,12 @@ class Mask(Transform):
         self.path = path
         self.value_outside = value_outside
         self._cached_mask: torch.Tensor | None = None
+        #: Cases whose stored mask was checked against the chain input's extent (once per case).
+        self._aligned: set[str] = set()
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # POINTWISE on the promise that the mask sits on the stage's input grid; a declaration may
+        # not do I/O, so the extent is checked at the point of use (stream_region), per case.
         return PatchLocality(LocalityKind.POINTWISE)
 
     def _apply(self, tensor: torch.Tensor, mask: torch.Tensor | np.ndarray) -> torch.Tensor:
@@ -2095,6 +2099,31 @@ class Mask(Transform):
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return self._apply(tensor, self._mask(name, None))
 
+    def _check_aligned(self, name: str, context: RegionContext) -> None:
+        """Refuse a mask whose extent is not the stage input's: a region of it would then be read
+        from the wrong place and the masked output would look right. Headers only, once per case."""
+        if name in self._aligned:
+            return
+        expected = tuple(int(extent) for extent in context.source_shape)
+        stored: tuple[int, ...] | None = None
+        if self.path.endswith(".mha"):
+            stored = tuple(int(extent) for extent in self._cached_mha().shape[1:])
+        else:
+            for dataset in self.datasets:
+                if dataset.is_dataset_exist(self.path, name):
+                    stored = tuple(int(extent) for extent in dataset.get_infos(self.path, name)[0][1:])
+                    break
+        if stored is None:
+            raise TransformError(f"'Mask' found no mask '{self.path}' for case '{name}' in any dataset.")
+        if stored != expected:
+            raise TransformError(
+                f"'Mask' reads '{self.path}' for case '{name}' region by region, but the mask's extent"
+                f" {list(stored)} is not the stage input's {list(expected)}.",
+                "A streamed Mask needs a mask on the grid it is applied to: resample the mask onto it"
+                " first, or apply the Mask before the stages that change the grid.",
+            )
+        self._aligned.add(name)
+
     def stream_region(
         self,
         name: str,
@@ -2102,7 +2131,9 @@ class Mask(Transform):
         context: RegionContext,
         cache_attribute: Attribute,
     ) -> torch.Tensor:
-        # Only the region's part of the (aligned) mask, 1-channel and far smaller than the output.
+        # Only the region's part of the mask, 1-channel and far smaller than the output; the mask
+        # is checked to sit on the stage input's grid before its first region is trusted.
+        self._check_aligned(name, context)
         return self._apply(tensor, self._mask(name, (slice(None), *context.source)))
 
 
