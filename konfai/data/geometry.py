@@ -29,7 +29,8 @@ Everything is plain float64 numpy: no torch, no SimpleITK. A value built here cr
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -37,6 +38,8 @@ import numpy as np
 from konfai.utils.errors import TransformError
 
 if TYPE_CHECKING:
+    import torch
+
     from konfai.utils.dataset import Attribute
 
 #: The geometry keys a grid is read from, in the order refusals name them.
@@ -225,12 +228,17 @@ class Grid:
     def rank(self) -> int:
         return len(self.size_zyx)
 
-    @property
+    @cached_property
     def index_to_world(self) -> AffineMap:
-        """Continuous index ``(x, y, z)`` to world: ``p = O + D S i``: ITK's own association."""
+        """Continuous index ``(x, y, z)`` to world: ``p = O + D S i``: ITK's own association.
+
+        Cached (the grid is frozen): a streamed walk asks per SLAB, and rebuilding the product --
+        and, for :attr:`world_to_index`, re-INVERTING it -- thousands of times per region was
+        measurable wall time. The cache returns the same floats it always returned, only once.
+        """
         return AffineMap(self.direction_xyz @ np.diag(self.spacing_xyz), np.asarray(self.origin_xyz, dtype=np.float64))
 
-    @property
+    @cached_property
     def world_to_index(self) -> AffineMap:
         return self.index_to_world.inverted()
 
@@ -422,6 +430,11 @@ class DisplacementStage:
     grid: Grid
     values: np.ndarray
     order: int
+    #: The values as a tensor, per (device, dtype), built on first use and living exactly as long
+    #: as the stage does: a stage is evaluated once per region per case, and re-uploading a whole
+    #: field for each was the copy the arithmetic never saw. Frozen dataclass, so a mutable field
+    #: hides behind object.__setattr__ once; it is excluded from equality and pickling by name.
+    _tensors: dict = field(default_factory=dict, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if self.order not in SUPPORTED_SPLINE_ORDERS:
@@ -431,6 +444,30 @@ class DisplacementStage:
                 "Write the transform as a displacement field, or as a cubic BSpline, which is what"
                 " every registration that produces one writes by default.",
             )
+
+    def tensor(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """``values`` on ``device`` in ``dtype``, uploaded once per (device, dtype) for the stage's life."""
+        import torch
+
+        key = (str(device), str(dtype), "czyx")
+        cached = self._tensors.get(key)
+        if cached is None:
+            cached = self._tensors[key] = torch.tensor(self.values, dtype=dtype, device=device)
+        return cached
+
+    def tensor_by_voxel(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """``values`` as ``(voxel, component)``, contiguous: the layout a per-voxel gather wants."""
+        key = (str(device), str(dtype), "vc")
+        cached = self._tensors.get(key)
+        if cached is None:
+            rank = int(self.values.shape[0])
+            cached = self._tensors[key] = self.tensor(device, dtype).reshape(rank, -1).transpose(0, 1).contiguous()
+        return cached
+
+    def __getstate__(self) -> dict:
+        state = dict(self.__dict__)
+        state["_tensors"] = {}
+        return state
 
     @property
     def bound_xyz(self) -> np.ndarray:

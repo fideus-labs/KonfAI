@@ -182,6 +182,38 @@ def test_plan_leaves_no_h5_file_behind(tmp_path: Path) -> None:
     assert not Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "__konfai_plan_probe__")
 
 
+def test_plan_leaves_no_single_file_store_behind(tmp_path: Path) -> None:
+    """The probe on an h5 destination created the file (a 6 KB store with an empty group): a dry
+    run that leaves an output where there was none is not a dry run."""
+    _write_source(tmp_path)
+    _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"))
+
+    _build(tmp_path).compute_plan(1, overwrite=False)
+
+    assert not (tmp_path / "out.h5").exists()
+
+
+_MHA_CHAIN = """\
+              Clip:
+                min_value: 0.0
+                max_value: 50.0
+              Write:
+                dataset: {out}:mha
+"""
+
+
+def test_a_bounded_source_streams_to_every_destination_format(tmp_path: Path) -> None:
+    """The head segment past the last Save has no reader in a chain ending in a Write, and pricing
+    it asked the Write's destination -- not there yet, so 'unbounded' -- and every mha/nii output
+    routed to LOAD 'because streaming would re-read the source', which was false."""
+    _write_source(tmp_path)
+    _write_config(tmp_path, _MHA_CHAIN.format(out=tmp_path / "out"))
+
+    plan = _build(tmp_path).compute_plan(1, overwrite=False)
+
+    assert [entry.verdict for entry in plan.entries] == ["STREAM", "STREAM"]
+
+
 def test_a_planned_workflow_survives_the_spawn_that_runs_it(tmp_path: Path) -> None:
     """``setup`` runs on the launcher and ``mp.spawn`` then pickles the workflow whole.
 
@@ -262,6 +294,29 @@ def test_the_budget_measures_the_largest_intermediate_not_the_stored_case(tmp_pa
     stored = 1 * 12 * 10 * 8 * 4 * 2  # [1, 12, 10, 8] float32, times the in-flight copy
     # A budget the stored case fits and the padded one does not.
     config_path.write_text(config_path.read_text().replace("memory_budget: auto", f"memory_budget: {stored + 1}b"))
+
+    with pytest.raises(TransformerError, match="budget"):
+        _build(tmp_path).setup(1)
+
+
+_RESAMPLES_THEN_FALLS_BACK = """\
+              Resample:
+                spacing: [0.5, 1.5, 2.0]
+              Standardize:
+                inverse: false
+              Write:
+                dataset: {out}:h5
+"""
+
+
+def test_the_budget_counts_a_stage_own_transients(tmp_path: Path) -> None:
+    """A whole-volume resample through ITK holds its input image, its output image and their tensor
+    copies: 4.5x the case, measured, where an elementwise stage holds 2x. Sized at 2x it passes a
+    budget it does not fit. The stage says what it holds (``working_multiple``), the plan sums it."""
+    _write_source(tmp_path)
+    config_path = _write_config(tmp_path, _RESAMPLES_THEN_FALLS_BACK.format(out=tmp_path / "out"))
+    case = 1 * 12 * 10 * 8 * 4  # the resample keeps the grid: same extent in and out
+    config_path.write_text(config_path.read_text().replace("memory_budget: auto", f"memory_budget: {case * 3}b"))
 
     with pytest.raises(TransformerError, match="budget"):
         _build(tmp_path).setup(1)

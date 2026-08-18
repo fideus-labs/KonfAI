@@ -258,6 +258,49 @@ def decode_transform_stages(transform: sitk.Transform) -> SpatialStages:
     )
 
 
+def encode_transform_stages(stages: SpatialStages) -> sitk.Transform:
+    """Geometry stages, in APPLICATION order, as one SimpleITK transform: the decoder's inverse.
+
+    An affine stage becomes an ``AffineTransform`` (matrix and translation, world units); a
+    displacement stage of order 1 a ``DisplacementFieldTransform`` on its own grid, of order 3 a
+    ``BSplineTransform`` from its coefficient images. ``CompositeTransform`` applies its members
+    LAST-ADDED-FIRST, so the stages are added in reverse to run in order (the mirror of what
+    :func:`decode_transform_stages` undoes). One stage is returned as itself.
+    """
+    _require_simpleitk()
+    from konfai.data.geometry import AffineStage
+
+    members: list[sitk.Transform] = []
+    for stage in stages:
+        if isinstance(stage, AffineStage):
+            rank = stage.map.rank
+            affine = sitk.AffineTransform(rank)
+            affine.SetMatrix(np.asarray(stage.map.matrix, dtype=np.float64).ravel().tolist())
+            affine.SetTranslation(np.asarray(stage.map.translation, dtype=np.float64).tolist())
+            members.append(affine)
+            continue
+        grid = stage.grid
+        rank = grid.rank
+        images = []
+        for component in range(rank):
+            image = sitk.GetImageFromArray(np.ascontiguousarray(stage.values[component], dtype=np.float64))
+            image.SetOrigin(np.asarray(grid.origin_xyz, dtype=np.float64).tolist())
+            image.SetSpacing(np.asarray(grid.spacing_xyz, dtype=np.float64).tolist())
+            image.SetDirection(np.asarray(grid.direction_xyz, dtype=np.float64).ravel().tolist())
+            images.append(image)
+        if stage.order == 1:
+            field = sitk.Compose(images)
+            members.append(sitk.DisplacementFieldTransform(field))
+        else:
+            members.append(sitk.BSplineTransform(images, int(stage.order)))
+    if len(members) == 1:
+        return members[0]
+    composite = sitk.CompositeTransform(members[0].GetDimension())
+    for member in reversed(members):
+        composite.AddTransform(member)
+    return composite
+
+
 def invert_stages(stages: SpatialStages, rank: int) -> SpatialStages | None:
     """The exact inverse of an all-affine decoded map, or ``None`` when one is not algebraic.
 

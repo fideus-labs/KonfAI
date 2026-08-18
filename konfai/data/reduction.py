@@ -182,7 +182,16 @@ class Median(Reduction):
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         if len(tensors) == 1:
             return tensors[0].to(_averaged_dtype(tensors[0].dtype))
-        middle = torch.quantile(torch.stack(tensors, dim=0).float(), 0.5, dim=0)
+        # The sort along the case axis, and the middle read off it: what torch.quantile computes,
+        # without its interpolation machinery around it (1.5-2x on CPU, 3.5x on CUDA over three
+        # cases, measured). The even-count middle is the same lerp quantile uses, so the two are
+        # bit-identical, odd and even.
+        ranked = torch.stack(tensors, dim=0).float().sort(dim=0).values
+        cases = ranked.shape[0]
+        if cases % 2:
+            middle = ranked[cases // 2]
+        else:
+            middle = torch.lerp(ranked[cases // 2 - 1], ranked[cases // 2], 0.5)
         return middle.to(_averaged_dtype(tensors[0].dtype))
 
 
@@ -193,13 +202,27 @@ class Vote(Reduction):
     """
 
     voxel_local = True
-    # ``torch.mode`` sorts a copy of the stack it is handed, alongside the stack itself.
+    # The sorted copy of the stack, and one stack-sized mask beside it.
     working_multiple = 2.0
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         if len(tensors) == 1:
             return tensors[0]
-        return torch.mode(torch.stack(tensors, dim=0), dim=0).values.to(tensors[0].dtype)
+        # NOT torch.mode: its tie-break is the smallest label on CPU and the LARGEST on CUDA
+        # (measured: 19% of a six-member fold differed by device), so a --gpu reduce and a CPU
+        # reduce wrote different label maps under one provenance. Sorted along the case axis and
+        # counted member by member, the first count that is not beaten IS the smallest label with
+        # the most votes, on every device. Per voxel this is cases^2 comparisons over the stack and
+        # nothing else: no unique over the volume (a sort of every voxel, 31 s per 512^3 on a
+        # CPU where this takes 2 s), no per-label count planes.
+        ranked = torch.stack(tensors, dim=0).sort(dim=0).values
+        best, best_count = ranked[0], (ranked == ranked[0]).sum(dim=0, dtype=torch.int16)
+        for member in ranked[1:]:
+            count = (ranked == member).sum(dim=0, dtype=torch.int16)
+            better = count > best_count
+            best = torch.where(better, member, best)
+            best_count = torch.where(better, count, best_count)
+        return best
 
 
 class Concat(Reduction):

@@ -283,6 +283,22 @@ class _ReadStagePlan:
     run_pull: Callable[[tuple[slice, ...]], list[slice]] | None = None
 
 
+def device_capped_budget(budget_bytes: float | None, device: "torch.device | None") -> float | None:
+    """The budget, capped at what ``device`` can actually hold.
+
+    The memory budget is declared in HOST bytes -- ``auto`` measures node RAM -- but on a GPU
+    chain the working sets it sizes (swept slabs, whole-volume fallbacks, a reduction's member
+    regions) live in VRAM. A 64G budget on a 16 GB card is then not a budget, it is a promise of
+    an OOM. Half the card's FREE memory, read when the fit runs: the halving is also the slack
+    that covers allocations arriving after the reading, since a fold sized once can run for hours.
+    """
+    if device is None or device.type != "cuda" or not torch.cuda.is_available():
+        return budget_bytes
+    free, _total = torch.cuda.mem_get_info(device)
+    vram = free * 0.5
+    return vram if budget_bytes is None or budget_bytes <= 0 else min(budget_bytes, vram)
+
+
 def save_destination(save: Save, default_dataset: Dataset, default_group: str) -> tuple[Dataset, str]:
     """The dataset and group a :class:`Save` caches into, the manager's own when it names none.
 
@@ -2231,6 +2247,16 @@ class DatasetManager:
         """
         self._sweep_budget_bytes = budget_bytes
 
+    def set_chain_device(self, device: torch.device | None) -> None:
+        """The device this case's chain replays on. Public for the same reason as the budget: a
+        reduction never calls :meth:`materialize`, only :meth:`read_region`, and its members must
+        replay where the fold will run. CPU collapses to None: opt-in only, because this same
+        machinery loads training cases inside DataLoader workers, where a CUDA default is wrong."""
+        self._chain_device = device if device is not None and device.type != "cpu" else None
+
+    def _device_budget(self, budget_bytes: float | None) -> float | None:
+        return device_capped_budget(budget_bytes, self._chain_device)
+
     def _set_rewrite(self, rewrite: bool) -> None:
         """The rewrite knob the materialization engine sets for one call: under it every
         satisfied-Save probe answers "not written yet" (the read path consults it too, which is
@@ -2444,6 +2470,11 @@ class DatasetManager:
                 stream_source.group, stream_source.entry, plan.data_slices
             )
             tensor = torch.from_numpy(data)
+            if self._chain_device is not None:
+                # The same move the region route and the whole-volume load make: a pointwise chain
+                # otherwise streamed on the host while its whole-volume twin ran on the GPU, and the
+                # two disagreed wherever a kernel's arithmetic differs by device (Softmax, a std).
+                tensor = tensor.to(self._chain_device)
             cache_attribute = Attribute(self.cache_attributes_bak[a])
             cache_attribute.update(attributes)
             # Says the Min/Max/Mean/Std here are the planner's DISK seeds, not a mid-chain stage's

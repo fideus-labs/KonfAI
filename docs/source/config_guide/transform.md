@@ -42,8 +42,16 @@ default chunking.
 ```bash
 konfai TRANSFORM --config Transform.yml          # transform
 konfai TRANSFORM --config Transform.yml --plan   # print the plan and stop
-konfai TRANSFORM --config Transform.yml --cpu 4  # shard the cases over 4 processes
+konfai TRANSFORM --config Transform.yml --cpu 4  # shard the work over 4 processes
 ```
+
+`--cpu N` (or `--gpu` with several ids) shards the *work items* over the ranks,
+balanced by bytes: an ordinary chain is one item per case, a reduction one item
+for all of its cases (so it never gains from more ranks). Every rank writes its
+own entries into the same output, which a single-file store cannot serve: a
+`Save`/`Write` to `:h5` refuses more than one rank; use `:omezarr`, `:mha` or
+`:nii`. An explicit `memory_budget` is per rank, and the plan header says what
+that makes on the node.
 
 A case whose output already exists is **skipped**: rerunning after an
 interruption resumes where it stopped. Pass `-y/--overwrite` to recompute
@@ -74,9 +82,11 @@ reports its own shard.
 With `--gpu`, each rank runs its chain on its device: the slabs are pulled to
 the GPU, transformed there, and land back on the host to be written, in taller
 slabs than on a CPU (as much as a quarter of the free device memory allows).
-The bytes are the ones a CPU run writes. The gain is modest for a light chain
-(the reads and the writes are the cost either way) and grows with the volume
-and the chain. `--gpu` also matters when a chain embeds a `KonfAIInference`
+The bytes are the ones a CPU run writes to the ulp (the coordinate walk is
+the same arithmetic on both). Without `--gpu` a `Resample` goes through ITK's
+own resampler on the host, the fastest exact one there is, and everything else
+through torch. The gain of `--gpu` is modest for a light chain (the reads and
+the writes are the cost either way) and grows with the volume and the chain. `--gpu` also matters when a chain embeds a `KonfAIInference`
 stage. That stage is a bridge, not a second prediction
 engine: it is whole-volume (the case is assembled, written to a temporary
 `.mha`, and read back), and each case spawns a process that resolves the app

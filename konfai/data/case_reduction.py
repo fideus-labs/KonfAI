@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
-from konfai.data.patching import DatasetManager, RegionWriter, save_destination
+from konfai.data.patching import DatasetManager, RegionWriter, device_capped_budget, save_destination
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
 from konfai.utils.dataset import (
@@ -255,6 +255,9 @@ class CaseReduction:
     group: str
     slab_rows: int = 64
     operator: Reduction = field(init=False)
+    #: The budget the last fit sized against, in host bytes: what a run-time device re-cap re-fits.
+    _budget_bytes: float | None = field(init=False, default=None)
+    _kept_folds: list | None = field(init=False, default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.managers:
@@ -266,7 +269,7 @@ class CaseReduction:
         self.operator = self.reduce.operator
         check_post_stages(self.post, self.reduce.output)
 
-    def fit_budget(self, budget_bytes: float | None, cap: int = 64) -> None:
+    def fit_budget(self, budget_bytes: float | None, cap: int | None = None) -> None:
         """Size the regions so the resident ones fit ``budget_bytes``.
 
         The default region height is safe for one case and not for N: a reduction holds one region
@@ -275,9 +278,18 @@ class CaseReduction:
         Below one row nothing fits; the plan then reports a peak above the budget and the workflow
         refuses, which is the only honest answer: there is no whole-volume path to fall back to.
 
+        THE BUDGET IS THE ONLY CEILING. ``cap`` defaults to the output's own height, so a node with
+        room folds the whole volume in one region and reads each case ONCE. A fixed cap did the
+        opposite of what it looked like: it bounded the region at 64 rows however much memory the
+        run was given, so a cohort measured at 0.11 GiB resident against a 59.60 GiB budget still
+        paid a full sweep of every source per 64 rows -- and the sweeps are what a chain resampling
+        through a field pays for, since a region's source window is not the region. What is spent
+        stays declared: half a budget the caller named, or ``auto``, which measures the node.
+
         The budget also goes to the cases' own managers, because a chain crossing a ``Save`` sweeps
         that cache when first read, and ``read_region`` carries no budget of its own.
         """
+        self._budget_bytes = budget_bytes
         for manager in self.managers:
             manager.set_memory_budget(budget_bytes)
         if not budget_bytes or budget_bytes <= 0:
@@ -286,7 +298,10 @@ class CaseReduction:
         row_bytes = plan.peak_bytes / max(1, plan.slab_rows)
         if row_bytes <= 0:
             return
-        self.slab_rows = max(1, min(cap, int(budget_bytes * 0.5 / row_bytes)))
+        # Past the output's own height there is nothing left to hold, so that is the ceiling when
+        # the caller names none.
+        ceiling = int(cap) if cap is not None else int(plan.spatial[0])
+        self.slab_rows = max(1, min(ceiling, int(budget_bytes * 0.5 / row_bytes)))
 
     # ---------------------------------------------------------------- planning
 
@@ -435,11 +450,16 @@ class CaseReduction:
             self.operator.accumulate(manager.read_region(region).unsqueeze(0))
         return self.operator.finalize().squeeze(0)
 
+    def _folds(self, spatial: list[int]):
+        """Every region's fold, in order: the loop both passes share."""
+        for region in self._regions(spatial):
+            yield region, self._fold(region)
+
     def _apply_post(self, block: torch.Tensor, attribute: Attribute, rank: int) -> np.ndarray:
         scope = Attribute(attribute)
         for stage in self.post:
             block = stage(self.reduce.output, block, scope)
-        array = block.numpy()
+        array = block.cpu().numpy()
         if array.ndim != rank:
             raise ReductionError(
                 f"A stage after the Reduce returned a rank-{array.ndim} region where the"
@@ -462,10 +482,21 @@ class CaseReduction:
             attribute["konfai_reduce_cases"] = "|".join(plan.cases)
         if plan.stat_pass:
             statistics = _RunningStatistics()
-            for region in self._regions(plan.spatial):
-                statistics.update(self._fold(region))
+            # The folds this pass computes ARE the folds the write pass needs: keep them when the
+            # whole folded output fits half the budget (regions, not member volumes -- for a field
+            # or a mask that is megabytes), and the write pass then only applies the post stages.
+            # Otherwise the second pass re-folds, as before: correctness never depends on the keep.
+            keep = self._folded_output_bytes(plan) <= 0.5 * float(self._budget_bytes or 0)
+            self._kept_folds = [] if keep else None
+            for _region, folded in self._folds(plan.spatial):
+                statistics.update(folded)
+                if self._kept_folds is not None:
+                    self._kept_folds.append(folded.cpu())
             statistics.write_into(attribute)
         return attribute
+
+    def _folded_output_bytes(self, plan: ReductionPlan) -> int:
+        return int(np.prod(plan.spatial, dtype=np.int64)) * max(1, int(plan.channels)) * _ASSUMED_ITEMSIZE
 
     def _open_stream(self, spatial: list[int], array: np.ndarray, attribute: Attribute) -> DataStream:
         stream = self.destination.open_data_stream(
@@ -484,15 +515,44 @@ class CaseReduction:
             )
         return stream
 
-    def materialize(self, rewrite: bool = False) -> bool:
+    def materialize(self, rewrite: bool = False, device: torch.device | None = None) -> bool:
         """Write the reduced entry, or raise saying why it cannot be written this way.
 
         There is no whole-volume fallback: assembling every case is exactly what this exists to
         avoid, and doing it silently would turn a bounded run into an unannounced OOM. A finished
         output is left alone unless ``rewrite``, which is the resume.
+
+        ``device`` is where the fold runs: each member replays its region there, the operator folds
+        there, and only the finished block comes back to the host for the write.
         """
         if not rewrite and self.destination.is_dataset_exist(self.group, self.reduce.output):
             return True
+        for manager in self.managers:
+            manager.set_chain_device(device)
+            # --overwrite must reach the MEMBERS, not just this output: each member's read_region
+            # resolves satisfied Saves from the previous run's caches unless told to rewrite, and a
+            # reduction folding stale caches writes a wrong volume whose provenance looks correct.
+            manager._set_rewrite(rewrite)
+        if device is not None and device.type == "cuda":
+            # The member regions this fold accumulates live in VRAM: the slabs are sized against
+            # the card, not against a budget declared in host bytes -- a host-sized region set on a
+            # 16 GB card is an OOM mid-fold, after the stat pass already paid.
+            declared = self._budget_bytes
+            capped = device_capped_budget(declared, device)
+            if capped is not None and capped != declared:
+                self.fit_budget(capped)
+                # The slabs are the card's; the KEEP decision is the host's: kept folds live in host
+                # memory (``.cpu()``), and judging them against VRAM/2 re-folded outputs the host
+                # could have held whole -- a second full pass for nothing.
+                self._budget_bytes = declared
+                # Said once, because the PLAN printed the host figure: the run must say which
+                # budget it actually worked under, or every future OOM is diagnosed off a lie.
+                print(
+                    f"[Reduce] '{self.reduce.output}': regions re-sized for {device} --"
+                    f" {self.slab_rows} row(s) under {capped / 2**30:.2f} GiB"
+                    f" (min of the declared budget and half the card's free memory).",
+                    flush=True,
+                )
         plan = self.plan()
         if not plan.streams:
             # A grid disagreement gets its own remedy: a Save changes nothing about the grids, so
@@ -510,10 +570,19 @@ class CaseReduction:
         spatial = plan.spatial
         attribute = self._output_attributes(plan)
         rank = len(spatial) + 1
+        # The folds a stat pass kept (when the folded output fits half the budget) are written as
+        # they are; otherwise every region is folded here, once.
+        kept = self._kept_folds
+        self._kept_folds = None
+        folds = (
+            ((region, kept[index]) for index, region in enumerate(self._regions(spatial)))
+            if kept is not None
+            else self._folds(spatial)
+        )
         writer = RegionWriter(lambda _key, array, header: self._open_stream(spatial, array, header))
         try:
-            for region in self._regions(spatial):
-                array = self._apply_post(self._fold(region), attribute, rank)
+            for region, folded in folds:
+                array = self._apply_post(folded, attribute, rank)
                 writer.write(None, (slice(0, int(array.shape[0])), *region), array, attribute)
             writer.close()
         except BaseException as exception:

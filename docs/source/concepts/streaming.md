@@ -138,7 +138,7 @@ extent that is 8× in 3D, against the single load streaming was avoiding. At pat
 | `HALO` | `Dilate(n>0)`, `Gradient` |
 | `ORIENTATION` | `Flip`, `Permute`, `Canonical` on axis-aligned direction cosines |
 | `CROP` | `Crop`, once its box is on the case |
-| `REGRID` | `Resample`, whichever grid and map it is given |
+| `REGRID` | `Resample`; `Padding` in `constant` mode (a translation into a filled, larger volume; `reflect`/`replicate` read the volume for their border and stay `WHOLE_VOLUME`) |
 
 Augmentations declare per **(case, draw)**, so two copies of one case can answer
 differently. `Permute`, `Flip` (with `vector_field: false`) and `Rotate` on a
@@ -161,10 +161,6 @@ once instead of once per patch per epoch, and it lets a statistic seed after a
 value-changing stage: `[Clip, Save, Standardize]` streams where
 `[Clip, Standardize]` cannot. Only a `Save` fed by an unstreamable prefix, or
 writing to a format without region writes, still loads the volume.
-
-One combination catches people out: `[Canonical, Resample, Padding]` streams on
-the write side but not on the read side, because `Padding` declares no forward
-locality and inherits `WHOLE_VOLUME`.
 
 A custom transform inherits `WHOLE_VOLUME` too, and is correct without knowing
 streaming exists. {doc}`../reference/api/extension-points` has the contract for
@@ -235,14 +231,25 @@ it in torch: same values, different summation order, so a voxel may land a few
 float32 ulp away. Seeded from `Min`/`Max` it is exact, since a min has no
 summation order to disagree on.
 
-A streamed `REGRID` computes its interpolation weights in the sub-region's
-coordinate frame, so the deviation follows the local gradient rather than the
-voxel's value: within a few ulp of the volume's peak on float volumes, within
-1 LSB on integer ones. Nearest-neighbour resampling, which is what a `uint8`
-label volume gets, uses no weights and stays exact. On the write side, an
-axis-aligned change of density is bit-identical; only a map that does not
-factorise, a rotation or a stored field, goes through the fused blend, where
-streamed and whole agree to about 1e-5 of the data's range.
+A streamed `REGRID` walks global float64 coordinates, so a slab computes the
+very numbers the whole volume computes. On the host the blend is ITK's own
+resampler on a window at its true origin, and on an axis-aligned volume streamed
+equals whole **bit for bit**, whatever the map. Two things cost an ulp: on CUDA a
+*linear* blend through a map that does not factorise (a rotation, a stored
+field) goes through `grid_sample`, which normalises coordinates by the window it
+is handed; and on oblique direction cosines a region's origin is one rounding
+the whole volume never takes. Either way streamed and whole agree to about 1e-5
+of the data's range, the deviation following the local gradient (within 1 LSB on
+integer volumes). Nearest-neighbour, which is what a `uint8` label volume gets,
+picks on the exact index; cubic walks its own corners; an axis-aligned change of
+density is read one axis at a time on global coordinates: all three are
+bit-identical everywhere.
+
+The slab height follows the budget, so it can differ between machines; through
+that same non-separable linear resample two runs of one chain under different
+budgets then differ by the same ~1e-5, and the plan says so when the budget
+lowers the height below the default. Everything else is independent of the
+slabbing: the same chain writes the same bytes under any budget.
 
 The same holds across slab heights. A `TRANSFORM` sweep cuts a case into slabs
 whose height follows the memory budget, so it depends on the machine (64 rows
