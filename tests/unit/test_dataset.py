@@ -494,6 +494,24 @@ def test_get_infos_reads_only_the_header_for_a_mismatched_extension(tmp_path: Pa
     assert np.allclose(attributes.get_np_array("Spacing"), [1.5, 1.5, 2.0])
 
 
+def test_get_infos_reads_a_npy_header_off_the_map(tmp_path: Path, monkeypatch) -> None:
+    """A ``.npy`` entry answers its shape from the header: the statistics fold and the plan ask for it
+    before any block, and a whole load there is the volume in memory the fold exists to avoid."""
+    root = tmp_path / "Dataset" / "case"
+    root.mkdir(parents=True)
+    np.save(root / "params.npy", np.arange(2 * 3 * 4 * 5, dtype=np.float32).reshape(2, 3, 4, 5))
+    original = np.load
+
+    def mapped_only(path, *args, **kwargs):
+        assert kwargs.get("mmap_mode") == "r", "a .npy is never loaded whole for its header"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(np, "load", mapped_only)
+    dataset = Dataset(str(tmp_path / "Dataset"), "mha")
+    assert dataset.get_infos("params", "case")[0] == [2, 3, 4, 5]
+    assert dataset.read_data_statistics("params", "case")["max"] == 119.0
+
+
 def test_a_group_written_through_another_dataset_object_is_seen(tmp_path: Path) -> None:
     """A group can be produced through one Dataset and read through another over the same folder: a
     ``Save`` builds its own (``Save.destination``) while the reader keeps the DataManager's.
