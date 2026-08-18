@@ -139,6 +139,47 @@ def _cgroup_paths() -> list[tuple[Path, str, tuple[str, ...]]]:
     return []
 
 
+def _cpu_cgroup_paths() -> list[Path]:
+    """This process's cpu cgroup directory and its ancestors (v2 ``cpu.max``), innermost first."""
+    try:
+        lines = Path(_PROC_SELF_CGROUP).read_text().splitlines()
+    except OSError:
+        return []
+    root = Path(_CGROUP_ROOT)
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        hierarchy, controllers, path = parts
+        if hierarchy == "0" and controllers == "":
+            base = root
+        elif "cpu" in controllers.split(","):
+            base = root / "cpu"
+        else:
+            continue
+        leaf = base / path.lstrip("/")
+        return [d for d in (leaf, *leaf.parents) if d == base or base in d.parents]
+    return []
+
+
+def available_cpus() -> int:
+    """The cores this process may actually run on: the tighter of its affinity mask and its cgroup
+    CPU quota (``cpu.max``). ``os.cpu_count()`` is the host's core count, which a container sees in
+    full while being allowed a fraction of it, and every thread past that fraction is contention."""
+    try:
+        cores = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cores = os.cpu_count() or 1
+    for directory in _cpu_cgroup_paths():
+        try:
+            quota, period = (directory / "cpu.max").read_text().split()
+        except (OSError, ValueError):
+            continue
+        if quota != "max":
+            cores = min(cores, max(1, -(-int(quota) // int(period))))
+    return max(1, cores)
+
+
 def _held_memory_bytes(directory: Path, keys: tuple[str, ...]) -> int | None:
     """The sum of KEYS in DIRECTORY's ``memory.stat``, or ``None`` when the file is missing or lacks them."""
     try:

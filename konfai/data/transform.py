@@ -50,11 +50,14 @@ from konfai.data.geometry import (
 from konfai.data.reduction import Reduction
 from konfai.data.sampling import (
     blend_order,
+    coordinate_precision,
     gather,
     gather_separable,
     separable_source_index,
     source_index,
+    source_index_rows,
     source_window,
+    walk_rows,
 )
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset, DataStream, data_to_image, image_to_data
@@ -211,6 +214,18 @@ class Transform(NeedDevice, ABC):
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
+
+    def output_channels(self, channels: int) -> int:
+        """How many channels this transform returns for ``channels`` in: the channel-axis twin of
+        :meth:`transform_shape`, for the plan's memory arithmetic.
+
+        Identity by default. A stage that WIDENS the axis must say so: the plan sizes a case, and
+        every streamed slab, from the channels a chain holds at its widest, and a one-hot priced at
+        its source's single channel loaded a 50-class volume onto a 2 GB budget and ran out of
+        memory 50 channels later. A stage that narrows may stay silent, that only makes the plan
+        conservative.
+        """
+        return channels
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         """Declare how this transform's output depends on its input, for patch streaming.
@@ -511,6 +526,10 @@ class TransformLoader:
             and not candidate.startswith("_")
             and any(base.__name__ in ("Transform", "DataAugmentation") for base in obj.__mro__)
         }
+        # Every resample-ish spelling and Warp are the one Resample stage; difflib alone offers
+        # 'EulerTransform' for 'ResampleTransform' and nothing for 'Warp'.
+        if "Resample" in name or name == "Warp":
+            return "Closest name: 'Resample' (the 1.8 spelling of every resample and Warp). "
         closest = difflib.get_close_matches(name, sorted(candidates), n=1)
         return f"Closest name: '{closest[0]}'. " if closest else ""
 
@@ -1257,6 +1276,52 @@ class _ReferenceGrid(_TargetGrid):
         return f"reference '{self.entry}'" + (" (per case)" if "{case}" in self.entry else "")
 
 
+def _resample_with_sitk(
+    payload: torch.Tensor,
+    region: Grid,
+    source: Grid,
+    stages: SpatialStages,
+    region_starts: list[int],
+    mode: str,
+    fill: float,
+) -> torch.Tensor | None:
+    """One region of a resample through ITK's own filter, on the host.
+
+    ``payload`` is the SOURCE window read for this region (``region_starts`` says where it sits
+    in the source grid); ``region`` is the target grid of the region. The window becomes an image
+    with the source's geometry shifted to its start; the target region an image with its own
+    grid; the stages one composite transform (:func:`~konfai.utils.ITK.encode_transform_stages`),
+    applied by ``sitk.Resample`` in the direction KonfAI's walk applies it (target point through
+    the stages to the source point). Channels are resampled one by one, which is what ITK does
+    for a vector image anyway. ``None`` for a payload ITK has no pixel type for (bool, bf16).
+    """
+    from konfai.utils.ITK import encode_transform_stages
+
+    if payload.dtype in (torch.bool, torch.bfloat16, torch.float16):
+        return None
+    interpolator = {"nearest": sitk.sitkNearestNeighbor, "linear": sitk.sitkLinear, "cubic": sitk.sitkBSpline}
+    if mode == "cubic":
+        return None  # ITK's BSpline is not Keys' Catmull-Rom: the walk keeps its own cubic
+    rank = source.rank
+    transform = encode_transform_stages(stages) if stages else sitk.Transform(rank, sitk.sitkIdentity)
+    # The window's own origin: the source origin moved by the window's start along each axis.
+    start_index = np.asarray(list(reversed(region_starts)), dtype=np.float64)  # (x, y, z)
+    window_origin = source.index_to_world.apply(start_index)
+    reference = sitk.Image([int(e) for e in reversed(region.size_zyx)], sitk.sitkFloat32)
+    reference.SetOrigin(np.asarray(region.origin_xyz, dtype=np.float64).tolist())
+    reference.SetSpacing(np.asarray(region.spacing_xyz, dtype=np.float64).tolist())
+    reference.SetDirection(np.asarray(region.direction_xyz, dtype=np.float64).ravel().tolist())
+    outputs = []
+    for channel in range(int(payload.shape[0])):
+        image = sitk.GetImageFromArray(np.ascontiguousarray(payload[channel].numpy()))
+        image.SetOrigin(np.asarray(window_origin, dtype=np.float64).tolist())
+        image.SetSpacing(np.asarray(source.spacing_xyz, dtype=np.float64).tolist())
+        image.SetDirection(np.asarray(source.direction_xyz, dtype=np.float64).ravel().tolist())
+        out = sitk.Resample(image, reference, transform, interpolator[mode], float(fill), image.GetPixelID())
+        outputs.append(torch.from_numpy(sitk.GetArrayFromImage(out)))
+    return torch.stack(outputs, dim=0)
+
+
 class Resample(TransformInverse):
     """Resample a case: onto another grid, through a stored map, or both, in one interpolation.
 
@@ -1349,6 +1414,7 @@ class Resample(TransformInverse):
         interpolation: str | None = None,
         fill: float = 0.0,
         inverse: bool = True,
+        precision: str = "exact",
     ) -> None:
         super().__init__(inverse)
         if interpolation is not None and interpolation not in ("linear", "nearest", "cubic"):
@@ -1358,6 +1424,17 @@ class Resample(TransformInverse):
                 " for a sharper image blend. Left unset, uint8 is taken for a label map and"
                 " everything else is interpolated linearly.",
             )
+        if precision not in ("exact", "fast"):
+            raise TransformError(
+                f"'Resample' has an unknown precision '{precision}'.",
+                "'exact' (the default) walks coordinates in float64, bit-identical to"
+                " sitk.Resample. 'fast' lets the device walk in float32: half the bytes and about"
+                " twice the rows per slab, at ~|world|/2^24 of coordinate error -- for INTENSITY"
+                " resamples only (on the host ITK's own resampler is used either way)."
+                " A nearest pick that lands within that band of a voxel boundary picks the other"
+                " voxel, so a label map must stay 'exact'.",
+            )
+        self.precision = precision
         self.interpolation = interpolation
         self.fill_value = float(fill)
         self._target = self._target_from(spacing, shape, reference, reference_group, reference_dataset, align)
@@ -1766,6 +1843,16 @@ class Resample(TransformInverse):
     def _sample(
         self, name: str, sub_tensor: torch.Tensor, target_slices: tuple[slice, ...], region_starts: list[int]
     ) -> torch.Tensor:
+        # 'fast' walks the coordinates in float32 for the whole sample: an opt-in the stage's
+        # declaration made for its own data. The default context is the bit-exact float64 walk.
+        if self.precision == "fast":
+            with coordinate_precision(torch.float32):
+                return self._sample_in_context(name, sub_tensor, target_slices, region_starts)
+        return self._sample_in_context(name, sub_tensor, target_slices, region_starts)
+
+    def _sample_in_context(
+        self, name: str, sub_tensor: torch.Tensor, target_slices: tuple[slice, ...], region_starts: list[int]
+    ) -> torch.Tensor:
         source, target = self._grids_of(name)
         region = target.sub_grid(target_slices)
         stages = self._stages(name, region)
@@ -1778,8 +1865,34 @@ class Resample(TransformInverse):
         if axes is not None:
             order = blend_order(target, source)
             return gather_separable(sub_tensor, axes, region_starts, shape, mode, self.fill_value, order)
-        coordinates = source_index(region, source, stages, sub_tensor.device)
-        return gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value)
+        # On the HOST, ITK's own resampler is the fastest one there is, exact included: sitk.Resample
+        # over the same region, through the same stages, is 12x the torch walk per voxel on this
+        # arithmetic (27 vs 326 ns, measured, 12 threads) -- the walk is written for the GPU, where
+        # it is 40x faster again. Same rule (ITK's), same window, same fill; the two agree to the
+        # ulp, which is exactly how far a CPU and a CUDA run already agree. 'precision: fast' is a
+        # permission the GPU walk uses; on the host the exact answer is also the cheapest.
+        if sub_tensor.device.type == "cpu" and sitk is not None:
+            resampled = _resample_with_sitk(sub_tensor, region, source, stages, region_starts, mode, self.fill_value)
+            if resampled is not None:
+                return resampled
+        # The walk's coordinate tensor is float64 x rank: on a large region it dwarfs the gathered
+        # payload (9 GB beside a 1 GB slab, measured on an ExaSPIM mask chain). Walking and
+        # gathering slab by slab bounds both under one budget, and changes no value: the row
+        # indices stay global to the region, the gather's window and starts are the region's own,
+        # so every row of every slab is the very tensor the single pass produces.
+        rows_total = int(region.size_zyx[0])
+        rows = walk_rows(region, stages, sub_tensor.device)
+        if rows >= rows_total:
+            coordinates = source_index(region, source, stages, sub_tensor.device)
+            return gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value)
+        parts = []
+        for start in range(0, rows_total, rows):
+            coordinates = source_index_rows(
+                region, source, stages, sub_tensor.device, start, min(rows_total, start + rows)
+            )
+            parts.append(gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value))
+            del coordinates
+        return torch.cat(parts, dim=1)
 
     def _mode(self, tensor: torch.Tensor) -> str:
         """``nearest``, ``linear`` or ``cubic``: what a sampler asks before it blends anything.
@@ -2573,7 +2686,11 @@ class _DisplacementSource:
             data, _attributes = root.read_data(group, name)
         else:
             data, _attributes = root.read_data_slice(group, name, (slice(None), *region))
-        field = torch.from_numpy(np.ascontiguousarray(data)).float()
+        # float64, not .float(): the walk evaluates the field in float64 (DisplacementStage's own
+        # contract), and a .float() here quantized a float64-stored field before the exact
+        # arithmetic ever saw it -- a silent sitk divergence for any field an external tool wrote
+        # in double. A float32 store widens losslessly.
+        field = torch.from_numpy(np.ascontiguousarray(data)).to(torch.float64)
         if field.shape[0] != channels:
             raise TransformError(
                 f"The field for case '{name}' has {field.shape[0]} component(s) where the case has"
@@ -2934,6 +3051,8 @@ class Canonical(TransformInverse):
     # reorientation is a product with an inverse, so it lands within a few double ulps of them.
     _AXIS_ALIGNED_ATOL = 1e-9
 
+    working_multiple = 3.0  # an oblique case is resampled: the resample's own figure
+
     def __init__(self, inverse: bool = True) -> None:
         super().__init__(inverse)
         self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
@@ -3261,14 +3380,18 @@ class OneHot(TransformInverse):
         # Expands each voxel's scalar label into a one-hot channel vector (spatially pointwise).
         return PatchLocality(LocalityKind.POINTWISE)
 
+    def output_channels(self, channels: int) -> int:
+        return self.num_classes * channels
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        result = (
-            F.one_hot(tensor.type(torch.int64), num_classes=self.num_classes)
-            .permute(0, len(tensor.shape), *[i + 1 for i in range(len(tensor.shape) - 1)])
-            .float()
-            .squeeze(0)
+        # Scattered straight into the float32 answer: ``F.one_hot`` builds the classes in int64
+        # first, three times the bytes of the result for the time of a cast (80 GB for 50 classes
+        # of a 512^3 map, where the answer is 27 GB and this holds the answer plus the labels).
+        result = torch.zeros(
+            (int(tensor.shape[0]), self.num_classes, *tensor.shape[1:]), dtype=torch.float32, device=tensor.device
         )
-        return result
+        result.scatter_(1, tensor.to(torch.int64).unsqueeze(1), 1.0)
+        return result.squeeze(0)
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Argmax the CLASS axis (the one sized num_classes) and re-insert it, restoring a [.., 1, *spatial]

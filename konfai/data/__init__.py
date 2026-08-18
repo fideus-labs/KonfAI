@@ -40,6 +40,8 @@ that declares neither is correct but loads whole volumes, so they are exported h
 buried in the module that happens to define them.
 """
 
+from typing import Any
+
 from konfai.data.data_manager import DataMetric, DataPrediction, DatasetIter, DataTrain, DataTransform
 from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager, DatasetPatch
@@ -55,14 +57,26 @@ from konfai.data.transform import (
     Write,
 )
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.ome_zarr import (
-    append_ome_zarr_levels,
-    create_ome_zarr_store,
-    get_ome_zarr_info,
-    is_displacement_field,
-    read_ome_zarr_data_slice,
-    write_ome_zarr,
+
+# The OME-Zarr helpers are part of this surface but resolved on first use: their module pulls dask,
+# zarr and ngff-zarr, half a second of every process start, for a job that may never touch a store.
+_OME_ZARR = (
+    "append_ome_zarr_levels",
+    "create_ome_zarr_store",
+    "get_ome_zarr_info",
+    "is_displacement_field",
+    "read_ome_zarr_data_slice",
+    "write_ome_zarr",
 )
+
+
+def __getattr__(name: str) -> Any:
+    if name in _OME_ZARR:
+        from konfai.utils import ome_zarr
+
+        return getattr(ome_zarr, name)
+    raise AttributeError(f"module 'konfai.data' has no attribute '{name}'")
+
 
 __all__ = [
     "Attribute",

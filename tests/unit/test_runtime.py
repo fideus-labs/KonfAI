@@ -652,7 +652,7 @@ def _budget_applied(monkeypatch, cores: int, ranks: str | None, omp: str | None,
     calls: list[int] = []
     monkeypatch.setattr(rt, "_cpu_budget_applied", False)
     monkeypatch.setattr(rt.sys, "platform", platform)
-    monkeypatch.setattr(rt.os, "cpu_count", lambda: cores)
+    monkeypatch.setattr(rt, "available_cpus", lambda: cores)
     monkeypatch.setattr(rt.torch, "set_num_threads", calls.append)
     for key, value in (("KONFAI_LOCAL_RANKS", ranks), ("OMP_NUM_THREADS", omp)):
         monkeypatch.delenv(key, raising=False)
@@ -660,6 +660,39 @@ def _budget_applied(monkeypatch, cores: int, ranks: str | None, omp: str | None,
             monkeypatch.setenv(key, value)
     rt.apply_cpu_thread_budget()
     return calls
+
+
+def test_available_cpus_is_the_tighter_of_affinity_and_cgroup_quota(monkeypatch, tmp_path) -> None:
+    """A container sees the host's cores in full while being allowed a fraction: os.cpu_count says
+    64 where the affinity mask says 8 and cpu.max says 4; every thread past 4 is contention."""
+    from konfai.utils import budget as bd
+
+    monkeypatch.setattr(bd.os, "sched_getaffinity", lambda pid: set(range(8)), raising=False)
+    root = tmp_path / "cgroup"
+    (root / "a" / "b").mkdir(parents=True)
+    proc = tmp_path / "proc_self_cgroup"
+    proc.write_text("0::/a/b\n")
+    monkeypatch.setattr(bd, "_CGROUP_ROOT", str(root))
+    monkeypatch.setattr(bd, "_PROC_SELF_CGROUP", str(proc))
+    assert bd.available_cpus() == 8  # no quota file: the affinity mask
+    (root / "a" / "b" / "cpu.max").write_text("max 100000\n")
+    assert bd.available_cpus() == 8  # unbounded quota
+    (root / "a" / "cpu.max").write_text("350000 100000\n")  # the quota sits on an ANCESTOR
+    assert bd.available_cpus() == 4  # 3.5 CPUs of quota round up
+
+
+def test_cpu_thread_budget_sizes_itks_pool_with_torchs(monkeypatch) -> None:
+    """ITK does the host resample: an unbounded ITK pool beside a bounded torch one is the same
+    oversubscription moved one library over."""
+    sitk = pytest.importorskip("SimpleITK")
+    before = sitk.ProcessObject.GetGlobalDefaultNumberOfThreads()
+    try:
+        assert _budget_applied(monkeypatch, cores=24, ranks="4", omp=None) == [6]
+        assert sitk.ProcessObject.GetGlobalDefaultNumberOfThreads() == 6
+        assert _budget_applied(monkeypatch, cores=24, ranks="4", omp="20") == []
+        assert sitk.ProcessObject.GetGlobalDefaultNumberOfThreads() == 20
+    finally:
+        sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(before)
 
 
 def test_cpu_thread_budget_caps_torchs_every_core_default(monkeypatch) -> None:

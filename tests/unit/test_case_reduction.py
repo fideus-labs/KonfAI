@@ -536,3 +536,27 @@ def test_a_vote_tie_goes_to_the_smallest_label_whatever_the_cohort_order() -> No
     # A majority still beats the smallest label: the tie rule is a tie-breaker, not a preference.
     counted = [torch.full((1, 1, 2, 2), value, dtype=torch.uint8) for value in (9, 2, 9)]
     assert int(Vote()(counted).flatten()[0]) == 9
+
+
+def test_a_budget_with_room_folds_the_whole_volume(tmp_path: Path) -> None:
+    """The budget is the ONLY ceiling: room in it must reach the region height.
+
+    A fixed cap of 64 rows did the opposite of what it looked like. It bounded the region however
+    much memory the run was given, so a cohort whose regions measured 0.11 GiB against a 59.60 GiB
+    budget still paid a full sweep of every source per 64 rows -- and the sweeps are what a chain
+    resampling through a field pays for, since a region's source window is not the region. Measured
+    on a 192-plane cohort: 191.5 s at the cap, 45.6 s once the budget decided.
+    """
+    engine, _destination, _volumes = _run(tmp_path, [], Reduce(output="t"), [], slab_rows=3)
+    height = engine.plan().spatial[0]
+
+    engine.fit_budget(64 * 1024**3)  # room for far more than the volume holds
+    assert engine.slab_rows == height, "a budget with room must reach the whole volume"
+
+    # And it is still a budget: too little room, and the region shrinks to what fits.
+    engine.fit_budget(4 * 1024)
+    assert 1 <= engine.slab_rows < height
+
+    # A caller that names a ceiling still gets it.
+    engine.fit_budget(64 * 1024**3, cap=2)
+    assert engine.slab_rows == 2

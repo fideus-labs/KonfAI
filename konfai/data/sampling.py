@@ -29,7 +29,10 @@ from the read to the write.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import itertools
+from collections.abc import Iterator
 
 import numpy as np
 import torch
@@ -51,6 +54,36 @@ from konfai.data.geometry import (
 #: smooth. Measured on a 64x512x512 slab: float32 coordinates disagree with SimpleITK by 0.35 on
 #: data in [0, 1], float64 by 3e-05 (which is the gather's own float32 rounding).
 _COORDINATE_DTYPE = torch.float64
+
+#: The walk's dtype for the CURRENT context, entered by :func:`coordinate_precision`. A contextvar
+#: and not a parameter threaded through eight signatures: the choice belongs to the stage that
+#: knows its data (an intensity resample can trade the last bits for bandwidth, a label resample
+#: must not), and every helper below reads the same answer without the plumbing.
+_COORDINATE_DTYPE_VAR: contextvars.ContextVar[torch.dtype | None] = contextvars.ContextVar(
+    "konfai_coordinate_dtype", default=None
+)
+
+
+def _walk_dtype() -> torch.dtype:
+    return _COORDINATE_DTYPE_VAR.get() or _COORDINATE_DTYPE
+
+
+@contextlib.contextmanager
+def coordinate_precision(dtype: torch.dtype) -> Iterator[None]:
+    """Run the coordinate walk under ``dtype`` for the duration of the block.
+
+    The default (float64) is the BIT-EXACT contract with SimpleITK and stays untouched unless a
+    caller opts out. float32 halves the walk's bytes -- measured ~1.6x on a bandwidth-bound GPU
+    walk, and twice the rows per slab -- at a coordinate error of about |world| / 2^24: a few 1e-4
+    of a voxel on world coordinates of order 1e4-1e5 units, growing with the magnitude. A NEAREST
+    pick within that band of a .5 boundary lands on the other voxel. Intensity chains may take the
+    trade; label chains and anything that must reproduce sitk.Resample bit for bit must not.
+    """
+    token = _COORDINATE_DTYPE_VAR.set(dtype)
+    try:
+        yield
+    finally:
+        _COORDINATE_DTYPE_VAR.reset(token)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -147,8 +180,8 @@ def _apply(points_xyz: torch.Tensor, affine: AffineMap, device: torch.device) ->
     an exact half then rounds to the other voxel. The one matmul saved is not worth a label map
     that disagrees with ``sitk.Resample`` in whole columns.
     """
-    matrix = torch.tensor(affine.matrix, dtype=_COORDINATE_DTYPE, device=device)
-    out = torch.tensor(affine.translation, dtype=_COORDINATE_DTYPE, device=device).expand(points_xyz.shape).clone()
+    matrix = torch.tensor(affine.matrix, dtype=_walk_dtype(), device=device)
+    out = torch.tensor(affine.translation, dtype=_walk_dtype(), device=device).expand(points_xyz.shape).clone()
     for j in range(affine.rank):
         out = out + points_xyz[..., j, None] * matrix[:, j]
     return out
@@ -161,8 +194,8 @@ def _to_index(world_xyz: torch.Tensor, grid: Grid, device: torch.device) -> torc
     origin into a translation instead (which is what a generic inverted affine map is) reassociates
     a difference of large world coordinates against a small one and moves the last bit.
     """
-    matrix = torch.tensor(grid.world_to_index.matrix, dtype=_COORDINATE_DTYPE, device=device)
-    origin = torch.tensor(grid.origin_xyz, dtype=_COORDINATE_DTYPE, device=device)
+    matrix = torch.tensor(grid.world_to_index.matrix, dtype=_walk_dtype(), device=device)
+    origin = torch.tensor(grid.origin_xyz, dtype=_walk_dtype(), device=device)
     shifted = world_xyz - origin
     out = torch.zeros_like(world_xyz)
     for j in range(grid.rank):
@@ -178,10 +211,16 @@ def _displacement_at(stage: DisplacementStage, world_xyz: torch.Tensor, device: 
     legal stand-in for the whole of it: the part it does not cover was going to be identity here
     anyway, which is exactly why the region handed in must COVER the target region, and why a
     short one degrades in silence rather than raising.
+
+    The corner walk is arranged so nothing is computed twice, and ONLY so: each axis's tap weights
+    and clamped positions are built once and the corners read them, and the per-corner gather pulls
+    all components through one ``index_select``. Every float op the original per-corner form ran is
+    still run, on the same values, in the same association, so the result is bit-identical: the
+    weight product multiplies axis 0 first, the corner sum accumulates in ``itertools.product``
+    order, and a gather copies without rounding.
     """
     rank = stage.grid.rank
     index = _to_index(world_xyz, stage.grid, device)  # continuous index on the value grid, (x, y, z)
-    values = torch.tensor(stage.values, dtype=_COORDINATE_DTYPE, device=device)
     extent_xyz = [int(stage.grid.size_zyx[rank - 1 - axis]) for axis in range(rank)]
 
     if stage.order != 1:
@@ -196,40 +235,71 @@ def _displacement_at(stage: DisplacementStage, world_xyz: torch.Tensor, device: 
             at_end = (index[..., axis] - end).abs() <= 4.0 * ulp
             index[..., axis] = index[..., axis].masked_fill(at_end, end - ulp)
 
-    base = torch.floor(index) - (stage.order - 1) // 2
     taps = stage.order + 1
-    # The two domains ITK actually implements, and they differ. A BSpline is the identity unless its
-    # whole support lies in the coefficient grid (``InsideValidRegion``), so its edge falls off a
-    # control point early. A dense field is an ordinary image: it interpolates anywhere in
+    shift = (stage.order - 1) // 2
+    # Per axis, per tap, once, on a CONTIGUOUS copy of that axis: ``index[..., axis]`` is a stride-
+    # rank view, and every elementwise op over it ran ~7x slower than over a packed tensor
+    # (measured). The copy holds the very same floats. ``base`` is derived per axis and dropped
+    # with it, and ``index`` is released before the corner loop: the walk's transient peak is made
+    # of tensors that outlive their use.
+    #
+    # The two domains ITK actually implements, and they differ. A BSpline is the identity unless
+    # its whole support lies in the coefficient grid (``InsideValidRegion``), so its edge falls off
+    # a control point early. A dense field is an ordinary image: it interpolates anywhere in
     # ``[-0.5, n - 0.5)`` with the taps clamped, which reaches half a voxel past the outermost
-    # samples. Using the spline's rule for a field blanks that rim: 10% of the voxels of a small
-    # volume, all of them at the border, all of them silently un-warped.
+    # samples. Using the spline's rule for a field blanks that rim.
     inside = torch.ones(index.shape[:-1], dtype=torch.bool, device=device)
+    weight_at: list[list[torch.Tensor]] = []
+    position_at: list[list[torch.Tensor]] = []
     for axis in range(rank):
+        coordinate = index[..., axis]
+        base = torch.floor(coordinate) - shift
         if stage.order == 1:
-            inside &= (index[..., axis] >= -0.5) & (index[..., axis] < extent_xyz[axis] - 0.5)
+            inside &= (coordinate >= -0.5) & (coordinate < extent_xyz[axis] - 0.5)
         else:
-            inside &= (base[..., axis] >= 0) & (base[..., axis] + taps - 1 < extent_xyz[axis])
+            inside &= (base >= 0) & (base + taps - 1 < extent_xyz[axis])
+        weights, positions = [], []
+        for tap in range(taps):
+            position = base + tap
+            weights.append(_kernel_weights(coordinate - position, stage.order))
+            # int32: every clamped position is below the axis extent, and the flat index it feeds
+            # stays below the window's voxel count, which no field window approaches 2**31 of.
+            positions.append(position.to(torch.int32).clamp(0, extent_xyz[axis] - 1))
+        weight_at.append(weights)
+        position_at.append(positions)
+        del coordinate, base
+    del index
 
-    flat_values = values.reshape(rank, -1)
-    out = torch.zeros(index.shape, dtype=_COORDINATE_DTYPE, device=device)
+    # (voxel, component), contiguous: a gather then lands each voxel's components side by side,
+    # which is the layout the accumulator wants -- the (component, voxel) form needed a strided
+    # transpose per corner, measured at 2.6x the cost for the same numbers.
+    flat_values = stage.tensor_by_voxel(device, _walk_dtype())
+    out = torch.zeros((*inside.shape, rank), dtype=_walk_dtype(), device=device)
     for corner in itertools.product(range(taps), repeat=rank):
-        weight = torch.ones(index.shape[:-1], dtype=_COORDINATE_DTYPE, device=device)
-        positions_xyz = []
-        for axis in range(rank):
-            position = base[..., axis] + corner[axis]
-            weight = weight * _kernel_weights(index[..., axis] - position, stage.order)
-            positions_xyz.append(position.to(torch.long).clamp(0, extent_xyz[axis] - 1))
+        weight = weight_at[0][corner[0]]
+        for axis in range(1, rank):
+            weight = weight * weight_at[axis][corner[axis]]
         # ``values`` is (component, Z, Y, X) and row-major over the spatial axes, so the flat index
         # runs the ARRAY axes outermost-first with x fastest: the mirror of the physical order the
         # coordinates arrive in. Running it the other way samples the field transposed, which warps
         # the anatomy somewhere plausible and wrong.
-        flat_index = torch.zeros(index.shape[:-1], dtype=torch.long, device=device)
-        for array_axis in range(rank):
-            flat_index = flat_index * int(stage.grid.size_zyx[array_axis]) + positions_xyz[rank - 1 - array_axis]
-        gathered = torch.stack([flat_values[c].index_select(0, flat_index.reshape(-1)) for c in range(rank)], dim=-1)
-        out = out + gathered.reshape(out.shape) * weight.unsqueeze(-1)
-    return out * inside.unsqueeze(-1)
+        # int64 for the flat index: a full-resolution field window exceeds 2**31 voxels, and the
+        # per-axis int32 positions widen exactly on the first multiply.
+        flat_index = position_at[rank - 1][corner[rank - 1]].to(torch.long)
+        for array_axis in range(1, rank):
+            axis = rank - 1 - array_axis
+            flat_index = flat_index * int(stage.grid.size_zyx[array_axis]) + position_at[axis][corner[axis]]
+        # One gather for all components; a copy, so the numbers are the stored ones. NOT addcmul_:
+        # a fused multiply-add rounds once where ``out + g * w`` rounds twice, and the last bit is
+        # the contract.
+        gathered = flat_values[flat_index.reshape(-1)]
+        # In place: the same two roundings as ``out = out + g * w`` (verified bitwise), one fewer
+        # full-size allocation per corner -- and per-corner allocations are what the walk's
+        # transient peak is made of.
+        out += gathered.reshape(out.shape) * weight.unsqueeze(-1)
+        del gathered, flat_index, weight
+    out *= inside.unsqueeze(-1)
+    return out
 
 
 def source_index(
@@ -237,6 +307,7 @@ def source_index(
     source_grid: Grid,
     stages: SpatialStages,
     device: torch.device,
+    budget_bytes: float | None = None,
 ) -> torch.Tensor:
     """One source continuous index per voxel of ``target_grid``, shaped ``(*size_zyx, rank)`` in ``(x, y, z)``.
 
@@ -252,9 +323,75 @@ def source_index(
     points, where nothing rounds to an index.
     """
     rank = target_grid.rank
-    axes = [
-        torch.arange(int(extent), dtype=_COORDINATE_DTYPE, device=device) for extent in reversed(target_grid.size_zyx)
-    ]
+    rows_total = int(target_grid.size_zyx[0])
+    plane = 1
+    for extent in target_grid.size_zyx[1:]:
+        plane *= int(extent)
+    # The walk holds several float64 tensors per voxel at once (world, index, per-tap weights and
+    # positions, the corner gather), so a large region's TRANSIENTS dwarf its result: ~30 GB beside
+    # a 3.6 GB answer, measured on an ExaSPIM slab. Slabbing the leading array axis bounds them
+    # without touching a value: every op here is per-voxel, and a sub-range arange holds the very
+    # integers the full one holds, so a slab computes bit for bit what the whole region computes.
+    rows = walk_rows(target_grid, stages, device, budget_bytes)
+    if rows >= rows_total:
+        return source_index_rows(target_grid, source_grid, stages, device, 0, rows_total)
+    out = torch.empty(
+        (rows_total, *[int(e) for e in target_grid.size_zyx[1:]], rank), dtype=_walk_dtype(), device=device
+    )
+    for start in range(0, rows_total, rows):
+        stop = min(rows_total, start + rows)
+        out[start:stop] = source_index_rows(target_grid, source_grid, stages, device, start, stop)
+    return out
+
+
+def walk_rows(target_grid: Grid, stages: SpatialStages, device: torch.device, budget_bytes: float | None = None) -> int:
+    """How many leading-axis rows of ``target_grid`` one walk slab may cover under ``budget_bytes``.
+
+    Priced from the walk itself: per voxel it holds the world point, the continuous index and the
+    output (rank each), a weight and a position per axis per tap, and the gather's flat index and
+    result -- doubled, because torch materializes each binary op's result beside its operands. The
+    default budget is the machine's, through the one rule every consumer shares
+    (:func:`~konfai.data.patching.device_capped_budget`): on CUDA half the free VRAM, on CPU a
+    quarter of what this process may still allocate.
+    """
+    from konfai.data.patching import device_capped_budget
+    from konfai.utils.budget import available_memory_bytes
+
+    if budget_bytes is None:
+        budget_bytes = device_capped_budget(available_memory_bytes()[0] * 0.25, torch.device(device)) or 0.0
+    plane = 1
+    for extent in target_grid.size_zyx[1:]:
+        plane *= int(extent)
+    rank = target_grid.rank
+    taps = max((stage.order + 1 for stage in stages if isinstance(stage, DisplacementStage)), default=2)
+    itemsize = torch.tensor([], dtype=_walk_dtype()).element_size()
+    per_voxel = 2 * itemsize * (3 * rank + 2 * rank * taps + rank + 1)
+    total = int(target_grid.size_zyx[0])
+    rows = max(1, min(total, int(budget_bytes) // max(1, plane * per_voxel)))
+    # Balanced slabs: 31 rows under a 15-row ceiling is 16 + 15, never 15 + 15 + 1 -- a one-row
+    # tail pays every fixed cost of a walk (meshgrid, affines, the field's taps) for one row's
+    # worth of work. Same ceiling, same values, one launch fewer.
+    return -(-total // -(-total // rows))
+
+
+def source_index_rows(
+    target_grid: Grid,
+    source_grid: Grid,
+    stages: SpatialStages,
+    device: torch.device,
+    start: int,
+    stop: int,
+) -> torch.Tensor:
+    """:func:`source_index` over rows ``[start, stop)`` of the leading array axis.
+
+    The row indices stay GLOBAL to ``target_grid`` and go through ITS map: re-deriving a chunk as a
+    ``sub_grid`` would fold the start into a new origin, a different association whose world points
+    disagree with the whole region's in the last bit: which is the whole disagreement
+    :func:`source_index`'s docstring forbids.
+    """
+    rank = target_grid.rank
+    axes = [torch.arange(int(extent), dtype=_walk_dtype(), device=device) for extent in reversed(target_grid.size_zyx)]
+    axes[-1] = torch.arange(start, stop, dtype=_walk_dtype(), device=device)
     # meshgrid in array order (Z, Y, X) with the physical components last, so the tensor indexes
     # like the volume it will sample.
     grids = torch.meshgrid(*reversed(axes), indexing="ij")
@@ -268,7 +405,7 @@ def source_index(
         if not pending.is_identity:
             world = _apply(world, pending, device)
             pending = AffineMap.identity(rank)
-        world = world + _displacement_at(stage, world, device)
+        world = world + _displacement_at(stage, world, device)  # not +=: the stage READS world
     if not pending.is_identity:
         world = _apply(world, pending, device)
     return _to_index(world, source_grid, device)
@@ -311,7 +448,7 @@ def separable_source_index(
     axes: list[torch.Tensor] = []
     for array_axis in range(rank):
         axis = rank - 1 - array_axis  # the physical component this array axis runs along
-        index = torch.arange(int(target_grid.size_zyx[array_axis]), dtype=_COORDINATE_DTYPE, device=device)
+        index = torch.arange(int(target_grid.size_zyx[array_axis]), dtype=_walk_dtype(), device=device)
         world = float(forward.translation[axis]) + index * float(forward.matrix[axis, axis])
         axes.append((world - float(source_grid.origin_xyz[axis])) * float(backward.matrix[axis, axis]))
     return axes
@@ -363,7 +500,9 @@ def gather_separable(
     inside_axes = [(axis >= -0.5) & (axis < source_shape_zyx[array_axis] - 0.5) for array_axis, axis in enumerate(axes)]
     out_shape = [int(source.shape[0]), *extent_zyx]
     if not all(bool(mask.any()) for mask in inside_axes):
-        return torch.full(out_shape, fill, device=device, dtype=torch.float32).type(source.dtype)
+        # Working dtype then cast, as the masked tail fills: a float32 detour quantizes a float64
+        # fill and a fully-outside slab then differs from the unslabbed pass in its fill bits.
+        return torch.full(out_shape, fill, device=device, dtype=sampling_dtype(source)).type(source.dtype)
 
     def local(index: torch.Tensor, array_axis: int) -> torch.Tensor:
         return window_index(index, source_shape_zyx[array_axis], source_starts_zyx[array_axis], window_zyx[array_axis])
@@ -414,8 +553,9 @@ def gather_separable(
         # lerp fuses the three passes `low * (1 - w) + high * w` into one. Exact at w = 0, which is
         # the only endpoint reachable: w is `x - floor(x)`, so it never reaches 1.
         out = torch.lerp(low, high, share)
-    if mode == "nearest" and not out.is_floating_point():
-        out = out.type(torch.float32)
+    # No float trip for a nearest pick: copies stay in the payload's own dtype the whole way, the
+    # rule `gather` already holds -- a float32 detour rounds every integer label above 2**24, and
+    # the two paths then disagree on the very volumes they are supposed to serve identically.
     if mode == "cubic":
         out = _saturate_overshoot(out, source.dtype)
 
@@ -467,7 +607,10 @@ def gather(
 
     out_shape = [int(source.shape[0]), *extent_zyx]
     if not bool(inside.any()):
-        return torch.full(out_shape, fill, device=device, dtype=torch.float32).type(source.dtype)
+        # In the WORKING dtype then cast, exactly as the masked path fills: filling in float32
+        # first quantizes a float64 fill, and a walk slab that clears the source then disagrees
+        # with the unslabbed pass in the last bits of its fill value.
+        return torch.full(out_shape, fill, device=device, dtype=sampling_dtype(source)).type(source.dtype)
 
     # A nearest pick copies voxels: no blend, no working dtype, and no float trip for a label,
     # whose values above 2**24 a float32 cannot carry back (gather_separable holds the same rule).
@@ -495,7 +638,7 @@ def gather(
         base_xyz = torch.floor(coordinates_xyz) - 1.0
         out = torch.zeros(out_shape, dtype=work.dtype, device=device)
         for corner in itertools.product(range(4), repeat=rank):
-            weight = torch.ones(extent_zyx, dtype=_COORDINATE_DTYPE, device=device)
+            weight = torch.ones(extent_zyx, dtype=_walk_dtype(), device=device)
             flat = torch.zeros(extent_zyx, dtype=torch.long, device=device)
             for array_axis in range(rank):
                 axis = rank - 1 - array_axis

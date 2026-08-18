@@ -64,7 +64,7 @@ from konfai import (
     transforms_directory,
 )
 from konfai.utils import State  # also the re-export ``konfai.utils.runtime.State`` callers import
-from konfai.utils.budget import node_local_ranks
+from konfai.utils.budget import available_cpus, node_local_ranks
 from konfai.utils.errors import ConfigError, KonfAIError
 from konfai.utils.utils import env_flag
 
@@ -269,8 +269,12 @@ class NeedDevice:
 
 
 def get_device(device: int):
-    """Return a CUDA index or CPU device depending on availability."""
-    return device if torch.cuda.is_available() and device >= 0 else torch.device("cpu")
+    """Return a CUDA index or CPU device depending on availability.
+
+    ``device_count`` and not availability alone: a latched runtime keeps ``is_available()`` True
+    after ``CUDA_VISIBLE_DEVICES`` was narrowed to nothing, while the count honestly reads 0.
+    """
+    return device if torch.cuda.is_available() and 0 <= device < torch.cuda.device_count() else torch.device("cpu")
 
 
 def safe_torch_load(path_or_url: str | Path, map_location: Any) -> Any:
@@ -777,7 +781,10 @@ class DistributedObject(ABC):
             torch.backends.cudnn.benchmark = self.manual_seed is None
             torch.backends.cudnn.deterministic = self.manual_seed is not None
             dataloaders = self.rank_dataloaders(global_rank)
-            if torch.cuda.is_available():
+            # device_count as well: on a process whose CUDA runtime latched BEFORE the launcher
+            # narrowed CUDA_VISIBLE_DEVICES to nothing, is_available() stays True while the count
+            # honestly reads 0, and set_device would pin a GPU the launch explicitly excluded.
+            if torch.cuda.is_available() and 0 <= local_rank < torch.cuda.device_count():
                 torch.cuda.set_device(local_rank)
             try:
                 self.run_process(world_size, global_rank, local_rank, dataloaders)
@@ -984,11 +991,14 @@ _cpu_budget_applied = False
 
 
 def apply_cpu_thread_budget() -> None:
-    """Give each rank a bounded share of the node's cores instead of torch's every-core default.
+    """Give each rank a bounded share of the machine's cores instead of every library's every-core
+    default -- torch's intraop pool AND ITK's, which does the host resample.
 
     Past memory-bus saturation more intraop threads only add barrier contention; on a hybrid
     24-core CPU the 498^3 separable gather measures 0.7 s at 12 threads and 67 s at 24. An
-    explicit ``OMP_NUM_THREADS`` keeps authority (torch already honors it at init).
+    explicit ``OMP_NUM_THREADS`` keeps authority over torch (which already honors it at init) and
+    sizes ITK's pool the same. Otherwise each of the node's local ranks gets its share of
+    :func:`available_cpus`, capped at 12.
 
     Applied once per process, and never on macOS: torch documents ``set_num_threads`` as to be
     called before any parallel work, and the Python API runs several workflows in one process.
@@ -997,10 +1007,19 @@ def apply_cpu_thread_budget() -> None:
     nodes, so macOS keeps torch's default.
     """
     global _cpu_budget_applied
-    if sys.platform == "darwin" or _cpu_budget_applied or os.environ.get("OMP_NUM_THREADS"):
+    if sys.platform == "darwin" or _cpu_budget_applied:
         return
     _cpu_budget_applied = True
-    torch.set_num_threads(max(1, min((os.cpu_count() or 1) // node_local_ranks(), 12)))
+    explicit = os.environ.get("OMP_NUM_THREADS")
+    share = int(explicit) if explicit else max(1, min(available_cpus() // node_local_ranks(), 12))
+    if not explicit:
+        torch.set_num_threads(share)
+    try:
+        import SimpleITK as sitk
+
+        sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(share)
+    except ImportError:
+        pass
 
 
 def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = True) -> tuple[int | None, int | None]:

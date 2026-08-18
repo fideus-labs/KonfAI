@@ -23,8 +23,6 @@ are different code (``write_ome_zarr`` against ``create_ome_zarr_store`` +
 ``append_ome_zarr_levels``), and the streamed one is the path a real volume takes.
 """
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 import zarr
@@ -111,26 +109,25 @@ def test_each_scale_factor_shrinks_the_level_above_it(tmp_path):
 
 
 def test_an_interrupted_level_append_leaves_the_original_store_readable(tmp_path, monkeypatch):
-    """Deriving the coarse levels rewrites level 0, so a failure here is a failure over the only copy.
+    """The coarse levels are grafted beside level 0, which is never rewritten, and the metadata that
+    names them lands last: an append cut off while a level is being stored leaves a store that still
+    reads exactly as its level 0, one level deep -- not a gap between two deletes, and not a
+    pyramid whose coarse level is half there."""
+    import dask.array
 
-    The safety is bought with a sibling store and a rename: a rename that does not happen has to leave
-    the original where its readers expect it, not a gap between two deletes.
-    """
     data = np.arange(1 * 16 * 16 * 16, dtype=np.float32).reshape(1, 16, 16, 16)
     Dataset(tmp_path / "out", "omezarr").write("G", "case", data, _geometry())
     store = _only_store(tmp_path / "out")
-    real_rename = Path.rename
 
-    def interrupt_the_publishing_rename(self, target):
-        if self.name.endswith(".appending"):
-            raise KeyboardInterrupt
-        return real_rename(self, target)
+    def interrupt_the_level_store(*args, **kwargs):
+        raise KeyboardInterrupt
 
-    monkeypatch.setattr(Path, "rename", interrupt_the_publishing_rename)
+    monkeypatch.setattr(dask.array, "store", interrupt_the_level_store)
     with pytest.raises(KeyboardInterrupt):
         append_ome_zarr_levels(store, [4])
     monkeypatch.undo()
 
+    assert get_ome_zarr_info(store)["n_levels"] == 1
     back, _ = Dataset(tmp_path / "out", "omezarr").read_data("G", "case")
     assert np.array_equal(np.asarray(back, dtype=np.float32).reshape(data.shape), data)
 

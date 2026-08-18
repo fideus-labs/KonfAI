@@ -217,13 +217,20 @@ def _attribute_text(value: Any) -> str:
     one, so normalising to either here breaks the other reader.
 
     Complete, because an attribute is a record and not a display: NumPy's own printing elides values
-    past a threshold, and an elided record is one no reader can parse back.
+    past a threshold, and an elided record is one no reader can parse back. Exact, for the same
+    reason: a float is printed as the shortest text that reads back to the very same float64 --
+    NumPy's default (8 decimals for an array, the float32-shortest form for a float32 scalar) is a
+    display, and a statistic that came back a few ulps off made the whole-volume and the streamed
+    path of one chain disagree by that much (measured: a Min/Max rescale, 28% of voxels one ulp
+    apart on CUDA).
     """
     if isinstance(value, torch.Tensor):
         # Accept a tensor from any device: attributes are host-side strings, and finalize transforms
         # (Normalize, Statistics, ...) may hand over stats computed on a CUDA-resident volume.
         value = value.detach().cpu().numpy()
-    with np.printoptions(threshold=sys.maxsize):
+    if isinstance(value, np.generic | np.ndarray) and np.issubdtype(value.dtype, np.floating):
+        value = np.asarray(value, dtype=np.float64)[()] if isinstance(value, np.generic) else value.astype(np.float64)
+    with np.printoptions(threshold=sys.maxsize, floatmode="unique"):
         return str(value).replace("\n", "")
 
 
@@ -565,6 +572,23 @@ def _finalize_running_statistics(state: dict[str, Any] | None) -> dict[str, Any]
 _unstreamed_formats_warned: set[str] = set()
 
 
+@functools.cache
+def _nifti_extract_aborts(path: str) -> bool:
+    """Whether an ITK region read of ``path`` would take the process down.
+
+    ITK's NIfTI IO extracts a region of a SCALAR image only. Asked for a region of a vector one (a
+    multi-channel .nii or .nii.gz) it frees a buffer twice and aborts the process -- ``double free
+    or corruption``, no exception, nothing to catch (measured with the SimpleITK this ships with,
+    compressed or not). Such a file is read whole and sliced here.
+    """
+    if sitk.ImageFileReader.GetImageIOFromFileName(path) != "NiftiImageIO":
+        return False
+    reader = sitk.ImageFileReader()
+    reader.SetFileName(path)
+    reader.ReadImageInformation()
+    return reader.GetNumberOfComponents() > 1
+
+
 def _warn_unstreamed_region_read(path: str) -> None:
     """Warn that `path`'s format decodes the whole volume for every patch region read from it.
 
@@ -640,15 +664,21 @@ def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np
 def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     """Convert a SimpleITK image into a channel-first NumPy array and attributes."""
     attributes = Attribute()
-    attributes["Origin"] = np.asarray(image.GetOrigin())
-    attributes["Spacing"] = np.asarray(image.GetSpacing())
-    attributes["Direction"] = np.asarray(image.GetDirection())
     for k in image.GetMetaDataKeys():
         # ``ITK_*`` keys are the reader's own bookkeeping (the input filter's name, the file's original
         # direction and spacing), not the volume's metadata: carried into an output they describe the
         # source of a resampled volume, which nothing should read as the output's.
         if not k.startswith("ITK_"):
             attributes[k] = image.GetMetaData(k)
+    # AFTER the metadata import, deliberately. data_to_image stamps every attribute -- the
+    # geometry stack included -- back onto the image as metadata text, and the loop above imports
+    # it verbatim (versioned keys carry a '_', so they land as-is). Recorded first, the header
+    # landed as Origin_0 and the stale text then OVERWROTE that very key: an image read, moved
+    # (SetOrigin) and written back kept its old origin, silently. Recorded last, the header
+    # appends the next version of the stack, which is the one every reader takes.
+    attributes["Origin"] = np.asarray(image.GetOrigin())
+    attributes["Spacing"] = np.asarray(image.GetSpacing())
+    attributes["Direction"] = np.asarray(image.GetDirection())
     data = sitk.GetArrayFromImage(image)
 
     if image.GetNumberOfComponentsPerPixel() == 1:
@@ -807,6 +837,50 @@ def is_staging_entry(name: str) -> bool:
     return leaf.endswith(".tmp") or ".tmp." in leaf or _REPLACED_MARKER in leaf
 
 
+# A writer's staging name carries its pid: ``<entry>.<pid>[-n].tmp``, the ``.replaced`` hop it keeps
+# the previous version under, or the dotted whole-file form ``.<entry>.<pid>.tmp.<ext>``.
+_STAGING_PID = re.compile(r"\.(?:(?P<pid>\d+)(?:-\d+)?\.(?:tmp|replaced)|replaced-(?P<hop>\d+))(?:\.|$)")
+
+
+def _writer_is_dead(pid: int) -> bool:
+    if pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass  # alive, someone else's
+    return False
+
+
+def _retire_dead_debris(final: Path) -> None:
+    """Remove what earlier, DEAD writers of ``final`` left beside it.
+
+    Every writer here stages under a pid-marked name and publishes by rename, so a hard kill leaves
+    a staging file or store the readers already know to skip -- and nothing ever removed: a
+    27 GB one-hot store's staging sat beside the published one for good. Publishing an entry is
+    the moment its history is settled, so the debris of any writer that no longer runs goes then.
+    A LIVE writer's staging is left alone (two writers of one entry are legal, the last rename
+    wins), which is what the pid in the name is for.
+    """
+    entry = final.name.split(".", 1)[0]
+    try:
+        siblings = list(final.parent.iterdir())
+    except OSError:
+        return
+    for sibling in siblings:
+        if sibling == final or not sibling.name.lstrip(".").startswith(f"{entry}."):
+            continue
+        marker = _STAGING_PID.search(sibling.name)
+        if marker is None or not _writer_is_dead(int(marker.group("pid") or marker.group("hop"))):
+            continue
+        if sibling.is_dir():
+            shutil.rmtree(sibling, ignore_errors=True)
+        else:
+            sibling.unlink(missing_ok=True)
+
+
 class DataStream(ABC):
     """One dataset entry written incrementally, region by region. Obtained from
     ``Dataset.open_data_stream``, which returns ``None`` when the write format cannot serve region writes
@@ -866,6 +940,10 @@ class DataStream(ABC):
     def __exit__(self, exc_type, value, traceback) -> None:
         self._finish(exc_type is None, exc_type, value, traceback)
 
+    #: Where the entry lands on disk, for a backend that publishes a file or a store by rename;
+    #: ``None`` for one that stages inside a container (h5).
+    published_path: Path | None = None
+
     def _finish(self, success: bool, exc_type, value, traceback) -> None:
         # Single-shot: a caller may both close() and, on the error path, abort() the same stream (or
         # exit a ``with`` that already closed). Only the first call acts, so the backing file is exited
@@ -875,6 +953,8 @@ class DataStream(ABC):
         self._finished = True
         try:
             self._close(success)
+            if success and (published := self.published_path) is not None:
+                _retire_dead_debris(published)
         finally:
             if self._file is not None:
                 self._file.__exit__(exc_type, value, traceback)
@@ -954,6 +1034,7 @@ class _ItkTransformDataStream(DataStream):
         self._parameters = parameters
         self._temporary_path = temporary_path
         self._final_path = final_path
+        self.published_path = Path(final_path)
         self._spatial = [int(extent) for extent in spatial]
 
     def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
@@ -1004,19 +1085,24 @@ class _NiftiDataStream(DataStream):
         import struct
 
         self.path = path
+        self.published_path = Path(path)
         self._temporary_path = f"{path}.{self.temporary_suffix()}"
         channels, spatial = int(shape[0]), [int(extent) for extent in shape[1:]]
         # The header is written little-endian, so the block must be too.
         self._dtype = np.dtype(dtype).newbyteorder("<")
-        size_xyz = spatial[::-1]
-        spacing = attributes.get_np_array("Spacing").astype(np.float64)
-        origin = attributes.get_np_array("Origin").astype(np.float64)
-        direction = attributes.get_np_array("Direction").astype(np.float64).reshape(3, 3)
+        rank = len(spatial)  # 2 or 3: a 2-D image is a NIfTI of two dims, its third axis a 1
+        size_xyz = [*spatial[::-1], *[1] * (3 - rank)]
+        spacing = np.ones(3)
+        spacing[:rank] = attributes.get_np_array("Spacing").astype(np.float64)
+        origin = np.zeros(3)
+        origin[:rank] = attributes.get_np_array("Origin").astype(np.float64)
+        direction = np.eye(3)
+        direction[:rank, :rank] = attributes.get_np_array("Direction").astype(np.float64).reshape(rank, rank)
         affine = np.concatenate([direction * spacing[np.newaxis, :], origin[:, np.newaxis]], axis=1)
         affine[:2] *= -1.0  # LPS -> RAS
         header = bytearray(348)
         struct.pack_into("<i", header, 0, 348)
-        struct.pack_into("<8h", header, 40, 3 if channels == 1 else 5, *size_xyz, 1, channels, 1, 1)
+        struct.pack_into("<8h", header, 40, rank if channels == 1 else 5, *size_xyz, 1, channels, 1, 1)
         if channels > 1:
             struct.pack_into("<h", header, 68, 1007)  # NIFTI_INTENT_VECTOR
         struct.pack_into("<h", header, 70, _NIFTI_DATATYPES[self._dtype.name])
@@ -1074,6 +1160,7 @@ class _MhaDataStream(DataStream):
 
     def __init__(self, path: str, shape: list[int], dtype: np.dtype, attributes: Attribute) -> None:
         self.path = path
+        self.published_path = Path(path)
         self._temporary_path = f"{path}.{self.temporary_suffix()}"
         spatial = list(shape[1:])
         # The header declares BinaryDataByteOrderMSB=False, so the map must be explicitly little-endian.
@@ -1084,7 +1171,13 @@ class _MhaDataStream(DataStream):
             ("BinaryData", "True"),
             ("BinaryDataByteOrderMSB", "False"),
             ("CompressedData", "False"),
-            ("TransformMatrix", " ".join(str(v) for v in attributes.get_np_array("Direction"))),
+            # MetaIO's TransformMatrix is the TRANSPOSE of ITK's Direction (verified against
+            # sitk.WriteImage): written in Direction order, every non-symmetric orientation reads
+            # back mirrored.
+            (
+                "TransformMatrix",
+                " ".join(str(v) for v in attributes.get_np_array("Direction").reshape(len(spatial), -1).T.ravel()),
+            ),
             ("Offset", " ".join(str(v) for v in attributes.get_np_array("Origin"))),
             ("ElementSpacing", " ".join(str(v) for v in attributes.get_np_array("Spacing"))),
             ("DimSize", " ".join(str(v) for v in reversed(spatial))),
@@ -1127,6 +1220,7 @@ class _OmeZarrDataStream(DataStream):
         self._array = array
         self._store_path = store_path
         self._final_path = final_path
+        self.published_path = Path(final_path)
         self._scale_factors = scale_factors
         self._downsample_method = downsample_method
 
@@ -1144,8 +1238,8 @@ class _OmeZarrDataStream(DataStream):
             return
         if self._scale_factors:
             # On the temporary store, so the rename below publishes level 0 and its coarser levels in
-            # one step. append_ome_zarr_levels REWRITES level 0 (ngff-zarr composes a multiscales as a
-            # whole), which is why this costs a pass over what was just written rather than nothing.
+            # one step. The levels are grafted beside level 0 (one pass over it, into an array 4^rank
+            # times smaller); level 0 itself is not rewritten.
             append_ome_zarr_levels(self._store_path, self._scale_factors, downsample_method=self._downsample_method)
             self._array = None
         replaced = self._final_path.exists()
@@ -1372,9 +1466,28 @@ class Dataset:
                 data = np.asarray(_encode_transform_leaves(data, name, attributes))
 
             h5_group, name = self._resolve_group(name)
-            if name in h5_group:
-                del h5_group[name]
-            self._create_entry(h5_group, name, attributes, data=data, dtype=data.dtype)
+            # Staged under a temp name and moved, never created under the final one: the invariant
+            # every DataStream holds (a hard-killed writer leaves .tmp debris, not a plausible
+            # partial entry the resume then SKIPs as done). The old entry is moved aside and put
+            # back if the publish fails, so no instant has neither version in the file.
+            staging = f"{name}.{DataStream.temporary_suffix()}"
+            if staging in h5_group:
+                del h5_group[staging]
+            self._create_entry(h5_group, staging, attributes, data=data, dtype=data.dtype)
+            backup = _replaced_name(name)
+            replaced = name in h5_group
+            if replaced:
+                if backup in h5_group:
+                    del h5_group[backup]
+                h5_group.move(name, backup)
+            try:
+                h5_group.move(staging, name)
+            except Exception:
+                if replaced and name not in h5_group:
+                    h5_group.move(backup, name)
+                raise
+            if replaced:
+                del h5_group[backup]
 
         @staticmethod
         def _create_entry(h5_group: h5py.Group, key: str, attributes: Attribute, **dataset_kwargs: Any) -> h5py.Dataset:
@@ -1521,6 +1634,8 @@ class Dataset:
                     header = file.read(4096)
                 return re.search(rb"CompressedData\s*=\s*True", header, re.IGNORECASE) is None
             if image_io == "NiftiImageIO":
+                if _nifti_extract_aborts(path):
+                    return False
                 with open(path, "rb") as file:
                     return file.read(2) != b"\x1f\x8b"  # gzip magic: a .nii.gz stream
             return False
@@ -1557,7 +1672,7 @@ class Dataset:
             data_shape = [reader.GetNumberOfComponents(), *spatial_shape]
             normalized = self._normalize_slices(slices, data_shape)
 
-            if not self._supports_direct_slice(normalized):
+            if not self._supports_direct_slice(normalized) or _nifti_extract_aborts(path):
                 data, attributes = self.file_to_data("", name)
                 return data[normalized], attributes
 
@@ -1730,6 +1845,7 @@ class Dataset:
                 staging = DataStream.staging_path(final)
                 sitk.WriteImage(data, staging)
                 os.replace(staging, final)
+                _retire_dead_debris(Path(final))
             elif isinstance(data, sitk.Transform):
                 sitk.WriteTransform(data, f"{self.filename}{name}.itk.txt")
             elif self.is_vtk_polydata(data):
@@ -1797,7 +1913,7 @@ class Dataset:
             if any(len(attributes.get_np_array(key)) != n for key, n in geometry):
                 return None
             if self.file_format == "nii":
-                if dimension != 3 or element_dtype.name not in _NIFTI_DATATYPES:
+                if dimension not in (2, 3) or element_dtype.name not in _NIFTI_DATATYPES:
                     return None
                 os.makedirs(self.filename, exist_ok=True)
                 return _NiftiDataStream(f"{self.filename}{name}.{self.file_format}", shape, element_dtype, attributes)
@@ -1963,8 +2079,17 @@ class Dataset:
                 displacement_field = True
             if not isinstance(data, np.ndarray):
                 raise DatasetManagerError("OME-Zarr datasets can only store image arrays.")
+            # Staged beside the final store and renamed over it: writing under the final name
+            # truncates the destination before a byte lands, so a crash mid-write left a partial
+            # store the resume then counted as already written -- and an overwrite lost both
+            # versions. The rename is the atomicity every DataStream already holds; the .replaced
+            # hop keeps an instant with SOME complete store on disk.
+            final = Path(self._path(name, writing=True))
+            staging = final.with_name(f"{final.name}.{os.getpid()}.tmp")
+            if staging.exists():
+                shutil.rmtree(staging)
             write_ome_zarr(
-                self._path(name, writing=True),
+                staging,
                 data,
                 spacing=attributes.get_np_array("Spacing") if "Spacing" in attributes else None,
                 origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
@@ -1973,6 +2098,18 @@ class Dataset:
                 scale_factors=self.scale_factors,
                 downsample_method=self.downsample_method,
             )
+            replaced = final.with_name(f"{final.name}.{os.getpid()}.replaced")
+            shutil.rmtree(replaced, ignore_errors=True)
+            try:
+                if final.exists():
+                    final.rename(replaced)
+                staging.rename(final)
+            except BaseException:
+                if replaced.exists() and not final.exists():
+                    replaced.rename(final)
+                raise
+            shutil.rmtree(replaced, ignore_errors=True)
+            _retire_dead_debris(final)
 
         def open_data_stream(
             self,
@@ -2540,9 +2677,21 @@ class Dataset:
         data: sitk.Image | sitk.Transform | np.ndarray,
         attributes: Attribute | None = None,
     ) -> None:
+        attributes = attributes if attributes is not None else Attribute()
+        # A stage may hand back a volume without its channel axis (``Sum(dim=0)`` and
+        # ``MergeLabels`` fold the leading axis, which in a TRANSFORM chain is the channel one).
+        # An array with as many axes as the geometry has spatial axes IS a single-channel image,
+        # and is written as one: read as channel-first it would be a 2-D image with a plane's worth
+        # of channels, refused by ITK or, worse, stored that way in silence.
+        if (
+            isinstance(data, np.ndarray)
+            and "Spacing" in attributes
+            and data.ndim == len(attributes.get_np_array("Spacing"))
+        ):
+            data = data[None]
         target, entry = self._write_target(group, name)
         with target as file:
-            file.data_to_file(entry, data, attributes if attributes is not None else Attribute())
+            file.data_to_file(entry, data, attributes)
 
     def can_stream_data(self, attributes: Attribute) -> bool:
         """Whether ``open_data_stream`` can serve this dataset's write format.

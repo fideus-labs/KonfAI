@@ -452,3 +452,98 @@ def test_h5_entry_whose_attributes_fail_is_not_left_in_the_file(tmp_path: Path, 
     monkeypatch.undo()
     with h5py.File(tmp_path / "streamed.h5", "r", locking=False) as handle:
         assert list(handle["CT"].keys()) == ["CASE_000"]
+
+
+def test_publishing_an_entry_retires_dead_writers_debris_and_keeps_live_ones(tmp_path):
+    """Every writer stages under a pid-marked name and publishes by rename, so a hard kill leaves a
+    staging file or store the readers skip -- and, until now, nothing ever removed. Publishing the
+    entry sweeps the debris of writers that no longer run; a live writer's staging stays."""
+    import os
+    import subprocess
+    import sys
+
+    from konfai.utils.dataset import _retire_dead_debris
+
+    final = tmp_path / "CT.ome.zarr"
+    final.mkdir()
+    dead = 1
+    while True:  # a pid nobody holds
+        dead += 7919
+        try:
+            os.kill(dead, 0)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            continue
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (tmp_path / f"CT.ome.zarr.{dead}-3.tmp").mkdir()
+        (tmp_path / f"CT.ome.zarr.{dead}.replaced").mkdir()
+        (tmp_path / f"CT.ome.zarr.replaced-{dead}").mkdir()
+        (tmp_path / f".CT.{dead}.tmp.mha").write_bytes(b"x")
+        (tmp_path / f"CT.ome.zarr.{live.pid}-1.tmp").mkdir()
+        (tmp_path / "CT_other.ome.zarr").mkdir()  # another entry: not this one's debris
+        (tmp_path / f"CT_other.ome.zarr.{dead}-1.tmp").mkdir()
+        _retire_dead_debris(final)
+        left = sorted(p.name for p in tmp_path.iterdir())
+        assert left == sorted(
+            ["CT.ome.zarr", f"CT.ome.zarr.{live.pid}-1.tmp", "CT_other.ome.zarr", f"CT_other.ome.zarr.{dead}-1.tmp"]
+        )
+    finally:
+        live.kill()
+        live.wait()
+
+
+@pytest.mark.parametrize("channels", [1, 3])
+def test_a_two_dimensional_nifti_streams_like_the_whole_write(tmp_path, channels):
+    """A 2-D image is a NIfTI of two dims: the streamed header says so (its third axis a 1, the
+    2x2 cosines embedded in the sform) and reads back as the whole write does, voxels and geometry."""
+    rng = np.random.default_rng(0)
+    volume = rng.random((channels, 7, 9)).astype(np.float32)
+    theta = 0.3
+    attributes = Attribute(
+        {
+            "Origin": np.array([-5.0, 2.0]),
+            "Spacing": np.array([0.7, 0.9]),
+            "Direction": np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]).ravel(),
+        }
+    )
+    whole = Dataset(tmp_path / "whole", "nii")
+    whole.write("G", "c", volume, attributes)
+    streamed = Dataset(tmp_path / "streamed", "nii")
+    stream = streamed.open_data_stream("G", "c", list(volume.shape), volume.dtype, attributes)
+    assert stream is not None
+    with stream:
+        for row in range(volume.shape[1]):
+            stream.write_slice((slice(None), slice(row, row + 1)), volume[:, row : row + 1])
+    expected, header_expected = whole.read_data("G", "c")
+    got, header_got = streamed.read_data("G", "c")
+    np.testing.assert_array_equal(got, expected)
+    for key in ("Origin", "Spacing", "Direction"):
+        np.testing.assert_allclose(header_got.get_np_array(key), header_expected.get_np_array(key), atol=1e-6)
+
+
+def test_replacing_an_h5_entry_keeps_the_old_one_until_the_new_is_in_place(tmp_path, monkeypatch):
+    """A rewrite moves the old entry aside, publishes, then drops it: at no instant is the entry
+    absent from the file, which is what a crash between the two steps used to leave."""
+    import h5py
+
+    dataset = Dataset(tmp_path / "store", "h5")
+    dataset.write("G", "c", np.ones((1, 4, 4, 4), dtype=np.float32), Attribute())
+    stream = dataset.open_data_stream("G", "c", [1, 4, 4, 4], np.dtype(np.float32), Attribute())
+    assert stream is not None
+    original_move = h5py.Group.move
+    seen = []
+
+    def spy(self, source, dest):
+        original_move(self, source, dest)
+        seen.append(("c" in self, dest))
+
+    monkeypatch.setattr(h5py.Group, "move", spy)
+    with stream:
+        stream.write_slice((slice(None),) * 4, np.zeros((1, 4, 4, 4), dtype=np.float32))
+    monkeypatch.undo()
+    # After the first move (old aside) the name is free; after the second the new one holds it.
+    assert [present for present, _ in seen] == [False, True]
+    written, _ = dataset.read_data("G", "c")
+    assert float(np.asarray(written).max()) == 0.0

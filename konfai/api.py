@@ -326,8 +326,10 @@ def plan_transform(
     on_fallback: str = "warn",
     manual_seed: int = 0,
     dataset_options: Mapping[str, object] | None = None,
+    gpu: Sequence[int] | None = None,
     cpu: int = 1,
     overwrite: bool = False,
+    quiet: bool = False,
     transforms_dir: Path | str = Path("./Transforms"),
 ) -> "TransformPlan":
     """:func:`transform`'s dry-run twin: build, plan, print, return the plan: the run never starts.
@@ -338,8 +340,16 @@ def plan_transform(
     tree = _transform_tree(name, datasets, chains, memory_budget, on_fallback, manual_seed, dataset_options)
     from konfai.transformer import plan_transform as _plan_transform
 
-    with _one_workflow_at_a_time(cpu):
-        return _plan_transform(transform_file=tree, transforms_dir=transforms_dir, cpu=cpu, overwrite=overwrite)
+    ranks = len(gpu or []) or cpu
+    with _one_workflow_at_a_time(ranks):
+        return _plan_transform(
+            transform_file=tree,
+            transforms_dir=transforms_dir,
+            gpu=list(gpu) if gpu is not None else None,
+            cpu=cpu,
+            quiet=quiet,
+            overwrite=overwrite,
+        )
 
 
 # ------------------------------------------------------------------------------------ EVALUATION

@@ -592,7 +592,12 @@ class _Trainer:
             }
         )
 
-        torch.save(save_dict, save_path)
+        # Staged and renamed, the invariant the dataset writers hold: a multi-GB torch.save takes
+        # seconds, and a kill mid-write left a truncated .pt under a plausible name that RESUME
+        # then died on with an opaque unpickling error.
+        staging = save_path.with_name(f"{save_path.name}.{os.getpid()}.tmp")
+        torch.save(save_dict, staging)
+        os.replace(staging, save_path)
 
         if self.save_checkpoint_mode == "BEST":
             self._update_best_checkpoint(save_path, checkpoint_loss)

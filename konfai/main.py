@@ -135,8 +135,7 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
         str(State.TRANSFORM), help="Prepare a dataset: apply a transform chain to every case and write the result."
     )
     # Deliberately NOT _add_common_args: -tb has no scalar to show, so refusing it here is a parse
-    # error, not a silent no-op. --gpu exists for one reason: a KonfAIInference stage runs a nested
-    # inference that does use the device; plain read transforms stay on CPU either way.
+    # error, not a silent no-op.
     parser.add_argument(
         "-c",
         "--config",
@@ -156,8 +155,8 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
         type=int,
         nargs="+",
         default=[],
-        help="GPU device ids for chains that run a nested inference (KonfAIInference). "
-        "Plain read transforms run on CPU regardless.",
+        help="GPU device ids the chain runs on: every stage, the streamed replays and the folds "
+        "included, executes on the rank's device. If omitted the run stays on CPU.",
     )
     device_group.add_argument(
         "--cpu",

@@ -950,7 +950,7 @@ class Transformer(DistributedObject):
             reduction = item.reduction
             assert reduction is not None  # nosec B101 - the item was built from the same predicate
             if item.pending(reduction.reduce.output, self._overwrite):
-                reduction.materialize(rewrite=self._overwrite)
+                reduction.materialize(rewrite=self._overwrite, device=chain_device)
                 counts[Verdict.REDUCE] += 1
             else:
                 counts[Verdict.SKIP] += 1

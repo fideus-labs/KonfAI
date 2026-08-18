@@ -115,19 +115,22 @@ _PEAK = 450.0
 #   float32 ulps away. Data-dependent: this fixture happens to agree exactly, a smooth field showed
 #   1.5e-8 (0.13 ulp), so the bound is stated rather than observed.
 _STAT_ATOL = 8 * float(np.finfo(np.float32).eps)
-# - a streamed regrid through a map that does NOT factorise (a field, a rotation): its blend goes to
-#   grid_sample, which takes normalised coordinates and so expresses them in the read sub-region's
-#   frame rather than the whole volume's. Both round to float32, so a weight lands ~ulp(coordinate)
-#   off and the interpolated voxel lands `neighbour gap * ulp(coordinate)` off: the deviation
-#   scales with the local GRADIENT, not with the voxel's own magnitude. The fixture's gap is its
-#   2*_PEAK bone/air step, which puts the bound at ulps of _PEAK; 64 of them is ~8x the measured max
-#   and stays far below one part per million of the range. A map that DOES factorise is read one axis
-#   at a time on global coordinates and stays bit-identical, which is why those cases carry no atol
-#   at all; nearest uses no weights and is exact either way.
+# - a linear resample through a map that does NOT factorise (a field, a rotation), ON THE DEVICE:
+#   the coordinate walk keeps global float64 coordinates and is bit-identical slab for slab, but the
+#   CUDA blend goes through grid_sample, which normalises the coordinates by the extent it is handed,
+#   and a region is handed a window. A weight lands ~ulp(coordinate) off and the voxel
+#   `neighbour gap * ulp(coordinate)` off: the deviation scales with the local GRADIENT. The
+#   fixture's gap is its 2*_PEAK bone/air step, which puts the bound at ulps of _PEAK; 64 of them is
+#   ~8x the measured max and far below one part per million of the range. On the HOST the same case
+#   goes through ITK's own resampler on a window at its true origin and is bit-identical on an
+#   axis-aligned volume (measured: zero differing voxels on every Resample case, field and stored
+#   map included); on OBLIQUE cosines the window's origin is one rounding the whole volume never
+#   takes, and a voxel in ~1e5 lands an ulp apart. A map that DOES factorise is read one axis at a
+#   time on global coordinates and is bit-identical everywhere; nearest uses no weights and is
+#   exact either way; cubic walks the corners itself and is exact.
 _REGRID_ATOL = 64 * float(np.spacing(np.float32(_PEAK)))
 # An integer volume truncates the interpolation, so a sub-ulp disagreement that straddles an integer
-# boundary becomes a whole least-significant bit. 1 LSB is the tightest bound that can hold: the
-# alternative would be bit-exact agreement between two different float coordinate frames.
+# boundary becomes a whole least-significant bit.
 _LSB_ATOL = 1.0
 
 
@@ -171,12 +174,14 @@ _CASES: dict[str, list[_Case]] = {
     "Mask": [_Case(Mask(path="Labels", value_outside=-7))],
     "MergeLabels": [_Case(MergeLabels(), group="Ensemble")],
     "OneHot": [_Case(OneHot(4), group="Labels")],
-    # A pad reaching both borders of every axis, constant and reflect: the fill and the mirror both
-    # need the source rows the clamp cut back to.
+    # Pads reaching both borders of every axis, asymmetric and wider than the patch, constant and
+    # reflect: the fill and the mirror both need the source rows the clamp cut back to.
     "Padding": [
         _Case(Padding(padding=[1, 2, 3, 0, 2, 4], mode="constant:-3")),
         _Case(Padding(padding=[2, 1, 1, 2, 3, 2], mode="reflect")),
         _Case(Padding(padding=[0, 0, 0, 0, 0, 0])),
+        _Case(Padding([1, 2, 3, 4, 5, 6])),
+        _Case(Padding([5, 0, 0, 5, 2, 2], mode="constant:-7")),
     ],
     "Percentage": [_Case(Percentage(100.0))],
     # The default (the case's own grid, no map) would be a no-op resample; these are the family's
@@ -192,15 +197,21 @@ _CASES: dict[str, list[_Case]] = {
         # bit for bit or not at all.
         _Case(Resample(reference=_CASE_NAME, reference_group="Reference")),
         _Case(Resample(reference=_CASE_NAME, reference_group="Reference"), group="Labels"),
-        # Through a field the map does not factorise, so the blend goes to grid_sample: which
-        # normalises by the extent it is handed, and a patch is handed a window. That is the one
-        # place a streamed answer is not bit-identical to the whole-volume one, and the atol says so.
+        # Through a field, and through a stored map: neither factorises. Exact on the host (ITK's
+        # resampler), ~ulp on the device (grid_sample's normalised coordinates): the atol says so.
         _Case(
             Resample(reference=_CASE_NAME, reference_group="Reference", field_group="Field"),
             atol=_REGRID_ATOL,
         ),
-        # A stored map never factorises: the grid_sample path again.
         _Case(Resample(transforms={"transform": True}), atol=_REGRID_ATOL),
+        # The same on an OBLIQUE case: a region's origin is the volume's map applied to its start,
+        # one more rounding than the whole volume's index-to-world takes, and on oblique cosines
+        # that rounding is not exact -- so a handful of voxels (measured: 1 in 64 in one patch,
+        # ~1e-5 of a volume) land an ulp apart, on the host as on the device; the same bound holds.
+        # A nearest pick on the fixture stays exact (the deviation is far from any .5 boundary).
+        _Case(Resample(spacing=[2.0, 1.0, 3.0]), group="Oblique", atol=_REGRID_ATOL),
+        _Case(Resample(reference=_CASE_NAME, reference_group="Reference"), group="Oblique", atol=_REGRID_ATOL),
+        _Case(Resample(reference=_CASE_NAME, reference_group="Reference", interpolation="nearest"), group="Oblique"),
         # Keys' cubic: the separable axis walk and the corner walk both keep GLOBAL coordinates, so
         # streamed and whole agree exactly on floats; int16 rounds the blend once, hence the LSB.
         _Case(Resample(spacing=[2.0, 1.0, 3.0], interpolation="cubic")),
@@ -535,7 +546,7 @@ def test_a_streamed_region_records_the_whole_volume_geometry(dataset: Dataset, g
 
 # A HALO draw is sampled by grid_sample from coordinates expressed in the halo'd read extent's frame
 # rather than the whole volume's: the same disagreement, for the same reason and with the same
-# gradient- and coordinate-scaling, that _REGRID_ATOL bounds for the streamed resample. It is bitwise
+# gradient- and coordinate-scaling, that _REGRID_ATOL bounds for the device resample. It is bitwise
 # on neither, and grows with the extent: a 160^3 case at patch 64 lands at 2e-5 of its range.
 _AUGMENTATION_ATOL = _REGRID_ATOL
 
