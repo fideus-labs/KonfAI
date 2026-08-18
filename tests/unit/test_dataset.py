@@ -419,7 +419,7 @@ def test_a_statistics_chunk_is_budgeted_with_its_channels() -> None:
 
     for channels in (1, 4, 122):
         shape = [channels, 400, 512, 512]
-        length = _statistics_chunk_length(shape, axis=1)
+        length = _statistics_chunk_length(shape, axis=1, budget=_STATISTICS_CHUNK_ELEMENTS)
         held = channels * length * 512 * 512
         # One step is the floor, so a volume whose step alone overflows is read a step at a time.
         assert held <= max(_STATISTICS_CHUNK_ELEMENTS, channels * 512 * 512)
@@ -428,7 +428,8 @@ def test_a_statistics_chunk_is_budgeted_with_its_channels() -> None:
 def test_a_statistics_chunk_reaches_further_on_a_thin_volume() -> None:
     from konfai.utils.dataset import _statistics_chunk_length
 
-    assert _statistics_chunk_length([1, 400, 64, 64], axis=1) > _statistics_chunk_length([1, 400, 512, 512], axis=1)
+    thin, wide = [1, 400, 64, 64], [1, 400, 512, 512]
+    assert _statistics_chunk_length(thin, 1, budget=1 << 20) > _statistics_chunk_length(wide, 1, budget=1 << 20)
 
 
 def test_directory_store_detects_extensionless_dicom(tmp_path: Path) -> None:

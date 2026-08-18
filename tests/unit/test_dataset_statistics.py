@@ -18,8 +18,8 @@
 
 Each backend used to own its walk (slabs, slices, or the whole volume); those walks are recopied
 here as oracles, and the fold is held against them key by key, next to numpy in float64 on the
-whole volume. Welford in floating point is not associative: a backend whose blocks are the ones it
-walked before folds to the same bits, a backend regrouped by the fold to within a few ulp."""
+whole volume. Welford in floating point is not associative, and the fold merges in cache-sized
+pieces of its own, so the bound is a few ulp, whatever the backend walked before."""
 
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -32,6 +32,7 @@ from konfai.utils.dataset import (
     Dataset,
     _finalize_running_statistics,
     _statistics_chunk_length,
+    _update_pieces,
     _update_running_statistics,
 )
 
@@ -68,11 +69,6 @@ def _former_walk(chunks: Iterator[np.ndarray], channels: list[int] | None = None
     return _finalize_running_statistics(state)
 
 
-def _assert_same_bits(new: dict[str, Any], old: dict[str, Any]) -> None:
-    for key in _KEYS:
-        assert np.array_equal(np.asarray(new[key]), np.asarray(old[key])), key
-
-
 def _assert_within_ulps(new: dict[str, Any], old: dict[str, Any], ulps: int = 64) -> None:
     for key in _KEYS:
         a, b = np.asarray(new[key], dtype=np.float64), np.asarray(old[key], dtype=np.float64)
@@ -87,8 +83,10 @@ def _assert_close_to_numpy(new: dict[str, Any], volume: np.ndarray) -> None:
 
 @pytest.fixture
 def small_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Blocks of about a thousand elements: several per volume, so the fold's merges are exercised."""
+    """Blocks of about a thousand elements, folded in pieces of about a hundred: several of each per
+    volume, so both grains of the fold are exercised."""
     monkeypatch.setattr(dataset_module, "_STATISTICS_CHUNK_ELEMENTS", 1000)
+    monkeypatch.setattr(dataset_module, "_STATISTICS_UPDATE_ELEMENTS", 100)
 
 
 def _former_h5_walk(path: Path, group: str, name: str) -> Iterator[np.ndarray]:
@@ -96,7 +94,7 @@ def _former_h5_walk(path: Path, group: str, name: str) -> Iterator[np.ndarray]:
     with dataset_module._open_h5(str(path), "r") as file:  # the pool's handle is unlocked: agree with it
         dataset = file[group][name]
         axis = 1 if dataset.ndim > 1 else 0
-        length = _statistics_chunk_length(dataset.shape, axis)
+        length = _statistics_chunk_length(dataset.shape, axis, dataset_module._STATISTICS_CHUNK_ELEMENTS)
         for start in range(0, dataset.shape[axis], length):
             slices = [slice(None)] * dataset.ndim
             slices[axis] = slice(start, min(dataset.shape[axis], start + length))
@@ -104,7 +102,7 @@ def _former_h5_walk(path: Path, group: str, name: str) -> Iterator[np.ndarray]:
 
 
 @pytest.mark.parametrize("channels", [None, [1]])
-def test_h5_folds_to_the_bits_of_its_former_walk(
+def test_h5_folds_within_ulps_of_its_former_walk(
     tmp_path: Path, image_attributes, small_blocks: None, channels: list[int] | None
 ) -> None:
     pytest.importorskip("h5py")
@@ -114,11 +112,13 @@ def test_h5_folds_to_the_bits_of_its_former_walk(
 
     got = dataset.read_data_statistics("CT", "P0", channels)
 
-    _assert_same_bits(got, _former_walk(_former_h5_walk(tmp_path / "store.h5", "CT", "P0"), channels))
+    _assert_within_ulps(got, _former_walk(_former_h5_walk(tmp_path / "store.h5", "CT", "P0"), channels))
     _assert_close_to_numpy(got, volume if channels is None else volume[channels])
 
 
-def test_a_vector_takes_the_whole_read_and_folds_to_its_former_bits(tmp_path: Path, small_blocks: None) -> None:
+def test_a_vector_takes_the_whole_read_and_folds_within_ulps_of_its_former_pass(
+    tmp_path: Path, small_blocks: None
+) -> None:
     """A 1-D entry (a parameter list) has no spatial axis to walk: one block, the former one chunk."""
     pytest.importorskip("h5py")
     vector = _volume((50,), dtype=np.float64)
@@ -127,7 +127,7 @@ def test_a_vector_takes_the_whole_read_and_folds_to_its_former_bits(tmp_path: Pa
 
     got = dataset.read_data_statistics("P", "P0")
 
-    _assert_same_bits(got, _former_walk(_former_h5_walk(tmp_path / "store.h5", "P", "P0")))
+    _assert_within_ulps(got, _former_walk(_former_h5_walk(tmp_path / "store.h5", "P", "P0")))
     _assert_close_to_numpy(got, vector.reshape(1, -1))
 
 
@@ -138,7 +138,7 @@ def _former_image_slab_walk(directory: Path, name: str, group: str, extension: s
     reader.SetFileName(path)
     reader.ReadImageInformation()
     shape = [reader.GetNumberOfComponents(), *reversed(reader.GetSize())]
-    length = _statistics_chunk_length(shape, 1)
+    length = _statistics_chunk_length(shape, 1, dataset_module._STATISTICS_CHUNK_ELEMENTS)
     file = Dataset.SitkFile(f"{directory / name}/", True, extension)
     for start in range(0, shape[1], length):
         slices = [slice(None)] * len(shape)
@@ -162,7 +162,7 @@ def _former_image_whole_pass(directory: Path, name: str, group: str, extension: 
     ids=["region reads", "whole read"],
 )
 @pytest.mark.parametrize("channels", [None, [1]])
-def test_an_image_folds_to_the_bits_of_its_former_pass(
+def test_an_image_folds_within_ulps_of_its_former_pass(
     tmp_path: Path,
     image_attributes,
     small_blocks: None,
@@ -177,11 +177,13 @@ def test_an_image_folds_to_the_bits_of_its_former_pass(
 
     got = dataset.read_data_statistics("CT", "P0", channels)
 
-    _assert_same_bits(got, _former_walk(former(tmp_path / "store", "P0", "CT", extension), channels))
+    _assert_within_ulps(got, _former_walk(former(tmp_path / "store", "P0", "CT", extension), channels))
     _assert_close_to_numpy(got, volume if channels is None else volume[channels])
 
 
-def test_parameter_rows_take_the_whole_read_and_fold_to_their_former_bits(tmp_path: Path, small_blocks: None) -> None:
+def test_parameter_rows_take_the_whole_read_and_fold_within_ulps_of_their_former_pass(
+    tmp_path: Path, small_blocks: None
+) -> None:
     """An ``.itk.txt`` entry is 2-D (one row per transform), but not an image: no region reads."""
     transform = sitk.AffineTransform(3)
     transform.SetParameters(tuple(_volume((12,), dtype=np.float64)))
@@ -192,7 +194,7 @@ def test_parameter_rows_take_the_whole_read_and_fold_to_their_former_bits(tmp_pa
     got = dataset.read_data_statistics("T", "P0")
 
     rows = Dataset.SitkFile(f"{tmp_path / 'store' / 'P0'}/", True, "mha").file_to_data("", "T")[0]
-    _assert_same_bits(got, _former_walk(iter([rows])))
+    _assert_within_ulps(got, _former_walk(iter([rows])))
     _assert_close_to_numpy(got, rows)
 
 
@@ -213,7 +215,7 @@ def test_a_npy_folds_within_ulps_of_its_former_whole_pass(tmp_path: Path, small_
 def _former_zarr_walk(directory: Path, name: str, group: str) -> Iterator[np.ndarray]:
     file = Dataset.OmeZarrFile(f"{directory / name}/", True)
     shape, _ = file.get_infos("", group)
-    length = _statistics_chunk_length(shape, 1)
+    length = _statistics_chunk_length(shape, 1, dataset_module._STATISTICS_CHUNK_ELEMENTS)
     for start in range(0, shape[1], length):
         slices = [slice(None)] * len(shape)
         slices[1] = slice(start, min(shape[1], start + length))
@@ -221,7 +223,7 @@ def _former_zarr_walk(directory: Path, name: str, group: str) -> Iterator[np.nda
 
 
 @pytest.mark.parametrize("channels", [None, [1]])
-def test_an_ome_zarr_folds_to_the_bits_of_its_former_walk(
+def test_an_ome_zarr_folds_within_ulps_of_its_former_walk(
     tmp_path: Path, image_attributes, small_blocks: None, channels: list[int] | None
 ) -> None:
     pytest.importorskip("ngff_zarr")
@@ -231,7 +233,7 @@ def test_an_ome_zarr_folds_to_the_bits_of_its_former_walk(
 
     got = dataset.read_data_statistics("CT", "P0", channels)
 
-    _assert_same_bits(got, _former_walk(_former_zarr_walk(tmp_path / "store", "P0", "CT"), channels))
+    _assert_within_ulps(got, _former_walk(_former_zarr_walk(tmp_path / "store", "P0", "CT"), channels))
     _assert_close_to_numpy(got, volume if channels is None else volume[channels])
 
 
@@ -312,3 +314,14 @@ def test_the_fold_reads_an_unbounded_store_whole_once(
     monkeypatch.setattr(Dataset, "read_data", lambda self, g, n: reads.append(n) or real(self, g, n))
     dataset.read_data_statistics("CT", "P0")
     assert reads == ["P0"]
+
+
+def test_a_block_is_folded_in_pieces_along_its_first_spatial_axis(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dataset_module, "_STATISTICS_UPDATE_ELEMENTS", 500)
+    block = _volume((2, 37, 12, 10))
+    pieces = list(_update_pieces(block))
+    assert [piece.shape for piece in pieces] == [(2, 2, 12, 10)] * 18 + [(2, 1, 12, 10)]  # 500 // 240 rows each
+    np.testing.assert_array_equal(np.concatenate(pieces, axis=1), block)
+    assert all(np.shares_memory(piece, block) for piece in pieces)
+    vector = _volume((50,))
+    assert [piece.shape for piece in _update_pieces(vector)] == [(50,)]
