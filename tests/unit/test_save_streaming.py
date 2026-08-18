@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data.materialize import CaseMaterializer
+from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Clip, Permute, Save, Standardize, Transform
 from konfai.utils.dataset import Attribute, Dataset
@@ -306,7 +306,7 @@ def test_a_rank_dropping_stage_refuses_instead_of_writing_a_broadcast_store(
         data_augmentations_list=[],
     )
     with pytest.warns(UserWarning, match="Falling back to the whole-volume path"):
-        assert CaseMaterializer(manager).materialize() is False
+        assert CaseMaterializer(manager).materialize() is Verdict.WHOLE_VOLUME
 
     written, _ = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")
     np.testing.assert_allclose(written, volume.sum(axis=0), rtol=1e-6)

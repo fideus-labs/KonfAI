@@ -356,6 +356,19 @@ def test_execute_puts_the_callers_rng_and_cudnn_flags_back(monkeypatch):
     assert (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic) == (True, False)
 
 
+def test_preserved_rng_puts_the_three_cpu_generators_back():
+    import numpy as np
+    import torch
+
+    rt.seed_all(7)
+    expected = (random.random(), float(np.random.random()), float(torch.rand(1)))
+    rt.seed_all(7)
+    with rt.preserved_rng():
+        rt.seed_all(123)
+        random.random(), np.random.random(), torch.rand(1)
+    assert (random.random(), float(np.random.random()), float(torch.rand(1))) == expected
+
+
 def test_execute_puts_the_callers_cuda_rng_back(monkeypatch):
     """torch.manual_seed reseeds every CUDA generator too; a caller with CUDA up gets its own back."""
     import torch

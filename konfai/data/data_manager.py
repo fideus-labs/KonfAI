@@ -327,6 +327,13 @@ class GroupOut(dict[str, GroupTransformOut]):
         super().__init__(groups_dest)
 
 
+def _chains(groups_src: Mapping[str, Group | GroupMetric | GroupOut]) -> Iterator[tuple[str, str, GroupTransform]]:
+    """Every ``(group_src, group_dest, chain)`` of the config, in declaration order."""
+    for group_src, group in groups_src.items():
+        for group_dest, chain in group.items():
+            yield group_src, group_dest, chain
+
+
 def _interleaved_case_entries(patches: list["DatasetPatch"], entries: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """One case's ``(copy, patch)`` entries ordered so the copies advance together along the slab axis.
 
@@ -545,9 +552,8 @@ class DatasetIter(data.Dataset):
         return self.patch_size, self.overlap
 
     def to(self, device: int):
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                self.groups_src[group_src][group_dest].to(device)
+        for _group_src, _group_dest, chain in _chains(self.groups_src):
+            chain.to(device)
         for data_augmentations in self.data_augmentations_list:
             for data_augmentation in data_augmentations.data_augmentations:
                 data_augmentation.to(device)
@@ -566,10 +572,9 @@ class DatasetIter(data.Dataset):
                 for data_augmentations in self.data_augmentations_list:
                     for data_augmentation in data_augmentations.data_augmentations:
                         data_augmentation.reset_state(case_index)
-                for group_src in self.groups_src:
-                    for group_dest in self.groups_src[group_src]:
-                        self.data[group_dest][index].unload_augmentation()
-                        self.data[group_dest][index].reset_augmentation(reset_state=False)
+                for _group_src, group_dest, _chain in _chains(self.groups_src):
+                    self.data[group_dest][index].unload_augmentation()
+                    self.data[group_dest][index].reset_augmentation(reset_state=False)
             self.load(label + " Augmentation")
 
     def load(self, label: str):
@@ -631,9 +636,8 @@ class DatasetIter(data.Dataset):
 
     def _load_data(self, index: int, augmentation_index: int | None = None) -> bool:
         loaded = False
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                loaded |= self.load_data(group_src, group_dest, index, augmentation_index)
+        for group_src, group_dest, _chain in _chains(self.groups_src):
+            loaded |= self.load_data(group_src, group_dest, index, augmentation_index)
         if loaded and index not in self._index_cache_lookup:
             self._index_cache.append(index)
             self._index_cache_lookup.add(index)
@@ -662,9 +666,8 @@ class DatasetIter(data.Dataset):
         if index in self._index_cache_lookup:
             self._index_cache_lookup.remove(index)
             self._index_cache.remove(index)
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                self.unload_data(group_dest, index)
+        for _group_src, group_dest, _chain in _chains(self.groups_src):
+            self.unload_data(group_dest, index)
 
     def unload_data(self, group_dest: str, index: int) -> None:
         return self.data[group_dest][index].unload()
@@ -677,32 +680,24 @@ class DatasetIter(data.Dataset):
         x, a, p = self.mapping[index]
         needs_full_load = any(
             not self.data[group_dest][x].can_stream_patch(a, self.apply_augmentations)
-            for group_src in self.groups_src
-            for group_dest in self.groups_src[group_src]
+            for _group_src, group_dest, _chain in _chains(self.groups_src)
         )
         if x not in self._index_cache_lookup and needs_full_load:
             if len(self._index_cache) >= self.buffer_size and not self.use_cache:
                 self._unload_data(self._index_cache[0])
             self._load_data(x, a)
 
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                dataset = self.data[group_dest][x]
-                sample[f"{group_dest}"] = DataItem(
-                    dataset.name,
-                    dataset.get_data(
-                        p,
-                        a,
-                        self.groups_src[group_src][group_dest].patch_transforms,
-                        self.groups_src[group_src][group_dest].is_input,
-                        self.apply_augmentations,
-                    ),
-                    dataset.cache_attributes[a],
-                    x,
-                    a,
-                    p,
-                    self.groups_src[group_src][group_dest].is_input,
-                )
+        for _group_src, group_dest, chain in _chains(self.groups_src):
+            dataset = self.data[group_dest][x]
+            sample[f"{group_dest}"] = DataItem(
+                dataset.name,
+                dataset.get_data(p, a, chain.patch_transforms, chain.is_input, self.apply_augmentations),
+                dataset.cache_attributes[a],
+                x,
+                a,
+                p,
+                chain.is_input,
+            )
         return sample
 
 
@@ -1042,17 +1037,16 @@ class Data(ABC):
         which is a separate word for a separate thing.
         """
         owner: dict[str, str] = {}
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                if group_dest in owner:
-                    raise DatasetManagerError(
-                        f"'groups_src.{owner[group_dest]}' and 'groups_src.{group_src}' both declare"
-                        f" a destination group named '{group_dest}'.",
-                        "A destination group names one chain. Give them distinct names; to store"
-                        " both under the same group name, say so on each Write:"
-                        " Write: {dataset: ./Out:omezarr, group: " + group_dest + "}.",
-                    )
-                owner[group_dest] = group_src
+        for group_src, group_dest, _chain in _chains(self.groups_src):
+            if group_dest in owner:
+                raise DatasetManagerError(
+                    f"'groups_src.{owner[group_dest]}' and 'groups_src.{group_src}' both declare"
+                    f" a destination group named '{group_dest}'.",
+                    "A destination group names one chain. Give them distinct names; to store"
+                    " both under the same group name, say so on each Write:"
+                    " Write: {dataset: ./Out:omezarr, group: " + group_dest + "}.",
+                )
+            owner[group_dest] = group_src
 
     def prepare(self) -> None:
         """Instantiate config-driven transforms and augmentations before runtime."""
@@ -1061,12 +1055,9 @@ class Data(ABC):
 
         self._check_destination_groups_are_unique()
         model_have_input = False
-        last_group_src: str | None = None
-        for group_src in self.groups_src:
-            last_group_src = group_src
-            for group_dest in self.groups_src[group_src]:
-                self.groups_src[group_src][group_dest].prepare(group_src, group_dest)
-                model_have_input |= self.groups_src[group_src][group_dest].is_input
+        for group_src, group_dest, chain in _chains(self.groups_src):
+            chain.prepare(group_src, group_dest)
+            model_have_input |= chain.is_input
 
         if self.patch is not None:
             self.patch.init()
@@ -1076,9 +1067,8 @@ class Data(ABC):
                 "At least one group must be defined with 'is_input: true' to provide input to the network."
             )
 
-        if last_group_src is not None:
-            for key, data_augmentations in self.data_augmentations_list.items():
-                data_augmentations.prepare(key)
+        for key, data_augmentations in self.data_augmentations_list.items():
+            data_augmentations.prepare(key)
         self._prepare_datasets()
 
     def worst_case_shape(self) -> list[int] | None:
@@ -1292,22 +1282,21 @@ class Data(ABC):
         nb_augmentation = self._get_nb_augmentation(data_augmentations_list)
         nb_patch = [[0] * nb_augmentation for _ in names]
 
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                datasets = [
-                    DatasetManager(
-                        i,
-                        group_src,
-                        group_dest,
-                        name,
-                        self.datasets[source_filename_by_group[group_src][name]],
-                        patch=self.patch,
-                        transforms=self.groups_src[group_src][group_dest].transforms,
-                        data_augmentations_list=data_augmentations_list,
-                    )
-                    for i, name in enumerate(names)
-                ]
-                nb_patch = [[dataset.get_size(a) for a in range(nb_augmentation)] for dataset in datasets]
+        for group_src, group_dest, chain in _chains(self.groups_src):
+            datasets = [
+                DatasetManager(
+                    i,
+                    group_src,
+                    group_dest,
+                    name,
+                    self.datasets[source_filename_by_group[group_src][name]],
+                    patch=self.patch,
+                    transforms=chain.transforms,
+                    data_augmentations_list=data_augmentations_list,
+                )
+                for i, name in enumerate(names)
+            ]
+            nb_patch = [[dataset.get_size(a) for a in range(nb_augmentation)] for dataset in datasets]
 
         return [int(np.sum(case_patch_counts)) for case_patch_counts in nb_patch]
 
@@ -1456,24 +1445,23 @@ class Data(ABC):
         source_filename_by_group = self._get_source_filename_by_group(dataset_name)
         nb_augmentation = self._get_nb_augmentation(data_augmentations_list)
 
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                data[group_dest] = [
-                    DatasetManager(
-                        # A globally-unique augmentation index (offset for validation) so the shared
-                        # augmentation objects do not collide train and validation draws in their cache.
-                        index_offset + i,
-                        group_src,
-                        group_dest,
-                        name,
-                        self.datasets[source_filename_by_group[group_src][name]],
-                        patch=self.patch,
-                        transforms=self.groups_src[group_src][group_dest].transforms,
-                        data_augmentations_list=data_augmentations_list,
-                    )
-                    for i, name in enumerate(names)
-                ]
-                nb_patch = [[dataset.get_size(a) for a in range(nb_augmentation)] for dataset in data[group_dest]]
+        for group_src, group_dest, chain in _chains(self.groups_src):
+            data[group_dest] = [
+                DatasetManager(
+                    # A globally-unique augmentation index (offset for validation) so the shared
+                    # augmentation objects do not collide train and validation draws in their cache.
+                    index_offset + i,
+                    group_src,
+                    group_dest,
+                    name,
+                    self.datasets[source_filename_by_group[group_src][name]],
+                    patch=self.patch,
+                    transforms=chain.transforms,
+                    data_augmentations_list=data_augmentations_list,
+                )
+                for i, name in enumerate(names)
+            ]
+            nb_patch = [[dataset.get_size(a) for a in range(nb_augmentation)] for dataset in data[group_dest]]
 
         # PREDICTION walks the mapping in order, and the copies of a TTA case must advance together
         # along the slab axis for the streamed write to hold a bounded window (see
@@ -1488,11 +1476,7 @@ class Data(ABC):
         return data, mapping
 
     def get_groups_dest(self):
-        groups_dest = []
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                groups_dest.append(group_dest)
-        return groups_dest
+        return [group_dest for _group_src, group_dest, _chain in _chains(self.groups_src)]
 
     @staticmethod
     def _split(mapping: list[tuple[int, int, int]], world_size: int) -> list[list[tuple[int, int, int]]]:
@@ -1863,9 +1847,8 @@ class DataTransform(Data):
         # The chains are bound first and the cardinality checked BEFORE any manager exists: a draw
         # declared outside a copy has no shape map, so the manager's own fold would die on an
         # AttributeError naming a method instead of refusing with the place to move the draw to.
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                self.groups_src[group_src][group_dest].prepare(group_src, group_dest)
+        for group_src, group_dest, chain in _chains(self.groups_src):
+            chain.prepare(group_src, group_dest)
         self._validate_expansion()
         self._seed_expansions()
         super().prepare()
@@ -1879,37 +1862,17 @@ class DataTransform(Data):
         chain agree: they never meet, they derive from one seed they both hold. A chain that
         declares ``seed`` keeps it, which is how two chains are asked for different copies.
         """
-        for group_src in self.groups_src:
-            for group_dest in self.groups_src[group_src]:
-                for transform in self.groups_src[group_src][group_dest].transforms:
-                    if isinstance(transform, Expand) and transform.seed is None:
-                        transform.seed = self.manual_seed
-
-    def _output_destinations(self) -> dict[tuple[str, str], list[tuple[str, str]]]:
-        """Resolved ``(root, group)`` of every Save/Write, keyed by chain: the parse-time view of
-        what the run would write, resolved exactly as ``save_destination`` will resolve it."""
-        destinations: dict[tuple[str, str], list[tuple[str, str]]] = {}
-        for group_src in self.groups_src:
-            for group_dest, group_transform in self.groups_src[group_src].items():
-                entries = []
-                for transform in group_transform.transforms:
-                    if isinstance(transform, Save) and transform.dataset:
-                        filename, _flag, _file_format = split_path_spec(
-                            transform.dataset, default_format="mha", supported_formats=SUPPORTED_FORMATS
-                        )
-                        entries.append((str(Path(filename).resolve()), transform.group or group_dest))
-                destinations[(group_src, group_dest)] = entries
-        return destinations
+        for _group_src, _group_dest, chain in _chains(self.groups_src):
+            for transform in chain.transforms:
+                if isinstance(transform, Expand) and transform.seed is None:
+                    transform.seed = self.manual_seed
 
     def _validate_write_chains(self) -> None:
-        """The parse-time refusals: everything below is decidable before any byte is read, so failing
-        later (or worse, succeeding wrongly) would be a silent failure by choice."""
+        """Refuse, before any byte is read: a chain not ending with a Write, a Save with no dataset,
+        a target inside a source root, and two chains writing the same (root, group)."""
         write_targets: dict[tuple[str, str], tuple[str, str]] = {}
         source_roots = {str(Path(filename).resolve()) for filename in self.datasets}
-        destinations = self._output_destinations()
-        for (group_src, group_dest), group_transform in (
-            ((gs, gd), self.groups_src[gs][gd]) for gs in self.groups_src for gd in self.groups_src[gs]
-        ):
+        for group_src, group_dest, group_transform in _chains(self.groups_src):
             chain = f"groups_src.{group_src}.groups_dest.{group_dest}"
             transforms = group_transform.transforms
             if not transforms or not isinstance(transforms[-1], Write):
@@ -1931,7 +1894,11 @@ class DataTransform(Data):
                         "Give the Save its own destination, e.g. Save: {dataset: ./Work:h5}.",
                     )
             chain_targets: list[tuple[str, str]] = []
-            for root, group in destinations[(group_src, group_dest)]:
+            for transform in transforms:
+                # The spec, not the Dataset: building one probes the store on disk.
+                if not isinstance(transform, Save) or (spec := transform.spec) is None:
+                    continue
+                root, group = str(Path(spec[0]).resolve()), transform.group or group_dest
                 for source_root in source_roots:
                     if root == source_root or Path(root).is_relative_to(source_root):
                         raise TransformerError(
@@ -1956,36 +1923,20 @@ class DataTransform(Data):
                 write_targets[target] = (group_src, group_dest)
 
     def _validate_expansion(self) -> None:
-        """The Expand contract, decidable from the config alone.
-
-        A draw only means something behind a cardinality change: applied once per case it is a
-        random transform, which is not what an augmentation is for and not what a reproducible
-        data-processing pass should contain. So a draw before the marker (or with no marker at
-        all) is refused with the place to move it to.
-        """
-        for (group_src, group_dest), group_transform in (
-            ((gs, gd), self.groups_src[gs][gd]) for gs in self.groups_src for gd in self.groups_src[gs]
-        ):
+        """Refuse, from the config alone: more than one Expand or Reduce marker, both in one chain,
+        a draw before the Expand (or with no Expand), and an Expand no draw follows."""
+        for group_src, group_dest, group_transform in _chains(self.groups_src):
             chain = f"groups_src.{group_src}.groups_dest.{group_dest}"
             transforms = group_transform.transforms
             expands = [t for t in transforms if isinstance(t, Expand)]
             reduces = [t for t in transforms if isinstance(t, Reduce)]
-            if len(expands) > 1:
-                raise TransformerError(
-                    f"'{chain}' declares {len(expands)} Expand markers; a chain changes its cardinality at most once.",
-                    "Keep one Expand per chain. Successive expansions compose across two"
-                    " invocations, the second reading the first one's output back.",
-                )
-            if len(reduces) > 1:
-                # Counted here, where a cardinality marker is refused under its own name. The chain
-                # splits at the FIRST Reduce, so a second one lands among the post stages and comes
-                # back as an ordinary stage that reads across space: a true sentence about the wrong
-                # problem, naming a remedy that does not apply.
-                raise TransformerError(
-                    f"'{chain}' declares {len(reduces)} Reduce markers; a chain changes its cardinality at most once.",
-                    "Keep one Reduce per chain. Successive reductions compose across two"
-                    " invocations, the second reading the first one's output back.",
-                )
+            for kind, markers in (("Expand", expands), ("Reduce", reduces)):
+                if len(markers) > 1:
+                    raise TransformerError(
+                        f"'{chain}' declares {len(markers)} {kind} markers; a chain changes its cardinality at most once.",
+                        f"Keep one {kind} per chain. Successive ones compose across two"
+                        " invocations, the second reading the first one's output back.",
+                    )
             if expands and reduces:
                 raise TransformerError(
                     f"'{chain}' declares both an Expand and a Reduce.",

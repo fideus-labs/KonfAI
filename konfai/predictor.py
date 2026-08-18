@@ -73,7 +73,7 @@ from konfai.data.transform import (
     TransformLoader,
 )
 from konfai.network.network import Model, ModelLoader, NetState, Network
-from konfai.utils.budget import AUTO_MEMORY_SAFETY_FRACTION, node_local_ranks
+from konfai.utils.budget import node_local_ranks, resolve_memory_budget
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, PredictorError
@@ -82,7 +82,6 @@ from konfai.utils.runtime import (
     DistributedObject,
     NeedDevice,
     State,
-    available_memory_bytes,
     configure_workflow_environment,
     confirm_overwrite_or_raise,
     description,
@@ -293,34 +292,24 @@ class OutputDataset(Dataset, NeedDevice, ABC):
             "after_reduction_transforms",
             "final_transforms",
         ]
+        konfai_args = f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset"
         for name, _transform_type, transform_type in [
             (k, getattr(self, f"_{k}"), getattr(self, k)) for k in transforms_type
         ]:
             if _transform_type is not None:
                 for classpath, transform in _transform_type.items():
-                    transform = transform.get_transform(
-                        classpath,
-                        konfai_args=f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset.{name}",
-                    )
+                    transform = transform.get_transform(classpath, konfai_args=f"{konfai_args}.{name}")
                     transform_type.append(transform)
 
         # A patch grid overlaps whether or not a combine is declared, so the overlap needs a
         # deterministic owner. Trim keeps each patch's central band: the bands tile the volume
         # exactly, a seamless selection that never averages (a label map survives it).
         module, name = get_module(self._patch_combine or "Trim", "konfai.data.patching")
-        self.patch_combine = apply_config(f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset")(
-            getattr(module, name)
-        )()
+        self.patch_combine = apply_config(konfai_args)(getattr(module, name))()
 
+        # Built-in or custom, the operator binds its parameters from its own block, like every stage.
         module, name = get_module(self.reduction_classpath, "konfai.predictor")
-        # get_module returns the module OBJECT: compare its dotted name, not the module against the string
-        # (a ``module == "konfai.predictor"`` comparison is always False and takes the custom branch).
-        if module.__name__ == "konfai.predictor":
-            self.reduction = getattr(module, name)()
-        else:
-            self.reduction = apply_config(
-                f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset.{self.reduction_classpath}"
-            )(getattr(module, name))()
+        self.reduction = apply_config(f"{konfai_args}.{self.reduction_classpath}")(getattr(module, name))()
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
         for transform in self.before_reduction_transforms:
@@ -457,6 +446,14 @@ class _FinalizeStage:
         if self.inverted:
             return cast(TransformInverse, self.transform).inverse(name, tensor, attribute)
         return self.transform(name, tensor, attribute)
+
+    def stream_region(
+        self, name: str, tensor: torch.Tensor, context: RegionContext, attribute: Attribute
+    ) -> torch.Tensor:
+        """The call, told where the region sits (both default to the whole-volume call)."""
+        if self.inverted:
+            return cast(TransformInverse, self.transform).stream_region_inverse(name, tensor, context, attribute)
+        return self.transform.stream_region(name, tensor, context, attribute)
 
 
 @dataclass(frozen=True)
@@ -763,7 +760,7 @@ class OutSameAsGroupDataset(OutputDataset):
         # against the auto-budget's own rule.
         budget = self._per_rank_budget_bytes
         if budget is None:
-            budget = AUTO_MEMORY_SAFETY_FRACTION * available_memory_bytes()[0]
+            budget = resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
         return assembled >= fraction * budget
 
     def _plan_stream(
@@ -1224,13 +1221,10 @@ class OutSameAsGroupDataset(OutputDataset):
         for position, stage in enumerate(plan.stages[: plan.boundary]):
             if position in plan.slab_stages:
                 result = stage.transform.stream_slab(self.names[index], result, region, spatial, attribute)
-            elif stage.inverted:
-                result = stage(self.names[index], result, attribute)
             else:
-                # Told where the slab sits: the default is the whole-volume call, exact on a slab for
-                # every voxel-local stage the gate admitted; a stage reading a companion volume
-                # (Mask) reads its slab region instead of the whole.
-                result = stage.transform.stream_region(self.names[index], result, context, attribute)
+                # Told where the slab sits: exact on a slab for every voxel-local stage the gate
+                # admitted, and a stage reading a companion volume (Mask) reads its slab region.
+                result = stage.stream_region(self.names[index], result, context, attribute)
         return result, attribute
 
     def reset(self) -> None:

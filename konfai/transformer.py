@@ -32,9 +32,7 @@ import os
 import shutil
 import time
 from collections import Counter
-from collections.abc import Callable
-from dataclasses import dataclass, field, replace
-from functools import partial
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
@@ -46,16 +44,14 @@ from ruamel.yaml import YAML
 from konfai import config_file, transforms_directory
 from konfai.data.case_reduction import CaseReduction, split_chain
 from konfai.data.data_manager import DataTransform
-from konfai.data.materialize import CaseMaterializer
+from konfai.data.materialize import CaseMaterializer, Regime, Verdict
 from konfai.data.patching import (
     CASE_ELEMENT_BYTES,
     FALLBACK_INFLIGHT_FACTOR,
-    SWEEP_SLAB_ROWS,
-    AugmentedStage,
     DatasetManager,
     save_destination,
 )
-from konfai.data.transform import Expand, LocalityKind, Reduce, Resample, Save, Transform, split_expand
+from konfai.data.transform import Expand, Reduce, Save, split_expand
 from konfai.utils.budget import format_bytes, node_local_ranks
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
@@ -81,36 +77,22 @@ class TransformPlanEntry:
     case: str  # the case name, the copy's entry name behind an Expand, or a reduction's output name
     group_src: str
     group_dest: str
-    #: "STREAM" | "LOAD" | "WHOLE-VOLUME" | "SKIP" | "REDUCE" | "REFUSED". LOAD is a choice, not a
-    #: fallback: the case fits the budget and streaming would re-read the source, so the run
-    #: assembles it: same bytes as far as the chain is byte-stable, one read instead of many.
-    verdict: str
+    verdict: Verdict
     reason: str | None
+    #: The largest single tensor the case's chain holds (a reduction: its resident regions).
     case_bytes: int
+    #: What this entry holds at its peak, the figure the budget bounds: the engine's whole-volume
+    #: working set (the case, one in-flight copy, the widest stage's own buffers), or a
+    #: reduction's regions.
+    working_set_bytes: int
     #: The cases folded into one, for a reduction. Empty for an ordinary per-case entry. Printed in
     #: full: a reduction whose case list silently changed writes a different volume under the same
     #: name, and nothing about the output would look wrong.
     reduced: tuple[str, ...] = ()
     #: The case this entry is an Expand copy of ("" for anything that is not a copy).
     expanded_from: str = ""
-    #: How a STREAM copy is read: "shared" rides the case's single read pass, "solo" sweeps its own
-    #: (its draw's read geometry is its own). None for non-copy entries and non-STREAM verdicts.
-    regime: str | None = None
-    #: What the chain's widest stage allocates beyond the case and its in-flight copy, in
-    #: volumes-worth (``Transform.working_multiple``): 0 for a reduction, priced in regions.
-    working_multiple: float = 0.0
-
-    @property
-    def working_set_bytes(self) -> int:
-        """What this entry holds at its peak: the figure the budget bounds.
-
-        A reduction's ``case_bytes`` is already its resident regions (it holds one region per case,
-        not one volume), where a whole-volume fallback holds the case, one in-flight copy, and the
-        widest stage's own buffers.
-        """
-        if self.reduced:
-            return self.case_bytes
-        return int(self.case_bytes * (FALLBACK_INFLIGHT_FACTOR + self.working_multiple))
+    #: How a STREAM copy is read; None for non-copy entries and non-STREAM verdicts.
+    regime: Regime | None = None
 
 
 @dataclass
@@ -133,19 +115,21 @@ class TransformPlan:
 
     @property
     def fallback_entries(self) -> list[TransformPlanEntry]:
-        return [entry for entry in self.entries if entry.verdict == "WHOLE-VOLUME"]
+        return [entry for entry in self.entries if entry.verdict is Verdict.WHOLE_VOLUME]
 
     @property
     def refused_entries(self) -> list[TransformPlanEntry]:
         """Reductions that cannot stream. Unlike a per-case chain they have no whole-volume path to
         fall back to, so these refuse the run whatever ``on_fallback`` says."""
-        return [entry for entry in self.entries if entry.verdict == "REFUSED"]
+        return [entry for entry in self.entries if entry.verdict is Verdict.REFUSED]
 
     def budget_violations(self) -> list[TransformPlanEntry]:
         """Entries whose working set exceeds the per-rank budget: a whole-volume fallback (the case,
         its in-flight copy, the widest stage's buffers) or a reduction whose regions are down to one
         row. A headers-only estimate; the report prints the margin."""
-        candidates = [entry for entry in self.entries if entry.verdict in ("WHOLE-VOLUME", "LOAD", "REDUCE")]
+        candidates = [
+            entry for entry in self.entries if entry.verdict in (Verdict.WHOLE_VOLUME, Verdict.LOAD, Verdict.REDUCE)
+        ]
         return [entry for entry in candidates if entry.working_set_bytes > self.budget_bytes]
 
     def summary(self) -> str:
@@ -207,8 +191,8 @@ class TransformPlan:
     def _reduction_lines(self, chain: str, entry: TransformPlanEntry) -> list[str]:
         lines = [f"  {chain}: REDUCE {len(entry.reduced)} case(s) -> 1 output '{entry.case}': {entry.verdict}"]
         if entry.reason:
-            lines.append(f"    {entry.reason}")
-        if entry.verdict == "REDUCE":
+            lines.extend(f"    {line}" for line in entry.reason.splitlines())
+        if entry.verdict is Verdict.REDUCE:
             lines.append(
                 f"    peak ~= {format_bytes(entry.working_set_bytes)} vs per-rank budget"
                 f" {format_bytes(self.budget_bytes)}"
@@ -221,13 +205,13 @@ class TransformPlan:
         counts = Counter(entry.verdict for entry in entries)
         expanded = [entry for entry in entries if entry.expanded_from]
         cases = len({entry.expanded_from for entry in expanded})
-        shared = sum(1 for entry in expanded if entry.regime == "shared")
-        solo = sum(1 for entry in expanded if entry.regime == "solo")
+        shared = sum(1 for entry in expanded if entry.regime is Regime.SHARED)
+        solo = sum(1 for entry in expanded if entry.regime is Regime.SOLO)
         return (
             f"  {chain}: EXPAND {cases} case(s) ->"
             f" {len(expanded)} cop(ies): {shared} STREAM (shared read pass),"
-            f" {solo} STREAM (own pass), {counts['WHOLE-VOLUME']} WHOLE-VOLUME,"
-            f" {counts['SKIP']} SKIP (copy already written)"
+            f" {solo} STREAM (own pass), {counts[Verdict.WHOLE_VOLUME]} WHOLE-VOLUME,"
+            f" {counts[Verdict.SKIP]} SKIP (copy already written)"
         )
 
     @staticmethod
@@ -235,9 +219,9 @@ class TransformPlan:
         counts = Counter(entry.verdict for entry in entries)
         return (
             f"  {chain}: {len(entries)} case(s) --"
-            f" {counts['STREAM']} STREAM, {counts['LOAD']} LOAD,"
-            f" {counts['WHOLE-VOLUME']} WHOLE-VOLUME,"
-            f" {counts['SKIP']} SKIP (output already written)"
+            f" {counts[Verdict.STREAM]} STREAM, {counts[Verdict.LOAD]} LOAD,"
+            f" {counts[Verdict.WHOLE_VOLUME]} WHOLE-VOLUME,"
+            f" {counts[Verdict.SKIP]} SKIP (output already written)"
         )
 
     @staticmethod
@@ -246,14 +230,17 @@ class TransformPlan:
         with how many entries it covers."""
         reasons: Counter[str] = Counter()
         for entry in entries:
-            if entry.reason and (entry.verdict in ("WHOLE-VOLUME", "LOAD") or entry.regime == "solo"):
-                label = entry.verdict if entry.verdict in ("WHOLE-VOLUME", "LOAD") else "own pass"
-                reasons[f"{label}: {entry.reason}"] += 1
+            if not entry.reason:
+                continue
+            if entry.verdict in (Verdict.WHOLE_VOLUME, Verdict.LOAD):
+                reasons[f"{entry.verdict}: {entry.reason}"] += 1
+            elif entry.regime is Regime.SOLO:
+                reasons[f"own pass: {entry.reason}"] += 1
         unit = "cop(ies)" if expanded else "case(s)"
         return [f"    ({count} {unit}) {reason}" for reason, count in reasons.items()]
 
     def _worst_fallback_lines(self, entries: list[TransformPlanEntry]) -> list[str]:
-        fallbacks = [entry.working_set_bytes for entry in entries if entry.verdict == "WHOLE-VOLUME"]
+        fallbacks = [entry.working_set_bytes for entry in entries if entry.verdict is Verdict.WHOLE_VOLUME]
         if not fallbacks:
             return []
         return [
@@ -346,7 +333,7 @@ class Transformer(DistributedObject):
         self._items: list[WorkItem] | None = None  # built once by _work_items(), after prepare()
         self._shards: list[list[int]] = []
         self._reductions: dict[str, CaseReduction | None] = {}
-        self._planned: dict[tuple[str, str], str] = {}
+        self._planned: dict[tuple[str, str], Verdict] = {}
 
     def _managers(self) -> dict[str, list[DatasetManager]]:
         prepared = self.dataset._prepared_data
@@ -516,39 +503,37 @@ class Transformer(DistributedObject):
         existed = destination.exists_on_disk()
         try:
             stream = destination.open_data_stream(group, _PROBE_ENTRY, shape, dtype, attributes)
+            if stream is None:
+                return (
+                    f"destination '{destination.filename}' cannot serve region writes"
+                    " (h5 and omezarr always can; mha only with image geometry)."
+                )
+            stream.__enter__()
+            stream.abort(RuntimeError("plan probe"))
+            return None
         except Exception as error:  # the probe exists to surface exactly these
-            Transformer._remove_probe_entry(destination, existed)
             return (
                 f"destination '{destination.filename}' refuses a"
                 f" [{', '.join(str(extent) for extent in shape)}] {dtype} region write:"
                 f" {type(error).__name__}: {error}"
             )
-        if stream is None:
+        finally:
             Transformer._remove_probe_entry(destination, existed)
-            return (
-                f"destination '{destination.filename}' cannot serve region writes"
-                " (h5 and omezarr always can; mha only with image geometry)."
-            )
-        stream.__enter__()
-        stream.abort(RuntimeError("plan probe"))
-        Transformer._remove_probe_entry(destination, existed)
-        return None
 
     @staticmethod
     def _remove_probe_entry(destination: Dataset, existed_before: bool) -> None:
         """Take back what the probe created beyond its entry: the case directory of a directory store
-        (``get_names`` would list it as a case) and, when the store did not exist before, the empty
-        root or the ``.h5`` file. ``rmdir``, never ``rmtree``: anything in there is not the probe's."""
+        (``get_names`` would list it as a case) and, when the store did not exist before, the store
+        itself. ``rmdir``, never ``rmtree``: anything in there is not the probe's."""
         with contextlib.suppress(OSError):
             if destination.is_directory:
-                (Path(destination.filename) / _PROBE_ENTRY).rmdir()
-                if not existed_before:
-                    Path(destination.filename).rmdir()
-            elif not existed_before and destination.file_format == "h5":
-                Path(f"{destination.filename}.h5").unlink()
+                (destination.path_on_disk / _PROBE_ENTRY).rmdir()
+            if not existed_before:
+                path = destination.path_on_disk
+                path.rmdir() if path.is_dir() else path.unlink()
 
     def output_destinations(self) -> list[dict[str, str]]:
-        """Every chain's terminal ``Write``, as ``{group_src, group_dest, dataset, group, format}``.
+        """Every chain's terminal ``Write``, as ``{group_src, group_dest, dataset, path, group, format}``.
 
         What the run produced, said in the run's own terms. The deliverable never lives under the
         run directory, so this is how a reader: a person, Studio's run panel, the next workflow --
@@ -559,15 +544,14 @@ class Transformer(DistributedObject):
             if not managers:
                 continue
             destination, group = self._terminal_destination(managers[0])
-            root = Path(destination.filename).resolve()
             destinations.append(
                 {
                     "group_src": self._group_src_of(group_dest),
                     "group_dest": group_dest,
                     # `dataset` is the root as a config names it (`<dataset>:<format>` reads it back);
                     # `path` is what is on disk: the same directory, or the `.h5` file itself.
-                    "dataset": str(root),
-                    "path": str(root.with_name(f"{root.name}.h5") if destination.file_format == "h5" else root),
+                    "dataset": str(Path(destination.filename).resolve()),
+                    "path": str(destination.path_on_disk.resolve()),
                     "group": group,
                     "format": destination.file_format,
                 }
@@ -579,7 +563,7 @@ class Transformer(DistributedObject):
     #: where the load holds the case, so streaming wins the tie; past it the re-reads are the cost.
     _STREAM_WORTH_FACTOR = 1.5
 
-    def _route(self, engine: CaseMaterializer, budget_bytes: float) -> tuple[str, str | None]:
+    def _route(self, engine: CaseMaterializer, budget_bytes: float) -> tuple[Verdict, str | None]:
         """``STREAM`` or ``LOAD``. A case whose working set exceeds the budget streams; one that fits
         streams while streaming is no dearer than loading (``predicted_stream_read_factor``), and
         is loaded past that. Expand copies are not routed here: they share one read pass."""
@@ -587,56 +571,47 @@ class Transformer(DistributedObject):
         if working_set <= budget_bytes:
             factor = engine.predicted_stream_read_factor(0, apply_augmentations=False)
             if factor is not None and factor > self._STREAM_WORTH_FACTOR:
-                return "LOAD", (
+                return Verdict.LOAD, (
                     f"fits the per-rank budget (~{format_bytes(working_set)} vs"
                     f" {format_bytes(budget_bytes)}); streaming would read ~{factor:.1f}x the source"
                 )
-        return "STREAM", None
+        return Verdict.STREAM, None
 
-    @staticmethod
-    def _sub_cap_sweep(manager: DatasetManager) -> bool:
-        """Whether this case sweeps below the default slab height AND a stage of its chain can show
-        it in the values: a resample whose map does not factorise, or a draw that samples through an
-        affine (a free rotation, a scale). Pointwise and separable chains land the same bytes at any
-        height."""
-        if manager._sweep_rows(list(manager.shapes[0]), int(manager.base_shape[0])) >= SWEEP_SLAB_ROWS:
-            return False
-        for stage in manager.chain_stages(0):
-            if isinstance(stage, Resample) and stage.slab_height_sensitive(manager.name):
-                return True
-            if (
-                isinstance(stage, AugmentedStage)
-                and stage.patch_locality(manager.stored_attributes).kind is LocalityKind.REGRID
-            ):
-                return True
-        return False
-
-    def _entry_verdict(
-        self,
-        item: WorkItem,
-        copy_index: int,
-        overwrite: bool,
-        probed: set[tuple[str, str]],
-        route: Callable[[], tuple[str, str | None]] | None = None,
-    ) -> tuple[str, str | None]:
-        """The SKIP -> streamable -> WHOLE-VOLUME cascade of every planned entry: an existing output
-        is a resume; a chain the planner accepts is priced by ``route`` once its destinations pass
-        the write probe (an Expand copy passes no route: it is STREAM, its reason doubling as the
-        solo/shared regime); everything else is the whole-volume pass, with the refusal."""
+    def _entry_refusal(
+        self, item: WorkItem, copy_index: int, overwrite: bool, probed: set[tuple[str, str]]
+    ) -> tuple[Verdict, str | None] | None:
+        """What stops an entry from streaming, or ``None``: an existing output is a resume (SKIP); a
+        chain the planner refuses, or whose destination fails the write probe, is the whole-volume
+        pass with the refusal."""
         manager = item.manager
         # Copies exist to carry augmentation draws: a real copy index asks the chain with them applied.
         augmented = copy_index > 0
         if not item.pending(manager.copy_entry(copy_index), overwrite):
-            return "SKIP", None
+            return Verdict.SKIP, None
         if not manager.can_stream_patch(copy_index, apply_augmentations=augmented):
-            return "WHOLE-VOLUME", manager.stream_refusal(copy_index, apply_augmentations=augmented)
+            return Verdict.WHOLE_VOLUME, manager.stream_refusal(copy_index, apply_augmentations=augmented)
         probe_failure = self._probe_write_destinations(item.engine, probed, copy_index)
         if probe_failure is not None:
             # The run would fail the sweep at its first slab and fall back: say so now.
-            return "WHOLE-VOLUME", probe_failure
-        if route is not None:
-            return route()
-        return "STREAM", item.engine.expansion_solo_reason(copy_index)
+            return Verdict.WHOLE_VOLUME, probe_failure
+        return None
+
+    @staticmethod
+    def _entry(
+        item: WorkItem, copy_index: int, verdict: Verdict, reason: str | None, regime: Regime | None = None
+    ) -> TransformPlanEntry:
+        manager = item.manager
+        return TransformPlanEntry(
+            manager.copy_entry(copy_index),
+            item.group_src,
+            item.group_dest,
+            verdict,
+            reason,
+            item.engine.peak_case_bytes(),
+            item.engine.fallback_working_set_bytes(),
+            expanded_from=manager.name if copy_index else "",
+            regime=regime,
+        )
 
     def _plan_item(
         self, item: WorkItem, budget_bytes: float, overwrite: bool, probed: set[tuple[str, str]]
@@ -661,15 +636,9 @@ class Transformer(DistributedObject):
         reduction_dtype = self._dtype_hypothesis(item.manager)
         reduction_plan = reduction.plan()
         skipped = not item.pending(reduction.reduce.output, overwrite)
-        verdict = "SKIP" if skipped else ("REDUCE" if reduction_plan.streams else "REFUSED")
-        reason = (
-            reduction_plan.refusal
-            if not reduction_plan.streams
-            # All of describe() but its header and its trailing case list, which report()
-            # prints on lines of its own.
-            else "\n".join(reduction_plan.describe().splitlines()[1:-1]).strip()
-        )
-        if verdict == "REDUCE":
+        verdict = Verdict.SKIP if skipped else (Verdict.REDUCE if reduction_plan.streams else Verdict.REFUSED)
+        reason = reduction_plan.refusal if not reduction_plan.streams else "\n".join(reduction_plan.body_lines())
+        if verdict is Verdict.REDUCE:
             # A reduction has no whole-volume fallback, so a destination that would refuse
             # its stream at the first region refuses the plan: probed here, like a chain's.
             probe_failure = self._probe_destination(
@@ -680,7 +649,7 @@ class Transformer(DistributedObject):
                 reduction.reference.landed_attributes(),
             )
             if probe_failure is not None:
-                verdict, reason = "REFUSED", probe_failure
+                verdict, reason = Verdict.REFUSED, probe_failure
         return TransformPlanEntry(
             case=reduction.reduce.output,
             group_src=item.group_src,
@@ -688,61 +657,28 @@ class Transformer(DistributedObject):
             verdict=verdict,
             reason=reason,
             case_bytes=reduction_plan.peak_bytes,
+            working_set_bytes=reduction_plan.peak_bytes,
             reduced=tuple(reduction_plan.cases),
         )
 
     def _plan_copies(self, item: WorkItem, overwrite: bool, probed: set[tuple[str, str]]) -> list[TransformPlanEntry]:
-        """One entry per Expand copy, each with its own resume, verdict and read regime."""
-        manager = item.manager
-        case_bytes = item.engine.peak_case_bytes()
-        # One line per copy: the copies are the outputs, each with its own resume, its
-        # own verdict, and, for STREAM: the regime that says who pays the reads.
-        copies: list[TransformPlanEntry] = []
-        for a in range(1, item.copies + 1):
-            verdict, reason = self._entry_verdict(item, a, overwrite, probed)
-            regime = ("solo" if reason else "shared") if verdict == "STREAM" else None
-            copies.append(
-                TransformPlanEntry(
-                    manager.copy_entry(a),
-                    item.group_src,
-                    item.group_dest,
-                    verdict,
-                    reason,
-                    case_bytes,
-                    expanded_from=manager.name,
-                    regime=regime,
-                    working_multiple=item.engine.working_multiple(),
-                )
-            )
-        shared = [index for index, entry in enumerate(copies) if entry.regime == "shared"]
-        if len(shared) == 1:
-            # The engine's own rule (materialize_copies): a shared pass with one member
-            # is that copy's own sweep, so a resume that leaves one copy sweeps it solo.
-            copies[shared[0]] = replace(
-                copies[shared[0]],
-                regime="solo",
-                reason="the only copy of this case still to write; a shared pass with one member is its own sweep.",
-            )
-        return copies
+        """One entry per Expand copy, each with its own resume, verdict and, for STREAM, the read
+        regime the engine will give it: the copies are the outputs."""
+        refusals = {a: self._entry_refusal(item, a, overwrite, probed) for a in range(1, item.copies + 1)}
+        routes = item.engine.classify_copies([a for a, refusal in refusals.items() if refusal is None])
+        return [
+            self._entry(item, a, *refusal)
+            if refusal is not None
+            else self._entry(item, a, Verdict.STREAM, routes[a].reason, routes[a].regime)
+            for a, refusal in refusals.items()
+        ]
 
     def _plan_case(
         self, item: WorkItem, budget_bytes: float, overwrite: bool, probed: set[tuple[str, str]]
     ) -> TransformPlanEntry:
         """A plain case: SKIP, STREAM or LOAD as :meth:`_route` prices it, or WHOLE-VOLUME with the refusal."""
-        manager = item.manager
-        case_bytes = item.engine.peak_case_bytes()
-        verdict, reason = self._entry_verdict(
-            item, 0, overwrite, probed, route=partial(self._route, item.engine, budget_bytes)
-        )
-        return TransformPlanEntry(
-            manager.name,
-            item.group_src,
-            item.group_dest,
-            verdict,
-            reason,
-            case_bytes,
-            working_multiple=item.engine.working_multiple(),
-        )
+        decision = self._entry_refusal(item, 0, overwrite, probed) or self._route(item.engine, budget_bytes)
+        return self._entry(item, 0, *decision)
 
     def compute_plan(self, world_size: int = 1, overwrite: bool = False) -> TransformPlan:
         """Plan every (case, chain) on the launcher, headers plus one write probe per destination."""
@@ -767,7 +703,7 @@ class Transformer(DistributedObject):
             planned_dtypes.add(str(self._dtype_hypothesis(item.manager)))
             planned = self._plan_item(item, per_rank_budget, overwrite, probed)
             entries.extend(planned)
-            if item.kind == "case" and planned[0].verdict == "STREAM" and self._sub_cap_sweep(item.manager):
+            if item.kind == "case" and planned[0].verdict is Verdict.STREAM and item.engine.sub_cap_sweep():
                 sub_cap_sweeps = True
         dropped: dict[str, int] = {}
         kept = set(self.dataset._prepared_train_names)
@@ -789,42 +725,24 @@ class Transformer(DistributedObject):
             chain_labels,
         )
 
+    #: What a streamed case whose slabs the budget lowered below the default height, and whose chain
+    #: interpolates through per-voxel coordinates, is told: its values differ from a taller-slab run.
+    _SUB_CAP_NOTE = (
+        "the budget lowers the sweep slab height below the default, and a stage of the chain"
+        " interpolates through per-voxel coordinates (a resample whose map does not factorise,"
+        " a free rotation): the streamed values then differ from a taller-slab run by ~1e-5 of"
+        " the data's range"
+    )
+
     def _plan_notes(self, sub_cap_sweeps: bool) -> list[str]:
-        """The notes the stages ask the plan to print (``Transform.plan_note``), in chain order, each
-        distinct one once."""
-        notes: list[str] = []
-        if sub_cap_sweeps:
-            notes.append(
-                "the budget lowers the sweep slab height below the default, and a stage of the chain"
-                " interpolates through per-voxel coordinates (a resample whose map does not factorise,"
-                " a free rotation): the streamed values then differ from a taller-slab run by ~1e-5 of"
-                " the data's range"
-            )
+        """The notes the plan prints beside its lines: the workflow's own, then what the stages ask
+        (``Transform.plan_note``), in chain order, each distinct one once."""
+        notes: list[str] = [self._SUB_CAP_NOTE] if sub_cap_sweeps else []
         for group_dest, managers in self._managers().items():
             for manager in managers:
-                # Each stage is asked about ITS OWN input, not about the case as stored: past a
-                # Resample or a Crop the grid a stage meets is no longer the one on disk. Folded the
-                # way the streamed planner folds it, over a copy of the stored state.
-                shape = [int(extent) for extent in manager.base_shape[1:]]
-                attributes = manager.stored_attributes
-                # Only as far as a Reduce. Past it the grid is the COHORT's: another case's
-                # entirely under `reference:<case>`: and a fold started from this case would hand
-                # the stages after it a geometry belonging to nobody. What the reduction writes is
-                # its own plan line, not a note derived from one of its members.
-                for stage in split_chain(manager.transforms)[0]:
-                    # A chain's stages are transforms AND draws; only a transform declares a note.
-                    # A draw has nothing to add anyway: what its copies cost is the `regime` column.
-                    if not isinstance(stage, Transform):
-                        continue
-                    note = stage.plan_note(group_dest, manager.name, list(shape), Attribute(attributes))
-                    if note is not None and note not in notes:
+                for note in CaseMaterializer(manager).plan_notes(group_dest):
+                    if note not in notes:
                         notes.append(note)
-                    source = list(shape)
-                    shape = [
-                        int(extent)
-                        for extent in stage.transform_shape(manager.group_src, manager.name, source, attributes)
-                    ]
-                    stage.write_stream_cache_attribute(attributes, source, manager.name)
         return notes
 
     def setup(self, world_size: int):
@@ -983,23 +901,23 @@ class Transformer(DistributedObject):
         started = time.monotonic()
         items = self._work_items()
         shard = self._shards[global_rank]
-        counts = {"STREAM": 0, "LOAD": 0, "WHOLE-VOLUME": 0, "SKIP": 0, "REDUCE": 0}
+        counts: Counter[Verdict] = Counter()
         # 'error' holds at run time too: a fallback the plan could not see (a sweep that fails, a
         # field bound exceeded) raises at that case instead of quietly costing a volume.
         allow_fallback = self.on_fallback != "error"
 
         def description() -> str:
             return (
-                f"Transform : {counts['STREAM']} streamed | {counts['LOAD']} loaded"
-                f" | {counts['REDUCE']} reduced"
-                f" | {counts['WHOLE-VOLUME']} whole-volume | {counts['SKIP']} skipped"
+                f"Transform : {counts[Verdict.STREAM]} streamed | {counts[Verdict.LOAD]} loaded"
+                f" | {counts[Verdict.REDUCE]} reduced"
+                f" | {counts[Verdict.WHOLE_VOLUME]} whole-volume | {counts[Verdict.SKIP]} skipped"
             )
 
         failed: list[tuple[str, str, str]] = []
         with tqdm.tqdm(total=len(shard), desc=description(), ncols=0) as progress:
             for item in (items[position] for position in shard):
                 try:
-                    self._run_item(item, chain_device, allow_fallback, counts, progress)
+                    counts.update(self._run_item(item, chain_device, allow_fallback, progress))
                 except Exception as error:  # one case's failure is not the shard's: keep going, list it
                     failed.append((item.group_dest, item.label, f"{type(error).__name__}: {error}"))
                     progress.write(
@@ -1008,13 +926,13 @@ class Transformer(DistributedObject):
                 progress.set_description(description())
                 progress.update(1)
         # No collective: each rank reports its own shard (one line for the usual single rank).
-        written = counts["STREAM"] + counts["LOAD"] + counts["WHOLE-VOLUME"] + counts["REDUCE"]
-        resume = f", {counts['SKIP']} already written (--overwrite recomputes)" if counts["SKIP"] else ""
+        written = sum(counts.values()) - counts[Verdict.SKIP]
+        resume = f", {counts[Verdict.SKIP]} already written (--overwrite recomputes)" if counts[Verdict.SKIP] else ""
         who = f"rank {global_rank}/{world_size} " if world_size > 1 else ""
         print(
             f"[KonfAI] {who}done in {time.monotonic() - started:.1f} s: {written} written"
-            f" ({counts['STREAM']} streamed, {counts['LOAD']} loaded,"
-            f" {counts['WHOLE-VOLUME']} whole-volume, {counts['REDUCE']} reduced){resume}"
+            f" ({counts[Verdict.STREAM]} streamed, {counts[Verdict.LOAD]} loaded,"
+            f" {counts[Verdict.WHOLE_VOLUME]} whole-volume, {counts[Verdict.REDUCE]} reduced){resume}"
             + (f", {len(failed)} FAILED" if failed else "")
             + f" -> outputs in {self.transform_path / 'outputs.json'}"
         )
@@ -1026,61 +944,53 @@ class Transformer(DistributedObject):
             )
 
     def _run_item(
-        self,
-        item: WorkItem,
-        chain_device: torch.device,
-        allow_fallback: bool,
-        counts: dict[str, int],
-        progress: tqdm.tqdm,
-    ) -> None:
-        """One work item: a reduction, an Expand case with all its copies, or a case."""
+        self, item: WorkItem, chain_device: torch.device, allow_fallback: bool, progress: tqdm.tqdm
+    ) -> Counter[Verdict]:
+        """One work item: a reduction, an Expand case with all its copies, or a case; returns what
+        its entries took."""
+        counts: Counter[Verdict] = Counter()
         if item.kind == "reduction":
             reduction = item.reduction
             assert reduction is not None  # nosec B101 - the item was built from the same predicate
             if item.pending(reduction.reduce.output, self._overwrite):
                 reduction.materialize(rewrite=self._overwrite)
-                counts["REDUCE"] += 1
+                counts[Verdict.REDUCE] += 1
             else:
-                counts["SKIP"] += 1
-            return
+                counts[Verdict.SKIP] += 1
+            return counts
         manager = item.manager
         if item.kind == "expansion":
             # One item per case, all its copies inside: the engine shares one read pass
             # across the copies whose draws allow it, which a per-copy loop could not.
             copies = list(range(1, item.copies + 1))
             todo = [a for a in copies if item.pending(manager.copy_entry(a), self._overwrite)]
-            counts["SKIP"] += len(copies) - len(todo)
-            regimes = item.engine.materialize_copies(
+            counts[Verdict.SKIP] += len(copies) - len(todo)
+            outcomes = item.engine.materialize_copies(
                 todo,
                 rewrite=self._overwrite,
                 fallback_budget_bytes=self._budget_bytes,
                 allow_fallback=allow_fallback,
                 device=chain_device,
             )
-            shared = sum(1 for regime in regimes.values() if regime == "stream-shared")
-            own = sum(1 for regime in regimes.values() if regime == "stream")
-            whole = sum(1 for regime in regimes.values() if regime == "whole-volume")
-            counts["STREAM"] += shared + own
-            counts["WHOLE-VOLUME"] += whole
-            if whole:
+            counts.update(verdict for verdict, _regime in outcomes.values())
+            if counts[Verdict.WHOLE_VOLUME]:
                 progress.write(
                     f"[KonfAI] case '{manager.name}' ({item.group_dest}):"
-                    f" {whole} of {len(copies)} cop(ies) took the whole-volume path"
+                    f" {counts[Verdict.WHOLE_VOLUME]} of {len(copies)} cop(ies) took the whole-volume path"
                 )
-            return
+            return counts
         if not item.pending(manager.name, self._overwrite):
-            counts["SKIP"] += 1
-            return
+            counts[Verdict.SKIP] += 1
+            return counts
         planned = self._planned.get((item.group_dest, manager.name))
-        streamed = item.engine.materialize(
+        verdict = item.engine.materialize(
             0,
             rewrite=self._overwrite,
             fallback_budget_bytes=self._budget_bytes,
             allow_fallback=allow_fallback,
-            prefer_whole=planned == "LOAD",
+            prefer_whole=planned is Verdict.LOAD,
             device=chain_device,
         )
-        verdict = "STREAM" if streamed else ("LOAD" if planned == "LOAD" else "WHOLE-VOLUME")
         counts[verdict] += 1
         if planned not in (None, verdict):
             # The one thing worth a line: the run did NOT do what the plan said.
@@ -1088,6 +998,7 @@ class Transformer(DistributedObject):
                 f"[KonfAI] case '{manager.name}' ({item.group_dest}): {verdict}"
                 f" (planned {planned}: {manager.stream_refusal(0) or 'see the log'})"
             )
+        return counts
 
 
 #: The grammar the strict mode accepts, level by level. ``None`` marks free-form levels (group

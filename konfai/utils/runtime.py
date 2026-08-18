@@ -29,8 +29,8 @@ import sys
 import tempfile
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from contextlib import closing, suppress
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from enum import Enum
 from functools import wraps
 from pathlib import Path
@@ -64,6 +64,7 @@ from konfai import (
     transforms_directory,
 )
 from konfai.utils import State  # also the re-export ``konfai.utils.runtime.State`` callers import
+from konfai.utils.budget import node_local_ranks
 from konfai.utils.errors import ConfigError, KonfAIError
 from konfai.utils.utils import env_flag
 
@@ -133,135 +134,6 @@ def get_memory_info() -> str:
 def get_memory() -> float:
     """Return current RAM usage in GiB."""
     return psutil.virtual_memory().used / 2**30
-
-
-# psutil.virtual_memory() always reports the HOST, so inside a container or a SLURM cgroup that grants
-# far less than the node has, a memory budget derived from it would overshoot the real limit and get
-# OOM-killed. The cgroup ceiling is read directly instead: the process's own cgroup (from
-# /proc/self/cgroup, since only ``docker run`` puts it at the mount root) and every ancestor up to the
-# mount, the tightest one winning. cgroup v2 exposes ``memory.max`` (the literal ``"max"`` means
-# unbounded); cgroup v1 exposes ``memory.limit_in_bytes`` with a page-aligned near INT64_MAX sentinel.
-# What the cgroup already holds is read from ``memory.stat`` and counts only the unreclaimable part
-# (``anon`` + ``kernel`` in v2, ``rss`` in v1): ``memory.current``/``usage_in_bytes`` include the page
-# cache, which the kernel drops under pressure, so a step that has streamed a cohort would otherwise
-# look full. Only Linux has these files.
-_CGROUP_ROOT = "/sys/fs/cgroup"
-_PROC_SELF_CGROUP = "/proc/self/cgroup"
-_CGROUP_UNLIMITED = 1 << 62  # any v1 limit at or above this is the "no limit" sentinel
-_CGROUP_V2_HELD_KEYS: tuple[str, ...] = ("anon", "kernel")
-_CGROUP_V1_HELD_KEYS: tuple[str, ...] = ("rss",)
-
-
-def _cgroup_paths() -> list[tuple[Path, str, tuple[str, ...]]]:
-    """The (directory, limit file, held-memory keys of ``memory.stat``) of this process's memory cgroup
-    and its ancestors, innermost first: v2 (``0::/path``) or v1 (``N:memory:/path``); empty when there
-    is no cgroup."""
-    try:
-        lines = Path(_PROC_SELF_CGROUP).read_text().splitlines()
-    except OSError:
-        return []
-    root = Path(_CGROUP_ROOT)
-    for line in lines:
-        parts = line.split(":", 2)
-        if len(parts) != 3:
-            continue
-        hierarchy, controllers, path = parts
-        if hierarchy == "0" and controllers == "":
-            base, limit_name, held_keys = root, "memory.max", _CGROUP_V2_HELD_KEYS
-        elif "memory" in controllers.split(","):
-            base, limit_name, held_keys = root / "memory", "memory.limit_in_bytes", _CGROUP_V1_HELD_KEYS
-        else:
-            continue
-        leaf = base / path.lstrip("/")
-        chain = [leaf, *leaf.parents]
-        return [(d, limit_name, held_keys) for d in chain if d == base or base in d.parents]
-    return []
-
-
-def _held_memory_bytes(directory: Path, keys: tuple[str, ...]) -> int | None:
-    """The sum of KEYS in DIRECTORY's ``memory.stat``, or ``None`` when the file is missing or lacks them."""
-    try:
-        lines = (directory / "memory.stat").read_text().splitlines()
-    except OSError:
-        return None
-    values: dict[str, int] = {}
-    for line in lines:
-        key, _, raw = line.partition(" ")
-        with suppress(ValueError):
-            values[key] = int(raw)
-    if any(key not in values for key in keys):
-        return None
-    return sum(values[key] for key in keys)
-
-
-def _read_cgroup_memory_limit() -> tuple[int, int] | None:
-    """``(ceiling, held bytes)`` for this process's cgroup, or ``None`` when unbounded or absent.
-
-    The ceiling is the tightest ``memory.max``/``limit_in_bytes`` on the path from the process's own
-    cgroup to the mount root; the held bytes are the innermost cgroup's unreclaimable memory, so a
-    SLURM step already holding memory does not count it as free. A missing hierarchy (non-Linux,
-    cgroups disabled), the ``"max"`` keyword, the v1 sentinel and unparseable values all mean "no
-    bound at this level".
-    """
-    limits: list[int] = []
-    held: int | None = None
-    for directory, limit_name, held_keys in _cgroup_paths():
-        try:
-            raw = (directory / limit_name).read_text().strip()
-        except OSError:
-            continue
-        if raw != "max":
-            with suppress(ValueError):
-                limit = int(raw)
-                if limit < _CGROUP_UNLIMITED:
-                    limits.append(limit)
-        if held is None:
-            held = _held_memory_bytes(directory, held_keys)
-    if not limits:
-        return None
-    return min(limits), held or 0
-
-
-def _slurm_memory_grant() -> int | None:
-    """The bytes SLURM granted this step (``--mem`` / ``--mem-per-cpu``, in MB), or ``None`` outside a job.
-    Read as well as the cgroup: on a cluster whose slurmd does not enforce cgroups, the env is the bound.
-    ``--mem=0`` means the whole node, not zero: a zero grant is no bound."""
-    per_node = _positive_int_env("SLURM_MEM_PER_NODE")
-    if per_node is not None:
-        return per_node * 2**20
-    per_cpu = _positive_int_env("SLURM_MEM_PER_CPU")
-    cpus = _positive_int_env("SLURM_CPUS_PER_TASK") or _positive_int_env("SLURM_CPUS_ON_NODE")
-    if per_cpu is not None and cpus is not None:
-        return per_cpu * cpus * 2**20
-    return None
-
-
-def _positive_int_env(name: str) -> int | None:
-    """The environment variable NAME as a positive int; ``None`` when unset, zero or not a number."""
-    try:
-        value = int(os.environ.get(name, ""))
-    except ValueError:
-        return None
-    return value if value > 0 else None
-
-
-def available_memory_bytes() -> tuple[int, str]:
-    """Return ``(bytes a process may safely allocate, source label)``, honouring a cgroup limit.
-
-    ``psutil`` sees the host's free RAM, which overshoots a container/cgroup ceiling; the tightest of
-    the cgroup's remaining room (its ceiling minus what it already holds), a SLURM memory grant and
-    the host figure wins, so the number is safe on a bare host, in a memory-capped container and in a
-    SLURM step alike. The label names which bound won, for the startup decision log.
-    """
-    candidates = [(int(psutil.virtual_memory().available), "host available RAM")]
-    cgroup = _read_cgroup_memory_limit()
-    if cgroup is not None:
-        limit, held = cgroup
-        candidates.append((max(0, limit - held), "cgroup limit"))
-    slurm = _slurm_memory_grant()
-    if slurm is not None:
-        candidates.append((slurm, "SLURM memory grant"))
-    return min(candidates, key=lambda candidate: candidate[0])
 
 
 def _materialized_config(tree: dict, root: str) -> Path:
@@ -786,6 +658,34 @@ class TensorBoard:
             self.process.wait()
 
 
+@contextmanager
+def preserved_rng() -> Iterator[None]:
+    """Snapshot random, numpy and torch's CPU generator, plus every CUDA generator when CUDA is already
+    initialised, and put them back on exit.
+
+    ``torch.manual_seed`` reseeds the CUDA generators too, so they belong in the snapshot; reading them
+    would initialise CUDA in a caller that never asked (a CPU data-loader worker, a notebook), so the
+    gate is ``torch.cuda.is_initialized()``, not ``is_available()``.
+    """
+    states = (random.getstate(), np.random.get_state(), torch.get_rng_state())
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    try:
+        yield
+    finally:
+        random.setstate(states[0])
+        np.random.set_state(states[1])
+        torch.set_rng_state(states[2])
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
+
+
+def seed_all(seed: int) -> None:
+    """Seed random, numpy and torch (``torch.manual_seed`` reaches every CUDA generator too)."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
 class DistributedObject(ABC):
     """Base class for trainer, predictor, and evaluator distributed workflows."""
 
@@ -873,9 +773,7 @@ class DistributedObject(ABC):
             if torch.cuda.is_available() and _PYNVML_AVAILABLE:
                 pynvml.nvmlInit()
             if self.manual_seed is not None:
-                np.random.seed(self.manual_seed * world_size + global_rank)
-                random.seed(self.manual_seed * world_size + global_rank)
-                torch.manual_seed(self.manual_seed * world_size + global_rank)
+                seed_all(self.manual_seed * world_size + global_rank)
             torch.backends.cudnn.benchmark = self.manual_seed is None
             torch.backends.cudnn.deterministic = self.manual_seed is not None
             dataloaders = self.rank_dataloaders(global_rank)
@@ -1013,83 +911,73 @@ def execute_distributed_object(
     previous_env = {key: os.environ.get(key) for key in managed_env}
     # The run seeds the process-wide RNGs and sets the cudnn flags; inline (the single-rank default)
     # that process is the caller's (a notebook, Slicer), so what it found is put back.
-    previous_rng = (random.getstate(), np.random.get_state(), torch.get_rng_state())
-    # torch.manual_seed reseeds the CUDA generators too; touched only when CUDA is already up,
-    # since reading them would initialize it in a caller that never asked.
-    previous_cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
     previous_cudnn = (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic)
 
-    try:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in gpu_ids if i >= 0])
-        os.environ["KONFAI_OVERWRITE"] = str(overwrite)
-        os.environ["KONFAI_CONFIG_MODE"] = "Done"
-        if tensorboard:
-            os.environ["KONFAI_TENSORBOARD_PORT"] = str(find_free_port())
-        if "KONFAI_MASTER_PORT" not in os.environ:
-            os.environ["KONFAI_MASTER_PORT"] = str(find_free_port())
-        os.environ["KONFAI_VERBOSE"] = str(not quiet)
+    with preserved_rng():
+        try:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in gpu_ids if i >= 0])
+            os.environ["KONFAI_OVERWRITE"] = str(overwrite)
+            os.environ["KONFAI_CONFIG_MODE"] = "Done"
+            if tensorboard:
+                os.environ["KONFAI_TENSORBOARD_PORT"] = str(find_free_port())
+            if "KONFAI_MASTER_PORT" not in os.environ:
+                os.environ["KONFAI_MASTER_PORT"] = str(find_free_port())
+            os.environ["KONFAI_VERBOSE"] = str(not quiet)
 
-        cluster_config = cluster_kwargs
-        if cluster_config is not None:
-            os.environ["KONFAI_OVERWRITE"] = "True"
-            os.environ["KONFAI_CLUSTER"] = "True"
+            cluster_config = cluster_kwargs
+            if cluster_config is not None:
+                os.environ["KONFAI_OVERWRITE"] = "True"
+                os.environ["KONFAI_CLUSTER"] = "True"
 
-        with distributed_object as configured_object:
-            with Log(configured_object.name, 0):
-                if configured_object.manual_seed is not None:
-                    np.random.seed(configured_object.manual_seed)
-                    random.seed(configured_object.manual_seed)
-                    torch.manual_seed(configured_object.manual_seed)
-                if cluster_config is not None:
-                    if cluster_config["resubmit"]:
-                        # Auto-requeue is not implemented; warn instead of silently dropping the flag.
-                        print(
-                            "[KonfAI] WARNING: --resubmit is not implemented yet; this job will NOT "
-                            "auto-requeue at the time limit. Relaunch manually with the RESUME command "
-                            "pointing at the latest checkpoint to continue training."
+            with distributed_object as configured_object:
+                with Log(configured_object.name, 0):
+                    if configured_object.manual_seed is not None:
+                        seed_all(configured_object.manual_seed)
+                    if cluster_config is not None:
+                        if cluster_config["resubmit"]:
+                            # Auto-requeue is not implemented; warn instead of silently dropping the flag.
+                            print(
+                                "[KonfAI] WARNING: --resubmit is not implemented yet; this job will NOT "
+                                "auto-requeue at the time limit. Relaunch manually with the RESUME command "
+                                "pointing at the latest checkpoint to continue training."
+                            )
+                        configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
+                        import submitit
+
+                        executor = submitit.AutoExecutor(folder="./Cluster/")
+                        executor.update_parameters(
+                            name=cluster_config["name"],
+                            mem_gb=cluster_config["memory"],
+                            gpus_per_node=len(gpu_ids),
+                            tasks_per_node=len(gpu_ids) // configured_object.size,
+                            cpus_per_task=1,
+                            nodes=cluster_config["num_nodes"],
+                            timeout_min=cluster_config["time_limit"],
                         )
-                    configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
-                    import submitit
+                        with TensorBoard(configured_object.name):
+                            executor.submit(configured_object)
+                        return
 
-                    executor = submitit.AutoExecutor(folder="./Cluster/")
-                    executor.update_parameters(
-                        name=cluster_config["name"],
-                        mem_gb=cluster_config["memory"],
-                        gpus_per_node=len(gpu_ids),
-                        tasks_per_node=len(gpu_ids) // configured_object.size,
-                        cpus_per_task=1,
-                        nodes=cluster_config["num_nodes"],
-                        timeout_min=cluster_config["time_limit"],
-                    )
+                    world_size = len(gpu_ids)
+                    if world_size == 0:
+                        world_size = cpu_workers
+                    configured_object.setup(world_size)
+                    # Share tensors through /dev/shm files instead of one file descriptor per tensor:
+                    # spawning a worker that pickles a loaded model can otherwise exhaust the process
+                    # open-file limit ("Too many open files"), e.g. under Slicer's embedded Python.
+                    mp.set_sharing_strategy("file_system")
                     with TensorBoard(configured_object.name):
-                        executor.submit(configured_object)
-                    return
-
-                world_size = len(gpu_ids)
-                if world_size == 0:
-                    world_size = cpu_workers
-                configured_object.setup(world_size)
-                # Share tensors through /dev/shm files instead of one file descriptor per tensor:
-                # spawning a worker that pickles a loaded model can otherwise exhaust the process
-                # open-file limit ("Too many open files"), e.g. under Slicer's embedded Python.
-                mp.set_sharing_strategy("file_system")
-                with TensorBoard(configured_object.name):
-                    if _runs_inline(world_size):
-                        configured_object(0)
-                    else:
-                        mp.spawn(configured_object, nprocs=world_size)
-    finally:
-        for key, value in previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        random.setstate(previous_rng[0])
-        np.random.set_state(previous_rng[1])
-        torch.set_rng_state(previous_rng[2])
-        if previous_cuda_rng is not None:
-            torch.cuda.set_rng_state_all(previous_cuda_rng)
-        torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = previous_cudnn
+                        if _runs_inline(world_size):
+                            configured_object(0)
+                        else:
+                            mp.spawn(configured_object, nprocs=world_size)
+        finally:
+            for key, value in previous_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = previous_cudnn
 
 
 _cpu_budget_applied = False
@@ -1112,8 +1000,7 @@ def apply_cpu_thread_budget() -> None:
     if sys.platform == "darwin" or _cpu_budget_applied or os.environ.get("OMP_NUM_THREADS"):
         return
     _cpu_budget_applied = True
-    local_ranks = max(1, int(os.environ.get("KONFAI_LOCAL_RANKS") or 1))
-    torch.set_num_threads(max(1, min((os.cpu_count() or 1) // local_ranks, 12)))
+    torch.set_num_threads(max(1, min((os.cpu_count() or 1) // node_local_ranks(), 12)))
 
 
 def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = True) -> tuple[int | None, int | None]:

@@ -324,8 +324,10 @@ def _transform_outputs(session: str, base: str) -> list[dict[str, str]]:
     A transform's run directory holds a log, a plan and a config copy: the volumes land wherever each
     ``Write`` pointed, one destination per chain, which the workflow records in ``outputs.json``. Each
     entry keeps what the run wrote (``group_src``, ``group_dest``, ``dataset``, ``group``, ``format``)
-    plus ``path``: the dataset session-relative when it lives inside the session, so Browse resolves it
-    like every other path, else as recorded. Empty for a run that has no manifest.
+    plus ``path``: what the run says is on disk (the ``.h5`` file itself for an h5 store, the dataset
+    directory otherwise), session-relative when it lives inside the session so Browse resolves it like
+    every other path, else as recorded. A manifest from before 1.9 has no ``path``: its ``dataset``
+    stands in. Empty for a run that has no manifest.
     """
     manifest = _session_dir(session) / base / "outputs.json"
     if not manifest.is_file():
@@ -343,9 +345,9 @@ def _transform_outputs(session: str, base: str) -> list[dict[str, str]]:
         dataset = entry.get("dataset")
         if not isinstance(dataset, str) or not dataset:
             continue
-        path = dataset
+        path = entry.get("path") or dataset
         with suppress(ValueError):
-            path = str(Path(dataset).relative_to(_session_dir(session)))
+            path = str(Path(path).relative_to(_session_dir(session)))
         found.append(
             {
                 **{key: str(entry.get(key) or "") for key in ("group_src", "group_dest", "group", "format")},

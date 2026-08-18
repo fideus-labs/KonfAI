@@ -18,7 +18,6 @@
 
 import math
 import os
-import random
 import shutil
 import signal
 from collections.abc import Callable
@@ -26,7 +25,6 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import tqdm
@@ -63,6 +61,7 @@ from konfai.utils.runtime import (
     description,
     run_distributed_app,
     safe_torch_load,
+    seed_all,
     synchronize_data,
 )
 from konfai.utils.utils import concretize_patch_size, size_free_axes
@@ -831,9 +830,7 @@ class Trainer(DistributedObject):
             # Without seeding, the global RNG is unseeded, so every run: a fresh TRAIN or a RESUME --
             # redraws a different split and leaks validation cases into training. Per-rank seeding for the
             # actual training happens later in the distributed runtime.
-            random.seed(self.manual_seed)
-            np.random.seed(self.manual_seed)
-            torch.manual_seed(self.manual_seed)
+            seed_all(self.manual_seed)
         self.dataset.prepare()
         self.model.init(self.autocast, state, self.dataset.get_groups_dest())
         self.model.init_outputs_group()
