@@ -74,6 +74,9 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   the store its probe created
 - **omezarr**: each scale factor shrinks the level above it, as the docs said (`[2, 2]` gives three
   levels at 1, 1/2, 1/4)
+- **omezarr**: a coarser level reads its own geometry. The sidecar describes the level the writer
+  was handed, so taken at its word on level 1 it put level 0's spacing and origin on level 1's
+  voxels: a volume read at `@1` came back four times too small in world coordinates
 - **reduction**: `Median` charges the working set its sort allocates (four buffers, measured)
 - **transform**: a bare stage name past the `Expand` marker is the draw (`Flip`, `Mask`, `Permute`,
   `Foreign` exist as both); the qualified spelling still forces either
@@ -104,6 +107,8 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   where the pass it replaces took 31 s) and `Median` reads the middle off a sort (1.5-2x on CPU,
   3.5x on CUDA); the folds a statistics pass computed are kept for the write pass when they fit
 - **transform**: a case is planned without listing the whole output directory
+- **dataset**: a volume's statistics come from one block walk, folded in cache-sized pieces, and a
+  `.npy` entry answers its shape from the header instead of reading the array
 - **cli**: `import konfai` 0.9 to 0.08 s, `konfai --help` 2.9 to 0.3 s: torch, dicom and ome-zarr
   load on first use
 
@@ -114,6 +119,11 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   shards and the run; the report is assembled from per-block helpers
 - **utils**: the memory budget lives in `konfai.utils.budget`; `State` in `konfai.utils`, importable
   without torch
+- **data**: `DataSources` holds what the four workflow datasets share (the roots, the case names
+  common to every group, one manager per destination group and case, the resolved budget); `Data`
+  adds the batch-loading mechanics and `DataTransform` builds on `DataSources` alone, so it no
+  longer forwards eleven loader parameters it never used. The managers and case names are public
+  on the base, which is what `Transformer` now reads
 
 ### ⚠️ Behaviour changes
 
