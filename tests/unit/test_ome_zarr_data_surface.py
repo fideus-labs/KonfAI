@@ -121,8 +121,8 @@ def test_write_ome_zarr_builds_a_pyramid_by_position(tmp_path: Path) -> None:
 def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path) -> None:
     """The konfai sidecar records the geometry the writer was handed: level 0's. Read at ``@1``
     through the Dataset, it used to win over the level's own scale and translation, and level 1
-    came back with level 0's spacing on a quarter of the voxels: a brain four times smaller, for
-    every consumer that registers on the coarse level."""
+    came back with level 0's spacing on an eighth of the voxels (half the samples along each of the
+    three axes): half the extent per axis, for every consumer that registers on the coarse level."""
     root = tmp_path / "cases"
     store = root / "case_1" / "CT.ome.zarr"
     store.parent.mkdir(parents=True)
