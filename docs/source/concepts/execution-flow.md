@@ -111,9 +111,10 @@ Outputs are written to:
 4. refuses **before writing a byte** when an entry's working set exceeds the
    per-rank `memory_budget`
 5. shards the work across ranks, by bytes rather than by count, and materializes
-   each chain's `Write` stages, skipping any case whose output already exists
-   unless `-y`. A work item is one case's chain, or one `Expand` case's copies,
-   or one `Reduce` cohort: the unit the plan priced
+   each chain's `Write` stages, skipping any output ENTRY that already exists
+   unless `-y`: an `Expand` case resumes copy by copy, where a `Reduce` is one
+   work item with a single output. A work item is one case's chain, one `Expand`
+   case's copies, or one `Reduce` cohort: the unit the plan priced
 
 Outputs are written to:
 
