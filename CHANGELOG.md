@@ -38,6 +38,9 @@ no longer stops a run. Two things a run already wrote come out differently, see 
 - **mcp**: transform runs steer GPUs, a finished job carries its `outputs`, and `read_dataset_file`
   summarises an ITK transform HDF5
 - **apps**: batch size as a first-class fine-tune knob (`--set`, `install_fine_tune`)
+- **config**: the binder reads a file strictly. `strict_config(root)` records, per level, what the
+  file holds against what the binder read, and reports the difference by path with the keys read
+  at that level and the closest one. TRANSFORM refuses; TRAIN, PREDICTION and EVALUATION warn
 
 ### 🐛 Bug Fixes
 
@@ -75,6 +78,8 @@ no longer stops a run. Two things a run already wrote come out differently, see 
 - **network**: a criterion is moved onto the output's device before it is called
 - **studio**: a fresh workspace tree, and a job launch brings its run forward
 - **mcp**: `Transform.yml` is exempt from the model lint
+- **predictor**: a built-in reduction (`Mean`, `Median`, `Concat`) binds from its own block like a
+  custom one; the `Mean:` block a resolved config carries was read by nothing
 
 ### ⚡ Performance
 
@@ -108,6 +113,12 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   SLURM grant that no cgroup enforces; the plan's header names which bound won.
 - **The written geometry sidecar no longer carries `ITK_*` keys** the reader had added; a consumer
   that read them from a KonfAI output finds them absent.
+- **A `Config.yml`, `Prediction.yml` or `Evaluation.yml` carrying a key nothing reads now warns**
+  at build, naming the key by path. Files written back by earlier versions carry a few
+  (`Patch.mask`, `Model.<name>.yaml_str`, `schedulers.<name>.verbose`, `is_input` under an
+  evaluation group): remove them; the run is otherwise unchanged. A `Transform.yml` refuses them, as
+  it already refused a typo'd structural key, and the check now covers a `Reduce` operator's own
+  parameters and a wrapped foreign class's.
 
 ## v1.8.0 (2026-08-07)
 
