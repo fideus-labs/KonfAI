@@ -714,9 +714,9 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
 
     THE SIDECAR DESCRIBES ONE LEVEL: the one the writer was handed, and it writes the finest. Every
     level of a pyramid carries its own scale and translation, so a sidecar taken at its word on a
-    coarser level put level 0's spacing and origin on level 1's voxels: a brain four times smaller,
-    read by anything that asks for ``@1``. The sidecar is therefore trusted for Spacing and Origin
-    only where its Spacing IS this level's scale; on any other level those two come from the level's
+    coarser level put level 0's spacing and origin on level 1's voxels: half the extent along every
+    axis, a brain that reads at half its size for anything that asks for ``@1``. The sidecar is
+    therefore trusted for Spacing and Origin only where its Spacing IS this level's scale; on any other level those two come from the level's
     own transforms, and the sidecar still supplies what NGFF cannot: the Direction, and every other
     key it recorded.
     """
@@ -1900,11 +1900,16 @@ class Dataset:
                 # Reverse the spatial size for every rank (see the module-level get_infos).
                 size = list(reversed(file_reader.GetSize()))
                 size = [file_reader.GetNumberOfComponents(), *size]
-            elif path is not None and path.endswith(".npy"):
-                size = list(np.load(path, mmap_mode="r").shape)  # the header alone, no page of the map
             else:
-                data, attributes = self.file_to_data(group if group is not None else "", name)
-                size = list(data.shape)
+                size = None
+                if path is not None and path.endswith(".npy"):
+                    try:
+                        size = list(np.load(path, mmap_mode="r").shape)  # the header alone, no page of the map
+                    except ValueError:
+                        size = None  # an object array cannot be mapped: the full read answers for it
+                if size is None:
+                    data, attributes = self.file_to_data(group if group is not None else "", name)
+                    size = list(data.shape)
             return size, attributes
 
     class OmeZarrFile(AbstractFile):
