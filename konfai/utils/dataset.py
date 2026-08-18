@@ -345,18 +345,34 @@ class Attribute(dict[str, Any]):
         return key in self and self[key] == value
 
 
-# Elements held in memory at once while accumulating statistics chunk by chunk, whatever the backend.
+#: Elements a block of ``Dataset.iter_data_blocks`` holds: the read grain of a scan (the statistics
+#: fold, the quantile scan), whatever the backend.
 _STATISTICS_CHUNK_ELEMENTS = 8_000_000
+#: Elements one running-statistics update takes at once: its float64 temporaries then stay in cache,
+#: where a whole block's stream through memory. Below the block on purpose: the block is the READ
+#: grain, and a chunked store decodes a chunk once per read that touches it.
+_STATISTICS_UPDATE_ELEMENTS = 1 << 18
 
 
-def _statistics_chunk_length(shape: list[int] | tuple[int, ...], axis: int) -> int:
-    """How far along ``axis`` a chunk may reach to hold about ``_STATISTICS_CHUNK_ELEMENTS``.
+def _statistics_chunk_length(shape: list[int] | tuple[int, ...], axis: int, budget: int) -> int:
+    """How far along ``axis`` a chunk may reach to hold about ``budget`` elements.
 
     A chunk spans every other axis whole (channels included), so the per-step cost is the volume
     divided by ``axis``; the length is that budget over the per-step cost, floored to one step.
     """
     per_step = int(np.prod([extent for other, extent in enumerate(shape) if other != axis], dtype=np.int64))
-    return max(1, _STATISTICS_CHUNK_ELEMENTS // max(1, per_step))
+    return max(1, budget // max(1, per_step))
+
+
+def _update_pieces(block: np.ndarray) -> Iterator[np.ndarray]:
+    """``block`` in pieces of about ``_STATISTICS_UPDATE_ELEMENTS`` along its first spatial axis, one
+    running-statistics update each; a vector is one piece."""
+    if block.ndim < 2:
+        yield block
+        return
+    rows = _statistics_chunk_length(block.shape, 1, _STATISTICS_UPDATE_ELEMENTS)
+    for start in range(0, block.shape[1], rows):
+        yield block[:, start : start + rows]
 
 
 #: Values a quantile scan collects at once when a bin has narrowed this far: the one buffer it holds.
@@ -2677,7 +2693,7 @@ class Dataset:
                 yield resident[0]
 
             return whole
-        rows = _statistics_chunk_length(shape, 1)
+        rows = _statistics_chunk_length(shape, 1, _STATISTICS_CHUNK_ELEMENTS)
 
         def slabs() -> Iterator[np.ndarray]:
             for start in range(0, int(shape[1]), rows):
@@ -2724,7 +2740,8 @@ class Dataset:
         both to those), folded over :meth:`iter_data_blocks`: the volume is never held."""
         state = None
         for block in self.iter_data_blocks(groups, name)():
-            state = _update_running_statistics(state, block if channels is None else block[channels])
+            for piece in _update_pieces(block if channels is None else block[channels]):
+                state = _update_running_statistics(state, piece)
         return _finalize_running_statistics(state)
 
     def read_transform(self, group: str, name: str) -> sitk.Transform:
