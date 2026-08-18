@@ -17,13 +17,16 @@
 """Configuration helpers that map YAML trees to KonfAI Python objects."""
 
 import collections
+import difflib
 import functools
 import inspect
 import logging
 import os
 import types
 import typing
-from collections.abc import Mapping, Sequence
+import warnings
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
@@ -79,6 +82,97 @@ def _unescape_key_component(component: str) -> str:
     return component.replace("%2E", ".").replace("%25", "%")
 
 
+def _load_tree(filename: Path | str) -> dict:
+    """The file's YAML tree (an empty file is an empty tree); a syntax error is a ConfigError with its line."""
+    with open(filename, encoding="utf-8") as stream:
+        try:
+            tree = yaml.load(stream)
+        except ruamel.yaml.YAMLError as exc:
+            mark = getattr(exc, "problem_mark", None)
+            location = f" at line {mark.line + 1}" if mark is not None else ""
+            raise ConfigError(f"Invalid YAML syntax in '{filename}'{location}.", str(exc)) from exc
+    return {} if tree is None else tree
+
+
+class _KeyLedger:
+    """What the file holds against what the binder read, per level (dotted path) of the file."""
+
+    def __init__(self) -> None:
+        self.present: dict[tuple[str, ...], set[str]] = collections.defaultdict(set)
+        self.consumed: dict[tuple[str, ...], set[str]] = collections.defaultdict(set)
+
+    def opened(self, level: tuple[str, ...], keys: Iterable[object]) -> None:
+        """A context opened at LEVEL over a mapping holding KEYS: they are present there, and the
+        subtree's own key is read at the level above."""
+        self.present[level].update(str(key) for key in keys)
+        if len(level) > 1:
+            self.consumed[level[:-1]].add(level[-1])
+
+    def read(self, level: tuple[str, ...], *keys: str) -> None:
+        self.consumed[level].update(keys)
+
+    def unknown(self, root: str) -> list[str]:
+        """One line per key under ROOT nothing read: its path, the keys read at that level, the closest."""
+        lines = []
+        for level in sorted(self.present):
+            if level[0] != root:
+                continue
+            read = sorted(self.consumed[level])
+            for key in sorted(self.present[level] - self.consumed[level]):
+                close = difflib.get_close_matches(key, read, n=1)
+                hint = f" Did you mean '{close[0]}'?" if close else ""
+                lines.append(f"'{'.'.join(level)}.{key}' (keys read at that level: {read}).{hint}")
+        return lines
+
+
+# The ledgers of the open strict_config() blocks; empty outside them, where the binder records nothing.
+_ledgers: list[_KeyLedger] = []
+
+
+@contextmanager
+def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
+    """Report, when the block ends, every key of the config file that nothing bound inside it read.
+
+    The binder reads a key when a parameter names it and materializes the default when none does,
+    so a typo'd key is carried along and its default used in its place. Inside this block every
+    ``Config`` context records the keys its level held and the keys read there; on a clean exit
+    the difference is reported by path, with the keys read at that level and the closest of them:
+    a :class:`ConfigError` when ``refuse``, a warning otherwise. The block must contain everything
+    the workflow binds from the file: a key a later, lazily bound callable would read is unknown to
+    it. On entry the file must hold ROOT: a missing root binds an all-defaults workflow and writes
+    the whole block back over the user's file.
+    """
+    filename = os.environ.get("KONFAI_config_file")
+    if filename and Path(filename).exists():
+        tree = _load_tree(filename)
+        if root not in tree:
+            _report(
+                refuse,
+                f"'{filename}' declares no '{root}' root (found: {sorted(str(key) for key in tree)}).",
+                f"This workflow reads the '{root}:' block; anything else is ignored and a full default"
+                " block appended to the file in its place.",
+            )
+    ledger = _KeyLedger()
+    _ledgers.append(ledger)
+    try:
+        yield
+    finally:
+        _ledgers.remove(ledger)
+    if unknown := ledger.unknown(root):
+        _report(
+            refuse,
+            f"Unknown key(s) in the {root} configuration: nothing reads them.",
+            *unknown,
+            "A key nothing reads is carried along and the default used in its place; fix the spelling or remove it.",
+        )
+
+
+def _report(refuse: bool, *messages: str) -> None:
+    if refuse:
+        raise ConfigError(*messages)
+    warnings.warn(str(ConfigError(*messages)), UserWarning, stacklevel=4)
+
+
 class Config:
     """
     Context manager for reading and updating a subtree of the active YAML
@@ -109,21 +203,7 @@ class Config:
                     "or set KONFAI_CONFIG_MODE=default.",
                 )
 
-        self.yml = open(self.filename, encoding="utf-8")
-        try:
-            self.data = yaml.load(self.yml)
-        except ruamel.yaml.YAMLError as exc:
-            self.yml.close()
-            location = ""
-            if hasattr(exc, "problem_mark") and exc.problem_mark is not None:
-                location = f" at line {exc.problem_mark.line + 1}"
-            raise ConfigError(
-                f"Invalid YAML syntax in '{self.filename}'{location}.",
-                str(exc),
-            ) from exc
-        if self.data is None:
-            self.data = {}
-
+        self.data = _load_tree(self.filename)
         self.config = self.data
 
         for key in self.keys:
@@ -131,6 +211,8 @@ class Config:
                 self.config = {key: {}}
 
             self.config = self.config[key]
+        for ledger in _ledgers:
+            ledger.opened(tuple(self.keys), self.config if isinstance(self.config, collections.abc.Mapping) else ())
         return self
 
     def create_dictionary(self, data, keys, i) -> dict:
@@ -154,15 +236,11 @@ class Config:
         return result
 
     def __exit__(self, exc_type, value, traceback) -> None:
-        self.yml.close()
         if os.environ["KONFAI_CONFIG_MODE"] == "remove":
             if os.path.exists(config_file()):
                 os.remove(config_file())
             return
-        with open(self.filename) as yml:
-            data = yaml.load(yml)
-            if data is None:
-                data = {}
+        data = _load_tree(self.filename)
         # Only the currently visited subtree is rewritten; the recursive merge preserves the rest of the
         # YAML file untouched. Write to a sibling temp file then os.replace (atomic on the same
         # filesystem) so a concurrent independent launch reading this file never observes a truncated or
@@ -235,6 +313,8 @@ class Config:
     def get_value(self, name, default) -> object:
         if not isinstance(self.config, collections.abc.MutableMapping):
             return None
+        for ledger in _ledgers:
+            ledger.read(tuple(self.keys), name)
 
         if name in self.config and self.config[name] is not None:
             value = self.config[name]
@@ -641,6 +721,8 @@ def apply_config(konfai_args: str | None = None):
                     with Config(key_tmp) as config:
                         if not isinstance(config.config, collections.abc.Mapping):
                             return None
+                        for ledger in _ledgers:  # a parameter the caller supplies itself is a read one
+                            ledger.read(tuple(config.keys), *without)
 
                         kwargs = {}
                         params = list(inspect.signature(function).parameters.values())

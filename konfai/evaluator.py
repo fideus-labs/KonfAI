@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
 from konfai.network.network import build_configured_criterions
-from konfai.utils.config import apply_config, config
+from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, EvaluatorError
 from konfai.utils.runtime import (
@@ -673,7 +673,8 @@ def build_evaluate(
         path_env={"KONFAI_EVALUATIONS_DIRECTORY": evaluations_dir},
     )
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
-    return apply_config()(Evaluator)()
+    with strict_config("Evaluator", refuse=False):
+        return apply_config()(Evaluator)()
 
 
 @run_distributed_app

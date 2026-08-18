@@ -25,7 +25,6 @@ Evaluator:
               TensorCast:
                 dtype: float32
                 inverse: true
-            is_input: true
       MOVING:  # Un-registered moving image (baseline)
         groups_dest:
           MOVING:
@@ -33,7 +32,6 @@ Evaluator:
               TensorCast:
                 dtype: float32
                 inverse: true
-            is_input: true
       MOVED:  # Registered image produced by PREDICTION
         groups_dest:
           MOVED:
@@ -41,7 +39,6 @@ Evaluator:
               TensorCast:
                 dtype: float32
                 inverse: true
-            is_input: true
     subset: None
     validation: None
     dataset_filenames:  # Ground-truth pair + predicted registered image

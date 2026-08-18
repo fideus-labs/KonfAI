@@ -48,7 +48,7 @@ from konfai import (
 )
 from konfai.data.data_manager import BatchSample, DataTrain
 from konfai.network.network import Model, ModelLoader, NetState, Network
-from konfai.utils.config import apply_config, config
+from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.errors import ConfigError, TrainerError
 from konfai.utils.live_control import LiveControl
 from konfai.utils.runtime import (
@@ -1124,7 +1124,9 @@ def build_train(
         },
     )
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
-    trainer = apply_config()(Trainer)()
+    # A warning, not a refusal: files written back by earlier versions carry keys nothing reads now.
+    with strict_config("Trainer", refuse=False):
+        trainer = apply_config()(Trainer)()
     if model is not None:
         # Keep https:// checkpoint URLs as raw strings: Path() collapses the '//' into
         # 'https:/…', which then fails both the startswith('https://') check and Path.exists().

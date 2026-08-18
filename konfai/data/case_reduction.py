@@ -29,7 +29,6 @@ operator can accumulate.
 
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -38,7 +37,6 @@ import torch
 from konfai.data.patching import DatasetManager, RegionWriter, save_destination
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
-from konfai.utils.config import apply_config
 from konfai.utils.dataset import (
     Attribute,
     Dataset,
@@ -47,7 +45,6 @@ from konfai.utils.dataset import (
     _update_running_statistics,
 )
 from konfai.utils.errors import ReductionError
-from konfai.utils.utils import get_module
 
 #: Geometry keys compared between cases under ``grid: strict``. Direction is in because a flipped
 #: axis shows in neither extent nor spacing: averaging two volumes that disagree on it mirrors half
@@ -60,10 +57,6 @@ _POST_KINDS = frozenset({LocalityKind.POINTWISE, LocalityKind.GLOBAL_STAT})
 
 #: Bytes per sample assumed when sizing regions from headers alone, before a dtype is known.
 _ASSUMED_ITEMSIZE = 4
-
-#: Keys the ``Reduce`` stage reads from its own mapping. An operator sharing one of these names
-#: would silently be handed the stage's value, so the collision is refused instead.
-_REDUCE_OWN_KEYS = frozenset({"operator", "output", "grid", "grid_tolerance", "provenance"})
 
 
 @dataclass(frozen=True)
@@ -209,53 +202,6 @@ def split_chain(transforms: list[Transform]) -> tuple[list[Transform], Reduce | 
     return list(transforms), None, []
 
 
-def resolve_operator(reduce: Reduce) -> Reduction:
-    """The operator the stage names, as an instance, refusing one that cannot fold a region.
-
-    Configured like every other extension point: its constructor arguments are bound from the same
-    mapping the ``Reduce`` itself was read from, so a custom operator takes parameters exactly as a
-    custom transform or a custom draw does::
-
-        Reduce:
-          operator: mypkg:TrimmedMean
-          output: template
-          trim: 0.2            # the operator's own parameter
-
-    A chain assembled in Python has no configuration to read, and the operator is then built from
-    its own defaults.
-    """
-    module, name = get_module(reduce.operator_classpath, "konfai.data.reduction")
-    factory = getattr(module, name)
-    shadowed = sorted(set(inspect.signature(factory.__init__).parameters) & _REDUCE_OWN_KEYS)
-    if shadowed:
-        raise ReductionError(
-            f"'{reduce.operator_classpath}' has parameter(s) {shadowed}, which the Reduce stage"
-            " reads for itself from the same mapping.",
-            f"Rename them: {sorted(_REDUCE_OWN_KEYS)} belong to Reduce, everything else in the"
-            " mapping is the operator's.",
-        )
-    try:
-        operator = apply_config(reduce.konfai_args)(factory)()
-    except TypeError as error:
-        raise ReductionError(
-            f"'{reduce.operator_classpath}' could not be built: {error}.",
-            "Give its parameters under the Reduce stage, next to 'operator' and 'output', or give them defaults.",
-        ) from error
-    if not isinstance(operator, Reduction):
-        raise ReductionError(
-            f"'{reduce.operator_classpath}' is not a Reduction.",
-            "Subclass konfai.data.reduction.Reduction, or use Mean / Median / Concat.",
-        )
-    if not operator.voxel_local:
-        raise ReductionError(
-            f"'{reduce.operator_classpath}' does not declare itself voxel-local, so it cannot be"
-            " folded one region at a time.",
-            "Set voxel_local = True when every output voxel depends only on the same voxel of each"
-            " case; an operator reading across space cannot stream.",
-        )
-    return operator
-
-
 def check_post_stages(post: list[Transform], output: str) -> None:
     """What may follow a ``Reduce`` in the same chain.
 
@@ -317,7 +263,7 @@ class CaseReduction:
                 "Check the dataset and its subset: a reduction over nothing has no result.",
             )
         self.slab_rows = max(1, int(self.slab_rows))
-        self.operator = resolve_operator(self.reduce)
+        self.operator = self.reduce.operator
         check_post_stages(self.post, self.reduce.output)
 
     def fit_budget(self, budget_bytes: float | None, cap: int = 64) -> None:

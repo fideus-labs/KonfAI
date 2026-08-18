@@ -15,7 +15,6 @@ Evaluator:
               TensorCast:
                 dtype: uint8
                 inverse: false
-            is_input: true
       SEG:
         groups_dest:
           SEG:
@@ -23,7 +22,6 @@ Evaluator:
               TensorCast:
                 dtype: uint8
                 inverse: false
-            is_input: true
     subset: None
     validation: None
     dataset_filenames:

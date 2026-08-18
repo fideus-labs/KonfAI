@@ -23,6 +23,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 from konfai.data.materialize import Regime, Verdict
+from konfai.data.reduction import Mean
+from konfai.data.transform import Reduce
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformerError
 
@@ -95,6 +97,11 @@ _STREAMABLE = """\
               Clip:
                 min_value: 0.0
                 max_value: 50.0
+              Write:
+                dataset: {out}:h5
+"""
+
+_WRITE = """\
               Write:
                 dataset: {out}:h5
 """
@@ -883,62 +890,65 @@ def test_an_expanded_run_never_reads_a_whole_volume(tmp_path: Path, monkeypatch:
 
 def test_a_config_without_the_transformer_root_is_refused(tmp_path: Path) -> None:
     """A typo'd root ('Transformr:') must not bind an all-defaults workflow over the user's file."""
-    from konfai.transformer import _reject_unknown_keys
-
-    config = tmp_path / "Transform.yml"
-    config.write_text("Transformr:\n  name: X\n")
+    _write_source(tmp_path)
+    (tmp_path / "Transform.yml").write_text("Transformr:\n  name: X\n")
     with pytest.raises(ConfigError, match="no 'Transformer' root"):
-        _reject_unknown_keys(config)
+        _build(tmp_path)
 
 
 def test_a_typo_stage_argument_is_refused_instead_of_binding_its_default(tmp_path: Path) -> None:
     """A stage argument the signature does not name is a parse error: the binder would otherwise
     materialize the default beside the typo, and `Clip: {min_val: 0}` would clip at -1024, exit 0."""
-    from konfai.transformer import _reject_unknown_keys
-
-    config = tmp_path / "Transform.yml"
-    config.write_text(
-        "Transformer:\n  Dataset:\n    groups_src:\n      CT:\n        groups_dest:\n"
-        "          CT_out:\n            transforms:\n"
-        "              Clip: {min_val: 0.0, max_value: 400.0}\n"
-        "              Write: {dataset: ./Out:h5}\n"
+    _write_source(tmp_path)
+    _write_config(
+        tmp_path, "              Clip: {min_val: 0.0, max_value: 400.0}\n" + _WRITE.format(out=tmp_path / "out")
     )
-    with pytest.raises(ConfigError, match=r"Unknown argument 'min_val' for 'Clip'"):
-        _reject_unknown_keys(config)
+    with pytest.raises(ConfigError, match=r"transforms\.Clip\.min_val'.*Did you mean 'min_value'"):
+        _build(tmp_path)
 
 
 def test_a_reduce_mapping_carries_its_operator_arguments_and_refuses_a_typo(tmp_path: Path) -> None:
-    """A Reduce's mapping legitimately holds its operator's own parameters (resolve_operator binds
-    them from the same mapping); only a key neither signature names is refused."""
-    from konfai.transformer import _reject_unknown_keys
+    """A Reduce's mapping legitimately holds its operator's own parameters (the stage binds them at
+    prepare, from the same mapping); only a key neither signature names is refused."""
+    _write_source(tmp_path)
+    operator = f"{__name__}:_TrimmedMean"
+    template = "              Reduce: {{operator: " + operator + ", output: atlas{extra}}}\n" + _WRITE
+    _write_config(tmp_path, template.format(extra=", trim: 0.2", out=tmp_path / "out"))
+    workflow = _build(tmp_path)
+    reduce = next(s for s in workflow.dataset.groups_src["CT"]["CT_out"].transforms if isinstance(s, Reduce))
+    assert isinstance(reduce.operator, _TrimmedMean) and reduce.operator.trim == 0.2
 
-    config = tmp_path / "Transform.yml"
-    template = (
-        "Transformer:\n  Dataset:\n    groups_src:\n      CT:\n        groups_dest:\n"
-        "          CT_out:\n            transforms:\n"
-        "              Reduce: {{operator: Mean, output: atlas{extra}}}\n"
-        "              Write: {{dataset: ./Out:h5}}\n"
-    )
-    config.write_text(template.format(extra=", grid: shape_only"))
-    _reject_unknown_keys(config)
-    config.write_text(template.format(extra=", grib: shape_only"))
-    with pytest.raises(ConfigError, match=r"Unknown argument 'grib' for 'Reduce'"):
-        _reject_unknown_keys(config)
+    _write_config(tmp_path, template.format(extra=", grib: shape_only", out=tmp_path / "out"))
+    with pytest.raises(ConfigError, match=r"transforms\.Reduce\.grib'.*Did you mean 'grid'"):
+        _build(tmp_path)
+
+
+class _TrimmedMean(Mean):
+    """A custom operator with a parameter of its own, bound from the Reduce mapping."""
+
+    def __init__(self, trim: float = 0.0) -> None:
+        super().__init__()
+        self.trim = float(trim)
 
 
 def test_a_stage_that_resolves_nowhere_is_left_to_the_loader(tmp_path: Path) -> None:
     """An unresolvable stage name must not be reported as a wrong ARGUMENT: the loader owns that
     refusal and names the searched packages."""
-    from konfai.transformer import _reject_unknown_keys
+    from konfai.utils.errors import TransformError
 
-    config = tmp_path / "Transform.yml"
-    config.write_text(
-        "Transformer:\n  Dataset:\n    groups_src:\n      CT:\n        groups_dest:\n"
-        "          CT_out:\n            transforms:\n"
-        "              Clipp: {min_value: 0.0}\n"
-        "              Write: {dataset: ./Out:h5}\n"
-    )
-    _reject_unknown_keys(config)
+    _write_source(tmp_path)
+    _write_config(tmp_path, "              Clipp: {min_value: 0.0}\n" + _WRITE.format(out=tmp_path / "out"))
+    with pytest.raises(TransformError, match="No transform or augmentation is named 'Clipp'"):
+        _build(tmp_path)
+
+
+def test_a_key_of_a_wrapped_foreign_stage_that_it_cannot_take_is_refused(tmp_path: Path) -> None:
+    """The binder hands a foreign class only the parameters its signature names, so a key under a
+    class taking none (or **kwargs) goes nowhere: refused, not silently dropped."""
+    _write_source(tmp_path)
+    _write_config(tmp_path, "              torch.nn:Sigmoid: {inplace: true}\n" + _WRITE.format(out=tmp_path / "out"))
+    with pytest.raises(ConfigError, match=r"torch\.nn:Sigmoid\.inplace'"):
+        _build(tmp_path)
 
 
 def test_on_fallback_error_holds_at_run_time_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -992,22 +1002,6 @@ def test_a_failing_case_does_not_stop_the_shard_and_is_listed(tmp_path: Path, mo
     assert out.is_dataset_exist("CT_out", "CASE_000")
     assert out.is_dataset_exist("CT_out", "CASE_002"), "the cases after the broken one must still be written"
     assert not out.is_dataset_exist("CT_out", "CASE_001")
-
-
-def test_the_strict_grammar_knows_every_key_the_binder_can_read() -> None:
-    """The grammar mirrors the two __init__ signatures: a parameter added to either without a
-    grammar entry would be refused in every config that sets it."""
-    import inspect
-
-    from konfai.data.data_manager import DataTransform
-    from konfai.transformer import _STRICT_GRAMMAR, Transformer
-
-    workflow_params = set(inspect.signature(Transformer.__init__).parameters) - {"self", "dataset"}
-    assert workflow_params | {"Dataset"} == set(_STRICT_GRAMMAR)
-    dataset_grammar = _STRICT_GRAMMAR["Dataset"]
-    assert isinstance(dataset_grammar, dict)
-    dataset_params = set(inspect.signature(DataTransform.__init__).parameters) - {"self"}
-    assert dataset_params == set(dataset_grammar)
 
 
 def test_two_ranks_partition_the_cases_and_every_output_is_written_once(

@@ -26,7 +26,6 @@ Nothing here falls back silently: a chain that cannot stream says which stage re
 """
 
 import contextlib
-import inspect
 import json
 import os
 import shutil
@@ -39,7 +38,6 @@ from typing import Literal, cast
 import numpy as np
 import torch
 import tqdm
-from ruamel.yaml import YAML
 
 from konfai import config_file, transforms_directory
 from konfai.data.case_reduction import CaseReduction, split_chain
@@ -51,9 +49,9 @@ from konfai.data.patching import (
     DatasetManager,
     save_destination,
 )
-from konfai.data.transform import Expand, Reduce, Save, split_expand
+from konfai.data.transform import Save, split_expand
 from konfai.utils.budget import format_bytes, node_local_ranks
-from konfai.utils.config import apply_config, config
+from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformerError
 from konfai.utils.runtime import (
@@ -65,7 +63,6 @@ from konfai.utils.runtime import (
     record,
     run_distributed_app,
 )
-from konfai.utils.utils import get_module
 
 _PROBE_ENTRY = "__konfai_plan_probe__"
 
@@ -1001,153 +998,18 @@ class Transformer(DistributedObject):
         return counts
 
 
-#: The grammar the strict mode accepts, level by level. ``None`` marks free-form levels (group
-#: names); ``"chain"`` marks a transforms mapping, whose keys are classpaths and whose arguments
-#: are checked against each stage's own signature.
-_STRICT_GRAMMAR: dict[str, object] = {
-    "name": None,
-    "on_fallback": None,
-    "manual_seed": None,
-    "Dataset": {
-        "dataset_filenames": None,
-        "memory_budget": None,
-        "subset": None,
-        "groups_src": {"*": {"groups_dest": {"*": {"transforms": "chain"}}}},
-    },
-}
-
-
-_STAGE_PACKAGES = ("konfai.data.transform", "konfai.data.augmentation")
-
-
-def _stage_class(
-    classpath: str, default_classpath: str = "konfai.data.transform", prefer_augmentation: bool = False
-) -> type | None:
-    """The class a chain stage's key names, resolved exactly as ``TransformLoader`` will resolve it
-    (a bare name: the transform package first, or the augmentation package first past an Expand).
-
-    ``None`` when it resolves nowhere: the loader raises its own error for that case, and refusing
-    the arguments of a class that does not exist would report the wrong problem.
-    """
-    try:
-        packages: tuple[str, ...] = tuple(reversed(_STAGE_PACKAGES)) if prefer_augmentation else _STAGE_PACKAGES
-        if default_classpath != "konfai.data.transform":
-            packages = (default_classpath,)
-        module, name = get_module(classpath, packages[0])
-        if not hasattr(module, name) and ":" not in classpath and len(packages) > 1:
-            module, name = get_module(classpath, packages[1])
-        candidate = getattr(module, name, None)
-    except Exception:  # an unresolvable stage is the loader's error to raise, with its own message
-        return None
-    return candidate if isinstance(candidate, type) else None
-
-
-def _stage_arguments(classpath: str, mapping: dict, prefer_augmentation: bool = False) -> set[str] | None:
-    """The argument names one stage accepts, or ``None`` when they cannot be known from here.
-
-    A ``Reduce`` also accepts its operator's own parameters (``resolve_operator`` binds them from
-    the same mapping), so its allowed set is the union of the two signatures.
-    """
-    stage = _stage_class(str(classpath), prefer_augmentation=prefer_augmentation)
-    if stage is None:
-        return None
-    classes = [stage]
-    if issubclass(stage, Reduce):
-        operator = _stage_class(str(mapping.get("operator", "Median")), "konfai.data.reduction")
-        if operator is None:
-            return None
-        classes.append(operator)
-    allowed: set[str] = set()
-    for cls in classes:
-        if all("__init__" not in vars(base) for base in cls.__mro__ if base is not object):
-            # No __init__ anywhere in the MRO: the class takes no arguments at all, and object's
-            # own (*args, **kwargs) signature must not read as "accepts anything".
-            continue
-        try:
-            parameters = dict(inspect.signature(cls).parameters)
-        except (TypeError, ValueError):
-            return None
-        if any(p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL) for p in parameters.values()):
-            return None
-        allowed |= set(parameters)
-    return allowed
-
-
-def _reject_unknown_stage_arguments(chain: object, path: str) -> None:
-    """A typo'd stage argument is refused like a typo'd structural key.
-
-    The binder reads only the parameters a stage's signature names and materializes the default
-    beside anything else: ``Clip: {min_val: 0}`` clips at -1024 and exits 0. A stage that resolves
-    nowhere, takes ``**kwargs`` or hides its signature is left to the loader's own error.
-    """
-    if not isinstance(chain, dict):
-        return
-    past_expand = False
-    for classpath, arguments in chain.items():
-        if not isinstance(arguments, dict):
-            continue
-        allowed = _stage_arguments(str(classpath), arguments, prefer_augmentation=past_expand)
-        stage = _stage_class(str(classpath), prefer_augmentation=past_expand)
-        past_expand = past_expand or (stage is not None and issubclass(stage, Expand))
-        if allowed is None:
-            continue
-        for argument in arguments:
-            if str(argument) not in allowed:
-                raise ConfigError(
-                    f"Unknown argument '{argument}' for '{classpath}' at '{path}.{classpath}'.",
-                    f"'{classpath}' takes: {sorted(allowed)}. A typo'd argument would otherwise be"
-                    " ignored and its default silently used in its place.",
-                )
-
-
-def _reject_unknown_keys(config_path: Path) -> None:
-    """Strict mode: any key the TRANSFORM grammar does not know is a parse error.
-
-    The binder reads a key when it exists and materializes the default when it does not: a typo'd
-    ``memory_budge:`` silently becomes ``memory_budget: auto``. On this workflow the config IS the
-    product, so an unknown key is refused with its exact path instead of being carried along. The
-    same bar holds inside a chain: a stage's arguments are checked against its own signature.
-    """
-    if not config_path.exists():
-        return
-    with open(config_path) as stream:
-        tree = YAML().load(stream)
-    if not isinstance(tree, dict):
-        return
-    if "Transformer" not in tree:
-        raise ConfigError(
-            f"'{config_path}' declares no 'Transformer' root (found: {sorted(str(key) for key in tree)}).",
-            "The TRANSFORM workflow reads the 'Transformer:' block; anything else would be ignored"
-            " and a full default block appended to the file in its place.",
-        )
-
-    def walk(node: object, grammar: dict[str, object], path: str) -> None:
-        if not isinstance(node, dict):
-            return
-        for key, value in node.items():
-            child = grammar.get(str(key), grammar.get("*", "unknown"))
-            if child == "unknown":
-                raise ConfigError(
-                    f"Unknown key '{path}.{key}' in the Transformer configuration.",
-                    f"Known keys at this level: {sorted(k for k in grammar if k != '*')}. A typo'd"
-                    " key would otherwise be ignored and its default silently used.",
-                )
-            if child == "chain":
-                _reject_unknown_stage_arguments(value, f"{path}.{key}")
-            elif isinstance(child, dict):
-                walk(value, child, f"{path}.{key}")
-
-    walk(tree["Transformer"], _STRICT_GRAMMAR, "Transformer")
-
-
 def build_transform(
     transform_file: Path | str | dict = Path("./Transform.yml").resolve(),
     transforms_dir: Path | str = Path("./Transforms").resolve(),
 ) -> DistributedObject:
     """Build the configured transform workflow without executing it: ``compute_plan()`` is the
     dry run, ``setup()`` prints and enforces the plan. ``transform_file`` may be the config tree as
-    a dict; it is materialized to a file here, so the strict-grammar check reads what every other
-    reader will.
+    a dict; it is materialized to a file here, so the strict read sees what every other reader will.
+
+    The read is strict: a key nothing binds (a typo'd ``memory_budge:``, a ``Clip: {min_val: 0}``)
+    is refused with its path instead of being carried along with its default used in its place.
+    Everything the workflow reads from the file is bound inside ``__init__`` (the chains, their
+    draws, a ``Reduce``'s operator), which is what lets the check close when it returns.
     """
     if isinstance(transform_file, dict):
         transform_file = _materialized_config(transform_file, "Transformer")
@@ -1158,8 +1020,8 @@ def build_transform(
         path_env={"KONFAI_TRANSFORMS_DIRECTORY": transforms_dir},
     )
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
-    _reject_unknown_keys(Path(transform_file))
-    return apply_config()(Transformer)()
+    with strict_config("Transformer"):
+        return apply_config()(Transformer)()
 
 
 def plan_transform(

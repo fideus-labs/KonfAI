@@ -22,7 +22,6 @@ Trainer:
             step_size: 10
             gamma: 0.75
             last_epoch: -1
-            verbose: deprecated
             nb_step: 0
         outputs_criterions:
           Discriminator_pB:Head:Conv: # Adversarial loss seen by the generator
@@ -127,7 +126,6 @@ Trainer:
             step_size: 10
             gamma: 0.75
             last_epoch: -1
-            verbose: deprecated
             nb_step: 0
         outputs_criterions:
           Discriminator_B:Head:Conv: # Real 3D CT chunk
@@ -224,7 +222,6 @@ Trainer:
       - 128
       - 128
       overlap: None
-      mask: None
       pad_value: -1
       extend_slice: 0
     subset: None
