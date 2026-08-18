@@ -18,9 +18,12 @@
 CLI-facing parameter contract of the backend entry points."""
 
 import inspect
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import konfai
 import konfai.evaluator as evaluator_module
 import konfai.main as main_module
 import konfai.predictor as predictor_module
@@ -36,6 +39,50 @@ def test_konfai_help_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
         main_module.main()
 
     assert exc_info.value.code == 0
+
+
+@pytest.mark.parametrize(
+    ("argv", "exit_code"),
+    [
+        (["--help"], 0),
+        (["TRANSFORM", "--help"], 0),
+        (["TRAIN", "--no-such-flag"], 2),
+        (["TRANSFORM", "--gpu", "0", "--cpu", "1"], 2),
+    ],
+)
+def test_konfai_help_and_usage_errors_do_not_import_torch(argv: list[str], exit_code: int) -> None:
+    """The parser is built without the runtime module: torch loads only for the command that runs."""
+    script = f"""
+import sys
+sys.argv = ["konfai", *{argv!r}]
+from konfai.main import main
+try:
+    main()
+except SystemExit as exit:
+    assert exit.code == {exit_code}, exit.code
+else:
+    raise AssertionError("expected an exit")
+loaded = sorted(name for name in ("torch", "konfai.utils.runtime") if name in sys.modules)
+assert not loaded, loaded
+"""
+    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
+
+
+def test_gpu_ids_are_checked_against_the_visible_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--gpu`` has no parse-time ``choices`` (resolving them imports torch); the check runs at dispatch."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(trainer_module, "train", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(konfai, "cuda_visible_devices", lambda: [0, 1])
+
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "--gpu", "1", "3"])
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main()
+    assert exc_info.value.code == 2
+    assert not captured
+
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "--gpu", "1"])
+    main_module.main()
+    assert captured["gpu"] == [1]
 
 
 def test_konfai_train_dispatches_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,6 +202,7 @@ def test_konfai_transform_plan_short_circuits_to_plan_transform(monkeypatch: pyt
     kwargs by the entrypoint's signature, so a 'plan' kwarg passed through would be silently
     dropped and the run would proceed as if the flag had never been given."""
     planned: dict[str, object] = {}
+    plan_parameters = inspect.signature(transformer_module.plan_transform).parameters
 
     def fake_plan_transform(**kwargs) -> None:
         planned.update(kwargs)
@@ -164,12 +212,52 @@ def test_konfai_transform_plan_short_circuits_to_plan_transform(monkeypatch: pyt
 
     monkeypatch.setattr(transformer_module, "plan_transform", fake_plan_transform)
     monkeypatch.setattr(transformer_module, "transform", fail_transform)
-    monkeypatch.setattr(sys, "argv", ["konfai", "TRANSFORM", "-c", "Transform.yml", "--plan"])
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRANSFORM", "-c", "Transform.yml", "--plan", "-q", "--cpu", "2"])
 
     main_module.main()
 
-    assert planned["transform_file"] == "Transform.yml"
-    assert "plan" not in planned
+    # Every CLI flag reaches plan_transform by name, and plan_transform declares each one: no
+    # catch-all that would swallow a flag in silence.
+    assert planned == {
+        "transform_file": "Transform.yml",
+        "transforms_dir": "./Transforms/",
+        "overwrite": False,
+        "gpu": [],
+        "cpu": 2,
+        "quiet": True,
+    }
+    assert set(planned) <= set(plan_parameters)
+    assert not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in plan_parameters.values())
+
+
+def test_plan_transform_sizes_the_plan_for_the_run_world_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One rank per GPU, else ``cpu`` ranks: the plan shards the way ``transform`` will."""
+    world_sizes: list[int] = []
+
+    def compute_plan(world_size: int, overwrite: bool) -> SimpleNamespace:
+        world_sizes.append(world_size)
+        return SimpleNamespace(report=lambda: "")
+
+    monkeypatch.setattr(
+        transformer_module, "build_transform", lambda **kwargs: SimpleNamespace(compute_plan=compute_plan)
+    )
+
+    transformer_module.plan_transform(gpu=[0, 1], cpu=None, transform_file="Transform.yml")
+    transformer_module.plan_transform(gpu=[], cpu=3, transform_file="Transform.yml")
+    transformer_module.plan_transform(transform_file="Transform.yml")
+
+    assert world_sizes == [2, 3, 1]
+
+
+def test_konfai_cluster_refuses_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plan runs where it is typed and submits nothing; the SLURM flags have no meaning for it."""
+    monkeypatch.setattr(transformer_module, "plan_transform", lambda **kwargs: pytest.fail("planned"))
+    monkeypatch.setattr(sys, "argv", ["konfai-cluster", "--name", "job", "TRANSFORM", "--plan"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.cluster()
+
+    assert exc_info.value.code == 2
 
 
 def test_predict_evaluate_expose_tensorboard_param():

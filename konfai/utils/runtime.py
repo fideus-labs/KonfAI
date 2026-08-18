@@ -63,6 +63,7 @@ from konfai import (
     statistics_directory,
     transforms_directory,
 )
+from konfai.utils import State  # also the re-export ``konfai.utils.runtime.State`` callers import
 from konfai.utils.errors import ConfigError, KonfAIError
 from konfai.utils.utils import env_flag
 
@@ -389,19 +390,6 @@ def safe_torch_load(path_or_url: str | Path, map_location: Any) -> Any:
         return torch.load(source, map_location=map_location, weights_only=True)
     except Exception:
         return torch.load(source, map_location=map_location, weights_only=False)  # nosec B614
-
-
-class State(Enum):
-    """Workflow state exported through the KonfAI process environment."""
-
-    TRAIN = "TRAIN"
-    RESUME = "RESUME"
-    PREDICTION = "PREDICTION"
-    EVALUATION = "EVALUATION"
-    TRANSFORM = "TRANSFORM"
-
-    def __str__(self) -> str:
-        return self.value
 
 
 def is_interactive_session() -> bool:
