@@ -103,7 +103,16 @@ def test_a_transform_run_carries_where_its_data_went(tmp_path: Path, monkeypatch
     run.mkdir(parents=True)
     (run / "log_0.txt").write_text("log\n", encoding="utf-8")
     (run / "outputs.json").write_text(
-        json.dumps([{"group_dest": "CT_prep", "dataset": str(session / "Prepared"), "format": "omezarr"}]),
+        json.dumps(
+            [
+                {
+                    "group_dest": "CT_prep",
+                    "dataset": str(session / "Prepared"),
+                    "path": str(session / "Prepared"),
+                    "format": "omezarr",
+                }
+            ]
+        ),
         encoding="utf-8",
     )
 
@@ -115,9 +124,11 @@ def test_a_transform_run_carries_where_its_data_went(tmp_path: Path, monkeypatch
 def test_a_transform_with_several_chains_carries_every_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One transform, two chains, two `Write:` destinations. `data` still names the first (the single-chain
-    panel keeps its one Browse), and `outputs` carries every chain with its session-relative path when
-    the destination is inside the session, the recorded path when it is not."""
+    """One transform, three chains, three `Write:` destinations. `data` still names the first (the
+    single-chain panel keeps its one Browse), and `outputs` carries every chain with the run's own `path`
+    (the `.h5` file for an h5 store, the directory otherwise), session-relative when the destination is
+    inside the session, as recorded when it is not. A manifest entry from before 1.9 has no `path`: its
+    `dataset` stands in."""
     session = tmp_path / "sessions" / "exp"
     run = session / "Transforms" / "PREP"
     run.mkdir(parents=True)
@@ -130,15 +141,24 @@ def test_a_transform_with_several_chains_carries_every_destination(
                     "group_src": "CT",
                     "group_dest": "CT_prep",
                     "dataset": str(session / "Prepared"),
+                    "path": str(session / "Prepared"),
                     "group": "CT_prep",
                     "format": "mha",
+                },
+                {
+                    "group_src": "CT",
+                    "group_dest": "CT_h5",
+                    "dataset": str(session / "Prepared_h5"),
+                    "path": str(session / "Prepared_h5.h5"),
+                    "group": "CT_h5",
+                    "format": "h5",
                 },
                 {
                     "group_src": "MR",
                     "group_dest": "MR_prep",
                     "dataset": str(elsewhere),
                     "group": "MR_prep",
-                    "format": "h5",
+                    "format": "mha",
                 },
                 {"group_dest": "broken"},
             ]
@@ -159,10 +179,18 @@ def test_a_transform_with_several_chains_carries_every_destination(
             "path": "Prepared",
         },
         {
+            "group_src": "CT",
+            "group_dest": "CT_h5",
+            "group": "CT_h5",
+            "format": "h5",
+            "dataset": str(session / "Prepared_h5"),
+            "path": "Prepared_h5.h5",
+        },
+        {
             "group_src": "MR",
             "group_dest": "MR_prep",
             "group": "MR_prep",
-            "format": "h5",
+            "format": "mha",
             "dataset": str(elsewhere),
             "path": str(elsewhere),
         },

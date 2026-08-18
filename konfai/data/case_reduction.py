@@ -120,11 +120,9 @@ class ReductionPlan:
 
     @property
     def resident_regions(self) -> float:
-        """Regions held at the peak, counted in MEMBER regions plus the output's own.
-
-        ``Median`` stacks the buffer into a new tensor and sorts a copy of that, so counting the
-        buffer alone under-states its peak threefold, and it is what a bare ``Reduce`` gets.
-        """
+        """Regions held at the peak, in member regions: the buffer, what the operator builds over
+        it (``working_multiple`` buffers-worth) and the output's own. A count for ``describe``;
+        ``peak_bytes`` is the figure the plan sizes by."""
         return self.buffered_regions * (1 + self.working_multiple) + 1
 
     def _region_bytes(self, channels: int) -> int:
@@ -147,30 +145,33 @@ class ReductionPlan:
 
     def describe(self) -> str:
         verdict = "STREAM" if self.streams else "REFUSED"
-        lines = [f"REDUCE {len(self.cases)} case(s) -> 1 output '{self.output}': {verdict}"]
+        header = f"REDUCE {len(self.cases)} case(s) -> 1 output '{self.output}': {verdict}"
         if not self.streams:
-            lines.append(f"    refused: {self.refusal}")
-            return "\n".join(lines)
-        regime = "incremental accumulator" if self.incremental else "every case resident per region"
-        lines.append(
-            f"    {self.resident_regions:g} resident region(s) of {self.slab_rows} row(s)"
-            f" = {self.peak_bytes / (1 << 30):.2f} GiB  ({regime})"
+            return "\n".join([header, f"    refused: {self.refusal}"])
+        return "\n".join(
+            [header, *(f"    {line}" for line in self.body_lines()), f"    cases: {', '.join(self.cases)}"]
         )
+
+    def body_lines(self) -> list[str]:
+        """What a streaming plan says of itself, between its header and its case list: the regions it
+        holds, its passes, and the members it decodes whole."""
+        regime = "incremental accumulator" if self.incremental else "every case resident per region"
+        lines = [
+            f"{self.resident_regions:g} resident region(s) of {self.slab_rows} row(s)"
+            f" = {self.peak_bytes / (1 << 30):.2f} GiB  ({regime})"
+        ]
         if self.stat_pass:
-            lines.append("    two passes: the first seeds the whole-volume statistics the chain asks of the RESULT")
+            lines.append("two passes: the first seeds the whole-volume statistics the chain asks of the RESULT")
         if self.unbounded and self.read_factor > 1:
             formats = ", ".join(sorted(set(self.unbounded.values())))
             per = "one per region and per pass" if self.stat_pass else "one per region"
             lines.append(
-                f"    reads: {len(self.unbounded)} of {len(self.cases)} member(s) sit on {formats}, which decodes"
+                f"reads: {len(self.unbounded)} of {len(self.cases)} member(s) sit on {formats}, which decodes"
                 f" the whole volume behind every region read: {self.read_factor:g} decodes per member ({per}),"
                 f" {self.read_factor * len(self.unbounded):g} in all"
             )
-            lines.append(
-                "    put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first"
-            )
-        lines.append(f"    cases: {', '.join(self.cases)}")
-        return "\n".join(lines)
+            lines.append("put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first")
+        return lines
 
 
 @dataclass
@@ -324,7 +325,7 @@ class CaseReduction:
 
         The default region height is safe for one case and not for N: a reduction holds one region
         PER CASE, so the constant that bounds a per-case sweep is off by the number of cases here.
-        Half the budget, because the operator's own output and the write buffer live alongside.
+        Half the budget, because the write buffer lives alongside the peak the plan prices.
         Below one row nothing fits; the plan then reports a peak above the budget and the workflow
         refuses, which is the only honest answer: there is no whole-volume path to fall back to.
 
@@ -336,7 +337,7 @@ class CaseReduction:
         if not budget_bytes or budget_bytes <= 0:
             return
         plan = self.plan()
-        row_bytes = plan.resident_regions * plan.region_bytes / max(1, plan.slab_rows)
+        row_bytes = plan.peak_bytes / max(1, plan.slab_rows)
         if row_bytes <= 0:
             return
         self.slab_rows = max(1, min(cap, int(budget_bytes * 0.5 / row_bytes)))
@@ -419,13 +420,12 @@ class CaseReduction:
         return None
 
     @staticmethod
-    def _member_source(manager: DatasetManager) -> tuple[Dataset, str, str]:
-        """The store a member's regions are read from: its own, or its last ``Save``'s cache."""
+    def _member_source(manager: DatasetManager) -> tuple[Dataset, str]:
+        """The store and group a member's regions are read from: its own, or its last ``Save``'s cache."""
         saves = [stage for stage in manager.transforms if isinstance(stage, Save)]
         if not saves:
-            return manager.dataset, manager.group_src, manager.name
-        dataset, group = save_destination(saves[-1], manager.dataset, manager.group_dest)
-        return dataset, group, manager.name
+            return manager.dataset, manager.group_src
+        return save_destination(saves[-1], manager.dataset, manager.group_dest)
 
     def _unbounded_members(self) -> dict[str, str]:
         """The members whose region reads decode their whole volume, with their store's format.
@@ -435,8 +435,8 @@ class CaseReduction:
         """
         unbounded: dict[str, str] = {}
         for manager in self.managers:
-            dataset, group, entry = self._member_source(manager)
-            if dataset.is_dataset_exist(group, entry) and not dataset.bounded_region_reads(group, entry):
+            dataset, group = self._member_source(manager)
+            if dataset.is_dataset_exist(group, manager.name) and not dataset.bounded_region_reads(group, manager.name):
                 unbounded[manager.name] = dataset.file_format
         return unbounded
 
@@ -564,11 +564,11 @@ class CaseReduction:
         spatial = plan.spatial
         attribute = self._output_attributes(plan)
         rank = len(spatial) + 1
-        writer = RegionWriter(lambda _key, array: self._open_stream(spatial, array, attribute))
+        writer = RegionWriter(lambda _key, array, header: self._open_stream(spatial, array, header))
         try:
             for region in self._regions(spatial):
                 array = self._apply_post(self._fold(region), attribute, rank)
-                writer.write(None, (slice(0, int(array.shape[0])), *region), array)
+                writer.write(None, (slice(0, int(array.shape[0])), *region), array, attribute)
             writer.close()
         except BaseException as exception:
             writer.abort(exception)

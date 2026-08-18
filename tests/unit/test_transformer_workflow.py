@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from konfai.data.materialize import Regime, Verdict
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformerError
 
@@ -1134,7 +1135,7 @@ def test_the_working_set_counts_the_widest_stages_own_buffers(tmp_path: Path) ->
     plan = _build(tmp_path).compute_plan()
     entry = plan.entries[0]
     case = 12 * 10 * 8 * CASE_ELEMENT_BYTES
-    assert entry.working_multiple == Gradient.working_multiple == 8.0
+    assert Gradient.working_multiple == 8.0
     assert entry.working_set_bytes == case * (FALLBACK_INFLIGHT_FACTOR + 8.0)
     assert "widest stage" in plan.report()
 
@@ -1405,8 +1406,8 @@ def test_the_plan_names_the_regime_the_resumed_copies_take(tmp_path: Path, monke
     workflow = _build(tmp_path)
     workflow.setup(1)
     engines = {manager.name: CaseMaterializer(manager) for manager in workflow._managers()["CT_out"]}
-    assert set(engines["CASE_000"].materialize_copies([1, 2]).values()) == {"stream-shared"}
-    assert set(engines["CASE_001"].materialize_copies([1, 2, 3]).values()) == {"stream-shared"}
+    assert set(engines["CASE_000"].materialize_copies([1, 2]).values()) == {(Verdict.STREAM, Regime.SHARED)}
+    assert set(engines["CASE_001"].materialize_copies([1, 2, 3]).values()) == {(Verdict.STREAM, Regime.SHARED)}
 
     again = _build(tmp_path)
     plan = again.compute_plan(1, overwrite=False)
@@ -1424,21 +1425,19 @@ def test_the_plan_names_the_regime_the_resumed_copies_take(tmp_path: Path, monke
     assert "2 STREAM (shared read pass), 1 STREAM (own pass)" in plan.report()
     assert "(1 cop(ies)) own pass: the only copy of this case still to write" in plan.report()
 
-    ran: dict[str, str] = {}
+    ran: dict[str, tuple[Verdict, Regime | None]] = {}
     original = CaseMaterializer.materialize_copies
 
-    def spy(self: CaseMaterializer, copies: list[int], **kwargs) -> dict[int, str]:
-        regimes = original(self, copies, **kwargs)
-        ran.update({self.manager.copy_entry(a): regime for a, regime in regimes.items()})
-        return regimes
+    def spy(self: CaseMaterializer, copies: list[int], **kwargs):
+        outcomes = original(self, copies, **kwargs)
+        ran.update({self.manager.copy_entry(a): outcome for a, outcome in outcomes.items()})
+        return outcomes
 
     monkeypatch.setattr(CaseMaterializer, "materialize_copies", spy)
     again.setup(1)
     again.run_process(1, 0, 0, [])
-    engine_regime = {"stream-shared": "shared", "stream": "solo"}
-    assert {case: engine_regime[regime] for case, regime in ran.items()} == {
-        case: regime for case, (verdict, regime) in planned.items() if verdict == "STREAM"
-    }
+    # The run's answer per copy is the plan's line, verdict and regime alike.
+    assert ran == {case: outcome for case, outcome in planned.items() if outcome[0] == "STREAM"}
 
 
 # ---------------------------------------------------------------- refusals and draws

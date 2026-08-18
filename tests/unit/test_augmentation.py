@@ -18,6 +18,7 @@
 Flip (incl. vector fields), Rotate, Translate, intensity augmentations, and the
 SimpleITK-backed Elastix/Mask augmentations."""
 
+import itertools
 from pathlib import Path
 
 import konfai.data.augmentation as augmentation_module
@@ -338,6 +339,54 @@ def test_rotate_declares_orientation_from_the_draw_not_from_the_flag() -> None:
     free = Rotate(a_min=10.0, a_max=10.0)
     free._state_init(0, [[12, 12, 12]], [Attribute()])
     assert free._patch_locality(0, 0, Attribute()).kind is LocalityKind.REGRID
+
+
+def test_a_regrid_draw_pulls_the_hull_of_its_mapped_corners() -> None:
+    """The pull box is the affine image of the target box (``WorldBox.image_under``): the hull of
+    the ``2^n`` mapped corners, which is enumerated here the long way and must give the very same
+    voxel window, for a rotation composed with a scale at free angles."""
+    from konfai.data.augmentation import EulerTransform, _reflect_interval, _rotation_3d_matrix, _scale_3d_matrix
+
+    class _Draw(EulerTransform):
+        def _state_init(self, index, shapes, caches_attribute):
+            return shapes
+
+    def corner_hull(matrix: torch.Tensor, target: tuple[slice, ...], full: tuple[int, ...]) -> list[slice]:
+        n = len(full)
+        corners = [
+            [
+                *reversed(
+                    [
+                        (-1.0 + 2.0 * (part.stop - 1 if bit else part.start) / (extent - 1)) if extent > 1 else 0.0
+                        for part, extent, bit in zip(target, full, bits, strict=True)
+                    ]
+                ),
+                1.0,
+            ]
+            for bits in itertools.product((0, 1), repeat=n)
+        ]
+        mapped = torch.tensor(corners, dtype=torch.float64) @ matrix[0, :n, :].to(torch.float64).T
+        pull = []
+        for axis in range(n):
+            span = float(full[axis] - 1)
+            values = mapped[:, n - 1 - axis]
+            low, high = _reflect_interval(
+                float((values.min() + 1.0) / 2.0 * span) - 1.0, float((values.max() + 1.0) / 2.0 * span) + 1.0, span
+            )
+            start, stop = max(0, int(np.floor(low))), min(full[axis], int(np.ceil(high)) + 1)
+            pull.append(slice(start, max(stop, start + 1)))
+        return pull
+
+    torch.manual_seed(3)
+    full = (7, 11, 13)
+    for _ in range(20):
+        draw = _Draw()
+        matrix = _rotation_3d_matrix(torch.deg2rad(torch.rand(3) * 360)) @ _scale_3d_matrix(
+            torch.exp2(torch.randn(1) * 0.3).repeat(3)
+        )
+        draw.matrix[0] = [matrix.unsqueeze(0)]
+        target = tuple(slice(int(start), int(start) + 4) for start in torch.randint(0, 4, (3,)))
+        assert draw._stream_region_source(0, 0, target, list(full)) == corner_hull(draw.matrix[0][0], target, full)
 
 
 # --------------------------------------------------------------------------------------

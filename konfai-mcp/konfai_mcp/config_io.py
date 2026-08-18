@@ -60,11 +60,6 @@ def yaml_dump_content(data: dict[str, Any]) -> str:
 def _lint_config_data(data: Any) -> list[dict[str, str]]:
     """Static lint for silent-failure traps an agent cannot see from the schema alone."""
     warnings: list[dict[str, str]] = []
-    # Evaluator groups_dest entries bind to GroupTransformMetric and Transformer ones to a chain
-    # (`transforms` only, strict grammar): neither has patch_transforms nor the -1 fill, so the
-    # trap only exists for Trainer/Predictor datasets.
-    if isinstance(data, dict) and any(isinstance(data.get(root), dict) for root in ("Evaluator", "Transformer")):
-        return warnings
 
     def _walk(node: Any) -> None:
         if isinstance(node, dict):
@@ -91,7 +86,11 @@ def _lint_config_data(data: Any) -> list[dict[str, str]]:
             for item in node:
                 _walk(item)
 
-    _walk(data)
+    # Only a Trainer/Predictor dataset has patch_transforms and its -1 fill: an Evaluator groups_dest
+    # entry binds to GroupTransformMetric and a Transformer one to a chain (`transforms` only).
+    if isinstance(data, dict):
+        for root in ("Trainer", "Predictor"):
+            _walk(data.get(root))
     warnings.extend(_lint_prediction_default_outputs_criterions(data))
     return warnings
 

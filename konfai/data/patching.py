@@ -25,10 +25,9 @@ the DataLoader. Writing that chain to disk for the dataset-preparation workflow 
 import contextlib
 import copy
 import hashlib
-import random
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import Any, Protocol, TypeGuard, cast
@@ -51,8 +50,8 @@ from konfai.data.transform import (
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, PatchError
+from konfai.utils.runtime import preserved_rng, seed_all
 from konfai.utils.utils import (
-    SUPPORTED_FORMATS,
     OverlapSpec,
     best_sweep_axis,
     concretize_patch_size,
@@ -61,16 +60,25 @@ from konfai.utils.utils import (
     get_module,
     get_patch_slices_from_shape,
     resolve_overlap,
-    split_path_spec,
 )
 
 # How far a halo may reach, as a fraction of the patch it surrounds. See DatasetManager._affords_halo.
 _MAX_HALO_FRACTION = 0.5
-#: The whole-volume statistics every store can serve (``Dataset.read_data_statistics``): what a
-#: GLOBAL_STAT stage may declare, and what the plan checks against without reading a voxel.
-_STREAM_STAT_KEYS = frozenset(
-    {"Min", "Max", "Mean", "Std", "MinPerChannel", "MaxPerChannel", "MeanPerChannel", "StdPerChannel"}
-)
+#: The whole-volume statistics every store can serve (``Dataset.read_data_statistics``), by the key a
+#: GLOBAL_STAT stage declares: what the plan checks against without reading a voxel, and what the
+#: seed reads. The per-channel figures are what a vector-valued quantity needs, where pooling the
+#: components into one number describes nothing.
+_STREAM_STATS = {
+    "Min": "min",
+    "Max": "max",
+    "Mean": "mean",
+    "Std": "std",
+    "MinPerChannel": "min_per_channel",
+    "MaxPerChannel": "max_per_channel",
+    "MeanPerChannel": "mean_per_channel",
+    "StdPerChannel": "std_per_channel",
+}
+_STREAM_STAT_KEYS = frozenset(_STREAM_STATS)
 
 # Rows per Save-sweep slab: full-plane slabs keep the materialization bounded to a window while the
 # composed region reads stay chunk-friendly. A declared memory_budget can only LOWER the height
@@ -156,21 +164,9 @@ def _drawn_from(*key: object) -> Iterator[None]:
     this is). ``blake2b``, not ``hash()``: string hashing is salted per process.
     """
     digest = hashlib.blake2b("|".join(str(part) for part in key).encode(), digest_size=4).digest()
-    seed = int.from_bytes(digest, "big")
-    cpu_state = torch.random.get_rng_state()
-    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-    states = (random.getstate(), np.random.get_state())
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    try:
+    with preserved_rng():
+        seed_all(int.from_bytes(digest, "big"))
         yield
-    finally:
-        random.setstate(states[0])
-        np.random.set_state(states[1])
-        torch.random.set_rng_state(cpu_state)
-        if cuda_states is not None:
-            torch.cuda.set_rng_state_all(cuda_states)
 
 
 def _stage_name(stage: Stage) -> str:
@@ -293,28 +289,16 @@ def save_destination(save: Save, default_dataset: Dataset, default_group: str) -
     Public because a planner has to resolve a destination exactly as the engine will: one that probes
     a store the run does not open has verified nothing.
     """
-    if save.dataset:
-        # Resolved once per Save: the chain is shared by every case's manager, and constructing a
-        # Dataset probes the destination directory on disk.
-        if save.destination is None:
-            filename, _, file_format = split_path_spec(
-                save.dataset,
-                default_format="mha",
-                supported_formats=SUPPORTED_FORMATS,
-            )
-            save.destination = Dataset(filename, file_format, save.scale_factors, save.downsample_method)
-        dataset = save.destination
-    else:
-        # No destination of its own: the Save caches into the manager's dataset, whose write format
-        # is not this stage's to redecorate: a pyramid asked here would silently not happen.
-        if save.scale_factors:
-            raise ConfigError(
-                f"A '{type(save).__name__}' asks for a pyramid but names no dataset of its own.",
-                "scale_factors describes a store this stage writes, so give it one:"
-                " Write: {dataset: ./Out:omezarr, scale_factors: [4]}.",
-            )
-        dataset = default_dataset
-    return dataset, save.group if save.group else default_group
+    destination = save.destination
+    # No destination of its own: the Save caches into the manager's dataset, whose write format is
+    # not this stage's to redecorate: a pyramid asked here would silently not happen.
+    if destination is None and save.scale_factors:
+        raise ConfigError(
+            f"A '{type(save).__name__}' asks for a pyramid but names no dataset of its own.",
+            "scale_factors describes a store this stage writes, so give it one:"
+            " Write: {dataset: ./Out:omezarr, scale_factors: [4]}.",
+        )
+    return destination or default_dataset, save.group or default_group
 
 
 class RegionWriter:
@@ -329,7 +313,7 @@ class RegionWriter:
     slab's compute), and it held one more block.
     """
 
-    def __init__(self, open_stream: Callable[[Any, np.ndarray], DataStream | None]) -> None:
+    def __init__(self, open_stream: Callable[[Any, np.ndarray, Attribute], DataStream]) -> None:
         self._open_stream = open_stream
         self._streams: dict[Any, DataStream] = {}
 
@@ -337,16 +321,11 @@ class RegionWriter:
     def opened(self) -> set[Any]:
         return set(self._streams)
 
-    def write(self, key: Any, region: tuple[slice, ...], block: np.ndarray) -> None:
-        """Write ``block`` at ``region`` (channel slice included) into ``key``'s stream.
-
-        Raises ``LookupError`` when the destination refuses a region stream: the caller turns it
-        into its own refusal (a sweep failure, a reduction error), and aborts.
-        """
+    def write(self, key: Any, region: tuple[slice, ...], block: np.ndarray, header: Attribute) -> None:
+        """Write ``block`` at ``region`` (channel slice included) into ``key``'s stream, opened on
+        its first block with ``header``; a destination that refuses the stream raises there."""
         if key not in self._streams:
-            stream = self._open_stream(key, block)
-            if stream is None:
-                raise LookupError(key)
+            stream = self._open_stream(key, block, header)
             stream.__enter__()
             self._streams[key] = stream
         self._streams[key].write_slice(region, block)
@@ -445,10 +424,10 @@ def _require_channel_first(block: np.ndarray, spatial: list[int], what: str) -> 
 
 def _open_sweep_stream(
     sweep: _PendingSweep, block: np.ndarray, spatial: list[int], rows: int, attributes: Attribute
-) -> DataStream | None:
+) -> DataStream:
     """One region-write stream shaped for the sweep: the store chunks on whole slabs (channels
     included), so no region write ever pays a read-modify-write."""
-    return sweep.destination.open_data_stream(
+    stream = sweep.destination.open_data_stream(
         sweep.group,
         sweep.entry,
         [int(block.shape[0]), *spatial],
@@ -456,6 +435,13 @@ def _open_sweep_stream(
         attributes,
         region_shape=[int(block.shape[0]), rows, *spatial[1:]],
     )
+    if stream is None:
+        raise PatchError(
+            f"destination '{sweep.destination.filename}' refused the region write of"
+            f" '{sweep.group}/{sweep.entry}' after accepting its plan.",
+            "h5 and omezarr always serve region writes; mha only with image geometry.",
+        )
+    return stream
 
 
 @dataclass(frozen=True)
@@ -1777,27 +1763,13 @@ class DatasetManager:
         cache_attribute: Attribute,
         required_stats: set[str],
         channels: list[int] | None = None,
-    ) -> bool:
+    ) -> None:
         missing_stats = [key for key in required_stats if key not in cache_attribute]
         if not missing_stats:
-            return True
-
+            return
         stats = self._read_disk_statistics(source_dataset, source_group, source_entry, channels)
-        stats_mapping = {
-            "Min": stats["min"],
-            "Max": stats["max"],
-            "Mean": stats["mean"],
-            "Std": stats["std"],
-            # The same figures per channel: what a vector-valued quantity needs, where pooling the
-            # components into one number describes nothing (the mean of a displacement field is a
-            # translation, and it has three parts).
-            "MinPerChannel": stats.get("min_per_channel"),
-            "MaxPerChannel": stats.get("max_per_channel"),
-            "MeanPerChannel": stats.get("mean_per_channel"),
-            "StdPerChannel": stats.get("std_per_channel"),
-        }
         for key in missing_stats:
-            value = stats_mapping.get(key)
+            value = stats.get(_STREAM_STATS[key])
             if value is None:
                 continue
             if key.endswith("PerChannel"):
@@ -1806,7 +1778,6 @@ class DatasetManager:
                 cache_attribute[key] = np.asarray([value], dtype=np.float32)
             else:
                 cache_attribute[key] = value
-        return all(key in cache_attribute for key in required_stats)
 
     def _affords_halo(self, a: int, halo: tuple[int, ...]) -> bool:
         """Whether a halo of this radius still buys copy *a* anything over loading the volume.
@@ -2292,17 +2263,18 @@ class DatasetManager:
             return False
         if not source.pending_sweeps:
             return True
-        for sweep in source.pending_sweeps:
-            # Stop at the first failure. The sweeps are CHAINED: each one's source is the previous
-            # one's destination, so past a failure the next reads a cache nobody wrote, fails too,
-            # and overwrites the recorded reason with its own. _sweep_failure has to keep the cause,
-            # not the last symptom.
+        self._sweep_pending(source.pending_sweeps)
+        return not self._sweep_failed and self._resolve_patch_stream_source(a, apply_augmentations) is not None
+
+    def _sweep_pending(self, sweeps: Iterable[_PendingSweep]) -> None:
+        """Materialize the pending Save caches in order, stopping at the first failure: they are
+        chained (each one's source is the previous one's destination), so past a failure the next
+        would read a cache nobody wrote and record its own symptom over the cause. Every plan is
+        then dropped: they pointed at caches that did not exist yet, or after a failure never will."""
+        for sweep in sweeps:
             if not self._materialize_save(sweep):
                 break
-        # Every copy replans: the pending plans pointed at caches that did not exist yet (or, after a
-        # failure, never will: _sweep_failed reroutes them to the whole-volume path).
         self._invalidate_stream_plans()
-        return not self._sweep_failed and self._resolve_patch_stream_source(a, apply_augmentations) is not None
 
     @property
     def _sweep_failed(self) -> bool:
@@ -2314,11 +2286,10 @@ class DatasetManager:
         self._stream_evolved.clear()
 
     def _materialize_save(self, sweep: _PendingSweep) -> bool:
-        """Write one Save cache slab by slab: each slab of the Save's space is read through the
-        segment (re-planned here, its source materialized by now, so a deferred statistic seeds from
-        the real entry) and region-written; the cache appears only when complete. On failure the
-        partial entry is removed, ``_sweep_failure`` keeps the reason and ``False`` is returned: the
-        case falls back to the whole-volume path, or a caller without one raises with the reason."""
+        """Write one Save cache slab by slab through its segment, re-planned against its source as
+        it is on disk now; the cache appears only when complete. On failure the partial entry is
+        removed, ``_sweep_failure`` keeps the reason and ``False`` is returned: the case falls back
+        to the whole-volume path, or a caller without one raises with the reason."""
         ledger_key = (str(sweep.destination.filename), sweep.group, sweep.entry)
         if ledger_key in self._swept_entries:
             # Already swept by THIS run: under --overwrite the existence probe answers "not written",
@@ -2326,63 +2297,96 @@ class DatasetManager:
             return True
         if not self._rewrite_saves and sweep.destination.is_dataset_exist(sweep.group, sweep.entry):
             return True
-        streamable, stage_plans, evolved, refusal = self._plan_stream_region(
-            0,
-            sweep.stages,
-            sweep.source_dataset,
-            sweep.source_group,
-            sweep.source_entry,
-            sweep.base_attributes,
-            [int(extent) for extent in sweep.source_shape[1:]],
-            landing_shape=list(sweep.out_spatial),
-        )
-        if not streamable:
+        source, evolved, refusal = self._replan_sweep(sweep)
+        if source is None:
             # The plan probe said yes and the re-plan against the materialized source says no: that
             # is new information, and it is the whole reason this case is about to cost a volume.
             return self._sweep_failed_because(
                 sweep, refusal or "the segment feeding it no longer plans against its materialized source."
             )
+        _written, failure = self._sweep(source, sweep, evolved, [(None, sweep, [], evolved)])
+        if failure is not None:
+            return self._sweep_failed_because(sweep, failure)
+        return True
+
+    def _replan_sweep(
+        self, sweep: _PendingSweep, stages: list[Stage] | None = None
+    ) -> tuple[_PatchStreamSource | None, Attribute, str | None]:
+        """Re-plan STAGES (the sweep's own by default) against the sweep's source as it is on disk
+        now: the stream source to replay from and the case state the segment lands with, or the
+        refusal (``source`` is then ``None``)."""
+        stages = sweep.stages if stages is None else stages
+        streamable, plans, evolved, refusal = self._plan_stream_region(
+            0,
+            stages,
+            sweep.source_dataset,
+            sweep.source_group,
+            sweep.source_entry,
+            Attribute(sweep.base_attributes),
+            [int(extent) for extent in sweep.source_shape[1:]],
+            landing_shape=list(sweep.out_spatial),
+        )
+        if not streamable:
+            return None, evolved, refusal
         source = _PatchStreamSource(
             sweep.source_dataset,
             sweep.source_group,
             sweep.source_entry,
             list(sweep.source_shape),
-            sweep.stages,
-            stage_plans,
+            stages,
+            plans,
         )
-        spatial = list(sweep.out_spatial)
-        rows = self._sweep_rows(spatial, int(sweep.source_shape[0]))
-        header: dict[str, Attribute] = {}
-        writer = RegionWriter(lambda _key, block: _open_sweep_stream(sweep, block, spatial, rows, header["attributes"]))
+        return source, evolved, None
+
+    def _sweep(
+        self,
+        source: _PatchStreamSource,
+        reference: _PendingSweep,
+        evolved: Attribute,
+        members: list[tuple[Any, _PendingSweep, list[Stage], Attribute]],
+    ) -> tuple[set[Any], str | None]:
+        """The slab loop every sweep runs: each slab of REFERENCE's landing is read once through
+        SOURCE (its first slab against EVOLVED, so a region stage recording geometry nowhere the
+        case can read refuses here, as the patch path does), then every member ``(key, sweep, tail,
+        evolved)`` applies its tail to the slab and region-writes it into its own stream, opened on
+        the first slab with the header the whole-volume pass would leave. Returns the keys written
+        and, when the pass failed, why: every stream is then aborted; an interrupt is re-raised."""
+        spatial = list(reference.out_spatial)
+        rows = self._sweep_rows(spatial, int(reference.source_shape[0]))
+        sweeps = {key: sweep for key, sweep, _tail, _evolved in members}
+        headers: dict[Any, Attribute] = {}
+        writer = RegionWriter(lambda key, block, header: _open_sweep_stream(sweeps[key], block, spatial, rows, header))
         try:
             for slab_index, target in enumerate(_sweep_targets(spatial, rows)):
-                # The first slab hands a throwaway case scope to the replay so the region-geometry
-                # check runs: a region stage recording geometry nowhere the case can read refuses the
-                # sweep (PatchError -> whole-volume fallback), exactly as the patch path refuses it.
                 tensor, slab_attribute, keys_before = self._replay_streamed_region(
-                    source, target, Attribute(sweep.base_attributes), Attribute(evolved) if slab_index == 0 else None
+                    source,
+                    target,
+                    Attribute(reference.base_attributes),
+                    Attribute(evolved) if slab_index == 0 else None,
                 )
-                block = tensor.cpu().numpy()
-                _require_channel_first(block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'")
-                if not header:
-                    header["attributes"] = _sweep_header(evolved, slab_attribute, keys_before)
-                try:
-                    writer.write(None, (slice(0, int(block.shape[0])), *target), block)
-                except LookupError:
-                    writer.abort()
-                    return self._sweep_failed_because(
-                        sweep,
-                        f"destination '{sweep.destination.filename}' refused the region write"
-                        " after accepting its plan.",
+                for key, sweep, tail, member_evolved in members:
+                    member_tensor = tensor.clone() if len(members) > 1 else tensor
+                    scope = Attribute(slab_attribute)
+                    for stage in tail:
+                        member_tensor = stage(self.name, member_tensor, scope)
+                    block = member_tensor.cpu().numpy()
+                    _require_channel_first(
+                        block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
                     )
+                    if key not in headers:
+                        headers[key] = _sweep_header(member_evolved, scope, keys_before)
+                    writer.write(key, (slice(0, int(block.shape[0])), *target), block, headers[key])
+            written = writer.opened
             writer.close()
-            self._swept_entries.add(ledger_key)
-            return True
+            for key in written:
+                sweep = sweeps[key]
+                self._swept_entries.add((str(sweep.destination.filename), sweep.group, sweep.entry))
+            return written, None
         except BaseException as exception:
             writer.abort(exception)
             if not isinstance(exception, Exception):
                 raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
-            return self._sweep_failed_because(sweep, f"{type(exception).__name__}: {exception}")
+            return set(), f"{type(exception).__name__}: {exception}"
 
     def _sweep_failed_because(self, sweep: _PendingSweep, reason: str) -> bool:
         """Record why a sweep gave up, warn, and answer ``False``: the one exit for all of them.

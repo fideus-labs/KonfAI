@@ -30,7 +30,7 @@ from konfai.data.data_manager import (
     DataPrediction,
     DataTrain,
 )
-from konfai.utils import runtime
+from konfai.utils import budget, runtime
 from konfai.utils.budget import AUTO_MEMORY_SAFETY_FRACTION, parse_memory_budget_bytes
 from konfai.utils.errors import ConfigError
 
@@ -79,15 +79,15 @@ def _fake_cgroup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, own: str, *, v
         base = root
     leaf = base / own.lstrip("/")
     leaf.mkdir(parents=True)
-    monkeypatch.setattr(runtime, "_CGROUP_ROOT", str(root))
-    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(proc))
+    monkeypatch.setattr(budget, "_CGROUP_ROOT", str(root))
+    monkeypatch.setattr(budget, "_PROC_SELF_CGROUP", str(proc))
     for key in ("SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU", "SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
         monkeypatch.delenv(key, raising=False)
     return leaf
 
 
 def _fake_host_available(monkeypatch: pytest.MonkeyPatch, num_bytes: int) -> None:
-    monkeypatch.setattr(runtime.psutil, "virtual_memory", lambda: SimpleNamespace(available=num_bytes))
+    monkeypatch.setattr(budget.psutil, "virtual_memory", lambda: SimpleNamespace(available=num_bytes))
 
 
 def test_auto_respects_cgroup_limit_not_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -97,7 +97,7 @@ def test_auto_respects_cgroup_limit_not_host(monkeypatch: pytest.MonkeyPatch, tm
     (leaf / "memory.max").write_text("8000000000")
     _fake_host_available(monkeypatch, 512 * 2**30)
 
-    assert runtime.available_memory_bytes() == (8_000_000_000, "cgroup limit")
+    assert budget.available_memory_bytes() == (8_000_000_000, "cgroup limit")
 
 
 def test_the_cgroup_is_the_process_s_own_not_the_mount_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -112,7 +112,7 @@ def test_the_cgroup_is_the_process_s_own_not_the_mount_root(monkeypatch: pytest.
     (leaf / "memory.stat").write_text("anon 1500000000\nfile 0\nkernel 500000000\n")  # already resident
     _fake_host_available(monkeypatch, 512 * 2**30)
 
-    assert runtime.available_memory_bytes() == (30_000_000_000, "cgroup limit")
+    assert budget.available_memory_bytes() == (30_000_000_000, "cgroup limit")
 
 
 def test_the_page_cache_is_not_held_memory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -124,7 +124,7 @@ def test_the_page_cache_is_not_held_memory(monkeypatch: pytest.MonkeyPatch, tmp_
     (leaf / "memory.stat").write_text("anon 9000000000\nfile 39000000000\nkernel 1000000000\nshmem 0\n")
     _fake_host_available(monkeypatch, 512 * 2**30)
 
-    assert runtime.available_memory_bytes() == (40_000_000_000, "cgroup limit")
+    assert budget.available_memory_bytes() == (40_000_000_000, "cgroup limit")
 
 
 def test_cgroup_v1_holds_rss_not_the_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -134,7 +134,7 @@ def test_cgroup_v1_holds_rss_not_the_cache(monkeypatch: pytest.MonkeyPatch, tmp_
     (leaf / "memory.stat").write_text("cache 6900000000\nrss 1000000000\nmapped_file 0\n")
     _fake_host_available(monkeypatch, 512 * 2**30)
 
-    assert runtime.available_memory_bytes() == (7_000_000_000, "cgroup limit")
+    assert budget.available_memory_bytes() == (7_000_000_000, "cgroup limit")
 
 
 def test_cgroup_v2_max_falls_back_to_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -142,7 +142,7 @@ def test_cgroup_v2_max_falls_back_to_host(monkeypatch: pytest.MonkeyPatch, tmp_p
     (leaf / "memory.max").write_text("max\n")
     _fake_host_available(monkeypatch, 64 * 2**30)
 
-    assert runtime.available_memory_bytes() == (64 * 2**30, "host available RAM")
+    assert budget.available_memory_bytes() == (64 * 2**30, "host available RAM")
 
 
 def test_cgroup_v1_limit_is_read_when_v2_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -150,7 +150,7 @@ def test_cgroup_v1_limit_is_read_when_v2_absent(monkeypatch: pytest.MonkeyPatch,
     (leaf / "memory.limit_in_bytes").write_text("8000000000\n")
     _fake_host_available(monkeypatch, 512 * 2**30)
 
-    assert runtime.available_memory_bytes() == (8_000_000_000, "cgroup limit")
+    assert budget.available_memory_bytes() == (8_000_000_000, "cgroup limit")
 
 
 def test_cgroup_v1_sentinel_reads_as_unlimited(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -158,48 +158,48 @@ def test_cgroup_v1_sentinel_reads_as_unlimited(monkeypatch: pytest.MonkeyPatch, 
     (leaf / "memory.limit_in_bytes").write_text(str(2**63))  # the near-INT64_MAX "no limit" sentinel
     _fake_host_available(monkeypatch, 64 * 2**30)
 
-    assert runtime.available_memory_bytes() == (64 * 2**30, "host available RAM")
+    assert budget.available_memory_bytes() == (64 * 2**30, "host available RAM")
 
 
 def test_no_cgroup_falls_back_to_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    monkeypatch.setattr(budget, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
     for key in ("SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU"):
         monkeypatch.delenv(key, raising=False)
     _fake_host_available(monkeypatch, 42 * 2**30)
 
-    assert runtime.available_memory_bytes() == (42 * 2**30, "host available RAM")
+    assert budget.available_memory_bytes() == (42 * 2**30, "host available RAM")
 
 
 def test_a_slurm_grant_bounds_the_budget_when_no_cgroup_enforces_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    monkeypatch.setattr(budget, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
     monkeypatch.setenv("SLURM_MEM_PER_NODE", "32000")  # MB
     monkeypatch.delenv("SLURM_MEM_PER_CPU", raising=False)
     _fake_host_available(monkeypatch, 512 * 2**30)
 
-    assert runtime.available_memory_bytes() == (32000 * 2**20, "SLURM memory grant")
+    assert budget.available_memory_bytes() == (32000 * 2**20, "SLURM memory grant")
 
 
 def test_a_slurm_grant_of_zero_means_the_whole_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    monkeypatch.setattr(budget, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
     monkeypatch.setenv("SLURM_MEM_PER_NODE", "0")  # --mem=0
     monkeypatch.setenv("SLURM_MEM_PER_CPU", "0")
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "8")
     _fake_host_available(monkeypatch, 512 * 2**30)
 
-    assert runtime.available_memory_bytes() == (512 * 2**30, "host available RAM")
+    assert budget.available_memory_bytes() == (512 * 2**30, "host available RAM")
 
 
 def test_a_slurm_per_cpu_grant_is_multiplied_by_the_task_cpus(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    monkeypatch.setattr(budget, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
     monkeypatch.delenv("SLURM_MEM_PER_NODE", raising=False)
     monkeypatch.setenv("SLURM_MEM_PER_CPU", "4000")  # MB
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "8")
     monkeypatch.setenv("SLURM_CPUS_ON_NODE", "64")  # the task's cpus win over the node's
     _fake_host_available(monkeypatch, 512 * 2**30)
 
-    assert runtime.available_memory_bytes() == (4000 * 8 * 2**20, "SLURM memory grant")
+    assert budget.available_memory_bytes() == (4000 * 8 * 2**20, "SLURM memory grant")
 
 
 # --------------------------------------------------------------------------------------
@@ -267,13 +267,13 @@ def test_none_budget_means_auto_for_training(monkeypatch: pytest.MonkeyPatch) ->
     # No key declared -> "auto": the tiny dataset fits the detected memory, so training caches; on
     # a node too small for it, the same absent key streams instead of blowing past the RAM.
     roomy = _make_train(None)
-    monkeypatch.setattr(runtime, "available_memory_bytes", lambda: (_DATASET_BYTES * 10, "host"))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (_DATASET_BYTES * 10, "host"))
     roomy._resolve_cache_regime(world_size=1)
     assert roomy.use_cache is True
 
     tight = _make_train(None)
     monkeypatch.setattr(
-        runtime,
+        budget,
         "available_memory_bytes",
         lambda: (int(_DATASET_BYTES / AUTO_MEMORY_SAFETY_FRACTION) - 1, "cgroup limit"),
     )
@@ -318,7 +318,7 @@ def test_an_auto_budget_is_split_across_one_node_not_the_whole_cluster(monkeypat
     # A node that offers half the dataset: a rank's sixteenth fits its quarter of that four times
     # over, while a sixteenth of it would be half of what the rank has to hold.
     node = _DATASET_BYTES / (2 * AUTO_MEMORY_SAFETY_FRACTION)
-    monkeypatch.setattr(runtime, "available_memory_bytes", lambda: (node, "host"))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (node, "host"))
     monkeypatch.setenv("KONFAI_LOCAL_RANKS", "4")
 
     data = _make_train(None)
@@ -342,7 +342,7 @@ def _metric_sizing_budget(
         "f": SimpleNamespace(get_names=lambda group: ["case"], get_infos=lambda group, name: ([1, 64, 64, 64], None))
     }
     monkeypatch.setattr(DataMetric, "_resolve_dataset_sources", lambda self: {"CT": [("f", False)]}, raising=False)
-    monkeypatch.setattr(runtime, "available_memory_bytes", lambda: (100 * 2**30, "host"))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (100 * 2**30, "host"))
     captured: dict[str, float] = {}
 
     def capture(template, shape, channels, element_bytes, budget, **kwargs):
@@ -413,7 +413,7 @@ def test_auto_budget_uses_detected_memory(monkeypatch: pytest.MonkeyPatch) -> No
     def fake_available() -> tuple[int, str]:
         return budget_source
 
-    monkeypatch.setattr(runtime, "available_memory_bytes", fake_available)
+    monkeypatch.setattr(budget, "available_memory_bytes", fake_available)
 
     # A cgroup so small that 80% of it cannot hold the dataset -> do not cache.
     budget_source = (int(_DATASET_BYTES / AUTO_MEMORY_SAFETY_FRACTION) - 1, "cgroup limit")

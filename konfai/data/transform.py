@@ -57,7 +57,7 @@ from konfai.data.sampling import (
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset, DataStream, data_to_image, image_to_data
 from konfai.utils.errors import TransformError
-from konfai.utils.ITK import _require_simpleitk, crop_with_mask
+from konfai.utils.ITK import _require_simpleitk
 from konfai.utils.runtime import NeedDevice
 from konfai.utils.utils import get_module, split_path_spec
 
@@ -970,9 +970,7 @@ class Padding(TransformInverse):
         return F.pad(tensor.unsqueeze(0), tuple(self.padding), mode, value).squeeze(0)
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        for dim in range(len(self.padding) // 2):
-            shape[-dim - 1] += sum(self.padding[dim * 2 : dim * 2 + 2])
-        return shape
+        return [extent + before + after for extent, (before, after) in zip(shape, self._pairs(len(shape)), strict=True)]
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         return PatchLocality(LocalityKind.REGRID)
@@ -1021,10 +1019,7 @@ class Padding(TransformInverse):
         return PatchLocality(LocalityKind.CROP)
 
     def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        shape = list(shape)
-        for dim in range(len(self.padding) // 2):
-            shape[-dim - 1] -= sum(self.padding[dim * 2 : dim * 2 + 2])
-        return shape
+        return [extent - before - after for extent, (before, after) in zip(shape, self._pairs(len(shape)), strict=True)]
 
     def stream_region_target(
         self,
@@ -1034,20 +1029,21 @@ class Padding(TransformInverse):
         cache_attribute: Attribute,
     ) -> list[slice]:
         # Output index o holds input index o + pad_before: a written region pulls its own slices stepped
-        # forward by the leading pad (padding pairs are in reversed axis order, like F.pad).
-        before = [0] * len(target_slices)
-        for dim in range(min(len(self.padding) // 2, len(before))):
-            before[-dim - 1] = self.padding[dim * 2]
-        return [slice(t.start + b, t.stop + b) for t, b in zip(target_slices, before, strict=False)]
+        # forward by the leading pad.
+        return [
+            slice(target.start + before, target.stop + before)
+            for target, (before, _after) in zip(target_slices, self._pairs(len(target_slices)), strict=True)
+        ]
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: dict[str, torch.Tensor]) -> torch.Tensor:
         if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
             cache_attribute.pop("Origin")
-        slices = [slice(0, shape) for shape in tensor.shape]
-        for dim in range(len(self.padding) // 2):
-            slices[-dim - 1] = slice(self.padding[dim * 2], tensor.shape[-dim - 1] - self.padding[dim * 2 + 1])
-        result = tensor[tuple(slices)]
-        return result
+        spatial = tensor.shape[1:]
+        crops = [
+            slice(before, extent - after)
+            for extent, (before, after) in zip(spatial, self._pairs(len(spatial)), strict=True)
+        ]
+        return tensor[(slice(None), *crops)]
 
 
 class Squeeze(TransformInverse):
@@ -2083,14 +2079,21 @@ class Mask(Transform):
             self._cached_mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
         return self._cached_mask
 
-    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+    def _mask(self, name: str, slices: tuple[slice, ...] | None) -> torch.Tensor | np.ndarray:
+        """The case's mask, or the ``slices`` region of it: a ``.mha`` mask is sliced from the one
+        cached copy, a dataset mask is read whole or by region."""
         if self.path.endswith(".mha"):
-            return self._apply(tensor, self._cached_mha())
+            mask = self._cached_mha()
+            return mask if slices is None else mask[slices]
         for dataset in self.datasets:
             if dataset.is_dataset_exist(self.path, name):
-                mask, _ = dataset.read_data(self.path, name)
-                return self._apply(tensor, mask)
-        raise NameError(f"Mask : {self.path}/{name} not found")
+                if slices is None:
+                    return dataset.read_data(self.path, name)[0]
+                return dataset.read_data_slice(self.path, name, slices)[0]
+        raise TransformError(f"'Mask' found no mask '{self.path}' for case '{name}' in any dataset.")
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return self._apply(tensor, self._mask(name, None))
 
     def stream_region(
         self,
@@ -2099,16 +2102,8 @@ class Mask(Transform):
         context: RegionContext,
         cache_attribute: Attribute,
     ) -> torch.Tensor:
-        # Only the region's part of the (aligned) mask: a dataset mask is region-read; a ``.mha``
-        # mask is sliced from the single cached copy (1-channel, far smaller than the output).
-        slices = (slice(None), *context.source)
-        if self.path.endswith(".mha"):
-            return self._apply(tensor, self._cached_mha()[slices])
-        for dataset in self.datasets:
-            if dataset.is_dataset_exist(self.path, name):
-                mask, _ = dataset.read_data_slice(self.path, name, slices)
-                return self._apply(tensor, mask)
-        raise NameError(f"Mask : {self.path}/{name} not found")
+        # Only the region's part of the (aligned) mask, 1-channel and far smaller than the output.
+        return self._apply(tensor, self._mask(name, (slice(None), *context.source)))
 
 
 class Dilate(Transform):
@@ -2357,12 +2352,31 @@ class Save(Transform):
             )
         self.scale_factors = [int(factor) for factor in scale_factors] if scale_factors else None
         self.downsample_method = downsample_method
-        #: The Dataset ``dataset`` names, resolved on first use by ``patching.save_destination``.
-        self.destination: Dataset | None = None
+        self._destination: Dataset | None = None
 
     # WHOLE_VOLUME by declaration, yet the case may still stream: a Save whose cache exists is a
     # source boundary, and an unsatisfied Save with a streamable prefix is materialized slab by slab
     # first (DatasetManager._materialize_save). Only an unsweepable prefix loads the whole volume.
+
+    @property
+    def spec(self) -> tuple[str, str] | None:
+        """``(filename, file_format)`` of the dataset this stage names, ``None`` when it names none.
+
+        Parsed only: a parse-time check reads the path without probing the store on disk."""
+        if not self.dataset:
+            return None
+        filename, _flag, file_format = split_path_spec(self.dataset, default_format="mha")
+        return filename, file_format
+
+    @property
+    def destination(self) -> Dataset | None:
+        """The :class:`Dataset` this stage writes into, ``None`` when it names none.
+
+        Built once: the stage is shared by every case's manager, and constructing a Dataset probes
+        the destination directory on disk."""
+        if self._destination is None and (spec := self.spec) is not None:
+            self._destination = Dataset(*spec, self.scale_factors, self.downsample_method)
+        return self._destination
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor
@@ -3639,12 +3653,10 @@ class Crop(TransformInverse):
         box = self._parse_box(cache_attribute["box"])
         self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
         # The box carries the FAR margin, so the stop it crops at is the one the extent in hand decides.
-        for i, ((_, b), s) in enumerate(zip(box, tensor.shape[1:], strict=False)):
-            box[i][1] = s - b
-        image = data_to_image(tensor, cache_attribute)
-        result = crop_with_mask(image, box)
-        data, _ = image_to_data(result)
-        return torch.from_numpy(data)
+        crops = [
+            slice(int(near), extent - int(far)) for (near, far), extent in zip(box, tensor.shape[1:], strict=False)
+        ]
+        return tensor[(slice(None), *crops)]
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "box" not in cache_attribute:

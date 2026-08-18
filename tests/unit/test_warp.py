@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data.materialize import CaseMaterializer
+from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import LocalityKind, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset
@@ -216,7 +216,7 @@ def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.Monkey
 
     manager = _manager(source, [warp, Save(f"{tmp_path / 'out'}:h5")])
     assert manager.can_stream_patch(0, apply_augmentations=False)
-    assert CaseMaterializer(manager).materialize() is True
+    assert CaseMaterializer(manager).materialize() is Verdict.STREAM
     streamed, _ = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")
 
     np.testing.assert_allclose(streamed, reference, rtol=1e-5, atol=1e-4)

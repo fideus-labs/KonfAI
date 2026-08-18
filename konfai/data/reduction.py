@@ -99,10 +99,10 @@ class Mean(Reduction):
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         if len(tensors) == 1:
             return tensors[0].to(_averaged_dtype(tensors[0].dtype))
-        accumulator = tensors[0].float().clone()
-        for tensor in tensors[1:]:
-            accumulator.add_(tensor.float())
-        return accumulator.div_(len(tensors)).to(_averaged_dtype(tensors[0].dtype))
+        self.start()
+        for tensor in tensors:
+            self.accumulate(tensor)
+        return self.finalize()
 
     def start(self) -> None:
         self._total: torch.Tensor | None = None

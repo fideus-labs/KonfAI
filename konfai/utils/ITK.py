@@ -164,28 +164,6 @@ def box_with_mask(mask: sitk.Image, label: list[int], dilatations: list[int]) ->
     return box
 
 
-def crop_with_mask(image: sitk.Image, box: np.ndarray) -> sitk.Image:
-    _require_simpleitk()
-    data = sitk.GetArrayFromImage(image)
-
-    for i, w in enumerate(box):
-        data = np.delete(data, slice(w[1], data.shape[i]), i)
-        data = np.delete(data, slice(0, w[0]), i)
-
-    origin = np.asarray(image.GetOrigin())
-    matrix = np.asarray(image.GetDirection()).reshape((len(origin), len(origin)))
-    origin = origin.dot(matrix)
-    for i, w in enumerate(box):
-        origin[-i - 1] += w[0] * np.asarray(image.GetSpacing())[-i - 1]
-    origin = origin.dot(np.linalg.inv(matrix))
-
-    result = sitk.GetImageFromArray(data)
-    result.SetOrigin(origin)
-    result.SetSpacing(image.GetSpacing())
-    result.SetDirection(image.GetDirection())
-    return result
-
-
 def _linear_map(transform: sitk.Transform) -> AffineMap:
     """The exact world map of a linear transform: ``T(p) = M p + T(0)``.
 
