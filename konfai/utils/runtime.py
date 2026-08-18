@@ -1009,7 +1009,6 @@ def apply_cpu_thread_budget() -> None:
     global _cpu_budget_applied
     if sys.platform == "darwin" or _cpu_budget_applied:
         return
-    _cpu_budget_applied = True
     explicit = os.environ.get("OMP_NUM_THREADS")
     share = int(explicit) if explicit else max(1, min(available_cpus() // node_local_ranks(), 12))
     if not explicit:
@@ -1020,6 +1019,8 @@ def apply_cpu_thread_budget() -> None:
         sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(share)
     except ImportError:
         pass
+    # Marked applied only once it is: a raise above (a bad OMP_NUM_THREADS) leaves the next call free to retry.
+    _cpu_budget_applied = True
 
 
 def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = True) -> tuple[int | None, int | None]:
