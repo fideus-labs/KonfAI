@@ -701,3 +701,17 @@ def test_a_streamed_transform_entry_replaces_a_tfm_under_the_h5_name(tmp_path: P
     assert (root / "P000" / "Transform.h5").exists()
     transform = dataset.read_transform("Transform", "P000")
     assert "DisplacementFieldTransform" in transform.GetName()
+
+
+def test_the_readers_own_itk_keys_do_not_travel_with_the_volume(tmp_path: Path) -> None:
+    """SimpleITK stamps ITK_InputFilterName / ITK_original_direction / ITK_original_spacing on what it
+    reads; carried into an output they describe the source, not the volume they land on."""
+    sitk = pytest.importorskip("SimpleITK")
+    image = sitk.GetImageFromArray(np.zeros((3, 4, 5), dtype=np.float32))
+    image.SetMetaData("Study", "phantom")
+    sitk.WriteImage(image, str(tmp_path / "x.mha"))
+    read = sitk.ReadImage(str(tmp_path / "x.mha"))
+    assert any(key.startswith("ITK_") for key in read.GetMetaDataKeys()), "the reader stamps its keys"
+    _, attributes = image_to_data(read)
+    assert attributes["Study"] == "phantom"
+    assert not [key for key in attributes.keys() if key.startswith("ITK_")]

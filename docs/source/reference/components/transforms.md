@@ -93,7 +93,7 @@ until it declares otherwise.
 
 | Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
-| `Padding` | `F.pad`; updates Origin. `mode` supports `"constant:<val>"`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | **yes** | **yes** | no‡ |
+| `Padding` | `F.pad`; updates Origin. `mode` supports `"constant:<val>"`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | **yes** | **yes** | **yes**, `REGRID`: a region pulls the source rows it covers (clamped, kept wide enough for a reflection) and fills the border itself |
 | `Crop` | Crop to foreground bounding box; caches the box; updates Origin. | `inverse=True` | **yes** | **yes** (pads back) | **yes**: once the `box` is on the case; the region is the patch translated |
 | `Resample` | **The one resample.** Pick the grid, and optionally a map to write it through. See below. | `spacing=None`, `shape=None`, `reference=None`, `reference_group=None`, `reference_dataset=None`, `transforms=None`, `field=None`, `field_group=None`, `align="extent"`, `interpolation=None`, `fill=0.0`, `inverse=True` | **yes** | **yes**, the grid change | **yes**, `REGRID` |
 | `Canonical` | Reorient to canonical direction (3-D); updates Origin/Direction. | `inverse=True` | **yes**: a remap that transposes extents moves the patch grid | **yes** | **yes**: when the case's direction is a signed axis permutation; no on an oblique one (it is resampled) |
@@ -147,7 +147,7 @@ stage that changes no grid refuses rather than pretend.
 | `Softmax` | `softmax(dim)`. | `dim=0` | no | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
 | `FlatLabel` | Binarise selected labels (else `>0`) → 1. | `labels=None` | no | no | **yes** |
 | `SelectLabel` | Remap labels; entries are `"(old,new)"` strings. | `labels` | no | no | **yes** |
-| `Mask` | Set voxels where mask==0 to `value_outside`. | `path="./default.mha", value_outside=0` | no | no | no, it cannot tell where its tensor sits, so it cannot read the matching mask region |
+| `Mask` | Set voxels where mask==0 to `value_outside`. | `path="./default.mha", value_outside=0` | no | no | **yes**: per voxel; the dispatcher tells it where its region sits (`stream_region`) and it reads that part of the mask, a dataset group or an `.mha` |
 | `Dilate` | Binary dilation via max-pool (2D/3D). | `dilate=1` | no | no | **yes**: halo of `dilate` voxels, within half the patch |
 | `Sum` | Sum over `dim` (merges multi-model label maps). | `dim=0` | no† | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
 | `MergeLabels` | Merge the per-model `argmax` maps of a `combine: Concat` ensemble into one global label map (the correct alternative to `Sum` for disjoint-task ensembles, e.g. 5-task TotalSegmentator). |: | no | no | yes |

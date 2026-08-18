@@ -14,7 +14,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Patch extraction, accumulation, and patch-combination helpers for KonfAI."""
+"""Patch extraction, accumulation, and patch-combination helpers for KonfAI.
+
+:class:`DatasetManager` is one case's read side: it plans a chain against the stored volume
+(patch and region reads, the streamed replay through unmaterialized ``Save`` caches) and serves
+the DataLoader. Writing that chain to disk for the dataset-preparation workflow is the job of
+:class:`~konfai.data.materialize.CaseMaterializer`, which drives the plan/replay API defined here.
+"""
 
 import contextlib
 import copy
@@ -68,21 +74,23 @@ _STREAM_STAT_KEYS = frozenset(
 
 # Rows per Save-sweep slab: full-plane slabs keep the materialization bounded to a window while the
 # composed region reads stay chunk-friendly. A declared memory_budget can only LOWER the height
-# (see DatasetManager._sweep_rows); this constant is the cap and the no-budget default.
-_SWEEP_SLAB_ROWS = 64
+# (see DatasetManager._sweep_rows); this constant is the cap and the no-budget default on a CPU.
+SWEEP_SLAB_ROWS = 64
 
 # What a sweep holds per row while in flight (the pulled source slab and the landed block) and
 # the bytes each element travels as (float32 through the chain). See DatasetManager._sweep_rows.
 _SWEEP_RESIDENT_SLABS = 2
+#: The slab height cap when the chain runs on a GPU (bounded by free device memory as well).
+_SWEEP_SLAB_ROWS_DEVICE = 256
 _SWEEP_ELEMENT_BYTES = 4
 
 #: What a whole-volume fallback holds while a case is in flight (the assembled tensor plus one
 #: transform output), and the bytes each element travels as.
 #:
 #: Public because two callers must agree on the figure and neither owns it: the run-time budget check
-#: (``_enforce_fallback_budget``) refuses a case against it, and the TRANSFORM plan prints and
-#: enforces the same number before a byte is written. A plan estimating differently from the run it
-#: describes is worse than no plan.
+#: (``CaseMaterializer._enforce_fallback_budget``) refuses a case against it, and the TRANSFORM plan
+#: prints and enforces the same number before a byte is written. A plan estimating differently from
+#: the run it describes is worse than no plan.
 FALLBACK_INFLIGHT_FACTOR = 2
 CASE_ELEMENT_BYTES = 4
 
@@ -142,22 +150,10 @@ def _is_draw(stage: object) -> TypeGuard[DataAugmentation]:
 
 @contextlib.contextmanager
 def _drawn_from(*key: object) -> Iterator[None]:
-    """Seed the global RNGs from ``key`` for the duration, then put them back exactly as they were.
-
-    What lets two chains augment a case coherently. Each ``groups_dest`` builds its own transform
-    objects, so an image chain and its mask chain hold different ``Rotate`` instances and cannot
-    coordinate through shared state, and a mask rotated by a different angle than its image is a
-    silently ruined dataset, not an error. Deriving the seed from what the two chains agree on (the
-    Expand's seed, the case, which draw this is) makes them draw the same thing without knowing
-    about each other.
-
-    ``blake2b`` and not ``hash()``: string hashing is salted per process, and the same config must
-    draw the same copies on every run and on every rank of one run.
-
-    The state is restored because it is global: reseeding everything downstream would make every
-    other random decision a function of how many copies were declared. CUDA's generators are part of
-    that state: ``torch.manual_seed`` seeds every device, so restoring the CPU generator alone
-    would leave every later GPU draw reseeded from here.
+    """Seed the global RNGs (random, numpy, torch on every device) from ``key`` for the duration,
+    then restore them. Two chains of one case (an image and its mask) hold different draw objects
+    and derive the same copies from the same key (the Expand's seed, the case's name, which draw
+    this is). ``blake2b``, not ``hash()``: string hashing is salted per process.
     """
     digest = hashlib.blake2b("|".join(str(part) for part in key).encode(), digest_size=4).digest()
     seed = int.from_bytes(digest, "big")
@@ -321,18 +317,58 @@ def save_destination(save: Save, default_dataset: Dataset, default_group: str) -
     return dataset, save.group if save.group else default_group
 
 
+class RegionWriter:
+    """Region writes into streams opened at their first block: the one sweep loop of the three
+    engines (a Save's sweep, an Expand's shared pass, a Reduce).
+
+    ``write`` opens the stream for a key on its first block (through ``open_stream``, so a refusal
+    surfaces where the caller can say why) and writes the block; ``close`` publishes every stream,
+    ``abort`` drops every partial entry and is safe after a failure or an interrupt. Writes are
+    synchronous on purpose: measured on a 300^3 float32 case to OME-Zarr, a slab in flight on a
+    background thread was 50 % slower than writing in place (the compression competes with the next
+    slab's compute), and it held one more block.
+    """
+
+    def __init__(self, open_stream: Callable[[Any, np.ndarray], DataStream | None]) -> None:
+        self._open_stream = open_stream
+        self._streams: dict[Any, DataStream] = {}
+
+    @property
+    def opened(self) -> set[Any]:
+        return set(self._streams)
+
+    def write(self, key: Any, region: tuple[slice, ...], block: np.ndarray) -> None:
+        """Write ``block`` at ``region`` (channel slice included) into ``key``'s stream.
+
+        Raises ``LookupError`` when the destination refuses a region stream: the caller turns it
+        into its own refusal (a sweep failure, a reduction error), and aborts.
+        """
+        if key not in self._streams:
+            stream = self._open_stream(key, block)
+            if stream is None:
+                raise LookupError(key)
+            stream.__enter__()
+            self._streams[key] = stream
+        self._streams[key].write_slice(region, block)
+
+    def close(self) -> None:
+        """Publish every stream."""
+        for stream in self._streams.values():
+            stream.close()
+
+    def abort(self, error: BaseException | None = None) -> None:
+        """Drop every partial entry."""
+        for stream in self._streams.values():
+            stream.abort(error)
+        self._streams.clear()
+
+
 @dataclass(frozen=True)
 class _PatchStreamSource:
-    """What a copy's patches are read from, and what runs on them once read.
-
-    ``stage_plans`` mirrors ``stages`` one to one: the region plans locate every stage that reads
-    somewhere other than the target patch (they compose, each pulling through the one before it); the
-    rest are pointwise, so they run wherever the regions put them. ``pending_sweeps`` are the
-    unsatisfied :class:`Save` caches the source reads through: each must be materialized (and the
-    source re-resolved from disk) before any patch flows.
-
-    ``entry`` is the entry name read from the source: the case's own, unless the source is a
-    satisfied per-copy cache behind an :class:`Expand`, whose entries carry the copy's name.
+    """What a copy's patches are read from, and what runs on them once read. ``stage_plans`` mirrors
+    ``stages`` one to one (the region plans compose, each pulling through the one before it);
+    ``pending_sweeps`` are the unsatisfied :class:`Save` caches to materialize before any patch
+    flows; ``entry`` is the case's own name, or the copy's behind an :class:`Expand`.
     """
 
     dataset: Dataset
@@ -354,17 +390,12 @@ class _PatchStreamSource:
 
 @dataclass(frozen=True)
 class _PendingSweep:
-    """One unsatisfied :class:`Save` and the segment that feeds it. Materializing reads each slab of
-    the Save's own space through the segment (re-planned at sweep time, see ``_materialize_save``)
-    and region-writes it to ``destination``, after which the Save is a satisfied source boundary.
-
-    ``entry`` names the destination entry (the copy's own behind an :class:`Expand`),
-    ``source_entry`` the entry the segment reads. ``copy_stage_start`` is where the per-copy part of
-    the segment begins: the :class:`Expand` splice point, or ``len(stages)`` for a segment that is
-    entirely shared between copies; the expansion engine reads it to share one read pass across the
-    copies whose per-copy stages are pointwise. ``stage_plans`` are the probe-time plans of the
-    segment, kept for that classification only: the sweep itself re-plans (see
-    ``_materialize_save``)."""
+    """One unsatisfied :class:`Save` and the segment that feeds it: the sweep reads each slab of the
+    Save's space through the segment (re-planned at sweep time) and region-writes it to
+    ``destination``. ``entry``/``source_entry`` are the destination and source entry names (the
+    copy's own behind an :class:`Expand`); ``copy_stage_start`` is where the per-copy part of the
+    segment begins (``len(stages)`` when it is entirely shared); ``stage_plans`` are the probe-time
+    plans, kept for the shared-pass classification only."""
 
     destination: Dataset
     group: str
@@ -379,6 +410,52 @@ class _PendingSweep:
     base_attributes: Attribute = field(repr=False)
     copy_stage_start: int = 0
     stage_plans: tuple[_ReadStagePlan, ...] = ()
+
+
+def _sweep_targets(spatial: list[int], rows: int) -> Iterator[tuple[slice, ...]]:
+    """The sweep's slabs: whole rows of the landing's first axis, full extent on the rest."""
+    for start in range(0, spatial[0], rows):
+        yield (slice(start, min(start + rows, spatial[0])), *(slice(0, extent) for extent in spatial[1:]))
+
+
+def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -> Attribute:
+    """The header a sweep publishes: the plan-time case state, completed by what the chain's
+    stages added in ``__call__``: the same keys the whole-volume pass would leave at the Save."""
+    attributes = Attribute(evolved)
+    for key in scope.keys():
+        if key not in keys_before and key not in attributes:
+            attributes[key] = scope[key]
+    return attributes
+
+
+def _require_channel_first(block: np.ndarray, spatial: list[int], what: str) -> None:
+    """Refuse a slab that lost the channel-first layout. Writing it anyway is the worst outcome
+    available: the header would take the slab's first spatial extent for a channel count and
+    publish a store of that many "channels", raising nothing, while the whole-volume path
+    returns the right rank: the two would silently disagree."""
+    if block.ndim != len(spatial) + 1:
+        raise PatchError(
+            f"{what} returned a rank-{block.ndim} slab where the channel-first layout needs rank"
+            f" {len(spatial) + 1} (C, {', '.join(str(extent) for extent in spatial)}).",
+            "A transform that reduces the leading axis must keep it (`keepdim=True`), so a slab"
+            " stays C[Z]YX; only then does a region write mean the same thing as the"
+            " whole-volume pass.",
+        )
+
+
+def _open_sweep_stream(
+    sweep: _PendingSweep, block: np.ndarray, spatial: list[int], rows: int, attributes: Attribute
+) -> DataStream | None:
+    """One region-write stream shaped for the sweep: the store chunks on whole slabs (channels
+    included), so no region write ever pays a read-modify-write."""
+    return sweep.destination.open_data_stream(
+        sweep.group,
+        sweep.entry,
+        [int(block.shape[0]), *spatial],
+        block.dtype,
+        attributes,
+        region_shape=[int(block.shape[0]), rows, *spatial[1:]],
+    )
 
 
 @dataclass(frozen=True)
@@ -1330,7 +1407,13 @@ class ModelPatch(Patch):
 
 
 class DatasetManager:
-    """Cache-backed manager for one dataset case and one source/destination group."""
+    """Cache-backed manager for one dataset case and one source/destination group.
+
+    The read side of a case: the chain planned against the stored volume, patches and regions
+    replayed through it, and a pending ``Save`` swept when a streamed read first crosses it. The
+    write side (materializing the chain's outputs, pricing the routes) is
+    :class:`~konfai.data.materialize.CaseMaterializer`, built over this manager.
+    """
 
     def __init__(
         self,
@@ -1411,7 +1494,6 @@ class DatasetManager:
         self._stream_refusals: dict[tuple[int, bool], str] = {}
         self._stream_evolved: dict[tuple[int, bool], Attribute] = {}
         self._stream_attributes_persisted: set[int] = set()
-        self._peak_case_bytes: int | None = None
         # A GLOBAL_STAT stage's whole-volume statistic is read on the process that runs the chain,
         # at first data access, never by a plan probe: the plan checks the source can provide it
         # (headers only) and the run reads it once. ``_statistics_deferred`` remembers that a plan
@@ -1426,7 +1508,7 @@ class DatasetManager:
         # from the source and each stream's finalize renames over the old entry. Never the default --
         # the boundary IS the per-case resume.
         self._rewrite_saves = False
-        # The per-rank budget the sweeps size their slabs against (None = the fixed _SWEEP_SLAB_ROWS).
+        # The per-rank budget the sweeps size their slabs against (None = the fixed SWEEP_SLAB_ROWS).
         self._sweep_budget_bytes: float | None = None
         self._chain_device: torch.device | None = None
         self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None], dict[str, float]] = {}
@@ -1462,20 +1544,11 @@ class DatasetManager:
         self.augmentationLoaded = self.total_augmentations == 0
 
     def _draw_expand_copies(self, reset_state: bool) -> None:
-        """Draw the :class:`Expand` copies by walking the per-copy tail STAGE BY STAGE.
-
-        This is what makes a draw a stage like any other: each one is parameterised on the grid and
-        the case state the stages before it leave, so a transform between two draws is seen by the
-        second, and a shape-changing draw is seen by the transform after it. Walking the tail once
-        per copy (rather than drawing everything up front and folding the transforms afterwards)
-        is the only order that makes ``T, draw, T, draw`` mean what it reads like.
-
-        Each draw is seeded from ``(Expand.seed, case, draw class, which one of that class it is)``
-        (everything two chains of the same case agree on, and nothing they do not), so an image
-        chain and its mask chain draw the same copies without ever meeting. Keyed on the draw's
-        CLASS and its rank among its own kind, not on its position in the tail: an intensity draw
-        one chain declares and the other has no use for must not shift the geometric draws they
-        share.
+        """Draw the :class:`Expand` copies by walking the per-copy tail stage by stage: each draw is
+        parameterised on the grid and case state the stages before it leave (``T, draw, T, draw``
+        means what it reads like). Each draw is seeded from ``(Expand.seed, case name, draw class,
+        rank among its class)``: what two chains of one case agree on, and not the draw's position
+        in the tail, so an intensity draw one chain lacks does not shift the geometric ones.
         """
         expand = self._expand
         assert expand is not None  # nosec B101 - the caller checked
@@ -1769,24 +1842,14 @@ class DatasetManager:
     ) -> tuple[bool, tuple[_ReadStagePlan, ...], Attribute, str | None]:
         """Validate a chain's locality declarations and plan its region stages, which compose.
 
-        Returns ``(streamable, stage_plans, evolved, refusal)``: ``refusal`` naming the stage and
-        the reason when the chain cannot stream (``None`` when it can): the stage's identity is only
-        in hand at the moment each check fails, so the reason is built here: dropping it would
-        leave every fallback silent. ``evolved`` is the case state the plan
-        leaves, which a :class:`Save` sweep writes as its cache header. The chain streams when every
-        stage is pointwise, a region kind (``HALO``/``ORIENTATION``/``CROP``/``REGRID``: any
-        number, each pulling through the one before it), or a ``GLOBAL_STAT`` with a pre-populated
-        statistic. The plan walks the chain once with one evolving case state, so each stage declares
-        against, and remaps from: the geometry the stages before it left, and folds the spatial
-        shapes stage by stage; a fold that does not land on ``landing_shape`` (the copy's own grid by
-        default) refuses (the safety net for a stage whose shape map is not declared). Any
-        ``WHOLE_VOLUME`` declaration, an unreadable ``GLOBAL_STAT``, a ``REGRID`` whose own
-        declaration refuses (a stage answers for its own inputs), or a halo too wide to be worth
-        reading rejects streaming. ``seed_statistics=False`` accepts a missing statistic instead of reading
-        it, for a chain fed by a cache that is not materialized yet, whose re-resolution seeds it
-        from the real entry. Nothing here names a stage: each declares its own contract, and this is
-        where the declarations are read, which is why a transform and an augmentation are planned
-        side by side.
+        Returns ``(streamable, stage_plans, evolved, refusal)``: ``refusal`` names the stage and the
+        reason when the chain cannot stream; ``evolved`` is the case state the plan leaves (a
+        :class:`Save` sweep writes it as its cache header). The chain streams when every stage is
+        pointwise, a region kind (``HALO``/``ORIENTATION``/``CROP``/``REGRID``, each pulling through
+        the one before it) or a ``GLOBAL_STAT`` the source can serve; each stage declares against
+        the geometry the stages before it left, and a shape fold that does not land on
+        ``landing_shape`` refuses. ``seed_statistics=False`` defers a statistic to the sweep of a
+        cache not materialized yet. A transform and a draw are planned alike: by declaration.
         """
         evolved = Attribute(cache_attribute)
         shape = [int(extent) for extent in source_spatial_shape]
@@ -1917,22 +1980,6 @@ class DatasetManager:
         if self._expand is None:
             return [*self.transforms, *self._augmentation_stages(a)]
         return [*self._expand_pre, *self._expand_tail(a)]
-
-    def write_targets(self, a: int = 0) -> list[tuple[Save, list[int], Attribute]]:
-        """Every ``Save`` copy ``a`` writes, with the extent and case state it lands at.
-
-        What a write probe must open to be the run's own verdict: behind an ``Expand`` the stages
-        after the marker fold the COPY's grid, so probing the chain with the marker left in it
-        would validate the pre-draw extent and call a destination good for a shape it never sees.
-        """
-        spatial = [int(extent) for extent in self.base_shape[1:]]
-        attributes = Attribute(self.cache_attributes_bak[0])
-        targets: list[tuple[Save, list[int], Attribute]] = []
-        for stage in self.chain_stages(a):
-            spatial = self._fold_case_state(stage, spatial, attributes)
-            if isinstance(stage, Save):
-                targets.append((stage, list(spatial), Attribute(attributes)))
-        return targets
 
     def _resolve_patch_stream_source(self, a: int, apply_augmentations: bool = True) -> _PatchStreamSource | None:
         key = (a, apply_augmentations)
@@ -2170,19 +2217,10 @@ class DatasetManager:
         return Attribute(evolved) if evolved is not None else self.stored_attributes
 
     def read_region(self, target: tuple[slice, ...], a: int = 0, apply_augmentations: bool = False) -> torch.Tensor:
-        """Run this case's chain over one region of its output, reading only what that region pulls.
-
-        The public form of the streamed read: the region stages' pull maps fold backward to the
-        stored volume, so one bounded read serves the whole chain and the volume is never assembled.
-        ``target`` indexes the SPATIAL axes of :attr:`spatial_shape`; every channel is read.
-
-        Raises rather than falling back, because a caller asking for one region has already decided
-        the volume does not fit: quietly loading it would answer a question they did not ask.
-        :meth:`stream_refusal` gives the reason before committing to this path.
-
-        Goes through :meth:`_stream_ready`, so a chain reading through an unwritten ``Save`` gets it
-        swept first, exactly as the DataLoader path does: resolving the source directly would plan
-        green against caches that do not exist yet and fail at the first region.
+        """Run this case's chain over one region of its output, reading only what that region pulls
+        (``target`` indexes the spatial axes of :attr:`spatial_shape`; every channel is read). Raises
+        rather than falling back (:meth:`stream_refusal` says why beforehand); an unwritten ``Save``
+        upstream is swept first (:meth:`_stream_ready`), as on the DataLoader path.
         """
         if not self._stream_ready(a, apply_augmentations):
             raise PatchError(
@@ -2212,81 +2250,20 @@ class DatasetManager:
         finally:
             self._chain_device = previous
 
-    def materialize(
-        self,
-        a: int = 0,
-        rewrite: bool = False,
-        fallback_budget_bytes: float | None = None,
-        allow_fallback: bool = True,
-        prefer_whole: bool = False,
-        device: "torch.device | None" = None,
-        release: bool = True,
-    ) -> bool:
-        """Write this case's chain to disk by the cheapest path that can, and say which one it took.
-
-        Two branches, and they are the whole write side: the streamed one sweeps every unsatisfied
-        :class:`Save` slab by slab and never holds the volume; when it refuses (a WHOLE_VOLUME
-        stage, a destination that cannot serve region writes, a sweep that failed) the classic load
-        writes the same caches from the assembled volume. The bytes are the same either way; only
-        the peak memory differs, which is why the caller must be told the answer rather than left to
-        assume the cheap one. Returns whether the streamed path wrote the case.
-        ``allow_fallback=False`` raises instead of taking the second branch, for a caller whose
-        contract is that a fallback refuses rather than costs a volume.
-
-        Never routed through :meth:`get_data`: a case with no declared patch is a single
-        whole-volume patch, so asking for data would read back the volume this just wrote. The
-        volume is released before returning, so a caller sweeping a dataset holds one case at a
-        time. A chain whose caches all exist already writes nothing and streams: that is the
-        per-case resume; a chain with no :class:`Save` at all writes nothing either, which is why
-        declaring an output is checked before a case is ever handed here. ``rewrite=True`` recomputes
-        the case from the source and every stream's finalize renames over the old entry: the forced
-        path behind ``--overwrite``, never the default. ``release=False`` keeps the loaded volume
-        for the caller that owns the release: the expansion engine, whose solo copies of one case
-        share the assembled prefix.
-        """
-        self._set_rewrite(rewrite)
-        self.set_memory_budget(fallback_budget_bytes)
-        # Opt-in only, and only here: this same machinery loads training cases inside DataLoader
-        # workers, where a CUDA default would be wrong. The transformer's rank is the one caller
-        # that knows its device.
-        with self._chain_device_scope(device):
-            # A chain with an Expand materializes a COPY, whose draw must be part of the plan;
-            # without one it materializes the case itself, and augmentations have nothing to do
-            # with writing.
-            apply_augmentations = self._expand is not None and a > 0
-            if prefer_whole:
-                # The plan chose to LOAD: the case fits its budget and streaming would re-read the
-                # source (:meth:`predicted_stream_read_factor`). A choice, not a fallback: nothing
-                # failed, so ``allow_fallback`` is not consulted; the budget check stays as the belt.
-                self._enforce_fallback_budget(fallback_budget_bytes)
-                self._assemble_and_write(a)
-                if release:
-                    self.unload()
-                return False
-            if self._stream_ready(a, apply_augmentations=apply_augmentations):
-                return True
-            if not allow_fallback:
-                raise PatchError(
-                    f"Case '{self.name}' would take the whole-volume path at run time.",
-                    self.stream_refusal(a, apply_augmentations) or self._sweep_failure or "the chain cannot stream.",
-                    "Nothing was written for this case; the caller forbids the whole-volume fallback.",
-                )
-            self._enforce_fallback_budget(fallback_budget_bytes)
-            self._assemble_and_write(a)
-            if release:
-                self.unload()
-            return False
-
     def set_memory_budget(self, budget_bytes: float | None) -> None:
         """The per-rank budget this case's streamed sweeps size their slabs against.
 
-        Public because the budget reaches a manager from more than one door: :meth:`materialize`
-        takes it as an argument, while a reduction only ever calls :meth:`read_region`: which
-        sweeps pending Saves as a side effect and must sweep them under the same bound.
+        Public because the budget reaches a manager from more than one door:
+        :meth:`~konfai.data.materialize.CaseMaterializer.materialize` takes it as an argument, while
+        a reduction only ever calls :meth:`read_region`: which sweeps pending Saves as a side effect
+        and must sweep them under the same bound.
         """
         self._sweep_budget_bytes = budget_bytes
 
     def _set_rewrite(self, rewrite: bool) -> None:
+        """The rewrite knob the materialization engine sets for one call: under it every
+        satisfied-Save probe answers "not written yet" (the read path consults it too, which is
+        why the flag and the ledger it resets live here and not on the engine)."""
         if rewrite == self._rewrite_saves:
             return
         # The memoized plans were probed under the other boundary answer: replan. And replan from
@@ -2301,428 +2278,6 @@ class DatasetManager:
         self._sweep_failure = None
         self.cache_attributes_bak = copy.deepcopy(self._cache_attributes_pristine)
         self.cache_attributes = copy.deepcopy(self._cache_attributes_pristine)
-
-    def peak_case_bytes(self) -> int:
-        """The largest single tensor the whole-volume path holds, from the chain's declared shapes.
-
-        The stored extent is a floor, not the answer: a chain that pads or resamples upward holds
-        its LARGEST intermediate, and that is the one a budget has to cover. Every stage declares
-        that extent through ``transform_shape``, so the fold is exact for the stages that know their
-        own geometry and identity for the rest: it can only bring the figure closer, never lower.
-
-        Headers-only still, and still a floor for the one thing it cannot see: a stage that widens
-        the dtype beyond what it declares.
-        """
-        if self._peak_case_bytes is None:
-            spatial = [int(extent) for extent in self.base_shape[1:]]
-            channels = int(self.base_shape[0])
-            peak = int(np.prod(self.base_shape, dtype=np.int64))
-            attributes = Attribute(self.stored_attributes)
-            for stage in self.transforms:
-                if not isinstance(stage, Transform):
-                    continue
-                spatial = self._fold_case_state(stage, list(spatial), attributes)
-                peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
-            self._peak_case_bytes = peak * CASE_ELEMENT_BYTES
-        return self._peak_case_bytes
-
-    def predicted_stream_read_factor(self, a: int = 0, apply_augmentations: bool = False) -> float | None:
-        """~How many times the streamed route reads the source, priced from the plan alone.
-
-        Streaming is a memory strategy, not a speed strategy: splitting re-reads: a halo re-reads
-        its overlap, a regrid pulls each slab's window through its map, and a store that cannot
-        serve bounded region reads decodes the whole volume once per slab, where loading reads the
-        source once. This is the number the route is CHOSEN with, never the answer: headers only,
-        one representative slab priced through the plan's own pull maps. ``None`` when the chain
-        cannot stream (there is no route to price). A chain reading through unmaterialized Save
-        caches is priced on its top-level plans: a proxy, close enough to route by.
-        """
-        source = self._resolve_patch_stream_source(a, apply_augmentations)
-        if source is None:
-            return None
-        # Each unsatisfied Save sweeps ITS source; past the last boundary the chain reads the
-        # materialized cache. The route is priced by the dominant segment: a max, not a sum --
-        # the segments read different stores, and one that re-reads is the cost either way.
-        factors = [
-            self._segment_read_factor(
-                sweep.source_dataset,
-                sweep.source_group,
-                sweep.source_entry,
-                [int(extent) for extent in sweep.source_shape],
-                list(sweep.out_spatial),
-                sweep.stage_plans,
-            )
-            for sweep in source.pending_sweeps
-        ]
-        # The head segment past the last boundary is read only if stages follow it: a chain
-        # ending on a Write leaves nothing to read from the destination, which does not exist yet.
-        if source.stage_plans:
-            landed = list(source.stage_plans[-1].out_shape)
-            factors.append(
-                self._segment_read_factor(
-                    source.dataset, source.group, source.entry, list(source.shape), landed, source.stage_plans
-                )
-            )
-        return max(factors) if factors else 1.0
-
-    def _segment_read_factor(
-        self,
-        dataset: Dataset,
-        group: str,
-        entry: str,
-        source_shape: list[int],
-        landed: list[int],
-        plans: tuple[_ReadStagePlan, ...],
-    ) -> float:
-        """One segment's reads over its source's voxels, slab by slab through the plan's own pulls."""
-        rows = self._sweep_rows(list(landed), int(source_shape[0]))
-        # A source that is not on disk yet is a Save cache this run sweeps first, onto a store that
-        # serves region writes, and every such store serves bounded reads: priced as bounded, not
-        # as the pessimistic answer a missing entry gets.
-        if dataset.is_dataset_exist(group, entry) and not dataset.bounded_region_reads(group, entry):
-            return float(max(1, -(-landed[0] // rows)))  # every slab decodes the whole store
-        read = 0
-        for start in range(0, landed[0], rows):
-            span = [slice(start, min(start + rows, landed[0])), *(slice(0, extent) for extent in landed[1:])]
-            for plan in reversed(plans):
-                span = list(plan.pull(tuple(span))) if plan.pull is not None else span
-            read += int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
-        return float(read) / float(max(1, int(np.prod(source_shape[1:], dtype=np.int64))))
-
-    def _enforce_fallback_budget(self, fallback_budget_bytes: float | None) -> None:
-        if fallback_budget_bytes is None:
-            return
-        # The plan's promise holds at run time too: a case whose sweep failed here (a refusal the
-        # probe could not see) must not assemble a volume the budget cannot hold.
-        case_bytes = self.peak_case_bytes() * FALLBACK_INFLIGHT_FACTOR
-        if case_bytes > fallback_budget_bytes:
-            raise PatchError(
-                f"Case '{self.name}' fell back to the whole-volume path at run time and its"
-                f" working set (~{case_bytes / 2**30:.2f} GiB) exceeds the per-rank budget.",
-                "Nothing was written for this case. Raise 'memory_budget' or make the chain streamable.",
-            )
-
-    def _assemble_and_write(self, a: int) -> None:
-        """The whole-volume fallback: assemble and write every Save. The caller releases.
-
-        Without an :class:`Expand` this is the classic load of the full chain. With one, the shared
-        part is assembled once (``load`` keeps it, so the copies of one case reuse the same tensor
-        across calls) and only the copy's draw and the per-copy stages run per copy, writing their
-        Saves under the copy's name.
-        """
-        if self._expand is None:
-            self.load(self.transforms, [], load_augmentations=False)
-            return
-        self.load(self._expand_pre, [], load_augmentations=False)
-        tensor = self.data[0].clone()
-        attribute = Attribute(self.cache_attributes[0])
-        self._apply_chain(tensor, self._expand_tail(a), attribute, self.copy_entry(a))
-
-    def materialize_copies(
-        self,
-        copies: list[int],
-        rewrite: bool = False,
-        fallback_budget_bytes: float | None = None,
-        allow_fallback: bool = True,
-        device: "torch.device | None" = None,
-    ) -> dict[int, str]:
-        """Write the :class:`Expand` copies of this case by the cheapest regime each can take.
-
-        The expansion engine, and the reason expansion is not just a loop over
-        :meth:`materialize`: reads are decompression-bound, so N independent sweeps decompress the
-        same source N times. Copies whose per-copy stages are all pointwise share ONE read pass:
-        each slab is read and carried through the shared prefix once, then every copy applies its
-        own draw and writes into its own stream. A copy whose draw reads regions (a rotation's remap, a
-        halo) sweeps its own pass; a copy that cannot stream falls back to the whole volume, whose
-        shared part is assembled once for all such copies. Returns the regime each copy took:
-        ``'stream-shared'`` | ``'stream'`` | ``'whole-volume'``.
-        """
-        if self._expand is None:
-            raise PatchError(
-                f"materialize_copies() on case '{self.name}' whose chain declares no Expand.",
-                "Use materialize() for a 1-to-1 chain; copies only exist behind an Expand marker.",
-            )
-        self._set_rewrite(rewrite)
-        self.set_memory_budget(fallback_budget_bytes)
-        self._require_statistics()
-        with self._chain_device_scope(device):
-            verdicts: dict[int, str] = {}
-            if not copies:
-                return verdicts
-
-            # The caches the copies share (pre-Expand Saves) are swept once, first: every copy's
-            # plan reads through them, and sweeping them inside each copy's own pass would redo
-            # the work.
-            first = self._resolve_patch_stream_source(copies[0], apply_augmentations=True)
-            if first is not None:
-                shared_pending = [sweep for sweep in first.pending_sweeps if sweep.entry == self.name]
-                if shared_pending:
-                    for sweep in shared_pending:
-                        # Chained here as on the per-case path: past a failure the next sweep reads
-                        # a cache nobody wrote and overwrites the recorded reason with its own
-                        # symptom.
-                        if not self._materialize_save(sweep):
-                            break
-                    self._invalidate_stream_plans()
-
-            shared: list[tuple[int, _PendingSweep]] = []
-            solo: list[int] = []
-            fallback: list[int] = []
-            for a in copies:
-                source = self._resolve_patch_stream_source(a, apply_augmentations=True)
-                if source is None:
-                    fallback.append(a)
-                    continue
-                per_copy = [sweep for sweep in source.pending_sweeps if sweep.entry != self.name]
-                if len(per_copy) != len(source.pending_sweeps):
-                    # A shared cache is still pending (its sweep failed): the per-copy path will
-                    # retry and fall back on its own terms.
-                    solo.append(a)
-                elif not per_copy:
-                    verdicts[a] = "stream"  # everything this copy writes is already on disk
-                elif len(per_copy) == 1 and self._pointwise_tail(per_copy[0]):
-                    shared.append((a, per_copy[0]))
-                else:
-                    solo.append(a)
-
-            if len(shared) == 1:
-                # One copy shares with nobody: its own sweep is the same work without the extra
-                # clone.
-                solo.append(shared.pop()[0])
-            if shared:
-                written = self._materialize_shared_pass(shared)
-                for a, _sweep in shared:
-                    if a in written:
-                        verdicts[a] = "stream-shared"
-                    else:
-                        solo.append(a)
-                if written:
-                    self._invalidate_stream_plans()
-
-            for a in sorted(solo):
-                verdicts[a] = (
-                    "stream"
-                    if self.materialize(
-                        a,
-                        rewrite,
-                        fallback_budget_bytes=fallback_budget_bytes,
-                        allow_fallback=allow_fallback,
-                        device=device,
-                        release=False,  # the copies share the assembled prefix; released once below
-                    )
-                    else "whole-volume"
-                )
-            if fallback:
-                if not allow_fallback:
-                    raise PatchError(
-                        f"{len(fallback)} cop(ies) of case '{self.name}' would take the whole-volume path at run time.",
-                        self.stream_refusal(fallback[0], apply_augmentations=True)
-                        or "the copies' chains cannot stream.",
-                        "Nothing was written for these copies; the caller forbids the whole-volume fallback.",
-                    )
-                self._enforce_fallback_budget(fallback_budget_bytes)
-                for a in fallback:
-                    self._assemble_and_write(a)
-                    verdicts[a] = "whole-volume"
-            self.unload()
-            return verdicts
-
-    def _pointwise_tail(self, sweep: _PendingSweep) -> bool:
-        """Whether everything per-copy in this sweep is a pure value map on its slab.
-
-        That is the shared-pass criterion: a pointwise tail pulls exactly the slab the shared prefix
-        landed on, so every such copy can consume one read. A region draw pulls its own geometry and
-        a GLOBAL_STAT reads a statistic of ITS input; both get their own pass.
-        """
-        return all(plan.kind is LocalityKind.POINTWISE for plan in sweep.stage_plans[sweep.copy_stage_start :])
-
-    def expansion_solo_reason(self, a: int) -> str | None:
-        """Why copy ``a`` cannot join the shared read pass, for the plan, never a write.
-
-        ``None`` when it can (or when nothing is pending for it). The reason names the first
-        per-copy stage whose declared locality is not pointwise: that is the stage whose pull makes
-        this copy's read geometry its own.
-        """
-        source = self._resolve_patch_stream_source(a, apply_augmentations=True)
-        if source is None:
-            return None
-        per_copy = [sweep for sweep in source.pending_sweeps if sweep.entry != self.name]
-        if len(per_copy) == 1 and self._pointwise_tail(per_copy[0]):
-            return None
-        if not per_copy:
-            return None
-        if len(per_copy) > 1:
-            return "the copy's chain crosses more than one per-copy Save, so it sweeps its own passes."
-        sweep = per_copy[0]
-        for stage, plan in zip(
-            sweep.stages[sweep.copy_stage_start :], sweep.stage_plans[sweep.copy_stage_start :], strict=False
-        ):
-            if plan.kind is not LocalityKind.POINTWISE:
-                return (
-                    f"stage '{_stage_name(stage)}' of this copy declares {plan.kind.name},"
-                    " so its read geometry is the draw's own and it sweeps its own pass."
-                )
-        return "the copy's plan is incomplete; it sweeps its own pass."
-
-    @staticmethod
-    def _sweep_targets(spatial: list[int], rows: int) -> Iterator[tuple[slice, ...]]:
-        """The sweep's slabs: whole rows of the landing's first axis, full extent on the rest."""
-        for start in range(0, spatial[0], rows):
-            yield (slice(start, min(start + rows, spatial[0])), *(slice(0, extent) for extent in spatial[1:]))
-
-    @staticmethod
-    def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -> Attribute:
-        """The header a sweep publishes: the plan-time case state, completed by what the chain's
-        stages added in ``__call__``: the same keys the whole-volume pass would leave at the Save."""
-        attributes = Attribute(evolved)
-        for key in scope.keys():
-            if key not in keys_before and key not in attributes:
-                attributes[key] = scope[key]
-        return attributes
-
-    @staticmethod
-    def _require_channel_first(block: np.ndarray, spatial: list[int], what: str) -> None:
-        """Refuse a slab that lost the channel-first layout. Writing it anyway is the worst outcome
-        available: the header would take the slab's first spatial extent for a channel count and
-        publish a store of that many "channels", raising nothing, while the whole-volume path
-        returns the right rank: the two would silently disagree."""
-        if block.ndim != len(spatial) + 1:
-            raise PatchError(
-                f"{what} returned a rank-{block.ndim} slab where the channel-first layout needs rank"
-                f" {len(spatial) + 1} (C, {', '.join(str(extent) for extent in spatial)}).",
-                "A transform that reduces the leading axis must keep it (`keepdim=True`), so a slab"
-                " stays C[Z]YX; only then does a region write mean the same thing as the"
-                " whole-volume pass.",
-            )
-
-    @staticmethod
-    def _open_sweep_stream(
-        sweep: _PendingSweep, block: np.ndarray, spatial: list[int], rows: int, attributes: Attribute
-    ) -> DataStream | None:
-        """One region-write stream shaped for the sweep: the store chunks on whole slabs (channels
-        included), so no region write ever pays a read-modify-write."""
-        return sweep.destination.open_data_stream(
-            sweep.group,
-            sweep.entry,
-            [int(block.shape[0]), *spatial],
-            block.dtype,
-            attributes,
-            region_shape=[int(block.shape[0]), rows, *spatial[1:]],
-        )
-
-    def _materialize_shared_pass(self, shared: list[tuple[int, _PendingSweep]]) -> set[int]:
-        """One read pass, N write streams: the optimal regime of the expansion engine.
-
-        Each slab of the shared landing is read and computed through the shared prefix ONCE; each
-        copy then applies its pointwise tail to a clone and writes into its own stream. Peak memory
-        is the pulled slab plus one copy's block, whatever N is. On failure every open stream is
-        aborted (entries publish by rename, so no partial copy survives), and the copies are
-        handed back to their own passes.
-        """
-        reference = shared[0][1]
-        # Defensive: the regime only holds when every copy lands the same grid from the same source
-        # and writes into the same store. Built that way, but a draw that lies about its shape map
-        # would corrupt N entries at once here, so the mismatch is checked rather than assumed.
-        shared = [
-            (a, sweep)
-            for a, sweep in shared
-            if sweep.out_spatial == reference.out_spatial
-            and str(sweep.source_dataset.filename) == str(reference.source_dataset.filename)
-            and sweep.source_group == reference.source_group
-            and sweep.source_entry == reference.source_entry
-            and str(sweep.destination.filename) == str(reference.destination.filename)
-        ]
-        if not shared:
-            return set()
-        prefix = list(reference.stages[: reference.copy_stage_start])
-        spatial = list(reference.out_spatial)
-        source_spatial = [int(extent) for extent in reference.source_shape[1:]]
-        streamable, prefix_plans, prefix_evolved, _refusal = self._plan_stream_region(
-            0,
-            prefix,
-            reference.source_dataset,
-            reference.source_group,
-            reference.source_entry,
-            Attribute(reference.base_attributes),
-            source_spatial,
-            landing_shape=spatial,
-        )
-        if not streamable:
-            return set()
-        source = _PatchStreamSource(
-            reference.source_dataset,
-            reference.source_group,
-            reference.source_entry,
-            list(reference.source_shape),
-            prefix,
-            prefix_plans,
-        )
-        # Each copy's header is its OWN full-segment plan state: the tail's geometry and inversion
-        # keys belong to the copy, not to the shared prefix.
-        active: list[tuple[int, _PendingSweep, list[Stage], Attribute]] = []
-        for a, sweep in shared:
-            ok, _plans, evolved, _reason = self._plan_stream_region(
-                0,
-                sweep.stages,
-                sweep.source_dataset,
-                sweep.source_group,
-                sweep.source_entry,
-                Attribute(sweep.base_attributes),
-                [int(extent) for extent in sweep.source_shape[1:]],
-                landing_shape=list(sweep.out_spatial),
-            )
-            if ok:
-                active.append((a, sweep, list(sweep.stages[sweep.copy_stage_start :]), evolved))
-        if not active:
-            return set()
-        rows = self._sweep_rows(spatial, int(reference.source_shape[0]))
-        streams: dict[int, DataStream] = {}
-        try:
-            for slab_index, target in enumerate(self._sweep_targets(spatial, rows)):
-                tensor, slab_attribute, keys_before = self._replay_streamed_region(
-                    source,
-                    target,
-                    Attribute(reference.base_attributes),
-                    Attribute(prefix_evolved) if slab_index == 0 else None,
-                )
-                for a, sweep, tail, evolved in active:
-                    copy_tensor = tensor.clone() if len(active) > 1 else tensor
-                    scope = Attribute(slab_attribute)
-                    for stage in tail:
-                        copy_tensor = stage(self.name, copy_tensor, scope)
-                    block = copy_tensor.cpu().numpy()
-                    self._require_channel_first(block, spatial, f"A per-copy stage of '{sweep.group}/{sweep.entry}'")
-                    if a not in streams:
-                        attributes = self._sweep_header(evolved, scope, keys_before)
-                        stream = self._open_sweep_stream(sweep, block, spatial, rows, attributes)
-                        if stream is None:
-                            raise PatchError(
-                                f"destination '{sweep.destination.filename}' refused the region write"
-                                f" of '{sweep.group}/{sweep.entry}' after accepting its plan.",
-                                "h5 and omezarr always serve region writes; mha only with image geometry.",
-                            )
-                        stream.__enter__()
-                        streams[a] = stream
-                    streams[a].write_slice((slice(0, int(block.shape[0])), *target), block)
-            written: set[int] = set()
-            for a, sweep, _tail, _evolved in active:
-                stream = streams.get(a)
-                if stream is not None:
-                    stream.close()
-                    self._swept_entries.add((str(sweep.destination.filename), sweep.group, sweep.entry))
-                    written.add(a)
-            return written
-        except BaseException as exception:
-            for stream in streams.values():
-                stream.abort(exception)
-            if not isinstance(exception, Exception):
-                raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
-            warnings.warn(
-                f"Shared-pass materialization of case '{self.name}' failed"
-                f" ({type(exception).__name__}: {exception}); its copies take their own passes.",
-                stacklevel=2,
-            )
-            return set()
 
     def _stream_ready(self, a: int, apply_augmentations: bool = True) -> bool:
         """Whether this copy can stream its patches, materializing what that requires.
@@ -2759,19 +2314,11 @@ class DatasetManager:
         self._stream_evolved.clear()
 
     def _materialize_save(self, sweep: _PendingSweep) -> bool:
-        """Write one Save cache slab by slab, without ever holding the volume.
-
-        Each slab of the Save's own space is read through the segment (the same composed replay a
-        patch uses), and region-written. The segment is re-planned here: its source is materialized
-        by now, so a statistic the pending plan deferred seeds from the real entry (a disk-scan seed,
-        so a GLOBAL_STAT segment matches the classic cache to float rounding (the streamed read's
-        own contract), where every other kind matches it exactly). The cache appears only when
-        complete (a DataStream renames on finalize), so a concurrent resolve never takes a partial
-        entry as a source boundary; on failure the partial entry is removed, ``_sweep_failure``
-        records why, and the case falls back to the whole-volume path, which writes the cache
-        classically. Every ``False`` below leaves that reason behind: a caller with no fallback (a
-        reduction reading through this cache) raises with it, so the answer is not "see the warning
-        it emitted" for a warning a filter may have swallowed."""
+        """Write one Save cache slab by slab: each slab of the Save's space is read through the
+        segment (re-planned here, its source materialized by now, so a deferred statistic seeds from
+        the real entry) and region-written; the cache appears only when complete. On failure the
+        partial entry is removed, ``_sweep_failure`` keeps the reason and ``False`` is returned: the
+        case falls back to the whole-volume path, or a caller without one raises with the reason."""
         ledger_key = (str(sweep.destination.filename), sweep.group, sweep.entry)
         if ledger_key in self._swept_entries:
             # Already swept by THIS run: under --overwrite the existence probe answers "not written",
@@ -2805,9 +2352,10 @@ class DatasetManager:
         )
         spatial = list(sweep.out_spatial)
         rows = self._sweep_rows(spatial, int(sweep.source_shape[0]))
-        stream: DataStream | None = None
+        header: dict[str, Attribute] = {}
+        writer = RegionWriter(lambda _key, block: _open_sweep_stream(sweep, block, spatial, rows, header["attributes"]))
         try:
-            for slab_index, target in enumerate(self._sweep_targets(spatial, rows)):
+            for slab_index, target in enumerate(_sweep_targets(spatial, rows)):
                 # The first slab hands a throwaway case scope to the replay so the region-geometry
                 # check runs: a region stage recording geometry nowhere the case can read refuses the
                 # sweep (PatchError -> whole-volume fallback), exactly as the patch path refuses it.
@@ -2815,27 +2363,23 @@ class DatasetManager:
                     source, target, Attribute(sweep.base_attributes), Attribute(evolved) if slab_index == 0 else None
                 )
                 block = tensor.cpu().numpy()
-                self._require_channel_first(
-                    block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
-                )
-                if stream is None:
-                    attributes = self._sweep_header(evolved, slab_attribute, keys_before)
-                    stream = self._open_sweep_stream(sweep, block, spatial, rows, attributes)
-                    if stream is None:
-                        return self._sweep_failed_because(
-                            sweep,
-                            f"destination '{sweep.destination.filename}' refused the region write"
-                            " after accepting its plan.",
-                        )
-                    stream.__enter__()
-                stream.write_slice((slice(0, int(block.shape[0])), *target), block)
-            if stream is not None:
-                stream.close()
+                _require_channel_first(block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'")
+                if not header:
+                    header["attributes"] = _sweep_header(evolved, slab_attribute, keys_before)
+                try:
+                    writer.write(None, (slice(0, int(block.shape[0])), *target), block)
+                except LookupError:
+                    writer.abort()
+                    return self._sweep_failed_because(
+                        sweep,
+                        f"destination '{sweep.destination.filename}' refused the region write"
+                        " after accepting its plan.",
+                    )
+            writer.close()
             self._swept_entries.add(ledger_key)
             return True
         except BaseException as exception:
-            if stream is not None:
-                stream.abort(exception)
+            writer.abort(exception)
             if not isinstance(exception, Exception):
                 raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
             return self._sweep_failed_because(sweep, f"{type(exception).__name__}: {exception}")
@@ -2852,25 +2396,22 @@ class DatasetManager:
         return False
 
     def _sweep_rows(self, spatial: list[int], channels: int) -> int:
-        """How many rows one sweep slab holds: the declared budget folded down, never up.
-
-        The fixed default height is the CAP: chunk-friendly, needing no budget --
-        and a declared ``memory_budget`` can only lower it: a sweep holds the pulled slab and the
-        landed block (plus the write buffer), so half the budget over that working set is the honest
-        height. Below one row nothing fits; the row is the floor, and the fallback budget check is
-        what refuses a case whose single row cannot fit.
-
-        ``channels`` is the SOURCE's, and ``_SWEEP_ELEMENT_BYTES`` assumes four: the landed block's
-        channel count and dtype are not known until the first slab has been read, and the height has
-        to be fixed before that so every slab writes whole chunks. A chain that multiplies channels
-        (a one-hot, a field synthesis) is therefore under-counted here; the per-case fallback budget
-        check runs on real shapes and is the authority that refuses.
+        """How many rows one sweep slab holds: the cap (``SWEEP_SLAB_ROWS`` on a CPU, taller on a GPU
+        as its memory allows), lowered by the budget (half of it over the pulled slab plus the landed
+        block), never below one row. Sized on the source's channels at four bytes each: the landed
+        block's are not known before the first slab, and the fallback budget check refuses on real
+        shapes.
         """
-        cap = max(1, int(_SWEEP_SLAB_ROWS))
+        cap = max(1, int(SWEEP_SLAB_ROWS))
+        plane = int(np.prod(spatial[1:], dtype=np.int64)) * max(1, int(channels)) * _SWEEP_ELEMENT_BYTES
+        if plane > 0 and self._chain_device is not None and self._chain_device.type == "cuda":
+            # On a GPU the transfers and launches per slab are the cost: taller slabs, as far as a
+            # quarter of the free device memory allows (measured +10-20 % at 500^3 over 64 rows).
+            free_bytes, _total = torch.cuda.mem_get_info(self._chain_device)
+            cap = max(cap, min(_SWEEP_SLAB_ROWS_DEVICE, int(free_bytes * 0.25 / (plane * _SWEEP_RESIDENT_SLABS))))
         budget = self._sweep_budget_bytes
         if not budget or budget <= 0:
             return cap
-        plane = int(np.prod(spatial[1:], dtype=np.int64)) * max(1, int(channels)) * _SWEEP_ELEMENT_BYTES
         if plane <= 0:
             return cap
         return max(1, min(cap, int(budget * 0.5 / (plane * _SWEEP_RESIDENT_SLABS))))
@@ -2924,15 +2465,9 @@ class DatasetManager:
         return self._get_streamed_region_data(index, a, stream_source, is_input)
 
     def _finalize_stream_patch(self, tensor: torch.Tensor, index: int, a: int, is_input: bool) -> torch.Tensor:
-        """Pad/format a target-extent streamed patch to ``patch_size`` like the whole-volume path.
-
-        The region streamed paths produce a patch at the raw target-slice extent, but the
-        overlap tiling can leave the last patch narrower than ``patch_size`` (integer-floor stride).
-        The whole-volume ``Patch.get_data`` pads that border patch up to ``patch_size`` via
-        ``apply_read_plan``; running the streamed patch through the SAME read plan makes border patches
-        byte-identical between the two paths instead of one voxel short. The plan is built on
-        ``self.shapes[a]``: the spatial grid this copy's patch slices were themselves cut on, which is
-        the source shape reordered by a Permute and resized by a Resample.
+        """Pad a streamed patch to ``patch_size`` through the same read plan the whole-volume path
+        applies, so a border patch the overlap tiling left narrower is byte-identical between the
+        two paths. The plan is built on ``self.shapes[a]``, the grid this copy's patches are cut on.
         """
         plan = self.patch.get_read_plan(self.shapes[a], index, a, is_input)
         return self.patch.apply_read_plan(tensor, plan)
@@ -2999,24 +2534,14 @@ class DatasetManager:
         cache_attribute: Attribute,
         case_attribute: Attribute | None,
     ) -> tuple[torch.Tensor, Attribute, set[str]]:
-        """Read only the source region a target region pulls, composed, and run the chain on it.
-
-        The region stages' pull maps fold backward from the target region down to the stored volume (each
-        stage's region pulls through the one before it), so one bounded read serves any number of
-        them; the chain then runs forward over the sub-region, each stage on the region pair the same
-        fold computed for it. HALO reads the region enlarged by the declared radius (clamped to the
-        volume) and crops it back after the stage: the stage's own edge padding reproduces the
-        whole-volume border once the clamp reaches the true border, so seams agree. ORIENTATION
-        applies the index remap to what its region read; a CROP's remap IS its action, so the stage is
-        not re-applied; REGRID interpolates the sub-region to its target extent. Only the composed
-        region is requested; whether that avoids decoding the whole volume depends on the storage
-        format: compressed MetaImage and NRRD decode the full volume per read
-        (see ``_supports_region_read``).
-
-        ``cache_attribute`` is this region's own scope, evolved by the chain; ``case_attribute``,
-        when given, receives each region stage's case-level geometry (computed once, from the FULL
-        shape of the stage's input). Returns the region tensor, the evolved scope, and the keys the
-        scope held before the chain ran (whatever the chain added is what the caller may persist).
+        """Read the source region a target region pulls (the region stages' pull maps folded back to
+        the stored volume) and run the chain forward on it, each stage on the region pair the fold
+        computed for it: HALO reads the enlarged region and is cropped back, ORIENTATION remaps what
+        it read, a CROP's remap is its action (not re-applied), REGRID interpolates to its target
+        extent, a per-voxel stage is told where its region sits. ``cache_attribute`` is the region's
+        scope, evolved by the chain; ``case_attribute``, when given, receives each region stage's
+        case-level geometry (from the full shape). Returns the tensor, the evolved scope, and the
+        keys the scope held before (what the chain added is what the caller may persist).
         """
         stages, plans = stream_source.stages, stream_source.stage_plans
         n_prefix = len(stream_source.shape) - len(target_slices)

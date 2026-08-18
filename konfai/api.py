@@ -236,7 +236,8 @@ class TransformResult:
     #: The run directory (``Transforms/<name>``): logs (the plan opens them), the resolved config,
     #: ``outputs.json``: never the deliverable, which each ``Write`` placed in the caller's tree.
     workspace: Path
-    #: Every chain's terminal ``Write``: ``{group_src, group_dest, dataset, group, format}``.
+    #: Every chain's terminal ``Write``: ``{group_src, group_dest, dataset, path, group, format}``
+    #: (``dataset`` as a config names the root, ``path`` as it is on disk: the ``.h5`` file itself).
     outputs: list[dict[str, str]]
     #: The resolved config the run kept: copy this file to version the experiment.
     config: Path

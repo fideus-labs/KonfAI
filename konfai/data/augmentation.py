@@ -460,9 +460,10 @@ class EulerTransform(DataAugmentation):
         array order: ``[*region_shape, n]``. Reflected into the volume as ``padding_mode='reflection'``
         would (``align_corners=True``: mirrored about the outer voxel centres) and clipped."""
         n = len(full)
-        # affine_grid's own base grid, restricted to the region: linspace over the FULL extent.
+        # affine_grid's own base grid, restricted to the region: linspace over the FULL extent (a
+        # singleton axis sits at 0, as affine_grid places it).
         axes = [
-            torch.linspace(-1.0, 1.0, extent, dtype=torch.float32)[part]
+            (torch.linspace(-1.0, 1.0, extent, dtype=torch.float32) if extent > 1 else torch.zeros(1))[part]
             for extent, part in zip(full, target, strict=True)
         ]
         mesh = torch.meshgrid(*axes, indexing="ij")
@@ -535,7 +536,7 @@ class EulerTransform(DataAugmentation):
             [
                 *reversed(
                     [
-                        -1.0 + 2.0 * (part.stop - 1 if bit else part.start) / max(1, extent - 1)
+                        (-1.0 + 2.0 * (part.stop - 1 if bit else part.start) / (extent - 1)) if extent > 1 else 0.0
                         for part, extent, bit in zip(target_slices, full, bits, strict=True)
                     ]
                 ),

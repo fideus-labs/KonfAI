@@ -71,8 +71,13 @@ item, `--cpu 8` on a chain that only reduces leaves seven ranks idle. The ranks
 share nothing but the work list: no process group is initialized, and each rank
 reports its own shard.
 
-Read transforms run on CPU; `--gpu` matters only when a chain embeds a
-`KonfAIInference` stage. That stage is a bridge, not a second prediction
+With `--gpu`, each rank runs its chain on its device: the slabs are pulled to
+the GPU, transformed there, and land back on the host to be written, in taller
+slabs than on a CPU (as much as a quarter of the free device memory allows).
+The bytes are the ones a CPU run writes. The gain is modest for a light chain
+(the reads and the writes are the cost either way) and grows with the volume
+and the chain. `--gpu` also matters when a chain embeds a `KonfAIInference`
+stage. That stage is a bridge, not a second prediction
 engine: it is whole-volume (the case is assembled, written to a temporary
 `.mha`, and read back), and each case spawns a process that resolves the app
 (the HuggingFace files are cached after the first case, its code is imported
@@ -104,7 +109,7 @@ The log holds the same plan in full, one line per chain and per reason.
 
 ```text
 [KonfAI] plan over 1 rank(s) | per-rank budget 7.45 GiB ('8G') | fallback working set
-= case x 4 B x 2 (in-flight copy), headers-only estimate | output dtype/channels assumed
+= case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed
 float32 / source channels until the first slab
   CT -> CT_iso: 120 case(s) -- 100 STREAM, 18 LOAD, 2 WHOLE-VOLUME, 0 SKIP (output already written)
     (18 case(s)) LOAD: fits the per-rank budget (~0.42 GiB vs 7.45 GiB); streaming would read
@@ -596,12 +601,12 @@ leave: a draw that permutes axes hands the next stage its own extent, and a
 resample between two draws is seen by the second. That is the same contract a
 transform has: a draw is a stage, not a separate phase.
 
-```{warning}
-A bare name resolves against `konfai.data.transform` **first**, and only then
-against `konfai.data.augmentation`. `Flip`, `Permute`, `Mask` and `Foreign`
-exist in both, so `Flip: {f_prob: [0.33, 0.33, 0.33]}` binds the deterministic
-*transform* and fails on an argument it does not take. Spell the draw out:
-`konfai.data.augmentation:Flip`.
+```{note}
+`Flip`, `Permute`, `Mask` and `Foreign` exist as a transform and as a draw. A
+bare name resolves against `konfai.data.transform` first **before** the
+`Expand` marker and against `konfai.data.augmentation` first **after** it, so
+`Flip: {f_prob: [0.33, 0.33, 0.33]}` past the marker is the draw. To force the
+other one, spell it out: `konfai.data.transform:Flip`.
 ```
 
 `pattern` is a `str.format` template and **both** tokens are required: `{name}`
@@ -735,9 +740,12 @@ show.
 ## Statistics a stage can ask for
 
 A stage that needs a whole-volume figure declares it rather than computing it:
-`GLOBAL_STAT` with the keys it reads. The planner obtains them once, by scanning
-the stored entry without materialising it, and the stage is then an ordinary
-value map, so it streams. That is how `Normalize` and `Standardize` work.
+`GLOBAL_STAT` with the keys it reads. The plan only checks the source can serve
+them (every store can); the rank reads them at the case's first data access, by
+scanning the stored entry without materialising it (a store without bounded
+reads, a gzipped NIfTI, is decoded once for it), and the stage is then an
+ordinary value map, so it streams. A case the plan LOADs computes them on the
+volume it holds. That is how `Normalize` and `Standardize` work.
 
 Two grains are available, and they come from the **same single pass**:
 

@@ -36,6 +36,7 @@ import torch
 from konfai.data import patching
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.augmentation import Flip as FlipAugmentation
+from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import (
     Canonical,
@@ -400,7 +401,7 @@ def test_the_predicted_read_factor_prices_the_route_not_the_answer(streaming_dat
         )
 
     bounded = manager(streaming_dataset_stub(volume))
-    assert bounded.predicted_stream_read_factor(0) == pytest.approx(1.0)
+    assert CaseMaterializer(bounded).predicted_stream_read_factor(0) == pytest.approx(1.0)
 
     class _Unbounded(streaming_dataset_stub):
         def bounded_region_reads(self, group_src: str, name: str) -> bool:
@@ -409,7 +410,7 @@ def test_the_predicted_read_factor_prices_the_route_not_the_answer(streaming_dat
     # A tiny budget cuts the sweep into 8 one-row slabs, each decoding the whole store.
     unbounded = manager(_Unbounded(volume))
     unbounded.set_memory_budget(1024.0)
-    assert unbounded.predicted_stream_read_factor(0) == pytest.approx(8.0)
+    assert CaseMaterializer(unbounded).predicted_stream_read_factor(0) == pytest.approx(8.0)
 
 
 def test_global_stat_after_float_cast_still_streams_and_matches(build_streaming_manager) -> None:
@@ -639,10 +640,10 @@ def test_the_read_factor_grows_as_the_budget_cuts_finer_slabs(streaming_dataset_
     factors = []
     for budget in (None, 64_000.0, 16_000.0, 8_000.0):
         manager.set_memory_budget(budget)
-        factors.append(manager.predicted_stream_read_factor(0))
+        factors.append(CaseMaterializer(manager).predicted_stream_read_factor(0))
     # The ~1.0 first factor holds only while the no-budget sweep covers the volume in ONE slab;
     # a smaller default cap would split it and re-read the Dilate halo at each boundary.
-    assert patching._SWEEP_SLAB_ROWS >= volume.shape[1], "the first factor's premise moved"
+    assert patching.SWEEP_SLAB_ROWS >= volume.shape[1], "the first factor's premise moved"
     assert factors[0] == pytest.approx(1.0, abs=0.2)  # one slab: the whole source, once
     assert factors == sorted(factors), f"the factor must be monotone in fineness, got {factors}"
     assert factors[-1] > 2.0

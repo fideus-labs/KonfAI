@@ -34,6 +34,7 @@ import time
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar, cast
 
@@ -366,6 +367,14 @@ def _lerp_like_numpy(a: Any, b: Any, t: float) -> Any:
     return result
 
 
+def _binned(block: np.ndarray, low: Any, high: Any) -> tuple[np.ndarray, np.ndarray]:
+    """The block's values inside ``[low, high]`` and the bin each falls in (monotone in the value)."""
+    flat = block.reshape(-1)
+    inside = flat[(flat >= low) & (flat <= high)]
+    scaled = (inside.astype(np.float64) - float(low)) / (float(high) - float(low)) * _QUANTILE_BINS
+    return inside, np.minimum(scaled.astype(np.int64), _QUANTILE_BINS - 1)
+
+
 def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], first: int, second: int) -> tuple[Any, Any]:
     """The values at ascending ranks ``first`` and ``second`` (``second`` is ``first`` or ``first + 1``)
     of everything the blocks hold, without holding it: passes over the blocks narrow a value interval
@@ -393,31 +402,22 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], first: int, se
             if second == first or first - below + 1 < inside_count:
                 return value, value
             return value, min_above if min_above is not None else value
-        span = float(high) - float(low)
+        binned = partial(_binned, low=low, high=high)
         histogram = np.zeros(_QUANTILE_BINS, dtype=np.int64)
         for block in blocks():
-            flat = block.reshape(-1)
-            inside = flat[(flat >= low) & (flat <= high)].astype(np.float64)
-            if inside.size:
-                index = np.minimum(((inside - float(low)) / span * _QUANTILE_BINS).astype(np.int64), _QUANTILE_BINS - 1)
-                histogram += np.bincount(index, minlength=_QUANTILE_BINS)
+            _inside, index = binned(block)
+            histogram += np.bincount(index, minlength=_QUANTILE_BINS)
         cumulative = np.cumsum(histogram)
-        target = first - below
-        chosen = int(np.searchsorted(cumulative, target, side="right"))
+        chosen = int(np.searchsorted(cumulative, first - below, side="right"))
         before_bin = int(cumulative[chosen - 1]) if chosen else 0
         in_bin = int(histogram[chosen])
         collected: list[np.ndarray] = []
         bin_low = bin_high = None
         above_local: Any = None
         for block in blocks():
-            flat = block.reshape(-1)
-            inside_mask = (flat >= low) & (flat <= high)
-            inside = flat[inside_mask]
+            inside, index = binned(block)
             if not inside.size:
                 continue
-            index = np.minimum(
-                ((inside.astype(np.float64) - float(low)) / span * _QUANTILE_BINS).astype(np.int64), _QUANTILE_BINS - 1
-            )
             members = inside[index == chosen]
             if members.size:
                 member_low, member_high = members.min(), members.max()
@@ -622,7 +622,11 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     attributes["Spacing"] = np.asarray(image.GetSpacing())
     attributes["Direction"] = np.asarray(image.GetDirection())
     for k in image.GetMetaDataKeys():
-        attributes[k] = image.GetMetaData(k)
+        # ``ITK_*`` keys are the reader's own bookkeeping (the input filter's name, the file's original
+        # direction and spacing), not the volume's metadata: carried into an output they describe the
+        # source of a resampled volume, which nothing should read as the output's.
+        if not k.startswith("ITK_"):
+            attributes[k] = image.GetMetaData(k)
     data = sitk.GetArrayFromImage(image)
 
     if image.GetNumberOfComponentsPerPixel() == 1:

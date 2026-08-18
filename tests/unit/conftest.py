@@ -75,6 +75,10 @@ class StreamingDatasetStub:
         del group_src, name
         return True  # in-memory: a slice reads the slice
 
+    def is_dataset_exist(self, group_src: str, name: str) -> bool:
+        del group_src, name
+        return True  # the one entry it serves is always there
+
 
 @pytest.fixture
 def streaming_dataset_stub() -> type[StreamingDatasetStub]:

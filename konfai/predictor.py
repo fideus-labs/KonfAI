@@ -44,11 +44,9 @@ except ImportError:
 from konfai import config_file, cuda_visible_devices, konfai_root, predictions_directory
 from konfai.data.augmentation import DataAugmentation
 from konfai.data.data_manager import (
-    _AUTO_MEMORY_SAFETY_FRACTION,
     BatchSample,
     DataPrediction,
     DatasetIter,
-    _node_local_ranks,
 )
 from konfai.data.patching import (
     Accumulator,
@@ -75,6 +73,7 @@ from konfai.data.transform import (
     TransformLoader,
 )
 from konfai.network.network import Model, ModelLoader, NetState, Network
+from konfai.utils.budget import AUTO_MEMORY_SAFETY_FRACTION, node_local_ranks
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, PredictorError
@@ -764,7 +763,7 @@ class OutSameAsGroupDataset(OutputDataset):
         # against the auto-budget's own rule.
         budget = self._per_rank_budget_bytes
         if budget is None:
-            budget = _AUTO_MEMORY_SAFETY_FRACTION * available_memory_bytes()[0]
+            budget = AUTO_MEMORY_SAFETY_FRACTION * available_memory_bytes()[0]
         return assembled >= fraction * budget
 
     def _plan_stream(
@@ -1969,7 +1968,7 @@ class Predictor(DistributedObject):
 
         self.datasets_filename = []
         self.predict_path = predictions_directory() / self.name
-        per_rank_budget = self.dataset.resolved_budget().per_rank_bytes(_node_local_ranks())
+        per_rank_budget = self.dataset.resolved_budget().per_rank_bytes(node_local_ranks())
         for output_dataset in self.outputs_dataset.values():
             output_dataset.set_memory_budget(per_rank_budget)
             self.datasets_filename.append(output_dataset.filename)

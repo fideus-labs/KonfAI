@@ -147,6 +147,7 @@ def test_objects_and_yaml_are_two_spellings_of_one_run(cohort: Path, monkeypatch
         assert by_objects == by_tree
     assert result.workspace == cohort / "Transforms" / "BY_OBJECTS"
     assert result.outputs[0]["dataset"] == str(cohort / "OutA")
+    assert result.outputs[0]["path"] == str(cohort / "OutA")
     assert result.config.is_file()
 
 
@@ -182,7 +183,7 @@ def test_the_output_is_not_left_open_in_the_callers_process(cohort: Path, monkey
     output it just produced (nor to the source it just read)."""
     h5py = pytest.importorskip("h5py")
     monkeypatch.chdir(cohort)
-    api.transform(
+    result = api.transform(
         "H5",
         "./Raw:mha",
         {"CT": {"CT": [Save(dataset="./Cache:h5"), Clip(min_value=0.0), Write(dataset="./OutH5:h5")]}},
@@ -192,6 +193,9 @@ def test_the_output_is_not_left_open_in_the_callers_process(cohort: Path, monkey
     for name in ("Cache.h5", "OutH5.h5"):
         with h5py.File(cohort / name, "a") as handle:
             assert "CT" in handle
+    assert result.outputs[0]["dataset"] == str(cohort / "OutH5") and result.outputs[0]["path"] == str(
+        cohort / "OutH5.h5"
+    )
 
 
 def test_one_workflow_at_a_time_per_process(cohort: Path) -> None:

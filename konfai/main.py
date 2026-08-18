@@ -131,7 +131,9 @@ def _add_evaluate(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_transform(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(str(State.TRANSFORM), help="Apply a transform chain to a dataset. No model.")
+    parser = subparsers.add_parser(
+        str(State.TRANSFORM), help="Prepare a dataset: apply a transform chain to every case and write the result."
+    )
     # Deliberately NOT _add_common_args: -tb has no scalar to show, so refusing it here is a parse
     # error, not a silent no-op. --gpu exists for one reason: a KonfAIInference stage runs a nested
     # inference that does use the device; plain read transforms stay on CPU either way.

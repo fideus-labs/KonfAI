@@ -438,7 +438,7 @@ def test_a_stage_is_asked_about_its_own_input_not_the_case_as_stored(tmp_path: P
     stored = [int(extent) for extent in manager.base_shape[1:]]
     reference = manager.transforms[1]
 
-    notes = workflow._plan_notes()
+    notes = workflow._plan_notes(sub_cap_sweeps=False)
 
     assert reference.plan_note("CT_out", "CASE_000", stored, manager.stored_attributes) is None
     assert notes and all("covers 67.5%" in note for note in notes)
@@ -1117,6 +1117,83 @@ def test_a_chain_through_its_own_save_cache_is_priced_as_bounded(tmp_path: Path)
     assert entry.verdict == "STREAM", entry.reason
 
 
+def test_the_working_set_counts_the_widest_stages_own_buffers(tmp_path: Path) -> None:
+    """The estimators guarding the budget were 2 to 4.5x optimistic: a Gradient's whole-volume
+    call holds eight volumes beside its input and output. A stage declares what it allocates
+    (working_multiple), and the plan sizes the fallback working set with it."""
+    from konfai.data.patching import CASE_ELEMENT_BYTES, FALLBACK_INFLIGHT_FACTOR
+    from konfai.data.transform import Gradient
+
+    _write_source(tmp_path)
+    _write_config(
+        tmp_path,
+        "              Gradient: {}\n"
+        "              Standardize:\n                inverse: false\n"
+        f"              Write:\n                dataset: {tmp_path / 'out'}:h5\n",
+    )
+    plan = _build(tmp_path).compute_plan()
+    entry = plan.entries[0]
+    case = 12 * 10 * 8 * CASE_ELEMENT_BYTES
+    assert entry.working_multiple == Gradient.working_multiple == 8.0
+    assert entry.working_set_bytes == case * (FALLBACK_INFLIGHT_FACTOR + 8.0)
+    assert "widest stage" in plan.report()
+
+
+def test_the_slab_height_note_is_printed_only_where_it_can_matter(tmp_path: Path) -> None:
+    """A budget that lowers the slab height changes no byte of a pointwise or separable chain; the
+    plan says so only for a chain that interpolates through per-voxel coordinates."""
+    rng = np.random.default_rng(3)
+    source = Dataset(tmp_path / "source", "mha")
+    source.write("CT", "CASE_000", (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
+    for chain, sensitive in (
+        ("              Clip:\n                min_value: 0.0\n                max_value: 50.0\n", False),
+        ("              Resample:\n                spacing: [1.0, 1.0, 1.0]\n", False),  # axis-aligned: factorises
+        (
+            "              Resample:\n                spacing: [1.0, 1.0, 1.0]\n                transforms: {transform: true}\n",
+            True,
+        ),
+    ):
+        if sensitive:
+            import SimpleITK as sitk
+
+            stored = sitk.Euler3DTransform()
+            stored.SetRotation(0.05, -0.03, 0.08)
+            (tmp_path / "source" / "CASE_000").mkdir(exist_ok=True)
+            sitk.WriteTransform(stored, str(tmp_path / "source" / "CASE_000" / "transform.itk.txt"))
+        config_path = _write_config(
+            tmp_path, chain + f"              Write:\n                dataset: {tmp_path / 'out'}:h5\n"
+        )
+        config_path.write_text(
+            config_path.read_text().replace("memory_budget: auto", f"memory_budget: {3 * 8 * 32 * 32 * 4}b")
+        )
+        plan = _build(tmp_path).compute_plan()
+        assert plan.entries[0].verdict == "STREAM", plan.entries[0].reason
+        assert any("slab height" in note for note in plan.notes) is sensitive, (chain, plan.notes)
+
+
+def test_a_bare_name_past_the_marker_is_the_draw(tmp_path: Path) -> None:
+    """Flip exists as a transform and as a draw. Before Expand the bare name is the transform;
+    after it, the copies' draw: `Flip: {f_prob: ...}` past the marker no longer binds the transform
+    and fails on f_prob."""
+    from konfai.data.augmentation import Flip as FlipDraw
+    from konfai.data.transform import Flip as FlipTransform
+
+    _write_source(tmp_path)
+    _write_config(
+        tmp_path,
+        "              Flip:\n                dims: '0'\n"
+        f"              Write:\n                dataset: {tmp_path / 'out'}:h5\n",
+    )
+    assert isinstance(next(iter(_build(tmp_path)._managers().values()))[0].transforms[0], FlipTransform)
+    _write_config(
+        tmp_path,
+        "              Expand:\n                nb: 2\n"
+        "              Flip:\n                f_prob: [1.0, 0.0, 0.0]\n"
+        f"              Write:\n                dataset: {tmp_path / 'out2'}:h5\n",
+    )
+    assert isinstance(next(iter(_build(tmp_path)._managers().values()))[0].transforms[1], FlipDraw)
+
+
 def test_the_shards_balance_bytes_not_counts(tmp_path: Path) -> None:
     """One 8x larger case among small ones: it takes a rank on its own and the small ones share the
     other, where an index split would pair the large case with half of the small ones."""
@@ -1128,7 +1205,7 @@ def test_the_shards_balance_bytes_not_counts(tmp_path: Path) -> None:
     _write_config(tmp_path, _DIRECTORY_CHAIN.format(out=tmp_path / "out"))
     workflow = _build(tmp_path)
     workflow.setup(2)
-    big = next(index for index, (_group, position) in enumerate(workflow._items) if position == 5)
+    big = next(index for index, item in enumerate(workflow._items) if item.manager.name == "CASE_BIG")
     shard_of_big = next(shard for shard in workflow._shards if big in shard)
     assert shard_of_big == [big]
     assert sorted(len(shard) for shard in workflow._shards) == [1, 5]
@@ -1198,16 +1275,16 @@ def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(
     workflow.setup(1)
     # The bytes of a pointwise chain cannot tell the routes apart, so the ROUTE itself is spied:
     # the run must hand materialize the plan's choice, not re-derive its own.
-    from konfai.data.patching import DatasetManager
+    from konfai.data.materialize import CaseMaterializer
 
     routes: list[bool] = []
-    original = DatasetManager.materialize
+    original = CaseMaterializer.materialize
 
-    def spy(self: DatasetManager, a: int = 0, **kwargs) -> bool:
+    def spy(self: CaseMaterializer, a: int = 0, **kwargs) -> bool:
         routes.append(bool(kwargs.get("prefer_whole", False)))
         return original(self, a, **kwargs)
 
-    monkeypatch.setattr(DatasetManager, "materialize", spy)
+    monkeypatch.setattr(CaseMaterializer, "materialize", spy)
     workflow.run_process(1, 0, 0, None)
     assert routes == [True], "the plan said LOAD and the run must execute it"
     loaded, _ = Dataset(out, "h5").read_data("CT_out", "CASE_000")
@@ -1321,15 +1398,15 @@ def test_the_plan_names_the_regime_the_resumed_copies_take(tmp_path: Path, monke
     ride it; a shared pass with ONE member is that copy's own sweep. Two of four copies left share,
     one of four sweeps solo, and the plan says which before the run does it.
     """
-    from konfai.data.patching import DatasetManager
+    from konfai.data.materialize import CaseMaterializer
 
     _write_source(tmp_path, cases=2)
     _write_expand_config(tmp_path, _EXPAND_CHAIN.format(out=tmp_path / "out").replace("nb: 3", "nb: 4"))
     workflow = _build(tmp_path)
     workflow.setup(1)
-    managers = {manager.name: manager for manager in workflow._managers()["CT_out"]}
-    assert set(managers["CASE_000"].materialize_copies([1, 2]).values()) == {"stream-shared"}
-    assert set(managers["CASE_001"].materialize_copies([1, 2, 3]).values()) == {"stream-shared"}
+    engines = {manager.name: CaseMaterializer(manager) for manager in workflow._managers()["CT_out"]}
+    assert set(engines["CASE_000"].materialize_copies([1, 2]).values()) == {"stream-shared"}
+    assert set(engines["CASE_001"].materialize_copies([1, 2, 3]).values()) == {"stream-shared"}
 
     again = _build(tmp_path)
     plan = again.compute_plan(1, overwrite=False)
@@ -1348,14 +1425,14 @@ def test_the_plan_names_the_regime_the_resumed_copies_take(tmp_path: Path, monke
     assert "(1 cop(ies)) own pass: the only copy of this case still to write" in plan.report()
 
     ran: dict[str, str] = {}
-    original = DatasetManager.materialize_copies
+    original = CaseMaterializer.materialize_copies
 
-    def spy(self: DatasetManager, copies: list[int], **kwargs) -> dict[int, str]:
+    def spy(self: CaseMaterializer, copies: list[int], **kwargs) -> dict[int, str]:
         regimes = original(self, copies, **kwargs)
-        ran.update({self.copy_entry(a): regime for a, regime in regimes.items()})
+        ran.update({self.manager.copy_entry(a): regime for a, regime in regimes.items()})
         return regimes
 
-    monkeypatch.setattr(DatasetManager, "materialize_copies", spy)
+    monkeypatch.setattr(CaseMaterializer, "materialize_copies", spy)
     again.setup(1)
     again.run_process(1, 0, 0, [])
     engine_regime = {"stream-shared": "shared", "stream": "solo"}
@@ -1443,3 +1520,114 @@ def test_a_mask_draw_after_the_marker_lands_every_copy_on_the_masks_grid(
                 for x in range(clipped.shape[2] - 3)
             )
             assert any(np.array_equal(inside, window) for window in windows), "the copy is not a window of the case"
+
+
+# ------------------------------------------------------------------ the plan text
+
+
+def _write_snapshot_cohort(tmp_path: Path) -> Path:
+    """Every kind of plan line at once, on two ranks: a chain that streams and LOADs, one that falls
+    back, an Expand with copies already written (both regimes, and the solo demotion), a reduction
+    that streams and one that is refused, a subset that drops a case, and a resumed plain case."""
+    rng = np.random.default_rng(3)
+    bounded = Dataset(tmp_path / "source", "mha")
+    for name in ("CASE_000", "CASE_001", "CASE_003"):
+        bounded.write("CT", name, (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
+    gzipped = Dataset(tmp_path / "source_gz", "nii.gz")
+    gzipped.write("CT", "CASE_002", (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
+    budget = 3 * 8 * 32 * 32 * 4
+    clip = "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
+    config_path = tmp_path / "Transform.yml"
+    config_path.write_text(
+        "Transformer:\n"
+        "  name: TEST\n"
+        "  on_fallback: warn\n"
+        "  manual_seed: 7\n"
+        "  Dataset:\n"
+        "    dataset_filenames:\n"
+        f"      - {tmp_path / 'source'}:mha\n"
+        f"      - {tmp_path / 'source_gz'}:nii.gz\n"
+        f"    memory_budget: {budget}b\n"
+        "    subset: '~CASE_003'\n"
+        "    groups_src:\n"
+        "      CT:\n"
+        "        groups_dest:\n"
+        "          A:\n"
+        "            transforms:\n"
+        f"{clip}"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_a'}:h5\n"
+        "          B:\n"
+        "            transforms:\n"
+        f"{clip}"
+        "              Standardize:\n                inverse: false\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_b'}:h5\n"
+        "          C:\n"
+        "            transforms:\n"
+        f"{clip}"
+        "              Expand:\n                nb: 3\n                pattern: '{name}_r{a:02d}'\n"
+        "              Brightness:\n                b_std: 0.3\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_c'}:h5\n"
+        "          D:\n"
+        "            transforms:\n"
+        f"{clip}"
+        "              Reduce:\n                operator: Mean\n                output: atlas\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_d'}:h5\n"
+        "          E:\n"
+        "            transforms:\n"
+        f"{clip}"
+        "              Standardize:\n                inverse: false\n"
+        "              Reduce:\n                operator: Mean\n                output: atlas\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_e'}:h5\n"
+    )
+    # Outputs already there: one plain case, one copy of CASE_000, two copies of CASE_001.
+    written = (rng.random((1, 8, 32, 32)) * 100).astype(np.float32)
+    Dataset(tmp_path / "out_a", "h5").write("A", "CASE_000", written, _image_attributes())
+    out_c = Dataset(tmp_path / "out_c", "h5")
+    for name in ("CASE_000_r01", "CASE_001_r01", "CASE_001_r02"):
+        out_c.write("C", name, written, _image_attributes())
+    return config_path
+
+
+_SNAPSHOT_SUMMARY = (
+    "[KonfAI] plan over 2 rank(s) | 17 entr(ies): 1 LOAD, 1 REDUCE, 1 REFUSED, 4 SKIP, 7 STREAM,"
+    " 3 WHOLE-VOLUME | per-rank budget 96.00 KiB ('98304b', per rank: x2 = 192.00 KiB on the node)"
+    " | 1 case(s) dropped"
+)
+
+_SNAPSHOT_REPORT = """\
+[KonfAI] plan over 2 rank(s) | per-rank budget 96.00 KiB ('98304b', per rank: x2 = 192.00 KiB on the node) | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed float32 / source channels until the first slab
+[KonfAI] 1 case(s) of 'CT' are DROPPED: the run keeps the cases every groups_src shares, minus what 'subset' excludes.
+  CT -> A (Clip -> Write <tmp>/out_a:h5): 3 case(s) -- 1 STREAM, 1 LOAD, 0 WHOLE-VOLUME, 1 SKIP (output already written)
+    (1 case(s)) LOAD: fits the per-rank budget (~64.00 KiB vs 96.00 KiB); streaming would read ~2.0x the source
+  CT -> B (Clip -> Standardize -> Write <tmp>/out_b:h5): 3 case(s) -- 0 STREAM, 0 LOAD, 3 WHOLE-VOLUME, 0 SKIP (output already written)
+    (3 case(s)) WHOLE-VOLUME: stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.
+    worst fallback case ~= 96.00 KiB vs per-rank budget 96.00 KiB
+  CT -> C (Clip -> Expand -> Brightness -> Write <tmp>/out_c:h5): EXPAND 3 case(s) -> 9 cop(ies): 5 STREAM (shared read pass), 1 STREAM (own pass), 0 WHOLE-VOLUME, 3 SKIP (copy already written)
+    (1 cop(ies)) own pass: the only copy of this case still to write; a shared pass with one member is its own sweep.
+  CT -> D (Clip -> Reduce -> Write <tmp>/out_d:h5): REDUCE 3 case(s) -> 1 output 'atlas': REDUCE
+    2 resident region(s) of 6 row(s) = 0.00 GiB  (incremental accumulator)
+    reads: 1 of 3 member(s) sit on nii.gz, which decodes the whole volume behind every region read: 2 decodes per member (one per region), 2 in all
+    put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first
+    peak ~= 48.00 KiB vs per-rank budget 96.00 KiB
+    cases: CASE_000, CASE_001, CASE_002
+  CT -> E (Clip -> Standardize -> Reduce -> Write <tmp>/out_e:h5): REDUCE 3 case(s) -> 1 output 'atlas': REFUSED
+    case 'CASE_000': stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.
+    cases: CASE_000, CASE_001, CASE_002"""
+
+
+def test_the_plan_text_is_the_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``report()`` and ``summary()`` byte for byte, over every kind of line the plan can print.
+
+    The plan opens the run's log and is what Studio and the MCP dry-run show; its text is a
+    contract, and this pins it across refactors of the code that assembles it.
+    """
+    monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
+    _write_snapshot_cohort(tmp_path)
+    plan = _build(tmp_path).compute_plan(2, overwrite=False)
+    assert plan.summary() == _SNAPSHOT_SUMMARY
+    assert plan.report().replace(str(tmp_path), "<tmp>") == _SNAPSHOT_REPORT
