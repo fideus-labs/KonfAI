@@ -29,7 +29,7 @@ import torch
 from konfai.data.case_reduction import CaseReduction, ReductionPlan, resolve_operator, split_chain
 from konfai.data.patching import DatasetManager
 from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
-from konfai.data.transform import Clip, Dilate, Normalize, Reduce, TensorCast, Transform
+from konfai.data.transform import Clip, Dilate, Normalize, Reduce, Save, TensorCast, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ReductionError, TransformError
 
@@ -44,10 +44,12 @@ def _attributes(spacing: tuple[float, float, float] = (1.0, 1.0, 2.0)) -> Attrib
     return attribute
 
 
-def _cohort(tmp_path: Path, count: int = CASES, spacings: list | None = None) -> tuple[Dataset, np.ndarray]:
+def _cohort(
+    tmp_path: Path, count: int = CASES, spacings: list | None = None, file_format: str = "h5"
+) -> tuple[Dataset, np.ndarray]:
     rng = np.random.default_rng(0)
     volumes = (rng.random((count, 1, 8, 10, 6)) * 100).astype(np.float32)
-    dataset = Dataset(tmp_path / "cases", "h5")
+    dataset = Dataset(tmp_path / "cases", file_format)
     for index in range(count):
         spacing = spacings[index] if spacings else (1.0, 1.0, 2.0)
         dataset.write("CT", f"CASE_{index:03d}", volumes[index], _attributes(spacing))
@@ -154,6 +156,60 @@ def test_an_operator_that_folds_in_place_is_budgeted_for_what_it_holds(tmp_path:
     assert plan.incremental is True
     assert Mean.working_multiple == 0.0
     assert plan.resident_regions == 2
+
+
+def test_members_on_an_unbounded_store_are_priced_once_per_region(tmp_path: Path) -> None:
+    """A gzipped NIfTI decodes the whole volume behind every region asked of it, so the fold reads
+    each member once per region (twice that with a statistics pass), and a budget that lowers the
+    slab multiplies it. The plan says so, with the remedy; the bytes are the same either way."""
+    engine, destination, volumes = _run(
+        tmp_path, [], Reduce(operator="Mean", output="avg"), [], slab_rows=3, file_format="nii.gz"
+    )
+    plan = engine.plan()
+    assert plan.regions == 3  # 8 rows in slabs of 3
+    assert plan.unbounded == {f"CASE_{index:03d}": "nii.gz" for index in range(CASES)}
+    assert plan.read_factor == 3
+    described = plan.describe()
+    assert "sit on nii.gz" in described and "3 decodes per member (one per region), 12 in all" in described
+    assert "put a Save ...:h5 before the Reduce" in described
+
+    engine.slab_rows = 1
+    assert engine.plan().read_factor == 8
+
+    engine.post = [Normalize(min_value=0.0, max_value=1.0)]
+    seeded = engine.plan()
+    assert seeded.stat_pass and seeded.read_factor == 16
+    assert "16 decodes per member (one per region and per pass), 64 in all" in seeded.describe()
+
+    engine.post = []
+    engine.materialize()
+    written, _ = destination.read_data("CT", "avg")
+    np.testing.assert_allclose(written, volumes.mean(axis=0), rtol=1e-6)
+
+
+def test_members_on_a_bounded_store_are_read_once(tmp_path: Path) -> None:
+    engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Mean", output="avg"), [], slab_rows=3)
+    plan = engine.plan()
+    assert plan.regions == 3 and plan.unbounded == {} and plan.read_factor == 1
+    assert "decodes" not in plan.describe()
+
+
+def test_a_save_before_the_reduce_moves_the_members_onto_a_bounded_store(tmp_path: Path) -> None:
+    """The remedy the plan prints, checked: past the Save the members are read from its cache,
+    which is written by a region stream and so serves bounded reads, whether it exists yet or not."""
+    engine, destination, volumes = _run(
+        tmp_path,
+        [Clip(0.0, 50.0), Save(f"{tmp_path / 'cache'}:h5")],
+        Reduce(operator="Mean", output="avg"),
+        [],
+        slab_rows=3,
+        file_format="nii.gz",
+    )
+    assert engine.plan().read_factor == 1 and not engine.plan().unbounded
+    engine.materialize()
+    assert engine.plan().read_factor == 1  # the cache now exists, and is h5
+    written, _ = destination.read_data("CT", "avg")
+    np.testing.assert_allclose(written, np.clip(volumes, 0.0, 50.0).mean(axis=0), rtol=1e-6)
 
 
 def test_per_member_stages_run_on_each_member_separately(tmp_path: Path) -> None:

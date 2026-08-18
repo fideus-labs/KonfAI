@@ -294,6 +294,17 @@ voxel-local stages (and statistics, seeded by an extra pass of the engine's
 own) may follow the `Reduce` in the same chain: anything reading across space
 belongs in a second chain that reads the written output back.
 
+**What it reads.** The fold walks the output's regions and reads each region
+from every member. A member on a store that serves bounded region reads (`h5`,
+`omezarr`, an uncompressed `mha` or `nii`) is read once. A member on a store
+that cannot (`nii.gz`, a compressed `mha`, NRRD) decodes its whole volume
+behind every region read: once per region, twice that when a statistic of the
+result is seeded by a first pass, and a `memory_budget` that lowers the slab
+raises the count. The plan prices it (`reads: ... decodes per member`) and
+prints the remedy: put a `Save: {dataset: ./Cache:h5}` before the `Reduce`, so
+each member is materialized on a bounded store first and the fold reads the
+cache. A reduction is also one work item: `--cpu N` cannot split it over ranks.
+
 ### `Resample`: one stage, two questions
 
 Every resample in KonfAI is one stage, `Resample`, and it asks two independent

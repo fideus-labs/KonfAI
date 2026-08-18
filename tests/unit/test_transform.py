@@ -40,8 +40,10 @@ from konfai.data.transform import (
     Normalize,
     OneHot,
     Padding,
+    Permute,
     Reduce,
     Resample,
+    SelectLabel,
     Squeeze,
     StandardDeviation,
     Standardize,
@@ -232,6 +234,51 @@ def test_crop_transform_shape_matches_spatial_crop() -> None:
 
     # 10-2-3, 20-1-1, 30-4-2, each spatial axis cropped by its own box row.
     assert out == [5, 18, 24]
+
+
+def _geometry() -> Attribute:
+    attribute = Attribute()
+    attribute["Origin"] = np.zeros(3)
+    attribute["Spacing"] = np.ones(3)
+    attribute["Direction"] = np.eye(3).reshape(-1)
+    return attribute
+
+
+@pytest.mark.parametrize("file_format", ["mha", "h5"])
+def test_crop_finds_its_box_without_holding_the_volume(tmp_path: Path, monkeypatch, file_format: str) -> None:
+    """The box is the SimpleITK one (bounding box of the voxels above the 5th percentile, every
+    channel voting), found by bounded passes over the store: no read_data of the volume, and one
+    computation per volume however many chains crop it."""
+    from konfai.utils.dataset import Dataset, data_to_image
+    from konfai.utils.ITK import box_with_mask
+
+    pytest.importorskip("SimpleITK")
+    rng = np.random.default_rng(2)
+    volume = np.where(rng.random((2, 30, 25, 20)) < 0.5, -5.0, rng.random((2, 30, 25, 20)) * 100).astype(np.float32)
+    dataset = Dataset(tmp_path / "source", file_format)
+    dataset.write("CT", "CASE", volume, _geometry())
+    threshold = np.percentile(volume, 5)
+    expected = box_with_mask(data_to_image((volume > threshold).astype(np.uint8), _geometry()), [1], [0, 0, 0])[:3]
+
+    reads: list[str] = []
+    monkeypatch.setattr(Dataset, "read_data", lambda self, group, name: reads.append(name) or (volume, _geometry()))
+    if file_format == "h5":  # h5 serves bounded reads: the volume is never read whole
+        monkeypatch.setattr(
+            Dataset, "read_data", lambda self, group, name: pytest.fail("Crop must not read the whole volume")
+        )
+    quantile_calls: list[float] = []
+    real_quantile = Dataset.read_data_quantile
+    monkeypatch.setattr(
+        Dataset, "read_data_quantile", lambda self, g, n, q: quantile_calls.append(q) or real_quantile(self, g, n, q)
+    )
+    first, second = Crop(), Crop()  # two chains of one case: two Crop instances
+    first.set_datasets([dataset])
+    second.set_datasets([dataset])
+    for crop in (first, second):
+        attribute = _geometry()
+        assert crop.transform_shape("CT", "CASE", [30, 25, 20], attribute) == [int(b - a) for a, b in expected]
+        assert np.array_equal(Crop._parse_box(attribute["box"])[:, 0], expected[:, 0])
+    assert quantile_calls == [0.05], "one scan per volume, shared by every chain"
 
 
 # --------------------------------------------------------------------------------------
@@ -857,3 +904,14 @@ def test_a_stage_key_naming_a_function_is_refused_as_not_a_class() -> None:
 
     with pytest.raises(TransformError, match="names a function, not a stage class"):
         TransformLoader().get_transform("split_expand", "X")
+
+
+def test_string_encoded_parameters_are_refused_with_their_spelling() -> None:
+    """A YAML list where the transform wants its own string encoding must not surface as a bare
+    ValueError from int(): the refusal says what the parameter looks like."""
+    with pytest.raises(TransformError, match=r'dims: "1\|0\|2"'):
+        Permute(dims=[0, 2, 1])  # type: ignore[arg-type]
+    with pytest.raises(TransformError, match=r'"\(old,new\)"'):
+        SelectLabel(["1->2"])
+    assert SelectLabel(["(1,2)", "(3,1)"]).labels == [(1, 2), (3, 1)]
+    assert Permute(dims="2|0|1").dims == [0, 3, 1, 2]

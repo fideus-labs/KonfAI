@@ -57,7 +57,7 @@ from konfai.data.sampling import (
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset, DataStream, data_to_image, image_to_data
 from konfai.utils.errors import TransformError
-from konfai.utils.ITK import _require_simpleitk, box_with_mask, crop_with_mask
+from konfai.utils.ITK import _require_simpleitk, crop_with_mask
 from konfai.utils.runtime import NeedDevice
 from konfai.utils.utils import get_module, split_path_spec
 
@@ -83,10 +83,12 @@ class LocalityKind(Enum):
       from outside the source altogether and the source region is no mere scaling of the target's.
       The stage owns both halves: it declares the source region a target region pulls
       (:meth:`Transform.stream_region_source`) and interpolates it (:meth:`Transform.stream_region`).
-    - ``SLAB``: per-voxel value map, plus a side effect that needs the slab's place in the
-      volume (a per-region side write): the streamed-WRITE dispatcher runs it through
-      :meth:`Transform.stream_slab` with region context; the read dispatcher has no such context and
-      treats it as ``WHOLE_VOLUME``.
+    - ``SLAB``: per-voxel value map, plus a side effect that needs the slabs of the written OUTPUT to
+      arrive in order and tile it once (a per-member stack written beside the result): the
+      streamed-WRITE dispatcher runs it through :meth:`Transform.stream_slab`; the read dispatcher
+      has no such tiling and treats it as ``WHOLE_VOLUME``. A stage that merely needs to know WHERE
+      its region sits (a mask read beside the volume) is ``POINTWISE`` and reads the place from
+      :meth:`Transform.stream_region`, which both dispatchers hand it.
     - ``WHOLE_VOLUME``-- genuinely needs the whole volume: the dispatcher falls back to a full load.
     """
 
@@ -265,8 +267,8 @@ class Transform(NeedDevice, ABC):
 
         The streamed-write dispatcher calls this instead of ``__call__`` for a ``SLAB`` declaration:
         the value map is per-voxel, so the default whole-volume call is exact on the slab, but the
-        stage's side effect needs to know where the slab sits, which is what a ``SLAB`` transform
-        overrides this to read. Slabs arrive in order and tile the volume exactly once per case.
+        stage's side effect needs the slabs in order, tiling the output exactly once per case, which
+        is the one thing this write-side hook promises and :meth:`stream_region` does not.
         """
         del region, spatial_shape
         return self(name, tensor, cache_attribute)
@@ -919,12 +921,31 @@ class TensorCast(TransformInverse):
 
 
 class Padding(TransformInverse):
+    """Pad the volume's borders (``padding`` pairs in ``F.pad`` order: last axis first).
+
+    A pad is a translation of the volume into a larger grid plus a border it fills, so it streams
+    as a REGRID: a target region pulls the source rows it covers (clamped to the volume, kept wide
+    enough for a reflection to read from) and the stage fills what the clamp cut. The origin moves
+    with the volume, written once from the full extent (``write_stream_cache_attribute``).
+    """
+
     def __init__(self, padding: list[int] = [0, 0, 0, 0, 0, 0], mode: str = "constant", inverse: bool = True) -> None:
         super().__init__(inverse)
         self.padding = padding
         self.mode = mode
 
-    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+    def _mode(self) -> tuple[str, float]:
+        parts = self.mode.split(":")
+        return parts[0], float(parts[1]) if len(parts) == 2 else 0.0
+
+    def _pairs(self, dims: int) -> list[tuple[int, int]]:
+        """``(before, after)`` per spatial axis in array order, zero where the config names none."""
+        pairs = [(0, 0)] * dims
+        for dim in range(min(len(self.padding) // 2, dims)):
+            pairs[-dim - 1] = (int(self.padding[dim * 2]), int(self.padding[dim * 2 + 1]))
+        return pairs
+
+    def _shift_origin(self, cache_attribute: Attribute) -> None:
         if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
             origin = torch.tensor(cache_attribute.get_np_array("Origin"))
             matrix = torch.tensor(cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin))))
@@ -932,18 +953,58 @@ class Padding(TransformInverse):
             for dim in range(len(self.padding) // 2):
                 origin[dim] -= self.padding[dim * 2] * cache_attribute.get_np_array("Spacing")[dim]
             cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
-        result = F.pad(
-            tensor.unsqueeze(0),
-            tuple(self.padding),
-            self.mode.split(":")[0],
-            float(self.mode.split(":")[1]) if len(self.mode.split(":")) == 2 else 0,
-        ).squeeze(0)
-        return result
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        self._shift_origin(cache_attribute)
+        mode, value = self._mode()
+        return F.pad(tensor.unsqueeze(0), tuple(self.padding), mode, value).squeeze(0)
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         for dim in range(len(self.padding) // 2):
             shape[-dim - 1] += sum(self.padding[dim * 2 : dim * 2 + 2])
         return shape
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.REGRID)
+
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
+        del source_spatial_shape, name
+        self._shift_origin(cache_attribute)
+
+    def stream_region_source(
+        self, name: str, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
+    ) -> list[slice]:
+        del name, cache_attribute
+        pull: list[slice] = []
+        for target, (before, _after), extent in zip(
+            target_slices, self._pairs(len(target_slices)), source_spatial_shape, strict=False
+        ):
+            low, high = max(0, target.start - before), min(extent, target.stop - before)
+            if target.start < before:  # reaches the low border: keep the rows a reflection reads back from
+                low, high = 0, max(high, min(extent, before - target.start + 1))
+            if target.stop > extent + before:  # reaches the high border
+                high, low = extent, min(low, max(0, extent - (target.stop - extent - before) - 1))
+            pull.append(slice(low, max(high, low + 1)))
+        return pull
+
+    def stream_region(
+        self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
+    ) -> torch.Tensor:
+        del name, cache_attribute
+        pads: list[tuple[int, int]] = []
+        crops: list[slice] = []
+        for target, source, (before, _after) in zip(
+            context.target, context.source, self._pairs(len(context.target)), strict=True
+        ):
+            start, stop = source.start + before, source.stop + before  # where the block sits in the output
+            low, high = max(0, start - target.start), max(0, target.stop - stop)
+            pads.append((low, high))
+            crops.append(slice(target.start - (start - low), target.stop - (start - low)))
+        mode, value = self._mode()
+        padded = F.pad(tensor.unsqueeze(0), tuple(x for pair in reversed(pads) for x in pair), mode, value).squeeze(0)
+        return padded[(slice(None), *crops)]
 
     def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # The inverse drops the padded border and keeps a translated copy of what remains: a CROP.
@@ -1972,11 +2033,10 @@ class Resample(TransformInverse):
 class Mask(Transform):
     """Set everything outside a mask to a constant.
 
-    Per-voxel, so it declares ``SLAB``: the value map is exact on a slab, and the only thing that
-    needs the slab's place in the volume is *which rows of the mask to read*. The mask is assumed
-    aligned to the volume at this point, so a slab reads the matching rows of the mask (a dataset mask
-    region-read, a ``.mha`` mask sliced from the one cached copy) instead of loading the whole volume.
-    ``__call__`` (the whole-volume path, and the read side, which has no region to place) stays exact.
+    Per-voxel: the only thing a region needs beyond its own voxels is WHICH part of the mask lines
+    up with it, which the dispatcher hands over (``stream_region``): a dataset mask is region-read,
+    a ``.mha`` mask sliced from the one cached copy. The mask is assumed aligned to the volume at
+    this point. ``__call__`` (the whole-volume path) stays the reference.
     """
 
     def __init__(self, path: str = "./default.mha", value_outside: int = 0) -> None:
@@ -1986,7 +2046,7 @@ class Mask(Transform):
         self._cached_mask: torch.Tensor | None = None
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.SLAB)
+        return PatchLocality(LocalityKind.POINTWISE)
 
     def _apply(self, tensor: torch.Tensor, mask: torch.Tensor | np.ndarray) -> torch.Tensor:
         # Index on the tensor's own device so the mask works whether the volume is on CPU or GPU
@@ -2009,20 +2069,18 @@ class Mask(Transform):
                 return self._apply(tensor, mask)
         raise NameError(f"Mask : {self.path}/{name} not found")
 
-    def stream_slab(
+    def stream_region(
         self,
         name: str,
         tensor: torch.Tensor,
-        region: slice,
-        spatial_shape: list[int],
+        context: RegionContext,
         cache_attribute: Attribute,
     ) -> torch.Tensor:
-        # Read only the slab's rows of the (aligned) mask, so the output streams within a window: a
-        # dataset mask is region-read; a ``.mha`` mask is sliced from the single cached copy (the mask
-        # is 1-channel, far smaller than the C-channel output it would otherwise hold whole).
+        # Only the region's part of the (aligned) mask: a dataset mask is region-read; a ``.mha``
+        # mask is sliced from the single cached copy (1-channel, far smaller than the output).
+        slices = (slice(None), *context.source)
         if self.path.endswith(".mha"):
-            return self._apply(tensor, self._cached_mha()[:, region])
-        slices = (slice(None), region, *(slice(0, extent) for extent in spatial_shape[1:]))
+            return self._apply(tensor, self._cached_mha()[slices])
         for dataset in self.datasets:
             if dataset.is_dataset_exist(self.path, name):
                 mask, _ = dataset.read_data_slice(self.path, name, slices)
@@ -2605,9 +2663,17 @@ class Flatten(Transform):
 
 
 class Permute(TransformInverse):
+    """Reorder the spatial axes: ``dims`` names the new order, ``|``-separated (``"1|0|2"``)."""
+
     def __init__(self, dims: str = "1|0|2", inverse: bool = True) -> None:
         super().__init__(inverse)
-        self.dims = [0] + [int(d) + 1 for d in dims.split("|")]
+        try:
+            self.dims = [0] + [int(d) + 1 for d in str(dims).split("|")]
+        except ValueError:
+            raise TransformError(
+                f"'Permute' cannot read dims={dims!r}.",
+                "dims is the new spatial axis order as a '|'-separated string: dims: \"1|0|2\" (not a list).",
+            ) from None
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return [shape[it - 1] for it in self.dims[1:]]
@@ -3007,9 +3073,17 @@ class HistogramMatching(Transform):
 
 
 class SelectLabel(Transform):
+    """Relabel: each ``"(old,new)"`` pair maps label ``old`` to ``new``; every other voxel is 0."""
+
     def __init__(self, labels: list[str]) -> None:
         super().__init__()
-        self.labels = [label[1:-1].split(",") for label in labels]
+        try:
+            self.labels = [(int(old), int(new)) for old, new in (str(label).strip("()").split(",") for label in labels)]
+        except ValueError:
+            raise TransformError(
+                f"'SelectLabel' cannot read labels={list(labels)!r}.",
+                'labels is a list of "(old,new)" strings: labels: ["(1,2)", "(3,1)"].',
+            ) from None
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         return PatchLocality(LocalityKind.POINTWISE)
@@ -3017,7 +3091,7 @@ class SelectLabel(Transform):
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         data = torch.zeros_like(tensor)
         for old_label, new_label in self.labels:
-            data[tensor == int(old_label)] = int(new_label)
+            data[tensor == old_label] = new_label
         return data
 
 
@@ -3474,20 +3548,47 @@ class Crop(TransformInverse):
         if "box" in cache_attribute:
             box = self._parse_box(cache_attribute["box"])
             return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
-        data = None
-        for dataset in self.datasets:
-            if dataset.is_dataset_exist(group_src, name):
-                data, _ = dataset.read_data(group_src, name)
-                break
-        if data is None:
+        source = next((dataset for dataset in self.datasets if dataset.is_dataset_exist(group_src, name)), None)
+        if source is None:
             return shape
-        treshold = np.percentile(data, 5)
-        image = data_to_image((data > treshold).astype(np.uint8), cache_attribute)
-        box = box_with_mask(image, [1], [0] * (len(data.shape) - 1))
+        box = self._foreground_box(source, group_src, name)
         for i, ((_, b), s) in enumerate(zip(box, shape, strict=False)):
             box[i][1] = s - b
         cache_attribute["box"] = box
         return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
+
+    @staticmethod
+    def _foreground_box(source: Dataset, group_src: str, name: str) -> np.ndarray:
+        """The bounding box (first and last index per spatial axis) of the voxels above the 5th
+        percentile, from bounded passes over the stored volume: the threshold by a quantile scan,
+        the box by one more pass. Memoised on the dataset: every chain of the case asks for the
+        same box, and it is the same volume."""
+        memo = source.case_facts.setdefault((group_src, name), {})
+        if "box" not in memo:
+            threshold = source.read_data_quantile(group_src, name, 0.05)
+            first: np.ndarray | None = None
+            last: np.ndarray | None = None
+            offset = 0
+            for block in source.iter_data_blocks(group_src, name)():
+                foreground = np.any(block > threshold, axis=0)  # every channel votes, as the vector image did
+                if foreground.any():
+                    axes_first, axes_last = [], []
+                    for axis in range(foreground.ndim):
+                        hits = np.flatnonzero(
+                            np.any(foreground, axis=tuple(o for o in range(foreground.ndim) if o != axis))
+                        )
+                        axes_first.append(int(hits[0]) + (offset if axis == 0 else 0))
+                        axes_last.append(int(hits[-1]) + (offset if axis == 0 else 0))
+                    first = np.asarray(axes_first) if first is None else np.minimum(first, axes_first)
+                    last = np.asarray(axes_last) if last is None else np.maximum(last, axes_last)
+                offset += int(block.shape[1])
+            if first is None or last is None:
+                raise TransformError(
+                    f"'Crop' found no foreground in '{group_src}/{name}': every voxel is at or under its 5th percentile.",
+                    "The volume is constant; drop the Crop for this case or crop it to a mask instead.",
+                )
+            memo["box"] = np.stack([first, last], axis=1).astype(np.int64)
+        return np.array(memo["box"], copy=True)
 
     @staticmethod
     def _parse_box(box_str: str) -> np.ndarray:

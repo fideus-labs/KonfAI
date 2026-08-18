@@ -58,8 +58,10 @@ from konfai.data.transform import (
     HistogramMatching,
     InferenceStack,
     LocalityKind,
+    Mask,
     MergeLabels,
     OneHot,
+    Padding,
     PatchLocality,
     Percentage,
     Reduce,
@@ -165,8 +167,17 @@ _CASES: dict[str, list[_Case]] = {
     "Gradient": [_Case(Gradient()), _Case(Gradient(per_dim=True))],
     "HistogramMatching": [_Case(HistogramMatching("Intensity"))],
     "InferenceStack": [_Case(InferenceStack("Dataset", "model"))],
+    # A companion volume aligned with the case: the mask is a stored group of the same grid.
+    "Mask": [_Case(Mask(path="Labels", value_outside=-7))],
     "MergeLabels": [_Case(MergeLabels(), group="Ensemble")],
     "OneHot": [_Case(OneHot(4), group="Labels")],
+    # A pad reaching both borders of every axis, constant and reflect: the fill and the mirror both
+    # need the source rows the clamp cut back to.
+    "Padding": [
+        _Case(Padding(padding=[1, 2, 3, 0, 2, 4], mode="constant:-3")),
+        _Case(Padding(padding=[2, 1, 1, 2, 3, 2], mode="reflect")),
+        _Case(Padding(padding=[0, 0, 0, 0, 0, 0])),
+    ],
     "Percentage": [_Case(Percentage(100.0))],
     # The default (the case's own grid, no map) would be a no-op resample; these are the family's
     # meaningful configurations, one per way of naming the grid and the map.

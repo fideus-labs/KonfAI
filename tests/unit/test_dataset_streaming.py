@@ -50,6 +50,7 @@ from konfai.data.transform import (
     OneHot,
     PatchLocality,
     Permute,
+    RegionContext,
     Standardize,
     TensorCast,
     Transform,
@@ -773,11 +774,14 @@ def test_clip_then_standardize_equals_the_whole_volume_result(patch_manager) -> 
 
 
 def test_streaming_still_seeds_a_global_stat_behind_a_reorientation(patch_manager) -> None:
-    """A flip only moves voxels, so the stored statistics are still Standardize's own input."""
+    """A flip only moves voxels, so the stored statistics are still Standardize's own input. The
+    plan probe accepts without reading a voxel; the first data read seeds the statistic."""
     volume = _structured_volume()
     manager = patch_manager(volume, [Flip(dims="0"), Standardize()])
 
     assert manager.can_stream_patch(0) is True
+    assert "Mean" not in manager.cache_attributes[0], "a plan probe reads headers only"
+    manager.get_data(0, 0, [], True)
     assert "Mean" in manager.cache_attributes[0]
 
 
@@ -937,9 +941,9 @@ def test_ome_zarr_image_is_memoised_per_store_and_invalidated_by_writes(tmp_path
 
 
 # --------------------------------------------------------------------------------------
-# ``Mask`` streams slab by slab: ``stream_slab`` reads only the aligned mask region and
-# reassembles byte-identically to the whole-volume ``__call__``, so a finalize ``Mask`` keeps
-# the case on the streamed path.
+# ``Mask`` streams region by region: POINTWISE, and ``stream_region`` reads only the part of the
+# aligned mask the region lines up with, reassembling byte-identically to the whole-volume
+# ``__call__`` on both dispatchers (the finalize writer's slabs, the reader's regions).
 # --------------------------------------------------------------------------------------
 sitk = pytest.importorskip("SimpleITK")
 
@@ -950,8 +954,13 @@ def _write_mask(path, z, y, x, seed=0):
     sitk.WriteImage(sitk.GetImageFromArray(arr), str(path))
 
 
+def _slab_context(z0: int, z1: int, shape: tuple[int, int, int]) -> RegionContext:
+    region = (slice(z0, z1), slice(0, shape[1]), slice(0, shape[2]))
+    return RegionContext(region, region, shape, shape)
+
+
 @pytest.mark.parametrize("slab", [1, 4, 5])
-def test_mask_stream_slab_reassembles_like_whole_volume(tmp_path, slab):
+def test_mask_stream_region_reassembles_like_whole_volume(tmp_path, slab):
     # Single-channel output (the real case: a masked sCT); a [1,Z,Y,X] mask indexes a 1-channel volume.
     z, y, x = 12, 8, 7
     path = tmp_path / "mask.mha"
@@ -959,22 +968,21 @@ def test_mask_stream_slab_reassembles_like_whole_volume(tmp_path, slab):
     torch.manual_seed(1)
     volume = torch.randn(1, z, y, x)
 
-    # SLAB declaration is what routes it through the streamed-write dispatcher.
     m = Mask(path=str(path), value_outside=-999)
-    assert m.patch_locality(Attribute()).kind is LocalityKind.SLAB
+    assert m.patch_locality(Attribute()).kind is LocalityKind.POINTWISE
 
     whole = m("case", volume.clone(), Attribute())
 
     streamed = volume.clone()
     for z0 in range(0, z, slab):
         z1 = min(z0 + slab, z)
-        rows = m.stream_slab("case", streamed[:, z0:z1].clone(), slice(z0, z1), [z, y, x], Attribute())
+        rows = m.stream_region("case", streamed[:, z0:z1].clone(), _slab_context(z0, z1, (z, y, x)), Attribute())
         streamed[:, z0:z1] = rows
 
     assert torch.equal(streamed, whole)
 
 
-def test_mask_stream_slab_masks_the_right_voxels(tmp_path):
+def test_mask_stream_region_masks_the_right_voxels(tmp_path):
     # A concrete check the region is aligned, not just self-consistent: outside the mask -> value_outside,
     # inside -> untouched, and the streamed slabs land on the same voxels as the whole-volume call.
     z, y, x = 6, 5, 4
@@ -984,6 +992,8 @@ def test_mask_stream_slab_masks_the_right_voxels(tmp_path):
     m = Mask(path=str(path), value_outside=-1)
     out = torch.ones(1, z, y, x) * 7.0
     for z0 in range(0, z, 2):
-        out[:, z0 : z0 + 2] = m.stream_slab("c", out[:, z0 : z0 + 2].clone(), slice(z0, z0 + 2), [z, y, x], Attribute())
+        out[:, z0 : z0 + 2] = m.stream_region(
+            "c", out[:, z0 : z0 + 2].clone(), _slab_context(z0, z0 + 2, (z, y, x)), Attribute()
+        )
     assert torch.equal(out[mask == 0], torch.full_like(out[mask == 0], -1.0))
     assert torch.equal(out[mask != 0], torch.full_like(out[mask != 0], 7.0))
