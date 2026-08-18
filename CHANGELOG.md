@@ -38,6 +38,9 @@ no longer stops a run. Two things a run already wrote come out differently, see 
 - **mcp**: transform runs steer GPUs, a finished job carries its `outputs`, and `read_dataset_file`
   summarises an ITK transform HDF5
 - **apps**: batch size as a first-class fine-tune knob (`--set`, `install_fine_tune`)
+- **transform**: a `Resample` on an intensity chain may declare `precision: fast`, a float32
+  coordinate walk over half the bytes; `exact` (float64, the default) stays bit-identical to
+  `sitk.Resample`, and any other chain is refused with the reason
 - **config**: the binder reads a file strictly. `strict_config(root)` records, per level, what the
   file holds against what the binder read, and reports the difference by path with the keys read
   at that level and the closest one. TRANSFORM refuses; TRAIN, PREDICTION and EVALUATION warn
@@ -59,6 +62,9 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   memory it holds and not the page cache, honours a SLURM grant, and reads `--mem=0` as the whole node
 - **runtime**: shards are balanced by bytes, and an inline run puts the caller's RNG (CPU and CUDA)
   and cudnn flags back
+- **runtime**: the per-rank thread share sizes ITK's pool along with torch's, and counts as applied
+  only once it is
+- **dataset**: a dead writer's debris is told apart portably (`psutil.pid_exists`), Windows included
 - **dataset**: an h5 replace keeps the old entry until the new one is in place; a streamed transform
   entry lands under the `.h5` name; an entry whose attributes fail is not left behind; one staging
   marker for every backend's temporary; the reader's own `ITK_*` keys do not travel with the volume
@@ -66,7 +72,7 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   the store its probe created
 - **omezarr**: each scale factor shrinks the level above it, as the docs said (`[2, 2]` gives three
   levels at 1, 1/2, 1/4)
-- **reduction**: `Median` charges the working set `torch.quantile` allocates (four buffers, measured)
+- **reduction**: `Median` charges the working set its sort allocates (four buffers, measured)
 - **transform**: a bare stage name past the `Expand` marker is the draw (`Flip`, `Mask`, `Permute`,
   `Foreign` exist as both); the qualified spelling still forces either
 - **transform**: the working set counts what the widest stage allocates; a `Save` cache the run
@@ -84,6 +90,17 @@ no longer stops a run. Two things a run already wrote come out differently, see 
 ### ⚡ Performance
 
 - **transform**: taller slabs when the chain runs on a GPU (500³ `Clip` 3.4 to 2.6 s)
+- **transform**: a streamed `Resample` walks its coordinates on the rank's device, out of core and
+  slabbed under the machine's budget: a three-specimen ExaSPIM template round folds in 127 s where
+  the host baseline did not finish in 1 h 47, at 4.5 GiB of VRAM, and the same bytes every run
+- **transform**: on a host with no GPU that `Resample` goes through ITK's own resampler, 27 ns per
+  voxel against the host walk's 326: the full CPU fold of the same round, 2005 s to 892 s
+- **omezarr**: a pyramid appended to a streamed store no longer rewrites level 0, the coarser
+  levels are derived from it lazily (that round's update pass 103 s to 53 s, the 4.9 GB template's
+  level 1 53 s to 4 s), and a store is created empty for zarr to fill (2.3 s where the rechunk took 14.4)
+- **reduction**: a fold runs on the rank's device, `Vote` counts along the case axis (2 s per 512³
+  where the pass it replaces took 31 s) and `Median` reads the middle off a sort (1.5-2x on CPU,
+  3.5x on CUDA); the folds a statistics pass computed are kept for the write pass when they fit
 - **transform**: a case is planned without listing the whole output directory
 - **cli**: `import konfai` 0.9 to 0.08 s, `konfai --help` 2.9 to 0.3 s: torch, dicom and ome-zarr
   load on first use
