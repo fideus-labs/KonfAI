@@ -215,9 +215,9 @@ class Median(Reduction):
     """
 
     voxel_local = True
-    # ``torch.stack`` copies the buffer into a new tensor and ``torch.quantile`` sorts a copy of
-    # that: two buffers-worth live alongside the one already held, for the duration of the call.
-    working_multiple = 2.0
+    # ``torch.stack`` copies the buffer and ``torch.quantile`` sorts, indexes and interpolates
+    # copies of that: measured at 4x the stack it is handed (6 x 16 MiB float32 cases).
+    working_multiple = 4.0
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         if len(tensors) == 1:

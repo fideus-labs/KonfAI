@@ -2272,6 +2272,8 @@ class Save(Transform):
             )
         self.scale_factors = [int(factor) for factor in scale_factors] if scale_factors else None
         self.downsample_method = downsample_method
+        #: The Dataset ``dataset`` names, resolved on first use by ``patching.save_destination``.
+        self.destination: Dataset | None = None
 
     # WHOLE_VOLUME by declaration, yet the case may still stream: a Save whose cache exists is a
     # source boundary, and an unsatisfied Save with a streamable prefix is materialized slab by slab

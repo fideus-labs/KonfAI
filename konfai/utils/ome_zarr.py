@@ -34,6 +34,8 @@ Optional dependencies: ``zarr`` + ``ngff-zarr`` (``pip install konfai[omezarr]``
 
 from __future__ import annotations
 
+import itertools
+import operator
 import shutil
 from collections.abc import Sequence
 from functools import lru_cache
@@ -333,6 +335,12 @@ def _downsample_method(downsample_method: str | None) -> Any:
         ) from None
 
 
+def _level_zero_scale_factors(scale_factors: Sequence[int]) -> list[int]:
+    """KonfAI's factors are per level (``[4, 4]``: each level a quarter of the one above);
+    ngff-zarr's are each relative to level 0, so ``[4, 4]`` there writes two identical levels."""
+    return list(itertools.accumulate((int(factor) for factor in scale_factors), operator.mul))
+
+
 def write_ome_zarr(
     store_path: str | Path,
     data: np.ndarray,
@@ -383,7 +391,7 @@ def write_ome_zarr(
     # takes that path every time.
     multiscales = ngff_zarr.to_multiscales(
         image,
-        scale_factors=[int(f) for f in scale_factors] if scale_factors else [],
+        scale_factors=_level_zero_scale_factors(scale_factors) if scale_factors else [],
         method=_downsample_method(downsample_method) if scale_factors else None,
         chunks=tuple(chunks) if chunks is not None else None,
         cache=False,
@@ -569,7 +577,7 @@ def append_ome_zarr_levels(
         base = ngff_zarr.from_ngff_zarr(str(store)).images[0]
         multiscales = ngff_zarr.to_multiscales(
             base,
-            scale_factors=[int(f) for f in scale_factors],
+            scale_factors=_level_zero_scale_factors(scale_factors),
             method=_downsample_method(downsample_method),
             # Level 0 is rewritten here, so the base store's own chunking has to be carried across:
             # ngff-zarr otherwise re-chunks it on its default.

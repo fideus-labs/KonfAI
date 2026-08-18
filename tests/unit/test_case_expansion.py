@@ -64,9 +64,9 @@ def _drawn_scales(augmentation: Scale, index: int = 0) -> list[torch.Tensor]:
     return list(augmentation.matrix[index])
 
 
-def _manager(source: Dataset, transforms: list[Transform], name: str = "CASE_000") -> DatasetManager:
+def _manager(source: Dataset, transforms: list[Transform], name: str = "CASE_000", index: int = 0) -> DatasetManager:
     return DatasetManager(
-        index=0,
+        index=index,
         group_src="CT",
         group_dest="CT",
         name=name,
@@ -172,6 +172,19 @@ def test_two_chains_of_one_case_draw_the_same_copies(tmp_path: Path) -> None:
     other_draw = _draw(Scale(0.2))
     _manager(source, [Expand(nb=4, seed=1), other_draw], name="CASE_000")
     assert not torch.equal(_drawn_scales(other_draw)[0], drawn[0])
+
+
+def test_the_copies_of_a_case_do_not_depend_on_its_position_in_the_run(tmp_path: Path) -> None:
+    """The draw is keyed by the case's NAME. Its index is its position in the run's case list,
+    which a different `subset` (or an image and a mask run over different subsets) shifts: keyed
+    by index, the same case would land other copies, and the mask would no longer match its image.
+    """
+    source = _source(tmp_path)
+    first, shifted = _draw(Scale(0.2)), _draw(Scale(0.2))
+    _manager(source, [Expand(nb=3), first], name="CASE_000", index=0)
+    _manager(source, [Expand(nb=3), shifted], name="CASE_000", index=7)
+    for mine, theirs in zip(_drawn_scales(first, 0), _drawn_scales(shifted, 7), strict=True):
+        assert torch.equal(mine, theirs)
 
 
 def test_an_unrelated_draw_in_one_chain_does_not_shift_the_shared_ones(tmp_path: Path) -> None:

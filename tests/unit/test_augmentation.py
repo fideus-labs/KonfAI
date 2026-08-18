@@ -93,6 +93,24 @@ def test_augmentation_resamples_after_reset_state():
     assert aug.flip[0] is not first  # a fresh draw replaced the cached one
 
 
+def test_noise_field_is_part_of_the_draw_not_of_the_global_rng() -> None:
+    """The field is drawn from a generator seeded in ``state_init``: applying the same copy twice,
+    with the global RNG in any state between the two, yields the same tensor. Otherwise a copy's
+    bytes depend on how many other copies the rank computed before it (``--cpu 1`` vs ``--cpu 2``).
+    """
+    aug = Noise(n_std=0.5)
+    aug.load(1.0)
+    aug.state_init(0, [[4, 4, 4], [4, 4, 4]], [Attribute(), Attribute()])
+    volume = torch.ones(1, 4, 4, 4)
+    first = aug._compute("case", 0, 1, volume.clone())
+    torch.manual_seed(12345)
+    torch.randn(100)
+    again = aug._compute("case", 0, 1, volume.clone())
+    assert torch.equal(first, again)
+    # Two copies of one draw carry two different fields.
+    assert not torch.equal(first, aug._compute("case", 0, 0, volume.clone()))
+
+
 def test_augmentation_inverse_uses_local_slot_for_global_index():
     """``inverse(a)`` receives the *global* sample index.
 

@@ -38,7 +38,17 @@ konfai TRANSFORM --config Transform.yml --cpu 4  # shard the cases over 4 proces
 
 A case whose output already exists is **skipped**: rerunning after an
 interruption resumes where it stopped. Pass `-y/--overwrite` to recompute
-everything.
+everything. A case that fails (an unreadable file, a stage that raises) does
+not stop the others: the rank finishes its shard, prints the failed cases,
+and exits non-zero; a rerun resumes at exactly those cases.
+
+`--cpu N` shards the work items (one per case and chain, one per reduction)
+over N processes; every `Save`/`Write` must then point at a directory
+destination (`mha`, `nii.gz`, `omezarr`), because a single-file store (`h5`)
+would have every rank writing into the same file, and the run refuses before
+any byte. A reduction is one work item, so `--cpu 8` on a chain that only
+reduces leaves seven ranks idle. The ranks share nothing but the work list:
+no process group is initialized, and each rank reports its own shard.
 
 Read transforms run on CPU; `--gpu` matters only when a chain embeds a
 `KonfAIInference` stage, whose nested inference does use the device. That stage
@@ -309,6 +319,14 @@ used to make silently: `extent` (the default) keeps the field of view (the
 outer faces coincide), while `origin` keeps voxel zero's centre where it is. A
 quarter of a voxel of anatomy separates them, and a `reference` states its own
 placement and ignores this.
+
+Under `extent` the voxel count is rounded, so the spacing written is the one
+that fits the field of view, not exactly the one asked: `spacing: [1, 1, 1]`
+over 204.8 mm lands 204 voxels of 1.0039 mm. Two cases of different extents
+resampled to the same `spacing` therefore land on two slightly different
+spacings, which `Reduce` under `grid: strict` refuses. To fold a cohort onto one
+grid, resample every member onto a `reference` (a stored image, or the grid a
+`Reduce` names) rather than to a bare spacing.
 
 ### `Resample: {reference: …}`: making `strict` true rather than waived
 
@@ -610,6 +628,18 @@ picks a regime per copy and the plan prints which:
 - **WHOLE-VOLUME**: the copy's chain cannot stream at all; the shared part is
   still assembled only once for the case.
 
+Which regime a copy takes is decided by the draws after the marker, and the
+draws are not equal:
+
+| Draw | Reads | Regime |
+|---|---|---|
+| `Brightness`, `Contrast`, `LumaFlip`, `HUE`, `Saturation` | its own voxel | shared read pass |
+| `Translate` | a halo around the slab | own pass |
+| `Flip` (not a vector field), `Permute`, `Rotate` with `is_quarter: true` | a permutation of the volume | own pass |
+| `Rotate` (free angle), `Scale`, `Noise`, `CutOUT`, `Elastix`, `Mask` | the whole volume | WHOLE-VOLUME |
+
+Eight copies of a free `Rotate` are eight whole-volume passes and hold the
+copies in memory beside the case; eight copies of `Brightness` are one read.
 When the shared prefix is expensive (a resample, a warp), put a `Save` before
 the `Expand`: it is materialized once and every copy reads the cache.
 

@@ -140,6 +140,10 @@ def test_patch_transforms_lint_skips_evaluator_configs() -> None:
     # so the missing-patch_transforms trap does not exist there and must not be reported.
     evaluator = {"Evaluator": {"metrics": {"PRED": {"targets_criterions": {"SEG": {"groups_dest": {"SEG": {}}}}}}}}
     assert server_support._lint_config_data(evaluator) == []
+    # A Transformer chain has `transforms` only: its strict grammar would REFUSE the advised
+    # `patch_transforms: None`, so the lint must not fire there either.
+    transformer = {"Transformer": {"Dataset": {"groups_src": {"CT": {"groups_dest": {"CT": {"transforms": None}}}}}}}
+    assert server_support._lint_config_data(transformer) == []
 
     trainer = {"Trainer": {"Dataset": {"groups_src": {"CT": {"groups_dest": {"CT": {"transforms": None}}}}}}}
     warnings = server_support._lint_config_data(trainer)

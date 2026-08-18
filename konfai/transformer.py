@@ -40,7 +40,6 @@ from typing import Literal, cast
 
 import numpy as np
 import torch
-import torch.distributed as dist
 import tqdm
 from ruamel.yaml import YAML
 
@@ -241,6 +240,9 @@ class TransformPlan:
 class Transformer(DistributedObject):
     """Model-less workflow that materializes every chain's ``Write`` outputs, plan first."""
 
+    # The ranks share the work list and nothing else: each writes its shard and reports it.
+    uses_collectives = False
+
     def __init__(
         self,
         name: str = "default|TRANSFORM_01",
@@ -376,14 +378,23 @@ class Transformer(DistributedObject):
         which the engine only reaches at the first computed slab. The probe pays one entry creation
         per destination (removed immediately), so ``--plan`` touches the output directories.
         """
+
+        def key_of(save: Save) -> tuple[str, str]:
+            destination, group = save_destination(save, manager.dataset, manager.group_dest)
+            return str(destination.filename), group
+
+        # Every case of a chain shares its destinations: past the first case there is nothing to
+        # probe, and the fold that sizes the probe (the whole chain, per case) is skipped.
+        if all(key_of(stage) in probed for stage in manager.chain_stages(a) if isinstance(stage, Save)):
+            return None
         channels = int(manager.base_shape[0])
         dtype = self._dtype_hypothesis(manager)
         for transform, spatial, attributes in manager.write_targets(a):
-            destination, group = save_destination(transform, manager.dataset, manager.group_dest)
-            key = (str(destination.filename), group)
+            key = key_of(transform)
             if key in probed:
                 continue
             probed.add(key)
+            destination, group = save_destination(transform, manager.dataset, manager.group_dest)
             failure = self._probe_destination(destination, group, [channels, *spatial], dtype, attributes)
             if failure is not None:
                 return failure
@@ -395,40 +406,45 @@ class Transformer(DistributedObject):
     ) -> str | None:
         """One real region-write open, removed immediately: the probe both chains and reductions
         share, so the plan's verdict is the run's own on every kind of output."""
+        existed = destination.exists_on_disk()
         try:
             stream = destination.open_data_stream(group, _PROBE_ENTRY, shape, dtype, attributes)
         except Exception as error:  # the probe exists to surface exactly these
-            Transformer._remove_probe_entry(destination)
+            Transformer._remove_probe_entry(destination, existed)
             return (
                 f"destination '{destination.filename}' refuses a"
                 f" [{', '.join(str(extent) for extent in shape)}] {dtype} region write:"
                 f" {type(error).__name__}: {error}"
             )
         if stream is None:
-            Transformer._remove_probe_entry(destination)
+            Transformer._remove_probe_entry(destination, existed)
             return (
                 f"destination '{destination.filename}' cannot serve region writes"
                 " (h5 and omezarr always can; mha only with image geometry)."
             )
         stream.__enter__()
         stream.abort(RuntimeError("plan probe"))
-        Transformer._remove_probe_entry(destination)
+        Transformer._remove_probe_entry(destination, existed)
         return None
 
     @staticmethod
-    def _remove_probe_entry(destination: Dataset) -> None:
-        """Take the probe's case directory back out of a directory store.
+    def _remove_probe_entry(destination: Dataset, existed_before: bool) -> None:
+        """Take back what the probe created beyond its entry: a dry run leaves the output as found.
 
         Aborting the stream removes the ENTRY, but a directory dataset gives every case a directory
         of its own (``<root>/<case>/<group>.<ext>``) and that one belongs to the store, not the
-        stream. It has to go too: it is shaped exactly like a case, ``get_names`` lists it as one,
-        and a dry run must leave the output as it found it. ``rmdir``, never ``rmtree``: anything
-        actually in there is not the probe's, and then the right move is to leave it alone.
+        stream. It has to go too: it is shaped exactly like a case, ``get_names`` lists it as one.
+        A store that did not exist before the probe goes with it: the empty root, or the ``.h5``
+        file the open created. ``rmdir``, never ``rmtree``: anything actually in there is not the
+        probe's, and then the right move is to leave it alone.
         """
-        if not destination.is_directory:
-            return
         with contextlib.suppress(OSError):
-            (Path(destination.filename) / _PROBE_ENTRY).rmdir()
+            if destination.is_directory:
+                (Path(destination.filename) / _PROBE_ENTRY).rmdir()
+                if not existed_before:
+                    Path(destination.filename).rmdir()
+            elif not existed_before and destination.file_format == "h5":
+                Path(f"{destination.filename}.h5").unlink()
 
     def output_destinations(self) -> list[dict[str, str]]:
         """Every chain's terminal ``Write``, as ``{group_src, group_dest, dataset, group, format}``.
@@ -517,7 +533,12 @@ class Transformer(DistributedObject):
     def compute_plan(self, world_size: int = 1, overwrite: bool = False) -> TransformPlan:
         """Plan every (case, chain) on the launcher, headers plus one write probe per destination."""
         budget = self.dataset.resolved_budget()
-        per_rank_budget = budget.per_rank_bytes(_node_local_ranks(world_size))
+        node_ranks = _node_local_ranks(world_size)
+        per_rank_budget = budget.per_rank_bytes(node_ranks)
+        budget_desc = budget.description
+        if not budget.shared_across_ranks and node_ranks > 1:
+            # An explicit budget is per rank and never divided: the node holds N of them.
+            budget_desc += f", per rank: x{node_ranks} = {_format_gib(per_rank_budget * node_ranks)} on the node"
         # Resolved before anything is planned, because a reduction sizes its regions against it --
         # the plan must measure the same run setup() will enforce.
         self._budget_bytes = per_rank_budget
@@ -631,7 +652,7 @@ class Transformer(DistributedObject):
         return TransformPlan(
             entries,
             per_rank_budget,
-            budget.description,
+            budget_desc,
             world_size,
             dropped,
             dtype_hypothesis,
@@ -688,7 +709,9 @@ class Transformer(DistributedObject):
         # rewritten in place, and prompting here would break the default per-case resume (a second
         # run would refuse because the first one left its config copy behind).
         os.makedirs(self.transform_path, exist_ok=True)
-        shutil.copyfile(config_file(), self.transform_path / config_file().name)
+        config_copy = self.transform_path / config_file().name
+        if not (config_copy.exists() and config_copy.samefile(config_file())):  # -c may name the copy itself
+            shutil.copyfile(config_file(), config_copy)
 
         self._overwrite = os.environ.get("KONFAI_OVERWRITE", "False") == "True"
         plan = self.compute_plan(world_size, self._overwrite)
@@ -701,7 +724,9 @@ class Transformer(DistributedObject):
         # holds a log, a plan and a config copy, never the deliverable, which lands wherever each
         # Write pointed. Without this, the one thing a reader wants after the run is the one thing
         # nothing in the run directory names.
-        (self.transform_path / "outputs.json").write_text(json.dumps(self.output_destinations(), indent=2) + "\n")
+        (self.transform_path / "outputs.json").write_text(
+            json.dumps(self.output_destinations(), indent=2) + "\n", encoding="utf-8"
+        )
 
         self._guard_sharded_destinations(world_size)
         self._enforce_plan(plan)
@@ -803,20 +828,35 @@ class Transformer(DistributedObject):
         of them. Each item still writes its own entry, so the disjoint-writes guard of
         :meth:`_guard_sharded_destinations` holds."""
         items: list[tuple[str, int]] = []
+        weights: list[int] = []
         for group_dest, managers in self._managers().items():
             if self._reduction(group_dest, managers) is not None:
                 items.append((group_dest, -1))
+                weights.append(sum(manager.peak_case_bytes() for manager in managers))
             else:
-                items.extend((group_dest, index) for index in range(len(managers)))
-        shards = np.array_split(np.arange(len(items)), max(1, world_size))
+                expansion = split_expand(managers[0].transforms)[1] if managers else None
+                copies = expansion.nb if expansion is not None else 1
+                for index, manager in enumerate(managers):
+                    items.append((group_dest, index))
+                    weights.append(manager.peak_case_bytes() * copies)
+        # Balanced by bytes, not by count: one large case among many small ones would otherwise
+        # hold a rank alone while the others finish, and a chain's cases would all land on the
+        # first ranks. Heaviest first onto the least-loaded rank (LPT); shards keep the run order.
+        ranks = max(1, world_size)
+        loads = [0] * ranks
+        shards: list[list[int]] = [[] for _ in range(ranks)]
+        for item in sorted(range(len(items)), key=lambda index: -weights[index]):
+            rank = min(range(ranks), key=loads.__getitem__)
+            shards[rank].append(item)
+            loads[rank] += weights[item]
         self._items = items
-        self._shards = [[int(index) for index in shard] for shard in shards]
-        self.dataloader = [[] for _ in range(max(1, world_size))]
+        self._shards = [sorted(shard) for shard in shards]
+        self.dataloader = [[] for _ in range(ranks)]
 
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders):
         """Materialize this rank's cases. The plan already said what will happen: the console gets
         the deviations from it, the live counter, and one final line that says how it went."""
-        del world_size, dataloaders
+        del dataloaders
         # The one caller that knows its device: cuda:<rank> when the launch requested GPUs (the
         # runtime narrowed CUDA_VISIBLE_DEVICES to them), CPU otherwise. The chain then runs where
         # the rank runs; regions still land on the host for every write.
@@ -837,90 +877,109 @@ class Transformer(DistributedObject):
                 f" | {counts['WHOLE-VOLUME']} whole-volume | {counts['SKIP']} skipped"
             )
 
+        failed: list[tuple[str, str, str]] = []
         with tqdm.tqdm(total=len(shard), desc=description(), ncols=0) as progress:
             for item in shard:
                 group_dest, index = self._items[item]
                 group_managers = managers[group_dest]
-                if index < 0:
-                    reduction = self._reduction(group_dest, group_managers)
-                    assert reduction is not None  # nosec B101 - the item was built from the same predicate
-                    output = reduction.reduce.output
-                    already = reduction.destination.is_dataset_exist(reduction.group, output)
-                    if not self._overwrite and already:
-                        counts["SKIP"] += 1
-                    else:
-                        reduction.materialize(rewrite=self._overwrite)
-                        counts["REDUCE"] += 1
-                else:
-                    manager = group_managers[index]
-                    destination, group = self._terminal_destination(manager)
-                    expansion = split_expand(manager.transforms)[1]
-                    if expansion is not None:
-                        # One item per case, all its copies inside: the engine shares one read pass
-                        # across the copies whose draws allow it, which a per-copy loop could not.
-                        copies = list(range(1, expansion.nb + 1))
-                        todo = [
-                            a
-                            for a in copies
-                            if self._overwrite or not destination.is_dataset_exist(group, manager.copy_entry(a))
-                        ]
-                        counts["SKIP"] += len(copies) - len(todo)
-                        regimes = manager.materialize_copies(
-                            todo,
-                            rewrite=self._overwrite,
-                            fallback_budget_bytes=self._budget_bytes,
-                            allow_fallback=allow_fallback,
-                            device=chain_device,
-                        )
-                        shared = sum(1 for regime in regimes.values() if regime == "stream-shared")
-                        own = sum(1 for regime in regimes.values() if regime == "stream")
-                        whole = sum(1 for regime in regimes.values() if regime == "whole-volume")
-                        counts["STREAM"] += shared + own
-                        counts["WHOLE-VOLUME"] += whole
-                        if whole:
-                            progress.write(
-                                f"[KonfAI] case '{manager.name}' ({group_dest}):"
-                                f" {whole} of {len(copies)} cop(ies) took the whole-volume path"
-                            )
-                    elif not self._overwrite and destination.is_dataset_exist(group, manager.name):
-                        counts["SKIP"] += 1
-                    else:
-                        planned = self._planned.get((group_dest, manager.name))
-                        streamed = manager.materialize(
-                            0,
-                            rewrite=self._overwrite,
-                            fallback_budget_bytes=self._budget_bytes,
-                            allow_fallback=allow_fallback,
-                            prefer_whole=planned == "LOAD",
-                            device=chain_device,
-                        )
-                        verdict = "STREAM" if streamed else ("LOAD" if planned == "LOAD" else "WHOLE-VOLUME")
-                        counts[verdict] += 1
-                        if planned not in (None, verdict):
-                            # The one thing worth a line: the run did NOT do what the plan said.
-                            progress.write(
-                                f"[KonfAI] case '{manager.name}' ({group_dest}): {verdict}"
-                                f" (planned {planned}: {manager.stream_refusal(0) or 'see the log'})"
-                            )
+                what = group_managers[index].name if index >= 0 else f"Reduce -> {group_dest}"
+                try:
+                    self._run_item(group_dest, group_managers, index, chain_device, allow_fallback, counts, progress)
+                except Exception as error:  # one case's failure is not the shard's: keep going, list it
+                    failed.append((group_dest, what, f"{type(error).__name__}: {error}"))
+                    progress.write(f"[KonfAI] case '{what}' ({group_dest}) FAILED: {type(error).__name__}: {error}")
                 progress.set_description(description())
                 progress.update(1)
-        totals = dict(counts)
-        if dist.is_available() and dist.is_initialized():
-            # NCCL reduces only device tensors; gloo takes CPU ones. Follow the backend, or every
-            # --gpu run dies on this bookkeeping reduce after all its cases were written.
-            device = torch.device("cuda") if dist.get_backend() == "nccl" else torch.device("cpu")
-            gathered = torch.tensor([counts[key] for key in sorted(counts)], dtype=torch.long, device=device)
-            dist.all_reduce(gathered)
-            totals = {key: int(value) for key, value in zip(sorted(counts), gathered, strict=True)}
-        if global_rank == 0:
-            written = totals["STREAM"] + totals["LOAD"] + totals["WHOLE-VOLUME"] + totals["REDUCE"]
-            resume = f", {totals['SKIP']} already written (--overwrite recomputes)" if totals["SKIP"] else ""
-            print(
-                f"[KonfAI] done in {time.monotonic() - started:.1f} s: {written} written"
-                f" ({totals['STREAM']} streamed, {totals['LOAD']} loaded,"
-                f" {totals['WHOLE-VOLUME']} whole-volume, {totals['REDUCE']} reduced){resume}"
-                f" -> outputs in {self.transform_path / 'outputs.json'}"
+        # No collective: each rank reports its own shard (one line for the usual single rank).
+        written = counts["STREAM"] + counts["LOAD"] + counts["WHOLE-VOLUME"] + counts["REDUCE"]
+        resume = f", {counts['SKIP']} already written (--overwrite recomputes)" if counts["SKIP"] else ""
+        who = f"rank {global_rank}/{world_size} " if world_size > 1 else ""
+        print(
+            f"[KonfAI] {who}done in {time.monotonic() - started:.1f} s: {written} written"
+            f" ({counts['STREAM']} streamed, {counts['LOAD']} loaded,"
+            f" {counts['WHOLE-VOLUME']} whole-volume, {counts['REDUCE']} reduced){resume}"
+            + (f", {len(failed)} FAILED" if failed else "")
+            + f" -> outputs in {self.transform_path / 'outputs.json'}"
+        )
+        if failed:
+            listed = "\n".join(f"  {group_dest}: '{what}': {reason}" for group_dest, what, reason in failed)
+            raise TransformerError(
+                f"{len(failed)} of {len(shard)} work item(s) failed on {who or 'this rank '}:\n{listed}",
+                "The other items were written; a rerun resumes at the failed ones (their outputs do not exist).",
             )
+
+    def _run_item(
+        self,
+        group_dest: str,
+        group_managers: list[DatasetManager],
+        index: int,
+        chain_device: torch.device,
+        allow_fallback: bool,
+        counts: dict[str, int],
+        progress: tqdm.tqdm,
+    ) -> None:
+        """One work item: a reduction (``index < 0``), an Expand case with all its copies, or a case."""
+        if index < 0:
+            reduction = self._reduction(group_dest, group_managers)
+            assert reduction is not None  # nosec B101 - the item was built from the same predicate
+            output = reduction.reduce.output
+            already = reduction.destination.is_dataset_exist(reduction.group, output)
+            if not self._overwrite and already:
+                counts["SKIP"] += 1
+            else:
+                reduction.materialize(rewrite=self._overwrite)
+                counts["REDUCE"] += 1
+        else:
+            manager = group_managers[index]
+            destination, group = self._terminal_destination(manager)
+            expansion = split_expand(manager.transforms)[1]
+            if expansion is not None:
+                # One item per case, all its copies inside: the engine shares one read pass
+                # across the copies whose draws allow it, which a per-copy loop could not.
+                copies = list(range(1, expansion.nb + 1))
+                todo = [
+                    a
+                    for a in copies
+                    if self._overwrite or not destination.is_dataset_exist(group, manager.copy_entry(a))
+                ]
+                counts["SKIP"] += len(copies) - len(todo)
+                regimes = manager.materialize_copies(
+                    todo,
+                    rewrite=self._overwrite,
+                    fallback_budget_bytes=self._budget_bytes,
+                    allow_fallback=allow_fallback,
+                    device=chain_device,
+                )
+                shared = sum(1 for regime in regimes.values() if regime == "stream-shared")
+                own = sum(1 for regime in regimes.values() if regime == "stream")
+                whole = sum(1 for regime in regimes.values() if regime == "whole-volume")
+                counts["STREAM"] += shared + own
+                counts["WHOLE-VOLUME"] += whole
+                if whole:
+                    progress.write(
+                        f"[KonfAI] case '{manager.name}' ({group_dest}):"
+                        f" {whole} of {len(copies)} cop(ies) took the whole-volume path"
+                    )
+            elif not self._overwrite and destination.is_dataset_exist(group, manager.name):
+                counts["SKIP"] += 1
+            else:
+                planned = self._planned.get((group_dest, manager.name))
+                streamed = manager.materialize(
+                    0,
+                    rewrite=self._overwrite,
+                    fallback_budget_bytes=self._budget_bytes,
+                    allow_fallback=allow_fallback,
+                    prefer_whole=planned == "LOAD",
+                    device=chain_device,
+                )
+                verdict = "STREAM" if streamed else ("LOAD" if planned == "LOAD" else "WHOLE-VOLUME")
+                counts[verdict] += 1
+                if planned not in (None, verdict):
+                    # The one thing worth a line: the run did NOT do what the plan said.
+                    progress.write(
+                        f"[KonfAI] case '{manager.name}' ({group_dest}): {verdict}"
+                        f" (planned {planned}: {manager.stream_refusal(0) or 'see the log'})"
+                    )
 
 
 #: The grammar the strict mode accepts, level by level. ``None`` marks free-form levels (group

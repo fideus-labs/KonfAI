@@ -89,7 +89,7 @@ def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
     ds.level = 0
     ds._names_cache = {}
     ds._infos_cache = {}
-    monkeypatch.setattr(ds, "_exists_on_disk", lambda: True)
+    monkeypatch.setattr(ds, "exists_on_disk", lambda: True)
 
     opens = {"n": 0}
 

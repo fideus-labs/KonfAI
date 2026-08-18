@@ -252,6 +252,48 @@ def test_h5_stream_temporary_key_is_invisible_to_name_listing(tmp_path: Path) ->
     assert sorted(dataset.get_names("CT")) == ["CASE_000", "CASE_001"]
 
 
+def test_h5_replace_keeps_the_old_entry_until_the_new_one_is_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HDF5 has no rename-over. Deleting the old entry and then moving the new one in leaves a
+    window where a crash loses both; the old entry is moved aside instead, and survives a crash in
+    that window (recoverable under its .replaced-<pid> key, which no listing shows as a case)."""
+    h5py = pytest.importorskip("h5py")
+    first = _volume()
+    dataset = Dataset(tmp_path / "streamed", "h5")
+    dataset.write("CT", "CASE_000", first, _image_attributes())
+    stream = dataset.open_data_stream("CT", "CASE_000", list(first.shape), first.dtype, _image_attributes())
+    assert stream is not None
+    real_move = h5py.Group.move
+
+    def crash_on_publish(self, source, dest):
+        if dest == "CASE_000":
+            raise OSError("crash between the two moves")
+        return real_move(self, source, dest)
+
+    monkeypatch.setattr(h5py.Group, "move", crash_on_publish)
+    with pytest.raises(OSError, match="crash"):
+        with stream:
+            slices = (slice(0, first.shape[0]), *(slice(0, extent) for extent in first.shape[1:]))
+            stream.write_slice(slices, first + 1)
+    monkeypatch.undo()
+    with h5py.File(tmp_path / "streamed.h5", "r", locking=False) as handle:
+        keys = list(handle["CT"].keys())
+    assert any(".replaced-" in key for key in keys), keys
+    assert "CASE_000" not in Dataset(tmp_path / "streamed", "h5").get_names("CT")
+
+    # The nominal replace: new data in, no .replaced- key left behind (the crashed stream's own
+    # .tmp is that crash's debris, invisible to listings, and not this replace's to clean).
+    dataset.write("CT", "CASE_000", first, _image_attributes())
+    stream = dataset.open_data_stream("CT", "CASE_000", list(first.shape), first.dtype, _image_attributes())
+    assert stream is not None
+    with stream:
+        stream.write_slice(slices, first + 1)
+    np.testing.assert_array_equal(dataset.read_data("CT", "CASE_000")[0], first + 1)
+    with h5py.File(tmp_path / "streamed.h5", "r", locking=False) as handle:
+        assert [key for key in handle["CT"].keys() if ".replaced-" in key] == []
+
+
 @pytest.mark.parametrize("file_format", FORMATS)
 def test_aborted_stream_leaves_an_existing_entry_untouched(tmp_path: Path, file_format: str) -> None:
     _skip_unavailable(file_format)

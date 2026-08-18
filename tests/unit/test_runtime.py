@@ -268,6 +268,24 @@ def test_synchronize_data_sets_device_on_cuda(monkeypatch):
     assert result == [{"b": 2}, {"b": 2}]
 
 
+def test_a_workflow_without_collectives_gets_its_rank_and_no_process_group(monkeypatch):
+    """A rank that never talks to the others (TRANSFORM) must not rendezvous: no port, no gloo, no
+    scontrol lookup, and none of the flakes those bring on a laptop or a shared login node."""
+
+    def fail_init(*_args, **_kwargs):
+        raise AssertionError("no process group must be initialized")
+
+    monkeypatch.setattr(rt.dist, "init_process_group", fail_init)
+    monkeypatch.setattr(rt.shutil, "which", lambda _name: pytest.fail("scontrol must not be looked up"))
+    assert rt.setup_gpu(2, 1, process_group=False) == (1, 1)
+    assert rt.setup_gpu(2, 2, process_group=False) == (None, None)  # a rank past the world is idle
+
+    from konfai.transformer import Transformer
+
+    assert Transformer.uses_collectives is False
+    assert rt.DistributedObject.uses_collectives is True
+
+
 def test_synchronize_data_no_dist(monkeypatch):
     """Without an active process group the local data is returned as-is."""
     monkeypatch.setattr(rt.dist, "is_initialized", lambda: False)
@@ -304,6 +322,38 @@ def test_execute_seeds_parent_before_setup(monkeypatch):
     _run_execute(monkeypatch, FakeObject())
 
     assert recorded[0] == recorded[1]
+
+
+def test_execute_puts_the_callers_rng_and_cudnn_flags_back(monkeypatch):
+    """Inline (the single-rank default) the run seeds the CALLER's process: a notebook or Slicer
+    whose own random draws must not become a function of having run a KonfAI workflow."""
+
+    class FakeObject(rt.DistributedObject):
+        def __init__(self) -> None:
+            super().__init__("fake-seeded")
+            self.manual_seed = 123
+
+        def setup(self, world_size: int) -> None:
+            pass
+
+        def run_process(self, *args, **kwargs) -> None:  # pragma: no cover - not spawned
+            pass
+
+    import numpy as np
+    import torch
+
+    random.seed(7)
+    np.random.seed(7)
+    torch.manual_seed(7)
+    monkeypatch.setattr(torch.backends.cudnn, "benchmark", True)
+    monkeypatch.setattr(torch.backends.cudnn, "deterministic", False)
+    expected = (random.random(), float(np.random.random()), float(torch.rand(1)))
+    random.seed(7)
+    np.random.seed(7)
+    torch.manual_seed(7)
+    _run_execute(monkeypatch, FakeObject())
+    assert (random.random(), float(np.random.random()), float(torch.rand(1))) == expected
+    assert (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic) == (True, False)
 
 
 # ---------------------------------------------------------------------------

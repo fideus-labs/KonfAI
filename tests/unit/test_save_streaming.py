@@ -254,6 +254,29 @@ def test_failed_sweep_falls_back_to_the_whole_volume_path(tmp_path: Path, monkey
     assert Dataset(tmp_path / "cache", "mha").is_dataset_exist("CT", "CASE_000")
 
 
+def test_an_interrupted_sweep_aborts_its_stream_and_does_not_fall_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C in the middle of a slab is not a sweep failure: the partial entry is removed and the
+    interrupt propagates. Treated as one, it would be warned away, and the whole-volume fallback
+    would then run the whole case the user just asked to stop."""
+    from konfai.utils import dataset as dataset_module
+
+    source = _source(tmp_path)
+    manager = _manager(source, [Clip(0.0, 50.0), Save(str(tmp_path / "cache"))])
+
+    def interrupted_write(self, slices, data):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", interrupted_write)
+    with pytest.raises(KeyboardInterrupt):
+        manager.get_data(0, 0, [], True)
+    monkeypatch.undo()
+    assert not manager._sweep_failed
+    assert not list((tmp_path / "cache").glob("**/*.tmp"))
+    assert not Dataset(tmp_path / "cache", "mha").is_dataset_exist("CT", "CASE_000")
+
+
 def test_a_rank_dropping_stage_refuses_instead_of_writing_a_broadcast_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
