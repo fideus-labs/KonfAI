@@ -87,14 +87,17 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
     try:
         yield
     finally:
-        from konfai.utils.dataset import release_read_handles  # lazy: api.py stays light to import
+        try:
+            from konfai.utils.dataset import release_read_handles  # lazy: api.py stays light to import
 
-        release_read_handles()
-        for key in [key for key in os.environ if key.startswith("KONFAI")]:
-            if key not in saved:
-                del os.environ[key]
-        os.environ.update(saved)
-        _ACTIVE.release()
+            release_read_handles()
+        finally:
+            # Whatever a handle's close raised, the caller gets its environment and the lock back.
+            for key in [key for key in os.environ if key.startswith("KONFAI")]:
+                if key not in saved:
+                    del os.environ[key]
+            os.environ.update(saved)
+            _ACTIVE.release()
 
 
 def _launch(

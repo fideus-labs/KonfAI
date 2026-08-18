@@ -36,12 +36,14 @@ from konfai.data.transform import (
     InferenceStack,
     KonfAIInference,
     LocalityKind,
+    Mask,
     Norm,
     Normalize,
     OneHot,
     Padding,
     Permute,
     Reduce,
+    RegionContext,
     Resample,
     SelectLabel,
     Squeeze,
@@ -51,7 +53,7 @@ from konfai.data.transform import (
     TensorCast,
     Variance,
 )
-from konfai.utils.dataset import Attribute
+from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 
 # --------------------------------------------------------------------------------------
@@ -952,3 +954,27 @@ def test_konfai_inference_hands_the_nested_run_this_ranks_device_only(tmp_path: 
     attributes["Direction"] = np.eye(3).reshape(-1)
     KonfAIInference()("case", torch.zeros(1, 2, 2, 2), attributes)
     assert launched["gpu"] == [7], "the rank's own device, in the launch's numbering"
+
+
+def test_a_streamed_mask_refuses_a_mask_off_the_stage_input_grid(tmp_path: Path) -> None:
+    """A region of the mask is read where the region of the volume sits, which only means anything
+    when the two share a grid; a mask of another extent would be sliced from the wrong place and the
+    output would look right. The extent is checked once per case, headers only, at the first region;
+    a mask on the grid streams as before."""
+    pytest.importorskip("SimpleITK")
+    store = Dataset(tmp_path / "source", "mha")
+    store.write("CT", "CASE", np.ones((1, 8, 8, 8), dtype=np.float32), _geometry())
+    store.write("MASK", "CASE", np.ones((1, 4, 8, 8), dtype=np.uint8), _geometry())  # 4 rows, not 8
+    store.write("MASK", "ALIGNED", np.ones((1, 8, 8, 8), dtype=np.uint8), _geometry())
+    context = RegionContext(
+        source=(slice(0, 2), slice(0, 8), slice(0, 8)),
+        target=(slice(0, 2), slice(0, 8), slice(0, 8)),
+        source_shape=(8, 8, 8),
+        target_shape=(8, 8, 8),
+    )
+    mask = Mask(path="MASK")
+    mask.set_datasets([store])
+    with pytest.raises(TransformError, match=r"extent \[4, 8, 8\] is not the stage input's \[8, 8, 8\]"):
+        mask.stream_region("CASE", torch.ones(1, 2, 8, 8), context, Attribute())
+    out = mask.stream_region("ALIGNED", torch.ones(1, 2, 8, 8), context, Attribute())
+    assert out.shape == (1, 2, 8, 8)

@@ -161,6 +161,9 @@ def test_a_transform_with_several_chains_carries_every_destination(
                     "format": "mha",
                 },
                 {"group_dest": "broken"},
+                # A path that is not a string is not one: the entry falls back to its dataset rather
+                # than stopping the feed on Path(list).
+                {"group_src": "MR", "group_dest": "MR_odd", "dataset": str(elsewhere), "path": ["not", "a", "path"]},
             ]
         ),
         encoding="utf-8",
@@ -191,6 +194,14 @@ def test_a_transform_with_several_chains_carries_every_destination(
             "group_dest": "MR_prep",
             "group": "MR_prep",
             "format": "mha",
+            "dataset": str(elsewhere),
+            "path": str(elsewhere),
+        },
+        {
+            "group_src": "MR",
+            "group_dest": "MR_odd",
+            "group": "",
+            "format": "",
             "dataset": str(elsewhere),
             "path": str(elsewhere),
         },

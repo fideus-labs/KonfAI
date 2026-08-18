@@ -577,7 +577,9 @@ class JobRegistry:
             },
             "manifest_path": str(job.manifest_path) if job.manifest_path is not None else None,
         }
-        outputs = self._recorded_outputs(job)
+        # Only a finished job's manifest is its own: the run directory is reused across runs of one
+        # name, so while the job is queued or running the file there is a previous run's.
+        outputs = self._recorded_outputs(job) if job.status == "done" else None
         if outputs is not None:
             payload["outputs"] = outputs
         return payload

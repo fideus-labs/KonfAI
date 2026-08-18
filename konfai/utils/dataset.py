@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
 import csv
 import functools
@@ -176,7 +177,8 @@ class _H5ReadPool:
             handles = list(self._handles.items())
             self._handles.clear()
         for filename, pooled in handles:
-            with _get_h5_file_lock(filename):
+            # One handle's failing close must not leave the rest open and untracked.
+            with _get_h5_file_lock(filename), contextlib.suppress(Exception):
                 if pooled.file.id.valid:
                     pooled.file.close()
 
@@ -406,6 +408,10 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], q: float) -> t
         flat = block.reshape(-1)
         if flat.size == 0:
             continue
+        if np.issubdtype(flat.dtype, np.floating) and np.isnan(flat).any():
+            # numpy.quantile of anything holding a NaN is NaN; a bin can hold no NaN, so the
+            # narrowing below would otherwise search a histogram the count does not match.
+            return np.nan, np.nan, 0.0
         count += int(flat.size)
         low, high = _min_of(low, flat.min()), _max_of(high, flat.max())
     if count == 0:
@@ -894,7 +900,13 @@ class _H5DataStream(DataStream):
             if backup in parent:
                 del parent[backup]
             parent.move(self._final_name, backup)
-        parent.move(temporary_name, self._final_name)
+        try:
+            parent.move(temporary_name, self._final_name)
+        except Exception:
+            # The old entry comes back where it was: a failed publish leaves the store as it found it.
+            if replaced and self._final_name not in parent:
+                parent.move(backup, self._final_name)
+            raise
         if replaced:
             del parent[backup]
 
@@ -1147,6 +1159,8 @@ class _OmeZarrDataStream(DataStream):
             # A concurrent writer of the same entry renamed its complete, identical store into place;
             # keep it and drop ours.
             if not self._final_path.exists():
+                if replaced:
+                    os.rename(backup, self._final_path)  # a failed publish leaves the old entry in place
                 raise
             shutil.rmtree(self._store_path, ignore_errors=True)
         if replaced:
