@@ -134,7 +134,7 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
     from konfai.utils import dicom
     from konfai.utils.errors import DatasetManagerError
 
-    root = tmp_path / "case"
+    root = tmp_path / "P000" / "CT"
     vol = (np.arange(1 * 4 * 5 * 6).reshape(1, 4, 5, 6) % 97).astype(np.float32)
     dicom.write_dicom_series(root, vol, origin=(1.0, 2.0, 3.0), spacing=(0.7, 0.8, 2.5), direction=np.eye(3).flatten())
 
@@ -169,13 +169,13 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
         dicom, "sort_series", lambda *a, **k: (calls.__setitem__("sort", calls["sort"] + 1), real_sort(*a, **k))[1]
     )
 
-    dataset_file = Dataset.DicomFile(str(tmp_path), read=True)
+    dataset_file = Dataset.DicomFile(str(tmp_path / "P000"), read=True)
 
     # one COLD patch read costs exactly 1 discovery + 2 sorts. get_dicom_info is memoised, so the
     # cache must be cleared for the spy to see the cold cost at all.
     calls["discover"] = calls["sort"] = 0
     dicom.get_dicom_info.cache_clear()
-    data, _attr = dataset_file.file_to_data_slice("", "case", sl)
+    data, _attr = dataset_file.file_to_data_slice("", "CT", sl)
     assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
     assert calls["discover"] == 1
     assert calls["sort"] == 2
@@ -183,7 +183,7 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
     # a WARM read of the same case re-discovers nothing; only the per-read slab sort (pixel
     # loading of the selected files) remains
     calls["discover"] = calls["sort"] = 0
-    data, _attr = dataset_file.file_to_data_slice("", "case", sl)
+    data, _attr = dataset_file.file_to_data_slice("", "CT", sl)
     assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
     assert calls["discover"] == 0
     assert calls["sort"] == 1
@@ -191,7 +191,7 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
     # statistics over Z: 1 cold discovery, not O(Z); numerics preserved (Welford, ddof=1)
     calls["discover"] = calls["sort"] = 0
     dicom.get_dicom_info.cache_clear()
-    stats = dataset_file.file_to_data_statistics("", "case")
+    stats = Dataset(tmp_path, "dicom").read_data_statistics("CT", "P000")
     assert calls["discover"] == 1
     assert np.isclose(stats["mean"], float(vol.mean()), atol=1e-4)
     assert np.isclose(stats["std"], float(np.std(vol, ddof=1)), atol=1e-4)
