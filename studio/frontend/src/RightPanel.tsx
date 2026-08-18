@@ -1477,7 +1477,9 @@ export default function RightPanel({
   // destination of its own is named rather than offered, because opening it would answer nothing.
   function inWorkspace(path?: string): boolean {
     if (!path) return true;
-    return !path.startsWith("/") && !path.startsWith("~") && !/^[A-Za-z]:/.test(path) && !path.split("/").includes("..");
+    // Absolute in either spelling: POSIX, a home, a Windows drive, or a UNC share.
+    if (/^([/~\\]|[A-Za-z]:)/.test(path)) return false;
+    return !path.split(/[\\/]/).includes("..");
   }
 
   function browseRun(r: RunFeed, data: string = r.data) {
