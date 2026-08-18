@@ -3250,6 +3250,15 @@ body {
   border-color: var(--sage);
   background: color-mix(in srgb, var(--sage) 12%, transparent);
 }
+.tb-link.tb-link-off {
+  color: var(--ink-2);
+  cursor: default;
+  opacity: 0.75;
+}
+.tb-link.tb-link-off:hover {
+  border-color: var(--line-2);
+  background: transparent;
+}
 .validate-job {
   border: 1px solid var(--line-2);
   background: var(--panel-2);

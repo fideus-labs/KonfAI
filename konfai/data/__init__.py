@@ -28,8 +28,8 @@ variables, no workflow. A chain of transforms applied to a dataset, out-of-core,
         transforms=[Clip(0.0, 400.0), Write("./Out:omezarr")],
         data_augmentations_list=[],
     )
-    streamed = CaseMaterializer(manager).materialize()   # True when it never held the volume
-    print(manager.stream_refusal())                      # why not, naming the stage, when it is False
+    verdict = CaseMaterializer(manager).materialize()    # Verdict.STREAM when it never held the volume
+    print(manager.stream_refusal())                      # why not, naming the stage, on any other verdict
 
 ``patch=None`` on purpose: out-of-core is not the same thing as patched, and a whole-volume slab
 sweep is both simpler and faster than a tiling at these sizes. Passing ``DatasetPatch()`` instead

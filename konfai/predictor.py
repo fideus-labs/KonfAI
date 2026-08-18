@@ -74,7 +74,7 @@ from konfai.data.transform import (
 )
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.budget import node_local_ranks, resolve_memory_budget
-from konfai.utils.config import apply_config, config
+from konfai.utils.config import _escape_key_component, apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, PredictorError
 from konfai.utils.runtime import (
@@ -309,7 +309,9 @@ class OutputDataset(Dataset, NeedDevice, ABC):
 
         # Built-in or custom, the operator binds its parameters from its own block, like every stage.
         module, name = get_module(self.reduction_classpath, "konfai.predictor")
-        self.reduction = apply_config(f"{konfai_args}.{self.reduction_classpath}")(getattr(module, name))()
+        # The classpath is one key, dots and all: escaped so the dotted path is not split through it.
+        subtree = f"{konfai_args}.{_escape_key_component(self.reduction_classpath)}"
+        self.reduction = apply_config(subtree)(getattr(module, name))()
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
         for transform in self.before_reduction_transforms:

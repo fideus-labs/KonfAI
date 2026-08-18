@@ -3320,9 +3320,15 @@ class KonfAIInference(Transform):
                 torch.cuda.empty_cache()
 
             # The nested run gets THIS rank's device, not every device the launch was given: under
-            # --gpu 0 1 each rank would otherwise spawn a two-GPU prediction of its own.
+            # --gpu 0 1 each rank would otherwise spawn a two-GPU prediction of its own. The ordinal
+            # is the one the tensor sits on: a TRANSFORM chain routes its tensors to the rank's
+            # device without moving the process's own default, so current_device() can read 0 there.
             visible = cuda_visible_devices()
-            devices = [visible[torch.cuda.current_device()]] if visible and torch.cuda.is_available() else visible
+            devices = visible
+            if visible and torch.cuda.is_available():
+                ordinal = tensor.device.index if tensor.device.type == "cuda" else torch.cuda.current_device()
+                if ordinal is not None and 0 <= ordinal < len(visible):
+                    devices = [visible[ordinal]]
             p = ctx.Process(target=self.infer_entry, args=(dataset_path, Path(tmpdir) / "Output", devices))
             p.start()
             p.join()
