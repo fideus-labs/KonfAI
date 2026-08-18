@@ -22,6 +22,7 @@ import functools
 import inspect
 import logging
 import os
+import time
 import types
 import typing
 import warnings
@@ -254,15 +255,20 @@ class Config:
         try:
             with open(tmp, "w", encoding="utf-8") as yml:
                 yaml.dump(merged, yml)
-            try:
-                os.replace(tmp, target)
-            except OSError:
-                # Windows can deny the atomic replace when the target is briefly held (a virus
-                # scanner or indexer touching the fresh temp file). Fall back to an in-place rewrite:
-                # POSIX (the DDP path) keeps the atomic guarantee, and Windows keeps its non-atomic
-                # behaviour instead of failing outright.
-                with open(target, "w", encoding="utf-8") as yml:
-                    yaml.dump(merged, yml)
+            # Windows can deny the replace while the target is briefly held (a virus scanner or an
+            # indexer touching the fresh file): retried a few times, then refused. Never an in-place
+            # rewrite, which a concurrent reader would see truncated and bind all-defaults from.
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, target)
+                    break
+                except OSError as error:
+                    if attempt == 4:
+                        raise ConfigError(
+                            f"Could not replace the config file '{target}' atomically: {error}.",
+                            "Release whatever holds the file (an editor, an indexer) and rerun; the file was left unchanged.",
+                        ) from error
+                    time.sleep(0.05 * (attempt + 1))
         finally:
             if tmp.exists():
                 tmp.unlink()
