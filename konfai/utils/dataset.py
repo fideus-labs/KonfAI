@@ -1884,6 +1884,8 @@ class Dataset:
                 # Reverse the spatial size for every rank (see the module-level get_infos).
                 size = list(reversed(file_reader.GetSize()))
                 size = [file_reader.GetNumberOfComponents(), *size]
+            elif path is not None and path.endswith(".npy"):
+                size = list(np.load(path, mmap_mode="r").shape)  # the header alone, no page of the map
             else:
                 data, attributes = self.file_to_data(group if group is not None else "", name)
                 size = list(data.shape)
