@@ -80,7 +80,6 @@ Trainer:
           step_size: 10
           gamma: 0.75
           last_epoch: -1
-          verbose: deprecated
           nb_step: 0
       dim: 2
       ModelPatch: None
@@ -147,7 +146,6 @@ Trainer:
       - 320
       - 320
       overlap: None # Overlap between patches (None = no overlap)
-      mask: None
       pad_value: -1 # Value used when padding outside image boundaries
       extend_slice: 4 # Number of neighboring slices used as context (2 above and 2 below for 2.5D input)
     subset: None  # Use the full dataset (or give a case-list file / list of files; prefix entries with ~ to exclude cases)

@@ -19,7 +19,6 @@ Evaluator:
               TensorCast: # Ensure CT tensors are in float32 for metric computation
                 dtype: float32
                 inverse: true
-            is_input: true
       sCT:
         groups_dest:
           sCT:
@@ -27,7 +26,6 @@ Evaluator:
               TensorCast: # Convert predicted sCT to float32 before computing metrics
                 dtype: float32
                 inverse: true
-            is_input: true
       MASK:
         groups_dest:
           MASK:
@@ -35,7 +33,6 @@ Evaluator:
               TensorCast: # Mask used to restrict metric computation
                 dtype: uint8
                 inverse: true
-            is_input: true
     subset: None # Use the full dataset
     validation: None # Optional validation selector: case-list file, list of files, or case names; produces a separate metrics JSON
     dataset_filenames: # Dataset sources (ground truth CT + predicted sCT)

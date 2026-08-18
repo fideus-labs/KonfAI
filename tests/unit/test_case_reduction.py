@@ -26,10 +26,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data.case_reduction import CaseReduction, ReductionPlan, resolve_operator, split_chain
+from konfai.data.case_reduction import CaseReduction, ReductionPlan, split_chain
 from konfai.data.patching import DatasetManager
 from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
-from konfai.data.transform import Clip, Dilate, Normalize, Reduce, Save, TensorCast, Transform
+from konfai.data.transform import Clip, Dilate, Normalize, Reduce, Save, TensorCast, Transform, resolve_operator
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ReductionError, TransformError
 

@@ -9,7 +9,7 @@ KonfAI is a modular, fully-configurable deep-learning framework for medical imag
 
 Three pillars run through the codebase:
 
-1. **Config-by-reflection.** `apply_config(path)` reads a callable's signature and builds its arguments from the YAML subtree it owns (`@config("Key")`), recursing into nested `@config` objects. Resolved defaults are written *back* to the file, so a run leaves a fully-resolved config on disk. **Reading a config mutates it.**
+1. **Config-by-reflection.** `apply_config(path)` reads a callable's signature and builds its arguments from the YAML subtree it owns (`@config("Key")`), recursing into nested `@config` objects. Resolved defaults are written *back* to the file, so a run leaves a fully-resolved config on disk. **Reading a config mutates it.** Each workflow builder reads its file inside `strict_config(root)`: a key nothing bound reads is reported by path (TRANSFORM refuses, the other three warn), so everything a workflow reads from its file must be bound at construction, not lazily.
 2. **Lazy, patch-based imaging.** A volume is never loaded whole into RAM on a route that can stream: data is read as overlapping patches (optionally streamed) and predictions are reassembled with overlap blending. **Mandatory invariant.** The one declared exception is TRANSFORM's whole-volume route, taken only when a stage cannot serve a region: the plan names it `WHOLE-VOLUME`, sizes it against the memory budget (`Transform.working_multiple`) and refuses the case when it does not fit. Never an implicit `read_data()`.
 3. **Declarative models.** Networks are routed `add_module` graphs, written as Python classes in `konfai/models/`, or entirely as a `.yml` via the YAML model builder.
 

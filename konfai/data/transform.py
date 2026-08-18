@@ -16,6 +16,7 @@
 
 """Tensor and image transforms used in KonfAI preprocessing and postprocessing."""
 
+import inspect
 import os
 import tempfile
 from abc import ABC, abstractmethod
@@ -46,6 +47,7 @@ from konfai.data.geometry import (
     TransformBound,
     bound_of,
 )
+from konfai.data.reduction import Reduction
 from konfai.data.sampling import (
     blend_order,
     gather,
@@ -56,7 +58,7 @@ from konfai.data.sampling import (
 )
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset, DataStream, data_to_image, image_to_data
-from konfai.utils.errors import TransformError
+from konfai.utils.errors import ReductionError, TransformError
 from konfai.utils.ITK import _require_simpleitk
 from konfai.utils.runtime import NeedDevice
 from konfai.utils.utils import get_module, split_path_spec
@@ -2581,6 +2583,58 @@ class _DisplacementSource:
         return field
 
 
+#: Keys the ``Reduce`` stage reads from its own mapping. An operator sharing one of these names
+#: would silently be handed the stage's value, so the collision is refused instead.
+_REDUCE_OWN_KEYS = frozenset({"operator", "output", "grid", "grid_tolerance", "provenance"})
+
+
+def resolve_operator(reduce: "Reduce") -> Reduction:
+    """The operator the stage names, as an instance, refusing one that cannot fold a region.
+
+    Configured like every other extension point: its constructor arguments are bound from the same
+    mapping the ``Reduce`` itself was read from, so a custom operator takes parameters exactly as a
+    custom transform or a custom draw does::
+
+        Reduce:
+          operator: mypkg:TrimmedMean
+          output: template
+          trim: 0.2            # the operator's own parameter
+
+    A chain assembled in Python has no configuration to read, and the operator is then built from
+    its own defaults.
+    """
+    module, name = get_module(reduce.operator_classpath, "konfai.data.reduction")
+    factory = getattr(module, name)
+    shadowed = sorted(set(inspect.signature(factory.__init__).parameters) & _REDUCE_OWN_KEYS)
+    if shadowed:
+        raise ReductionError(
+            f"'{reduce.operator_classpath}' has parameter(s) {shadowed}, which the Reduce stage"
+            " reads for itself from the same mapping.",
+            f"Rename them: {sorted(_REDUCE_OWN_KEYS)} belong to Reduce, everything else in the"
+            " mapping is the operator's.",
+        )
+    try:
+        operator = apply_config(reduce.konfai_args)(factory)()
+    except TypeError as error:
+        raise ReductionError(
+            f"'{reduce.operator_classpath}' could not be built: {error}.",
+            "Give its parameters under the Reduce stage, next to 'operator' and 'output', or give them defaults.",
+        ) from error
+    if not isinstance(operator, Reduction):
+        raise ReductionError(
+            f"'{reduce.operator_classpath}' is not a Reduction.",
+            "Subclass konfai.data.reduction.Reduction, or use Mean / Median / Concat.",
+        )
+    if not operator.voxel_local:
+        raise ReductionError(
+            f"'{reduce.operator_classpath}' does not declare itself voxel-local, so it cannot be"
+            " folded one region at a time.",
+            "Set voxel_local = True when every output voxel depends only on the same voxel of each"
+            " case; an operator reading across space cannot stream.",
+        )
+    return operator
+
+
 class Reduce(Transform):
     """Fold every case of a group into one volume, at fixed voxel.
 
@@ -2631,13 +2685,24 @@ class Reduce(Transform):
         # Where this stage was configured from, so its operator binds its own parameters from the
         # same mapping: None when the chain was built in Python, where there is no config to read.
         self.konfai_args: str | None = None
+        self._operator: Reduction | None = None
         self.output = str(output).strip()
         self.grid = f"reference:{reference}" if reference else policy
         self.grid_tolerance = float(grid_tolerance)
         self.provenance = bool(provenance)
 
     def prepare(self, konfai_args: str) -> None:
+        # Bound here, not when the reduction engine first needs it: its parameters sit in the
+        # stage's mapping, and a strict read of the config counts them only if something read them.
         self.konfai_args = konfai_args
+        self._operator = resolve_operator(self)
+
+    @property
+    def operator(self) -> Reduction:
+        """The bound operator; a stage built in Python, never prepared, binds it from its defaults."""
+        if self._operator is None:
+            self._operator = resolve_operator(self)
+        return self._operator
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # A cardinality marker, not a per-case stage: the reduction engine SPLITS it out of the chain

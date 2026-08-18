@@ -64,7 +64,6 @@ Predictor:
       - 512
       - 512
       overlap: None
-      mask: None
       pad_value: -1
       extend_slice: 4 # 2 slices above + 2 below for 2.5D context
     subset: None # Use the full dataset

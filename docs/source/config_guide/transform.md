@@ -218,12 +218,14 @@ a byte is read:
   streaming re-reads the source while writing, so an in-place transform would
   read its own half-written output;
 - a `Save` with no `dataset` of its own, which would write next to the source;
-- **any structural key the grammar does not list, and any stage argument its
-  constructor does not take.** A typo'd `memory_budge:` or
-  `Clip: {min_val: …}` would otherwise be ignored and its default used
-  silently; here it is an error naming the exact path and the legal keys. (A
-  stage that takes `**kwargs` or resolves nowhere is left to the loader's own
-  error, and the contents of `subset:` are not walked.)
+- **any key nothing reads**: a structural key the workflow does not know, a
+  stage argument its constructor does not take, an operator parameter under a
+  `Reduce` that the operator does not declare. A typo'd `memory_budge:` or
+  `Clip: {min_val: …}` would otherwise be carried along and its default used
+  silently; here it is an error naming the exact path, the keys read at that
+  level and the closest of them. The read is what the binder did, not a
+  grammar kept beside it: whatever a stage's constructor names is legal there,
+  and a stage that resolves nowhere is refused by the loader before that.
 
 ## Fields
 

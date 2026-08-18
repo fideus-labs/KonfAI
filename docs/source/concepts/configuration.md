@@ -126,6 +126,19 @@ the exact constructor argument names (typically `snake_case`). A missing key
 falls back to the parameter default, or to a `default|...` marker when one is
 provided (see below).
 
+## Keys nothing reads
+
+The binder reads a key when a parameter names it and materializes the default
+when none does, so a key nothing reads (a typo, a parameter an older version
+had) is carried along and the default used in its place. Each workflow builder
+reads its file inside `konfai.utils.config.strict_config(root)`, which records,
+level by level, what the file holds against what the binder read, and reports
+the difference by path with the keys read at that level: `TRANSFORM` refuses
+(its config is the deliverable), `TRAIN`/`PREDICTION`/`EVALUATION` warn, since
+files written back by earlier versions carry such keys. The check closes when
+the builder returns, so everything a workflow reads from its file is bound at
+construction.
+
 ## Config modes
 
 `KONFAI_CONFIG_MODE` selects how KonfAI reacts to a missing file or missing keys:

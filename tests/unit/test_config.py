@@ -27,7 +27,7 @@ from typing import Literal
 
 import pytest
 import ruamel.yaml
-from konfai.utils.config import Config, apply_config, config
+from konfai.utils.config import Config, apply_config, config, strict_config
 from konfai.utils.errors import ConfigError
 
 
@@ -611,3 +611,103 @@ def test_union_with_literal_member_does_not_crash() -> None:
     from konfai.utils.config import _convert_union_sequence_value
 
     assert _convert_union_sequence_value("beta", (Literal["alpha", "beta"], str), "p") == "beta"
+
+
+# --------------------------------------------------------------------------------------
+# strict_config: a key nothing reads is refused, whoever would have read it
+# --------------------------------------------------------------------------------------
+
+
+class _Leaf:
+    def __init__(self, depth: int = 1) -> None:
+        self.depth = depth
+
+
+@config("Nested")
+class _Nested:
+    def __init__(self, width: int = 2) -> None:
+        self.width = width
+
+
+class _StrictRoot:
+    def __init__(self, kept: int = 0, leaf: _Leaf = _Leaf(), nested: _Nested = _Nested()) -> None:
+        self.kept, self.leaf, self.nested = kept, leaf, nested
+
+
+def test_strict_config_refuses_a_key_nothing_reads_with_its_path_and_the_closest_key(write_config) -> None:
+    write_config("Root:\n  kept: 1\n  kep: 2\n  Nested:\n    widht: 3\n")
+    with pytest.raises(ConfigError) as raised, strict_config("Root"):
+        apply_config("Root")(_StrictRoot)()
+    message = str(raised.value)
+    assert "'Root.kep'" in message and "Did you mean 'kept'?" in message
+    assert "'Root.Nested.widht'" in message and "Did you mean 'width'?" in message
+    # What the level's readers name: the parent's own parameters, the flat child's, the keyed child's key.
+    assert "'Root.kep' (keys read at that level: ['Nested', 'depth', 'kept'])" in message
+
+
+def test_strict_config_counts_what_a_flat_child_and_a_keyed_child_read(write_config) -> None:
+    """``leaf`` has no @config key: it binds on the SAME level as its parent and reads ``depth``
+    there; ``Nested`` owns a sub-level, and its key is read by the parent. Neither is unknown."""
+    write_config("Root:\n  kept: 1\n  depth: 4\n  Nested:\n    width: 5\n")
+    with strict_config("Root"):
+        root = apply_config("Root")(_StrictRoot)()
+    assert (root.kept, root.leaf.depth, root.nested.width) == (1, 4, 5)
+
+
+def test_strict_config_counts_a_konfai_without_parameter_as_read(write_config) -> None:
+    write_config("Root:\n  kept: 5\n  skipped: 42\n")
+
+    class Root:
+        def __init__(self, kept: int, skipped: int = 0) -> None:
+            self.kept, self.skipped = kept, skipped
+
+    with strict_config("Root"):
+        root = apply_config("Root")(Root)(konfai_without=["skipped"])
+    assert (root.kept, root.skipped) == (5, 0)
+
+
+def test_strict_config_leaves_a_dict_of_objects_entries_free_and_checks_inside_them(write_config) -> None:
+    write_config("Root:\n  children:\n    left:\n      value: 3\n    right:\n      valeu: 7\n")
+
+    class Child:
+        def __init__(self, value: int = 0) -> None:
+            self.value = value
+
+    class Root:
+        def __init__(self, children: dict[str, Child]) -> None:
+            self.children = children
+
+    with (
+        pytest.raises(ConfigError, match=r"'Root\.children\.right\.valeu'.*Did you mean 'value'"),
+        strict_config("Root"),
+    ):
+        apply_config("Root")(Root)()
+
+
+def test_strict_config_refuses_a_missing_root_before_anything_binds(write_config) -> None:
+    write_config("Rot:\n  kept: 2\n")
+    with pytest.raises(ConfigError, match="declares no 'Root' root"), strict_config("Root"):
+        raise AssertionError("refused before anything binds")
+
+
+def test_strict_config_can_warn_instead_of_refusing(write_config) -> None:
+    """The legacy workflows' setting: existing files carry keys older versions wrote back, so the
+    reader is told and the run goes on."""
+    write_config("Root:\n  kep: 2\n")
+    with pytest.warns(UserWarning, match=r"'Root\.kep'.*Did you mean 'kept'"), strict_config("Root", refuse=False):
+        root = apply_config("Root")(_StrictRoot)()
+    assert root.kept == 0
+
+
+def test_outside_strict_config_the_binder_records_nothing_and_refuses_nothing(write_config) -> None:
+    from konfai.utils import config as config_module
+
+    write_config("Root:\n  kep: 2\n")
+    root = apply_config("Root")(_StrictRoot)()
+    assert root.kept == 0 and config_module._ledgers == []
+
+
+def test_strict_config_reports_a_yaml_syntax_error_as_a_config_error(write_config) -> None:
+    write_config("Root:\n  kept: [1, 2\n")
+    with pytest.raises(ConfigError, match=r"Invalid YAML syntax .* at line"), strict_config("Root"):
+        raise AssertionError("refused before anything binds")

@@ -74,7 +74,7 @@ from konfai.data.transform import (
 )
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.budget import node_local_ranks, resolve_memory_budget
-from konfai.utils.config import _escape_key_component, apply_config, config
+from konfai.utils.config import _escape_key_component, apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, PredictorError
 from konfai.utils.runtime import (
@@ -2316,7 +2316,8 @@ def build_predict(
         path_env={"KONFAI_PREDICTIONS_DIRECTORY": predictions_dir},
     )
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
-    predictor = apply_config()(Predictor)()
+    with strict_config("Predictor", refuse=False):
+        predictor = apply_config()(Predictor)()
     predictor.set_models(models)
     return predictor
 
