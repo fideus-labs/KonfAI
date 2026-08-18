@@ -87,6 +87,9 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
     try:
         yield
     finally:
+        from konfai.utils.dataset import release_read_handles  # lazy: api.py stays light to import
+
+        release_read_handles()
         for key in [key for key in os.environ if key.startswith("KONFAI")]:
             if key not in saved:
                 del os.environ[key]

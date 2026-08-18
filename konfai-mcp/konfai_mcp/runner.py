@@ -230,7 +230,7 @@ def _apply_single_process_patches() -> None:
     import konfai.trainer as konfai_trainer
     import konfai.utils.runtime as konfai_runtime
 
-    konfai_runtime.setup_gpu = lambda world_size, rank=None: (0, 0)  # type: ignore[assignment]
+    konfai_runtime.setup_gpu = lambda world_size, rank=None, process_group=True: (0, 0)  # type: ignore[assignment,misc]
     konfai_runtime.mp.spawn = (  # type: ignore[assignment]
         lambda fn, nprocs, args=(), join=True, daemon=False, start_method="spawn": fn(0, *args)
     )

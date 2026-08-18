@@ -271,6 +271,35 @@ def test_job_registry_refresh_and_payload() -> None:
     assert payload["resources"]["status"] == "job://job1/status"
 
 
+def test_a_finished_transform_job_carries_where_its_data_went(tmp_path: Path) -> None:
+    # A transform's run directory holds no data: each Write landed in the user's tree, recorded in
+    # outputs.json beside the runtime log. The payload surfaces it, so "inspect_dataset" has a path.
+    registry = JobRegistry({"queued", "running"})
+    run_dir = tmp_path / "Transforms" / "PREP"
+    run_dir.mkdir(parents=True)
+    outputs = [{"group_src": "CT", "group_dest": "CT_out", "dataset": str(tmp_path / "Out"), "format": "h5"}]
+    (run_dir / "outputs.json").write_text(json.dumps(outputs), encoding="utf-8")
+    job = Job(
+        job_id="job2",
+        session="default",
+        kind="transform",
+        command=["echo", "ok"],
+        cwd=tmp_path,
+        log_path=tmp_path / "job.log",
+        config_path=tmp_path / "Transform.yml",
+        runtime_log_path=run_dir / "log_0.txt",
+        status="running",
+    )
+    job.proc = cast(Any, _ProcDone(0))
+    registry.jobs[job.job_id] = job
+
+    payload = registry.payload(job, _isoformat)
+
+    assert payload["status"] == "done"
+    assert payload["outputs"] == outputs
+    assert "inspect_dataset" in payload["next_actions"]
+
+
 def test_declared_output_but_empty_result_becomes_error(tmp_path: Path) -> None:
     # Generic (no per-kind logic): a job that declared an output and exited 0 without producing it must
     # NOT report a misleading "done". A job with no declared output (output_path=None) is untouched.

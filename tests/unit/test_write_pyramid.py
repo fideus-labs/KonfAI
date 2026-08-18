@@ -92,6 +92,24 @@ def test_a_declared_pyramid_is_written_by_both_paths_and_they_agree(tmp_path):
     assert get_ome_zarr_info(streamed, 1)["scale"] == [1.0, 4.0, 4.0, 8.0]
 
 
+def test_each_scale_factor_shrinks_the_level_above_it(tmp_path):
+    """``[2, 2]`` is 16 / 8 / 4, on both write paths: each factor is relative to the previous level,
+    as the Save docstring says. ngff-zarr takes factors relative to level 0, where ``[2, 2]`` writes
+    two identical levels; a user following the doc would get two quarters and no eighth."""
+    data = np.arange(1 * 16 * 16 * 16, dtype=np.float32).reshape(1, 16, 16, 16)
+    Dataset(tmp_path / "whole", "omezarr", scale_factors=[2, 2]).write("G", "case", data, _geometry())
+    streamed_dataset = Dataset(tmp_path / "streamed", "omezarr", scale_factors=[2, 2])
+    stream = streamed_dataset.open_data_stream("G", "case", [1, 16, 16, 16], np.dtype("float32"), _geometry())
+    assert stream is not None
+    with stream:
+        stream.write_slice((slice(0, 1), slice(0, 16), slice(0, 16), slice(0, 16)), data)
+    for root in ("whole", "streamed"):
+        shapes = [
+            list(Dataset(tmp_path / root, f"omezarr@{level}").read_data("G", "case")[0].shape) for level in range(3)
+        ]
+        assert shapes == [[1, 16, 16, 16], [1, 8, 8, 8], [1, 4, 4, 4]], root
+
+
 def test_an_interrupted_level_append_leaves_the_original_store_readable(tmp_path, monkeypatch):
     """Deriving the coarse levels rewrites level 0, so a failure here is a failure over the only copy.
 

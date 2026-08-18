@@ -515,7 +515,7 @@ class CaseReduction:
                 stream.write_slice((slice(0, int(array.shape[0])), *region), array)
             if stream is not None:
                 stream.close()
-        except Exception as exception:
+        except BaseException as exception:
             if stream is not None:
                 stream.abort(exception)
             raise

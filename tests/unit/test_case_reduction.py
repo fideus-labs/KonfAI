@@ -434,7 +434,7 @@ def test_a_single_case_is_its_own_vote() -> None:
     "operator,output_channels,member_regions,why",
     [
         (Mean(), 1, 2, "one running accumulator and the region coming into it"),
-        (Median(), 1, 3 * CASES + 1, "the cohort, the stack it is copied into, the sort, the output"),
+        (Median(), 1, 5 * CASES + 1, "the cohort, the stack it is copied into, quantile's copies, the output"),
         (Vote(), 1, 3 * CASES + 1, "same shape of work: a mode sorts a copy of the stack too"),
         (Concat(), CASES, 2 * CASES, "the cohort, and the concatenation that IS the output"),
     ],

@@ -61,10 +61,9 @@ def test_the_template_example_folds_the_cohort_into_one_entry(cohort: Path) -> N
     planned = _run([*konfai_cli_command(), "TRANSFORM", "--config", "Transform.yml", "--plan"], cohort)
     assert planned.returncode == 0, f"the template example does not plan:\n{planned.stdout}{planned.stderr}"
     assert "REDUCE 6 case(s) -> 1 output 'template'" in planned.stdout
-    # --plan probes each destination with a real region-write open, so the store itself may be
-    # created; what it must not leave behind is an entry, the probe's own included.
-    assert not (cohort / "Template" / "template").exists(), "--plan must not write the deliverable"
-    assert [p.name for p in (cohort / "Template").iterdir()] == [], "--plan must remove what it probed with"
+    # --plan probes each destination with a real region-write open, then takes back what the probe
+    # created: the entry, and the store itself when it did not exist before.
+    assert not (cohort / "Template").exists(), "--plan must leave the output as it found it"
 
     executed = _run([*konfai_cli_command(), "TRANSFORM", "--config", "Transform.yml"], cohort)
     assert executed.returncode == 0, f"the template example does not run:\n{executed.stdout}{executed.stderr}"

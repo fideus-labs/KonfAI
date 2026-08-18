@@ -295,12 +295,16 @@ def save_destination(save: Save, default_dataset: Dataset, default_group: str) -
     a store the run does not open has verified nothing.
     """
     if save.dataset:
-        filename, _, file_format = split_path_spec(
-            save.dataset,
-            default_format="mha",
-            supported_formats=SUPPORTED_FORMATS,
-        )
-        dataset = Dataset(filename, file_format, save.scale_factors, save.downsample_method)
+        # Resolved once per Save: the chain is shared by every case's manager, and constructing a
+        # Dataset probes the destination directory on disk.
+        if save.destination is None:
+            filename, _, file_format = split_path_spec(
+                save.dataset,
+                default_format="mha",
+                supported_formats=SUPPORTED_FORMATS,
+            )
+            save.destination = Dataset(filename, file_format, save.scale_factors, save.downsample_method)
+        dataset = save.destination
     else:
         # No destination of its own: the Save caches into the manager's dataset, whose write format
         # is not this stage's to redecorate: a pyramid asked here would silently not happen.
@@ -1404,6 +1408,7 @@ class DatasetManager:
         self._stream_refusals: dict[tuple[int, bool], str] = {}
         self._stream_evolved: dict[tuple[int, bool], Attribute] = {}
         self._stream_attributes_persisted: set[int] = set()
+        self._peak_case_bytes: int | None = None
         # Why a Save sweep gave up for this case, or None. One field rather than a flag beside a
         # warning: the flag is what reroutes the case, the sentence is what a caller with no
         # fallback has to raise with, and they must never disagree.
@@ -1480,7 +1485,10 @@ class DatasetManager:
                 drawn[kind] = occurrence + 1
                 # One draw, every copy at once: state_init IS the per-copy sampler, and it wants the
                 # copies' current grids, which the stages before it just folded.
-                with _drawn_from(expand.draw_seed, self.index, kind, occurrence):
+                # Keyed by the case's NAME, not its index: the index is a position in the run's
+                # case list, and a different `subset` (or a second run over image and mask with
+                # different subsets) must not hand a case other copies.
+                with _drawn_from(expand.draw_seed, self.name, kind, occurrence):
                     shapes = stage.state_init(self.index, shapes, foldings)
                 continue
             for index in range(expand.nb):
@@ -2183,6 +2191,7 @@ class DatasetManager:
         allow_fallback: bool = True,
         prefer_whole: bool = False,
         device: "torch.device | None" = None,
+        release: bool = True,
     ) -> bool:
         """Write this case's chain to disk by the cheapest path that can, and say which one it took.
 
@@ -2202,7 +2211,9 @@ class DatasetManager:
         per-case resume; a chain with no :class:`Save` at all writes nothing either, which is why
         declaring an output is checked before a case is ever handed here. ``rewrite=True`` recomputes
         the case from the source and every stream's finalize renames over the old entry: the forced
-        path behind ``--overwrite``, never the default.
+        path behind ``--overwrite``, never the default. ``release=False`` keeps the loaded volume
+        for the caller that owns the release: the expansion engine, whose solo copies of one case
+        share the assembled prefix.
         """
         self._set_rewrite(rewrite)
         self.set_memory_budget(fallback_budget_bytes)
@@ -2220,7 +2231,8 @@ class DatasetManager:
                 # failed, so ``allow_fallback`` is not consulted; the budget check stays as the belt.
                 self._enforce_fallback_budget(fallback_budget_bytes)
                 self._assemble_and_write(a)
-                self.unload()
+                if release:
+                    self.unload()
                 return False
             if self._stream_ready(a, apply_augmentations=apply_augmentations):
                 return True
@@ -2232,7 +2244,8 @@ class DatasetManager:
                 )
             self._enforce_fallback_budget(fallback_budget_bytes)
             self._assemble_and_write(a)
-            self.unload()
+            if release:
+                self.unload()
             return False
 
     def set_memory_budget(self, budget_bytes: float | None) -> None:
@@ -2271,16 +2284,18 @@ class DatasetManager:
         Headers-only still, and still a floor for the one thing it cannot see: a stage that widens
         the dtype beyond what it declares.
         """
-        spatial = [int(extent) for extent in self.base_shape[1:]]
-        channels = int(self.base_shape[0])
-        peak = int(np.prod(self.base_shape, dtype=np.int64))
-        attributes = Attribute(self.stored_attributes)
-        for stage in self.transforms:
-            if not isinstance(stage, Transform):
-                continue
-            spatial = self._fold_case_state(stage, list(spatial), attributes)
-            peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
-        return peak * CASE_ELEMENT_BYTES
+        if self._peak_case_bytes is None:
+            spatial = [int(extent) for extent in self.base_shape[1:]]
+            channels = int(self.base_shape[0])
+            peak = int(np.prod(self.base_shape, dtype=np.int64))
+            attributes = Attribute(self.stored_attributes)
+            for stage in self.transforms:
+                if not isinstance(stage, Transform):
+                    continue
+                spatial = self._fold_case_state(stage, list(spatial), attributes)
+                peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
+            self._peak_case_bytes = peak * CASE_ELEMENT_BYTES
+        return self._peak_case_bytes
 
     def predicted_stream_read_factor(self, a: int = 0, apply_augmentations: bool = False) -> float | None:
         """~How many times the streamed route reads the source, priced from the plan alone.
@@ -2310,14 +2325,16 @@ class DatasetManager:
             )
             for sweep in source.pending_sweeps
         ]
-        spatial = [int(extent) for extent in source.shape[1:]]
-        landed = list(source.stage_plans[-1].out_shape) if source.stage_plans else list(spatial)
-        factors.append(
-            self._segment_read_factor(
-                source.dataset, source.group, source.entry, list(source.shape), landed, source.stage_plans
+        # The head segment past the last boundary is read only if stages follow it: a chain
+        # ending on a Write leaves nothing to read from the destination, which does not exist yet.
+        if source.stage_plans:
+            landed = list(source.stage_plans[-1].out_shape)
+            factors.append(
+                self._segment_read_factor(
+                    source.dataset, source.group, source.entry, list(source.shape), landed, source.stage_plans
+                )
             )
-        )
-        return max(factors)
+        return max(factors) if factors else 1.0
 
     def _segment_read_factor(
         self,
@@ -2458,6 +2475,7 @@ class DatasetManager:
                         fallback_budget_bytes=fallback_budget_bytes,
                         allow_fallback=allow_fallback,
                         device=device,
+                        release=False,  # the copies share the assembled prefix; released once below
                     )
                     else "whole-volume"
                 )
@@ -2661,9 +2679,11 @@ class DatasetManager:
                     self._swept_entries.add((str(sweep.destination.filename), sweep.group, sweep.entry))
                     written.add(a)
             return written
-        except Exception as exception:
+        except BaseException as exception:
             for stream in streams.values():
                 stream.abort(exception)
+            if not isinstance(exception, Exception):
+                raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
             warnings.warn(
                 f"Shared-pass materialization of case '{self.name}' failed"
                 f" ({type(exception).__name__}: {exception}); its copies take their own passes.",
@@ -2779,9 +2799,11 @@ class DatasetManager:
                 stream.close()
             self._swept_entries.add(ledger_key)
             return True
-        except Exception as exception:
+        except BaseException as exception:
             if stream is not None:
                 stream.abort(exception)
+            if not isinstance(exception, Exception):
+                raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
             return self._sweep_failed_because(sweep, f"{type(exception).__name__}: {exception}")
 
     def _sweep_failed_because(self, sweep: _PendingSweep, reason: str) -> bool:
