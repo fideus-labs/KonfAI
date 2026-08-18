@@ -231,8 +231,9 @@ it in torch: same values, different summation order, so a voxel may land a few
 float32 ulp away. Seeded from `Min`/`Max` it is exact, since a min has no
 summation order to disagree on.
 
-A streamed `REGRID` walks global float64 coordinates, so a slab computes the
-very numbers the whole volume computes. On the host the blend is ITK's own
+A streamed `REGRID` walks global float64 coordinates (`precision: exact`, the
+default; `precision: fast` walks in float32 and the bounds below then no longer
+hold), so a slab computes the very numbers the whole volume computes. On the host the blend is ITK's own
 resampler on a window at its true origin, and on an axis-aligned volume streamed
 equals whole **bit for bit**, whatever the map. Two things cost an ulp: on CUDA a
 *linear* blend through a map that does not factorise (a rotation, a stored
