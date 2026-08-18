@@ -1027,6 +1027,69 @@ def test_two_ranks_partition_the_cases_and_every_output_is_written_once(
         assert out.is_dataset_exist("CT_out", f"CASE_{index:03d}")
 
 
+def test_the_plan_reads_no_voxel_for_a_global_statistic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Standardize needs the volume's Mean/Std. The plan only checks the source can provide them
+    (headers); the rank reads them at first data access, so a 10k-case plan is not 10k full passes
+    on the launcher before the first byte. The written result is the standardized volume."""
+    from konfai.utils import dataset as dataset_module
+
+    _write_source(tmp_path)
+    _write_config(
+        tmp_path,
+        "              Standardize:\n                inverse: false\n"
+        f"              Write:\n                dataset: {tmp_path / 'out'}:h5\n",
+    )
+    scans: list[str] = []
+    real = dataset_module.Dataset.read_data_statistics
+
+    def counted(self, group, name, channels=None):
+        scans.append(name)
+        return real(self, group, name, channels)
+
+    monkeypatch.setattr(dataset_module.Dataset, "read_data_statistics", counted)
+    workflow = _build(tmp_path)
+    plan = workflow.compute_plan(1)
+    assert [entry.verdict for entry in plan.entries] == ["STREAM", "STREAM"]
+    assert scans == [], "planning must not scan a volume"
+    workflow.setup(1)
+    workflow.run_process(1, 0, 0, [])
+    assert sorted(scans) == ["CASE_000", "CASE_001"], "one scan per case, on the rank"
+    source, _ = Dataset(tmp_path / "source", "mha").read_data("CT", "CASE_000")
+    written, _ = Dataset(tmp_path / "out", "h5").read_data("CT_out", "CASE_000")
+    np.testing.assert_allclose(written, (source - source.mean()) / source.std(ddof=1), rtol=1e-4, atol=1e-4)
+
+
+def test_a_loaded_case_takes_its_statistic_from_the_loaded_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LOAD reads the source once: a Standardize on that route computes on the volume in hand rather
+    than paying a second full read for a disk scan of the same numbers."""
+    from konfai.utils import dataset as dataset_module
+
+    rng = np.random.default_rng(3)
+    source = Dataset(tmp_path / "source", "nii.gz")
+    volume = (rng.random((1, 8, 32, 32)) * 100).astype(np.float32)
+    source.write("CT", "CASE_000", volume, _image_attributes())
+    config_path = _write_config(
+        tmp_path,
+        "              Standardize:\n                inverse: false\n"
+        f"              Write:\n                dataset: {tmp_path / 'out'}:h5\n",
+    )
+    config_path.write_text(
+        config_path.read_text().replace("memory_budget: auto", f"memory_budget: {3 * volume.nbytes}b")
+    )
+    monkeypatch.setattr(
+        dataset_module.Dataset, "read_data_statistics", lambda *_a, **_k: pytest.fail("no disk scan on the LOAD route")
+    )
+    workflow = _build(tmp_path)
+    plan = workflow.compute_plan(1)
+    assert plan.entries[0].verdict == "LOAD"
+    workflow.setup(1)
+    workflow.run_process(1, 0, 0, [])
+    written, _ = Dataset(tmp_path / "out", "h5").read_data("CT_out", "CASE_000")
+    np.testing.assert_allclose(written, (volume - volume.mean()) / volume.std(ddof=1), rtol=1e-4, atol=1e-4)
+
+
 def test_the_shards_balance_bytes_not_counts(tmp_path: Path) -> None:
     """One 8x larger case among small ones: it takes a rank on its own and the small ones share the
     other, where an index split would pair the large case with half of the small ones."""

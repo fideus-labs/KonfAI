@@ -255,6 +255,34 @@ def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, mo
     assert torch.equal(got_stack, want_stack)
 
 
+def test_a_mask_after_reduction_streams_and_reads_its_slab_of_the_mask(tmp_path, monkeypatch, drive_tta) -> None:
+    # Mask is per-voxel and reads a companion volume: on the writer it is told where the slab sits
+    # (stream_region) and reads that part of the mask, so it keeps the case streamed and lands the
+    # same bytes as the whole-volume call.
+    sitk = pytest.importorskip("SimpleITK")
+    from konfai.data.transform import Argmax, Mask
+
+    mask = (np.random.default_rng(5).random((6, 4, 3)) > 0.5).astype(np.uint8)
+    sitk.WriteImage(sitk.GetImageFromArray(mask), str(tmp_path / "mask.mha"))
+
+    def run(where: str, streamed: bool):
+        return drive_tta(
+            tmp_path / where,
+            monkeypatch,
+            augmentation=Flip(f_prob=[0, 1, 1]),
+            streamed=streamed,
+            reduction=Mean(),
+            after=[Argmax(0), Mask(path=str(tmp_path / "mask.mha"), value_outside=-9)],
+        )
+
+    assert Mask(path="x").patch_locality(Attribute()).kind is LocalityKind.POINTWISE
+    got, whole_volume = run("streamed", streamed=True)
+    assert not whole_volume, "a per-voxel stage reading a companion must not force the whole-volume path"
+    want, _ = run("reference", streamed=False)
+    assert torch.equal(got, want)
+    assert (got.numpy()[0][mask == 0] == -9).all()
+
+
 def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path, monkeypatch, drive_tta) -> None:
     # A destination that cannot serve region writes must not lose the stack: the SLAB stage buffers
     # and writes classically at the last slab: the whole-volume path's memory, never a missing file.

@@ -60,6 +60,11 @@ from konfai.utils.utils import (
 
 # How far a halo may reach, as a fraction of the patch it surrounds. See DatasetManager._affords_halo.
 _MAX_HALO_FRACTION = 0.5
+#: The whole-volume statistics every store can serve (``Dataset.read_data_statistics``): what a
+#: GLOBAL_STAT stage may declare, and what the plan checks against without reading a voxel.
+_STREAM_STAT_KEYS = frozenset(
+    {"Min", "Max", "Mean", "Std", "MinPerChannel", "MaxPerChannel", "MeanPerChannel", "StdPerChannel"}
+)
 
 # Rows per Save-sweep slab: full-plane slabs keep the materialization bounded to a window while the
 # composed region reads stay chunk-friendly. A declared memory_budget can only LOWER the height
@@ -1409,6 +1414,12 @@ class DatasetManager:
         self._stream_evolved: dict[tuple[int, bool], Attribute] = {}
         self._stream_attributes_persisted: set[int] = set()
         self._peak_case_bytes: int | None = None
+        # A GLOBAL_STAT stage's whole-volume statistic is read on the process that runs the chain,
+        # at first data access, never by a plan probe: the plan checks the source can provide it
+        # (headers only) and the run reads it once. ``_statistics_deferred`` remembers that a plan
+        # was resolved without its seed, so the run replans before reading.
+        self._statistics_seeded = False
+        self._statistics_deferred = False
         # Why a Save sweep gave up for this case, or None. One field rather than a flag beside a
         # warning: the flag is what reroutes the case, the sentence is what a caller with no
         # fallback has to raise with, and they must never disagree.
@@ -1677,6 +1688,16 @@ class DatasetManager:
             self._disk_statistics[key] = source_dataset.read_data_statistics(source_group, source_entry, channels)
         return self._disk_statistics[key]
 
+    def _require_statistics(self) -> None:
+        """Run-time entry: from here on the plan seeds the statistics it deferred, and a plan resolved
+        without them is resolved again. Called by every path that reads data through the plan."""
+        if self._statistics_seeded:
+            return
+        self._statistics_seeded = True
+        if self._statistics_deferred:
+            self._statistics_deferred = False
+            self._invalidate_stream_plans()
+
     def _ensure_stream_stats(
         self,
         source_dataset: Dataset,
@@ -1797,10 +1818,20 @@ class DatasetManager:
                         f"{label} needs whole-volume statistics, but an earlier stage changes the values"
                         ": the stored volume's statistic is not this stage's input."
                     )
-                if seed_statistics and not self._ensure_stream_stats(
-                    source_dataset, source_group, source_entry, cache_attribute, set(loc.stat_keys), loc.stat_channels
-                ):
-                    return refuse(f"{label} needs statistics {sorted(loc.stat_keys)} that the source cannot provide.")
+                unknown = sorted(set(loc.stat_keys) - _STREAM_STAT_KEYS)
+                if unknown:
+                    return refuse(f"{label} needs statistics {unknown} that no source can provide.")
+                if seed_statistics and self._statistics_seeded:
+                    self._ensure_stream_stats(
+                        source_dataset,
+                        source_group,
+                        source_entry,
+                        cache_attribute,
+                        set(loc.stat_keys),
+                        loc.stat_channels,
+                    )
+                elif seed_statistics:
+                    self._statistics_deferred = True
                 # The evolving case state carries the seed too: a Save sweep writes it as the cache
                 # header, exactly as the whole-volume pass leaves the statistic in the attribute.
                 for stat_key in loc.stat_keys:
@@ -2412,6 +2443,7 @@ class DatasetManager:
             )
         self._set_rewrite(rewrite)
         self.set_memory_budget(fallback_budget_bytes)
+        self._require_statistics()
         with self._chain_device_scope(device):
             verdicts: dict[int, str] = {}
             if not copies:
@@ -2698,6 +2730,7 @@ class DatasetManager:
         caches is actually asked for data, sweeps them and re-resolves from disk: all data then
         flows through the satisfied-boundary path, exactly as if the caches had always existed. The
         regime probes (``can_stream_patch``) answer from the plan alone and never write."""
+        self._require_statistics()
         source = self._resolve_patch_stream_source(a, apply_augmentations)
         if source is None:
             return False
@@ -2848,6 +2881,7 @@ class DatasetManager:
         is_input: bool,
         apply_augmentations: bool = True,
     ) -> tuple[torch.Tensor, Attribute]:
+        self._require_statistics()
         stream_source = self._resolve_patch_stream_source(a, apply_augmentations)
         if stream_source is None:
             raise RuntimeError("Patch streaming requested on a dataset manager without a streaming source.")
@@ -2872,8 +2906,13 @@ class DatasetManager:
             cache_attribute["StatisticsSeeded"] = 1.0
             persist = a not in self._stream_attributes_persisted
             keys_before = set(cache_attribute.keys()) if persist else set()
+            # Told where the patch sits, like every region: a per-voxel stage reading a companion
+            # volume (a mask) reads the part that lines up with it.
+            spatial = tuple(int(extent) for extent in stream_source.shape[1:])
+            region = tuple(plan.data_slices[len(plan.data_slices) - len(spatial) :])
+            context = RegionContext(region, region, spatial, spatial)
             for stage in stream_source.stages:
-                tensor = stage(self.name, tensor, cache_attribute)
+                tensor = stage.stream_region(self.name, tensor, context, cache_attribute)
             # The read plan is applied AFTER the chain, as the whole-volume path transforms before
             # Patch.get_data cuts: padding first would feed f(pad) to the model on every border patch.
             tensor = self.patch.apply_read_plan(tensor, plan)

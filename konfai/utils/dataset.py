@@ -33,7 +33,7 @@ import threading
 import time
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar, cast
 
@@ -338,6 +338,110 @@ def _statistics_chunk_length(shape: list[int] | tuple[int, ...], axis: int) -> i
     """
     per_step = int(np.prod([extent for other, extent in enumerate(shape) if other != axis], dtype=np.int64))
     return max(1, _STATISTICS_CHUNK_ELEMENTS // max(1, per_step))
+
+
+#: Values a quantile scan collects at once when a bin has narrowed this far: the one buffer it holds.
+_QUANTILE_COLLECT_CAP = 1 << 22
+_QUANTILE_BINS = 1 << 16
+
+
+def _quantile_positions(count: int, q: float) -> tuple[int, int, float]:
+    """The two order statistics ``numpy.quantile(..., method='linear')`` interpolates between, and the
+    weight: the same arithmetic as numpy's ``_compute_virtual_index`` (alpha = beta = 1)."""
+    virtual = count * q + (1 + q * (1 - 1 - 1)) - 1
+    if virtual >= count - 1:
+        return count - 1, count - 1, 0.0
+    if virtual < 0:
+        return 0, 0, 0.0
+    previous = int(np.floor(virtual))
+    return previous, previous + 1, float(virtual - previous)
+
+
+def _lerp_like_numpy(a: Any, b: Any, t: float) -> Any:
+    """``numpy.lib._function_base_impl._lerp`` on two scalars of the array's dtype and a Python weight."""
+    diff = b - a
+    result = a + diff * t
+    if t >= 0.5:
+        result = b - diff * (1 - t)
+    return result
+
+
+def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], first: int, second: int) -> tuple[Any, Any]:
+    """The values at ascending ranks ``first`` and ``second`` (``second`` is ``first`` or ``first + 1``)
+    of everything the blocks hold, without holding it: passes over the blocks narrow a value interval
+    by histogram until the rank's bin holds few enough values to collect, or a single value.
+    """
+    count = 0
+    low = high = None
+    for block in blocks():
+        flat = block.reshape(-1)
+        if flat.size == 0:
+            continue
+        count += int(flat.size)
+        block_low, block_high = flat.min(), flat.max()
+        low = block_low if low is None or block_low < low else low
+        high = block_high if high is None or block_high > high else high
+    if count == 0:
+        raise ValueError("quantile of an empty volume")
+    assert low is not None and high is not None  # nosec B101 - count > 0
+    below = 0  # values strictly under the interval, all levels folded
+    inside_count = count  # values in the interval
+    min_above: Any = None  # the smallest value strictly over the interval
+    while True:
+        if low == high:
+            value = low
+            if second == first or first - below + 1 < inside_count:
+                return value, value
+            return value, min_above if min_above is not None else value
+        span = float(high) - float(low)
+        histogram = np.zeros(_QUANTILE_BINS, dtype=np.int64)
+        for block in blocks():
+            flat = block.reshape(-1)
+            inside = flat[(flat >= low) & (flat <= high)].astype(np.float64)
+            if inside.size:
+                index = np.minimum(((inside - float(low)) / span * _QUANTILE_BINS).astype(np.int64), _QUANTILE_BINS - 1)
+                histogram += np.bincount(index, minlength=_QUANTILE_BINS)
+        cumulative = np.cumsum(histogram)
+        target = first - below
+        chosen = int(np.searchsorted(cumulative, target, side="right"))
+        before_bin = int(cumulative[chosen - 1]) if chosen else 0
+        in_bin = int(histogram[chosen])
+        collected: list[np.ndarray] = []
+        bin_low = bin_high = None
+        above_local: Any = None
+        for block in blocks():
+            flat = block.reshape(-1)
+            inside_mask = (flat >= low) & (flat <= high)
+            inside = flat[inside_mask]
+            if not inside.size:
+                continue
+            index = np.minimum(
+                ((inside.astype(np.float64) - float(low)) / span * _QUANTILE_BINS).astype(np.int64), _QUANTILE_BINS - 1
+            )
+            members = inside[index == chosen]
+            if members.size:
+                member_low, member_high = members.min(), members.max()
+                bin_low = member_low if bin_low is None or member_low < bin_low else bin_low
+                bin_high = member_high if bin_high is None or member_high > bin_high else bin_high
+                if in_bin <= _QUANTILE_COLLECT_CAP:
+                    collected.append(members)
+            higher = inside[index > chosen]
+            if higher.size:
+                higher_low = higher.min()
+                above_local = higher_low if above_local is None or higher_low < above_local else above_local
+        if above_local is not None and (min_above is None or above_local < min_above):
+            min_above = above_local
+        below += before_bin
+        rank_in_bin = first - below
+        if collected:
+            values = np.sort(np.concatenate(collected))
+            value = values[rank_in_bin]
+            if second == first:
+                return value, value
+            second_value = values[rank_in_bin + 1] if rank_in_bin + 1 < values.size else min_above
+            return value, second_value if second_value is not None else value
+        assert bin_low is not None and bin_high is not None  # nosec B101 - the bin holds target's rank
+        low, high, inside_count = bin_low, bin_high, in_bin
 
 
 def _update_running_statistics(
@@ -657,9 +761,12 @@ def write_landmarks(data: np.ndarray, filename: Path) -> None:
 
 
 def is_staging_entry(name: str) -> bool:
-    """Whether ``name`` is a writer's staging entry, never a case: an in-flight (or hard-kill-orphaned)
-    ``.tmp``, or the ``.replaced-<pid>`` an entry is moved to while its replacement is published."""
-    return name.endswith(".tmp") or ".replaced-" in name
+    """Whether ``name`` (a path or an h5 key) is a writer's staging entry, never a case: an in-flight (or
+    hard-kill-orphaned) temporary carrying the ``.tmp`` marker of :meth:`DataStream.temporary_suffix` or
+    :meth:`DataStream.staging_path`, or the ``.replaced-<pid>`` an entry is moved to while its replacement
+    is published."""
+    leaf = os.path.basename(name)
+    return leaf.endswith(".tmp") or ".tmp." in leaf or ".replaced-" in leaf
 
 
 class DataStream(ABC):
@@ -683,6 +790,15 @@ class DataStream(ABC):
     def temporary_suffix() -> str:
         """The per-stream unique suffix a backend appends to its temporary name."""
         return f"{os.getpid()}-{next(DataStream._sequence)}.tmp"
+
+    @staticmethod
+    def staging_path(final: str) -> str:
+        """The hidden sibling a whole-file writer stages ``final`` under until ``os.replace``: the same
+        marker as :meth:`temporary_suffix`, ahead of the extension a format-detecting writer (SimpleITK,
+        ITK) picks its IO from, behind a leading dot the readers' ``<name>.*`` glob cannot reach."""
+        directory, filename = os.path.split(final)
+        stem, _, extension = filename.partition(".")
+        return os.path.join(directory, f".{stem}.{DataStream.temporary_suffix()}.{extension}")
 
     _file: Dataset.File | None = None
     _finished: bool = False
@@ -770,7 +886,9 @@ def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attrib
             attributes.get_np_array("Direction").astype(np.float64).reshape(-1),
         ]
     )
-    file = h5py.File(path, "w")
+    # Unlocked, as every h5py open in this module: HDF5 refuses to open a file this process already
+    # holds under the other file-locking flag, and the h5 read pool holds its handles unlocked.
+    file = h5py.File(path, "w", locking=False)
     file.create_dataset(
         "TransformGroup/0/TransformType",
         data=[b"DisplacementFieldTransform_double_3_3"],
@@ -1170,7 +1288,9 @@ class Dataset:
 
         def bounded_region_reads(self, name: str) -> bool:
             del name
-            return True  # h5 is chunked: a slice reads its chunks and nothing else
+            # A hyperslab reads the bytes it covers (contiguous, what KonfAI writes) or the chunks it
+            # touches (a third-party chunked store): never the whole volume.
+            return True
 
         def file_to_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
             dataset = self._get_dataset(groups, name)
@@ -1220,9 +1340,20 @@ class Dataset:
             h5_group, name = self._resolve_group(name)
             if name in h5_group:
                 del h5_group[name]
+            self._create_entry(h5_group, name, attributes, data=data, dtype=data.dtype)
 
-            dataset = h5_group.create_dataset(name, data=data, dtype=data.dtype, chunks=None)
-            dataset.attrs.update({k: str(v) for k, v in attributes.items()})
+        @staticmethod
+        def _create_entry(h5_group: h5py.Group, key: str, attributes: Attribute, **dataset_kwargs: Any) -> h5py.Dataset:
+            """A dataset with its attributes, or nothing: an interrupt between the two must not leave an
+            attribute-less entry (or an orphaned temporary) in a file HDF5 never reclaims space from.
+            Contiguous: a full-row slab is one byte span, and a patch reads its own bytes, not a chunk."""
+            dataset = h5_group.create_dataset(key, chunks=None, **dataset_kwargs)
+            try:
+                dataset.attrs.update({k: str(v) for k, v in attributes.items()})
+            except BaseException:
+                del h5_group[key]
+                raise
+            return dataset
 
         def _resolve_group(self, name: str) -> tuple[h5py.Group, str]:
             """The (created) parent group a slash-qualified entry name writes into, and its leaf name."""
@@ -1247,8 +1378,7 @@ class Dataset:
                 return None
             h5_group, name = self._resolve_group(name)
             temporary_name = f"{name}.{DataStream.temporary_suffix()}"
-            dataset = h5_group.create_dataset(temporary_name, shape=tuple(shape), dtype=dtype, chunks=None)
-            dataset.attrs.update({k: str(v) for k, v in attributes.items()})
+            dataset = self._create_entry(h5_group, temporary_name, attributes, shape=tuple(shape), dtype=dtype)
             return _H5DataStream(dataset, name)
 
         def is_exist(self, group: str, name: str | None = None) -> bool:
@@ -1577,11 +1707,9 @@ class Dataset:
                     if v and len(v):
                         data.SetMetaData(k, v)
                 # Publish by rename, as the streaming writer does: an existence probe answers from disk,
-                # so a reader must never meet the entry while it is being written. The staging name keeps
-                # the format extension (SimpleITK picks its writer from it) and is dotted so the readers'
-                # own `<group>.*` glob cannot reach it; the pid keeps two writers of one entry apart.
+                # so a reader must never meet the entry while it is being written.
                 final = f"{self.filename}{name}.{self.file_format}"
-                staging = f"{self.filename}.{name}.{os.getpid()}.tmp.{self.file_format}"
+                staging = DataStream.staging_path(final)
                 sitk.WriteImage(data, staging)
                 os.replace(staging, final)
             elif isinstance(data, sitk.Transform):
@@ -2107,7 +2235,7 @@ class Dataset:
                 return data[slices], attributes
             spatial = shape[1:]
             row = 3 * int(np.prod(spatial[1:], dtype=np.int64))
-            with h5py.File(self._path(name), "r") as file:
+            with h5py.File(self._path(name), "r", locking=False) as file:
                 span = file["TransformGroup/0/TransformParameters"][leading[0] * row : leading[1] * row]
             block = np.moveaxis(span.reshape(leading[1] - leading[0], *spatial[1:], 3), -1, 0)
             # The span is the axis WITHOUT its step: rows start..stop were read whole, so the step
@@ -2138,7 +2266,7 @@ class Dataset:
             # Always the `.h5` name: the content is HDF5 and ITK selects its transform IO from the
             # extension, so renaming it onto a resolved existing `.tfm` would corrupt that entry.
             final = os.path.join(self.filename, f"{name}.h5")
-            staging = f"{self.filename}.{name}.{os.getpid()}.tmp.h5"
+            staging = DataStream.staging_path(final)
             if isinstance(data, sitk.Transform):
                 sitk.WriteTransform(data, staging)
             else:
@@ -2174,16 +2302,30 @@ class Dataset:
                 return None
             os.makedirs(self.filename, exist_ok=True)
             spatial = [int(extent) for extent in shape[1:]]
-            staging = f"{self.filename}.{name}.{os.getpid()}.tmp.h5"
+            # The `.h5` name, as data_to_file: HDF5 content renamed onto a resolved `.tfm` is a
+            # transform ITK reads with its text IO.
+            final = os.path.join(self.filename, f"{name}.h5")
+            staging = DataStream.staging_path(final)
             file, parameters = _create_itk_transform_file(staging, spatial, attributes)
-            return _ItkTransformDataStream(file, parameters, staging, self._path(name), [3, *spatial])
+            return _ItkTransformDataStream(file, parameters, staging, final, [3, *spatial])
+
+        def _entries(self) -> list[str]:
+            # Path.glob matches hidden files, so a writer's staging file is filtered out by name.
+            return sorted(
+                {
+                    path.stem
+                    for pattern in ("*.h5", "*.tfm")
+                    for path in Path(self.filename).glob(pattern)
+                    if not is_staging_entry(path.name)
+                }
+            )
 
         def get_names(self, group: str) -> list[str]:
             del group
-            return sorted({path.stem for pattern in ("*.h5", "*.tfm") for path in Path(self.filename).glob(pattern)})
+            return self._entries()
 
         def get_group(self) -> list[str]:
-            return sorted({path.stem for pattern in ("*.h5", "*.tfm") for path in Path(self.filename).glob(pattern)})
+            return self._entries()
 
         def is_exist(self, group: str, name: str | None = None) -> bool:
             return os.path.exists(self._path(name if name else group))
@@ -2194,7 +2336,7 @@ class Dataset:
             if not h5py.is_hdf5(self._path(name)):
                 data, attributes = self.file_to_data(group, name)
                 return [int(extent) for extent in data.shape], attributes
-            with h5py.File(self._path(name), "r") as file:
+            with h5py.File(self._path(name), "r", locking=False) as file:
                 kind = bytes(file["TransformGroup/0/TransformType"][0])
                 fixed = np.asarray(file["TransformGroup/0/TransformFixedParameters"][()], dtype=np.float64)
             if not kind.startswith(b"DisplacementFieldTransform"):
@@ -2278,6 +2420,9 @@ class Dataset:
         self.downsample_method = downsample_method
         self._names_cache: dict[str, list[str]] = {}
         self._infos_cache: dict[tuple[str, str], tuple[list[int], Attribute]] = {}
+        #: Facts a stage derived from an entry's pixels (a Crop's foreground box), keyed by
+        #: ``(group, name)``: computed once per volume, whatever the number of chains reading it.
+        self.case_facts: dict[tuple[str, str], dict[str, Any]] = {}
 
     @staticmethod
     def _normalize_path(filename: str | Path, file_format: str) -> tuple[str, bool]:
@@ -2339,6 +2484,7 @@ class Dataset:
         """
         self._names_cache.clear()
         self._infos_cache.clear()
+        self.case_facts.clear()
         if self.is_directory:
             os.makedirs(self.filename, exist_ok=True)
             s_group = group.split("/")
@@ -2457,6 +2603,47 @@ class Dataset:
         return self._resolve_entry(
             groups, name, lambda file, group, entry: file.file_to_data_slice(group, entry, slices)
         )
+
+    def iter_data_blocks(self, groups: str, name: str) -> Callable[[], Iterator[np.ndarray]]:
+        """A factory of passes over one entry, block by block along the first spatial axis, each
+        block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what a scan that must never hold the
+        volume iterates. A store that cannot serve bounded region reads (gzipped NIfTI, compressed
+        MetaImage) is read whole ONCE and kept for every pass the factory serves: decoding it once
+        per block would cost more than holding it, and holding it once is what such a store costs
+        anyway (the same policy as ``read_data_statistics``)."""
+        shape, _ = self.get_infos(groups, name)
+        if len(shape) < 2 or not self.bounded_region_reads(groups, name):
+            resident: list[np.ndarray] = []
+
+            def whole() -> Iterator[np.ndarray]:
+                if not resident:
+                    resident.append(self.read_data(groups, name)[0])
+                yield resident[0]
+
+            return whole
+        rows = _statistics_chunk_length(shape, 1)
+
+        def slabs() -> Iterator[np.ndarray]:
+            for start in range(0, int(shape[1]), rows):
+                slices = (
+                    slice(None),
+                    slice(start, min(int(shape[1]), start + rows)),
+                    *(slice(None) for _ in shape[2:]),
+                )
+                yield self.read_data_slice(groups, name, slices)[0]
+
+        return slabs
+
+    def read_data_quantile(self, groups: str, name: str, q: float) -> Any:
+        """``numpy.quantile(volume, q)`` (the default ``linear`` method, to the value) without
+        holding the volume: bounded passes over :meth:`iter_data_blocks`."""
+        blocks = self.iter_data_blocks(groups, name)
+        count = 0
+        for block in blocks():
+            count += int(block.size)
+        first, second, weight = _quantile_positions(count, float(q))
+        low, high = _order_statistics(blocks, first, second)
+        return _lerp_like_numpy(low, high, weight) if weight else low
 
     def bounded_region_reads(self, groups: str, name: str) -> bool:
         """Whether a region read of this entry decodes only the region, or the whole volume.
@@ -2601,7 +2788,7 @@ class Dataset:
             groups_set = set()
             for root_dir, _, files in os.walk(self.filename):
                 for file in files:
-                    if file.startswith("."):  # hidden: a staging write in flight, or its crashed leftover
+                    if file.startswith(".") or is_staging_entry(file):  # a staging write, or its crashed leftover
                         continue
                     path = Path(root_dir, file.split(".")[0]).relative_to(self.filename).as_posix()
                     parts = path.split("/")

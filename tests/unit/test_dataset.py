@@ -624,3 +624,80 @@ def test_an_evicted_h5_handle_goes_back_with_the_view_it_had(tmp_path: Path) -> 
         holder.join(120)
 
     assert dataset.is_dataset_exist("MASK", "P001")
+
+
+@pytest.mark.parametrize("file_format", ["mha", "h5", "nii.gz"])
+def test_read_data_quantile_is_numpys_without_holding_the_volume(
+    tmp_path: Path, image_attributes, monkeypatch: pytest.MonkeyPatch, file_format: str
+) -> None:
+    """The value, dtype and interpolation of numpy.quantile (method 'linear'), from bounded passes:
+    a heavy bin (60 % of the voxels at one value), integers, a constant volume, and the top of the
+    range all land on the same scalar. A store with bounded region reads is never read whole."""
+    if file_format == "nii.gz":
+        pytest.importorskip("SimpleITK")
+    rng = np.random.default_rng(1)
+    volumes = {
+        "f32": (rng.random((2, 40, 30, 20)) * 1000).astype(np.float32),
+        "ct": np.clip(rng.normal(0, 300, (1, 60, 50, 40)), -1024, 3000).astype(np.int16),
+        "air": np.where(rng.random((1, 60, 50, 40)) < 0.6, -1024.0, rng.random((1, 60, 50, 40)) * 100).astype(
+            np.float32
+        ),
+        "const": np.full((1, 8, 8, 8), 3.0, np.float32),
+    }
+    dataset = Dataset(tmp_path / "store", file_format)
+    for name, volume in volumes.items():
+        dataset.write("G", name, volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    if dataset.bounded_region_reads("G", "f32"):
+        monkeypatch.setattr(Dataset, "read_data", lambda *_: pytest.fail("the scan must not read the whole volume"))
+    for name, volume in volumes.items():
+        for q in (0.05, 0.5, 0.999):
+            got = dataset.read_data_quantile("G", name, q)
+            expected = np.quantile(volume, q)
+            assert got == expected and type(got) is type(expected), (name, q, got, expected)
+
+
+def test_a_transform_file_the_h5_pool_holds_stays_readable_as_a_transform(tmp_path: Path) -> None:
+    """HDF5 refuses to open a file this process already holds under the other file-locking flag. The h5
+    read pool opens unlocked and keeps its handle for the life of the process, so the itktransform reader
+    must open the same way, or a transform file once served by the h5 backend stops being a transform."""
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([1.0, 2.0, 3.0])
+    attributes["Spacing"] = np.asarray([1.0, 1.0, 2.0])
+    attributes["Direction"] = np.eye(3).reshape(-1)
+    field = np.arange(3 * 4 * 5 * 6, dtype=np.float32).reshape(3, 4, 5, 6)
+    root = tmp_path / "out"
+    Dataset(root, "itktransform").write("Transform", "P000", field, attributes)
+
+    # Read through the h5 backend: the pooled handle stays open on the file, unlocked.
+    fixed, _ = Dataset(root / "P000" / "Transform", "h5").read_data("TransformGroup/0", "TransformFixedParameters")
+    assert fixed.shape == (18,)
+
+    transforms = Dataset(root, "itktransform")
+    shape, read_attributes = transforms.get_infos("Transform", "P000")
+    assert shape == [3, 4, 5, 6]
+    np.testing.assert_array_equal(read_attributes.get_np_array("Origin"), [1.0, 2.0, 3.0])
+    region, _ = transforms.read_data_slice("Transform", "P000", (slice(0, 3), slice(1, 3), slice(0, 5), slice(0, 6)))
+    np.testing.assert_array_equal(region, field[:, 1:3])
+
+
+def test_a_streamed_transform_entry_replaces_a_tfm_under_the_h5_name(tmp_path: Path) -> None:
+    """ITK picks a transform's IO from its extension, so HDF5 content must land under `.h5`, never be
+    renamed onto an existing `.tfm` of the same entry (which is what resolving the final path would do)."""
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([0.0, 0.0, 0.0])
+    attributes["Spacing"] = np.asarray([1.0, 1.0, 1.0])
+    attributes["Direction"] = np.eye(3).reshape(-1)
+    root = tmp_path / "out"
+    (root / "P000").mkdir(parents=True)
+    sitk.WriteTransform(sitk.TranslationTransform(3, (1.0, 2.0, 3.0)), str(root / "P000" / "Transform.tfm"))
+
+    field = np.ones((3, 4, 5, 6), dtype=np.float32)
+    dataset = Dataset(root, "itktransform")
+    stream = dataset.open_data_stream("Transform", "P000", list(field.shape), field.dtype, attributes)
+    assert stream is not None
+    with stream:
+        stream.write_slice((slice(0, 3), slice(0, 4), slice(0, 5), slice(0, 6)), field)
+
+    assert (root / "P000" / "Transform.h5").exists()
+    transform = dataset.read_transform("Transform", "P000")
+    assert "DisplacementFieldTransform" in transform.GetName()

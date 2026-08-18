@@ -35,9 +35,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
-from konfai.data.patching import DatasetManager
+from konfai.data.patching import DatasetManager, save_destination
 from konfai.data.reduction import Reduction
-from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Transform, stat_seed_valid
+from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import (
     Attribute,
@@ -82,11 +82,36 @@ class ReductionPlan:
     #: charging the members at the output's width over-states the peak by the cohort's size.
     source_channels: int = 0
     working_multiple: float = 0.0
+    #: Members read from a store that cannot serve a bounded region read (a gzipped NIfTI, a
+    #: compressed MetaImage, NRRD), by name, with the store's format: every region asked of such a
+    #: member decodes its whole volume, so the fold reads it once per region rather than once.
+    unbounded: dict[str, str] = field(default_factory=dict)
     refusal: str | None = None
 
     @property
     def streams(self) -> bool:
         return self.refusal is None
+
+    @property
+    def regions(self) -> int:
+        """Output regions the fold walks: slabs of ``slab_rows`` along the first spatial axis."""
+        return max(1, -(-int(self.spatial[0]) // max(1, self.slab_rows)))
+
+    @property
+    def passes(self) -> int:
+        """Traversals of the cohort: one, or two when a statistic of the result is seeded first."""
+        return 2 if self.stat_pass else 1
+
+    @property
+    def read_factor(self) -> float:
+        """How many times a member's source is read in full, priced from the plan alone.
+
+        A store serving bounded region reads is read once per pass. One that cannot decodes the
+        whole volume behind every region asked of it: once per region and per pass, so a budget
+        that lowers ``slab_rows`` raises the count. The figure of the worst member, which the run is
+        paced by; ``unbounded`` names the members it applies to.
+        """
+        return float(self.passes * (self.regions if self.unbounded else 1))
 
     @property
     def buffered_regions(self) -> int:
@@ -133,6 +158,17 @@ class ReductionPlan:
         )
         if self.stat_pass:
             lines.append("    two passes: the first seeds the whole-volume statistics the chain asks of the RESULT")
+        if self.unbounded and self.read_factor > 1:
+            formats = ", ".join(sorted(set(self.unbounded.values())))
+            per = "one per region and per pass" if self.stat_pass else "one per region"
+            lines.append(
+                f"    reads: {len(self.unbounded)} of {len(self.cases)} member(s) sit on {formats}, which decodes"
+                f" the whole volume behind every region read: {self.read_factor:g} decodes per member ({per}),"
+                f" {self.read_factor * len(self.unbounded):g} in all"
+            )
+            lines.append(
+                "    put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first"
+            )
         lines.append(f"    cases: {', '.join(self.cases)}")
         return "\n".join(lines)
 
@@ -382,6 +418,28 @@ class CaseReduction:
                 return f"case '{manager.name}': {case_refusal}"
         return None
 
+    @staticmethod
+    def _member_source(manager: DatasetManager) -> tuple[Dataset, str, str]:
+        """The store a member's regions are read from: its own, or its last ``Save``'s cache."""
+        saves = [stage for stage in manager.transforms if isinstance(stage, Save)]
+        if not saves:
+            return manager.dataset, manager.group_src, manager.name
+        dataset, group = save_destination(saves[-1], manager.dataset, manager.group_dest)
+        return dataset, group, manager.name
+
+    def _unbounded_members(self) -> dict[str, str]:
+        """The members whose region reads decode their whole volume, with their store's format.
+
+        Only an entry on disk is asked: a cache the run has still to write is swept onto a store
+        that serves region writes, and every such store serves bounded region reads.
+        """
+        unbounded: dict[str, str] = {}
+        for manager in self.managers:
+            dataset, group, entry = self._member_source(manager)
+            if dataset.is_dataset_exist(group, entry) and not dataset.bounded_region_reads(group, entry):
+                unbounded[manager.name] = dataset.file_format
+        return unbounded
+
     def _needs_stat_pass(self) -> bool:
         """Whether a stage after the reduction wants whole-volume statistics OF THE RESULT.
 
@@ -406,6 +464,7 @@ class CaseReduction:
             incremental=self.operator.incremental,
             working_multiple=float(self.operator.working_multiple),
             stat_pass=self._needs_stat_pass(),
+            unbounded=self._unbounded_members(),
             refusal=self._first_refusal(),
         )
 
