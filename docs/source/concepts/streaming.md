@@ -244,6 +244,14 @@ axis-aligned change of density is bit-identical; only a map that does not
 factorise, a rotation or a stored field, goes through the fused blend, where
 streamed and whole agree to about 1e-5 of the data's range.
 
+The same holds across slab heights. A `TRANSFORM` sweep cuts a case into slabs
+whose height follows the memory budget, so it depends on the machine (64 rows
+without a budget, fewer under a tight or `auto` one). A pointwise, halo,
+orientation or crop chain and an axis-aligned `Resample` write the same bytes at
+8 rows as at 64; only the non-separable linear resample above can differ, and by
+that same 1e-5. An OME-Zarr store's chunk layout does follow the slab, so the
+values are portable and the layout is not: see {doc}`../config_guide/transform`.
+
 ## Next steps
 
 - {doc}`../usage/large-images` to tune it: OME-Zarr chunks, patch size, workers.

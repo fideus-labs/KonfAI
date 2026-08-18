@@ -176,7 +176,7 @@ KonfAI
          <a class="kf-nextcard kf-h-amber" href="usage/making-data.html">
            <span class="intent">Make</span>
            <h3>Build a dataset</h3>
-           <p>No model at all: resample a cohort onto one grid, fold it into a template,
+           <p>Dataset preparation: resample a cohort onto one grid, fold it into a template,
               draw augmented copies, or write a field another tool can open.</p>
            <span class="go">Making datasets &rarr;</span>
          </a>

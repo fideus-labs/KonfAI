@@ -38,6 +38,18 @@ export type LiveStatus = {
   at: number;
 };
 
+// One chain of a transform run: its terminal `Write:` destination, as the run recorded it in outputs.json.
+// `path` is the dataset session-relative when it lives inside the session (browsable like any other path),
+// else the recorded path.
+export type RunOutput = {
+  group_src: string;
+  group_dest: string;
+  dataset: string;
+  group: string;
+  format: string;
+  path: string;
+};
+
 // One run of the experiment (a runtime-log directory: a training MR2CT_01, a prediction, an evaluation…).
 // Runs of every kind accumulate and persist: launching a prediction never clears the training runs.
 // Metrics accumulate into one continuous series per (label, metric) so a curve spans the whole run.
@@ -47,6 +59,7 @@ export type RunFeed = {
   kind: string;
   base: string; // run dir relative to the session root: "Statistics/<run>" or "<app_output>-<hash>/…/<run>"
   data: string; // where the run's DATA is, when that is not its run dir (a transform writes elsewhere); "" otherwise
+  outputs: RunOutput[]; // a transform's chains, one destination each (`data` is the first); [] for every other kind
   status: string;
   startedAt: number;
   series: Record<string, Series>; // keyed `${label}/${metric}`
@@ -133,6 +146,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
             kind: k,
             base: "",
             data: "",
+            outputs: [],
             status: "running",
             startedAt: Date.now(),
             series: {},
@@ -201,6 +215,7 @@ export function useJobStream(session: string, runNonce: number): JobStream {
             status: ev.status || r.status,
             base: ev.base || r.base,
             data: ev.data || r.data,
+            outputs: Array.isArray(ev.outputs) && ev.outputs.length > 0 ? ev.outputs : r.outputs,
           }));
         } else if (ev.type === "idle") {
           setStatus("");

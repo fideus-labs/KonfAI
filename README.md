@@ -168,7 +168,7 @@ KonfAI is command-driven; each CLI state maps to one YAML file:
 | `konfai TRAIN` / `RESUME` | `Config.yml` (`Trainer:`) | fit a model |
 | `konfai PREDICTION` | `Prediction.yml` (`Predictor:`) | patch/TTA/ensemble inference → datasets |
 | `konfai EVALUATION` | `Evaluation.yml` (`Evaluator:`) | metrics on saved predictions |
-| `konfai TRANSFORM` | `Transform.yml` (`Transformer:`) | no model: a transform chain → datasets (1→1, N→1, 1→N) |
+| `konfai TRANSFORM` | `Transform.yml` (`Transformer:`) | dataset preparation: a transform chain → datasets (1→1, N→1, 1→N) |
 
 Full CLI reference (flags, `konfai-cluster`, `konfai-apps`):
 [docs/reference/cli](https://konfai.readthedocs.io/en/latest/reference/cli.html).

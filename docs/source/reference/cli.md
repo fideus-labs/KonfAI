@@ -28,7 +28,7 @@ Use `konfai` when you are still designing a workflow directly from YAML.
 | `RESUME` | Resume training from a checkpoint. |
 | `PREDICTION` | Run inference using one or more checkpoints. |
 | `EVALUATION` | Compute metrics on saved outputs. |
-| `TRANSFORM` | Apply a transform chain to a dataset: no model. |
+| `TRANSFORM` | Prepare a dataset: apply a transform chain and write the result. |
 
 ### Common options
 
@@ -90,6 +90,8 @@ defaults. See {doc}`../concepts/configuration`.
 - `--plan`: print the per-case streaming plan and exit. The plan probes each
   destination with a real region-write open (created, then removed), so its
   verdict is the run's own, and even plan mode touches the output directories.
+  It also reads the config the way a run does, which resolves the defaults back
+  into `Transform.yml`; copy the file first to keep the text you wrote.
 - `--transforms-dir` / `--transforms_dir` (default `./Transforms/`): run logs;
   the outputs go where each `Write:` says. `--plan` prints and writes nothing
   there.
