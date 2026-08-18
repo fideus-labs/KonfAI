@@ -252,7 +252,7 @@ class Config:
         target = Path(self.filename)
         tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
         try:
-            with open(tmp, "w") as yml:
+            with open(tmp, "w", encoding="utf-8") as yml:
                 yaml.dump(merged, yml)
             try:
                 os.replace(tmp, target)
@@ -261,7 +261,7 @@ class Config:
                 # scanner or indexer touching the fresh temp file). Fall back to an in-place rewrite:
                 # POSIX (the DDP path) keeps the atomic guarantee, and Windows keeps its non-atomic
                 # behaviour instead of failing outright.
-                with open(target, "w") as yml:
+                with open(target, "w", encoding="utf-8") as yml:
                     yaml.dump(merged, yml)
         finally:
             if tmp.exists():
