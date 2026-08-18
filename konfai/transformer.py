@@ -482,7 +482,7 @@ class Transformer(DistributedObject):
         This is what makes the plan the run's own verdict: ``can_stream_data`` is a capability
         check, but the refusals that matter (rank, dtype, geometry) live in ``open_data_stream``,
         which the engine only reaches at the first computed slab. The probe pays one entry creation
-        per destination (removed immediately), so ``--plan`` touches the output directories.
+        per destination and takes it back (with the store, when the probe created it).
         """
         manager = engine.manager
 
@@ -1262,8 +1262,8 @@ def plan_transform(
     """CLI ``--plan``: build, plan, print, and stop. Same flags and world size as :func:`transform`,
     so the plan shards the way the run will; the plan is the requested output, printed whatever
     ``quiet`` says; nothing is written under ``transforms_dir``. The write probe opens then removes
-    one entry per destination (and takes back a store it created), so plan mode touches the output
-    directories.
+    one entry per destination and takes back a store it created, so plan mode leaves no output
+    behind.
     """
     del quiet
     workflow = build_transform(transform_file=transform_file, transforms_dir=transforms_dir)
