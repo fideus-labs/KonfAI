@@ -497,7 +497,7 @@ def test_a_stage_is_asked_about_its_own_input_not_the_case_as_stored(tmp_path: P
     _write_source(tmp_path)
     _write_config(tmp_path, _RESAMPLED_THEN_REFERENCED.format(out=tmp_path / "out"))
     workflow = _build(tmp_path)
-    manager = workflow._managers()["CT_out"][0]
+    manager = workflow.dataset.managers["CT_out"][0]
     stored = [int(extent) for extent in manager.base_shape[1:]]
     reference = manager.transforms[1]
 
@@ -787,7 +787,7 @@ def test_the_run_seed_reaches_the_draws_through_the_real_config(tmp_path: Path) 
     _write_expand_config(tmp_path, _EXPAND_CHAIN.format(out=tmp_path / "out"))
     workflow = _build(tmp_path)
 
-    manager = workflow.dataset._prepared_data["CT_out"][0]
+    manager = workflow.dataset.managers["CT_out"][0]
     assert manager._expand is not None
     assert manager._expand.draw_seed == 7  # _EXPAND_HEADER declares manual_seed: 7
 
@@ -1248,14 +1248,14 @@ def test_a_bare_name_past_the_marker_is_the_draw(tmp_path: Path) -> None:
         "              Flip:\n                dims: '0'\n"
         f"              Write:\n                dataset: {tmp_path / 'out'}:h5\n",
     )
-    assert isinstance(next(iter(_build(tmp_path)._managers().values()))[0].transforms[0], FlipTransform)
+    assert isinstance(next(iter(_build(tmp_path).dataset.managers.values()))[0].transforms[0], FlipTransform)
     _write_config(
         tmp_path,
         "              Expand:\n                nb: 2\n"
         "              Flip:\n                f_prob: [1.0, 0.0, 0.0]\n"
         f"              Write:\n                dataset: {tmp_path / 'out2'}:h5\n",
     )
-    assert isinstance(next(iter(_build(tmp_path)._managers().values()))[0].transforms[1], FlipDraw)
+    assert isinstance(next(iter(_build(tmp_path).dataset.managers.values()))[0].transforms[1], FlipDraw)
 
 
 def test_the_shards_balance_bytes_not_counts(tmp_path: Path) -> None:
@@ -1468,7 +1468,7 @@ def test_the_plan_names_the_regime_the_resumed_copies_take(tmp_path: Path, monke
     _write_expand_config(tmp_path, _EXPAND_CHAIN.format(out=tmp_path / "out").replace("nb: 3", "nb: 4"))
     workflow = _build(tmp_path)
     workflow.setup(1)
-    engines = {manager.name: CaseMaterializer(manager) for manager in workflow._managers()["CT_out"]}
+    engines = {manager.name: CaseMaterializer(manager) for manager in workflow.dataset.managers["CT_out"]}
     assert set(engines["CASE_000"].materialize_copies([1, 2]).values()) == {(Verdict.STREAM, Regime.SHARED)}
     assert set(engines["CASE_001"].materialize_copies([1, 2, 3]).values()) == {(Verdict.STREAM, Regime.SHARED)}
 

@@ -136,7 +136,7 @@ The `dataset_filenames` field accepts strings in the form:
 - `path:format`
 - `path:flag:format`
 
-This behavior is implemented in `konfai.data.data_manager.Data._resolve_dataset_sources()`,
+This behavior is implemented in `konfai.data.data_manager.DataSources._resolve_dataset_sources()`,
 which delegates the parsing to `konfai.utils.utils.split_path_spec()`.
 
 The most important conventions are:

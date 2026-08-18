@@ -217,10 +217,10 @@ def _make_train(memory_budget: str | float | None) -> DataTrain:
     """A DataTrain with an injected, header-free prepared dataset (no disk, no config file)."""
     data = DataTrain(augmentations=None, memory_budget=memory_budget)
     managers = {group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE)) for _ in _CASES] for group in ("CT", "SEG")}
-    data._prepared_data = managers  # type: ignore[assignment]
-    data._prepared_validation_data = {}
-    data._prepared_train_names = list(_CASES)
-    data._prepared_validation_names = []
+    data._managers = managers  # type: ignore[assignment]
+    data._validation_managers = {}
+    data.case_names = list(_CASES)
+    data._validation_names = []
     return data
 
 
@@ -240,10 +240,10 @@ def test_estimate_counts_one_copy_per_augmentation_draw() -> None:
         validation=None,
     )
     managers = {group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE)) for _ in _CASES] for group in ("CT", "SEG")}
-    data._prepared_data = managers  # type: ignore[assignment]
-    data._prepared_validation_data = {}
-    data._prepared_train_names = list(_CASES)
-    data._prepared_validation_names = []
+    data._managers = managers  # type: ignore[assignment]
+    data._validation_managers = {}
+    data.case_names = list(_CASES)
+    data._validation_names = []
 
     # 1 base copy + 4 draws.
     assert data._estimate_cached_bytes() == 5 * _DATASET_BYTES
@@ -288,10 +288,10 @@ def test_one_pass_workflows_never_cache_whatever_the_budget() -> None:
         DataPrediction(augmentations=None, memory_budget=f"{_DATASET_BYTES * 100}b"),
         DataMetric(memory_budget=f"{_DATASET_BYTES * 100}b"),
     ):
-        data._prepared_data = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2])]}  # type: ignore[assignment]
-        data._prepared_validation_data = {}
-        data._prepared_train_names = ["case_a"]
-        data._prepared_validation_names = []
+        data._managers = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2])]}  # type: ignore[assignment]
+        data._validation_managers = {}
+        data.case_names = ["case_a"]
+        data._validation_names = []
         data._resolve_cache_regime(world_size=1)
         assert data.use_cache is False, type(data).__name__
 

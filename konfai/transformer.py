@@ -332,12 +332,6 @@ class Transformer(DistributedObject):
         self._reductions: dict[str, CaseReduction | None] = {}
         self._planned: dict[tuple[str, str], Verdict] = {}
 
-    def _managers(self) -> dict[str, list[DatasetManager]]:
-        prepared = self.dataset._prepared_data
-        if prepared is None:
-            raise TransformerError("The dataset was not prepared before planning.")
-        return prepared
-
     def _group_src_of(self, group_dest: str) -> str:
         for group_src in self.dataset.groups_src:
             if group_dest in self.dataset.groups_src[group_src]:
@@ -410,7 +404,7 @@ class Transformer(DistributedObject):
         if self._items is not None:
             return self._items
         items: list[WorkItem] = []
-        for group_dest, managers in self._managers().items():
+        for group_dest, managers in self.dataset.managers.items():
             if not managers:
                 continue
             group_src = self._group_src_of(group_dest)
@@ -537,7 +531,7 @@ class Transformer(DistributedObject):
         finds it without parsing the plan or re-reading the config.
         """
         destinations: list[dict[str, str]] = []
-        for group_dest, managers in self._managers().items():
+        for group_dest, managers in self.dataset.managers.items():
             if not managers:
                 continue
             destination, group = self._terminal_destination(managers[0])
@@ -703,7 +697,7 @@ class Transformer(DistributedObject):
             if item.kind == "case" and planned[0].verdict is Verdict.STREAM and item.engine.sub_cap_sweep():
                 sub_cap_sweeps = True
         dropped: dict[str, int] = {}
-        kept = set(self.dataset._prepared_train_names)
+        kept = set(self.dataset.case_names)
         for group_src in self.dataset.groups_src:
             available: set[str] = set()
             for dataset in self.dataset.datasets.values():
@@ -735,7 +729,7 @@ class Transformer(DistributedObject):
         """The notes the plan prints beside its lines: the workflow's own, then what the stages ask
         (``Transform.plan_note``), in chain order, each distinct one once."""
         notes: list[str] = [self._SUB_CAP_NOTE] if sub_cap_sweeps else []
-        for group_dest, managers in self._managers().items():
+        for group_dest, managers in self.dataset.managers.items():
             for manager in managers:
                 for note in CaseMaterializer(manager).plan_notes(group_dest):
                     if note not in notes:
@@ -780,7 +774,7 @@ class Transformer(DistributedObject):
         """Multi-rank runs refuse a single-file Save destination before anything is written."""
         if world_size <= 1:
             return
-        for managers in self._managers().values():
+        for managers in self.dataset.managers.values():
             for transform in managers[0].transforms if managers else []:
                 if not isinstance(transform, Save):
                     continue
@@ -835,7 +829,7 @@ class Transformer(DistributedObject):
             )
         if plan.refused_entries:
             first = plan.refused_entries[0]
-            reduction = self._reduction(first.group_dest, self._managers().get(first.group_dest, []))
+            reduction = self._reduction(first.group_dest, self.dataset.managers.get(first.group_dest, []))
             # A grid disagreement gets its own remedy: a Save changes nothing about the grids, so
             # the generic advice would send the reader in a circle.
             remedy = (
