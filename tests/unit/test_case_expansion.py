@@ -377,7 +377,7 @@ def test_a_region_draw_takes_its_own_pass_and_the_plan_names_the_draw(tmp_path: 
     assert out.is_dataset_exist("CT", "CASE_000_r01") and out.is_dataset_exist("CT", "CASE_000_r02")
 
 
-def test_a_solo_copy_sweeps_on_the_requested_device(tmp_path: Path, monkeypatch) -> None:
+def test_a_solo_copy_sweeps_on_the_requested_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A copy that sweeps its own pass runs where the shared pass runs: the copies engine must
     hand its device down, or solo copies silently fall back to CPU."""
     source = _source(tmp_path)
