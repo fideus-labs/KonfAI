@@ -28,10 +28,22 @@ reason live on the manager, because a streamed read of a pending ``Save`` sweeps
 """
 
 import contextlib
+import sys
 import warnings
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from enum import StrEnum
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:  # Python 3.10 has no StrEnum: the same contract, a str whose text is its value
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        def __str__(self) -> str:
+            return str(self.value)
+
+        __format__ = str.__format__
+
 
 import numpy as np
 import torch
