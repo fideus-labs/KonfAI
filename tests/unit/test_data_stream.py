@@ -458,7 +458,6 @@ def test_publishing_an_entry_retires_dead_writers_debris_and_keeps_live_ones(tmp
     """Every writer stages under a pid-marked name and publishes by rename, so a hard kill leaves a
     staging file or store the readers skip -- and, until now, nothing ever removed. Publishing the
     entry sweeps the debris of writers that no longer run; a live writer's staging stays."""
-    import os
     import subprocess
     import sys
 
@@ -466,15 +465,13 @@ def test_publishing_an_entry_retires_dead_writers_debris_and_keeps_live_ones(tmp
 
     final = tmp_path / "CT.ome.zarr"
     final.mkdir()
+    import psutil
+
     dead = 1
-    while True:  # a pid nobody holds
+    while True:  # a pid nobody holds (psutil: portable where os.kill(pid, 0) is not)
         dead += 7919
-        try:
-            os.kill(dead, 0)
-        except ProcessLookupError:
+        if not psutil.pid_exists(dead):
             break
-        except PermissionError:
-            continue
     live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         (tmp_path / f"CT.ome.zarr.{dead}-3.tmp").mkdir()

@@ -843,15 +843,13 @@ _STAGING_PID = re.compile(r"\.(?:(?P<pid>\d+)(?:-\d+)?\.(?:tmp|replaced)|replace
 
 
 def _writer_is_dead(pid: int) -> bool:
+    """Whether the writer that staged under ``pid`` no longer runs. ``psutil`` rather than
+    ``os.kill(pid, 0)``: on Windows a missing pid raises a generic OSError, not ProcessLookupError."""
     if pid == os.getpid():
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        pass  # alive, someone else's
-    return False
+    import psutil
+
+    return not psutil.pid_exists(pid)
 
 
 def _retire_dead_debris(final: Path) -> None:
