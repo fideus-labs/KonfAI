@@ -140,16 +140,22 @@ def get_memory() -> float:
 # OOM-killed. The cgroup ceiling is read directly instead: the process's own cgroup (from
 # /proc/self/cgroup, since only ``docker run`` puts it at the mount root) and every ancestor up to the
 # mount, the tightest one winning. cgroup v2 exposes ``memory.max`` (the literal ``"max"`` means
-# unbounded) and ``memory.current``; cgroup v1 exposes ``memory.limit_in_bytes`` with a page-aligned
-# near INT64_MAX sentinel and ``memory.usage_in_bytes``. Only Linux has these files.
+# unbounded); cgroup v1 exposes ``memory.limit_in_bytes`` with a page-aligned near INT64_MAX sentinel.
+# What the cgroup already holds is read from ``memory.stat`` and counts only the unreclaimable part
+# (``anon`` + ``kernel`` in v2, ``rss`` in v1): ``memory.current``/``usage_in_bytes`` include the page
+# cache, which the kernel drops under pressure, so a step that has streamed a cohort would otherwise
+# look full. Only Linux has these files.
 _CGROUP_ROOT = "/sys/fs/cgroup"
 _PROC_SELF_CGROUP = "/proc/self/cgroup"
 _CGROUP_UNLIMITED = 1 << 62  # any v1 limit at or above this is the "no limit" sentinel
+_CGROUP_V2_HELD_KEYS: tuple[str, ...] = ("anon", "kernel")
+_CGROUP_V1_HELD_KEYS: tuple[str, ...] = ("rss",)
 
 
-def _cgroup_paths() -> list[tuple[Path, str, str]]:
-    """The (directory, limit file, usage file) of this process's memory cgroup and its ancestors,
-    innermost first: v2 (``0::/path``) or v1 (``N:memory:/path``); empty when there is no cgroup."""
+def _cgroup_paths() -> list[tuple[Path, str, tuple[str, ...]]]:
+    """The (directory, limit file, held-memory keys of ``memory.stat``) of this process's memory cgroup
+    and its ancestors, innermost first: v2 (``0::/path``) or v1 (``N:memory:/path``); empty when there
+    is no cgroup."""
     try:
         lines = Path(_PROC_SELF_CGROUP).read_text().splitlines()
     except OSError:
@@ -161,28 +167,45 @@ def _cgroup_paths() -> list[tuple[Path, str, str]]:
             continue
         hierarchy, controllers, path = parts
         if hierarchy == "0" and controllers == "":
-            base, files = root, ("memory.max", "memory.current")
+            base, limit_name, held_keys = root, "memory.max", _CGROUP_V2_HELD_KEYS
         elif "memory" in controllers.split(","):
-            base, files = root / "memory", ("memory.limit_in_bytes", "memory.usage_in_bytes")
+            base, limit_name, held_keys = root / "memory", "memory.limit_in_bytes", _CGROUP_V1_HELD_KEYS
         else:
             continue
         leaf = base / path.lstrip("/")
         chain = [leaf, *leaf.parents]
-        return [(directory, *files) for directory in chain if directory == base or base in directory.parents]
+        return [(d, limit_name, held_keys) for d in chain if d == base or base in d.parents]
     return []
 
 
+def _held_memory_bytes(directory: Path, keys: tuple[str, ...]) -> int | None:
+    """The sum of KEYS in DIRECTORY's ``memory.stat``, or ``None`` when the file is missing or lacks them."""
+    try:
+        lines = (directory / "memory.stat").read_text().splitlines()
+    except OSError:
+        return None
+    values: dict[str, int] = {}
+    for line in lines:
+        key, _, raw = line.partition(" ")
+        with suppress(ValueError):
+            values[key] = int(raw)
+    if any(key not in values for key in keys):
+        return None
+    return sum(values[key] for key in keys)
+
+
 def _read_cgroup_memory_limit() -> tuple[int, int] | None:
-    """``(ceiling, current usage)`` in bytes for this process's cgroup, or ``None`` when unbounded or absent.
+    """``(ceiling, held bytes)`` for this process's cgroup, or ``None`` when unbounded or absent.
 
     The ceiling is the tightest ``memory.max``/``limit_in_bytes`` on the path from the process's own
-    cgroup to the mount root; the usage is the innermost cgroup's, so a SLURM step already holding
-    memory does not count it as free. A missing hierarchy (non-Linux, cgroups disabled), the ``"max"``
-    keyword, the v1 sentinel and unparseable values all mean "no bound at this level".
+    cgroup to the mount root; the held bytes are the innermost cgroup's unreclaimable memory, so a
+    SLURM step already holding memory does not count it as free. A missing hierarchy (non-Linux,
+    cgroups disabled), the ``"max"`` keyword, the v1 sentinel and unparseable values all mean "no
+    bound at this level".
     """
     limits: list[int] = []
-    usage: int | None = None
-    for directory, limit_name, usage_name in _cgroup_paths():
+    held: int | None = None
+    for directory, limit_name, held_keys in _cgroup_paths():
         try:
             raw = (directory / limit_name).read_text().strip()
         except OSError:
@@ -192,28 +215,34 @@ def _read_cgroup_memory_limit() -> tuple[int, int] | None:
                 limit = int(raw)
                 if limit < _CGROUP_UNLIMITED:
                     limits.append(limit)
-        if usage is None:
-            with suppress(OSError, ValueError):
-                usage = int((directory / usage_name).read_text().strip())
+        if held is None:
+            held = _held_memory_bytes(directory, held_keys)
     if not limits:
         return None
-    return min(limits), usage or 0
+    return min(limits), held or 0
 
 
 def _slurm_memory_grant() -> int | None:
     """The bytes SLURM granted this step (``--mem`` / ``--mem-per-cpu``, in MB), or ``None`` outside a job.
-    Read as well as the cgroup: on a cluster whose slurmd does not enforce cgroups, the env is the bound."""
-    per_node = os.environ.get("SLURM_MEM_PER_NODE")
-    per_cpu = os.environ.get("SLURM_MEM_PER_CPU")
-    cpus = os.environ.get("SLURM_CPUS_PER_TASK") or os.environ.get("SLURM_CPUS_ON_NODE")
+    Read as well as the cgroup: on a cluster whose slurmd does not enforce cgroups, the env is the bound.
+    ``--mem=0`` means the whole node, not zero: a zero grant is no bound."""
+    per_node = _positive_int_env("SLURM_MEM_PER_NODE")
+    if per_node is not None:
+        return per_node * 2**20
+    per_cpu = _positive_int_env("SLURM_MEM_PER_CPU")
+    cpus = _positive_int_env("SLURM_CPUS_PER_TASK") or _positive_int_env("SLURM_CPUS_ON_NODE")
+    if per_cpu is not None and cpus is not None:
+        return per_cpu * cpus * 2**20
+    return None
+
+
+def _positive_int_env(name: str) -> int | None:
+    """The environment variable NAME as a positive int; ``None`` when unset, zero or not a number."""
     try:
-        if per_node:
-            return int(per_node) * 2**20
-        if per_cpu and cpus:
-            return int(per_cpu) * int(cpus) * 2**20
+        value = int(os.environ.get(name, ""))
     except ValueError:
         return None
-    return None
+    return value if value > 0 else None
 
 
 def available_memory_bytes() -> tuple[int, str]:
@@ -227,8 +256,8 @@ def available_memory_bytes() -> tuple[int, str]:
     candidates = [(int(psutil.virtual_memory().available), "host available RAM")]
     cgroup = _read_cgroup_memory_limit()
     if cgroup is not None:
-        limit, usage = cgroup
-        candidates.append((max(0, limit - usage), "cgroup limit"))
+        limit, held = cgroup
+        candidates.append((max(0, limit - held), "cgroup limit"))
     slurm = _slurm_memory_grant()
     if slurm is not None:
         candidates.append((slurm, "SLURM memory grant"))
@@ -985,6 +1014,9 @@ def execute_distributed_object(
     # The run seeds the process-wide RNGs and sets the cudnn flags; inline (the single-rank default)
     # that process is the caller's (a notebook, Slicer), so what it found is put back.
     previous_rng = (random.getstate(), np.random.get_state(), torch.get_rng_state())
+    # torch.manual_seed reseeds the CUDA generators too; touched only when CUDA is already up,
+    # since reading them would initialize it in a caller that never asked.
+    previous_cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
     previous_cudnn = (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic)
 
     try:
@@ -1055,6 +1087,8 @@ def execute_distributed_object(
         random.setstate(previous_rng[0])
         np.random.set_state(previous_rng[1])
         torch.set_rng_state(previous_rng[2])
+        if previous_cuda_rng is not None:
+            torch.cuda.set_rng_state_all(previous_cuda_rng)
         torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = previous_cudnn
 
 

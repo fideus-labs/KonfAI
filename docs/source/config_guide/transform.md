@@ -151,8 +151,8 @@ The verdicts, and each one is a fact about *your* run:
 
 The plan is a measurement, not a prediction: it opens a **real** region-write
 stream on each destination and removes it immediately, so the verdict it prints
-is the one the run will act on. That is why `--plan` still touches the output
-directories.
+is the one the run will act on. A store the probe had to create is removed with
+it, so `--plan` leaves no output behind.
 
 Two numbers it prints are estimates, and it says so rather than hiding it. The
 case sizes come from headers alone (`prod(shape) x 4 bytes`), and the output

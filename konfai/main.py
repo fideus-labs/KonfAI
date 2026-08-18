@@ -170,9 +170,9 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
         "--plan",
         action="store_true",
         help="Print the per-case streaming plan and exit without transforming. The plan probes each"
-        " destination with a real region-write open (created then removed), so it reports the run's"
-        " actual verdict, it touches the output directories even in plan mode. The plan is printed"
-        " even with -q.",
+        " destination with a real region-write open, so it reports the run's actual verdict, and"
+        " takes back what the probe created (the entry, and the store when it did not exist). The"
+        " plan is printed even with -q.",
     )
     _add_dir_argument(
         parser, "transforms", "Directory where run logs are written; --plan prints and writes nothing there"

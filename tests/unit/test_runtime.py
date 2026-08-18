@@ -356,6 +356,32 @@ def test_execute_puts_the_callers_rng_and_cudnn_flags_back(monkeypatch):
     assert (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic) == (True, False)
 
 
+def test_execute_puts_the_callers_cuda_rng_back(monkeypatch):
+    """torch.manual_seed reseeds every CUDA generator too; a caller with CUDA up gets its own back."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+
+    class FakeObject(rt.DistributedObject):
+        def __init__(self) -> None:
+            super().__init__("fake-seeded")
+            self.manual_seed = 123
+
+        def setup(self, world_size: int) -> None:
+            pass
+
+        def run_process(self, *args, **kwargs) -> None:  # pragma: no cover - not spawned
+            pass
+
+    torch.cuda.init()
+    torch.cuda.manual_seed_all(7)
+    expected = float(torch.rand(1, device="cuda"))
+    torch.cuda.manual_seed_all(7)
+    _run_execute(monkeypatch, FakeObject())
+    assert float(torch.rand(1, device="cuda")) == expected
+
+
 # ---------------------------------------------------------------------------
 # is_interactive_session must not crash when stdout has no isatty
 # ---------------------------------------------------------------------------
