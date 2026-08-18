@@ -25,8 +25,7 @@ import os
 import sys
 from typing import Any
 
-from konfai import cuda_visible_devices
-from konfai.utils.runtime import State
+from konfai.utils import State
 
 _cwd = os.getcwd()
 if _cwd not in sys.path:
@@ -61,7 +60,6 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         "--gpu",
         type=int,
         nargs="+",
-        choices=cuda_visible_devices(),
         default=[],
         help="GPU device ids to use, space separated: --gpu 0, or --gpu 0 1 2. If omitted runs on CPU.",
     )
@@ -155,7 +153,6 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
         "--gpu",
         type=int,
         nargs="+",
-        choices=cuda_visible_devices(),
         default=[],
         help="GPU device ids for chains that run a nested inference (KonfAIInference). "
         "Plain read transforms run on CPU regardless.",
@@ -172,9 +169,12 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Print the per-case streaming plan and exit without transforming. The plan probes each"
         " destination with a real region-write open (created then removed), so it reports the run's"
-        " actual verdict, it touches the output directories even in plan mode.",
+        " actual verdict, it touches the output directories even in plan mode. The plan is printed"
+        " even with -q.",
     )
-    _add_dir_argument(parser, "transforms", "Directory where run logs and the plan are written")
+    _add_dir_argument(
+        parser, "transforms", "Directory where run logs are written; --plan prints and writes nothing there"
+    )
 
 
 # Command -> (implementation module, entrypoint, the kwarg the config path travels under).
@@ -188,11 +188,26 @@ _COMMANDS: dict[str, tuple[str, str, str]] = {
 }
 
 
+def _check_gpu_ids(parser: argparse.ArgumentParser, gpu: list[int]) -> None:
+    """The ``--gpu`` choices, checked after parsing: resolving them imports torch, which
+    ``--help`` and a usage error must not pay for."""
+    if not gpu:
+        return
+    from konfai import cuda_visible_devices
+
+    visible = cuda_visible_devices()
+    unknown = [device for device in gpu if device not in visible]
+    if unknown:
+        choices = ", ".join(str(device) for device in visible) or "no GPU visible"
+        parser.error(f"argument --gpu: invalid choice: {unknown[0]} (choose from {choices})")
+
+
 def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
     if args["command"] not in _COMMANDS:
         # Exhaustive on purpose: a fallback would silently launch the trainer for any command it
         # does not know: a new workflow would train a UNet instead of failing.
         parser.error(f"Unknown command '{args['command']}'.")
+    _check_gpu_ids(parser, args["gpu"])
     module_name, function_name, config_key = _COMMANDS[args["command"]]
     if args["config"] is None:
         del args["config"]  # the entrypoint's own default config filename applies
@@ -202,6 +217,10 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
         # --plan must SHORT-CIRCUIT here: the distributed wrapper filters kwargs by the entrypoint's
         # signature, so a 'plan' passed through would be silently dropped and the run would proceed
         # as if the flag had never been given.
+        if "resubmit" in args:
+            parser.error("--plan is a dry run on this machine and submits nothing: use `konfai TRANSFORM --plan`.")
+        # plan_transform declares the TRANSFORM flags and nothing else; the command name is not one.
+        del args["command"]
         function_name = "plan_transform"
     entrypoint = getattr(importlib.import_module(module_name), function_name)
     entrypoint(**args)

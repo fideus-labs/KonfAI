@@ -90,20 +90,25 @@ defaults. See {doc}`../concepts/configuration`.
 - `--plan`: print the per-case streaming plan and exit. The plan probes each
   destination with a real region-write open (created, then removed), so its
   verdict is the run's own, and even plan mode touches the output directories.
-- `--transforms-dir` / `--transforms_dir` (default `./Transforms/`): run logs
-  and the plan; the outputs go where each `Write:` says.
+- `--transforms-dir` / `--transforms_dir` (default `./Transforms/`): run logs;
+  the outputs go where each `Write:` says. `--plan` prints and writes nothing
+  there.
 - `--gpu` exists for one reason: a `KonfAIInference` stage runs a nested
   inference that does use the device. Plain read transforms run on CPU either
   way. There is no `-tb`: the workflow emits no scalars.
 - `--plan` short-circuits before the distributed wrapper, so it runs in one
-  process and spawns no ranks. `--cpu` is still read: an `auto` budget is the
-  node's memory split across that many ranks, so `--plan --cpu 4` reports the
-  per-rank budget a four-process run would actually get. An explicit
-  `memory_budget` is already per rank and is not divided.
+  process and spawns no ranks. `--cpu` and `--gpu` are still read: the plan is
+  sized for the run's world size (one rank per GPU, else `--cpu` ranks), and an
+  `auto` budget is the node's memory split across that many ranks, so
+  `--plan --cpu 4` reports the per-rank budget a four-process run would actually
+  get. An explicit `memory_budget` is already per rank and is not divided. The
+  plan is the requested output, so `-q` does not silence it. `konfai-cluster`
+  refuses `--plan`: a plan submits nothing.
 
 The default is **CPU**: `--gpu` defaults to an empty list, so pass `--gpu 0` to
-use a card. Valid ids are frozen at startup from the visible CUDA devices, and an
-id that is not visible is rejected by argparse. `--cpu` must be greater than 0.
+use a card. An id that is not among the visible CUDA devices is a usage error
+(exit code 2), checked once the command is dispatched so that `--help` never
+loads torch. `--cpu` must be greater than 0.
 `--version` works on the root parser, `konfai --version`, not on a subcommand.
 
 ## `konfai-apps`
