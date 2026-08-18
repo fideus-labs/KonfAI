@@ -16,6 +16,99 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
+## v1.8.1 (2026-08-18)
+
+TRANSFORM, the dataset-preparation workflow, is the bulk of this release: the plan reads no voxel,
+more stages stream, the memory budget is right in a container and on a cluster, and one failing case
+no longer stops a run. Two things a run already wrote come out differently, see the behaviour changes.
+
+### ✨ Features
+
+- **transform**: the chain runs on the rank's device (`--gpu`), in taller slabs than on a CPU, and
+  writes the same bytes; a nested `KonfAIInference` runs there too
+- **augmentation**: free rotations, scales, noise and cutouts stream, so an `Expand` copy that draws
+  them no longer takes the whole-volume path
+- **transform**: `Mask` and `Padding` stream, on the reader's regions and on the writer's slabs alike
+- **transform**: `Transform.working_multiple` declares what a stage allocates beyond its input and
+  output (`Resample` 3, `Gradient` 8, `Dilate` 3); the plan sizes the whole-volume fallback with it
+- **reduction**: the plan prices the reads of a `Reduce` whose members sit on a store that cannot
+  serve a bounded region
+- **transform**: `outputs.json` names the path on disk beside the dataset root, and Studio shows one
+  Browse per chain of a transform run
+- **mcp**: transform runs steer GPUs, a finished job carries its `outputs`, and `read_dataset_file`
+  summarises an ITK transform HDF5
+- **apps**: batch size as a first-class fine-tune knob (`--set`, `install_fine_tune`)
+
+### 🐛 Bug Fixes
+
+- **transform**: the plan prices the route on what the chain reads: a destination that does not
+  exist yet is not a read, so h5 to mha and h5 to omezarr stream instead of loading
+- **transform**: `Crop` finds its box by a bounded quantile scan (exactly `numpy.quantile`) instead
+  of holding the volume, and the plan reads no voxel for a global statistic: the rank reads it at
+  first access, a LOAD case on the volume it holds
+- **transform**: a case's copies do not depend on its position in the run, and `Noise` draws its
+  field from the copy's own seed
+- **transform**: a failing case does not stop the rank's shard; the rank finishes, lists the failures
+  and exits non-zero (`on_fallback: error` goes through the same channel)
+- **transform**: the ranks run without a process group: no port, no rendezvous, no `scontrol`
+- **transform**: an interrupt aborts the stream and leaves no `.tmp` behind
+- **runtime**: the auto budget reads the process's own cgroup (not the mount root), subtracts the
+  memory it holds and not the page cache, honours a SLURM grant, and reads `--mem=0` as the whole node
+- **runtime**: shards are balanced by bytes, and an inline run puts the caller's RNG (CPU and CUDA)
+  and cudnn flags back
+- **dataset**: an h5 replace keeps the old entry until the new one is in place; a streamed transform
+  entry lands under the `.h5` name; an entry whose attributes fail is not left behind; one staging
+  marker for every backend's temporary; the reader's own `ITK_*` keys do not travel with the volume
+- **cli**: `--plan` takes explicit flags, shards the way the run will, and takes back the entry and
+  the store its probe created
+- **omezarr**: each scale factor shrinks the level above it, as the docs said (`[2, 2]` gives three
+  levels at 1, 1/2, 1/4)
+- **reduction**: `Median` charges the working set `torch.quantile` allocates (four buffers, measured)
+- **transform**: a bare stage name past the `Expand` marker is the draw (`Flip`, `Mask`, `Permute`,
+  `Foreign` exist as both); the qualified spelling still forces either
+- **transform**: the working set counts what the widest stage allocates; a `Save` cache the run
+  sweeps is priced as a bounded source; the plan says own pass for the last copy of a case; the
+  slab-height note names only the chains it applies to
+- **data**: a case present in two roots is read from the first, and a warning says so
+- **augmentation**: a singleton axis sits at 0 in the affine sampler, as `affine_grid` places it
+- **api**: a workflow releases its h5 read handles on return
+- **network**: a criterion is moved onto the output's device before it is called
+- **studio**: a fresh workspace tree, and a job launch brings its run forward
+- **mcp**: `Transform.yml` is exempt from the model lint
+
+### ⚡ Performance
+
+- **transform**: taller slabs when the chain runs on a GPU (500³ `Clip` 3.4 to 2.6 s)
+- **transform**: a case is planned without listing the whole output directory
+- **cli**: `import konfai` 0.9 to 0.08 s, `konfai --help` 2.9 to 0.3 s: torch, dicom and ome-zarr
+  load on first use
+
+### ♻️ Refactoring
+
+- **data**: `CaseMaterializer` (`konfai/data/materialize.py`) is the TRANSFORM engine, out of
+  `DatasetManager`; one `RegionWriter` for the three engines; one `WorkItem` for the plan, the
+  shards and the run; the report is assembled from per-block helpers
+- **utils**: the memory budget lives in `konfai.utils.budget`; `State` in `konfai.utils`, importable
+  without torch
+
+### ⚠️ Behaviour changes
+
+- **An `Expand` copy is a different volume than before.** A copy's draws are keyed by the case name,
+  not by its index in the run, and `Noise` derives its field from the voxel position and the copy's
+  seed. Same config, same seed: the copies written by this version are not the ones an earlier version
+  wrote. **An `Expand` output partly written before this version and resumed after it mixes the two
+  rules**: the cases already on disk keep the old draws, the resumed ones get the new. Run those
+  outputs once with `--overwrite`.
+- **A `Median` reduction may plan differently.** Its working set is four buffers of the fold instead
+  of two, so a cohort that streamed within a few percent of the budget may now be refused (a
+  reduction has no whole-volume path); the plan says so.
+- **A failing case does not stop the run.** The rank finishes its shard and exits non-zero with the
+  list; a caller that relied on the first failure raising mid-run reads the list instead.
+- **The auto memory budget is larger on a host that has streamed a cohort** and smaller under a
+  SLURM grant that no cgroup enforces; the plan's header names which bound won.
+- **The written geometry sidecar no longer carries `ITK_*` keys** the reader had added; a consumer
+  that read them from a KonfAI output finds them absent.
+
 ## v1.8.0 (2026-08-07)
 
 ### 💥 Breaking changes
