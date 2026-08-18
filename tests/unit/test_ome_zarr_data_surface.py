@@ -34,7 +34,7 @@ from konfai.data import (
     read_ome_zarr_data_slice,
     write_ome_zarr,
 )
-from konfai.utils.dataset import _store_chunks
+from konfai.utils.dataset import Attribute, Dataset, _store_chunks
 from konfai.utils.errors import DatasetManagerError
 
 
@@ -116,6 +116,37 @@ def test_write_ome_zarr_builds_a_pyramid_by_position(tmp_path: Path) -> None:
     # centre-of-voxel convention, so the coarse first voxel sits at the centre of the block it
     # averages. Reusing the fine origin biases every voxel and still looks like a plausible image.
     assert [round(t, 6) for t in coarse["translation"]] == [0.0, 0.5, 0.5, 1.0]
+
+
+def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path) -> None:
+    """The konfai sidecar records the geometry the writer was handed: level 0's. Read at ``@1``
+    through the Dataset, it used to win over the level's own scale and translation, and level 1
+    came back with level 0's spacing on a quarter of the voxels: a brain four times smaller, for
+    every consumer that registers on the coarse level."""
+    root = tmp_path / "cases"
+    store = root / "case_1" / "CT.ome.zarr"
+    store.parent.mkdir(parents=True)
+    attributes = Attribute()
+    attributes["Spacing"] = np.asarray([2.0, 1.0, 1.0])
+    attributes["Origin"] = np.asarray([10.0, 20.0, 30.0])
+    attributes["Direction"] = np.asarray([0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    write_ome_zarr(
+        store, _volume(), spacing=[2.0, 1.0, 1.0], origin=[10.0, 20.0, 30.0], attributes=attributes, scale_factors=[2]
+    )
+
+    _shape, fine = Dataset(str(root), "omezarr@0").get_infos("CT", "case_1")
+    _shape, coarse = Dataset(str(root), "omezarr@1").get_infos("CT", "case_1")
+    # Level 0 is the level the sidecar describes: read as recorded, Direction included.
+    np.testing.assert_array_equal(fine.get_np_array("Spacing"), [2.0, 1.0, 1.0])
+    np.testing.assert_array_equal(fine.get_np_array("Origin"), [10.0, 20.0, 30.0])
+    # Level 1 has its own scale and translation (x, y, z): the sidecar's Spacing and Origin are
+    # not this level's, so they yield to the transforms, while the Direction NGFF cannot express
+    # still comes from the sidecar.
+    np.testing.assert_allclose(coarse.get_np_array("Spacing"), [4.0, 2.0, 2.0])
+    np.testing.assert_allclose(coarse.get_np_array("Origin"), [11.0, 20.5, 30.5])
+    np.testing.assert_array_equal(coarse.get_np_array("Direction"), fine.get_np_array("Direction"))
+    # One rung per key, whichever level answered: a later write records the geometry once.
+    assert [key for key in coarse.keys() if key.startswith("Spacing")] == ["Spacing_0"]
 
 
 def test_default_downsampling_is_a_block_mean_not_a_gaussian(tmp_path: Path) -> None:

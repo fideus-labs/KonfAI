@@ -695,16 +695,37 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     scale/translation cannot express) otherwise geometry falls back to the NGFF transforms, Direction
     defaulting to identity. Shared by the Dataset OME-Zarr reader and ``ITK.read_displacement_field``
     so both recover geometry the one same way.
+
+    THE SIDECAR DESCRIBES ONE LEVEL: the one the writer was handed, and it writes the finest. Every
+    level of a pyramid carries its own scale and translation, so a sidecar taken at its word on a
+    coarser level put level 0's spacing and origin on level 1's voxels: a brain four times smaller,
+    read by anything that asks for ``@1``. The sidecar is therefore trusted for Spacing and Origin
+    only where its Spacing IS this level's scale; on any other level those two come from the level's
+    own transforms, and the sidecar still supplies what NGFF cannot: the Direction, and every other
+    key it recorded.
     """
     attributes = Attribute(metadata.get("attributes", {}))
     axes = metadata["axes"]
     scale = dict(zip(axes, metadata.get("scale", []), strict=False))
     translation = dict(zip(axes, metadata.get("translation", []), strict=False))
     spatial_axes = [axis for axis in ("x", "y", "z") if axis in axes]
+    level_spacing = np.asarray([scale.get(axis, 1.0) for axis in spatial_axes])
+    level_origin = np.asarray([translation.get(axis, 0.0) for axis in spatial_axes])
+    if "Spacing" in attributes:
+        recorded = attributes.get_np_array("Spacing")
+        if recorded.shape != level_spacing.shape or not np.allclose(recorded, level_spacing, rtol=1e-6, atol=0.0):
+            # Another level than the one the sidecar was written for: its own geometry, not the
+            # sidecar's. Popped then set, so the key keeps its place in the stack rather than
+            # gaining a rung that a later write would record twice.
+            attributes.pop("Spacing")
+            attributes["Spacing"] = level_spacing
+            if "Origin" in attributes:
+                attributes.pop("Origin")
+            attributes["Origin"] = level_origin
     if "Spacing" not in attributes:
-        attributes["Spacing"] = np.asarray([scale.get(axis, 1.0) for axis in spatial_axes])
+        attributes["Spacing"] = level_spacing
     if "Origin" not in attributes:
-        attributes["Origin"] = np.asarray([translation.get(axis, 0.0) for axis in spatial_axes])
+        attributes["Origin"] = level_origin
     if "Direction" not in attributes:
         attributes["Direction"] = np.eye(len(spatial_axes), dtype=np.float64).flatten()
     attributes["OMEAxes"] = np.asarray(axes)
