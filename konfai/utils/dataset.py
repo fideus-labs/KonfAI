@@ -2662,6 +2662,11 @@ class Dataset:
         """``numpy.quantile(volume, q)`` (the default ``linear`` method, to the value) without
         holding the volume: bounded passes over :meth:`iter_data_blocks`."""
         low, high, weight = _order_statistics(self.iter_data_blocks(groups, name), float(q))
+        if not np.issubdtype(np.asarray(low).dtype, np.inexact):
+            # numpy.quantile promotes an integer input to float64 before it interpolates: the
+            # difference of two order statistics would wrap on a narrow signed type, and an exact
+            # index would answer in the stored dtype where numpy answers in float64.
+            low, high = np.float64(low), np.float64(high)
         return _lerp_like_numpy(low, high, weight) if weight else low
 
     def bounded_region_reads(self, groups: str, name: str) -> bool:

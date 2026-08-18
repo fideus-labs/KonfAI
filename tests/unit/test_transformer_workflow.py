@@ -961,16 +961,30 @@ def test_on_fallback_error_holds_at_run_time_too(tmp_path: Path, monkeypatch: py
     assert not Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "CASE_000")
 
 
-def test_a_failing_case_does_not_stop_the_shard_and_is_listed(tmp_path: Path) -> None:
+def test_a_failing_case_does_not_stop_the_shard_and_is_listed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """One unreadable case among three: the other two are written, the rank finishes its shard, and
     it exits non-zero naming the failed case. Before, the rank died at the broken case and every
     case sorted after it was silently never written, with no summary of what failed."""
     _write_source(tmp_path, cases=3)
-    broken = tmp_path / "source" / "CASE_001" / "CT.mha"
-    broken.write_bytes(broken.read_bytes()[:-1000])  # header intact (the plan reads it), pixels truncated
     _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"))
     workflow = _build(tmp_path)
     workflow.setup(1)
+
+    # The failure is injected at the read, not filed as a truncated MetaImage: what a short file
+    # does is the reader version's business (a warning and a zero fill reads as success), and what
+    # this pins is the rank's behaviour around a case it cannot read, whatever made it unreadable.
+    def refuse(name: str, method):
+        def read(self, groups, entry, *args, **kwargs):
+            if entry == name:
+                raise OSError("simulated read failure")
+            return method(self, groups, entry, *args, **kwargs)
+
+        return read
+
+    # Both doors: the streamed read AND the whole-volume one the rank falls back to, or the case
+    # would be written by the fallback and this would test nothing.
+    monkeypatch.setattr(Dataset, "read_data_slice", refuse("CASE_001", Dataset.read_data_slice))
+    monkeypatch.setattr(Dataset, "read_data", refuse("CASE_001", Dataset.read_data))
     with pytest.raises(TransformerError, match="1 of 3 work item\\(s\\) failed") as raised, pytest.warns(UserWarning):
         workflow.run_process(1, 0, 0, [])
     assert "CASE_001" in str(raised.value)

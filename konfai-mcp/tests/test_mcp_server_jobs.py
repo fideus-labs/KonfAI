@@ -307,6 +307,43 @@ def test_a_finished_transform_job_carries_where_its_data_went(tmp_path: Path) ->
     assert "inspect_dataset" in payload["next_actions"]
 
 
+@pytest.mark.usefixtures("workspace_root")
+def test_a_client_sees_where_a_finished_transform_wrote(
+    tmp_path: Path, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    """The same manifest, over the wire. payload() can hold `outputs` and the tool still drop them
+    on the way out, and what an agent acts on is the response: so this asserts through a client.
+    """
+    server = load_mcp_server()
+    run_dir = tmp_path / "Transforms" / "PREP"
+    run_dir.mkdir(parents=True)
+    outputs = [{"group_src": "CT", "group_dest": "CT_out", "dataset": str(tmp_path / "Out"), "format": "h5"}]
+    (run_dir / "outputs.json").write_text(json.dumps(outputs), encoding="utf-8")
+    job = Job(
+        job_id="client-transform",
+        session="default",
+        kind="transform",
+        command=["echo", "ok"],
+        cwd=tmp_path,
+        log_path=tmp_path / "job.log",
+        config_path=tmp_path / "Transform.yml",
+        runtime_log_path=run_dir / "log_0.txt",
+        status="running",
+    )
+    job.proc = cast(Any, _ProcDone(0))
+    server.JOB_REGISTRY.jobs[job.job_id] = job
+
+    async def scenario() -> None:
+        async with fastmcp.Client(server.mcp) as client:
+            answered = await client.call_tool("get_job_status", {"job_id": job.job_id})
+            data = answered.structured_content
+            assert data["status"] == "done"
+            assert data["outputs"] == outputs
+            assert "inspect_dataset" in data["next_actions"]
+
+    asyncio.run(scenario())
+
+
 def test_a_running_transform_job_does_not_report_a_previous_runs_outputs(tmp_path: Path) -> None:
     # The run directory is reused across runs of one name: while the job is still running, the
     # outputs.json there is a previous run's manifest, not this job's.

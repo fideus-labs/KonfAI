@@ -110,8 +110,10 @@ Outputs are written to:
    `REDUCE`, `SKIP` or `REFUSED`: probing each destination with a real region-write open
 4. refuses **before writing a byte** when an entry's working set exceeds the
    per-rank `memory_budget`
-5. shards the cases across ranks and materializes each chain's `Write` stages,
-   skipping any case whose output already exists unless `-y`
+5. shards the work across ranks, by bytes rather than by count, and materializes
+   each chain's `Write` stages, skipping any case whose output already exists
+   unless `-y`. A work item is one case's chain, or one `Expand` case's copies,
+   or one `Reduce` cohort: the unit the plan priced
 
 Outputs are written to:
 
@@ -146,7 +148,10 @@ From the code, this layer is responsible for:
 - initializing `torch.distributed` with a local TCP port
 
 This means that even local multi-process execution uses the same distributed
-bootstrap logic.
+bootstrap logic, for the workflows that need a process group: TRAIN, PREDICTION
+and EVALUATION. TRANSFORM ranks are independent, each writing its own shard, so
+they are spawned without one: no port, no rendezvous, and a rank that fails
+takes down nothing but its own shard.
 
 ## Apps
 

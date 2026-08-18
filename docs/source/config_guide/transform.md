@@ -715,7 +715,8 @@ machine-dependent quantity, and it is worth knowing where it can and cannot
 show.
 
 - **The draws.** A case's `Expand` copies are keyed by `manual_seed`, the
-  case's name and the draw's rank in the chain: nothing else. The same case
+  case's name, and the draw's own class with its rank among the draws of that
+  class: nothing else, and in particular not its position in the chain. The same case
   gets the same copies on another machine, under `--cpu 1` or `--cpu 8`, in a
   `subset` or in the full cohort, and in a rerun that resumes. `Noise` draws
   its field's generator seed with the copy, so it holds too.

@@ -106,10 +106,11 @@ around (`Rotate`, `Flip`) cannot share it, and each copy gets its own pass.
 
 `manual_seed` in `Transform_expand.yml` is what makes an image chain and its mask
 chain draw the *same* copies. The two chains never meet: each derives its draws
-from `(seed, the case's name, which copy)`, so they agree without coordinating,
-and a case keeps its copies whatever subset of the cohort a run covers. A mask
-rotated by a different angle than its image is a silently ruined dataset, not an
-error, which is why the seed is not optional in practice.
+from `(seed, the case's name, the draw's class and its rank among the draws of
+that class)`, so they agree without coordinating, and a case keeps its copies
+whatever subset of the cohort a run covers. A mask rotated by a different angle
+than its image is a silently ruined dataset, not an error, which is why the seed
+is not optional in practice.
 
 ## Next
 

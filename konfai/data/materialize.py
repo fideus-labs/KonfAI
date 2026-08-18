@@ -423,20 +423,27 @@ class CaseMaterializer:
 
     def peak_case_bytes(self) -> int:
         """The largest single tensor the whole-volume path holds: the chain's shapes folded through
-        ``transform_shape`` (a pad or an upsample holds its largest intermediate), at
+        each stage's own map (a pad or an upsample holds its largest intermediate), at
         ``CASE_ELEMENT_BYTES`` per element. Headers only, so a floor for a stage that widens the
         dtype beyond what it declares."""
         if self._peak_case_bytes is None:
             manager = self.manager
-            spatial = [int(extent) for extent in manager.base_shape[1:]]
             channels = int(manager.base_shape[0])
             peak = int(np.prod(manager.base_shape, dtype=np.int64))
-            attributes = Attribute(manager.stored_attributes)
-            for stage in manager.transforms:
-                if not isinstance(stage, Transform):
-                    continue
-                spatial = manager._fold_case_state(stage, list(spatial), attributes)
-                peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
+
+            # Copy 0 carries no draw, copy 1 carries them all, and a draw widens the grid as readily
+            # as a transform does (the augmentation Mask pads to the mask's own extent), so both
+            # walks run from the stored state and the peak is the largest either one holds. Copy 1
+            # exists only where the chain has copies at all.
+            copies = [0]
+            if manager._expand is not None or any(group.nb for group in manager.data_augmentations_list):
+                copies.append(1)
+            for a in copies:
+                spatial = [int(extent) for extent in manager.base_shape[1:]]
+                attributes = Attribute(manager.stored_attributes)
+                for stage in manager.chain_stages(a):
+                    spatial = manager._fold_case_state(stage, list(spatial), attributes)
+                    peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
             self._peak_case_bytes = peak * CASE_ELEMENT_BYTES
         return self._peak_case_bytes
 

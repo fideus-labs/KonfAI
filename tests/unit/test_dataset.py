@@ -650,7 +650,9 @@ def test_read_data_quantile_is_numpys_without_holding_the_volume(
     if dataset.bounded_region_reads("G", "f32"):
         monkeypatch.setattr(Dataset, "read_data", lambda *_: pytest.fail("the scan must not read the whole volume"))
     for name, volume in volumes.items():
-        for q in (0.05, 0.5, 0.999):
+        # 0 and 1 land on an exact index (weight 0): the branch that returns an order statistic
+        # untouched, where numpy still answers in float64 for the int16 volume.
+        for q in (0.0, 0.05, 0.5, 0.999, 1.0):
             got = dataset.read_data_quantile("G", name, q)
             expected = np.quantile(volume, q)
             assert type(got) is type(expected), (name, q, got, expected)

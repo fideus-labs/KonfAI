@@ -1933,7 +1933,8 @@ class DataTransform(Data):
             for kind, markers in (("Expand", expands), ("Reduce", reduces)):
                 if len(markers) > 1:
                     raise TransformerError(
-                        f"'{chain}' declares {len(markers)} {kind} markers; a chain changes its cardinality at most once.",
+                        f"'{chain}' declares {len(markers)} {kind} markers; a chain changes its"
+                        " cardinality at most once.",
                         f"Keep one {kind} per chain. Successive ones compose across two"
                         " invocations, the second reading the first one's output back.",
                     )

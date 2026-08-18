@@ -1311,6 +1311,10 @@ class Mask(DataAugmentation):
         ]
         return [list(self.mask_shape) for _ in shapes]
 
+    def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
+        # The mask's own grid, the extent state_init gave the copy: the draw crops or pads to it.
+        return list(self.mask_shape)
+
     # WHOLE_VOLUME on purpose: the output grid is the mask's, and the mask volume is already resident
     # at that extent: there is no whole-volume read left for a declaration to save.
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:

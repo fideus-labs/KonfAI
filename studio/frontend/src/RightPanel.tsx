@@ -1473,6 +1473,13 @@ export default function RightPanel({
   // its config, a prediction → the first predicted image, an evaluation → its Metric_TRAIN.json. `data`
   // names the folder when it is not the run's own (a transform chain's destination); it defaults to the
   // run's first one.
+  // The workspace tree only serves paths inside the session: a chain that wrote to an absolute
+  // destination of its own is named rather than offered, because opening it would answer nothing.
+  function inWorkspace(path?: string): boolean {
+    if (!path) return true;
+    return !path.startsWith("/") && !path.startsWith("~") && !/^[A-Za-z]:/.test(path) && !path.split("/").includes("..");
+  }
+
   function browseRun(r: RunFeed, data: string = r.data) {
     // Prefer the run's real base (isolated app runs live under "<app_output>-<hash>/…"); fall back to the
     // session-root layout for an older stream that predates the base field.
@@ -1665,20 +1672,37 @@ export default function RightPanel({
                 {sel.outputs.length > 1 ? (
                   // A transform with several chains wrote to several places: one Browse per destination,
                   // named by the group it wrote. A single chain keeps the one button every kind has.
-                  sel.outputs.map((o) => (
-                    <button
-                      key={`${o.group_dest}:${o.path}`}
-                      className="tb-link"
-                      onClick={() => browseRun(sel, o.path)}
-                      title={`Open ${o.group_src || "?"} → ${o.group_dest} (${o.format || "?"}) in the Workspace tree`}
-                    >
-                      Browse {o.group_dest} ↦
-                    </button>
-                  ))
-                ) : (
+                  sel.outputs.map((o) =>
+                    inWorkspace(o.path) ? (
+                      <button
+                        key={`${o.group_dest}:${o.path}`}
+                        className="tb-link"
+                        onClick={() => browseRun(sel, o.path)}
+                        title={`Open ${o.group_src || "?"} → ${o.group_dest} (${o.format || "?"}) in the Workspace tree`}
+                      >
+                        Browse {o.group_dest} ↦
+                      </button>
+                    ) : (
+                      <span
+                        key={`${o.group_dest}:${o.path}`}
+                        className="tb-link tb-link-off"
+                        title={`${o.path}: outside the session workspace, so the tree cannot open it`}
+                      >
+                        {o.group_dest} → {o.path}
+                      </span>
+                    ),
+                  )
+                ) : inWorkspace(sel.outputs.length === 1 ? sel.outputs[0].path : sel.data) ? (
                   <button className="tb-link" onClick={() => browseRun(sel)} title={`Open ${sel.kind} outputs in the Workspace tree`}>
                     Browse files ↦
                   </button>
+                ) : (
+                  <span
+                    className="tb-link tb-link-off"
+                    title={`${sel.outputs.length === 1 ? sel.outputs[0].path : sel.data}: outside the session workspace, so the tree cannot open it`}
+                  >
+                    Wrote {sel.outputs.length === 1 ? sel.outputs[0].path : sel.data} ↦
+                  </span>
                 )}
                 <button className="tb-link" onClick={openTensorboard} title="Open the full TensorBoard for this experiment">
                   TensorBoard ↗
