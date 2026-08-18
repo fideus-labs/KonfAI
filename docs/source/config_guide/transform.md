@@ -687,12 +687,14 @@ draws are not equal:
 | Draw | Reads | Regime |
 |---|---|---|
 | `Brightness`, `Contrast`, `LumaFlip`, `HUE`, `Saturation` | its own voxel | shared read pass |
+| `Noise`, `CutOUT` | its own voxel (the field and the box are functions of the voxel's position) | shared read pass |
 | `Translate` | a halo around the slab | own pass |
 | `Flip` (not a vector field), `Permute`, `Rotate` with `is_quarter: true` | a permutation of the volume | own pass |
-| `Rotate` (free angle), `Scale`, `Noise`, `CutOUT`, `Elastix`, `Mask` | the whole volume | WHOLE-VOLUME |
+| `Rotate` (free angle), `Scale` | the source box each region maps to (a slab of a rotated volume pulls a wide band, which the plan prices) | own pass |
+| `Elastix`, `Mask`, `Foreign`, `Flip` of a vector field | the whole volume | WHOLE-VOLUME |
 
-Eight copies of a free `Rotate` are eight whole-volume passes and hold the
-copies in memory beside the case; eight copies of `Brightness` are one read.
+Eight copies of `Brightness` or `Noise` are one read; eight copies of a free
+`Rotate` are eight bounded passes, each re-reading the band its slabs pull.
 When the shared prefix is expensive (a resample, a warp), put a `Save` before
 the `Expand`: it is materialized once and every copy reads the cache.
 

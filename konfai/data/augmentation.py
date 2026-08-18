@@ -16,6 +16,7 @@
 
 """Data augmentation primitives applied by KonfAI datasets."""
 
+import itertools
 import random
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -32,7 +33,7 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 
 from konfai import konfai_root
-from konfai.data.transform import LocalityKind, PatchLocality
+from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset, data_to_image
 from konfai.utils.errors import AugmentationError
@@ -337,6 +338,23 @@ class DataAugmentation(NeedDevice, ABC):
             tensor = self._compute(name, index, self.who_index[index].index(a), tensor)
         return tensor
 
+    def stream_region(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+    ) -> torch.Tensor:
+        """Apply the draw of copy *a* to one region, told where it sits (the same contract as
+        :meth:`konfai.data.transform.Transform.stream_region`). The default is the draw itself: a
+        per-voxel draw gives the same answer wherever its input came from; a draw parameterised by
+        the place (a noise field, a cutout box, a resample) overrides ``_stream_region``."""
+        if a not in self.who_index[index]:
+            return tensor
+        return self._stream_region(name, index, self.who_index[index].index(a), tensor, context)
+
+    def _stream_region(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+    ) -> torch.Tensor:
+        del context
+        return self._compute(name, index, a, tensor)
+
     def __call__(
         self,
         name: str,
@@ -359,7 +377,75 @@ class DataAugmentation(NeedDevice, ABC):
         pass
 
 
+def _hashed_normal_field(
+    seed: int, shape: tuple[int, ...], offsets: tuple[int, ...], full: tuple[int, ...], device: torch.device
+) -> torch.Tensor:
+    """A standard-normal field over ``shape`` (channel first) whose value at a voxel is a function of
+    ``(seed, channel, position in the full volume)``: what lets a region hold exactly its part of the
+    volume's field. splitmix64 over the voxel's linear index (int64 arithmetic wraps, on every
+    device), two uniforms, one Box-Muller draw."""
+    channels, spatial = int(shape[0]), tuple(int(extent) for extent in shape[1:])
+    positions = [
+        torch.arange(start, start + extent, device=device, dtype=torch.int64)
+        for start, extent in zip(offsets, spatial, strict=True)
+    ]
+    linear = torch.zeros((), device=device, dtype=torch.int64)
+    for axis, (position, extent) in enumerate(zip(positions, full, strict=True)):
+        view = [1] * len(spatial)
+        view[axis] = -1
+        linear = linear * int(extent) + position.reshape(view)
+    voxels = int(np.prod(full, dtype=np.int64))
+    channel = torch.arange(channels, device=device, dtype=torch.int64).reshape(-1, *[1] * len(spatial))
+    key = (channel * voxels + linear).expand(channels, *spatial) * 2 + torch.tensor(
+        seed, device=device, dtype=torch.int64
+    ) * (2 * voxels * channels + 1)
+
+    def shift(value: torch.Tensor, bits: int) -> torch.Tensor:
+        return (value >> bits) & ((1 << (64 - bits)) - 1)  # a logical shift on the two's-complement int64
+
+    def mix(value: torch.Tensor) -> torch.Tensor:
+        value = value + (-7046029254386353131)  # 0x9E3779B97F4A7C15 as a signed 64-bit constant
+        value = (value ^ shift(value, 30)) * (-4658895280553007687)  # 0xBF58476D1CE4E5B9
+        value = (value ^ shift(value, 27)) * (-7723592293110705685)  # 0x94D049BB133111EB
+        return value ^ shift(value, 31)
+
+    def uniform(value: torch.Tensor) -> torch.Tensor:
+        # The top 53 bits of the hash, in (0, 1): never exactly 0, which the log needs.
+        return shift(value, 11).to(torch.float64) * (1.0 / (1 << 53)) + (0.5 / (1 << 53))
+
+    first, second = uniform(mix(key)), uniform(mix(key + 1))
+    normal = torch.sqrt(-2.0 * torch.log(first)) * torch.cos(2.0 * torch.pi * second)
+    return normal.to(torch.float32)
+
+
+def _reflect_interval(low: float, high: float, span: float) -> tuple[float, float]:
+    """The interval ``[low, high]`` after ``padding_mode='reflection'`` folds it into ``[0, span]``
+    (mirrors at 0 and at ``span``, repeated). Every fold inside the interval lands on 0 or on
+    ``span``, so the image is the hull of the folded endpoints and those."""
+    if span <= 0:
+        return 0.0, 0.0
+
+    def fold(value: float) -> float:
+        magnitude = abs(value)
+        flips = np.floor(magnitude / span)
+        extra = magnitude - flips * span
+        return extra if flips % 2 == 0 else span - extra
+
+    points = [fold(low), fold(high)]
+    for k in range(int(np.ceil(low / span)), int(np.floor(high / span)) + 1):
+        points.append(0.0 if k % 2 == 0 else span)
+    return max(0.0, min(points)), min(span, max(points))
+
+
 class EulerTransform(DataAugmentation):
+    """A draw that resamples the copy through an affine map about the volume's centre.
+
+    The map is stated in the normalised coordinates ``affine_grid`` spans over the whole extent
+    (``[-1, 1]`` per axis, ``align_corners=True``), output to source. Sampling goes through
+    :meth:`_sample_region`: the whole volume is the region that covers everything, so a streamed
+    region and the whole-volume copy run the very same arithmetic and agree to float rounding.
+    """
+
     def __init__(self) -> None:
         super().__init__()
         self.matrix: dict[int, list[torch.Tensor]] = {}
@@ -368,24 +454,119 @@ class EulerTransform(DataAugmentation):
         """Copy *a*'s affine, in the normalised coordinates ``affine_grid`` spans over ``shape``."""
         return self.matrix[index][a]
 
-    def _sample(self, matrix: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
-        # Integer tensors are label maps: interpolating them blends class ids into
-        # non-existent labels, so resample them with nearest-neighbour instead.
-        mode = "nearest" if not tensor.dtype.is_floating_point else "bilinear"
+    @staticmethod
+    def _source_coordinates(matrix: torch.Tensor, target: tuple[slice, ...], full: tuple[int, ...]) -> torch.Tensor:
+        """Where each target voxel samples from, in source VOXEL indices of the full grid, per axis in
+        array order: ``[*region_shape, n]``. Reflected into the volume as ``padding_mode='reflection'``
+        would (``align_corners=True``: mirrored about the outer voxel centres) and clipped."""
+        n = len(full)
+        # affine_grid's own base grid, restricted to the region: linspace over the FULL extent.
+        axes = [
+            torch.linspace(-1.0, 1.0, extent, dtype=torch.float32)[part]
+            for extent, part in zip(full, target, strict=True)
+        ]
+        mesh = torch.meshgrid(*axes, indexing="ij")
+        # affine_grid orders a coordinate (x, y, z): the last array axis first.
+        homogeneous = torch.stack([*reversed(mesh), torch.ones_like(mesh[0])], dim=-1)
+        source = homogeneous.reshape(-1, n + 1) @ matrix[0, :n, :].T.to(torch.float32)
+        source = source.reshape(*[part.stop - part.start for part in target], n).flip(-1)  # back to array order
+        extents = torch.tensor([float(extent - 1) for extent in full], dtype=torch.float32)
+        index = (source + 1.0) / 2.0 * extents
+        # reflect_coordinates(in, 0, 2 * (size - 1)) then clip, as torch's kernel does.
+        span = extents.clamp(min=1.0)
+        magnitude = index.abs()
+        extra = torch.remainder(magnitude, span)
+        flips = torch.floor(magnitude / span)
+        reflected = torch.where(flips.remainder(2) == 0, extra, span - extra)
+        reflected = torch.where(extents > 0, reflected, torch.zeros_like(reflected))
+        return torch.minimum(torch.maximum(reflected, torch.zeros_like(reflected)), extents)
+
+    def _sample_region(
+        self,
+        matrix: torch.Tensor,
+        block: torch.Tensor,
+        source: tuple[slice, ...],
+        target: tuple[slice, ...],
+        full: tuple[int, ...],
+    ) -> torch.Tensor:
+        """Sample the target region from ``block`` (the source region ``source`` of the full grid).
+
+        Integer tensors are label maps: interpolating them blends class ids into non-existent labels,
+        so they are resampled with nearest-neighbour instead. The coordinates are the full grid's,
+        re-expressed on the block: every one lies inside it, since the pull kept what a reflection
+        reads back from.
+        """
+        mode = "nearest" if not block.dtype.is_floating_point else "bilinear"
+        coordinates = self._source_coordinates(matrix, target, full).to(block.device)
+        starts = torch.tensor([float(part.start) for part in source], dtype=torch.float32, device=block.device)
+        sizes = torch.tensor(
+            [float(part.stop - part.start - 1) for part in source], dtype=torch.float32, device=block.device
+        )
+        local = torch.where(
+            sizes > 0, (coordinates - starts) * 2.0 / sizes.clamp(min=1.0) - 1.0, torch.zeros_like(coordinates)
+        )
+        grid = local.flip(-1).unsqueeze(0)  # grid_sample orders a coordinate (x, y, z)
         return (
             F.grid_sample(
-                tensor.unsqueeze(0).type(torch.float32),
-                F.affine_grid(matrix[:, :-1, ...], [1, *list(tensor.shape)], align_corners=True).to(tensor.device),
-                align_corners=True,
-                mode=mode,
-                padding_mode="reflection",
+                block.unsqueeze(0).type(torch.float32), grid, align_corners=True, mode=mode, padding_mode="border"
             )
-            .type(tensor.dtype)
+            .type(block.dtype)
             .squeeze(0)
         )
 
+    def _sample(self, matrix: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
+        full = tuple(int(extent) for extent in tensor.shape[1:])
+        whole = tuple(slice(0, extent) for extent in full)
+        return self._sample_region(matrix, tensor, whole, whole, full)
+
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         return self._sample(self._grid_matrix(index, a, list(tensor.shape[1:])), tensor)
+
+    def _stream_region_source(
+        self, index: int, a: int, target_slices: tuple[slice, ...], source_spatial_shape: list[int]
+    ) -> list[slice]:
+        """The source box a target region samples from: its corners through the map, widened by
+        one voxel for the interpolation taps and to what a reflection at the border reads back
+        from, clamped to the volume."""
+        full = tuple(int(extent) for extent in source_spatial_shape)
+        matrix = self._grid_matrix(index, a, list(full)).to(torch.float64)
+        n = len(full)
+        corners = [
+            [
+                *reversed(
+                    [
+                        -1.0 + 2.0 * (part.stop - 1 if bit else part.start) / max(1, extent - 1)
+                        for part, extent, bit in zip(target_slices, full, bits, strict=True)
+                    ]
+                ),
+                1.0,
+            ]
+            for bits in itertools.product((0, 1), repeat=n)
+        ]  # (x, y, z, 1): affine_grid's order
+        mapped = torch.tensor(corners, dtype=torch.float64) @ matrix[0, :n, :].T
+        pull: list[slice] = []
+        for axis in range(n):
+            extent = full[axis]
+            span = float(extent - 1)
+            values = mapped[:, n - 1 - axis]  # (x, y, z) back to array order
+            low = float((values.min() + 1.0) / 2.0 * span) - 1.0
+            high = float((values.max() + 1.0) / 2.0 * span) + 1.0
+            low, high = _reflect_interval(low, high, span)
+            start = max(0, int(np.floor(low)))
+            stop = min(extent, int(np.ceil(high)) + 1)
+            pull.append(slice(start, max(stop, start + 1)))
+        return pull
+
+    def _stream_region(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+    ) -> torch.Tensor:
+        return self._sample_region(
+            self._grid_matrix(index, a, list(context.source_shape)),
+            tensor,
+            tuple(context.source),
+            tuple(context.target),
+            tuple(int(extent) for extent in context.source_shape),
+        )
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         return self._sample(self._grid_matrix(index, a, list(tensor.shape[1:])).inverse(), tensor)
@@ -420,14 +601,22 @@ class Translate(EulerTransform):
         radius = (torch.ceil(self.translate[index][a].abs()).to(torch.int64) + 1).tolist()
         return PatchLocality(LocalityKind.HALO, halo=tuple(int(r) for r in reversed(radius)))
 
+    def _stream_region(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+    ) -> torch.Tensor:
+        # HALO: the dispatcher hands the enlarged block and crops the answer back; the shift is
+        # normalised against the block it is applied to (``_grid_matrix``).
+        del context
+        return self._compute(name, index, a, tensor)
+
 
 class Rotate(EulerTransform):
     """Rotate a copy of the case about its centre.
 
     A quarter draw is a signed permutation of the axes: an exact index remap (permute + flip), never an
     interpolation, and it transposes the extents it swaps, so the copy is cut on its own grid. A free
-    angle displaces a voxel by 2 * R * sin(theta / 2) from the centre, which no constant halo bounds --
-    it stays whole-volume.
+    angle resamples: it streams as a REGRID, each target region pulling the source box its corners map
+    to (a slab of a rotated volume pulls a wide band, which the plan prices).
     """
 
     # A quarter angle's cosines are computed in float32, so an entry of the composed matrix lands within
@@ -518,14 +707,19 @@ class Rotate(EulerTransform):
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         # Permuting and mirroring voxels is a bijection on them, which is what ORIENTATION promises and
         # what LocalityKind.preserves_statistics lets a later stage trust. Only the draw can say whether
-        # this one is that, and the draw is a property of the copy rather than of the case.
+        # this one is that, and the draw is a property of the copy rather than of the case. Any other
+        # angle resamples: a REGRID whose target region pulls the source box its corners map to.
         if Rotate._index_remap(self.matrix[index][a]) is None:
-            return PatchLocality(
-                LocalityKind.WHOLE_VOLUME,
-                reason="this copy's draw is not a quarter-turn, so it resamples the whole volume;"
-                " is_quarter: true keeps every draw an index remap",
-            )
+            return PatchLocality(LocalityKind.REGRID)
         return PatchLocality(LocalityKind.ORIENTATION)
+
+    def _stream_region(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+    ) -> torch.Tensor:
+        # A quarter turn is the remap of the region it was handed (ORIENTATION); any other angle samples.
+        if Rotate._index_remap(self.matrix[index][a]) is not None:
+            return self._compute(name, index, a, tensor)
+        return super()._stream_region(name, index, a, tensor, context)
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
         # The same extent carry state_init applied to the copy's grid.
@@ -543,10 +737,7 @@ class Rotate(EulerTransform):
         # ``[n - stop, n - start)`` of it. Dims and flips are channel-first, so spatial axis k is dim k + 1.
         remap = Rotate._index_remap(self.matrix[index][a])
         if remap is None:
-            raise AugmentationError(
-                "Rotate declared a region patch-locality for a draw it cannot remap exactly.",
-                "Report this: _patch_locality() and _stream_region_source() disagree about the draw.",
-            )
+            return super()._stream_region_source(index, a, target_slices, source_spatial_shape)
         dims, flips = remap
         source_slices = [slice(0, n) for n in source_spatial_shape]
         for out_dim in range(1, len(dims)):
@@ -558,12 +749,15 @@ class Rotate(EulerTransform):
 
 
 class Scale(EulerTransform):
-    # WHOLE_VOLUME on purpose: a scale about the volume centre displaces a voxel by |s - 1| * its
-    # distance from that centre, so the source region depends on where the patch sits: no constant
-    # halo is both correct at the border and cheap in the middle.
+    """Scale a copy about the volume centre: a REGRID, each target region pulling the source box its
+    corners map to (no constant halo could: the displacement grows with the distance to the centre)."""
+
     def __init__(self, s_std: float = 0.2):
         super().__init__()
         self.s_std = s_std
+
+    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.REGRID)
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         func = _scale_3d_matrix if len(shapes[0]) == 3 else _scale_2d_matrix
@@ -833,8 +1027,8 @@ class Noise(DataAugmentation):
         self.noise_step = noise_step
 
         self.ts: dict[int, list[torch.Tensor]] = {}
-        #: One generator seed per copy, drawn with the step: the field is part of the draw, so
-        #: it does not depend on the rank's global RNG or on the order the copies are computed in.
+        #: One field seed per copy, drawn with the step: the field is a function of (seed, voxel
+        #: position), so a region computes exactly its part of it, and no order or rank changes it.
         self.field_seeds: dict[int, list[int]] = {}
         self.betas = torch.linspace(beta_start, beta_end, noise_step)
         self.betas = Noise.enforce_zero_terminal_snr(self.betas)
@@ -873,14 +1067,26 @@ class Noise(DataAugmentation):
         self.field_seeds[index] = [int(torch.randint(0, 2**31 - 1, (1,))) for _ in shapes]
         return shapes
 
-    # WHOLE_VOLUME on purpose: the noise field is drawn per call, not per voxel position, so two
-    # overlapping patches would sample unrelated fields and the overlap blend would suppress the
-    # variance this exists to add.
-    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
+        # The field at a voxel is a hash of (seed, its position): a region computes its own part.
+        return PatchLocality(LocalityKind.POINTWISE)
+
+    def _apply(
+        self, index: int, a: int, tensor: torch.Tensor, offsets: tuple[int, ...], full: tuple[int, ...]
+    ) -> torch.Tensor:
         alpha_hat_t = self.alpha_hat[self.ts[index][a]].to(tensor.device).reshape(*[1 for _ in tensor.shape])
-        generator = torch.Generator(device=tensor.device).manual_seed(self.field_seeds[index][a])
-        field = torch.randn(tensor.shape, generator=generator, device=tensor.device, dtype=torch.float32)
+        field = _hashed_normal_field(self.field_seeds[index][a], tuple(tensor.shape), offsets, full, tensor.device)
         return alpha_hat_t.sqrt() * tensor + (1 - alpha_hat_t).sqrt() * field * self.n_std
+
+    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        full = tuple(int(extent) for extent in tensor.shape[1:])
+        return self._apply(index, a, tensor, tuple(0 for _ in full), full)
+
+    def _stream_region(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+    ) -> torch.Tensor:
+        offsets = tuple(int(part.start) for part in context.source)
+        return self._apply(index, a, tensor, offsets, tuple(int(extent) for extent in context.source_shape))
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         return tensor
@@ -904,15 +1110,20 @@ class CutOUT(DataAugmentation):
         self.centers[index] = [torch.rand((3) if len(shape) == 3 else (2)) for shape in shapes]
         return shapes
 
-    # WHOLE_VOLUME on purpose: the cutout box is normalised to the extent of the tensor in hand, so
-    # applied per patch it would land in every patch instead of once in the volume.
-    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
+        # The box is normalised to the VOLUME's extent; a region keeps only its part of it.
+        return PatchLocality(LocalityKind.POINTWISE)
+
+    def _apply(
+        self, index: int, a: int, tensor: torch.Tensor, offsets: tuple[int, ...], full: tuple[int, ...]
+    ) -> torch.Tensor:
         center = self.centers[index][a]
         masks = []
         for i, w in enumerate(tensor.shape[1:]):
             re = [1] * i + [-1] + [1] * (len(tensor.shape[1:]) - i - 1)
+            positions = torch.arange(offsets[i], offsets[i] + w).reshape(re)
             masks.append(
-                ((torch.arange(w).reshape(re) + 0.5) / w - center[i].reshape([1, 1])).abs()
+                ((positions + 0.5) / full[i] - center[i].reshape([1, 1])).abs()
                 >= torch.tensor(self.cutout_size).reshape([1, 1]) / 2
             )
         result = masks[0]
@@ -924,6 +1135,16 @@ class CutOUT(DataAugmentation):
             tensor,
             torch.tensor(self.value).to(tensor.device),
         )
+
+    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        full = tuple(int(extent) for extent in tensor.shape[1:])
+        return self._apply(index, a, tensor, tuple(0 for _ in full), full)
+
+    def _stream_region(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+    ) -> torch.Tensor:
+        offsets = tuple(int(part.start) for part in context.source)
+        return self._apply(index, a, tensor, offsets, tuple(int(extent) for extent in context.source_shape))
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         return tensor
