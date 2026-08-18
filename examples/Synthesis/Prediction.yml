@@ -93,7 +93,6 @@ Predictor:
         group: sCT # Name of the predicted modality
         same_as_group: MR:MR # Use MR geometry (spacing/origin/orientation)
         patch_combine: None  # No patch combination needed because 512*512 patches cover the full image slice
-        inverse_transform: false # If true, apply the inverse of transforms marked with inverse=true from the reference group
         reduction: Mean # Combine predictions from TTA using the Mean or Median
         Mean: {}
         attributes: None
