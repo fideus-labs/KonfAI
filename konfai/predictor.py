@@ -435,6 +435,13 @@ class OutputDataset(Dataset, NeedDevice, ABC):
 _STREAM_WORTH_MIN_FRACTION = 0.05
 
 
+def _slab_context(region: slice, spatial: list[int]) -> RegionContext:
+    """Where one z-slab of the accumulator grid sits: the same region as source and target."""
+    slices = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
+    shape = tuple(int(extent) for extent in spatial)
+    return RegionContext(slices, slices, shape, shape)
+
+
 @dataclass(frozen=True)
 class _FinalizeStage:
     """One step of the finalize chain, bound to how the chain applies it (forward or inverted)."""
@@ -791,9 +798,9 @@ class OutSameAsGroupDataset(OutputDataset):
             return None
         for transform in self.before_reduction_transforms:
             locality = transform.patch_locality(Attribute(attribute))
-            # A SLAB before-reduction transform (e.g. Mask) streams per slab through ``stream_slab`` in
-            # ``_prepare_copy_slab``, so it does not force the whole-volume path; anything else that is
-            # not voxel-local (a spatial mix, an unseeded statistic) still refuses outright.
+            # A SLAB before-reduction transform (InferenceStack) streams per slab through ``stream_slab``
+            # in ``_prepare_copy_slab``, so it does not force the whole-volume path; anything else that
+            # is not voxel-local (a spatial mix, an unseeded statistic) still refuses outright.
             if not self._voxel_local(locality, attribute) and locality.kind is not LocalityKind.SLAB:
                 return None
         stages = [
@@ -1164,19 +1171,21 @@ class OutSameAsGroupDataset(OutputDataset):
     ) -> torch.Tensor:
         """One copy's slab through the per-copy head of ``_get_output``: un-augment it (exact on a
         slab: the gate admitted only slab-parallel draws), split the model chunks, run
-        before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block. A SLAB
-        before-reduction transform learns where the slab sits through ``stream_slab`` (the accumulator
-        grid, where before_reduction runs), so it reads its slab region instead of the whole volume."""
+        before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block. A per-voxel
+        before-reduction transform is told where the slab sits (``stream_region``, the accumulator
+        grid, where before_reduction runs), so one reading a companion volume (a mask) reads its
+        slab region instead of the whole; a SLAB one goes through ``stream_slab``."""
         layer = self._unaugment(dataset, index, index_augmentation, layer)
         attribute = Attribute(self.attributes[index][index_augmentation][0])
         chunks = self._split_model_chunks(layer, number_of_channels_per_model, attribute)
+        context = _slab_context(region, spatial)
         results = []
         for chunk in chunks:
             for transform in self.before_reduction_transforms:
                 if transform.patch_locality(Attribute(attribute)).kind is LocalityKind.SLAB:
                     chunk = transform.stream_slab(self.names[index], chunk, region, spatial, Attribute(attribute))
                 else:
-                    chunk = transform(self.names[index], chunk, Attribute(attribute))
+                    chunk = transform.stream_region(self.names[index], chunk, context, Attribute(attribute))
             results.append(chunk)
         # A lone chunk stacks as a view: torch.stack would copy the slab once per slab of the case.
         if len(results) == 1:
@@ -1212,11 +1221,17 @@ class OutSameAsGroupDataset(OutputDataset):
         result = self._reduce_copies(blocks)
         attribute = Attribute(self.attributes[index][0][0])
         self._split_model_chunks(next(iter(copies.values())), number_of_channels_per_model, attribute)
+        context = _slab_context(region, spatial)
         for position, stage in enumerate(plan.stages[: plan.boundary]):
             if position in plan.slab_stages:
                 result = stage.transform.stream_slab(self.names[index], result, region, spatial, attribute)
-            else:
+            elif stage.inverted:
                 result = stage(self.names[index], result, attribute)
+            else:
+                # Told where the slab sits: the default is the whole-volume call, exact on a slab for
+                # every voxel-local stage the gate admitted; a stage reading a companion volume
+                # (Mask) reads its slab region instead of the whole.
+                result = stage.transform.stream_region(self.names[index], result, context, attribute)
         return result, attribute
 
     def reset(self) -> None:

@@ -18,11 +18,12 @@
 indistinguishable from a whole-volume ``write``, remove partial entries on failure, and refuse formats
 that cannot serve region writes."""
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import Attribute, Dataset, is_staging_entry
 
 pytest.importorskip("SimpleITK")
 
@@ -382,3 +383,66 @@ def test_nii_stream_multi_channel_reads_back_as_vector_image(tmp_path: Path) -> 
     assert image.GetNumberOfComponentsPerPixel() == 3
     back, _ = dataset.read_data("CT", "CASE_001")
     np.testing.assert_array_equal(np.asarray(back), volume)
+
+
+@pytest.mark.parametrize("file_format", ["mha", "nii", "nii.gz", "h5", "omezarr", "itktransform"])
+def test_a_crashed_writer_leaves_debris_and_no_case(tmp_path: Path, file_format: str, monkeypatch) -> None:
+    """Every backend's staging entry (a stream's temporary, or the hidden file a whole-volume write
+    publishes from) is recognised as staging and invisible to the listing and to the membership probe:
+    what a hard kill leaves behind is debris a rerun rewrites, never a case it skips."""
+    _skip_unavailable(file_format)
+    volume = _volume(channels=3)
+    root = tmp_path / "streamed"
+    dataset = Dataset(root, file_format)
+
+    def crash(*args, **kwargs):
+        raise OSError("killed before publish")
+
+    # Fail the publish step: the staging entry is then on disk, exactly as a hard kill leaves it.
+    if file_format == "h5":
+        monkeypatch.setattr(pytest.importorskip("h5py").Group, "move", crash)
+    elif file_format == "omezarr":
+        monkeypatch.setattr(os, "rename", crash)
+    else:
+        monkeypatch.setattr(os, "replace", crash)
+    with pytest.raises(OSError, match="killed"):
+        if file_format == "nii.gz":  # no stream: the whole-volume write stages and publishes by rename
+            dataset.write("CT", "CASE_001", volume, _image_attributes())
+        else:
+            _write_by_slabs(dataset, volume, _image_attributes())
+    monkeypatch.undo()
+
+    if file_format == "h5":
+        with pytest.importorskip("h5py").File(f"{root}.h5", "r", locking=False) as handle:
+            debris = list(handle["CT"].keys())
+    else:
+        debris = [path.name for path in (root / "CASE_001").iterdir()]
+    assert debris and all(is_staging_entry(name) for name in debris), debris
+    fresh = Dataset(root, file_format)
+    assert fresh.get_names("CT") == []
+    assert not fresh.is_dataset_exist("CT", "CASE_001")
+    if file_format != "h5":  # an h5 group exists as soon as it holds a temporary; a directory lists its files
+        assert fresh.get_group() == []
+
+
+@pytest.mark.parametrize("how", ["stream", "write"])
+def test_h5_entry_whose_attributes_fail_is_not_left_in_the_file(tmp_path: Path, how: str, monkeypatch) -> None:
+    """The dataset and its attributes are one entry: an interrupt between the two leaves neither an
+    attribute-less entry under the final name nor an orphaned temporary (HDF5 never reclaims one)."""
+    h5py = pytest.importorskip("h5py")
+    volume = _volume()
+    dataset = Dataset(tmp_path / "streamed", "h5")
+    dataset.write("CT", "CASE_000", volume, _image_attributes())
+
+    def crash(self, *args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(h5py.AttributeManager, "update", crash)
+    with pytest.raises(KeyboardInterrupt):
+        if how == "stream":
+            dataset.open_data_stream("CT", "CASE_001", list(volume.shape), volume.dtype, _image_attributes())
+        else:
+            dataset.write("CT", "CASE_001", volume, _image_attributes())
+    monkeypatch.undo()
+    with h5py.File(tmp_path / "streamed.h5", "r", locking=False) as handle:
+        assert list(handle["CT"].keys()) == ["CASE_000"]
