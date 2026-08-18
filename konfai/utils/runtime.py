@@ -1005,8 +1005,6 @@ def apply_cpu_thread_budget() -> None:
 
 def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = True) -> tuple[int | None, int | None]:
     """Resolve the rank and, with ``process_group``, initialize torch distributed on it."""
-    if os.name == "nt":
-        return rank, rank
     if rank is None:
         import submitit
 
@@ -1018,7 +1016,7 @@ def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = Tr
         local_rank = rank
     if global_rank >= world_size:
         return None, None
-    if not process_group:
+    if os.name == "nt" or not process_group:
         return global_rank, local_rank
     try:
         nodelist = os.getenv("SLURM_JOB_NODELIST")
