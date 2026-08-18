@@ -1,8 +1,7 @@
 # Transform: the workflow that makes a dataset
 
 `konfai TRANSFORM` reads a dataset, applies a chain of transforms, and writes a
-dataset. There is no network, no checkpoint and no training loop. `EVALUATION`
-has none either, and the difference is the product: an evaluation measures, this
+dataset: it is the dataset-preparation workflow. `EVALUATION` measures, this
 one is the workflow you reach for when the thing you need is *data*.
 
 Two configs here, one per direction the cardinality can change.
@@ -58,7 +57,7 @@ grid first.
 the plan is the run's own verdict, not an estimate of it:
 
 ```text
-  CT -> CT_template: REDUCE 6 case(s) -> 1 output 'template' -- REDUCE
+  CT -> CT_template: REDUCE 6 case(s) -> 1 output 'template': REDUCE
     19 resident region(s) of 64 row(s) = 0.01 GiB  (every case resident per region)
     peak ~= 0.01 GiB vs per-rank budget 1.86 GiB
 ```
@@ -100,14 +99,15 @@ is applied once per case, which is a random transform rather than an
 augmentation, and the run refuses it and says so.
 
 Because `Brightness` is pointwise, the four copies share a single read pass over
-the source: the plan says `4 shared pass, 0 own pass`. A draw that moves voxels
+the source: the plan says `4 STREAM (shared read pass), 0 STREAM (own pass)`. A draw that moves voxels
 around (`Rotate`, `Flip`) cannot share it, and each copy gets its own pass.
 
 ## Reproducibility
 
 `manual_seed` in `Transform_expand.yml` is what makes an image chain and its mask
 chain draw the *same* copies. The two chains never meet: each derives its draws
-from `(seed, case, which copy)`, so they agree without coordinating. A mask
+from `(seed, the case's name, which copy)`, so they agree without coordinating,
+and a case keeps its copies whatever subset of the cohort a run covers. A mask
 rotated by a different angle than its image is a silently ruined dataset, not an
 error, which is why the seed is not optional in practice.
 

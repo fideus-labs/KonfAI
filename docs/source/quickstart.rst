@@ -11,8 +11,8 @@ everything. Same run, same result.
 
 In a hurry, or without a GPU? :doc:`examples/transform` runs in about a minute on
 CPU and downloads nothing: it generates its own data, folds a cohort into one
-volume and draws augmented copies. No model is involved, so it is the shortest
-path to seeing KonfAI work.
+volume and draws augmented copies. It is dataset preparation, nothing to train
+first, so it is the shortest path to seeing KonfAI work.
 
 Install
 -------

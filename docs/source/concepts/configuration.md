@@ -25,7 +25,7 @@ The root key of the YAML selects the high-level workflow object:
 - `Trainer` for training
 - `Predictor` for inference
 - `Evaluator` for metrics
-- `Transformer` for model-less dataset transformation
+- `Transformer` for dataset preparation
 
 These names map directly to the public classes in:
 

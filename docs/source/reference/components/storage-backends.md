@@ -209,6 +209,15 @@ without reading any pixels.
 `write_ome_zarr` writes a single-level OME-NGFF store with channel/spatial axes,
 chunking, scale, translation, and the original KonfAI attributes.
 
+A store written region by region (a streamed `TRANSFORM` `Write`, a streamed
+prediction) is chunked on the writer's region: a slab sweep declares
+`[C, slab_rows, Y, X]`, and an axis the region covers end to end is tiled to at
+most 128 once the chunk exceeds 32 MiB, so a large plane lands as
+`[C, slab_rows, 128, 128]`. `slab_rows` follows the memory budget, so the chunk
+layout of the store depends on the machine that wrote it; the values do not. A
+reader cutting `32^3` training patches from that store decompresses those
+chunks. A store written whole keeps `ngff-zarr`'s default chunking.
+
 ### Why `ngff-zarr` over `ome-zarr`
 
 Two Python libraries read OME-NGFF: the OME consortium's `ome-zarr` and

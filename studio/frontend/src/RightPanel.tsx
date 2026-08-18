@@ -1470,8 +1470,10 @@ export default function RightPanel({
   }
 
   // Jump to the run's output folder in the Workspace tree and open its most useful artifact: a training →
-  // its config, a prediction → the first predicted image, an evaluation → its Metric_TRAIN.json.
-  function browseRun(r: RunFeed) {
+  // its config, a prediction → the first predicted image, an evaluation → its Metric_TRAIN.json. `data`
+  // names the folder when it is not the run's own (a transform chain's destination); it defaults to the
+  // run's first one.
+  function browseRun(r: RunFeed, data: string = r.data) {
     // Prefer the run's real base (isolated app runs live under "<app_output>-<hash>/…"); fall back to the
     // session-root layout for an older stream that predates the base field.
     const root =
@@ -1488,8 +1490,8 @@ export default function RightPanel({
     // A transform's run dir holds a log, a plan and a config copy; its volumes land wherever each
     // Write: pointed, which the run records in outputs.json and the feed carries as `data`. Opening
     // the run dir would answer "what did it produce" with a YAML file.
-    const [dir, open] = r.data
-      ? [r.data, "volume"]
+    const [dir, open] = data
+      ? [data, "volume"]
       : r.kind === "prediction"
         ? [`${root}/Dataset`, "volume"]
         : r.kind === "evaluation"
@@ -1660,9 +1662,24 @@ export default function RightPanel({
                 ))}
               </div>
               <span className="feed-job-actions">
-                <button className="tb-link" onClick={() => browseRun(sel)} title={`Open ${sel.kind} outputs in the Workspace tree`}>
-                  Browse files ↦
-                </button>
+                {sel.outputs.length > 1 ? (
+                  // A transform with several chains wrote to several places: one Browse per destination,
+                  // named by the group it wrote. A single chain keeps the one button every kind has.
+                  sel.outputs.map((o) => (
+                    <button
+                      key={`${o.group_dest}:${o.path}`}
+                      className="tb-link"
+                      onClick={() => browseRun(sel, o.path)}
+                      title={`Open ${o.group_src || "?"} → ${o.group_dest} (${o.format || "?"}) in the Workspace tree`}
+                    >
+                      Browse {o.group_dest} ↦
+                    </button>
+                  ))
+                ) : (
+                  <button className="tb-link" onClick={() => browseRun(sel)} title={`Open ${sel.kind} outputs in the Workspace tree`}>
+                    Browse files ↦
+                  </button>
+                )}
                 <button className="tb-link" onClick={openTensorboard} title="Open the full TensorBoard for this experiment">
                   TensorBoard ↗
                 </button>

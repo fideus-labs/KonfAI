@@ -318,34 +318,57 @@ def _runtime_events(line: str, run: str, kind: str, step: int) -> tuple[list[dic
     return [], step
 
 
-def _run_data_dir(session: str, base: str, kind: str) -> str:
-    """Where a run's DATA is, when that is not the run directory itself.
+def _transform_outputs(session: str, base: str) -> list[dict[str, str]]:
+    """Every chain's destination from a transform run's ``outputs.json``, in the run's own terms.
 
     A transform's run directory holds a log, a plan and a config copy: the volumes land wherever each
-    ``Write`` pointed, which the workflow records in ``outputs.json``. An app prediction writes its
-    volumes under ``<run>/Output`` (the session-root layout uses ``Predictions/<run>/Dataset``, which
-    the client already knows how to browse). Pointing Browse at the run directory would open a YAML
-    file for someone who just asked to see what was produced. Answers "" for every kind whose data IS
-    under its run directory, and the caller keeps its usual path.
+    ``Write`` pointed, one destination per chain, which the workflow records in ``outputs.json``. Each
+    entry keeps what the run wrote (``group_src``, ``group_dest``, ``dataset``, ``group``, ``format``)
+    plus ``path``: the dataset session-relative when it lives inside the session, so Browse resolves it
+    like every other path, else as recorded. Empty for a run that has no manifest.
     """
-    if kind == "prediction" and (_session_dir(session) / base / "Output").is_dir():
-        return f"{base}/Output"
     manifest = _session_dir(session) / base / "outputs.json"
     if not manifest.is_file():
-        return ""
+        return []
     try:
         outputs = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
-    if not isinstance(outputs, list) or not outputs or not isinstance(outputs[0], dict):
-        return ""
-    dataset = outputs[0].get("dataset")
-    if not isinstance(dataset, str) or not dataset:
-        return ""
-    # Session-relative when it lives inside the session, so Browse resolves it like every other path.
-    with suppress(ValueError):
-        return str(Path(dataset).relative_to(_session_dir(session)))
-    return dataset
+        return []
+    if not isinstance(outputs, list):
+        return []
+    found: list[dict[str, str]] = []
+    for entry in outputs:
+        if not isinstance(entry, dict):
+            continue
+        dataset = entry.get("dataset")
+        if not isinstance(dataset, str) or not dataset:
+            continue
+        path = dataset
+        with suppress(ValueError):
+            path = str(Path(dataset).relative_to(_session_dir(session)))
+        found.append(
+            {
+                **{key: str(entry.get(key) or "") for key in ("group_src", "group_dest", "group", "format")},
+                "dataset": dataset,
+                "path": path,
+            }
+        )
+    return found
+
+
+def _run_data_dir(session: str, base: str, kind: str, outputs: list[dict[str, str]]) -> str:
+    """Where a run's DATA is, when that is not the run directory itself.
+
+    A transform's volumes are wherever its chains wrote (``outputs``: the first chain's destination
+    stands for the run, every chain is carried beside it). An app prediction writes its volumes under
+    ``<run>/Output`` (the session-root layout uses ``Predictions/<run>/Dataset``, which the client
+    already knows how to browse). Pointing Browse at the run directory would open a YAML file for
+    someone who just asked to see what was produced. Answers "" for every kind whose data IS under its
+    run directory, and the caller keeps its usual path.
+    """
+    if kind == "prediction" and (_session_dir(session) / base / "Output").is_dir():
+        return f"{base}/Output"
+    return outputs[0]["path"] if outputs else ""
 
 
 def _discover_session_runs(
@@ -465,6 +488,7 @@ async def live(session: str = Query("default")) -> StreamingResponse:
             if was == (status, base):
                 return []
             announced[key] = (status, base)
+            outputs = _transform_outputs(name, base) if base else []
             out = [
                 _sse(
                     {
@@ -475,7 +499,9 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                         "base": base,
                         # Empty unless the run's data lives outside its run directory; the client then
                         # browses the run directory as it does for every other kind.
-                        "data": _run_data_dir(name, base, kind) if base else "",
+                        "data": _run_data_dir(name, base, kind, outputs) if base else "",
+                        # A transform's chains, one destination each, so the panel offers every one.
+                        "outputs": outputs,
                     }
                 )
             ]
