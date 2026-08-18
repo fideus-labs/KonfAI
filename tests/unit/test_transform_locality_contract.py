@@ -563,7 +563,9 @@ class _AugmentationCase:
 _AUGMENTATION_CASES: dict[str, list[_AugmentationCase]] = {
     "Brightness": [_AugmentationCase(augmentation_module.Brightness(0.5), LocalityKind.POINTWISE, True)],
     "Contrast": [_AugmentationCase(augmentation_module.Contrast(0.5), LocalityKind.POINTWISE, True)],
-    "CutOUT": [_AugmentationCase(augmentation_module.CutOUT(1.0, 2, 0.0), LocalityKind.WHOLE_VOLUME, False)],
+    # The box is normalised to the volume; a region keeps its part of it. A wide box so it lands
+    # in more than one patch of the fixture.
+    "CutOUT": [_AugmentationCase(augmentation_module.CutOUT(1.0, 0.5, 0.0), LocalityKind.POINTWISE, True)],
     "Elastix": [_AugmentationCase(augmentation_module.Elastix(), LocalityKind.WHOLE_VOLUME, False)],
     "Flip": [
         _AugmentationCase(FlipAugmentation(f_prob=[1.0, 1.0, 1.0]), LocalityKind.ORIENTATION, True),
@@ -582,12 +584,16 @@ _AUGMENTATION_CASES: dict[str, list[_AugmentationCase]] = {
     "HUE": [_AugmentationCase(augmentation_module.HUE(1.0), LocalityKind.POINTWISE, True)],
     "LumaFlip": [_AugmentationCase(augmentation_module.LumaFlip(), LocalityKind.POINTWISE, True)],
     "Mask": [],  # a second on-disk volume that dictates the output grid; see its note.
-    "Noise": [_AugmentationCase(augmentation_module.Noise(1.0), LocalityKind.WHOLE_VOLUME, False)],
+    # The field at a voxel is a function of (seed, position): a region computes exactly its part.
+    "Noise": [_AugmentationCase(augmentation_module.Noise(1.0), LocalityKind.POINTWISE, True)],
     "Permute": [
         _AugmentationCase(augmentation_module.Permute(prob_permute=[1.0, 1.0]), LocalityKind.ORIENTATION, True)
     ],
     "Rotate": [
-        _AugmentationCase(augmentation_module.Rotate(a_min=10.0, a_max=10.0), LocalityKind.WHOLE_VOLUME, False),
+        # A free angle resamples: a REGRID pulling the source box the region's corners map to.
+        _AugmentationCase(
+            augmentation_module.Rotate(a_min=10.0, a_max=10.0), LocalityKind.REGRID, True, atol=_AUGMENTATION_ATOL
+        ),
         # A quarter draw is a signed permutation of the axes, so it is an exact remap whichever multiple
         # of 90 degrees it lands on: the declaration holds for every draw, not for the seed this
         # happens to run on. The fixture is non-cubic, so 26 of its 27 draws transpose extents and cut
@@ -595,7 +601,7 @@ _AUGMENTATION_CASES: dict[str, list[_AugmentationCase]] = {
         _AugmentationCase(augmentation_module.Rotate(is_quarter=True), LocalityKind.ORIENTATION, True),
     ],
     "Saturation": [_AugmentationCase(augmentation_module.Saturation(0.5), LocalityKind.POINTWISE, True)],
-    "Scale": [_AugmentationCase(augmentation_module.Scale(), LocalityKind.WHOLE_VOLUME, False)],
+    "Scale": [_AugmentationCase(augmentation_module.Scale(), LocalityKind.REGRID, True, atol=_AUGMENTATION_ATOL)],
     "Translate": [
         # A halo of ceil(1) + 1 = 2 on a patch of 4: half the patch, the widest _affords_halo allows.
         _AugmentationCase(

@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data.augmentation import Brightness, Flip, Permute, Scale
+from konfai.data.augmentation import Brightness, CutOUT, Flip, Noise, Permute, Rotate, Scale
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Expand, Resample, Save, TensorCast, Transform, Write, split_expand
 from konfai.utils.dataset import Attribute, Dataset
@@ -388,14 +388,53 @@ def test_a_solo_copy_sweeps_on_the_requested_device(tmp_path: Path, monkeypatch)
     assert manager._chain_device is None
 
 
+@pytest.mark.parametrize(
+    ("draw", "regime", "atol"),
+    [
+        (lambda: _draw(Noise(1.0)), "stream-shared", 0.0),  # a field hashed on position: per-voxel
+        (lambda: _draw(CutOUT(1.0, 0.5, 0.0)), "stream-shared", 0.0),  # a box on the volume's grid
+        (lambda: _draw(Rotate(a_min=10.0, a_max=10.0)), "stream", 1e-4),  # a free angle: its own pull map
+        (lambda: _draw(Scale(0.2)), "stream", 1e-4),
+    ],
+    ids=["Noise", "CutOUT", "Rotate", "Scale"],
+)
+def test_the_geometric_and_field_draws_stream_their_copies(tmp_path: Path, draw, regime: str, atol: float) -> None:
+    """The offline-augmentation case: 4 copies of a free rotation were 4 whole-volume passes and 5x
+    the volume in RSS. A rotation or a scale now pulls the source box each region maps to (its own
+    pass, bounded); a noise field or a cutout is a function of the voxel's position, so their copies
+    share one read pass. Streamed copies equal the whole-volume ones."""
+    source = _source(tmp_path)
+    augmentation = draw()
+    streamed = _manager(
+        source,
+        [Clip(0.0, 50.0), Expand(nb=2, pattern="{name}_r{a:02d}"), augmentation, Write(f"{tmp_path / 'streamed'}:h5")],
+    )
+    assert streamed.materialize_copies([1, 2]) == {1: regime, 2: regime}
+    classic = _manager(
+        source,
+        [Clip(0.0, 50.0), Expand(nb=2, pattern="{name}_r{a:02d}"), augmentation, Write(f"{tmp_path / 'classic'}:h5")],
+    )
+    for a in (1, 2):
+        classic._assemble_and_write(a)
+    for a in (1, 2):
+        got, _ = Dataset(tmp_path / "streamed", "h5").read_data("CT", f"CASE_000_r{a:02d}")
+        expected, _ = Dataset(tmp_path / "classic", "h5").read_data("CT", f"CASE_000_r{a:02d}")
+        np.testing.assert_allclose(got, expected, rtol=0, atol=atol)
+        assert not np.array_equal(got, np.clip(source.read_data("CT", "CASE_000")[0], 0.0, 50.0)), (
+            "the copy carries no draw"
+        )
+
+
 def test_a_whole_volume_draw_falls_back_per_copy_and_still_writes(tmp_path: Path) -> None:
+    from konfai.data.augmentation import Foreign
+
     source = _source(tmp_path)
     manager = _manager(
         source,
         [
             Clip(0.0, 50.0),
             Expand(nb=2, pattern="{name}_r{a:02d}"),
-            _draw(Scale(s_std=0.1)),  # Scale declares WHOLE_VOLUME on purpose
+            _draw(Foreign(torch.nn.Sigmoid(), "torch.nn:Sigmoid")),  # says nothing of where it reads: WHOLE_VOLUME
             Write(f"{tmp_path / 'out'}:h5"),
         ],
     )

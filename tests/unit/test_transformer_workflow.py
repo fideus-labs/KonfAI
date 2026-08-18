@@ -1090,6 +1090,33 @@ def test_a_loaded_case_takes_its_statistic_from_the_loaded_volume(
     np.testing.assert_allclose(written, (volume - volume.mean()) / volume.std(ddof=1), rtol=1e-4, atol=1e-4)
 
 
+def test_a_chain_through_its_own_save_cache_is_priced_as_bounded(tmp_path: Path) -> None:
+    """The segment past a Save the run itself sweeps reads a cache that does not exist at planning
+    time; a missing entry answers 'unbounded' to bounded_region_reads. Priced that way, an mha case
+    with an h5 Save in the middle was routed LOAD for no reason: the cache lands on a region-write
+    store, and every one of those serves bounded reads."""
+    rng = np.random.default_rng(3)
+    source = Dataset(tmp_path / "source", "mha")
+    source.write("CT", "CASE_000", (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
+    transforms = f"""\
+              Clip:
+                min_value: 0.0
+                max_value: 50.0
+              Save:
+                dataset: {tmp_path / "cache"}:h5
+              TensorCast:
+                dtype: float32
+              Write:
+                dataset: {tmp_path / "out"}:h5
+"""
+    config_path = _write_config(tmp_path, transforms, header="  on_fallback: error\n")
+    budget = 3 * 8 * 32 * 32 * 4
+    config_path.write_text(config_path.read_text().replace("memory_budget: auto", f"memory_budget: {budget}b"))
+    plan = _build(tmp_path).compute_plan()
+    entry = next(entry for entry in plan.entries if entry.case == "CASE_000")
+    assert entry.verdict == "STREAM", entry.reason
+
+
 def test_the_shards_balance_bytes_not_counts(tmp_path: Path) -> None:
     """One 8x larger case among small ones: it takes a rank on its own and the small ones share the
     other, where an index split would pair the large case with half of the small ones."""
