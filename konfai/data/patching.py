@@ -219,10 +219,8 @@ class AugmentedStage:
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
     ) -> torch.Tensor:
-        # A draw is parameterised by the case and the copy, never by where in the volume it lands:
-        # nothing an augmentation does depends on the region's position.
-        del context
-        return self(name, tensor, cache_attribute)
+        del cache_attribute  # a draw reads no case metadata; the place is what it may need
+        return self.augmentation.stream_region(name, self.index, self.a, tensor, context)
 
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
@@ -2378,7 +2376,10 @@ class DatasetManager:
     ) -> float:
         """One segment's reads over its source's voxels, slab by slab through the plan's own pulls."""
         rows = self._sweep_rows(list(landed), int(source_shape[0]))
-        if not dataset.bounded_region_reads(group, entry):
+        # A source that is not on disk yet is a Save cache this run sweeps first, onto a store that
+        # serves region writes, and every such store serves bounded reads: priced as bounded, not
+        # as the pessimistic answer a missing entry gets.
+        if dataset.is_dataset_exist(group, entry) and not dataset.bounded_region_reads(group, entry):
             return float(max(1, -(-landed[0] // rows)))  # every slab decodes the whole store
         read = 0
         for start in range(0, landed[0], rows):

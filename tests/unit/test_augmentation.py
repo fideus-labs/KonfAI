@@ -328,7 +328,8 @@ def test_rotate_quarter_transposes_a_non_cubic_grid_exactly(seed: int) -> None:
 
 def test_rotate_declares_orientation_from_the_draw_not_from_the_flag() -> None:
     # The declaration is about the turn that was drawn, so a free range pinned to a right angle is just
-    # as exact as a quarter draw, and a free angle is not: whatever the extents it was drawn for.
+    # as exact as a quarter draw (an index remap), and a free angle resamples through its own pull
+    # map (a REGRID): whatever the extents it was drawn for.
     torch.manual_seed(0)
     right_angle = Rotate(a_min=90.0, a_max=90.0)
     right_angle._state_init(0, [[9, 10, 11]], [Attribute()])
@@ -336,7 +337,7 @@ def test_rotate_declares_orientation_from_the_draw_not_from_the_flag() -> None:
 
     free = Rotate(a_min=10.0, a_max=10.0)
     free._state_init(0, [[12, 12, 12]], [Attribute()])
-    assert free._patch_locality(0, 0, Attribute()).kind is LocalityKind.WHOLE_VOLUME
+    assert free._patch_locality(0, 0, Attribute()).kind is LocalityKind.REGRID
 
 
 # --------------------------------------------------------------------------------------
