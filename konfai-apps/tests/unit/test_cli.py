@@ -74,7 +74,15 @@ def _run_apps_server(monkeypatch: pytest.MonkeyPatch, apps_config: Path) -> str:
     `main_apps_server` opens with `import uvicorn`, so every path through it -- including the
     validation that never reaches `uvicorn.run` -- needs the server stack importable.
     """
-    pytest.importorskip("uvicorn")
+    uvicorn = pytest.importorskip("uvicorn")
+
+    def _refuse_to_serve(*args: object, **kwargs: object) -> None:
+        # Both callers must exit during validation. Should that validation ever regress, falling
+        # through to the real `uvicorn.run` would bind a port and serve forever, hanging the unit
+        # suite instead of failing it -- so make reaching this point a loud failure.
+        pytest.fail("main_apps_server reached uvicorn.run: --apps validation did not reject the config")
+
+    monkeypatch.setattr(uvicorn, "run", _refuse_to_serve)
     # --auth off keeps the test on config validation instead of token resolution; delenv first so
     # the pop the CLI performs on a real inherited token is restored at teardown.
     monkeypatch.delenv("KONFAI_API_TOKEN", raising=False)
