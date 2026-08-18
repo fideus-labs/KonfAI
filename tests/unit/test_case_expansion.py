@@ -529,3 +529,77 @@ def test_interleaved_patch_reads_of_two_copies_each_keep_their_own_grid(tmp_path
         got = manager.get_data(index, a, [], True)
         expected = manager.patch.get_data(truth(a), index, a, True)
         assert torch.equal(got, expected), f"patch {index} of copy {a} returned another copy's sampling"
+
+
+# ------------------------------------------------- other destinations, other draws
+
+
+def test_a_shared_pass_writes_an_mha_destination_like_the_whole_volume_copies(tmp_path: Path) -> None:
+    """The shared read pass is not an h5 privilege: a directory store of one file per copy takes
+    the same N write streams, and what lands equals the whole-volume copies, voxels and geometry."""
+    source = _source(tmp_path)
+    draw = _draw(Brightness(b_std=0.3))  # one instance, so the classic copies replay the same draw
+    streamed = _manager(
+        source,
+        [Clip(0.0, 50.0), Expand(nb=3, pattern="{name}_r{a:02d}"), draw, Write(f"{tmp_path / 'streamed'}:mha")],
+    )
+    assert streamed.materialize_copies([1, 2, 3]) == {1: "stream-shared", 2: "stream-shared", 3: "stream-shared"}
+    assert sorted(entry.name for entry in (tmp_path / "streamed").iterdir()) == [
+        "CASE_000_r01",
+        "CASE_000_r02",
+        "CASE_000_r03",
+    ]
+
+    classic = _manager(
+        source,
+        [Clip(0.0, 50.0), Expand(nb=3, pattern="{name}_r{a:02d}"), draw, Write(f"{tmp_path / 'classic'}:mha")],
+    )
+    for a in (1, 2, 3):
+        classic._assemble_and_write(a)
+
+    for a in (1, 2, 3):
+        entry = f"CASE_000_r{a:02d}"
+        got, got_attributes = Dataset(tmp_path / "streamed", "mha").read_data("CT", entry)
+        expected, expected_attributes = Dataset(tmp_path / "classic", "mha").read_data("CT", entry)
+        assert got.dtype == expected.dtype
+        np.testing.assert_array_equal(got, expected)
+        for key in ("Origin", "Spacing", "Direction"):
+            np.testing.assert_allclose(
+                got_attributes.get_np_array(key), expected_attributes.get_np_array(key), rtol=0, atol=1e-9
+            )
+
+
+class _GlobalNoise:
+    """A foreign augmentation drawing from the interpreter's global state, as torchvision's do."""
+
+    def __init__(self, std: float) -> None:
+        self.std = std
+
+    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        return img + torch.randn(img.shape) * self.std
+
+
+def test_a_foreign_draw_after_the_marker_falls_back_and_each_copy_carries_its_own_draw(tmp_path: Path) -> None:
+    """A draw from another framework declares nothing about where its output comes from, so the
+    copies take the whole-volume path; each still lands its own seeded draw, and the same seed
+    replays it: what is written is what the draw itself computes for that copy."""
+    from konfai.data.augmentation import Foreign
+
+    source = _source(tmp_path)
+    foreign = _draw(Foreign(_GlobalNoise(std=5.0), f"{__name__}:_GlobalNoise"))
+    manager = _manager(
+        source,
+        [Clip(0.0, 50.0), Expand(nb=2, pattern="{name}_r{a:02d}"), foreign, Write(f"{tmp_path / 'out'}:h5")],
+    )
+    refusal = manager.stream_refusal(1, apply_augmentations=True)
+    assert refusal is not None and "'Foreign'" in refusal and "WHOLE_VOLUME" in refusal
+
+    assert manager.materialize_copies([1, 2]) == {1: "whole-volume", 2: "whole-volume"}
+
+    out = Dataset(tmp_path / "out", "h5")
+    clipped = torch.from_numpy(np.clip(source.read_data("CT", "CASE_000")[0], 0.0, 50.0))
+    copies = [out.read_data("CT", f"CASE_000_r{a:02d}")[0] for a in (1, 2)]
+    assert not np.array_equal(copies[0], clipped.numpy()), "the copy carries no draw"
+    assert not np.array_equal(copies[0], copies[1]), "the two copies took the same draw"
+    for a, written in enumerate(copies):
+        np.testing.assert_allclose(written, foreign.compute("CASE_000", 0, a, clipped.clone()).numpy(), atol=1e-6)

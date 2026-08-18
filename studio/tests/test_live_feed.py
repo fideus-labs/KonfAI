@@ -112,6 +112,85 @@ def test_a_transform_run_carries_where_its_data_went(tmp_path: Path, monkeypatch
     assert [(run["run"], run["kind"], run["data"]) for run in runs] == [("CT_PREP", "transform", "Prepared")]
 
 
+def test_a_transform_with_several_chains_carries_every_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One transform, two chains, two `Write:` destinations. `data` still names the first (the single-chain
+    panel keeps its one Browse), and `outputs` carries every chain with its session-relative path when
+    the destination is inside the session, the recorded path when it is not."""
+    session = tmp_path / "sessions" / "exp"
+    run = session / "Transforms" / "PREP"
+    run.mkdir(parents=True)
+    (run / "log_0.txt").write_text("log\n", encoding="utf-8")
+    elsewhere = tmp_path / "shared" / "MR_prep"
+    (run / "outputs.json").write_text(
+        json.dumps(
+            [
+                {
+                    "group_src": "CT",
+                    "group_dest": "CT_prep",
+                    "dataset": str(session / "Prepared"),
+                    "group": "CT_prep",
+                    "format": "mha",
+                },
+                {
+                    "group_src": "MR",
+                    "group_dest": "MR_prep",
+                    "dataset": str(elsewhere),
+                    "group": "MR_prep",
+                    "format": "h5",
+                },
+                {"group_dest": "broken"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    [announced] = announced_runs(session, monkeypatch, tmp_path)
+
+    assert announced["data"] == "Prepared"
+    assert announced["outputs"] == [
+        {
+            "group_src": "CT",
+            "group_dest": "CT_prep",
+            "group": "CT_prep",
+            "format": "mha",
+            "dataset": str(session / "Prepared"),
+            "path": "Prepared",
+        },
+        {
+            "group_src": "MR",
+            "group_dest": "MR_prep",
+            "group": "MR_prep",
+            "format": "h5",
+            "dataset": str(elsewhere),
+            "path": str(elsewhere),
+        },
+    ]
+
+
+def test_a_transform_run_log_yields_its_counter_and_never_a_curve_from_its_last_line() -> None:
+    """The transform's runtime log is followed like any other: its tqdm counter is a `progress` event
+    labelled by the phase, whatever the counts on the line say. Its closing line, with or without a rank
+    prefix and a FAILED suffix, is a statement, not a bar: it yields nothing (the console shows it)."""
+    from konfai_studio.jobs import _runtime_events
+
+    counter = (
+        "Transform : 3 streamed | 1 loaded | 0 reduced | 0 whole-volume | 2 skipped:  60% 6/10 [00:12<00:08,  2.00s/it]"
+    )
+    [event], step = _runtime_events(counter, "PREP", "transform", 0)
+    assert (event["type"], event["stage"], event["label"]) == ("progress", "transform", "Transform")
+    assert (event["progress"]["step"], event["progress"]["total"]) == (6, 10)
+    assert step == 0
+
+    for closing in (
+        "[KonfAI] done in 31.2 s: 9 written (7 streamed, 1 loaded, 1 whole-volume, 0 reduced) -> outputs in o.json",
+        "[KonfAI] rank 1/2 done in 31.2 s: 4 written (3 streamed, 1 loaded, 0 whole-volume, 0 reduced)"
+        ", 1 already written (--overwrite recomputes), 1 FAILED -> outputs in o.json",
+    ):
+        assert _runtime_events(closing, "PREP", "transform", 0) == ([], 0)
+
+
 def test_a_run_whose_data_is_its_own_directory_carries_no_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -253,7 +332,8 @@ def test_the_console_keeps_a_workflows_milestones_and_drops_its_startup_chatter(
         "[KonfAI] memory_budget: dataset ~= 4.20 GiB over 75 cases\n"
         "[KonfAI] plan over 1 rank(s) | 75 entr(ies): 75 STREAM -> Transforms/CT/plan.txt\n"
         "[KonfAI] VRAM: rank 0 ran out of memory -> re-planning the free patch axes\n"
-        "[KonfAI] done in 31.2 s: 75 written (75 streamed) -> outputs in outputs.json\n",
+        "[KonfAI] case 'P3' (CT) FAILED: ValueError: no such slice\n"
+        "[KonfAI] rank 0/2 done in 31.2 s: 74 written (74 streamed), 1 FAILED -> outputs in outputs.json\n",
         encoding="utf-8",
     )
     job_record(session, kind="transform", run_name="CT", log_path=str(log))
@@ -263,7 +343,8 @@ def test_the_console_keeps_a_workflows_milestones_and_drops_its_startup_chatter(
     assert [line.split(":")[0] for line in shown] == [
         "[KonfAI] plan over 1 rank(s) | 75 entr(ies)",
         "[KonfAI] VRAM",
-        "[KonfAI] done in 31.2 s",
+        "[KonfAI] case 'P3' (CT) FAILED",
+        "[KonfAI] rank 0/2 done in 31.2 s",
     ]
 
 

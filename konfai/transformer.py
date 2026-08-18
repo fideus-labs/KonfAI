@@ -33,7 +33,7 @@ import shutil
 import time
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal, cast
@@ -610,13 +610,14 @@ class Transformer(DistributedObject):
                 if expansion is not None:
                     # One line per copy: the copies are the outputs, each with its own resume, its
                     # own verdict, and, for STREAM: the regime that says who pays the reads.
+                    copies: list[TransformPlanEntry] = []
                     for a in range(1, expansion.nb + 1):
                         entry_name = manager.copy_entry(a)
                         verdict, reason = self._entry_verdict(
                             manager, destination, group, entry_name, a, overwrite, probed
                         )
                         regime = ("solo" if reason else "shared") if verdict == "STREAM" else None
-                        entries.append(
+                        copies.append(
                             TransformPlanEntry(
                                 entry_name,
                                 group_src,
@@ -628,6 +629,17 @@ class Transformer(DistributedObject):
                                 regime=regime,
                             )
                         )
+                    shared = [index for index, entry in enumerate(copies) if entry.regime == "shared"]
+                    if len(shared) == 1:
+                        # The engine's own rule (materialize_copies): a shared pass with one member
+                        # is that copy's own sweep, so a resume that leaves one copy sweeps it solo.
+                        copies[shared[0]] = replace(
+                            copies[shared[0]],
+                            regime="solo",
+                            reason="the only copy of this case still to write; a shared pass with one member"
+                            " is its own sweep.",
+                        )
+                    entries.extend(copies)
                     continue
                 verdict, reason = self._entry_verdict(
                     manager,

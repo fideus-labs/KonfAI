@@ -1185,3 +1185,234 @@ def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(
     assert routes == [True], "the plan said LOAD and the run must execute it"
     loaded, _ = Dataset(out, "h5").read_data("CT_out", "CASE_000")
     np.testing.assert_array_equal(loaded, np.clip(volume, 0.0, 50.0))
+
+
+# ------------------------------------------------------------- the plan is the run
+
+
+def _run_counters(console: str) -> dict[str, int]:
+    """The counters of the rank's closing line, keyed like the plan's verdicts."""
+    import re
+
+    closing = re.compile(
+        r"\[KonfAI\] (?:rank \d+/\d+ )?done in [\d.]+ s: \d+ written"
+        r" \((?P<STREAM>\d+) streamed, (?P<LOAD>\d+) loaded, (?P<WHOLE>\d+) whole-volume, (?P<REDUCE>\d+) reduced\)"
+        r"(?:, (?P<SKIP>\d+) already written)?"
+    )
+    found = [match for match in map(closing.search, console.splitlines()) if match is not None]
+    assert len(found) == 1, f"expected one closing line, got {len(found)} in:\n{console}"
+    groups = found[0].groupdict()
+    return {
+        "STREAM": int(groups["STREAM"]),
+        "LOAD": int(groups["LOAD"]),
+        "WHOLE-VOLUME": int(groups["WHOLE"]),
+        "REDUCE": int(groups["REDUCE"]),
+        "SKIP": int(groups["SKIP"] or 0),
+    }
+
+
+def _plan_counters(plan) -> dict[str, int]:
+    counts = dict.fromkeys(("STREAM", "LOAD", "WHOLE-VOLUME", "REDUCE", "SKIP"), 0)
+    for entry in plan.entries:
+        counts[entry.verdict] += 1
+    return counts
+
+
+def _write_mixed_cohort(tmp_path: Path) -> Path:
+    """Two bounded mha cases and one gzipped NIfTI case, read through two chains: one that streams
+    (or LOADs, for the source that cannot serve bounded reads) and one that falls back."""
+    rng = np.random.default_rng(3)
+    bounded = Dataset(tmp_path / "source", "mha")
+    for index in range(2):
+        volume = (rng.random((1, 8, 32, 32)) * 100).astype(np.float32)
+        bounded.write("CT", f"CASE_{index:03d}", volume, _image_attributes())
+    gzipped = Dataset(tmp_path / "source_gz", "nii.gz")
+    gzipped.write("CT", "CASE_002", (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
+    budget = 3 * 8 * 32 * 32 * 4  # the case fits (working set 2x), the sweep still slabs it
+    config_path = tmp_path / "Transform.yml"
+    config_path.write_text(
+        "Transformer:\n"
+        "  name: TEST\n"
+        "  on_fallback: warn\n"
+        "  Dataset:\n"
+        "    dataset_filenames:\n"
+        f"      - {tmp_path / 'source'}:mha\n"
+        f"      - {tmp_path / 'source_gz'}:nii.gz\n"
+        f"    memory_budget: {budget}b\n"
+        "    groups_src:\n"
+        "      CT:\n"
+        "        groups_dest:\n"
+        "          A:\n"
+        "            transforms:\n"
+        "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_a'}:h5\n"
+        "          B:\n"
+        "            transforms:\n"
+        "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
+        "              Standardize:\n                inverse: false\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out_b'}:h5\n"
+    )
+    return config_path
+
+
+def test_the_run_counters_equal_the_plan_verdicts_over_a_mixed_cohort(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The plan is the run's own verdict, counted: STREAM, LOAD, WHOLE-VOLUME and SKIP together.
+
+    Each verdict is decided by a different question (the patch planner, the read-cost pricing, the
+    fallback, the resume), and the run answers them again on its own path; only the totals say the
+    two agree for every kind at once, on one cohort, in one run.
+    """
+    _write_mixed_cohort(tmp_path)
+    workflow = _build(tmp_path)
+    plan = workflow.compute_plan(1, overwrite=False)
+    assert _plan_counters(plan) == {"STREAM": 2, "LOAD": 1, "WHOLE-VOLUME": 3, "REDUCE": 0, "SKIP": 0}
+
+    workflow.setup(1)
+    capsys.readouterr()
+    workflow.run_process(1, 0, 0, [])
+    assert _run_counters(capsys.readouterr().out) == _plan_counters(plan)
+
+    # A resume with one chain's outputs gone: SKIP beside the recomputed fallbacks, still equal.
+    (tmp_path / "out_b.h5").unlink()
+    again = _build(tmp_path)
+    plan = again.compute_plan(1, overwrite=False)
+    assert _plan_counters(plan) == {"STREAM": 0, "LOAD": 0, "WHOLE-VOLUME": 3, "REDUCE": 0, "SKIP": 3}
+    again.setup(1)
+    capsys.readouterr()
+    again.run_process(1, 0, 0, [])
+    assert _run_counters(capsys.readouterr().out) == _plan_counters(plan)
+
+
+def test_the_plan_names_the_regime_the_resumed_copies_take(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a resume of an expansion the plan's regime column is the engine's own answer.
+
+    The engine shares one read pass between the copies of a case that are still to write and can
+    ride it; a shared pass with ONE member is that copy's own sweep. Two of four copies left share,
+    one of four sweeps solo, and the plan says which before the run does it.
+    """
+    from konfai.data.patching import DatasetManager
+
+    _write_source(tmp_path, cases=2)
+    _write_expand_config(tmp_path, _EXPAND_CHAIN.format(out=tmp_path / "out").replace("nb: 3", "nb: 4"))
+    workflow = _build(tmp_path)
+    workflow.setup(1)
+    managers = {manager.name: manager for manager in workflow._managers()["CT_out"]}
+    assert set(managers["CASE_000"].materialize_copies([1, 2]).values()) == {"stream-shared"}
+    assert set(managers["CASE_001"].materialize_copies([1, 2, 3]).values()) == {"stream-shared"}
+
+    again = _build(tmp_path)
+    plan = again.compute_plan(1, overwrite=False)
+    planned = {entry.case: (entry.verdict, entry.regime) for entry in plan.entries}
+    assert planned == {
+        "CASE_000_r01": ("SKIP", None),
+        "CASE_000_r02": ("SKIP", None),
+        "CASE_000_r03": ("STREAM", "shared"),
+        "CASE_000_r04": ("STREAM", "shared"),
+        "CASE_001_r01": ("SKIP", None),
+        "CASE_001_r02": ("SKIP", None),
+        "CASE_001_r03": ("SKIP", None),
+        "CASE_001_r04": ("STREAM", "solo"),
+    }
+    assert "2 STREAM (shared read pass), 1 STREAM (own pass)" in plan.report()
+    assert "(1 cop(ies)) own pass: the only copy of this case still to write" in plan.report()
+
+    ran: dict[str, str] = {}
+    original = DatasetManager.materialize_copies
+
+    def spy(self: DatasetManager, copies: list[int], **kwargs) -> dict[int, str]:
+        regimes = original(self, copies, **kwargs)
+        ran.update({self.copy_entry(a): regime for a, regime in regimes.items()})
+        return regimes
+
+    monkeypatch.setattr(DatasetManager, "materialize_copies", spy)
+    again.setup(1)
+    again.run_process(1, 0, 0, [])
+    engine_regime = {"stream-shared": "shared", "stream": "solo"}
+    assert {case: engine_regime[regime] for case, regime in ran.items()} == {
+        case: regime for case, (verdict, regime) in planned.items() if verdict == "STREAM"
+    }
+
+
+# ---------------------------------------------------------------- refusals and draws
+
+
+def test_a_save_without_a_dataset_is_refused_at_parse(tmp_path: Path) -> None:
+    """A Save that names no dataset would cache next to the source: refused before any byte, with
+    the remedy, whether the mapping is empty or carries only a group."""
+    _write_source(tmp_path)
+    for spelling in ("              Save: {}\n", "              Save:\n                group: cache\n"):
+        _write_config(
+            tmp_path,
+            "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
+            f"{spelling}"
+            "              Write:\n"
+            f"                dataset: {tmp_path / 'out'}:h5\n",
+        )
+        with pytest.raises(TransformerError, match="'Save' with no dataset"):
+            _build(tmp_path)
+    assert not (tmp_path / "out.h5").exists()
+
+
+def _write_mask_file(tmp_path: Path) -> tuple[Path, np.ndarray]:
+    import SimpleITK as sitk
+
+    mask = np.zeros((6, 6, 6), dtype=np.uint8)
+    mask[1:5, 1:5, 1:5] = 1
+    sitk.WriteImage(sitk.GetImageFromArray(mask), str(tmp_path / "mask.mha"))
+    return tmp_path / "mask.mha", mask
+
+
+def test_a_mask_draw_after_the_marker_lands_every_copy_on_the_masks_grid(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``Mask`` the DRAW (a window of the case under a stored mask, drawn per copy) is reachable
+    from a chain by its augmentation classpath, since the bare name is the transform of that name.
+
+    It declares WHOLE_VOLUME, so the plan sends every copy down the fallback and the run agrees;
+    what lands is on the mask's grid, zero outside the mask, and a window of the clipped case
+    inside it.
+    """
+    _write_source(tmp_path, cases=2)
+    mask_path, mask = _write_mask_file(tmp_path)
+    _write_expand_config(
+        tmp_path,
+        "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
+        "              Expand:\n                nb: 2\n"
+        '                pattern: "{name}_r{a:02d}"\n'
+        "              konfai.data.augmentation:Mask:\n"
+        f"                mask: {mask_path}\n"
+        "                value: 0.0\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out'}:h5\n",
+    )
+    workflow = _build(tmp_path)
+    plan = workflow.compute_plan(1, overwrite=False)
+    assert len(plan.entries) == 4
+    assert {entry.verdict for entry in plan.entries} == {"WHOLE-VOLUME"}
+    assert all(entry.reason and "'Mask'" in entry.reason for entry in plan.entries)
+
+    workflow.setup(1)
+    capsys.readouterr()
+    workflow.run_process(1, 0, 0, [])
+    assert _run_counters(capsys.readouterr().out) == _plan_counters(plan)
+
+    out = Dataset(tmp_path / "out", "h5")
+    source = Dataset(tmp_path / "source", "mha")
+    for case in ("CASE_000", "CASE_001"):
+        clipped = np.clip(source.read_data("CT", case)[0], 0.0, 50.0)[0]
+        for a in (1, 2):
+            written = out.read_data("CT_out", f"{case}_r{a:02d}")[0]
+            assert written.shape == (1, *mask.shape)
+            assert not written[0][mask == 0].any(), "outside the mask the copy must hold the fill value"
+            inside = written[0][1:5, 1:5, 1:5]
+            windows = (
+                clipped[z : z + 4, y : y + 4, x : x + 4]
+                for z in range(clipped.shape[0] - 3)
+                for y in range(clipped.shape[1] - 3)
+                for x in range(clipped.shape[2] - 3)
+            )
+            assert any(np.array_equal(inside, window) for window in windows), "the copy is not a window of the case"

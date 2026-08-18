@@ -100,14 +100,14 @@ Outputs are written to:
 
 ## What happens during a transform
 
-`TRANSFORM` runs no model:
+`TRANSFORM` prepares a dataset:
 
 1. parses `Transform.yml` into a `Transformer`, refusing any key its grammar
    does not know
 2. binds every chain and runs the parse-time refusals: a chain not ending in
    `Write`, two chains writing the same target, a `Write` inside a source
-3. computes and prints the per-case plan: `STREAM`, `WHOLE-VOLUME`, `REDUCE`,
-   `SKIP` or `REFUSED`: probing each destination with a real region-write open
+3. computes and prints the per-case plan: `STREAM`, `LOAD`, `WHOLE-VOLUME`,
+   `REDUCE`, `SKIP` or `REFUSED`: probing each destination with a real region-write open
 4. refuses **before writing a byte** when an entry's working set exceeds the
    per-rank `memory_budget`
 5. shards the cases across ranks and materializes each chain's `Write` stages,
@@ -160,4 +160,4 @@ See {doc}`../usage/apps`.
 - {doc}`../config_guide/training`: every `Config.yml` key the training workflow reads.
 - {doc}`../config_guide/prediction`: configuring checkpoints, patch inference, and `outputs_dataset`.
 - {doc}`../config_guide/evaluation`: turning predictions and ground truth into metric JSON.
-- {doc}`../config_guide/transform`: the model-less workflow: chains, `Write`, and the plan.
+- {doc}`../config_guide/transform`: the dataset-preparation workflow: chains, `Write`, and the plan.

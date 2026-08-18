@@ -3128,6 +3128,15 @@ DEFAULT_INFERENCE_MODEL_NAME = "MRSegmentator"
 
 
 class KonfAIInference(Transform):
+    """Run a nested KonfAI app inference on the case, as one stage of a chain.
+
+    Whole-volume by construction: the tensor is written to a temporary ``.mha``, a spawned process
+    resolves the app (``konfai-apps``, a HuggingFace repo by default) and loads the model, and the
+    output is read back. That happens once per case, so a cohort loads the model as many times as it
+    has cases; its GPU/RAM usage lives outside the ``memory_budget`` a TRANSFORM plan bounds. Inference
+    over a cohort is PREDICTION's job; this stage is for an inference that feeds a later stage.
+    """
+
     supports_dataloader_workers = False
 
     def __init__(

@@ -1,7 +1,8 @@
-# Making datasets, without a model
+# Making datasets
 
-The fourth workflow has no network, no checkpoint and no training loop. It reads
-a dataset, runs a chain of transforms over it, and writes a dataset:
+The fourth workflow prepares data. It reads a dataset, runs a chain of
+transforms over it, and writes a dataset, and it is what you run before, or
+instead of, a training:
 
 ```bash
 konfai TRANSFORM --config Transform.yml --plan   # what it would do
@@ -31,7 +32,11 @@ Transformer:
               Write:    {dataset: ./Out:omezarr}
 ```
 
-That writes `./Out/<case>/CT_iso.ome.zarr/` per case, one slab at a time.
+That writes `./Out/<case>/CT_iso.ome.zarr/` per case, one slab at a time. The
+store is chunked the way it was written, `[C, slab_rows, <=128, <=128]`, and
+`slab_rows` follows the memory budget, so the chunk layout depends on the
+machine that wrote it (the values do not); a training reader of `32^3` patches
+decompresses those chunks. {doc}`../config_guide/transform` has the rule.
 
 ## Fold a cohort into one volume
 
@@ -106,9 +111,10 @@ transforms:
   Write:  {dataset: ./Augmented:omezarr}
 ```
 
-Each draw is derived from the seed, the case and its position in the chain, so an
-image chain and its mask chain produce matching copies: copy `k` of the mask
-carries copy `k` of the image's rotation.
+Each draw is derived from the seed, the case's name and its rank among the
+chain's draws, so an image chain and its mask chain produce matching copies:
+copy `k` of the mask carries copy `k` of the image's rotation, and a case keeps
+its copies whatever subset of the cohort the run covers.
 
 ## Write for another tool
 
@@ -131,7 +137,7 @@ Every run prints its plan before touching data, and `--plan` prints it and stops
 Each case gets a verdict:
 
 ```text
-  CT -> CT_iso: 120 case(s) -- 118 STREAM, 2 WHOLE-VOLUME, 0 SKIP
+  CT -> CT_iso: 120 case(s) -- 100 STREAM, 18 LOAD, 2 WHOLE-VOLUME, 0 SKIP (output already written)
 ```
 
 ```{mermaid}

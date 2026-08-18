@@ -1,10 +1,9 @@
 # Transform configuration
 
-Transform configuration lives under the `Transformer` root object. It runs **no
-model**: nor does `EVALUATION`, and the difference is what comes out: an
-evaluation measures, this one **makes**. It reads a dataset, applies a chain of
-transforms, and writes a dataset. If you never train anything, this is the only
-page you need.
+Transform configuration lives under the `Transformer` root object. `TRANSFORM`
+is the dataset-preparation workflow: it reads a dataset, applies a chain of
+transforms, and writes a dataset. `EVALUATION` measures, this one **makes**. If
+you never train anything, this is the only page you need.
 
 ```yaml
 Transformer:
@@ -28,6 +27,16 @@ Transformer:
 That writes `./Out/<case>/CT_iso.ome.zarr/` for every case in `./Raw`, one slab
 at a time: the whole volume is never held in memory.
 
+A streamed OME-Zarr write chunks the store the way it was written: one chunk is
+`[C, slab_rows, Y, X]`, tiled down to at most `128 x 128` in-plane once that
+exceeds 32 MiB, so a large plane lands as `[C, slab_rows, 128, 128]`.
+`slab_rows` follows the budget (64 without one, fewer under a tight
+`memory_budget`), so the layout of the store depends on the machine that wrote
+it. A training reader cutting `32^3` patches from that store decompresses those
+chunks, `slab_rows x 128 x 128` voxels for a 32-row patch. A case written whole
+(`LOAD`, `WHOLE-VOLUME`) declares no region shape and keeps `ngff-zarr`'s
+default chunking.
+
 ## Running it
 
 ```bash
@@ -42,19 +51,38 @@ everything. A case that fails (an unreadable file, a stage that raises) does
 not stop the others: the rank finishes its shard, prints the failed cases,
 and exits non-zero; a rerun resumes at exactly those cases.
 
-`--cpu N` shards the work items (one per case and chain, one per reduction)
-over N processes; every `Save`/`Write` must then point at a directory
-destination (`mha`, `nii.gz`, `omezarr`), because a single-file store (`h5`)
-would have every rank writing into the same file, and the run refuses before
-any byte. A reduction is one work item, so `--cpu 8` on a chain that only
-reduces leaves seven ranks idle. The ranks share nothing but the work list:
-no process group is initialized, and each rank reports its own shard.
+`--plan` reads the config the way a run does, and reading a config resolves
+its defaults back into the file: after `--plan`, `Transform.yml` carries every
+key the grammar knows, at the value the plan used. Copy the file first if you
+want to keep the text you wrote. `konfai-mcp`'s `plan_transform` snapshots the
+session's `Transform.yml` and restores it once the plan is back, and
+`konfai.plan_transform` writes the tree it is handed to a scratch file, so
+neither leaves that write behind.
+
+`--cpu N` shards the **work items** over N processes, not the cases: an
+ordinary chain has one item per case, so a case read by two chains is two items
+and may land on two ranks; a reduction is one item for the whole cohort. Items
+are dealt heaviest first onto the least-loaded rank, weighed by bytes, so one
+large case does not hold a rank alone while the others finish. Every
+`Save`/`Write` must then point at a directory destination (`mha`, `nii.gz`,
+`omezarr`), because a single-file store (`h5`) would have every rank writing
+into the same file, and the run refuses before any byte. A reduction being one
+item, `--cpu 8` on a chain that only reduces leaves seven ranks idle. The ranks
+share nothing but the work list: no process group is initialized, and each rank
+reports its own shard.
 
 Read transforms run on CPU; `--gpu` matters only when a chain embeds a
-`KonfAIInference` stage, whose nested inference does use the device. That stage
-is whole-volume and its GPU/RAM usage lives **outside** `memory_budget`: the
-plan prints a note saying it cannot bound those chains. There is no `-tb`: the
-workflow emits no scalars.
+`KonfAIInference` stage. That stage is a bridge, not a second prediction
+engine: it is whole-volume (the case is assembled, written to a temporary
+`.mha`, and read back), and each case spawns a process that resolves the app
+(the HuggingFace files are cached after the first case, its code is imported
+every time) and loads the model again, so a 100-case cohort loads the model 100
+times. Its GPU/RAM usage lives
+**outside** `memory_budget`: the plan prints a note saying it cannot bound those
+chains. Inference over a cohort is what `PREDICTION` is for: it loads the model
+once, tiles patches, and streams the output. Use `KonfAIInference` in a chain
+when the inference is one stage of a larger transform and a later stage
+consumes its result. There is no `-tb`: the workflow emits no scalars.
 
 ## Read the plan before you read anything else
 
@@ -67,7 +95,7 @@ what it will do, and where to read the rest. Nothing is dropped in silence,
 what it folds away it counts.
 
 ```text
-[KonfAI] plan over 1 rank(s) | 120 entr(ies): 2 WHOLE-VOLUME, 118 STREAM | per-rank
+[KonfAI] plan over 1 rank(s) | 120 entr(ies): 18 LOAD, 100 STREAM, 2 WHOLE-VOLUME | per-rank
 budget 7.45 GiB ('8G') | 2 note(s) -> full plan in ./Transforms/CT_ISO/log_0.txt
 ```
 
@@ -78,10 +106,20 @@ The log holds the same plan in full, one line per chain and per reason.
 [KonfAI] plan over 1 rank(s) | per-rank budget 7.45 GiB ('8G') | fallback working set
 = case x 4 B x 2 (in-flight copy), headers-only estimate | output dtype/channels assumed
 float32 / source channels until the first slab
-  CT -> CT_iso: 120 case(s) -- 118 STREAM, 2 WHOLE-VOLUME, 0 SKIP (output already written)
+  CT -> CT_iso: 120 case(s) -- 100 STREAM, 18 LOAD, 2 WHOLE-VOLUME, 0 SKIP (output already written)
+    (18 case(s)) LOAD: fits the per-rank budget (~0.42 GiB vs 7.45 GiB); streaming would read
+    ~2.0x the source
     (2 case(s)) WHOLE-VOLUME: stage 1 'Standardize' needs whole-volume statistics, but an
     earlier stage changes the values -- the stored volume's statistic is not this stage's input.
     worst fallback case ~= 3.10 GiB vs per-rank budget 7.45 GiB
+```
+
+A reduction prints one line for the cohort instead, `REDUCE` when the fold
+streams and `REFUSED` when it cannot:
+
+```text
+  CT -> CT_template: REDUCE 120 case(s) -> 1 output 'template': REFUSED
+    case 'CASE_001' lands on extent [44, 60, 52] where 'CASE_000' lands on [48, 56, 56]
 ```
 
 The verdicts, and each one is a fact about *your* run:
@@ -203,8 +241,8 @@ Under `Dataset:`:
 The grammar is deliberately **smaller** than `Train`'s `Dataset:`. There is no
 `patch:` (the planner cuts slabs; declaring a patch size would be guessing on
 KonfAI's behalf, and would make the output depend on it), no `batch_size`, no
-`validation`, no `shuffle`, no `is_input` (every group is an input when there is
-no network).
+`validation`, no `shuffle`, no `is_input` (every group is an input here: nothing
+is a target).
 
 Several `groups_src` keep only the cases present in **all** of them: a case with
 an image but no label disappears from the run. The plan prints how many were
@@ -579,10 +617,11 @@ be identical).
 ### Augmenting an image and its mask together
 
 The copies are drawn from `manual_seed`, not from a shared random generator: each
-draw is parameterised from `(seed, case, which draw this is)`. Two chains never
-meet and cannot agree on the order they consume a generator in, but they can
-derive from one number they both hold. So declaring the same `nb` in both chains
-is enough, and copy `k` of the mask carries copy `k` of the image's rotation:
+draw is parameterised from `(seed, the case's name, which draw this is)`. Two
+chains never meet and cannot agree on the order they consume a generator in, but
+they can derive from one number they both hold. So declaring the same `nb` in
+both chains is enough, and copy `k` of the mask carries copy `k` of the image's
+rotation:
 
 ```yaml
 Transformer:
@@ -611,7 +650,10 @@ Transformer:
 
 A draw is keyed on its own class and its rank among draws of that class, not on
 its position in the chain, so `Brightness`, declared in one chain and not the
-other, does not desynchronise the `Rotate` they share.
+other, does not desynchronise the `Rotate` they share. And it is keyed on the
+case's **name**, not on its position in the run's case list, so a `subset`, a
+case that fails, or an image and a mask run over different subsets hand a case
+the same copies.
 
 `Expand` also takes a `seed` of its own. Leave it out and the chain inherits
 `manual_seed`, which is what makes the two chains above agree; set it when you
@@ -658,6 +700,35 @@ Resume is **per copy**: a copy whose entry exists is skipped, so an interrupted
 run picks up at the copy it stopped on, and because the draws come from
 `manual_seed` rather than from the order a generator was consumed in, the copies
 it keeps are the copies it would have written.
+
+## Reproducibility across machines
+
+What the run writes is a function of the config and the data, with one
+machine-dependent quantity, and it is worth knowing where it can and cannot
+show.
+
+- **The draws.** A case's `Expand` copies are keyed by `manual_seed`, the
+  case's name and the draw's rank in the chain: nothing else. The same case
+  gets the same copies on another machine, under `--cpu 1` or `--cpu 8`, in a
+  `subset` or in the full cohort, and in a rerun that resumes. `Noise` draws
+  its field's generator seed with the copy, so it holds too.
+- **The slab height.** A streamed case is swept in slabs of full planes, 64
+  rows by default; a `memory_budget` can only lower that, and an `auto`
+  budget is read from the machine (its RAM, or the cgroup it runs in). So the
+  slab height depends on the machine, and with it the OME-Zarr chunk layout
+  above and the number of regions the log counts.
+- **The bytes.** For a chain of pointwise, halo, orientation and crop stages,
+  and for an axis-aligned `Resample` (a change of spacing, a change of shape),
+  the written values are identical whatever the slab height: streamed at 8
+  rows or at 64, and equal to the case assembled whole. Only a `Resample`
+  through a map that does not factorise into axes, a rotation or a stored
+  displacement field, computes its interpolation weights per slab, and there a
+  shorter slab differs from a taller one by about `1e-5` of the data's range.
+  That is what the plan's note says when the budget lowers the slab height
+  below the default; it is printed for the run, so read it against your chain:
+  it names a possibility, and a chain with no such resample is exact. How a
+  streamed result compares to a whole-volume one stage by stage is in
+  {doc}`../concepts/streaming`.
 
 ## Statistics a stage can ask for
 
