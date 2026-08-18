@@ -14,7 +14,6 @@ Predictor:
       int_steps: 7
       int_downsize: 2
       outputs_criterions: None  # No losses at prediction time; metrics are computed in Evaluation.yml
-      ModelPatch: None
       BlockConfig:
         kernel_size: 3
         stride: 1
