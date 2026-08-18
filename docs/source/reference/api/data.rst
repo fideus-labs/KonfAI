@@ -54,6 +54,15 @@ Patching
    :show-inheritance:
    :no-index:
 
+.. currentmodule:: konfai.data.materialize
+
+.. autoclass:: CaseMaterializer
+   :members:
+   :show-inheritance:
+   :no-index:
+
+.. currentmodule:: konfai.data.patching
+
 .. autoclass:: Accumulator
    :members:
    :show-inheritance:

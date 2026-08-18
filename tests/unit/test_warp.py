@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import LocalityKind, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset
@@ -207,7 +208,7 @@ def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.Monkey
     nothing was declared to make it true, the windows being measured from the field itself."""
     from konfai.data import patching as patching_module
 
-    monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
     source, _fields, volume = _fixture(tmp_path, shift_um=(1.0, 2.0, 3.0))
     warp = Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF")
 
@@ -215,7 +216,7 @@ def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.Monkey
 
     manager = _manager(source, [warp, Save(f"{tmp_path / 'out'}:h5")])
     assert manager.can_stream_patch(0, apply_augmentations=False)
-    assert manager.materialize() is True
+    assert CaseMaterializer(manager).materialize() is True
     streamed, _ = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")
 
     np.testing.assert_allclose(streamed, reference, rtol=1e-5, atol=1e-4)

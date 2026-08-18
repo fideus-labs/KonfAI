@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.augmentation import DataAugmentationsList, Rotate
+from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import (
     Accumulator,
     Cosinus,
@@ -771,7 +772,7 @@ def test_chain_device_is_opt_in_and_cpu_is_a_no_op(streaming_dataset_stub) -> No
         data_augmentations_list=[],
     )
     assert manager._chain_device is None
-    manager.materialize(rewrite=True, device=torch.device("cpu"))
+    CaseMaterializer(manager).materialize(rewrite=True, device=torch.device("cpu"))
     assert manager._chain_device is None
 
 
@@ -797,6 +798,6 @@ def test_chain_device_lives_only_for_the_materialize_call(streaming_dataset_stub
         return original(*args, **kwargs)
 
     monkeypatch.setattr(manager, "_stream_ready", spy)
-    manager.materialize(rewrite=True, device=torch.device("cuda", 0))
+    CaseMaterializer(manager).materialize(rewrite=True, device=torch.device("cuda", 0))
     assert seen == [torch.device("cuda", 0)]
     assert manager._chain_device is None

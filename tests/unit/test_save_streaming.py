@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Clip, Permute, Save, Standardize, Transform
 from konfai.utils.dataset import Attribute, Dataset
@@ -121,7 +122,7 @@ def test_multi_slab_sweep_writes_the_same_cache_as_the_whole_volume_load(
     slab only, and a region stage composed across slab boundaries."""
     from konfai.data import patching as patching_module
 
-    monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 4)
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 4)
     source = _source(tmp_path)
     classic = [Permute("2|1|0"), Clip(0.0, 50.0), Save(str(tmp_path / "cache_classic"))]
     swept = [Permute("2|1|0"), Clip(0.0, 50.0), Save(str(tmp_path / "cache_swept"))]
@@ -142,7 +143,7 @@ def test_failed_multi_slab_sweep_leaves_no_partial_cache(tmp_path: Path, monkeyp
     from konfai.data import patching as patching_module
     from konfai.utils import dataset as dataset_module
 
-    monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 4)
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 4)
     source = _source(tmp_path)
     manager = _manager(source, [Clip(0.0, 50.0), Save(str(tmp_path / "cache"))])
     reference = _whole_volume_patches(manager, [Clip(0.0, 50.0)])
@@ -288,7 +289,7 @@ def test_a_rank_dropping_stage_refuses_instead_of_writing_a_broadcast_store(
     from konfai.data import patching as patching_module
     from konfai.data.transform import Sum
 
-    monkeypatch.setattr(patching_module, "_SWEEP_SLAB_ROWS", 2)
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 2)
     rng = np.random.default_rng(0)
     volume = rng.random((5, 12, 10, 8)).astype(np.float32)
     source = Dataset(tmp_path / "source", "h5")
@@ -305,7 +306,7 @@ def test_a_rank_dropping_stage_refuses_instead_of_writing_a_broadcast_store(
         data_augmentations_list=[],
     )
     with pytest.warns(UserWarning, match="Falling back to the whole-volume path"):
-        assert manager.materialize() is False
+        assert CaseMaterializer(manager).materialize() is False
 
     written, _ = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")
     np.testing.assert_allclose(written, volume.sum(axis=0), rtol=1e-6)

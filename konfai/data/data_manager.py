@@ -19,9 +19,9 @@
 import math
 import os
 import random
-import re
 import threading
 import traceback
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -50,12 +50,17 @@ from konfai.data.transform import (
     TransformLoader,
     Write,
 )
+from konfai.utils.budget import (
+    MemoryBudget,
+    format_bytes,
+    node_local_ranks,
+    resolve_memory_budget,
+)
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
 from konfai.utils.runtime import (
     State,
-    available_memory_bytes,
     get_cpu_info,
     get_memory,
     get_memory_info,
@@ -67,96 +72,6 @@ from konfai.utils.utils import SUPPORTED_FORMATS, OverlapSpec, resolve_patch, sp
 # bytes are counted at 4/element from the header shape alone, not the on-disk dtype, and without
 # modelling transforms that shrink or grow the cached tensor.
 _CACHE_ELEMENT_BYTES = 4
-
-# Fraction of the detected node memory an ``"auto"`` budget offers the cache; the rest is reserved for
-# the model's optimizer/gradient state, DataLoader worker copies, CUDA pinned staging buffers, and
-# allocator slack. Caching runs with zero DataLoader workers, so a fifth of the node held back is ample.
-_AUTO_MEMORY_SAFETY_FRACTION = 0.8
-
-# Decimal (10^n) and binary (2^n) suffixes; "" / "b" are bytes. Case is folded before lookup.
-_MEMORY_UNIT_BYTES: dict[str, int] = {
-    "": 1, "b": 1,
-    "k": 10**3, "kb": 10**3, "kib": 2**10,
-    "m": 10**6, "mb": 10**6, "mib": 2**20,
-    "g": 10**9, "gb": 10**9, "gib": 2**30,
-    "t": 10**12, "tb": 10**12, "tib": 2**40,
-}  # fmt: skip
-
-
-def _format_gib(num_bytes: float) -> str:
-    """Human bytes at the unit that carries digits: a 0.3 MB refusal must not read '0.00 GiB'."""
-    for shift, unit in ((40, "TiB"), (30, "GiB"), (20, "MiB"), (10, "KiB")):
-        if abs(num_bytes) >= 2**shift:
-            return f"{num_bytes / 2**shift:.2f} {unit}"
-    return f"{num_bytes:.0f} B"
-
-
-@dataclass(frozen=True)
-class MemoryBudget:
-    """A resolved memory budget that knows its own scope.
-
-    The one decision no consumer may make for itself: an ``auto`` budget measures the NODE, so
-    ranks sharing it split it; an explicit budget is the user's per-rank figure, taken as is.
-    Handing consumers a bare number with an ``is_auto`` flag makes each of them re-derive that
-    rule: this object answers it once, through :meth:`per_rank_bytes`.
-    """
-
-    total_bytes: float
-    description: str
-    shared_across_ranks: bool
-
-    def per_rank_bytes(self, world_size: int) -> float:
-        return self.total_bytes / max(1, world_size) if self.shared_across_ranks else self.total_bytes
-
-
-def _node_local_ranks(world_size: int | None = None) -> int:
-    """How many ranks of this run share ONE node's RAM: the divisor a node-scoped budget needs.
-
-    The launcher publishes the count in ``KONFAI_LOCAL_RANKS``, because a budget is often sized before
-    the spawn where a world size exists at all. Without it (direct API use, a garbled value) the
-    world size stands in: exact on a single node, conservative everywhere else.
-    """
-    try:
-        local = int(os.environ.get("KONFAI_LOCAL_RANKS", "0"))
-    except ValueError:
-        local = 0
-    if local <= 0:
-        return max(1, world_size or 1)
-    return min(local, world_size) if world_size else local
-
-
-def _parse_memory_budget_bytes(value: str | float) -> int:
-    """Parse an explicit memory budget to bytes: a bare number is GiB, a string carries its own unit.
-
-    KonfAI reports RAM in GiB throughout, so an unadorned ``24`` reads as ``24 GiB``: whether it
-    arrives as a number or, through the YAML binding, as the string ``"24"``. A string may name its
-    unit: decimal ``GB``/``MB`` (10^n) or binary ``GiB``/``MiB`` (2^n), case-insensitive, optional
-    space (``"24GB"``, ``"32 GiB"``, ``"512mb"``); ``"b"`` means bytes. ``"auto"`` is resolved by the
-    caller, not here.
-    """
-    if not isinstance(value, str):
-        if float(value) <= 0:
-            raise ConfigError(
-                f"memory_budget: {value!r} must be a positive size.",
-                "Use a positive number in GiB (e.g. 24), a unit string ('24GB'), 'auto', or None.",
-            )
-        return int(float(value) * 2**30)
-    match = re.fullmatch(r"\s*(?P<number>[0-9]*\.?[0-9]+)\s*(?P<unit>[a-z]*)\s*", value.lower())
-    if match is not None and match.group("unit") in _MEMORY_UNIT_BYTES:
-        if float(match.group("number")) <= 0:
-            raise ConfigError(
-                f"memory_budget: '{value}' must be a positive size.",
-                "Use a positive number in GiB (e.g. 24), a unit string ('24GB'), 'auto', or None.",
-            )
-        unit = match.group("unit")
-        # A bare numeric string is the YAML face of a bare number: GiB, not bytes.
-        factor = 2**30 if unit == "" else _MEMORY_UNIT_BYTES[unit]
-        return int(float(match.group("number")) * factor)
-    raise ConfigError(
-        f"memory_budget: '{value}' is not a valid memory size.",
-        "Use a number in GiB (e.g. 24), a unit string ('24GB', '32GiB', '512MB'), 'auto', or None "
-        "(the default): which means 'auto': size from the detected memory.",
-    )
 
 
 def _cache_worker_count(cpu_count: int, device_count: int) -> int:
@@ -317,6 +232,9 @@ class GroupTransform:
                 transform = transform_loader.get_transform(
                     classpath,
                     konfai_args=f"{konfai_root()}.Dataset.groups_src.{group_src}.groups_dest.{group_dest}.transforms",
+                    # Past an Expand marker the chain is the copies' draws: a name both packages
+                    # have (Flip, Mask, Permute) is the draw there, the transform before it.
+                    prefer_augmentation=any(isinstance(stage, Expand) for stage in self.transforms),
                 )
                 self.transforms.append(transform)
         if self._patch_transforms is not None:
@@ -366,7 +284,7 @@ class GroupTransformMetric(GroupTransform):
 class GroupTransformOut(GroupTransform):
     """Transform-workflow group: a plain chain, no patch-time transforms, no ``is_input``.
 
-    Every group of a model-less workflow is an input, so the flag is not a question to ask; and the
+    Every group of a dataset-preparation workflow is an input, so the flag is not a question to ask; and the
     patch grid is an execution detail the planner owns, so a per-patch transform would make the
     OUTPUT a function of the declared budget."""
 
@@ -989,23 +907,8 @@ class Data(ABC):
         self._prepared_validation_names: list[str] = []
 
     def resolved_budget(self) -> MemoryBudget:
-        """The configured memory budget as an object that knows its own scope.
-
-        ``None``/``"auto"`` offers ``_AUTO_MEMORY_SAFETY_FRACTION`` of the node's allocatable
-        memory: a NODE budget, which ranks sharing the node split; an explicit budget is the
-        caller's own figure, per rank as declared."""
-        if self.memory_budget is None or (
-            isinstance(self.memory_budget, str) and self.memory_budget.strip().lower() == "auto"
-        ):
-            node_bytes, source = available_memory_bytes()
-            return MemoryBudget(
-                node_bytes * _AUTO_MEMORY_SAFETY_FRACTION,
-                f"auto: {_format_gib(node_bytes)} {source} x {_AUTO_MEMORY_SAFETY_FRACTION:.0%}",
-                shared_across_ranks=True,
-            )
-        return MemoryBudget(
-            float(_parse_memory_budget_bytes(self.memory_budget)), f"{self.memory_budget!r}", shared_across_ranks=False
-        )
+        """The configured memory budget as an object that knows its own scope (``resolve_memory_budget``)."""
+        return resolve_memory_budget(self.memory_budget)
 
     def _configure_data_loading(self, use_cache: bool) -> None:
         """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
@@ -1098,7 +1001,7 @@ class Data(ABC):
         per_rank_bytes = dataset_bytes / world_size
 
         budget = self.resolved_budget()
-        per_rank_budget = budget.per_rank_bytes(_node_local_ranks(world_size))
+        per_rank_budget = budget.per_rank_bytes(node_local_ranks(world_size))
         budget_desc = f"{budget.description}, per-rank"
 
         use_cache = per_rank_bytes <= per_rank_budget
@@ -1109,12 +1012,12 @@ class Data(ABC):
             case_bytes = dataset_bytes / max(1, n_cases)
             decision = (
                 f"STREAM/BUFFER, no cache; FIFO working set ~= {self._buffer_size} cases x "
-                f"{_format_gib(case_bytes)} = {_format_gib(self._buffer_size * case_bytes)} per worker"
+                f"{format_bytes(case_bytes)} = {format_bytes(self._buffer_size * case_bytes)} per worker"
             )
         print(
-            f"[KonfAI] memory_budget: dataset ~= {_format_gib(dataset_bytes)} over {n_cases} cases | "
-            f"per-rank ~= {_format_gib(per_rank_bytes)} across {world_size} rank(s) | "
-            f"budget {_format_gib(per_rank_budget)} ({budget_desc}) -> {decision}"
+            f"[KonfAI] memory_budget: dataset ~= {format_bytes(dataset_bytes)} over {n_cases} cases | "
+            f"per-rank ~= {format_bytes(per_rank_bytes)} across {world_size} rank(s) | "
+            f"budget {format_bytes(per_rank_budget)} ({budget_desc}) -> {decision}"
         )
 
     def _get_data_augmentations(self, apply_augmentations: bool = True) -> list[DataAugmentationsList]:
@@ -1365,7 +1268,15 @@ class Data(ABC):
             source_filename_by_group[group_src] = {}
             for filename, group_names in filenames_by_group.items():
                 for name in group_names:
-                    source_filename_by_group[group_src].setdefault(name, filename)
+                    first = source_filename_by_group[group_src].setdefault(name, filename)
+                    if first != filename:
+                        # Two roots hold the same case of the same group: the first declared is read.
+                        # Said out loud, because a stale copy left in one root would be read in silence.
+                        warnings.warn(
+                            f"Case '{name}' of group '{group_src}' is in '{first}' and in '{filename}':"
+                            f" reading '{first}' (dataset_filenames order).",
+                            stacklevel=2,
+                        )
         return source_filename_by_group
 
     def _get_case_entry_counts(
@@ -1843,7 +1754,7 @@ class DataMetric(Data):
             spatial_by_name,
             key=lambda name: channels_by_name[name] * int(np.prod(spatial_by_name[name], dtype=np.int64)),
         )
-        budget = self.resolved_budget().per_rank_bytes(_node_local_ranks())
+        budget = self.resolved_budget().per_rank_bytes(node_local_ranks())
         sized = resolve_patch(
             [0] * len(spatial_by_name[worst]),
             spatial_by_name[worst],

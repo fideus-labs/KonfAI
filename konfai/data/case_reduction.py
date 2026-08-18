@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
-from konfai.data.patching import DatasetManager, save_destination
+from konfai.data.patching import DatasetManager, RegionWriter, save_destination
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
 from konfai.utils.config import apply_config
@@ -564,18 +564,13 @@ class CaseReduction:
         spatial = plan.spatial
         attribute = self._output_attributes(plan)
         rank = len(spatial) + 1
-        stream: DataStream | None = None
+        writer = RegionWriter(lambda _key, array: self._open_stream(spatial, array, attribute))
         try:
             for region in self._regions(spatial):
                 array = self._apply_post(self._fold(region), attribute, rank)
-                if stream is None:
-                    stream = self._open_stream(spatial, array, attribute)
-                    stream.__enter__()
-                stream.write_slice((slice(0, int(array.shape[0])), *region), array)
-            if stream is not None:
-                stream.close()
+                writer.write(None, (slice(0, int(array.shape[0])), *region), array)
+            writer.close()
         except BaseException as exception:
-            if stream is not None:
-                stream.abort(exception)
+            writer.abort(exception)
             raise
         return True

@@ -39,12 +39,12 @@ Each workflow maps to one file with one mandatory root key:
 | `EVALUATION` | `Evaluation.yml` | `Evaluator:` |
 | `TRANSFORM` | `Transform.yml` | `Transformer:` |
 
-`TRANSFORM` sits outside the loop: it runs no model. It reads a dataset, applies a chain, and writes
+`TRANSFORM` sits outside the loop: it prepares a dataset. It reads a dataset, applies a chain, and writes
 a dataset: resampling a cohort onto one grid, folding it into a template (`Reduce`, N→1), expanding
-each case into drawn copies (`Expand`, 1→N). A chain may still embed a `KonfAIInference` stage, so
-"no model" means no top-level one. It takes no `-tb`, and `--plan` prints what a run would do and
-stops without writing the deliverable, it does probe each destination with a real region-write it
-then removes, so the output store may be created.
+each case into drawn copies (`Expand`, 1→N). A chain may still embed a `KonfAIInference` stage
+(whole-volume, one spawned process per case; a cohort inference is PREDICTION). It takes no `-tb`,
+and `--plan` prints what a run would do and stops without writing anything: it probes each
+destination with a real region-write it then removes, and takes back a store it created.
 
 **Don't write configs from scratch: copy a runnable template from `examples/`** (Segmentation,
 Synthesis, Registration or Transform) and adapt it. Then:
@@ -56,7 +56,7 @@ konfai TRAIN      -y --gpu 0 --config Config.yml
 konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/<train_name>/<checkpoint>.pt
 konfai EVALUATION -y          --config Evaluation.yml
 
-cd ../Transform                          # no model, no GPU
+cd ../Transform                          # dataset preparation; --gpu runs the chain on the device
 konfai TRANSFORM     --config Transform.yml --plan   # what it would do; writes no deliverable
 konfai TRANSFORM     --config Transform.yml
 ```

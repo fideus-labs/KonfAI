@@ -188,6 +188,11 @@ class Transform(NeedDevice, ABC):
     """Base class for transforms operating on tensors and cached attributes."""
 
     supports_dataloader_workers = True
+    #: What the whole-volume ``__call__`` allocates ON TOP of its input and its output, in
+    #: volumes-worth of the case: the plan multiplies it into the working set it sizes a
+    #: whole-volume fallback against (an interpolation holds its sampling grid, a gradient its
+    #: per-axis derivatives). Measured, not derived: RSS over the call, on a 300^3 float32 case.
+    working_multiple: float = 0.0
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         # Every stage records its constructor arguments as given, so konfai.api can write the
@@ -445,18 +450,21 @@ class TransformLoader:
     def __init__(self) -> None:
         pass
 
-    def get_transform(self, classpath: str, konfai_args: str) -> Transform:
-        module, name = get_module(classpath, "konfai.data.transform")
+    def get_transform(self, classpath: str, konfai_args: str, prefer_augmentation: bool = False) -> Transform:
+        """Build the stage ``classpath`` names. A bare name resolves in ``konfai.data.transform``,
+        then in ``konfai.data.augmentation``: those are stages too, declared exactly where they apply
+        (see Expand). ``prefer_augmentation`` reverses the order: past an Expand marker the chain is
+        the copies' draws, so a name both packages have (Flip, Mask, Permute) is the draw there."""
+        first, second = ("konfai.data.augmentation", "konfai.data.transform")
+        if not prefer_augmentation:
+            first, second = second, first
+        module, name = get_module(classpath, first)
         if not hasattr(module, name) and ":" not in classpath:
-            # A bare name the transform package does not have may be an AUGMENTATION: those are
-            # stages too, and a chain declares them exactly where they apply (see Expand). Looked up
-            # second, so a transform never loses its name to a same-named draw.
-            module, name = get_module(classpath, "konfai.data.augmentation")
+            module, name = get_module(classpath, second)
             if not hasattr(module, name):
                 raise TransformError(
                     f"No transform or augmentation is named '{name}'.",
-                    self._closest_stage_name(name)
-                    + "A bare name resolves in konfai.data.transform, then konfai.data.augmentation;"
+                    self._closest_stage_name(name) + f"A bare name resolves in {first}, then {second};"
                     " use 'module:Class' for a class anywhere else.",
                 )
         if not hasattr(module, name):
@@ -793,6 +801,8 @@ class UnNormalize(Transform):
 
 class Standardize(TransformInverse):
     """Standardize tensors using cached or computed mean and standard deviation."""
+
+    working_multiple = 1.0  # the float copy the statistics are taken on
 
     def __init__(
         self,
@@ -1325,6 +1335,8 @@ class Resample(TransformInverse):
     common (the rest takes ``fill``), and the plan prints how much of the grid it covers.
     """
 
+    working_multiple = 3.0  # the sampling grid (three coordinates per output voxel) and the taps
+
     def __init__(
         self,
         spacing: list[float] | None = None,
@@ -1473,6 +1485,17 @@ class Resample(TransformInverse):
                 " geometry is readable (mha, nii, h5, or an OME-Zarr written by KonfAI).",
             )
         return source, self._target.of(source, name)
+
+    def slab_height_sensitive(self, name: str) -> bool:
+        """Whether this case's streamed values can depend on the slab height: only a map that does
+        not factorise (a rotation, a displacement field) interpolates through per-voxel coordinates
+        whose float rounding differs with where the region starts; a separable map is bit-identical
+        whatever the region. Answers True when the question cannot be settled from the headers."""
+        try:
+            source, target = self._grids_of(name)
+            return separable_source_index(target, source, self._stages(name, target), torch.device("cpu")) is None
+        except Exception:  # nosec B110 - a map this cannot read is priced as the general path
+            return True
 
     def _grids_of(self, name: str) -> tuple[Grid, Grid]:
         source = self._source_grid(name)
@@ -2089,6 +2112,8 @@ class Mask(Transform):
 
 
 class Dilate(Transform):
+    working_multiple = 3.0  # the binary mask, its dilation, and the label restore
+
     def __init__(self, dilate: int = 1) -> None:
         super().__init__()
         if dilate < 0:
@@ -2199,6 +2224,8 @@ class MergeLabels(Transform):
 
 
 class Gradient(Transform):
+    working_multiple = 8.0  # one derivative per axis, their squares, and the magnitude
+
     def __init__(self, per_dim: bool = False):
         super().__init__()
         self.per_dim = per_dim
@@ -3227,9 +3254,11 @@ class KonfAIInference(Transform):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            p = ctx.Process(
-                target=self.infer_entry, args=(dataset_path, Path(tmpdir) / "Output", cuda_visible_devices())
-            )
+            # The nested run gets THIS rank's device, not every device the launch was given: under
+            # --gpu 0 1 each rank would otherwise spawn a two-GPU prediction of its own.
+            visible = cuda_visible_devices()
+            devices = [visible[torch.cuda.current_device()]] if visible and torch.cuda.is_available() else visible
+            p = ctx.Process(target=self.infer_entry, args=(dataset_path, Path(tmpdir) / "Output", devices))
             p.start()
             p.join()
 

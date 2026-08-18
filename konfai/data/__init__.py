@@ -19,7 +19,7 @@
 This is the surface for driving KonfAI's data machinery from plain Python: no YAML, no environment
 variables, no workflow. A chain of transforms applied to a dataset, out-of-core, is::
 
-    from konfai.data import Dataset, DatasetManager, Write
+    from konfai.data import CaseMaterializer, Dataset, DatasetManager, Write
     from konfai.data.transform import Clip   # the concrete stages stay in the module that defines them
 
     manager = DatasetManager(
@@ -28,8 +28,8 @@ variables, no workflow. A chain of transforms applied to a dataset, out-of-core,
         transforms=[Clip(0.0, 400.0), Write("./Out:omezarr")],
         data_augmentations_list=[],
     )
-    streamed = manager.materialize()      # True when it never held the volume
-    print(manager.stream_refusal())       # why not, naming the stage, when it is False
+    streamed = CaseMaterializer(manager).materialize()   # True when it never held the volume
+    print(manager.stream_refusal())                      # why not, naming the stage, when it is False
 
 ``patch=None`` on purpose: out-of-core is not the same thing as patched, and a whole-volume slab
 sweep is both simpler and faster than a tiling at these sizes. Passing ``DatasetPatch()`` instead
@@ -41,6 +41,7 @@ buried in the module that happens to define them.
 """
 
 from konfai.data.data_manager import DataMetric, DataPrediction, DatasetIter, DataTrain, DataTransform
+from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
 from konfai.data.transform import (
@@ -65,6 +66,7 @@ from konfai.utils.ome_zarr import (
 
 __all__ = [
     "Attribute",
+    "CaseMaterializer",
     "Concat",
     "DataMetric",
     "DataPrediction",

@@ -33,6 +33,7 @@ import torch
 from konfai.data.case_reduction import CaseReduction
 from konfai.data.data_manager import _check_patch_transform_locality
 from konfai.data.geometry import AffineMap, Grid, TransformBound
+from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.sampling import source_window
 from konfai.data.transform import LocalityKind, Reduce, Resample, Write
@@ -329,7 +330,7 @@ def test_it_never_assembles_the_volume(dataset: Dataset, tmp_path: Path) -> None
     monkeypatched = pytest.MonkeyPatch()
     monkeypatched.setattr(Dataset, "read_data", refuse)
     try:
-        assert manager.materialize() is True
+        assert CaseMaterializer(manager).materialize() is True
     finally:
         monkeypatched.undo()
 
@@ -851,7 +852,7 @@ def test_the_warped_run_never_assembles_the_volume(warped: tuple[Dataset, Datase
     monkeypatched = pytest.MonkeyPatch()
     monkeypatched.setattr(Dataset, "read_data", refuse)
     try:
-        assert manager.materialize() is True
+        assert CaseMaterializer(manager).materialize() is True
     finally:
         monkeypatched.undo()
     written = Dataset(tmp_path / "Warped", "mha").read_data("Case", _CASE)[0]

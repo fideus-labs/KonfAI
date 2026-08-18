@@ -1036,3 +1036,11 @@ def test_split_path_spec_supports_windows_paths_without_breaking_drive_letters()
     assert split_path_spec(r"C:\Dataset") == (r"C:\Dataset", None, "mha")
     assert split_path_spec(r"C:\Dataset:mha") == (r"C:\Dataset", None, "mha")
     assert split_path_spec(r"C:\Dataset:a:mha", allowed_flags={"a", "i"}) == (r"C:\Dataset", "a", "mha")
+
+
+def test_a_case_present_in_two_roots_is_read_from_the_first_and_said_so() -> None:
+    """dataset_filenames may name several roots; a case of one group in two of them was read from
+    the first in silence, so a stale copy left in one root would be read without a word."""
+    with pytest.warns(UserWarning, match="Case 'P001' of group 'CT' is in 'A' and in 'B'"):
+        chosen = Data._get_source_filename_by_group({"CT": {"A": ["P001", "P002"], "B": ["P001", "P003"]}})
+    assert chosen == {"CT": {"P001": "A", "P002": "A", "P003": "B"}}
