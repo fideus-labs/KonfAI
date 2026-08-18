@@ -931,7 +931,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         root = data.get(WORKFLOW_SPECS[kind].root_key)
         if not isinstance(root, dict):
             return None
-        # A model-less workflow names its run 'name': there is no training to name it after.
+        # A dataset-preparation run is named by 'name': there is no training to name it after.
         value = root.get("train_name", root.get("name"))
         return value if isinstance(value, str) and value not in {"", "None"} else None
 

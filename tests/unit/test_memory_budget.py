@@ -26,13 +26,12 @@ import pytest
 from konfai.data import data_manager
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager import (
-    _AUTO_MEMORY_SAFETY_FRACTION,
     DataMetric,
     DataPrediction,
     DataTrain,
-    _parse_memory_budget_bytes,
 )
 from konfai.utils import runtime
+from konfai.utils.budget import AUTO_MEMORY_SAFETY_FRACTION, parse_memory_budget_bytes
 from konfai.utils.errors import ConfigError
 
 # --------------------------------------------------------------------------------------
@@ -53,14 +52,14 @@ from konfai.utils.errors import ConfigError
         ("24", 24 * 2**30),  # unitless string (YAML face of a bare number) is GiB
     ],
 )
-def test_parse_memory_budget_bytes(value: str | float, expected: int) -> None:
-    assert _parse_memory_budget_bytes(value) == expected
+def testparse_memory_budget_bytes(value: str | float, expected: int) -> None:
+    assert parse_memory_budget_bytes(value) == expected
 
 
 @pytest.mark.parametrize("value", ["twelve", "24 gigabytes", "GB", ""])
 def test_parse_memory_budget_bytes_rejects_garbage(value: str) -> None:
     with pytest.raises(ConfigError):
-        _parse_memory_budget_bytes(value)
+        parse_memory_budget_bytes(value)
 
 
 # --------------------------------------------------------------------------------------
@@ -225,15 +224,15 @@ def test_none_budget_means_auto_for_training(monkeypatch: pytest.MonkeyPatch) ->
     # No key declared -> "auto": the tiny dataset fits the detected memory, so training caches; on
     # a node too small for it, the same absent key streams instead of blowing past the RAM.
     roomy = _make_train(None)
-    monkeypatch.setattr(data_manager, "available_memory_bytes", lambda: (_DATASET_BYTES * 10, "host"))
+    monkeypatch.setattr(runtime, "available_memory_bytes", lambda: (_DATASET_BYTES * 10, "host"))
     roomy._resolve_cache_regime(world_size=1)
     assert roomy.use_cache is True
 
     tight = _make_train(None)
     monkeypatch.setattr(
-        data_manager,
+        runtime,
         "available_memory_bytes",
-        lambda: (int(_DATASET_BYTES / _AUTO_MEMORY_SAFETY_FRACTION) - 1, "cgroup limit"),
+        lambda: (int(_DATASET_BYTES / AUTO_MEMORY_SAFETY_FRACTION) - 1, "cgroup limit"),
     )
     tight._resolve_cache_regime(world_size=1)
     assert tight.use_cache is False
@@ -275,8 +274,8 @@ def test_an_auto_budget_is_split_across_one_node_not_the_whole_cluster(monkeypat
     """
     # A node that offers half the dataset: a rank's sixteenth fits its quarter of that four times
     # over, while a sixteenth of it would be half of what the rank has to hold.
-    node = _DATASET_BYTES / (2 * _AUTO_MEMORY_SAFETY_FRACTION)
-    monkeypatch.setattr(data_manager, "available_memory_bytes", lambda: (node, "host"))
+    node = _DATASET_BYTES / (2 * AUTO_MEMORY_SAFETY_FRACTION)
+    monkeypatch.setattr(runtime, "available_memory_bytes", lambda: (node, "host"))
     monkeypatch.setenv("KONFAI_LOCAL_RANKS", "4")
 
     data = _make_train(None)
@@ -300,7 +299,7 @@ def _metric_sizing_budget(
         "f": SimpleNamespace(get_names=lambda group: ["case"], get_infos=lambda group, name: ([1, 64, 64, 64], None))
     }
     monkeypatch.setattr(DataMetric, "_resolve_dataset_sources", lambda self: {"CT": [("f", False)]}, raising=False)
-    monkeypatch.setattr(data_manager, "available_memory_bytes", lambda: (100 * 2**30, "host"))
+    monkeypatch.setattr(runtime, "available_memory_bytes", lambda: (100 * 2**30, "host"))
     captured: dict[str, float] = {}
 
     def capture(template, shape, channels, element_bytes, budget, **kwargs):
@@ -319,7 +318,7 @@ def _metric_sizing_budget(
 def test_eval_auto_budget_is_divided_by_the_local_ranks(monkeypatch: pytest.MonkeyPatch) -> None:
     # 4 ranks evaluating on one node share its RAM: each sizes its patch from a quarter of the
     # auto budget, or together they over-commit the host 4-fold.
-    node_auto = 100 * 2**30 * _AUTO_MEMORY_SAFETY_FRACTION
+    node_auto = 100 * 2**30 * AUTO_MEMORY_SAFETY_FRACTION
     assert _metric_sizing_budget(monkeypatch, None, "4") == node_auto // 4
     # Without the launcher's hint (direct API use), today's undivided behaviour is preserved.
     assert _metric_sizing_budget(monkeypatch, None, None) == node_auto
@@ -331,7 +330,7 @@ def test_eval_explicit_budget_is_per_rank_and_never_divided(monkeypatch: pytest.
 
 def test_a_garbled_local_ranks_variable_keeps_the_undivided_default(monkeypatch: pytest.MonkeyPatch) -> None:
     # A user-exported junk value must not crash the build: any unparsable content falls back to 1.
-    node_auto = 100 * 2**30 * _AUTO_MEMORY_SAFETY_FRACTION
+    node_auto = 100 * 2**30 * AUTO_MEMORY_SAFETY_FRACTION
     assert _metric_sizing_budget(monkeypatch, None, "two") == node_auto
 
 
@@ -371,10 +370,10 @@ def test_auto_budget_uses_detected_memory(monkeypatch: pytest.MonkeyPatch) -> No
     def fake_available() -> tuple[int, str]:
         return budget_source
 
-    monkeypatch.setattr(data_manager, "available_memory_bytes", fake_available)
+    monkeypatch.setattr(runtime, "available_memory_bytes", fake_available)
 
     # A cgroup so small that 80% of it cannot hold the dataset -> do not cache.
-    budget_source = (int(_DATASET_BYTES / _AUTO_MEMORY_SAFETY_FRACTION) - 1, "cgroup limit")
+    budget_source = (int(_DATASET_BYTES / AUTO_MEMORY_SAFETY_FRACTION) - 1, "cgroup limit")
     tight = _make_train("auto")
     tight._resolve_cache_regime(world_size=1)
     assert tight.use_cache is False

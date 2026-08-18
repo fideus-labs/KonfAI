@@ -95,9 +95,9 @@ defaults. See {doc}`../concepts/configuration`.
 - `--transforms-dir` / `--transforms_dir` (default `./Transforms/`): run logs;
   the outputs go where each `Write:` says. `--plan` prints and writes nothing
   there.
-- `--gpu` exists for one reason: a `KonfAIInference` stage runs a nested
-  inference that does use the device. Plain read transforms run on CPU either
-  way. There is no `-tb`: the workflow emits no scalars.
+- `--gpu`: each rank runs its chain on its device, in taller slabs than on a
+  CPU, and writes the same bytes; a `KonfAIInference` stage runs its nested
+  inference there too. There is no `-tb`: the workflow emits no scalars.
 - `--plan` short-circuits before the distributed wrapper, so it runs in one
   process and spawns no ranks. `--cpu` and `--gpu` are still read: the plan is
   sized for the run's world size (one rank per GPU, else `--cpu` ranks), and an

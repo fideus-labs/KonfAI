@@ -29,6 +29,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.augmentation import Brightness, CutOUT, Flip, Noise, Permute, Rotate, Scale
+from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Expand, Resample, Save, TensorCast, Transform, Write, split_expand
 from konfai.utils.dataset import Attribute, Dataset
@@ -127,7 +128,7 @@ def test_copies_are_written_under_their_own_names_and_carry_their_draw(tmp_path:
         ],
     )
 
-    assert set(manager.materialize_copies([1, 2])) == {1, 2}
+    assert set(CaseMaterializer(manager).materialize_copies([1, 2])) == {1, 2}
     assert out.is_dataset_exist("CT", "CASE_000_r01")
     assert out.is_dataset_exist("CT", "CASE_000_r02")
     # The case's own name is NOT written: a copy is not the case.
@@ -147,7 +148,7 @@ def test_a_chain_without_expand_is_untouched(tmp_path: Path) -> None:
     assert manager.copy_entry(1) == "CASE_000"
     assert manager.shapes == [[12, 10, 8]]
     with pytest.raises(PatchError, match="declares no Expand"):
-        manager.materialize_copies([1])
+        CaseMaterializer(manager).materialize_copies([1])
 
 
 def test_two_chains_of_one_case_draw_the_same_copies(tmp_path: Path) -> None:
@@ -228,7 +229,7 @@ def test_a_draw_is_a_stage_that_chains_with_the_transforms_around_it(tmp_path: P
         "Write",
     ]
 
-    assert set(manager.materialize_copies([1, 2]).values()) <= {"stream", "stream-shared"}
+    assert set(CaseMaterializer(manager).materialize_copies([1, 2]).values()) <= {"stream", "stream-shared"}
 
     expected = Clip(0.0, 50.0)(
         "CASE_000", torch.from_numpy(source.read_data("CT", "CASE_000")[0]), Attribute(_image_attributes())
@@ -257,7 +258,11 @@ def test_a_transform_after_a_shape_changing_draw_folds_on_the_copys_grid(tmp_pat
     assert manager.shapes[0] == [12, 10, 8]
     assert manager.shapes[1] != manager.shapes[0], "the copy's grid did not follow its draw"
 
-    assert set(manager.materialize_copies([1, 2]).values()) <= {"stream", "stream-shared", "whole-volume"}
+    assert set(CaseMaterializer(manager).materialize_copies([1, 2]).values()) <= {
+        "stream",
+        "stream-shared",
+        "whole-volume",
+    }
     written = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000_r01")[0]
     assert list(written.shape[1:]) == manager.shapes[1]
 
@@ -285,14 +290,18 @@ def test_a_streamed_copy_equals_the_whole_volume_copy(tmp_path: Path) -> None:
         source,
         [Clip(0.0, 50.0), Expand(nb=3, pattern="{name}_r{a:02d}"), draw, Write(f"{tmp_path / 'streamed'}:h5")],
     )
-    assert streamed.materialize_copies([1, 2, 3]) == {1: "stream-shared", 2: "stream-shared", 3: "stream-shared"}
+    assert CaseMaterializer(streamed).materialize_copies([1, 2, 3]) == {
+        1: "stream-shared",
+        2: "stream-shared",
+        3: "stream-shared",
+    }
 
     classic = _manager(
         source,
         [Clip(0.0, 50.0), Expand(nb=3, pattern="{name}_r{a:02d}"), draw, Write(f"{tmp_path / 'classic'}:h5")],
     )
     for a in (1, 2, 3):
-        classic._assemble_and_write(a)
+        CaseMaterializer(classic)._assemble_and_write(a)
 
     for a in (1, 2, 3):
         entry = f"CASE_000_r{a:02d}"
@@ -333,7 +342,7 @@ def test_the_shared_pass_reads_the_source_once_for_every_copy(tmp_path: Path) ->
     )
     Dataset.read_data_slice = counted  # type: ignore[method-assign]
     try:
-        regimes = manager.materialize_copies([1, 2, 3])
+        regimes = CaseMaterializer(manager).materialize_copies([1, 2, 3])
     finally:
         Dataset.read_data_slice = original  # type: ignore[method-assign]
 
@@ -354,10 +363,10 @@ def test_a_region_draw_takes_its_own_pass_and_the_plan_names_the_draw(tmp_path: 
             Write(f"{tmp_path / 'out'}:h5"),
         ],
     )
-    reason = manager.expansion_solo_reason(1)
+    reason = CaseMaterializer(manager).expansion_solo_reason(1)
     assert reason is not None and "Flip" in reason and "ORIENTATION" in reason
 
-    assert manager.materialize_copies([1, 2]) == {1: "stream", 2: "stream"}
+    assert CaseMaterializer(manager).materialize_copies([1, 2]) == {1: "stream", 2: "stream"}
     out = Dataset(tmp_path / "out", "h5")
     assert out.is_dataset_exist("CT", "CASE_000_r01") and out.is_dataset_exist("CT", "CASE_000_r02")
 
@@ -381,9 +390,9 @@ def test_a_solo_copy_sweeps_on_the_requested_device(tmp_path: Path, monkeypatch)
         seen.append(kwargs.get("device"))
         return True  # the sweep itself is not the point, the handed-down device is
 
-    monkeypatch.setattr(DatasetManager, "materialize", spy)
+    monkeypatch.setattr(CaseMaterializer, "materialize", spy)
     device = torch.device("cuda", 0)
-    manager.materialize_copies([1, 2], device=device)
+    CaseMaterializer(manager).materialize_copies([1, 2], device=device)
     assert seen == [device, device]
     assert manager._chain_device is None
 
@@ -409,13 +418,13 @@ def test_the_geometric_and_field_draws_stream_their_copies(tmp_path: Path, draw,
         source,
         [Clip(0.0, 50.0), Expand(nb=2, pattern="{name}_r{a:02d}"), augmentation, Write(f"{tmp_path / 'streamed'}:h5")],
     )
-    assert streamed.materialize_copies([1, 2]) == {1: regime, 2: regime}
+    assert CaseMaterializer(streamed).materialize_copies([1, 2]) == {1: regime, 2: regime}
     classic = _manager(
         source,
         [Clip(0.0, 50.0), Expand(nb=2, pattern="{name}_r{a:02d}"), augmentation, Write(f"{tmp_path / 'classic'}:h5")],
     )
     for a in (1, 2):
-        classic._assemble_and_write(a)
+        CaseMaterializer(classic)._assemble_and_write(a)
     for a in (1, 2):
         got, _ = Dataset(tmp_path / "streamed", "h5").read_data("CT", f"CASE_000_r{a:02d}")
         expected, _ = Dataset(tmp_path / "classic", "h5").read_data("CT", f"CASE_000_r{a:02d}")
@@ -439,7 +448,7 @@ def test_a_whole_volume_draw_falls_back_per_copy_and_still_writes(tmp_path: Path
         ],
     )
     assert manager.stream_refusal(1, apply_augmentations=True) is not None
-    assert manager.materialize_copies([1, 2]) == {1: "whole-volume", 2: "whole-volume"}
+    assert CaseMaterializer(manager).materialize_copies([1, 2]) == {1: "whole-volume", 2: "whole-volume"}
     out = Dataset(tmp_path / "out", "h5")
     assert out.is_dataset_exist("CT", "CASE_000_r01") and out.is_dataset_exist("CT", "CASE_000_r02")
     assert not manager.loaded and not manager.data
@@ -457,8 +466,8 @@ def test_the_write_probe_targets_the_copys_grid_not_the_cases(tmp_path: Path) ->
             Write(f"{tmp_path / 'out'}:h5"),
         ],
     )
-    case_targets = manager.write_targets(0)
-    copy_targets = manager.write_targets(1)
+    case_targets = CaseMaterializer(manager).write_targets(0)
+    copy_targets = CaseMaterializer(manager).write_targets(1)
     assert [shape for _stage, shape, _attributes in copy_targets] == [manager.shapes[1]]
     assert copy_targets[0][1] != case_targets[0][1], "the probe would validate the pre-draw extent"
 
@@ -496,16 +505,16 @@ def test_a_written_copy_is_not_rewritten_and_overwrite_forces_it(
             ],
         )
 
-    build().materialize_copies([1, 2])
+    CaseMaterializer(build()).materialize_copies([1, 2])
     written = list(opened)
     assert len(written) == 2, written
 
     opened.clear()
-    build().materialize_copies([1, 2])
+    CaseMaterializer(build()).materialize_copies([1, 2])
     assert opened == [], "a copy already on disk was written again"
 
     opened.clear()
-    build().materialize_copies([1, 2], rewrite=True)
+    CaseMaterializer(build()).materialize_copies([1, 2], rewrite=True)
     assert opened == written, "rewrite=True did not force both copies"
 
 
@@ -522,7 +531,7 @@ def test_a_shared_cache_before_the_marker_is_swept_once_for_every_copy(tmp_path:
             Write(f"{tmp_path / 'out'}:h5"),
         ],
     )
-    manager.materialize_copies([1, 2, 3], rewrite=True)
+    CaseMaterializer(manager).materialize_copies([1, 2, 3], rewrite=True)
 
     work = Dataset(tmp_path / "work", "h5")
     # The shared cache holds the CASE (no draw), under the case's own name, once.
@@ -582,7 +591,11 @@ def test_a_shared_pass_writes_an_mha_destination_like_the_whole_volume_copies(tm
         source,
         [Clip(0.0, 50.0), Expand(nb=3, pattern="{name}_r{a:02d}"), draw, Write(f"{tmp_path / 'streamed'}:mha")],
     )
-    assert streamed.materialize_copies([1, 2, 3]) == {1: "stream-shared", 2: "stream-shared", 3: "stream-shared"}
+    assert CaseMaterializer(streamed).materialize_copies([1, 2, 3]) == {
+        1: "stream-shared",
+        2: "stream-shared",
+        3: "stream-shared",
+    }
     assert sorted(entry.name for entry in (tmp_path / "streamed").iterdir()) == [
         "CASE_000_r01",
         "CASE_000_r02",
@@ -594,7 +607,7 @@ def test_a_shared_pass_writes_an_mha_destination_like_the_whole_volume_copies(tm
         [Clip(0.0, 50.0), Expand(nb=3, pattern="{name}_r{a:02d}"), draw, Write(f"{tmp_path / 'classic'}:mha")],
     )
     for a in (1, 2, 3):
-        classic._assemble_and_write(a)
+        CaseMaterializer(classic)._assemble_and_write(a)
 
     for a in (1, 2, 3):
         entry = f"CASE_000_r{a:02d}"
@@ -633,7 +646,7 @@ def test_a_foreign_draw_after_the_marker_falls_back_and_each_copy_carries_its_ow
     refusal = manager.stream_refusal(1, apply_augmentations=True)
     assert refusal is not None and "'Foreign'" in refusal and "WHOLE_VOLUME" in refusal
 
-    assert manager.materialize_copies([1, 2]) == {1: "whole-volume", 2: "whole-volume"}
+    assert CaseMaterializer(manager).materialize_copies([1, 2]) == {1: "whole-volume", 2: "whole-volume"}
 
     out = Dataset(tmp_path / "out", "h5")
     clipped = torch.from_numpy(np.clip(source.read_data("CT", "CASE_000")[0], 0.0, 50.0))

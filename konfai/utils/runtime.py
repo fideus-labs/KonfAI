@@ -826,8 +826,16 @@ class DistributedObject(ABC):
                             )
         return result
 
+    @property
+    def world_size(self) -> int:
+        """How many ranks ``setup`` sharded the run over: one dataloader list per rank."""
+        return len(self.dataloader)
+
+    def rank_dataloaders(self, global_rank: int) -> "list[DataLoader]":
+        return self.dataloader[global_rank]
+
     def __call__(self, rank: int | None = None) -> None:
-        world_size = len(self.dataloader)
+        world_size = self.world_size
         global_rank, local_rank = setup_gpu(world_size, rank, process_group=self.uses_collectives)
         if global_rank is None or local_rank is None:
             return
@@ -841,7 +849,7 @@ class DistributedObject(ABC):
                 torch.manual_seed(self.manual_seed * world_size + global_rank)
             torch.backends.cudnn.benchmark = self.manual_seed is None
             torch.backends.cudnn.deterministic = self.manual_seed is not None
-            dataloaders = self.dataloader[global_rank]
+            dataloaders = self.rank_dataloaders(global_rank)
             if torch.cuda.is_available():
                 torch.cuda.set_device(local_rank)
             try:
