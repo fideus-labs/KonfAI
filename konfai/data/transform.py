@@ -3387,10 +3387,19 @@ class OneHot(TransformInverse):
         # Scattered straight into the float32 answer: ``F.one_hot`` builds the classes in int64
         # first, three times the bytes of the result for the time of a cast (80 GB for 50 classes
         # of a 512^3 map, where the answer is 27 GB and this holds the answer plus the labels).
+        labels = tensor.to(torch.int64)
+        # scatter_ names no label: out of range it is a raw index error on CPU and a device-side
+        # assert on CUDA that poisons the context, where F.one_hot said which value was wrong.
+        lowest, highest = int(labels.min()), int(labels.max())
+        if lowest < 0 or highest >= self.num_classes:
+            raise TransformError(
+                f"'OneHot' with num_classes={self.num_classes} met labels from {lowest} to {highest} in '{name}'.",
+                "Labels must lie in [0, num_classes): raise num_classes or relabel (SelectLabel) first.",
+            )
         result = torch.zeros(
             (int(tensor.shape[0]), self.num_classes, *tensor.shape[1:]), dtype=torch.float32, device=tensor.device
         )
-        result.scatter_(1, tensor.to(torch.int64).unsqueeze(1), 1.0)
+        result.scatter_(1, labels.unsqueeze(1), 1.0)
         return result.squeeze(0)
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:

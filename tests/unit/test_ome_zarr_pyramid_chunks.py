@@ -136,10 +136,13 @@ def test_chunk_cache_serves_the_same_bytes_and_survives_eviction(tmp_path):
     for window in windows:
         got, _ = read_ome_zarr_data_slice(store, window, level=0)
         np.testing.assert_array_equal(got, volume[window])
-    # A tiny cache: nothing fits, every read decodes -- still the same bytes.
+    # A tiny cache: nothing fits, every read decodes -- still the same bytes. Restored whatever
+    # the assertions say: the cache is process-global.
     OZ._CHUNK_CACHE = OZ._DecodedChunkCache(1024)
-    for window in windows:
-        got, _ = read_ome_zarr_data_slice(store, window, level=0)
-        np.testing.assert_array_equal(got, volume[window])
-    OZ._CHUNK_CACHE = None
-    OZ.clear_ome_zarr_cache()
+    try:
+        for window in windows:
+            got, _ = read_ome_zarr_data_slice(store, window, level=0)
+            np.testing.assert_array_equal(got, volume[window])
+    finally:
+        OZ._CHUNK_CACHE = None
+        OZ.clear_ome_zarr_cache()

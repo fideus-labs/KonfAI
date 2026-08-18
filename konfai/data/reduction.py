@@ -175,24 +175,25 @@ class Median(Reduction):
     """
 
     voxel_local = True
-    # ``torch.stack`` copies the buffer and ``torch.quantile`` sorts, indexes and interpolates
-    # copies of that: measured at 4x the stack it is handed (6 x 16 MiB float32 cases).
+    # ``torch.stack`` copies the buffer and the sort along the case axis returns values and
+    # int64 indices over that: measured at 4x the stack it is handed (6 x 16 MiB float32 cases).
     working_multiple = 4.0
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        dtype = _averaged_dtype(tensors[0].dtype)
         if len(tensors) == 1:
-            return tensors[0].to(_averaged_dtype(tensors[0].dtype))
+            return tensors[0].to(dtype)
         # The sort along the case axis, and the middle read off it: what torch.quantile computes,
         # without its interpolation machinery around it (1.5-2x on CPU, 3.5x on CUDA over three
-        # cases, measured). The even-count middle is the same lerp quantile uses, so the two are
-        # bit-identical, odd and even.
-        ranked = torch.stack(tensors, dim=0).float().sort(dim=0).values
+        # cases, measured), in the dtype the average belongs in, so a float64 cohort keeps its
+        # precision. The even-count middle is the same lerp quantile uses, so the two agree.
+        ranked = torch.stack(tensors, dim=0).to(dtype).sort(dim=0).values
         cases = ranked.shape[0]
         if cases % 2:
             middle = ranked[cases // 2]
         else:
             middle = torch.lerp(ranked[cases // 2 - 1], ranked[cases // 2], 0.5)
-        return middle.to(_averaged_dtype(tensors[0].dtype))
+        return middle
 
 
 class Vote(Reduction):

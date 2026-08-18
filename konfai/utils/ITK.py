@@ -293,6 +293,11 @@ def encode_transform_stages(stages: SpatialStages) -> sitk.Transform:
             members.append(sitk.DisplacementFieldTransform(field))
         else:
             members.append(sitk.BSplineTransform(images, int(stage.order)))
+    if not members:
+        raise TransformError(
+            "encode_transform_stages() was given no stage to encode.",
+            "Hand it the decoded stages of a transform; an identity is sitk.Transform(rank, sitk.sitkIdentity).",
+        )
     if len(members) == 1:
         return members[0]
     composite = sitk.CompositeTransform(members[0].GetDimension())

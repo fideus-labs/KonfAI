@@ -23,6 +23,7 @@ one question every consumer had been re-deriving: what is MY rank's share.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from contextlib import suppress
@@ -139,8 +140,9 @@ def _cgroup_paths() -> list[tuple[Path, str, tuple[str, ...]]]:
     return []
 
 
-def _cpu_cgroup_paths() -> list[Path]:
-    """This process's cpu cgroup directory and its ancestors (v2 ``cpu.max``), innermost first."""
+def _cpu_cgroup_paths() -> list[tuple[Path, bool]]:
+    """This process's cpu cgroup directory and its ancestors, innermost first, each flagged v2
+    (``cpu.max``) or v1 (``cpu.cfs_quota_us`` / ``cpu.cfs_period_us``)."""
     try:
         lines = Path(_PROC_SELF_CGROUP).read_text().splitlines()
     except OSError:
@@ -152,31 +154,47 @@ def _cpu_cgroup_paths() -> list[Path]:
             continue
         hierarchy, controllers, path = parts
         if hierarchy == "0" and controllers == "":
-            base = root
+            base, v2 = root, True
         elif "cpu" in controllers.split(","):
-            base = root / "cpu"
+            base, v2 = root / "cpu", False
         else:
             continue
         leaf = base / path.lstrip("/")
-        return [d for d in (leaf, *leaf.parents) if d == base or base in d.parents]
+        return [(d, v2) for d in (leaf, *leaf.parents) if d == base or base in d.parents]
     return []
+
+
+def _cpu_quota(directory: Path, v2: bool) -> float | None:
+    """The CPU quota of one cgroup directory in cores, ``None`` when unbounded, missing or malformed."""
+    try:
+        if v2:
+            quota, period = (directory / "cpu.max").read_text().split()
+        else:
+            quota = (directory / "cpu.cfs_quota_us").read_text().strip()
+            period = (directory / "cpu.cfs_period_us").read_text().strip()
+        if quota in ("max", "-1"):
+            return None
+        quota_us, period_us = int(quota), int(period)
+    except (OSError, ValueError):
+        return None
+    if quota_us <= 0 or period_us <= 0:
+        return None
+    return quota_us / period_us
 
 
 def available_cpus() -> int:
     """The cores this process may actually run on: the tighter of its affinity mask and its cgroup
-    CPU quota (``cpu.max``). ``os.cpu_count()`` is the host's core count, which a container sees in
-    full while being allowed a fraction of it, and every thread past that fraction is contention."""
+    CPU quota (v2 ``cpu.max``, v1 ``cpu.cfs_quota_us``/``cpu.cfs_period_us``, over its ancestors).
+    ``os.cpu_count()`` is the host's core count, which a container sees in full while being allowed
+    a fraction of it, and every thread past that fraction is contention."""
     try:
         cores = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         cores = os.cpu_count() or 1
-    for directory in _cpu_cgroup_paths():
-        try:
-            quota, period = (directory / "cpu.max").read_text().split()
-        except (OSError, ValueError):
-            continue
-        if quota != "max":
-            cores = min(cores, max(1, -(-int(quota) // int(period))))
+    for directory, v2 in _cpu_cgroup_paths():
+        quota = _cpu_quota(directory, v2)
+        if quota is not None:
+            cores = min(cores, max(1, math.ceil(quota)))
     return max(1, cores)
 
 
