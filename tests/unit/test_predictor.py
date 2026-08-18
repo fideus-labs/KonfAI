@@ -83,3 +83,27 @@ def test_async_gate_stays_inline_for_single_stores_and_cpu_outputs(tmp_path, mon
     monkeypatch.delenv("KONFAI_ASYNC_WRITES", raising=False)
     drive_tta(tmp_path / "cpu", monkeypatch, augmentation=Flip(f_prob=[0, 1, 1]), streamed=True, file_format="mha")
     assert not used, "a CPU-only output must stay inline in automatic mode"
+
+
+def test_a_built_in_reduction_binds_from_its_own_block_like_a_custom_one(write_config, monkeypatch) -> None:
+    """``reduction: Mean`` used to build ``Mean()`` directly, so the ``Mean:`` block a resolved config
+    carries was read by nothing; every operator now binds from its block, and the write-back says so."""
+    import ruamel.yaml
+    from konfai.data.reduction import Mean
+    from konfai.predictor import OutSameAsGroupDataset
+
+    path = write_config("Predictor:\n  outputs_dataset:\n    L:\n      OutputDataset:\n        reduction: Mean\n")
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    output = OutSameAsGroupDataset(
+        same_as_group="a:b",
+        dataset_filename="./Out:mha",
+        before_reduction_transforms={},
+        after_reduction_transforms={},
+        final_transforms={},
+        reduction="Mean",
+    )
+    output.prepare("L")
+
+    assert isinstance(output.reduction, Mean)
+    block = ruamel.yaml.YAML().load(path.read_text())["Predictor"]["outputs_dataset"]["L"]["OutputDataset"]
+    assert "Mean" in block

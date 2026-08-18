@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from konfai.data.materialize import CaseMaterializer
+from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Permute, Save, Standardize, Transform
 from konfai.utils.dataset import Attribute, Dataset
@@ -67,7 +67,7 @@ def test_streamed_branch_writes_without_holding_the_volume(tmp_path: Path) -> No
     source = _source(tmp_path)
     manager = _manager(source, [Clip(0.0, 50.0), Save(str(tmp_path / "out"))])
 
-    assert CaseMaterializer(manager).materialize() is True
+    assert CaseMaterializer(manager).materialize() is Verdict.STREAM
     assert Dataset(tmp_path / "out", "mha").is_dataset_exist("CT", "CASE_000")
     # The volume was never assembled: the sweep read regions and wrote regions.
     assert not manager.loaded
@@ -80,7 +80,7 @@ def test_streamed_branch_writes_the_same_bytes_as_the_classic_load(tmp_path: Pat
     swept = [Permute("2|1|0"), Clip(0.0, 50.0), Save(str(tmp_path / "swept"))]
 
     _manager(source, classic).load(classic, [], load_augmentations=False)
-    assert CaseMaterializer(_manager(source, swept)).materialize() is True
+    assert CaseMaterializer(_manager(source, swept)).materialize() is Verdict.STREAM
 
     expected, expected_attributes = Dataset(tmp_path / "classic", "mha").read_data("CT", "CASE_000")
     result, result_attributes = Dataset(tmp_path / "swept", "mha").read_data("CT", "CASE_000")
@@ -101,7 +101,7 @@ def test_whole_volume_branch_still_writes_and_says_so(tmp_path: Path) -> None:
     manager = _manager(source, [Clip(0.0, 50.0), Standardize(inverse=False), Save(str(tmp_path / "out"))])
 
     assert manager.can_stream_patch(0) is False
-    assert CaseMaterializer(manager).materialize() is False
+    assert CaseMaterializer(manager).materialize() is Verdict.WHOLE_VOLUME
     assert Dataset(tmp_path / "out", "mha").is_dataset_exist("CT", "CASE_000")
     # The fallback assembled the volume, but released it before returning.
     assert not manager.data
@@ -112,7 +112,7 @@ def test_unstreamable_destination_falls_back_and_writes(tmp_path: Path) -> None:
     source = _source(tmp_path)
     manager = _manager(source, [Clip(0.0, 50.0), Save(f"{tmp_path / 'out'}:nii.gz")])
 
-    assert CaseMaterializer(manager).materialize() is False
+    assert CaseMaterializer(manager).materialize() is Verdict.WHOLE_VOLUME
     assert Dataset(tmp_path / "out", "nii.gz").is_dataset_exist("CT", "CASE_000")
 
 
@@ -128,21 +128,21 @@ def test_materialize_never_reads_the_volume_back(tmp_path: Path, monkeypatch: py
         raise AssertionError("materialize() read the whole volume")
 
     monkeypatch.setattr(Dataset, "read_data", refuse)
-    assert CaseMaterializer(manager).materialize() is True
+    assert CaseMaterializer(manager).materialize() is Verdict.STREAM
 
 
 def test_second_run_skips_the_case(tmp_path: Path) -> None:
     """Per-case resume, for free: the Save boundary answers, so nothing is recomputed or rewritten."""
     source = _source(tmp_path)
     transforms = [Clip(0.0, 50.0), Save(str(tmp_path / "out"))]
-    assert CaseMaterializer(_manager(source, transforms)).materialize() is True
+    assert CaseMaterializer(_manager(source, transforms)).materialize() is Verdict.STREAM
 
     written = Dataset(tmp_path / "out", "mha")
     before, _ = written.read_data("CT", "CASE_000")
     stamp = next((tmp_path / "out").glob("**/*")).stat().st_mtime_ns
 
     manager = _manager(source, transforms)
-    assert CaseMaterializer(manager).materialize() is True
+    assert CaseMaterializer(manager).materialize() is Verdict.STREAM
     after, _ = written.read_data("CT", "CASE_000")
     np.testing.assert_array_equal(after, before)
     assert next((tmp_path / "out").glob("**/*")).stat().st_mtime_ns == stamp

@@ -29,7 +29,9 @@ reason live on the manager, because a streamed read of a pending ``Save`` sweeps
 
 import contextlib
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from enum import StrEnum
 
 import numpy as np
 import torch
@@ -37,21 +39,48 @@ import torch
 from konfai.data.patching import (
     CASE_ELEMENT_BYTES,
     FALLBACK_INFLIGHT_FACTOR,
+    SWEEP_SLAB_ROWS,
+    AugmentedStage,
     DatasetManager,
-    RegionWriter,
     Stage,
-    _open_sweep_stream,
-    _PatchStreamSource,
     _PendingSweep,
     _ReadStagePlan,
-    _require_channel_first,
     _stage_name,
-    _sweep_header,
-    _sweep_targets,
 )
-from konfai.data.transform import LocalityKind, Save, Transform
+from konfai.data.transform import LocalityKind, Reduce, Resample, Save, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PatchError
+
+
+class Verdict(StrEnum):
+    """What the plan says of an entry, and what the run then does with it: one vocabulary. The engine
+    answers STREAM, LOAD (the plan's choice: the case fits and streaming would re-read the source) or
+    WHOLE_VOLUME (the fallback); SKIP, REDUCE and REFUSED are the workflow's."""
+
+    STREAM = "STREAM"
+    LOAD = "LOAD"
+    WHOLE_VOLUME = "WHOLE-VOLUME"
+    SKIP = "SKIP"
+    REDUCE = "REDUCE"
+    REFUSED = "REFUSED"
+
+
+class Regime(StrEnum):
+    """How a STREAM copy of an Expand case is read: SHARED rides the case's single read pass, SOLO
+    sweeps its own (its draw's read geometry is its own)."""
+
+    SHARED = "shared"
+    SOLO = "solo"
+
+
+@dataclass(frozen=True)
+class CopyRoute:
+    """The engine's answer for one Expand copy: its regime (``None`` when it cannot stream), why it
+    sweeps alone, and the per-copy Save a SHARED copy writes."""
+
+    regime: Regime | None
+    reason: str | None = None
+    sweep: _PendingSweep | None = None
 
 
 class CaseMaterializer:
@@ -90,36 +119,32 @@ class CaseMaterializer:
         allow_fallback: bool = True,
         prefer_whole: bool = False,
         device: "torch.device | None" = None,
-        release: bool = True,
-    ) -> bool:
-        """Write this case's chain to disk by the cheapest path that can; returns whether it streamed.
+    ) -> Verdict:
+        """Write this case's chain to disk by the cheapest path that can, and say which it took.
 
         The streamed path sweeps every unsatisfied :class:`Save` slab by slab; when the plan refuses
         (a WHOLE_VOLUME stage, a destination without region writes, a failed sweep) the whole-volume
         load writes the same caches, same bytes, more memory. ``allow_fallback=False`` raises instead
         of loading; ``prefer_whole`` is the plan's LOAD choice (no fallback, no refusal);
         ``rewrite=True`` recomputes the case and renames over the old entries (``--overwrite``). A
-        chain whose caches all exist writes nothing (the per-case resume). The loaded volume is
-        released before returning unless ``release=False`` (the expansion engine's solo copies share
-        the assembled prefix).
+        chain whose caches all exist writes nothing (the per-case resume).
         """
-        manager = self.manager
         with self._materialization(rewrite, fallback_budget_bytes, device):
-            # A chain with an Expand materializes a COPY, whose draw must be part of the plan;
-            # without one it materializes the case itself, and augmentations have nothing to do
-            # with writing.
-            apply_augmentations = manager._expand is not None and a > 0
-            if prefer_whole:
-                # The plan chose to LOAD: the case fits its budget and streaming would re-read the
-                # source (:meth:`predicted_stream_read_factor`). A choice, not a fallback: nothing
-                # failed, so ``allow_fallback`` is not consulted; the budget check stays as the belt.
-                self._enforce_fallback_budget(fallback_budget_bytes)
-                self._assemble_and_write(a)
-                if release:
-                    manager.unload()
-                return False
+            verdict = self._write_case(a, fallback_budget_bytes, allow_fallback, prefer_whole)
+            self.manager.unload()
+            return verdict
+
+    def _write_case(
+        self, a: int, fallback_budget_bytes: float | None, allow_fallback: bool, prefer_whole: bool
+    ) -> Verdict:
+        """One case or copy, inside a materialization: streamed if it can, else the whole volume."""
+        manager = self.manager
+        # A chain with an Expand materializes a COPY, whose draw must be part of the plan; without
+        # one it materializes the case itself, and augmentations have nothing to do with writing.
+        apply_augmentations = manager._expand is not None and a > 0
+        if not prefer_whole:
             if manager._stream_ready(a, apply_augmentations=apply_augmentations):
-                return True
+                return Verdict.STREAM
             if not allow_fallback:
                 raise PatchError(
                     f"Case '{manager.name}' would take the whole-volume path at run time.",
@@ -128,17 +153,15 @@ class CaseMaterializer:
                     or "the chain cannot stream.",
                     "Nothing was written for this case; the caller forbids the whole-volume fallback.",
                 )
-            self._enforce_fallback_budget(fallback_budget_bytes)
-            self._assemble_and_write(a)
-            if release:
-                manager.unload()
-            return False
+        # The plan's promise holds at run time too: a case that fell back here (a refusal the probe
+        # could not see) must not assemble a volume the budget cannot hold.
+        self._enforce_fallback_budget(fallback_budget_bytes)
+        self._assemble_and_write(a)
+        return Verdict.LOAD if prefer_whole else Verdict.WHOLE_VOLUME
 
     def _enforce_fallback_budget(self, fallback_budget_bytes: float | None) -> None:
         if fallback_budget_bytes is None:
             return
-        # The plan's promise holds at run time too: a case whose sweep failed here (a refusal the
-        # probe could not see) must not assemble a volume the budget cannot hold.
         case_bytes = self.fallback_working_set_bytes()
         if case_bytes > fallback_budget_bytes:
             raise PatchError(
@@ -171,9 +194,9 @@ class CaseMaterializer:
         fallback_budget_bytes: float | None = None,
         allow_fallback: bool = True,
         device: "torch.device | None" = None,
-    ) -> dict[int, str]:
-        """Write the :class:`Expand` copies of this case; returns the regime each took,
-        ``'stream-shared'`` | ``'stream'`` | ``'whole-volume'``.
+    ) -> dict[int, tuple[Verdict, Regime | None]]:
+        """Write the :class:`Expand` copies of this case; returns what each took, as the plan lines
+        it: the verdict and, for a streamed copy, whether it rode the shared pass or its own.
 
         Copies whose per-copy stages are all pointwise share ONE read pass (each slab is read and
         carried through the shared prefix once, then every copy applies its draw into its own
@@ -188,72 +211,32 @@ class CaseMaterializer:
             )
         with self._materialization(rewrite, fallback_budget_bytes, device):
             manager._require_statistics()
-            verdicts: dict[int, str] = {}
+            outcomes: dict[int, tuple[Verdict, Regime | None]] = {}
             if not copies:
-                return verdicts
-
+                return outcomes
             # The caches the copies share (pre-Expand Saves) are swept once, first: every copy's
             # plan reads through them, and sweeping them inside each copy's own pass would redo
             # the work.
             first = manager._resolve_patch_stream_source(copies[0], apply_augmentations=True)
             if first is not None:
-                shared_pending = [sweep for sweep in first.pending_sweeps if sweep.entry == manager.name]
-                if shared_pending:
-                    for sweep in shared_pending:
-                        # Chained here as on the per-case path: past a failure the next sweep reads
-                        # a cache nobody wrote and overwrites the recorded reason with its own
-                        # symptom.
-                        if not manager._materialize_save(sweep):
-                            break
-                    manager._invalidate_stream_plans()
+                manager._sweep_pending([sweep for sweep in first.pending_sweeps if sweep.entry == manager.name])
 
-            shared: list[tuple[int, _PendingSweep]] = []
-            solo: list[int] = []
-            fallback: list[int] = []
-            for a in copies:
-                source = manager._resolve_patch_stream_source(a, apply_augmentations=True)
-                if source is None:
-                    fallback.append(a)
-                    continue
-                per_copy = [sweep for sweep in source.pending_sweeps if sweep.entry != manager.name]
-                if len(per_copy) != len(source.pending_sweeps):
-                    # A shared cache is still pending (its sweep failed): the per-copy path will
-                    # retry and fall back on its own terms.
-                    solo.append(a)
-                elif not per_copy:
-                    verdicts[a] = "stream"  # everything this copy writes is already on disk
-                elif len(per_copy) == 1 and self._pointwise_tail(per_copy[0]):
-                    shared.append((a, per_copy[0]))
-                else:
-                    solo.append(a)
-
-            if len(shared) == 1:
-                # One copy shares with nobody: its own sweep is the same work without the extra
-                # clone.
-                solo.append(shared.pop()[0])
+            routes = self.classify_copies(copies)
+            shared = [(a, route.sweep) for a, route in routes.items() if route.regime is Regime.SHARED and route.sweep]
+            solo = [a for a, route in routes.items() if route.regime is Regime.SOLO]
+            fallback = [a for a, route in routes.items() if route.regime is None]
             if shared:
                 written = self._materialize_shared_pass(shared)
                 for a, _sweep in shared:
                     if a in written:
-                        verdicts[a] = "stream-shared"
+                        outcomes[a] = (Verdict.STREAM, Regime.SHARED)
                     else:
                         solo.append(a)
                 if written:
                     manager._invalidate_stream_plans()
-
             for a in sorted(solo):
-                verdicts[a] = (
-                    "stream"
-                    if self.materialize(
-                        a,
-                        rewrite,
-                        fallback_budget_bytes=fallback_budget_bytes,
-                        allow_fallback=allow_fallback,
-                        device=device,
-                        release=False,  # the copies share the assembled prefix; released once below
-                    )
-                    else "whole-volume"
-                )
+                verdict = self._write_case(a, fallback_budget_bytes, allow_fallback, prefer_whole=False)
+                outcomes[a] = (verdict, Regime.SOLO if verdict is Verdict.STREAM else None)
             if fallback:
                 if not allow_fallback:
                     raise PatchError(
@@ -265,18 +248,64 @@ class CaseMaterializer:
                 self._enforce_fallback_budget(fallback_budget_bytes)
                 for a in fallback:
                     self._assemble_and_write(a)
-                    verdicts[a] = "whole-volume"
+                    outcomes[a] = (Verdict.WHOLE_VOLUME, None)
             manager.unload()
-            return verdicts
+            return outcomes
 
-    def _pointwise_tail(self, sweep: _PendingSweep) -> bool:
-        """Whether everything per-copy in this sweep is a pure value map on its slab.
+    def classify_copies(self, copies: Iterable[int]) -> dict[int, CopyRoute]:
+        """How each copy streams, decided once for the run and the plan alike.
 
-        That is the shared-pass criterion: a pointwise tail pulls exactly the slab the shared prefix
-        landed on, so every such copy can consume one read. A region draw pulls its own geometry and
-        a GLOBAL_STAT reads a statistic of ITS input; both get their own pass.
+        A copy joins the shared read pass when its per-copy segment is one Save whose stages are all
+        pointwise (its pull is exactly the slab the shared prefix landed on); it sweeps alone when a
+        per-copy stage reads regions, when it crosses several per-copy Saves, or when a cache the
+        copies share is still to write; and a shared pass with one member is that copy's own sweep.
+        A copy the planner refuses has no regime.
         """
+        manager = self.manager
+        routes: dict[int, CopyRoute] = {}
+        for a in copies:
+            source = manager._resolve_patch_stream_source(a, apply_augmentations=True)
+            if source is None:
+                routes[a] = CopyRoute(None)
+                continue
+            per_copy = [sweep for sweep in source.pending_sweeps if sweep.entry != manager.name]
+            if len(per_copy) != len(source.pending_sweeps):
+                reason = "a cache the copies share is still to write, so this copy sweeps it on its own pass."
+                routes[a] = CopyRoute(Regime.SOLO, reason)
+            elif not per_copy:
+                routes[a] = CopyRoute(Regime.SOLO)  # nothing left to write: its own path writes nothing
+            elif len(per_copy) == 1 and self._pointwise_tail(per_copy[0]):
+                routes[a] = CopyRoute(Regime.SHARED, sweep=per_copy[0])
+            else:
+                routes[a] = CopyRoute(Regime.SOLO, self._solo_reason(per_copy))
+        shared = [a for a, route in routes.items() if route.regime is Regime.SHARED]
+        if len(shared) == 1:
+            reason = "the only copy of this case still to write; a shared pass with one member is its own sweep."
+            routes[shared[0]] = CopyRoute(Regime.SOLO, reason)
+        return routes
+
+    @staticmethod
+    def _pointwise_tail(sweep: _PendingSweep) -> bool:
+        """Whether everything per-copy in this sweep is a pure value map on its slab: a pointwise
+        tail pulls exactly the slab the shared prefix landed on, so every such copy can consume one
+        read; a region draw pulls its own geometry and a GLOBAL_STAT reads a statistic of ITS input."""
         return all(plan.kind is LocalityKind.POINTWISE for plan in sweep.stage_plans[sweep.copy_stage_start :])
+
+    @staticmethod
+    def _solo_reason(per_copy: list[_PendingSweep]) -> str:
+        """Why a copy with pending per-copy Saves cannot join the shared pass."""
+        if len(per_copy) > 1:
+            return "the copy's chain crosses more than one per-copy Save, so it sweeps its own passes."
+        sweep = per_copy[0]
+        for stage, plan in zip(
+            sweep.stages[sweep.copy_stage_start :], sweep.stage_plans[sweep.copy_stage_start :], strict=False
+        ):
+            if plan.kind is not LocalityKind.POINTWISE:
+                return (
+                    f"stage '{_stage_name(stage)}' of this copy declares {plan.kind.name},"
+                    " so its read geometry is the draw's own and it sweeps its own pass."
+                )
+        return "the copy's plan is incomplete; it sweeps its own pass."
 
     def _materialize_shared_pass(self, shared: list[tuple[int, _PendingSweep]]) -> set[int]:
         """One read pass, N write streams: each slab is read and computed through the shared prefix
@@ -300,92 +329,28 @@ class CaseMaterializer:
         ]
         if not shared:
             return set()
-        prefix = list(reference.stages[: reference.copy_stage_start])
-        spatial = list(reference.out_spatial)
-        source_spatial = [int(extent) for extent in reference.source_shape[1:]]
-        streamable, prefix_plans, prefix_evolved, _refusal = manager._plan_stream_region(
-            0,
-            prefix,
-            reference.source_dataset,
-            reference.source_group,
-            reference.source_entry,
-            Attribute(reference.base_attributes),
-            source_spatial,
-            landing_shape=spatial,
+        # The shared prefix is planned once, and replayed once per slab; each copy's header is its
+        # OWN full-segment plan state, since the tail's geometry and inversion keys are the copy's.
+        source, prefix_evolved, _refusal = manager._replan_sweep(
+            reference, list(reference.stages[: reference.copy_stage_start])
         )
-        if not streamable:
+        if source is None:
             return set()
-        source = _PatchStreamSource(
-            reference.source_dataset,
-            reference.source_group,
-            reference.source_entry,
-            list(reference.source_shape),
-            prefix,
-            prefix_plans,
-        )
-        # Each copy's header is its OWN full-segment plan state: the tail's geometry and inversion
-        # keys belong to the copy, not to the shared prefix.
-        active: list[tuple[int, _PendingSweep, list[Stage], Attribute]] = []
+        members: list[tuple[int, _PendingSweep, list[Stage], Attribute]] = []
         for a, sweep in shared:
-            ok, _plans, evolved, _reason = manager._plan_stream_region(
-                0,
-                sweep.stages,
-                sweep.source_dataset,
-                sweep.source_group,
-                sweep.source_entry,
-                Attribute(sweep.base_attributes),
-                [int(extent) for extent in sweep.source_shape[1:]],
-                landing_shape=list(sweep.out_spatial),
-            )
-            if ok:
-                active.append((a, sweep, list(sweep.stages[sweep.copy_stage_start :]), evolved))
-        if not active:
+            planned, evolved, _reason = manager._replan_sweep(sweep)
+            if planned is not None:
+                members.append((a, sweep, list(sweep.stages[sweep.copy_stage_start :]), evolved))
+        if not members:
             return set()
-        rows = manager._sweep_rows(spatial, int(reference.source_shape[0]))
-        sweeps = {a: sweep for a, sweep, _tail, _evolved in active}
-        headers: dict[int, Attribute] = {}
-        writer = RegionWriter(lambda a, block: _open_sweep_stream(sweeps[a], block, spatial, rows, headers[a]))
-        try:
-            for slab_index, target in enumerate(_sweep_targets(spatial, rows)):
-                tensor, slab_attribute, keys_before = manager._replay_streamed_region(
-                    source,
-                    target,
-                    Attribute(reference.base_attributes),
-                    Attribute(prefix_evolved) if slab_index == 0 else None,
-                )
-                for a, sweep, tail, evolved in active:
-                    copy_tensor = tensor.clone() if len(active) > 1 else tensor
-                    scope = Attribute(slab_attribute)
-                    for stage in tail:
-                        copy_tensor = stage(manager.name, copy_tensor, scope)
-                    block = copy_tensor.cpu().numpy()
-                    _require_channel_first(block, spatial, f"A per-copy stage of '{sweep.group}/{sweep.entry}'")
-                    if a not in headers:
-                        headers[a] = _sweep_header(evolved, scope, keys_before)
-                    try:
-                        writer.write(a, (slice(0, int(block.shape[0])), *target), block)
-                    except LookupError:
-                        raise PatchError(
-                            f"destination '{sweep.destination.filename}' refused the region write"
-                            f" of '{sweep.group}/{sweep.entry}' after accepting its plan.",
-                            "h5 and omezarr always serve region writes; mha only with image geometry.",
-                        ) from None
-            written = writer.opened
-            writer.close()
-            for a in written:
-                sweep = sweeps[a]
-                manager._swept_entries.add((str(sweep.destination.filename), sweep.group, sweep.entry))
-            return written
-        except BaseException as exception:
-            writer.abort(exception)
-            if not isinstance(exception, Exception):
-                raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
+        written, failure = manager._sweep(source, reference, prefix_evolved, members)
+        if failure is not None:
             warnings.warn(
-                f"Shared-pass materialization of case '{manager.name}' failed"
-                f" ({type(exception).__name__}: {exception}); its copies take their own passes.",
+                f"Shared-pass materialization of case '{manager.name}' failed ({failure});"
+                " its copies take their own passes.",
                 stacklevel=2,
             )
-            return set()
+        return written
 
     # ---------------------------------------------------------------- what the plan asks
 
@@ -405,6 +370,44 @@ class CaseMaterializer:
             if isinstance(stage, Save):
                 targets.append((stage, list(spatial), Attribute(attributes)))
         return targets
+
+    def sub_cap_sweep(self) -> bool:
+        """Whether this case sweeps below the default slab height AND a stage of its chain can show
+        it in the values: a resample whose map does not factorise, or a draw that samples through an
+        affine (a free rotation, a scale). Pointwise and separable chains land the same bytes at any
+        height."""
+        manager = self.manager
+        if manager._sweep_rows(list(manager.shapes[0]), int(manager.base_shape[0])) >= SWEEP_SLAB_ROWS:
+            return False
+        for stage in manager.chain_stages(0):
+            if isinstance(stage, Resample) and stage.slab_height_sensitive(manager.name):
+                return True
+            if (
+                isinstance(stage, AugmentedStage)
+                and stage.patch_locality(manager.stored_attributes).kind is LocalityKind.REGRID
+            ):
+                return True
+        return False
+
+    def plan_notes(self, group_dest: str) -> list[str]:
+        """The notes the chain's transforms ask the plan to print (``Transform.plan_note``), each
+        stage asked about ITS OWN input: the case state folded through the stages before it, as
+        the streamed planner folds it. Only as far as a ``Reduce``: past it the grid is the
+        cohort's, and what the reduction writes is its own plan line."""
+        manager = self.manager
+        shape = [int(extent) for extent in manager.base_shape[1:]]
+        attributes = Attribute(manager.stored_attributes)
+        notes: list[str] = []
+        for stage in manager.transforms:
+            if isinstance(stage, Reduce):
+                break
+            if not isinstance(stage, Transform):
+                continue  # a draw has nothing to add: what its copies cost is the plan's regime column
+            note = stage.plan_note(group_dest, manager.name, list(shape), Attribute(attributes))
+            if note is not None and note not in notes:
+                notes.append(note)
+            shape = manager._fold_case_state(stage, shape, attributes)
+        return notes
 
     def peak_case_bytes(self) -> int:
         """The largest single tensor the whole-volume path holds: the chain's shapes folded through
@@ -494,31 +497,3 @@ class CaseMaterializer:
                 span = list(plan.pull(tuple(span))) if plan.pull is not None else span
             read += int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
         return float(read) / float(max(1, int(np.prod(source_shape[1:], dtype=np.int64))))
-
-    def expansion_solo_reason(self, a: int) -> str | None:
-        """Why copy ``a`` cannot join the shared read pass, for the plan, never a write.
-
-        ``None`` when it can (or when nothing is pending for it). The reason names the first
-        per-copy stage whose declared locality is not pointwise: that is the stage whose pull makes
-        this copy's read geometry its own.
-        """
-        source = self.manager._resolve_patch_stream_source(a, apply_augmentations=True)
-        if source is None:
-            return None
-        per_copy = [sweep for sweep in source.pending_sweeps if sweep.entry != self.manager.name]
-        if len(per_copy) == 1 and self._pointwise_tail(per_copy[0]):
-            return None
-        if not per_copy:
-            return None
-        if len(per_copy) > 1:
-            return "the copy's chain crosses more than one per-copy Save, so it sweeps its own passes."
-        sweep = per_copy[0]
-        for stage, plan in zip(
-            sweep.stages[sweep.copy_stage_start :], sweep.stage_plans[sweep.copy_stage_start :], strict=False
-        ):
-            if plan.kind is not LocalityKind.POINTWISE:
-                return (
-                    f"stage '{_stage_name(stage)}' of this copy declares {plan.kind.name},"
-                    " so its read geometry is the draw's own and it sweeps its own pass."
-                )
-        return "the copy's plan is incomplete; it sweeps its own pass."

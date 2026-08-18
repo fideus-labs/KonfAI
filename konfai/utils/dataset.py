@@ -59,6 +59,17 @@ _h5_file_locks: dict[str, threading.RLock] = {}
 _h5_file_locks_guard = threading.Lock()
 
 
+def _open_h5(path: str, mode: str, **kwargs: Any) -> Any:
+    """Every h5py open in this module. Unlocked, because the flag must agree across a file's handles:
+    HDF5 refuses to open a file this process already holds under the other file-locking flag, and the
+    read pool keeps a handle open on a store while a stream writes it (the "invisible until finalize"
+    read contract reads the store mid-write). A held HDF5 lock would also block every other process's
+    open of the file for as long as the handle lives, the pool's whole lifetime. Same-process races
+    are held off by the per-file thread lock.
+    """
+    return h5py.File(path, mode, locking=False, **kwargs)
+
+
 def _get_h5_file_lock(filename: str) -> threading.RLock:
     """Return the process-wide lock guarding one HDF5 file across worker threads."""
     with _h5_file_locks_guard:
@@ -84,9 +95,7 @@ class _H5ReadPool:
     makes the cache effective: a per-read open rebuilds it empty every time. ``get``/``drop`` must be
     called under the file's lock; a write drops the file's reader so it never serves stale metadata;
     handles inherited across ``fork`` are dropped unused (closing them would flush another process's
-    state). Pooled handles open with ``locking=False``: a held HDF5 read lock would block every other
-    process's write-open of the file for as long as the handle lives: the pool's whole lifetime.
-    Same-process access is serialized by the per-file thread lock.
+    state).
 
     A handle also stops answering for a store another PROCESS has written (a loader worker producing
     the group its parent reads), so one is kept only while the file it was opened on is unchanged.
@@ -121,7 +130,7 @@ class _H5ReadPool:
         for remaining in reversed(range(self._OPEN_ATTEMPTS)):
             stamp = self._stamp(filename)
             try:
-                return _PooledRead(h5py.File(filename, "r", locking=False, **open_kwargs), stamp)
+                return _PooledRead(_open_h5(filename, "r", **open_kwargs), stamp)
             except OSError:
                 if not remaining:
                     raise
@@ -375,10 +384,21 @@ def _binned(block: np.ndarray, low: Any, high: Any) -> tuple[np.ndarray, np.ndar
     return inside, np.minimum(scaled.astype(np.int64), _QUANTILE_BINS - 1)
 
 
-def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], first: int, second: int) -> tuple[Any, Any]:
-    """The values at ascending ranks ``first`` and ``second`` (``second`` is ``first`` or ``first + 1``)
-    of everything the blocks hold, without holding it: passes over the blocks narrow a value interval
-    by histogram until the rank's bin holds few enough values to collect, or a single value.
+def _min_of(current: Any, candidate: Any) -> Any:
+    """``min`` of a running value that may not exist yet and a candidate."""
+    return candidate if current is None or candidate < current else current
+
+
+def _max_of(current: Any, candidate: Any) -> Any:
+    """``max`` of a running value that may not exist yet and a candidate."""
+    return candidate if current is None or candidate > current else current
+
+
+def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], q: float) -> tuple[Any, Any, float]:
+    """The two order statistics ``numpy.quantile(..., q)`` interpolates between, and the weight, over
+    everything the blocks hold, without holding it: one pass counts and bounds the values, then passes
+    narrow a value interval by histogram until the rank's bin holds few enough values to collect, or a
+    single value.
     """
     count = 0
     low = high = None
@@ -387,12 +407,11 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], first: int, se
         if flat.size == 0:
             continue
         count += int(flat.size)
-        block_low, block_high = flat.min(), flat.max()
-        low = block_low if low is None or block_low < low else low
-        high = block_high if high is None or block_high > high else high
+        low, high = _min_of(low, flat.min()), _max_of(high, flat.max())
     if count == 0:
         raise ValueError("quantile of an empty volume")
     assert low is not None and high is not None  # nosec B101 - count > 0
+    first, second, weight = _quantile_positions(count, q)
     below = 0  # values strictly under the interval, all levels folded
     inside_count = count  # values in the interval
     min_above: Any = None  # the smallest value strictly over the interval
@@ -400,8 +419,8 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], first: int, se
         if low == high:
             value = low
             if second == first or first - below + 1 < inside_count:
-                return value, value
-            return value, min_above if min_above is not None else value
+                return value, value, weight
+            return value, min_above if min_above is not None else value, weight
         binned = partial(_binned, low=low, high=high)
         histogram = np.zeros(_QUANTILE_BINS, dtype=np.int64)
         for block in blocks():
@@ -420,26 +439,23 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], first: int, se
                 continue
             members = inside[index == chosen]
             if members.size:
-                member_low, member_high = members.min(), members.max()
-                bin_low = member_low if bin_low is None or member_low < bin_low else bin_low
-                bin_high = member_high if bin_high is None or member_high > bin_high else bin_high
+                bin_low, bin_high = _min_of(bin_low, members.min()), _max_of(bin_high, members.max())
                 if in_bin <= _QUANTILE_COLLECT_CAP:
                     collected.append(members)
             higher = inside[index > chosen]
             if higher.size:
-                higher_low = higher.min()
-                above_local = higher_low if above_local is None or higher_low < above_local else above_local
-        if above_local is not None and (min_above is None or above_local < min_above):
-            min_above = above_local
+                above_local = _min_of(above_local, higher.min())
+        if above_local is not None:
+            min_above = _min_of(min_above, above_local)
         below += before_bin
         rank_in_bin = first - below
         if collected:
             values = np.sort(np.concatenate(collected))
             value = values[rank_in_bin]
             if second == first:
-                return value, value
+                return value, value, weight
             second_value = values[rank_in_bin + 1] if rank_in_bin + 1 < values.size else min_above
-            return value, second_value if second_value is not None else value
+            return value, second_value if second_value is not None else value, weight
         assert bin_low is not None and bin_high is not None  # nosec B101 - the bin holds target's rank
         low, high, inside_count = bin_low, bin_high, in_bin
 
@@ -764,13 +780,25 @@ def write_landmarks(data: np.ndarray, filename: Path) -> None:
         f.close()
 
 
+#: The suffix an entry is moved to while its replacement is published. A stream moves the old entry
+#: aside rather than deleting it first: neither HDF5 nor a directory swap has an atomic rename-over,
+#: and a crash between a delete and the move would lose both. Per pid, so two writers of one entry
+#: never share a backup.
+_REPLACED_MARKER = ".replaced-"
+
+
+def _replaced_name(name: str) -> str:
+    """Where ``name`` (an h5 key or a directory leaf) is kept while its replacement is published."""
+    return f"{name}{_REPLACED_MARKER}{os.getpid()}"
+
+
 def is_staging_entry(name: str) -> bool:
     """Whether ``name`` (a path or an h5 key) is a writer's staging entry, never a case: an in-flight (or
     hard-kill-orphaned) temporary carrying the ``.tmp`` marker of :meth:`DataStream.temporary_suffix` or
-    :meth:`DataStream.staging_path`, or the ``.replaced-<pid>`` an entry is moved to while its replacement
-    is published."""
+    :meth:`DataStream.staging_path`, or the :func:`_replaced_name` an entry is moved to while its
+    replacement is published."""
     leaf = os.path.basename(name)
-    return leaf.endswith(".tmp") or ".tmp." in leaf or ".replaced-" in leaf
+    return leaf.endswith(".tmp") or ".tmp." in leaf or _REPLACED_MARKER in leaf
 
 
 class DataStream(ABC):
@@ -860,10 +888,7 @@ class _H5DataStream(DataStream):
         if not success:
             del parent[temporary_name]
             return
-        # Move the old entry aside rather than deleting it first: HDF5 has no rename-over, and a
-        # crash between a delete and the move would lose both. Same idiom as the directory
-        # stores' <name>.replaced-<pid>.
-        backup = f"{self._final_name}.replaced-{os.getpid()}"
+        backup = _replaced_name(self._final_name)
         replaced = self._final_name in parent
         if replaced:
             if backup in parent:
@@ -890,9 +915,7 @@ def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attrib
             attributes.get_np_array("Direction").astype(np.float64).reshape(-1),
         ]
     )
-    # Unlocked, as every h5py open in this module: HDF5 refuses to open a file this process already
-    # holds under the other file-locking flag, and the h5 read pool holds its handles unlocked.
-    file = h5py.File(path, "w", locking=False)
+    file = _open_h5(path, "w")
     file.create_dataset(
         "TransformGroup/0/TransformType",
         data=[b"DisplacementFieldTransform_double_3_3"],
@@ -1113,11 +1136,8 @@ class _OmeZarrDataStream(DataStream):
             # whole), which is why this costs a pass over what was just written rather than nothing.
             append_ome_zarr_levels(self._store_path, self._scale_factors, downsample_method=self._downsample_method)
             self._array = None
-        # Move an existing store aside instead of deleting it up front, so a replaced entry stays
-        # recoverable (at <name>.replaced-<pid>) until the new store is renamed into place: a directory
-        # swap is not atomic, and deleting first loses both stores on a crash in the window.
         replaced = self._final_path.exists()
-        backup = self._final_path.with_name(f"{self._final_path.name}.replaced-{os.getpid()}")
+        backup = self._final_path.with_name(_replaced_name(self._final_path.name))
         if replaced:
             shutil.rmtree(backup, ignore_errors=True)
             os.rename(self._final_path, backup)
@@ -1259,15 +1279,11 @@ class Dataset:
                     )
                 else:
                     _h5_read_pool.drop(self.filename)
-                    # locking=False on every KonfAI open: the HDF5 file-lock flag must agree across a file's
-                    # handles, and the pooled reader (unlocked) stays open on the same file while a stream
-                    # writes it: the "invisible until finalize" read contract reads the store mid-write.
-                    # Same-process races are held off by the per-file thread lock above.
                     if not os.path.exists(self.filename):
                         Path(self.filename).parent.mkdir(parents=True, exist_ok=True)
-                        self.h5 = h5py.File(self.filename, "w", locking=False)
+                        self.h5 = _open_h5(self.filename, "w")
                     else:
-                        self.h5 = h5py.File(self.filename, "r+", locking=False)
+                        self.h5 = _open_h5(self.filename, "r+")
                     self.h5.attrs["Date"] = current_date()
             except BaseException:
                 self._lock.release()
@@ -1567,18 +1583,18 @@ class Dataset:
             return _finalize_running_statistics(state)
 
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
+            path = self._resolve_data_path(name)
+            if path is None:
+                raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
             attributes = Attribute()
-            if os.path.exists(f"{self.filename}{name}.itk.txt"):
-                datas = _encode_transform_leaves(sitk.ReadTransform(f"{self.filename}{name}.itk.txt"), name, attributes)
+            if path.endswith(".itk.txt"):
+                datas = _encode_transform_leaves(sitk.ReadTransform(path), name, attributes)
                 max_len = max(len(v) for v in datas)
-
-                padded_datas = np.array([np.pad(v, (0, max_len - len(v)), constant_values=np.nan) for v in datas])
-
-                data = np.asarray(padded_datas)
-            elif os.path.exists(f"{self.filename}{name}.fcsv"):
-                data = read_landmarks(Path(f"{self.filename}{name}.fcsv"))
-            elif os.path.exists(f"{self.filename}{name}.xml"):
-                with open(f"{self.filename}{name}.xml", "rb") as xml_file:
+                data = np.array([np.pad(v, (0, max_len - len(v)), constant_values=np.nan) for v in datas])
+            elif path.endswith(".fcsv"):
+                data = read_landmarks(Path(path))
+            elif path.endswith(".xml"):
+                with open(path, "rb") as xml_file:
                     root = etree.parse(xml_file, etree.XMLParser(remove_blank_text=True)).getroot()  # nosec B320
                 node = root
                 while len(node):
@@ -1587,11 +1603,11 @@ class Dataset:
                     attributes[key] = value
                 text = (node.text or "").strip()
                 data = np.fromstring(text, sep=",", dtype=np.float64) if text else np.asarray([], dtype=np.float64)
-            elif os.path.exists(f"{self.filename}{name}.vtk"):
+            elif path.endswith(".vtk"):
                 import vtk
 
                 vtk_reader = vtk.vtkPolyDataReader()
-                vtk_reader.SetFileName(f"{self.filename}{name}.vtk")
+                vtk_reader.SetFileName(path)
                 vtk_reader.Update()
                 data = []
                 points = vtk_reader.GetOutput().GetPoints()
@@ -1599,25 +1615,9 @@ class Dataset:
                 for i in range(num_points):
                     data.append(list(points.GetPoint(i)))
                 data = np.asarray(data)
-            elif os.path.exists(f"{self.filename}{name}.npy"):
-                data = np.load(f"{self.filename}{name}.npy")
+            elif path.endswith(".npy"):
+                data = np.load(path)
             else:
-                # Prefer the declared format's own extension; otherwise skip a crashed writer's '.tmp' (a
-                # header plus zero-reserved pixels) and deprioritize the sidecar halves of paired formats
-                # (.raw/.zraw are unreadable standalone; .img reads only via its paired .hdr, so prefer the
-                # header). glob order is unsorted, so without this a '.mhd'+'.raw' pair could hand the '.raw'
-                # to ReadImage, or a leftover '.tmp' a zero-filled partial volume, as in _resolve_data_path.
-                direct = f"{self.filename}{name}.{self.file_format}"
-                if os.path.exists(direct):
-                    path = direct
-                else:
-                    matches = sorted(
-                        (c for c in glob.glob(f"{self.filename}{name}.*") if not is_staging_entry(c)),
-                        key=lambda candidate: candidate.lower().endswith((".raw", ".zraw", ".img")),
-                    )
-                    if not matches:
-                        raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
-                    path = matches[0]
                 image = sitk.ReadImage(path)
                 data, attributes_tmp = image_to_data(image)
                 attributes.update(attributes_tmp)
@@ -2239,7 +2239,7 @@ class Dataset:
                 return data[slices], attributes
             spatial = shape[1:]
             row = 3 * int(np.prod(spatial[1:], dtype=np.int64))
-            with h5py.File(self._path(name), "r", locking=False) as file:
+            with _open_h5(self._path(name), "r") as file:
                 span = file["TransformGroup/0/TransformParameters"][leading[0] * row : leading[1] * row]
             block = np.moveaxis(span.reshape(leading[1] - leading[0], *spatial[1:], 3), -1, 0)
             # The span is the axis WITHOUT its step: rows start..stop were read whole, so the step
@@ -2340,7 +2340,7 @@ class Dataset:
             if not h5py.is_hdf5(self._path(name)):
                 data, attributes = self.file_to_data(group, name)
                 return [int(extent) for extent in data.shape], attributes
-            with h5py.File(self._path(name), "r", locking=False) as file:
+            with _open_h5(self._path(name), "r") as file:
                 kind = bytes(file["TransformGroup/0/TransformType"][0])
                 fixed = np.asarray(file["TransformGroup/0/TransformFixedParameters"][()], dtype=np.float64)
             if not kind.startswith(b"DisplacementFieldTransform"):
@@ -2463,11 +2463,17 @@ class Dataset:
                 return "dicom" if volume == "" else "omezarr"
         return None
 
+    @property
+    def path_on_disk(self) -> Path:
+        """Where the store lives: its root directory, or the ``.h5`` file for a single-file store
+        (named with or without the suffix, as the backend opens it)."""
+        root = Path(self.filename)
+        if self.file_format == "h5" and root.suffix != ".h5":
+            return root.with_name(f"{root.name}.h5")
+        return root
+
     def exists_on_disk(self) -> bool:
-        """Whether the store is there at all: the directory root, or the ``.h5`` file."""
-        if os.path.exists(self.filename):
-            return True
-        return self.file_format == "h5" and os.path.exists(f"{self.filename}.h5")
+        return self.path_on_disk.exists()
 
     def concurrent_write_safe(self) -> bool:
         """Whether writes to different entries land in disjoint files, so a background writer may
@@ -2641,12 +2647,7 @@ class Dataset:
     def read_data_quantile(self, groups: str, name: str, q: float) -> Any:
         """``numpy.quantile(volume, q)`` (the default ``linear`` method, to the value) without
         holding the volume: bounded passes over :meth:`iter_data_blocks`."""
-        blocks = self.iter_data_blocks(groups, name)
-        count = 0
-        for block in blocks():
-            count += int(block.size)
-        first, second, weight = _quantile_positions(count, float(q))
-        low, high = _order_statistics(blocks, first, second)
+        low, high, weight = _order_statistics(self.iter_data_blocks(groups, name), float(q))
         return _lerp_like_numpy(low, high, weight) if weight else low
 
     def bounded_region_reads(self, groups: str, name: str) -> bool:

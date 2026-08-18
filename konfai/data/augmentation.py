@@ -16,8 +16,6 @@
 
 """Data augmentation primitives applied by KonfAI datasets."""
 
-import itertools
-import random
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from functools import partial
@@ -33,11 +31,12 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 
 from konfai import konfai_root
+from konfai.data.geometry import AffineMap, WorldBox
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset, data_to_image
 from konfai.utils.errors import AugmentationError
-from konfai.utils.runtime import NeedDevice
+from konfai.utils.runtime import NeedDevice, preserved_rng, seed_all
 from konfai.utils.utils import get_module
 
 
@@ -285,6 +284,11 @@ class DataAugmentation(NeedDevice, ABC):
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         pass
 
+    def _slot(self, index: int, a: int) -> int:
+        """The slot copy *a*'s draw is kept at: state is stored for the selected copies only, in
+        selection order, and the ``_``-prefixed methods are all handed that slot."""
+        return self.who_index[index].index(a)
+
     def patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         """Declare how the draw of copy *a* makes its output depend on its input, for patch streaming.
 
@@ -296,7 +300,7 @@ class DataAugmentation(NeedDevice, ABC):
         """
         if a not in self.who_index[index]:
             return PatchLocality(LocalityKind.POINTWISE)
-        return self._patch_locality(index, self.who_index[index].index(a), cache_attribute)
+        return self._patch_locality(index, self._slot(index, a), cache_attribute)
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
@@ -309,13 +313,13 @@ class DataAugmentation(NeedDevice, ABC):
         source_spatial_shape: list[int],
     ) -> list[slice]:
         """Map a target patch's spatial slices to the source region copy *a* reads (region kinds)."""
-        return self._stream_region_source(index, self.who_index[index].index(a), target_slices, source_spatial_shape)
+        return self._stream_region_source(index, self._slot(index, a), target_slices, source_spatial_shape)
 
     def stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
         """The spatial shape copy *a*'s draw produces from ``shape`` (the shape-fold counterpart of
         ``Transform.transform_shape``). The identity default covers every draw but a shape-changing
         one, which restates here what its ``state_init`` did to the copy's grid."""
-        return self._stream_shape(index, self.who_index[index].index(a), shape)
+        return self._stream_shape(index, self._slot(index, a), shape)
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
         return shape
@@ -335,7 +339,7 @@ class DataAugmentation(NeedDevice, ABC):
     def compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         """Apply the draw of copy *a* to one tensor: the forward counterpart of :meth:`inverse`."""
         if a in self.who_index[index]:
-            tensor = self._compute(name, index, self.who_index[index].index(a), tensor)
+            tensor = self._compute(name, index, self._slot(index, a), tensor)
         return tensor
 
     def stream_region(
@@ -347,7 +351,7 @@ class DataAugmentation(NeedDevice, ABC):
         the place (a noise field, a cutout box, a resample) overrides ``_stream_region``."""
         if a not in self.who_index[index]:
             return tensor
-        return self._stream_region(name, index, self.who_index[index].index(a), tensor, context)
+        return self._stream_region(name, index, self._slot(index, a), tensor, context)
 
     def _stream_region(
         self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
@@ -369,7 +373,7 @@ class DataAugmentation(NeedDevice, ABC):
 
     def inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         if a in self.who_index[index]:
-            tensor = self._inverse(index, self.who_index[index].index(a), tensor)
+            tensor = self._inverse(index, self._slot(index, a), tensor)
         return tensor
 
     @abstractmethod
@@ -444,11 +448,20 @@ class EulerTransform(DataAugmentation):
     (``[-1, 1]`` per axis, ``align_corners=True``), output to source. Sampling goes through
     :meth:`_sample_region`: the whole volume is the region that covers everything, so a streamed
     region and the whole-volume copy run the very same arithmetic and agree to float rounding.
+
+    A REGRID by default, and the declared kind is what routes a streamed region: a REGRID samples
+    the target region out of the source box it pulled; any other kind (a HALO shift, an ORIENTATION
+    quarter turn) is handed the block its declaration asked for and applies the draw to it whole.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.matrix: dict[int, list[torch.Tensor]] = {}
+
+    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
+        # A map about the centre displaces a voxel by an amount that grows with its distance to it,
+        # so no constant halo bounds the read: each target region pulls the source box it maps to.
+        return PatchLocality(LocalityKind.REGRID)
 
     def _grid_matrix(self, index: int, a: int, shape: list[int]) -> torch.Tensor:
         """Copy *a*'s affine, in the normalised coordinates ``affine_grid`` spans over ``shape``."""
@@ -526,32 +539,31 @@ class EulerTransform(DataAugmentation):
     def _stream_region_source(
         self, index: int, a: int, target_slices: tuple[slice, ...], source_spatial_shape: list[int]
     ) -> list[slice]:
-        """The source box a target region samples from: its corners through the map, widened by
-        one voxel for the interpolation taps and to what a reflection at the border reads back
-        from, clamped to the volume."""
+        """The source box a target region samples from: the affine image of the region's box,
+        widened by one voxel for the interpolation taps and to what a reflection at the border
+        reads back from, clamped to the volume."""
         full = tuple(int(extent) for extent in source_spatial_shape)
-        matrix = self._grid_matrix(index, a, list(full)).to(torch.float64)
         n = len(full)
-        corners = [
+        matrix = self._grid_matrix(index, a, list(full))[0].to(torch.float64).numpy()
+
+        def normalised(position: int, extent: int) -> float:
+            # affine_grid's coordinate of a voxel of the FULL extent (a singleton axis sits at 0).
+            return -1.0 + 2.0 * position / (extent - 1) if extent > 1 else 0.0
+
+        # The region's first and last voxel per axis, in (x, y, z): affine_grid's order.
+        ends = np.array(
             [
-                *reversed(
-                    [
-                        (-1.0 + 2.0 * (part.stop - 1 if bit else part.start) / (extent - 1)) if extent > 1 else 0.0
-                        for part, extent, bit in zip(target_slices, full, bits, strict=True)
-                    ]
-                ),
-                1.0,
+                [normalised(part.start, extent), normalised(part.stop - 1, extent)]
+                for part, extent in zip(target_slices, full, strict=True)
             ]
-            for bits in itertools.product((0, 1), repeat=n)
-        ]  # (x, y, z, 1): affine_grid's order
-        mapped = torch.tensor(corners, dtype=torch.float64) @ matrix[0, :n, :].T
+        )[::-1]
+        box = WorldBox(ends[:, 0], ends[:, 1]).image_under(AffineMap(matrix[:n, :n], matrix[:n, n]))
         pull: list[slice] = []
         for axis in range(n):
             extent = full[axis]
             span = float(extent - 1)
-            values = mapped[:, n - 1 - axis]  # (x, y, z) back to array order
-            low = float((values.min() + 1.0) / 2.0 * span) - 1.0
-            high = float((values.max() + 1.0) / 2.0 * span) + 1.0
+            low = float((box.low_xyz[n - 1 - axis] + 1.0) / 2.0 * span) - 1.0  # (x, y, z) back to array order
+            high = float((box.high_xyz[n - 1 - axis] + 1.0) / 2.0 * span) + 1.0
             low, high = _reflect_interval(low, high, span)
             start = max(0, int(np.floor(low)))
             stop = min(extent, int(np.ceil(high)) + 1)
@@ -561,6 +573,8 @@ class EulerTransform(DataAugmentation):
     def _stream_region(
         self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
     ) -> torch.Tensor:
+        if self._patch_locality(index, a, Attribute()).kind is not LocalityKind.REGRID:
+            return self._compute(name, index, a, tensor)
         return self._sample_region(
             self._grid_matrix(index, a, list(context.source_shape)),
             tensor,
@@ -601,14 +615,6 @@ class Translate(EulerTransform):
         # shift interpolates from. The draw is in (x, y, z); a halo is in array order.
         radius = (torch.ceil(self.translate[index][a].abs()).to(torch.int64) + 1).tolist()
         return PatchLocality(LocalityKind.HALO, halo=tuple(int(r) for r in reversed(radius)))
-
-    def _stream_region(
-        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
-    ) -> torch.Tensor:
-        # HALO: the dispatcher hands the enlarged block and crops the answer back; the shift is
-        # normalised against the block it is applied to (``_grid_matrix``).
-        del context
-        return self._compute(name, index, a, tensor)
 
 
 class Rotate(EulerTransform):
@@ -714,14 +720,6 @@ class Rotate(EulerTransform):
             return PatchLocality(LocalityKind.REGRID)
         return PatchLocality(LocalityKind.ORIENTATION)
 
-    def _stream_region(
-        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
-    ) -> torch.Tensor:
-        # A quarter turn is the remap of the region it was handed (ORIENTATION); any other angle samples.
-        if Rotate._index_remap(self.matrix[index][a]) is not None:
-            return self._compute(name, index, a, tensor)
-        return super()._stream_region(name, index, a, tensor, context)
-
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
         # The same extent carry state_init applied to the copy's grid.
         return Rotate._draw_shape(self.matrix[index][a], list(shape))
@@ -750,15 +748,11 @@ class Rotate(EulerTransform):
 
 
 class Scale(EulerTransform):
-    """Scale a copy about the volume centre: a REGRID, each target region pulling the source box its
-    corners map to (no constant halo could: the displacement grows with the distance to the centre)."""
+    """Scale a copy about the volume centre."""
 
     def __init__(self, s_std: float = 0.2):
         super().__init__()
         self.s_std = s_std
-
-    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.REGRID)
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         func = _scale_3d_matrix if len(shapes[0]) == 3 else _scale_2d_matrix
@@ -818,24 +812,12 @@ class Foreign(DataAugmentation):
         groups of one case would leave it in the same place and whatever drew next would draw twice
         the same, and torch's seed reaches the devices, where the model draws its own.
         """
-        states = (random.getstate(), np.random.get_state(), torch.random.get_rng_state())
-        # torch.manual_seed also (re)seeds every CUDA generator, so snapshot those too, but only when
-        # CUDA is already initialised, so a CPU data-loader worker is never forced to spin CUDA up.
-        cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
-        try:
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            random.seed(seed)
+        with preserved_rng():
+            seed_all(seed)
             set_random_state = getattr(self.transform, "set_random_state", None)
             if callable(set_random_state):
                 set_random_state(seed=seed)
             yield
-        finally:
-            random.setstate(states[0])
-            np.random.set_state(states[1])
-            torch.random.set_rng_state(states[2])
-            if cuda_states is not None:
-                torch.cuda.set_rng_state_all(cuda_states)
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         with self._seeded(self.seeds[index][a]):
@@ -1014,7 +996,38 @@ class Saturation(ColorTransform):
         return shapes
 
 
-class Noise(DataAugmentation):
+class PlacedDraw(DataAugmentation):
+    """A per-voxel draw whose value at a voxel is a function of the voxel's place in the volume.
+
+    POINTWISE: a region computes exactly its part, given where it sits (``offsets``) and the volume's
+    spatial extent (``full``), which the whole volume passes as zeros and its own shape.
+    """
+
+    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.POINTWISE)
+
+    @abstractmethod
+    def _apply(
+        self, index: int, a: int, tensor: torch.Tensor, offsets: tuple[int, ...], full: tuple[int, ...]
+    ) -> torch.Tensor:
+        pass
+
+    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        full = tuple(int(extent) for extent in tensor.shape[1:])
+        return self._apply(index, a, tensor, tuple(0 for _ in full), full)
+
+    def _stream_region(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+    ) -> torch.Tensor:
+        offsets = tuple(int(part.start) for part in context.source)
+        return self._apply(index, a, tensor, offsets, tuple(int(extent) for extent in context.source_shape))
+
+    def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        # A value draw moves no voxel: the inverse a TTA applies to a prediction is the tensor itself.
+        return tensor
+
+
+class Noise(PlacedDraw):
     def __init__(
         self,
         n_std: float,
@@ -1028,9 +1041,7 @@ class Noise(DataAugmentation):
         self.noise_step = noise_step
 
         self.ts: dict[int, list[torch.Tensor]] = {}
-        #: One field seed per copy, drawn with the step: the field is a function of (seed, voxel
-        #: position), so a region computes exactly its part of it, and no order or rank changes it.
-        self.field_seeds: dict[int, list[int]] = {}
+        self.field_seeds: dict[int, list[int]] = {}  #: one field seed per copy, drawn with the step
         self.betas = torch.linspace(beta_start, beta_end, noise_step)
         self.betas = Noise.enforce_zero_terminal_snr(self.betas)
         self.alphas = 1 - self.betas
@@ -1068,10 +1079,6 @@ class Noise(DataAugmentation):
         self.field_seeds[index] = [int(torch.randint(0, 2**31 - 1, (1,))) for _ in shapes]
         return shapes
 
-    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        # The field at a voxel is a hash of (seed, its position): a region computes its own part.
-        return PatchLocality(LocalityKind.POINTWISE)
-
     def _apply(
         self, index: int, a: int, tensor: torch.Tensor, offsets: tuple[int, ...], full: tuple[int, ...]
     ) -> torch.Tensor:
@@ -1079,21 +1086,8 @@ class Noise(DataAugmentation):
         field = _hashed_normal_field(self.field_seeds[index][a], tuple(tensor.shape), offsets, full, tensor.device)
         return alpha_hat_t.sqrt() * tensor + (1 - alpha_hat_t).sqrt() * field * self.n_std
 
-    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        full = tuple(int(extent) for extent in tensor.shape[1:])
-        return self._apply(index, a, tensor, tuple(0 for _ in full), full)
 
-    def _stream_region(
-        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
-    ) -> torch.Tensor:
-        offsets = tuple(int(part.start) for part in context.source)
-        return self._apply(index, a, tensor, offsets, tuple(int(extent) for extent in context.source_shape))
-
-    def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor
-
-
-class CutOUT(DataAugmentation):
+class CutOUT(PlacedDraw):
     def __init__(
         self,
         c_prob: float,
@@ -1110,10 +1104,6 @@ class CutOUT(DataAugmentation):
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         self.centers[index] = [torch.rand((3) if len(shape) == 3 else (2)) for shape in shapes]
         return shapes
-
-    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        # The box is normalised to the VOLUME's extent; a region keeps only its part of it.
-        return PatchLocality(LocalityKind.POINTWISE)
 
     def _apply(
         self, index: int, a: int, tensor: torch.Tensor, offsets: tuple[int, ...], full: tuple[int, ...]
@@ -1136,19 +1126,6 @@ class CutOUT(DataAugmentation):
             tensor,
             torch.tensor(self.value).to(tensor.device),
         )
-
-    def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        full = tuple(int(extent) for extent in tensor.shape[1:])
-        return self._apply(index, a, tensor, tuple(0 for _ in full), full)
-
-    def _stream_region(
-        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
-    ) -> torch.Tensor:
-        offsets = tuple(int(part.start) for part in context.source)
-        return self._apply(index, a, tensor, offsets, tuple(int(extent) for extent in context.source_shape))
-
-    def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor
 
 
 class Elastix(DataAugmentation):

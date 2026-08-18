@@ -31,7 +31,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data import Attribute, LocalityKind, PatchLocality, Transform, Write
-from konfai.data.materialize import CaseMaterializer
+from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.utils.dataset import Dataset
 
@@ -102,7 +102,9 @@ def test_a_user_stage_streams_and_equals_the_whole_volume(tmp_path: Path) -> Non
     source = _field(tmp_path)
     manager = _manager(source, [_CentreAndScale(step=0.25), Write(f"{tmp_path / 'out'}:h5")])
     assert manager.stream_refusal(0, apply_augmentations=False) is None
-    assert CaseMaterializer(manager).materialize() is True, "a per-component centring is a value map: it must stream"
+    assert CaseMaterializer(manager).materialize() is Verdict.STREAM, (
+        "a per-component centring is a value map: it must stream"
+    )
 
     volume = source.read_data("DVF", "CASE_000")[0].astype(np.float32)
     expected = -0.25 * (volume - volume.reshape(3, -1).mean(axis=1).reshape(3, 1, 1, 1))
@@ -122,4 +124,4 @@ def test_a_streamed_user_stage_never_reads_the_volume(tmp_path: Path, monkeypatc
     # reads, and a whole-volume read there would fall outside a guard armed later.
     monkeypatch.setattr(Dataset, "read_data", refuse)
     manager = _manager(source, [_CentreAndScale(step=0.25), Write(f"{tmp_path / 'out'}:h5")])
-    assert CaseMaterializer(manager).materialize() is True
+    assert CaseMaterializer(manager).materialize() is Verdict.STREAM

@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.augmentation import Brightness, CutOUT, Flip, Noise, Permute, Rotate, Scale
-from konfai.data.materialize import CaseMaterializer
+from konfai.data.materialize import CaseMaterializer, Regime, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Expand, Resample, Save, TensorCast, Transform, Write, split_expand
 from konfai.utils.dataset import Attribute, Dataset
@@ -229,7 +229,10 @@ def test_a_draw_is_a_stage_that_chains_with_the_transforms_around_it(tmp_path: P
         "Write",
     ]
 
-    assert set(CaseMaterializer(manager).materialize_copies([1, 2]).values()) <= {"stream", "stream-shared"}
+    assert set(CaseMaterializer(manager).materialize_copies([1, 2]).values()) <= {
+        (Verdict.STREAM, Regime.SOLO),
+        (Verdict.STREAM, Regime.SHARED),
+    }
 
     expected = Clip(0.0, 50.0)(
         "CASE_000", torch.from_numpy(source.read_data("CT", "CASE_000")[0]), Attribute(_image_attributes())
@@ -259,9 +262,9 @@ def test_a_transform_after_a_shape_changing_draw_folds_on_the_copys_grid(tmp_pat
     assert manager.shapes[1] != manager.shapes[0], "the copy's grid did not follow its draw"
 
     assert set(CaseMaterializer(manager).materialize_copies([1, 2]).values()) <= {
-        "stream",
-        "stream-shared",
-        "whole-volume",
+        (Verdict.STREAM, Regime.SOLO),
+        (Verdict.STREAM, Regime.SHARED),
+        (Verdict.WHOLE_VOLUME, None),
     }
     written = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000_r01")[0]
     assert list(written.shape[1:]) == manager.shapes[1]
@@ -291,9 +294,9 @@ def test_a_streamed_copy_equals_the_whole_volume_copy(tmp_path: Path) -> None:
         [Clip(0.0, 50.0), Expand(nb=3, pattern="{name}_r{a:02d}"), draw, Write(f"{tmp_path / 'streamed'}:h5")],
     )
     assert CaseMaterializer(streamed).materialize_copies([1, 2, 3]) == {
-        1: "stream-shared",
-        2: "stream-shared",
-        3: "stream-shared",
+        1: (Verdict.STREAM, Regime.SHARED),
+        2: (Verdict.STREAM, Regime.SHARED),
+        3: (Verdict.STREAM, Regime.SHARED),
     }
 
     classic = _manager(
@@ -346,7 +349,7 @@ def test_the_shared_pass_reads_the_source_once_for_every_copy(tmp_path: Path) ->
     finally:
         Dataset.read_data_slice = original  # type: ignore[method-assign]
 
-    assert set(regimes.values()) == {"stream-shared"}
+    assert set(regimes.values()) == {(Verdict.STREAM, Regime.SHARED)}
     source_reads = [entry for entry in reads if entry == ("CT", "CASE_000")]
     assert len(source_reads) == 1, f"the copies did not share the read pass: {len(source_reads)} reads"
 
@@ -363,10 +366,13 @@ def test_a_region_draw_takes_its_own_pass_and_the_plan_names_the_draw(tmp_path: 
             Write(f"{tmp_path / 'out'}:h5"),
         ],
     )
-    reason = CaseMaterializer(manager).expansion_solo_reason(1)
-    assert reason is not None and "Flip" in reason and "ORIENTATION" in reason
+    route = CaseMaterializer(manager).classify_copies([1, 2])[1]
+    assert route.regime is Regime.SOLO and route.reason and "Flip" in route.reason and "ORIENTATION" in route.reason
 
-    assert CaseMaterializer(manager).materialize_copies([1, 2]) == {1: "stream", 2: "stream"}
+    assert CaseMaterializer(manager).materialize_copies([1, 2]) == {
+        1: (Verdict.STREAM, Regime.SOLO),
+        2: (Verdict.STREAM, Regime.SOLO),
+    }
     out = Dataset(tmp_path / "out", "h5")
     assert out.is_dataset_exist("CT", "CASE_000_r01") and out.is_dataset_exist("CT", "CASE_000_r02")
 
@@ -386,11 +392,11 @@ def test_a_solo_copy_sweeps_on_the_requested_device(tmp_path: Path, monkeypatch)
     )
     seen: list[torch.device | None] = []
 
-    def spy(self, a=0, *args, **kwargs):
-        seen.append(kwargs.get("device"))
-        return True  # the sweep itself is not the point, the handed-down device is
+    def spy(self, a, *args, **kwargs):
+        seen.append(self.manager._chain_device)  # the sweep itself is not the point, the device it runs on is
+        return Verdict.STREAM
 
-    monkeypatch.setattr(CaseMaterializer, "materialize", spy)
+    monkeypatch.setattr(CaseMaterializer, "_write_case", spy)
     device = torch.device("cuda", 0)
     CaseMaterializer(manager).materialize_copies([1, 2], device=device)
     assert seen == [device, device]
@@ -400,10 +406,14 @@ def test_a_solo_copy_sweeps_on_the_requested_device(tmp_path: Path, monkeypatch)
 @pytest.mark.parametrize(
     ("draw", "regime", "atol"),
     [
-        (lambda: _draw(Noise(1.0)), "stream-shared", 0.0),  # a field hashed on position: per-voxel
-        (lambda: _draw(CutOUT(1.0, 0.5, 0.0)), "stream-shared", 0.0),  # a box on the volume's grid
-        (lambda: _draw(Rotate(a_min=10.0, a_max=10.0)), "stream", 1e-4),  # a free angle: its own pull map
-        (lambda: _draw(Scale(0.2)), "stream", 1e-4),
+        (lambda: _draw(Noise(1.0)), (Verdict.STREAM, Regime.SHARED), 0.0),  # a field hashed on position: per-voxel
+        (lambda: _draw(CutOUT(1.0, 0.5, 0.0)), (Verdict.STREAM, Regime.SHARED), 0.0),  # a box on the volume's grid
+        (
+            lambda: _draw(Rotate(a_min=10.0, a_max=10.0)),
+            (Verdict.STREAM, Regime.SOLO),
+            1e-4,
+        ),  # a free angle: its own pull map
+        (lambda: _draw(Scale(0.2)), (Verdict.STREAM, Regime.SOLO), 1e-4),
     ],
     ids=["Noise", "CutOUT", "Rotate", "Scale"],
 )
@@ -448,7 +458,10 @@ def test_a_whole_volume_draw_falls_back_per_copy_and_still_writes(tmp_path: Path
         ],
     )
     assert manager.stream_refusal(1, apply_augmentations=True) is not None
-    assert CaseMaterializer(manager).materialize_copies([1, 2]) == {1: "whole-volume", 2: "whole-volume"}
+    assert CaseMaterializer(manager).materialize_copies([1, 2]) == {
+        1: (Verdict.WHOLE_VOLUME, None),
+        2: (Verdict.WHOLE_VOLUME, None),
+    }
     out = Dataset(tmp_path / "out", "h5")
     assert out.is_dataset_exist("CT", "CASE_000_r01") and out.is_dataset_exist("CT", "CASE_000_r02")
     assert not manager.loaded and not manager.data
@@ -592,9 +605,9 @@ def test_a_shared_pass_writes_an_mha_destination_like_the_whole_volume_copies(tm
         [Clip(0.0, 50.0), Expand(nb=3, pattern="{name}_r{a:02d}"), draw, Write(f"{tmp_path / 'streamed'}:mha")],
     )
     assert CaseMaterializer(streamed).materialize_copies([1, 2, 3]) == {
-        1: "stream-shared",
-        2: "stream-shared",
-        3: "stream-shared",
+        1: (Verdict.STREAM, Regime.SHARED),
+        2: (Verdict.STREAM, Regime.SHARED),
+        3: (Verdict.STREAM, Regime.SHARED),
     }
     assert sorted(entry.name for entry in (tmp_path / "streamed").iterdir()) == [
         "CASE_000_r01",
@@ -646,7 +659,10 @@ def test_a_foreign_draw_after_the_marker_falls_back_and_each_copy_carries_its_ow
     refusal = manager.stream_refusal(1, apply_augmentations=True)
     assert refusal is not None and "'Foreign'" in refusal and "WHOLE_VOLUME" in refusal
 
-    assert CaseMaterializer(manager).materialize_copies([1, 2]) == {1: "whole-volume", 2: "whole-volume"}
+    assert CaseMaterializer(manager).materialize_copies([1, 2]) == {
+        1: (Verdict.WHOLE_VOLUME, None),
+        2: (Verdict.WHOLE_VOLUME, None),
+    }
 
     out = Dataset(tmp_path / "out", "h5")
     clipped = torch.from_numpy(np.clip(source.read_data("CT", "CASE_000")[0], 0.0, 50.0))
