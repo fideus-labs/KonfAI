@@ -1629,4 +1629,4 @@ def test_the_plan_text_is_the_snapshot(tmp_path: Path, monkeypatch: pytest.Monke
     _write_snapshot_cohort(tmp_path)
     plan = _build(tmp_path).compute_plan(2, overwrite=False)
     assert plan.summary() == _SNAPSHOT_SUMMARY
-    assert plan.report().replace(str(tmp_path), "<tmp>") == _SNAPSHOT_REPORT
+    assert plan.report().replace(tmp_path.as_posix(), "<tmp>").replace(str(tmp_path), "<tmp>") == _SNAPSHOT_REPORT
