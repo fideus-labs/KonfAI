@@ -1325,15 +1325,6 @@ class Dataset:
             return False
 
         @abstractmethod
-        def file_to_data_statistics(
-            self,
-            group: str,
-            name: str,
-            channels: list[int] | None = None,
-        ) -> dict[str, Any]:
-            pass
-
-        @abstractmethod
         def data_to_file(
             self,
             name: str,
@@ -1444,30 +1435,6 @@ class Dataset:
             dataset = self._get_dataset(groups, name)
             data = np.asarray(dataset[slices])
             return data, Attribute(dict(dataset.attrs))
-
-        def file_to_data_statistics(
-            self,
-            groups: str,
-            name: str,
-            channels: list[int] | None = None,
-        ) -> dict[str, Any]:
-            dataset = self._get_dataset(groups, name)
-            if dataset is None:
-                raise NameError(f"Dataset '{groups}/{name}' not found in '{self.filename}'.")
-
-            axis = 1 if dataset.ndim > 1 else 0
-            chunk_length = _statistics_chunk_length(dataset.shape, axis)
-            state: dict[str, Any] | None = None
-
-            for start in range(0, dataset.shape[axis], chunk_length):
-                slices = [slice(None)] * dataset.ndim
-                slices[axis] = slice(start, min(dataset.shape[axis], start + chunk_length))
-                chunk = np.asarray(dataset[tuple(slices)])
-                if channels is not None:
-                    chunk = chunk[channels]
-                state = _update_running_statistics(state, chunk)
-
-            return _finalize_running_statistics(state)
 
         def data_to_file(
             self,
@@ -1712,25 +1679,6 @@ class Dataset:
             attributes["Origin"] = origin + direction @ (np.asarray(extract_index_xyz, dtype=np.float64) * spacing)
             return data[normalized[:1] + tuple(slice(None) for _ in normalized[1:])], attributes
 
-        def _file_to_image_statistics(self, name: str, path: str, channels: list[int] | None) -> dict[str, float]:
-            reader = sitk.ImageFileReader()
-            reader.SetFileName(path)
-            reader.ReadImageInformation()
-            data_shape = [reader.GetNumberOfComponents(), *reversed(reader.GetSize())]
-
-            slab_length = _statistics_chunk_length(data_shape, 1)
-            state: dict[str, Any] | None = None
-
-            for start in range(0, data_shape[1], slab_length):
-                slices: list[slice] = [slice(None)] * len(data_shape)
-                slices[1] = slice(start, min(data_shape[1], start + slab_length))
-                slab, _ = self._file_to_image_slice(name, path, tuple(slices))
-                if channels is not None:
-                    slab = slab[channels]
-                state = _update_running_statistics(state, slab)
-
-            return _finalize_running_statistics(state)
-
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             path = self._resolve_data_path(name)
             if path is None:
@@ -1794,43 +1742,6 @@ class Dataset:
             if path.endswith(".npy"):
                 return True  # np.load(mmap) reads the slice off the map
             return not path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")) and self._supports_region_read(path)
-
-        def file_to_data_statistics(
-            self,
-            group: str,
-            name: str,
-            channels: list[int] | None = None,
-        ) -> dict[str, Any]:
-            path = self._resolve_data_path(name)
-            if path is None:
-                raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
-
-            if path.endswith(".npy"):
-                data = np.load(path, mmap_mode="r")
-                if channels is not None:
-                    data = data[channels]
-                return _finalize_running_statistics(_update_running_statistics(None, data))
-
-            if path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")):
-                data, _ = self.file_to_data(group, name)
-                if channels is not None:
-                    data = data[channels]
-                return _finalize_running_statistics(_update_running_statistics(None, data))
-
-            if self._supports_region_read(path):
-                return self._file_to_image_statistics(name, path, channels)
-
-            # The whole volume lands in memory here, which the streamed path above exists to avoid. Nothing
-            # better is left: a format that cannot serve a region would decode itself once per slab.
-            image = sitk.ReadImage(path)
-            data = sitk.GetArrayViewFromImage(image)
-            if image.GetNumberOfComponentsPerPixel() == 1:
-                data = np.expand_dims(data, 0)
-            else:
-                data = np.transpose(data, (len(data.shape) - 1, *list(range(len(data.shape) - 1))))
-            if channels is not None:
-                data = data[channels]
-            return _finalize_running_statistics(_update_running_statistics(None, data))
 
         def is_vtk_polydata(self, obj) -> bool:
             try:
@@ -2056,24 +1967,6 @@ class Dataset:
             del name
             return True  # zarr is chunked: a slice reads its chunks and nothing else
 
-        def file_to_data_statistics(
-            self,
-            group: str,
-            name: str,
-            channels: list[int] | None = None,
-        ) -> dict[str, Any]:
-            shape, _ = self.get_infos(group, name)
-            chunk_length = _statistics_chunk_length(shape, 1)
-            state: dict[str, Any] | None = None
-            for start in range(0, shape[1], chunk_length):
-                slices = [slice(None)] * len(shape)
-                slices[1] = slice(start, min(shape[1], start + chunk_length))
-                chunk, _ = self.file_to_data_slice(group, name, tuple(slices))
-                if channels is not None:
-                    chunk = chunk[channels]
-                state = _update_running_statistics(state, chunk)
-            return _finalize_running_statistics(state)
-
         def data_to_file(
             self,
             name: str,
@@ -2258,30 +2151,6 @@ class Dataset:
             info.update(origin=origin, spacing=spacing, direction=direction)
             return data, self._attributes(info)
 
-        def file_to_data_statistics(
-            self,
-            group: str,
-            name: str,
-            channels: list[int] | None = None,
-        ) -> dict[str, Any]:
-            from konfai.utils.dicom import get_dicom_info, read_dicom_series_slice
-
-            path = self._path(name)
-            info = get_dicom_info(path)
-            shape = info["shape"]
-            state: dict[str, Any] | None = None
-            for index in range(shape[1]):
-                chunk, _, _, _ = read_dicom_series_slice(
-                    path,
-                    (slice(None), slice(index, index + 1), slice(None), slice(None)),
-                    series_uid=info["series_uid"],
-                    info=info,
-                )
-                if channels is not None:
-                    chunk = chunk[channels]
-                state = _update_running_statistics(state, chunk)
-            return _finalize_running_statistics(state)
-
         def data_to_file(
             self,
             name: str,
@@ -2422,17 +2291,6 @@ class Dataset:
                 np.asarray(block[(slices[0], slice(None, None, leading[2]), *slices[2:])], dtype=np.float32),
                 attributes,
             )
-
-        def file_to_data_statistics(
-            self,
-            group: str,
-            name: str,
-            channels: list[int] | None = None,
-        ) -> dict[str, Any]:
-            data, _attributes = self.file_to_data(group, name)
-            if channels is not None:
-                data = data[channels]
-            return _finalize_running_statistics(_update_running_statistics(None, data))
 
         def data_to_file(
             self,
@@ -2803,10 +2661,10 @@ class Dataset:
     def iter_data_blocks(self, groups: str, name: str) -> Callable[[], Iterator[np.ndarray]]:
         """A factory of passes over one entry, block by block along the first spatial axis, each
         block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what a scan that must never hold the
-        volume iterates. A store that cannot serve bounded region reads (gzipped NIfTI, compressed
-        MetaImage) is read whole ONCE and kept for every pass the factory serves: decoding it once
-        per block would cost more than holding it, and holding it once is what such a store costs
-        anyway (the same policy as ``read_data_statistics``)."""
+        volume iterates (the statistics fold, the quantile scan). A store that cannot serve bounded
+        region reads (gzipped NIfTI, compressed MetaImage) is read whole ONCE and kept for every
+        pass the factory serves: decoding it once per block would cost more than holding it, and
+        holding it once is what such a store costs anyway."""
         shape, _ = self.get_infos(groups, name)
         if len(shape) < 2 or not self.bounded_region_reads(groups, name):
             resident: list[np.ndarray] = []
@@ -2860,9 +2718,12 @@ class Dataset:
         name: str,
         channels: list[int] | None = None,
     ) -> dict[str, Any]:
-        return self._resolve_entry(
-            groups, name, lambda file, group, entry: file.file_to_data_statistics(group, entry, channels)
-        )
+        """Min/max/mean/std of one entry, over the volume and per channel (``channels`` restricts
+        both to those), folded over :meth:`iter_data_blocks`: the volume is never held."""
+        state = None
+        for block in self.iter_data_blocks(groups, name)():
+            state = _update_running_statistics(state, block if channels is None else block[channels])
+        return _finalize_running_statistics(state)
 
     def read_transform(self, group: str, name: str) -> sitk.Transform:
         if not self.exists_on_disk():
