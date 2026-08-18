@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -65,3 +66,38 @@ def test_main_apps_dispatches_local_infer(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert infer_kwargs["tta"] == 2
     assert infer_kwargs["mc"] == 1
     assert infer_kwargs["inputs"] == [[(tmp_path / "input.mha").resolve()]]
+
+
+def _run_apps_server(monkeypatch: pytest.MonkeyPatch, apps_config: Path) -> str:
+    """Drive `main_apps_server` up to its `--apps` validation and return the exit message.
+
+    `main_apps_server` opens with `import uvicorn`, so every path through it -- including the
+    validation that never reaches `uvicorn.run` -- needs the server stack importable.
+    """
+    pytest.importorskip("uvicorn")
+    # --auth off keeps the test on config validation instead of token resolution; delenv first so
+    # the pop the CLI performs on a real inherited token is restored at teardown.
+    monkeypatch.delenv("KONFAI_API_TOKEN", raising=False)
+    monkeypatch.setattr(sys, "argv", ["konfai-apps-server", "--auth", "off", "--apps", str(apps_config)])
+
+    with pytest.raises(SystemExit) as excinfo:
+        apps_cli_module.main_apps_server()
+    return str(excinfo.value)
+
+
+def test_main_apps_server_rejects_a_missing_apps_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A mistyped --apps must name the path it could not find, not start a server with no apps.
+    missing = tmp_path / "absent.json"
+
+    assert str(missing) in _run_apps_server(monkeypatch, missing)
+
+
+def test_main_apps_server_rejects_a_config_without_an_apps_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Valid JSON of the wrong shape must be refused up front: the server reads `apps` as a list, so
+    # binding the port first would only surface the mistake on the first request.
+    apps_config = tmp_path / "apps.json"
+    apps_config.write_text(json.dumps({"applications": ["demo/app"]}), encoding="utf-8")
+
+    assert "Invalid config file" in _run_apps_server(monkeypatch, apps_config)

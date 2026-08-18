@@ -38,6 +38,10 @@ ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
 APP_ASSETS_DIR = ASSETS_DIR / "AppClientRemote" / "TinySynthesisApp"
 WORKFLOW_ASSETS_DIR = REPO_ROOT / "tests" / "assets" / "Workflows"
 SimpleITK = pytest.importorskip("SimpleITK")
+# The server subprocess runs under this interpreter (`sys.executable` + PYTHONPATH), so the server
+# stack has to be importable here or `konfai-apps-server` exits before it can bind the port.
+pytest.importorskip("fastapi")
+pytest.importorskip("uvicorn")
 
 
 @dataclass
