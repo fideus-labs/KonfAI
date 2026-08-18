@@ -16,6 +16,35 @@
 
 """Utility modules supporting configuration, datasets, ITK, DICOM, OME-Zarr, and runtime helpers."""
 
-from konfai.utils import dicom, ome_zarr
+import importlib
+from enum import Enum
 
-__all__ = ["dicom", "ome_zarr"]
+
+class State(Enum):
+    """Workflow state exported through the KonfAI process environment (``KONFAI_STATE``)."""
+
+    TRAIN = "TRAIN"
+    RESUME = "RESUME"
+    PREDICTION = "PREDICTION"
+    EVALUATION = "EVALUATION"
+    TRANSFORM = "TRANSFORM"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+# ``dicom`` and ``ome_zarr`` import pydicom and dask/ngff-zarr at module level; resolved on first
+# attribute access so ``import konfai`` does not pay for them.
+_LAZY_SUBMODULES = ("dicom", "ome_zarr")
+
+__all__ = ["State", *_LAZY_SUBMODULES]
+
+
+def __getattr__(name: str):
+    if name in _LAZY_SUBMODULES:
+        return importlib.import_module(f"{__name__}.{name}")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(list(globals()) + list(_LAZY_SUBMODULES))

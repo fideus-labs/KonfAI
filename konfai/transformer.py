@@ -1138,19 +1138,26 @@ def build_transform(
 
 def plan_transform(
     overwrite: bool = False,
-    cpu: int = 1,
+    gpu: list[int] | None = None,
+    cpu: int | None = 1,
+    quiet: bool = False,
     transform_file: Path | str | dict = Path("./Transform.yml").resolve(),
     transforms_dir: Path | str = Path("./Transforms").resolve(),
-    **_ignored: object,
 ) -> TransformPlan:
     """CLI ``--plan``: build, plan, print, and stop: the workflow never runs.
+
+    Same flags as :func:`transform`, same world size (one rank per GPU, else ``cpu`` ranks), so the
+    plan shards the way the run will. The plan is the requested output: it is printed whatever
+    ``quiet`` says. Nothing is written under ``transforms_dir``.
 
     The probe opens then removes one region-write entry per destination, so even plan mode touches
     the output directories: that is the price of a verdict that is the run's own (the printed plan
     is a measurement, not a prediction).
     """
+    del quiet
     workflow = build_transform(transform_file=transform_file, transforms_dir=transforms_dir)
-    plan = cast(Transformer, workflow).compute_plan(max(1, int(cpu or 1)), bool(overwrite))
+    world_size = len(gpu or []) or max(1, int(cpu or 1))
+    plan = cast(Transformer, workflow).compute_plan(world_size, bool(overwrite))
     print(plan.report())
     return plan
 
