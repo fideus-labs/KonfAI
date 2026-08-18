@@ -88,10 +88,11 @@ defaults. See {doc}`../concepts/configuration`.
 `TRANSFORM`
 
 - `--plan`: print the per-case streaming plan and exit. The plan probes each
-  destination with a real region-write open (created, then removed), so its
-  verdict is the run's own, and even plan mode touches the output directories.
-  It also reads the config the way a run does, which resolves the defaults back
-  into `Transform.yml`; copy the file first to keep the text you wrote.
+  destination with a real region-write open, so its verdict is the run's own,
+  then takes back what the probe created: the entry, and the store itself when
+  it did not exist before. It also reads the config the way a run does, which
+  resolves the defaults back into `Transform.yml`; copy the file first to keep
+  the text you wrote.
 - `--transforms-dir` / `--transforms_dir` (default `./Transforms/`): run logs;
   the outputs go where each `Write:` says. `--plan` prints and writes nothing
   there.

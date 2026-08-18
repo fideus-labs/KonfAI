@@ -109,10 +109,32 @@ def test_the_cgroup_is_the_process_s_own_not_the_mount_root(monkeypatch: pytest.
     (job / "memory.max").write_text("32000000000\n")  # --mem=32G
     (leaf.parent / "memory.max").write_text("max\n")
     (leaf / "memory.max").write_text("max\n")
-    (leaf / "memory.current").write_text("2000000000\n")  # already resident
+    (leaf / "memory.stat").write_text("anon 1500000000\nfile 0\nkernel 500000000\n")  # already resident
     _fake_host_available(monkeypatch, 512 * 2**30)
 
     assert runtime.available_memory_bytes() == (30_000_000_000, "cgroup limit")
+
+
+def test_the_page_cache_is_not_held_memory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A step that has streamed a cohort has a memory.current near its ceiling, almost all of it
+    page cache the kernel drops under pressure: the budget subtracts anon + kernel, not current."""
+    leaf = _fake_cgroup(monkeypatch, tmp_path, "/docker/abc")
+    (leaf / "memory.max").write_text("50000000000\n")
+    (leaf / "memory.current").write_text("49000000000\n")
+    (leaf / "memory.stat").write_text("anon 9000000000\nfile 39000000000\nkernel 1000000000\nshmem 0\n")
+    _fake_host_available(monkeypatch, 512 * 2**30)
+
+    assert runtime.available_memory_bytes() == (40_000_000_000, "cgroup limit")
+
+
+def test_cgroup_v1_holds_rss_not_the_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    leaf = _fake_cgroup(monkeypatch, tmp_path, "/docker/abc", v1=True)
+    (leaf / "memory.limit_in_bytes").write_text("8000000000\n")
+    (leaf / "memory.usage_in_bytes").write_text("7900000000\n")
+    (leaf / "memory.stat").write_text("cache 6900000000\nrss 1000000000\nmapped_file 0\n")
+    _fake_host_available(monkeypatch, 512 * 2**30)
+
+    assert runtime.available_memory_bytes() == (7_000_000_000, "cgroup limit")
 
 
 def test_cgroup_v2_max_falls_back_to_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -157,6 +179,27 @@ def test_a_slurm_grant_bounds_the_budget_when_no_cgroup_enforces_it(
     _fake_host_available(monkeypatch, 512 * 2**30)
 
     assert runtime.available_memory_bytes() == (32000 * 2**20, "SLURM memory grant")
+
+
+def test_a_slurm_grant_of_zero_means_the_whole_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    monkeypatch.setenv("SLURM_MEM_PER_NODE", "0")  # --mem=0
+    monkeypatch.setenv("SLURM_MEM_PER_CPU", "0")
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "8")
+    _fake_host_available(monkeypatch, 512 * 2**30)
+
+    assert runtime.available_memory_bytes() == (512 * 2**30, "host available RAM")
+
+
+def test_a_slurm_per_cpu_grant_is_multiplied_by_the_task_cpus(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    monkeypatch.delenv("SLURM_MEM_PER_NODE", raising=False)
+    monkeypatch.setenv("SLURM_MEM_PER_CPU", "4000")  # MB
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "8")
+    monkeypatch.setenv("SLURM_CPUS_ON_NODE", "64")  # the task's cpus win over the node's
+    _fake_host_available(monkeypatch, 512 * 2**30)
+
+    assert runtime.available_memory_bytes() == (4000 * 8 * 2**20, "SLURM memory grant")
 
 
 # --------------------------------------------------------------------------------------
