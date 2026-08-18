@@ -30,7 +30,7 @@ import tempfile
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import closing, suppress
 from enum import Enum
 from functools import wraps
 from pathlib import Path
@@ -136,50 +136,102 @@ def get_memory() -> float:
 
 # psutil.virtual_memory() always reports the HOST, so inside a container or a SLURM cgroup that grants
 # far less than the node has, a memory budget derived from it would overshoot the real limit and get
-# OOM-killed. The cgroup ceiling is read directly instead. cgroup v2 exposes ``memory.max`` (the literal
-# ``"max"`` means unbounded); cgroup v1 exposes ``memory.limit_in_bytes`` with a page-aligned near
-# INT64_MAX sentinel that means the same. Only Linux has these files; every other host has no cgroup.
-_CGROUP_V2_MEMORY_MAX = "/sys/fs/cgroup/memory.max"
-_CGROUP_V1_MEMORY_LIMIT = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+# OOM-killed. The cgroup ceiling is read directly instead: the process's own cgroup (from
+# /proc/self/cgroup, since only ``docker run`` puts it at the mount root) and every ancestor up to the
+# mount, the tightest one winning. cgroup v2 exposes ``memory.max`` (the literal ``"max"`` means
+# unbounded) and ``memory.current``; cgroup v1 exposes ``memory.limit_in_bytes`` with a page-aligned
+# near INT64_MAX sentinel and ``memory.usage_in_bytes``. Only Linux has these files.
+_CGROUP_ROOT = "/sys/fs/cgroup"
+_PROC_SELF_CGROUP = "/proc/self/cgroup"
 _CGROUP_UNLIMITED = 1 << 62  # any v1 limit at or above this is the "no limit" sentinel
 
 
-def _read_cgroup_memory_limit() -> int | None:
-    """Return this process's cgroup memory ceiling in bytes, or ``None`` when unbounded or absent.
-
-    Tries cgroup v2 first, then v1. A missing file (non-Linux host, or cgroups disabled), the ``"max"``
-    keyword, the v1 sentinel, or an unparseable value all resolve to ``None``: "no cgroup limit".
-    """
+def _cgroup_paths() -> list[tuple[Path, str, str]]:
+    """The (directory, limit file, usage file) of this process's memory cgroup and its ancestors,
+    innermost first: v2 (``0::/path``) or v1 (``N:memory:/path``); empty when there is no cgroup."""
     try:
-        raw = Path(_CGROUP_V2_MEMORY_MAX).read_text().strip()
+        lines = Path(_PROC_SELF_CGROUP).read_text().splitlines()
     except OSError:
-        raw = ""
-    if raw:
-        if raw == "max":
-            return None
+        return []
+    root = Path(_CGROUP_ROOT)
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        hierarchy, controllers, path = parts
+        if hierarchy == "0" and controllers == "":
+            base, files = root, ("memory.max", "memory.current")
+        elif "memory" in controllers.split(","):
+            base, files = root / "memory", ("memory.limit_in_bytes", "memory.usage_in_bytes")
+        else:
+            continue
+        leaf = base / path.lstrip("/")
+        chain = [leaf, *leaf.parents]
+        return [(directory, *files) for directory in chain if directory == base or base in directory.parents]
+    return []
+
+
+def _read_cgroup_memory_limit() -> tuple[int, int] | None:
+    """``(ceiling, current usage)`` in bytes for this process's cgroup, or ``None`` when unbounded or absent.
+
+    The ceiling is the tightest ``memory.max``/``limit_in_bytes`` on the path from the process's own
+    cgroup to the mount root; the usage is the innermost cgroup's, so a SLURM step already holding
+    memory does not count it as free. A missing hierarchy (non-Linux, cgroups disabled), the ``"max"``
+    keyword, the v1 sentinel and unparseable values all mean "no bound at this level".
+    """
+    limits: list[int] = []
+    usage: int | None = None
+    for directory, limit_name, usage_name in _cgroup_paths():
         try:
-            return int(raw)
-        except ValueError:
-            pass
-    try:
-        limit = int(Path(_CGROUP_V1_MEMORY_LIMIT).read_text().strip())
-    except (OSError, ValueError):
+            raw = (directory / limit_name).read_text().strip()
+        except OSError:
+            continue
+        if raw != "max":
+            with suppress(ValueError):
+                limit = int(raw)
+                if limit < _CGROUP_UNLIMITED:
+                    limits.append(limit)
+        if usage is None:
+            with suppress(OSError, ValueError):
+                usage = int((directory / usage_name).read_text().strip())
+    if not limits:
         return None
-    return None if limit >= _CGROUP_UNLIMITED else limit
+    return min(limits), usage or 0
+
+
+def _slurm_memory_grant() -> int | None:
+    """The bytes SLURM granted this step (``--mem`` / ``--mem-per-cpu``, in MB), or ``None`` outside a job.
+    Read as well as the cgroup: on a cluster whose slurmd does not enforce cgroups, the env is the bound."""
+    per_node = os.environ.get("SLURM_MEM_PER_NODE")
+    per_cpu = os.environ.get("SLURM_MEM_PER_CPU")
+    cpus = os.environ.get("SLURM_CPUS_PER_TASK") or os.environ.get("SLURM_CPUS_ON_NODE")
+    try:
+        if per_node:
+            return int(per_node) * 2**20
+        if per_cpu and cpus:
+            return int(per_cpu) * int(cpus) * 2**20
+    except ValueError:
+        return None
+    return None
 
 
 def available_memory_bytes() -> tuple[int, str]:
     """Return ``(bytes a process may safely allocate, source label)``, honouring a cgroup limit.
 
-    ``psutil`` sees the host's free RAM, which overshoots a container/cgroup ceiling; the tighter of
-    the cgroup limit and the host figure wins, so the number is safe on a bare host and in a
-    memory-capped container alike. The label names which bound won, for the startup decision log.
+    ``psutil`` sees the host's free RAM, which overshoots a container/cgroup ceiling; the tightest of
+    the cgroup's remaining room (its ceiling minus what it already holds), a SLURM memory grant and
+    the host figure wins, so the number is safe on a bare host, in a memory-capped container and in a
+    SLURM step alike. The label names which bound won, for the startup decision log.
     """
-    host_available = int(psutil.virtual_memory().available)
-    limit = _read_cgroup_memory_limit()
-    if limit is not None and limit < host_available:
-        return limit, "cgroup limit"
-    return host_available, "host available RAM"
+    candidates = [(int(psutil.virtual_memory().available), "host available RAM")]
+    cgroup = _read_cgroup_memory_limit()
+    if cgroup is not None:
+        limit, usage = cgroup
+        candidates.append((max(0, limit - usage), "cgroup limit"))
+    slurm = _slurm_memory_grant()
+    if slurm is not None:
+        candidates.append((slurm, "SLURM memory grant"))
+    return min(candidates, key=lambda candidate: candidate[0])
 
 
 def _materialized_config(tree: dict, root: str) -> Path:
@@ -720,6 +772,10 @@ class TensorBoard:
 class DistributedObject(ABC):
     """Base class for trainer, predictor, and evaluator distributed workflows."""
 
+    #: Whether the ranks talk to each other (DDP, gathers). A workflow whose ranks only share the
+    #: work list sets it False and runs without a process group: no rendezvous port, no gloo/NCCL.
+    uses_collectives: bool = True
+
     def __init__(self, name: str) -> None:
         self.dataloader: list[list[DataLoader]]
         self.manual_seed: int | None = None
@@ -784,7 +840,7 @@ class DistributedObject(ABC):
 
     def __call__(self, rank: int | None = None) -> None:
         world_size = len(self.dataloader)
-        global_rank, local_rank = setup_gpu(world_size, rank)
+        global_rank, local_rank = setup_gpu(world_size, rank, process_group=self.uses_collectives)
         if global_rank is None or local_rank is None:
             return
         apply_cpu_thread_budget()
@@ -916,7 +972,9 @@ def execute_distributed_object(
         Optional cluster submission parameters used by ``submitit``.
     """
     gpu_ids = [] if gpu is None else list(gpu)
-    cpu_workers = 1 if cpu is None else cpu
+    cpu_workers = 1 if cpu is None else int(cpu)
+    if cpu_workers < 1:
+        raise ConfigError(f"cpu={cpu!r} is not a rank count.", "Pass cpu=1 or more (the CLI refuses it the same way).")
 
     managed_env = [
         "CUDA_VISIBLE_DEVICES",
@@ -928,6 +986,10 @@ def execute_distributed_object(
         "KONFAI_CLUSTER",
     ]
     previous_env = {key: os.environ.get(key) for key in managed_env}
+    # The run seeds the process-wide RNGs and sets the cudnn flags; inline (the single-rank default)
+    # that process is the caller's (a notebook, Slicer), so what it found is put back.
+    previous_rng = (random.getstate(), np.random.get_state(), torch.get_rng_state())
+    previous_cudnn = (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic)
 
     try:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in gpu_ids if i >= 0])
@@ -994,6 +1056,10 @@ def execute_distributed_object(
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        random.setstate(previous_rng[0])
+        np.random.set_state(previous_rng[1])
+        torch.set_rng_state(previous_rng[2])
+        torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = previous_cudnn
 
 
 _cpu_budget_applied = False
@@ -1020,10 +1086,23 @@ def apply_cpu_thread_budget() -> None:
     torch.set_num_threads(max(1, min((os.cpu_count() or 1) // local_ranks, 12)))
 
 
-def setup_gpu(world_size: int, rank: int | None = None) -> tuple[int | None, int | None]:
-    """Initialize torch distributed on the requested rank."""
+def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = True) -> tuple[int | None, int | None]:
+    """Resolve the rank and, with ``process_group``, initialize torch distributed on it."""
     if os.name == "nt":
         return rank, rank
+    if rank is None:
+        import submitit
+
+        job_env = submitit.JobEnvironment()
+        global_rank = job_env.global_rank
+        local_rank = job_env.local_rank
+    else:
+        global_rank = rank
+        local_rank = rank
+    if global_rank >= world_size:
+        return None, None
+    if not process_group:
+        return global_rank, local_rank
     try:
         nodelist = os.getenv("SLURM_JOB_NODELIST")
         if nodelist is None:
@@ -1043,18 +1122,6 @@ def setup_gpu(world_size: int, rank: int | None = None) -> tuple[int | None, int
         )
     except Exception:
         host_name = "localhost"
-    if rank is None:
-        import submitit
-
-        job_env = submitit.JobEnvironment()
-        global_rank = job_env.global_rank
-        local_rank = job_env.local_rank
-    else:
-        global_rank = rank
-        local_rank = rank
-    if global_rank >= world_size:
-        return None, None
-
     port = os.environ.get("KONFAI_MASTER_PORT")
     if not port:
         port = str(find_free_port())

@@ -30,7 +30,7 @@ sitk = pytest.importorskip("SimpleITK")
 
 from konfai import api  # noqa: E402
 from konfai.data.reduction import Std  # noqa: E402
-from konfai.data.transform import Clip, Magnitude, Resample, Write  # noqa: E402
+from konfai.data.transform import Clip, Magnitude, Resample, Save, Write  # noqa: E402
 from konfai.metric.measure import Dice  # noqa: E402
 from konfai.utils.errors import ConfigError, KonfAIError  # noqa: E402
 
@@ -174,6 +174,24 @@ def test_the_environment_is_left_as_found(cohort: Path, monkeypatch: pytest.Monk
         quiet=True,
     )
     assert [key for key in os.environ if key.startswith("KONFAI")] == []
+
+
+def test_the_output_is_not_left_open_in_the_callers_process(cohort: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run's pooled h5 read handles are released when the call returns: HDF5 refuses to open for
+    writing a file this process still holds for reading, so a notebook could not append to the
+    output it just produced (nor to the source it just read)."""
+    h5py = pytest.importorskip("h5py")
+    monkeypatch.chdir(cohort)
+    api.transform(
+        "H5",
+        "./Raw:mha",
+        {"CT": {"CT": [Save(dataset="./Cache:h5"), Clip(min_value=0.0), Write(dataset="./OutH5:h5")]}},
+        transforms_dir=cohort / "Transforms",
+        quiet=True,
+    )
+    for name in ("Cache.h5", "OutH5.h5"):
+        with h5py.File(cohort / name, "a") as handle:
+            assert "CT" in handle
 
 
 def test_one_workflow_at_a_time_per_process(cohort: Path) -> None:

@@ -156,7 +156,22 @@ def test_plan_leaves_no_probe_case_in_a_directory_store(tmp_path: Path) -> None:
     _build(tmp_path).compute_plan(1, overwrite=False)
 
     assert not (tmp_path / "out" / "__konfai_plan_probe__").exists()
-    assert Dataset(tmp_path / "out", "omezarr").get_names("CT_out") == []
+    assert not (tmp_path / "out").exists(), "the probe created the root; a dry run takes it back"
+
+
+def test_plan_leaves_no_h5_file_behind(tmp_path: Path) -> None:
+    """A single-file store is created by the very open the probe makes; --plan must not leave a
+    6 KB empty ``out.h5`` where the user asked whether the run would work."""
+    _write_source(tmp_path)
+    _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"))
+    _build(tmp_path).compute_plan(1, overwrite=False)
+    assert not (tmp_path / "out.h5").exists()
+
+    # An existing store is left exactly as it was: no entry added, no file removed.
+    Dataset(tmp_path / "out", "h5").write("OTHER", "X", np.zeros((1, 2, 2, 2), dtype=np.float32), _image_attributes())
+    _build(tmp_path).compute_plan(1, overwrite=False)
+    assert Dataset(tmp_path / "out", "h5").get_names("OTHER") == ["X"]
+    assert not Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "__konfai_plan_probe__")
 
 
 def test_a_planned_workflow_survives_the_spawn_that_runs_it(tmp_path: Path) -> None:
@@ -930,7 +945,6 @@ def test_on_fallback_error_holds_at_run_time_too(tmp_path: Path, monkeypatch: py
     mid-run (here, a sweep that fails after a green plan) raises at that case instead of costing an
     unannounced volume."""
     from konfai.data.patching import DatasetManager
-    from konfai.utils.errors import PatchError
 
     _write_source(tmp_path)
     _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"), header="  on_fallback: error\n")
@@ -941,9 +955,28 @@ def test_on_fallback_error_holds_at_run_time_too(tmp_path: Path, monkeypatch: py
         "_materialize_save",
         lambda self, sweep: self._sweep_failed_because(sweep, "OSError: no space left on device"),
     )
-    with pytest.raises(PatchError, match="whole-volume path at run time"), pytest.warns(UserWarning):
+    with pytest.raises(TransformerError, match="whole-volume path at run time"), pytest.warns(UserWarning):
         workflow.run_process(1, 0, 0, [])
     assert not Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "CASE_000")
+
+
+def test_a_failing_case_does_not_stop_the_shard_and_is_listed(tmp_path: Path) -> None:
+    """One unreadable case among three: the other two are written, the rank finishes its shard, and
+    it exits non-zero naming the failed case. Before, the rank died at the broken case and every
+    case sorted after it was silently never written, with no summary of what failed."""
+    _write_source(tmp_path, cases=3)
+    broken = tmp_path / "source" / "CASE_001" / "CT.mha"
+    broken.write_bytes(broken.read_bytes()[:-1000])  # header intact (the plan reads it), pixels truncated
+    _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"))
+    workflow = _build(tmp_path)
+    workflow.setup(1)
+    with pytest.raises(TransformerError, match="1 of 3 work item\\(s\\) failed") as raised, pytest.warns(UserWarning):
+        workflow.run_process(1, 0, 0, [])
+    assert "CASE_001" in str(raised.value)
+    out = Dataset(tmp_path / "out", "h5")
+    assert out.is_dataset_exist("CT_out", "CASE_000")
+    assert out.is_dataset_exist("CT_out", "CASE_002"), "the cases after the broken one must still be written"
+    assert not out.is_dataset_exist("CT_out", "CASE_001")
 
 
 def test_the_strict_grammar_knows_every_key_the_binder_can_read() -> None:
@@ -982,6 +1015,7 @@ def test_two_ranks_partition_the_cases_and_every_output_is_written_once(
     workflow.setup(2)
     flattened = sorted(index for shard in workflow._shards for index in shard)
     assert flattened == list(range(3)), "the shards must partition the work items exactly"
+    assert all(workflow._shards), "three equal cases over two ranks: neither rank idles"
     # Both ranks run in THIS process, without the launcher that narrows CUDA_VISIBLE_DEVICES to
     # one GPU each: on a machine with fewer GPUs than ranks, rank 1 would name cuda:1. The
     # contract under test is the sharding, so the chain stays on CPU.
@@ -991,6 +1025,51 @@ def test_two_ranks_partition_the_cases_and_every_output_is_written_once(
     out = Dataset(f"{tmp_path / 'out_dir'}/", "omezarr")
     for index in range(3):
         assert out.is_dataset_exist("CT_out", f"CASE_{index:03d}")
+
+
+def test_the_shards_balance_bytes_not_counts(tmp_path: Path) -> None:
+    """One 8x larger case among small ones: it takes a rank on its own and the small ones share the
+    other, where an index split would pair the large case with half of the small ones."""
+    rng = np.random.default_rng(0)
+    source = Dataset(tmp_path / "source", "mha")
+    for index in range(5):
+        source.write("CT", f"CASE_{index:03d}", rng.random((1, 4, 8, 8)).astype(np.float32), _image_attributes())
+    source.write("CT", "CASE_BIG", rng.random((1, 32, 8, 8)).astype(np.float32), _image_attributes())
+    _write_config(tmp_path, _DIRECTORY_CHAIN.format(out=tmp_path / "out"))
+    workflow = _build(tmp_path)
+    workflow.setup(2)
+    big = next(index for index, (_group, position) in enumerate(workflow._items) if position == 5)
+    shard_of_big = next(shard for shard in workflow._shards if big in shard)
+    assert shard_of_big == [big]
+    assert sorted(len(shard) for shard in workflow._shards) == [1, 5]
+
+
+@pytest.mark.parametrize("destination", ["mha", "omezarr"])
+def test_a_bounded_source_streams_whatever_the_destination_format(tmp_path: Path, destination: str) -> None:
+    """The route is priced on what the chain READS. A chain ending on a Write leaves nothing to
+    read past the boundary, so the destination (which does not exist yet, and cannot answer
+    whether it serves bounded reads) must not be priced as a source: an mha case written to
+    mha or omezarr streams exactly as it does to h5."""
+    rng = np.random.default_rng(3)
+    source = Dataset(tmp_path / "source", "mha")
+    volume = (rng.random((1, 8, 32, 32)) * 100).astype(np.float32)
+    source.write("CT", "CASE_000", volume, _image_attributes())
+    out = tmp_path / "out"
+    suffix = "/" if destination == "omezarr" else ""
+    transforms = f"""\
+              Clip:
+                min_value: 0.0
+                max_value: 50.0
+              Write:
+                dataset: {out}{suffix}:{destination}
+"""
+    config_path = _write_config(tmp_path, transforms, header="  on_fallback: error\n")
+    budget = 3 * 8 * 32 * 32 * 4  # fits, while the sweep splits the case into several slabs
+    config_path.write_text(config_path.read_text().replace("memory_budget: auto", f"memory_budget: {budget}b"))
+    workflow = _build(tmp_path)
+    plan = workflow.compute_plan()
+    entry = next(entry for entry in plan.entries if entry.case == "CASE_000")
+    assert entry.verdict == "STREAM", entry.reason
 
 
 def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(

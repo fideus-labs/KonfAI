@@ -833,6 +833,9 @@ class Noise(DataAugmentation):
         self.noise_step = noise_step
 
         self.ts: dict[int, list[torch.Tensor]] = {}
+        #: One generator seed per copy, drawn with the step: the field is part of the draw, so
+        #: it does not depend on the rank's global RNG or on the order the copies are computed in.
+        self.field_seeds: dict[int, list[int]] = {}
         self.betas = torch.linspace(beta_start, beta_end, noise_step)
         self.betas = Noise.enforce_zero_terminal_snr(self.betas)
         self.alphas = 1 - self.betas
@@ -867,6 +870,7 @@ class Noise(DataAugmentation):
             self.ts[index] = [0 for _ in shapes]
         else:
             self.ts[index] = [torch.randint(0, int(self.max_T), (1,)) for _ in shapes]
+        self.field_seeds[index] = [int(torch.randint(0, 2**31 - 1, (1,))) for _ in shapes]
         return shapes
 
     # WHOLE_VOLUME on purpose: the noise field is drawn per call, not per voxel position, so two
@@ -874,10 +878,9 @@ class Noise(DataAugmentation):
     # variance this exists to add.
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         alpha_hat_t = self.alpha_hat[self.ts[index][a]].to(tensor.device).reshape(*[1 for _ in tensor.shape])
-        return (
-            alpha_hat_t.sqrt() * tensor
-            + (1 - alpha_hat_t).sqrt() * torch.randn_like(tensor.float()).to(tensor.device) * self.n_std
-        )
+        generator = torch.Generator(device=tensor.device).manual_seed(self.field_seeds[index][a])
+        field = torch.randn(tensor.shape, generator=generator, device=tensor.device, dtype=torch.float32)
+        return alpha_hat_t.sqrt() * tensor + (1 - alpha_hat_t).sqrt() * field * self.n_std
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         return tensor

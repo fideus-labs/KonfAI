@@ -538,7 +538,7 @@ class JobRegistry:
         else:
             next_actions.append("read_job_log")
             next_actions.extend([retry_tool] if app_kind else ["validate_config_semantics", retry_tool])
-        return {
+        payload: dict[str, Any] = {
             "job_id": job.job_id,
             "session": job.session,
             "kind": job.kind,
@@ -577,6 +577,26 @@ class JobRegistry:
             },
             "manifest_path": str(job.manifest_path) if job.manifest_path is not None else None,
         }
+        outputs = self._recorded_outputs(job)
+        if outputs is not None:
+            payload["outputs"] = outputs
+        return payload
+
+    @staticmethod
+    def _recorded_outputs(job: Job) -> list[dict[str, Any]] | None:
+        """Where a run put its data, when the workflow records it: a TRANSFORM writes each chain's
+        destination to ``outputs.json`` beside its runtime log (the volumes land in the user's own
+        tree, not in the run directory), and it is the one thing a reader of a finished job wants."""
+        if job.runtime_log_path is None:
+            return None
+        manifest = job.runtime_log_path.parent / "outputs.json"
+        if not manifest.is_file():
+            return None
+        try:
+            outputs = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return outputs if isinstance(outputs, list) else None
 
     def get(self, job_id: str) -> Job:
         with self.lock:

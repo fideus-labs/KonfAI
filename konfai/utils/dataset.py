@@ -159,6 +159,17 @@ class _H5ReadPool:
         if pooled is not None and pooled.file.id.valid:
             pooled.file.close()
 
+    def close_all(self) -> None:
+        """Release every pooled handle: what a workflow leaves behind in the caller's process
+        would otherwise keep its outputs open (read-only) for as long as the process lives."""
+        with self._guard:
+            handles = list(self._handles.items())
+            self._handles.clear()
+        for filename, pooled in handles:
+            with _get_h5_file_lock(filename):
+                if pooled.file.id.valid:
+                    pooled.file.close()
+
     def _close_idle(self, filename: str, pooled: _PooledRead) -> None:
         # An evicted handle may be mid-read under its file's lock: close only when that lock is free,
         # otherwise put it back in the pool: an untracked open handle could never be dropped again.
@@ -176,6 +187,12 @@ class _H5ReadPool:
 
 
 _h5_read_pool = _H5ReadPool()
+
+
+def release_read_handles() -> None:
+    """Close the process's pooled read handles (h5). A workflow's caller reopening its own output
+    for writing needs them gone: HDF5 refuses a write-open of a file this process holds for reading."""
+    _h5_read_pool.close_all()
 
 
 def _attribute_text(value: Any) -> str:
@@ -639,6 +656,12 @@ def write_landmarks(data: np.ndarray, filename: Path) -> None:
         f.close()
 
 
+def is_staging_entry(name: str) -> bool:
+    """Whether ``name`` is a writer's staging entry, never a case: an in-flight (or hard-kill-orphaned)
+    ``.tmp``, or the ``.replaced-<pid>`` an entry is moved to while its replacement is published."""
+    return name.endswith(".tmp") or ".replaced-" in name
+
+
 class DataStream(ABC):
     """One dataset entry written incrementally, region by region. Obtained from
     ``Dataset.open_data_stream``, which returns ``None`` when the write format cannot serve region writes
@@ -717,9 +740,18 @@ class _H5DataStream(DataStream):
         if not success:
             del parent[temporary_name]
             return
-        if self._final_name in parent:
-            del parent[self._final_name]
+        # Move the old entry aside rather than deleting it first: HDF5 has no rename-over, and a
+        # crash between a delete and the move would lose both. Same idiom as the directory
+        # stores' <name>.replaced-<pid>.
+        backup = f"{self._final_name}.replaced-{os.getpid()}"
+        replaced = self._final_name in parent
+        if replaced:
+            if backup in parent:
+                del parent[backup]
+            parent.move(self._final_name, backup)
         parent.move(temporary_name, self._final_name)
+        if replaced:
+            del parent[backup]
 
 
 def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attribute) -> tuple[Any, Any]:
@@ -1240,7 +1272,7 @@ class Dataset:
                     dataset.name.split("/")[-1]
                     for dataset in h5_group.values()
                     # ``.tmp`` keys are in-flight (or hard-kill-orphaned) DataStream writes, not entries.
-                    if isinstance(dataset, h5py.Dataset) and not dataset.name.endswith(".tmp")
+                    if isinstance(dataset, h5py.Dataset) and not is_staging_entry(dataset.name)
                 ]
             elif group == "*":
                 for k in h5_group.keys():
@@ -1346,7 +1378,7 @@ class Dataset:
             # standalone) and .img (readable via its paired .hdr, but prefer the header half). glob order
             # is unsorted, so a bare matches[0] could hand the .raw half of a .mhd+.raw pair to the reader.
             matches = sorted(
-                (candidate for candidate in glob.glob(f"{base}.*") if not candidate.endswith(".tmp")),
+                (candidate for candidate in glob.glob(f"{base}.*") if not is_staging_entry(candidate)),
                 key=lambda candidate: candidate.lower().endswith((".raw", ".zraw", ".img")),
             )
             return matches[0] if matches else None
@@ -1446,7 +1478,7 @@ class Dataset:
                     path = direct
                 else:
                     matches = sorted(
-                        (c for c in glob.glob(f"{self.filename}{name}.*") if not c.endswith(".tmp")),
+                        (c for c in glob.glob(f"{self.filename}{name}.*") if not is_staging_entry(c)),
                         key=lambda candidate: candidate.lower().endswith((".raw", ".zraw", ".img")),
                     )
                     if not matches:
@@ -2271,17 +2303,19 @@ class Dataset:
         base = Path(root)
         if not base.is_dir():
             return None
-        for case in sorted(base.iterdir()):
-            if not case.is_dir():
-                continue
-            for entry in sorted(case.iterdir()):
-                volume = directory_volume_form(entry)
-                if volume is not None:
-                    return "dicom" if volume == "" else "omezarr"
-            return None  # first case is representative of the whole dataset's layout
+        # No sort: any case is representative of the layout, and sorting lists the whole
+        # directory for one probe (a resume over N written cases would pay it N times).
+        case = next((child for child in base.iterdir() if child.is_dir()), None)
+        if case is None:
+            return None
+        for entry in sorted(case.iterdir()):
+            volume = directory_volume_form(entry)
+            if volume is not None:
+                return "dicom" if volume == "" else "omezarr"
         return None
 
-    def _exists_on_disk(self) -> bool:
+    def exists_on_disk(self) -> bool:
+        """Whether the store is there at all: the directory root, or the ``.h5`` file."""
         if os.path.exists(self.filename):
             return True
         return self.file_format == "h5" and os.path.exists(f"{self.filename}.h5")
@@ -2404,7 +2438,7 @@ class Dataset:
         path's last component, so the coordinates are ``("", group)`` there and ``(groups, name)``
         on a single-file dataset. Raises ``NameError`` when the dataset or the entry is missing.
         """
-        if not self._exists_on_disk():
+        if not self.exists_on_disk():
             raise NameError(f"Dataset {self.filename} not found")
         if self.is_directory:
             for sub_directory in self._get_sub_directories(groups):
@@ -2448,7 +2482,7 @@ class Dataset:
         )
 
     def read_transform(self, group: str, name: str) -> sitk.Transform:
-        if not self._exists_on_disk():
+        if not self.exists_on_disk():
             raise NameError(f"Dataset {self.filename} not found")
         transform_parameters, attribute = self.read_data(group, name)
         if DISPLACEMENT_FIELD_ATTRIBUTE in attribute:
@@ -2485,7 +2519,7 @@ class Dataset:
         One entry, one probe: O(1) in the number of cases, where the listing is O(N) headers, and cheaper
         than the listing it replaces.
         """
-        if not self._exists_on_disk():
+        if not self.exists_on_disk():
             # A store that is not there yet holds nothing: the first probe of every fresh
             # destination, which a single-file backend would otherwise turn into an open error.
             return False

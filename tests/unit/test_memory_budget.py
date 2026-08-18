@@ -68,9 +68,23 @@ def test_parse_memory_budget_bytes_rejects_garbage(value: str) -> None:
 # --------------------------------------------------------------------------------------
 
 
-def _point_cgroup_at(monkeypatch: pytest.MonkeyPatch, *, v2: Path | None, v1: Path | None) -> None:
-    monkeypatch.setattr(runtime, "_CGROUP_V2_MEMORY_MAX", str(v2) if v2 else "/nonexistent/memory.max")
-    monkeypatch.setattr(runtime, "_CGROUP_V1_MEMORY_LIMIT", str(v1) if v1 else "/nonexistent/limit_in_bytes")
+def _fake_cgroup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, own: str, *, v1: bool = False) -> Path:
+    """A cgroup tree under tmp_path whose /proc/self/cgroup names ``own``; returns the process's cgroup dir."""
+    root = tmp_path / "cgroup"
+    proc = tmp_path / "proc_self_cgroup"
+    if v1:
+        proc.write_text(f"3:memory:{own}\n1:cpu:{own}\n")
+        base = root / "memory"
+    else:
+        proc.write_text(f"0::{own}\n")
+        base = root
+    leaf = base / own.lstrip("/")
+    leaf.mkdir(parents=True)
+    monkeypatch.setattr(runtime, "_CGROUP_ROOT", str(root))
+    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(proc))
+    for key in ("SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU", "SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
+        monkeypatch.delenv(key, raising=False)
+    return leaf
 
 
 def _fake_host_available(monkeypatch: pytest.MonkeyPatch, num_bytes: int) -> None:
@@ -78,47 +92,72 @@ def _fake_host_available(monkeypatch: pytest.MonkeyPatch, num_bytes: int) -> Non
 
 
 def test_auto_respects_cgroup_limit_not_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # The headline: cgroup grants 8 GB while psutil sees a 512 GB host.
-    limit = tmp_path / "memory.max"
-    limit.write_text("8000000000")
-    _point_cgroup_at(monkeypatch, v2=limit, v1=None)
+    # The headline: cgroup grants 8 GB while psutil sees a 512 GB host (docker run: the process
+    # sits at the mount root).
+    leaf = _fake_cgroup(monkeypatch, tmp_path, "/")
+    (leaf / "memory.max").write_text("8000000000")
     _fake_host_available(monkeypatch, 512 * 2**30)
 
     assert runtime.available_memory_bytes() == (8_000_000_000, "cgroup limit")
 
 
+def test_the_cgroup_is_the_process_s_own_not_the_mount_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Outside `docker run` the process lives deep in the hierarchy (a SLURM step, a user slice)
+    and the mount root has no memory.max at all: the bound is the tightest ancestor's, minus what
+    the process's own cgroup already holds."""
+    leaf = _fake_cgroup(monkeypatch, tmp_path, "/system.slice/slurmstepd.scope/job_42/step_0/user/task_0")
+    job = leaf.parents[2]  # job_42
+    (job / "memory.max").write_text("32000000000\n")  # --mem=32G
+    (leaf.parent / "memory.max").write_text("max\n")
+    (leaf / "memory.max").write_text("max\n")
+    (leaf / "memory.current").write_text("2000000000\n")  # already resident
+    _fake_host_available(monkeypatch, 512 * 2**30)
+
+    assert runtime.available_memory_bytes() == (30_000_000_000, "cgroup limit")
+
+
 def test_cgroup_v2_max_falls_back_to_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    unlimited = tmp_path / "memory.max"
-    unlimited.write_text("max\n")
-    _point_cgroup_at(monkeypatch, v2=unlimited, v1=None)
+    leaf = _fake_cgroup(monkeypatch, tmp_path, "/user.slice/app.scope")
+    (leaf / "memory.max").write_text("max\n")
     _fake_host_available(monkeypatch, 64 * 2**30)
 
     assert runtime.available_memory_bytes() == (64 * 2**30, "host available RAM")
 
 
 def test_cgroup_v1_limit_is_read_when_v2_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    v1 = tmp_path / "memory.limit_in_bytes"
-    v1.write_text("8000000000\n")
-    _point_cgroup_at(monkeypatch, v2=None, v1=v1)
+    leaf = _fake_cgroup(monkeypatch, tmp_path, "/docker/abc", v1=True)
+    (leaf / "memory.limit_in_bytes").write_text("8000000000\n")
     _fake_host_available(monkeypatch, 512 * 2**30)
 
     assert runtime.available_memory_bytes() == (8_000_000_000, "cgroup limit")
 
 
 def test_cgroup_v1_sentinel_reads_as_unlimited(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    v1 = tmp_path / "memory.limit_in_bytes"
-    v1.write_text(str(2**63))  # the near-INT64_MAX "no limit" sentinel
-    _point_cgroup_at(monkeypatch, v2=None, v1=v1)
+    leaf = _fake_cgroup(monkeypatch, tmp_path, "/", v1=True)
+    (leaf / "memory.limit_in_bytes").write_text(str(2**63))  # the near-INT64_MAX "no limit" sentinel
     _fake_host_available(monkeypatch, 64 * 2**30)
 
     assert runtime.available_memory_bytes() == (64 * 2**30, "host available RAM")
 
 
-def test_no_cgroup_falls_back_to_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    _point_cgroup_at(monkeypatch, v2=None, v1=None)
+def test_no_cgroup_falls_back_to_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    for key in ("SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU"):
+        monkeypatch.delenv(key, raising=False)
     _fake_host_available(monkeypatch, 42 * 2**30)
 
     assert runtime.available_memory_bytes() == (42 * 2**30, "host available RAM")
+
+
+def test_a_slurm_grant_bounds_the_budget_when_no_cgroup_enforces_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runtime, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    monkeypatch.setenv("SLURM_MEM_PER_NODE", "32000")  # MB
+    monkeypatch.delenv("SLURM_MEM_PER_CPU", raising=False)
+    _fake_host_available(monkeypatch, 512 * 2**30)
+
+    assert runtime.available_memory_bytes() == (32000 * 2**20, "SLURM memory grant")
 
 
 # --------------------------------------------------------------------------------------
