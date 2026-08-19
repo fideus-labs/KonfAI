@@ -67,6 +67,12 @@ no longer stops a run. Two things a run already wrote come out differently, see 
 - **dataset**: a dead writer's debris is told apart portably (`psutil.pid_exists`), Windows included
 - **dataset**: a streamed `.mha` writes MetaIO's `TransformMatrix`, which is the TRANSPOSE of
   ITK's `Direction`: a non-symmetric orientation used to read back mirrored
+- **dataset**: an entry whose writer was killed between moving the old version aside and
+  publishing the new one is served again. The previous, complete version survived under the
+  `<name>.replaced-<pid>` backup that every listing hides, so the output was preserved and not
+  served, which reads as data loss. A single backup from a writer that no longer runs is put back
+  (h5, MetaImage/NIfTI and OME-Zarr alike) with a warning saying which write to run again; a live
+  writer's backup is still left alone
 - **dataset**: an h5 replace keeps the old entry until the new one is in place; a streamed transform
   entry lands under the `.h5` name; an entry whose attributes fail is not left behind; one staging
   marker for every backend's temporary; the reader's own `ITK_*` keys do not travel with the volume
