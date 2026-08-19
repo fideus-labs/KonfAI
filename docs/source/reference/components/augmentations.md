@@ -35,11 +35,11 @@ cut straight from disk or whether the augmentation needs the case loaded whole
 (see {doc}`transforms`). An augmentation answers per **copy**, not per
 transform: the answer follows the draw, so two copies of the same case can differ
 and the same copy can differ next epoch. A copy the draw did not select is the
-identity, which streams. The draw is planned as part of the group's chain, so
-a region augmentation and a region transform (`Dilate`, `Canonical`, a resampler)
-in the same chain load the volume whole: only one of them can shape the read. An
-augmentation you write yourself starts at the whole volume and streams nothing
-until it declares otherwise.
+identity, which streams. The draw is planned as part of the group's chain, one
+list, so a region augmentation and a region transform (`Dilate`, `Canonical`, a
+resampler) compose exactly like two transforms: each pulls its region through the
+one before it, down to a single bounded read. An augmentation you write yourself
+starts at the whole volume and streams nothing until it declares otherwise.
 
 ## Spatial (Euler transforms)
 
