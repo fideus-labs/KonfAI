@@ -540,6 +540,33 @@ def test_median_selects_the_middle_instead_of_sorting_the_stack(cases: int) -> N
     assert Median().working_multiple_for(cases) == {1: 1.0, 2: 1.5, 3: 1.0, 4: 2.5, 5: 1.5}.get(cases, 4.0)
 
 
+def test_reading_the_members_at_once_writes_the_same_bytes_as_one_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member's read is a decode plus a replay of that case's chain, and the members are
+    independent, so a non-incremental fold -- which holds every member anyway -- reads several at
+    once. Every case's chain shares the same stage OBJECTS, so this is where a shared cache would
+    show: what it must produce is the same volume, to the byte, as reading one at a time.
+
+    The pre-chain here is deliberately stateful across cases: ``Crop`` memoises a content-derived box
+    per case on the dataset, and ``Resample`` caches a grid per name.
+    """
+    import konfai.data.case_reduction as case_reduction
+
+    pre = [Clip(0.0, 50.0)]
+    monkeypatch.setattr(case_reduction, "_MEMBER_READERS", 1)
+    engine, destination, _volumes = _run(tmp_path, pre, Reduce(operator="Median", output="serial"), [])
+    engine.materialize()
+    one_at_a_time, _ = destination.read_data("CT", "serial")
+
+    monkeypatch.setattr(case_reduction, "_MEMBER_READERS", 4)
+    engine, destination, _volumes = _run(tmp_path, pre, Reduce(operator="Median", output="together"), [])
+    engine.materialize()
+    together, _ = destination.read_data("CT", "together")
+
+    np.testing.assert_array_equal(together, one_at_a_time)
+
+
 def test_a_vote_tie_goes_to_the_smallest_label_whatever_the_cohort_order() -> None:
     """The reproducibility half of Vote's contract, which its docstring promises out loud.
 
