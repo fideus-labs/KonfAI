@@ -544,3 +544,54 @@ def test_replacing_an_h5_entry_keeps_the_old_one_until_the_new_is_in_place(tmp_p
     assert [present for present, _ in seen] == [False, True]
     written, _ = dataset.read_data("G", "c")
     assert float(np.asarray(written).max()) == 0.0
+
+
+def _kill_between_the_two_moves(dataset: Dataset, name: str, volume: np.ndarray, attributes: Attribute) -> None:
+    """Leave on disk exactly what a writer killed between the move-aside and the publish leaves:
+    the previous entry under its backup name, nothing under its own."""
+    from konfai.utils.dataset import _replaced_name
+
+    dataset.write("CT", name, volume, attributes)
+    if dataset.file_format == "h5":
+        import h5py
+
+        with h5py.File(f"{str(dataset.filename).rstrip('/')}.h5", "r+") as handle:
+            handle["CT"].move(name, _replaced_name(name))
+        return
+    entry = next(path for path in (Path(dataset.filename) / name).iterdir() if path.name.startswith("CT"))
+    entry.rename(entry.with_name(_replaced_name(entry.name)))
+
+
+@pytest.mark.parametrize("file_format", ["mha", "h5", "omezarr"])
+def test_a_backup_orphaned_by_a_killed_writer_is_served_again(tmp_path: Path, file_format: str, monkeypatch) -> None:
+    """A replacement moves the old entry aside, publishes, then drops the backup. A writer killed
+    between the first two moves leaves the previous, COMPLETE entry under a name every listing
+    hides: the output is preserved and not served, which reads as data loss. It is served again."""
+    _skip_unavailable(file_format)
+    import konfai.utils.dataset as dataset_module
+
+    volume, attributes = _volume(), _image_attributes()
+    dataset = Dataset(tmp_path / "store", file_format)
+    _kill_between_the_two_moves(dataset, "CASE_001", volume, attributes)
+    monkeypatch.setattr(dataset_module, "_writer_is_dead", lambda pid: True)
+
+    fresh = Dataset(tmp_path / "store", file_format)
+    # Whichever question comes first recovers it, and says so: the probe a resume makes, or the read.
+    with pytest.warns(UserWarning, match="killed between moving the entry aside"):
+        assert fresh.is_dataset_exist("CT", "CASE_001")
+        recovered, _ = fresh.read_data("CT", "CASE_001")
+    np.testing.assert_array_equal(recovered, volume)
+    assert Dataset(tmp_path / "store", file_format).is_dataset_exist("CT", "CASE_001")  # and it stays back
+
+
+@pytest.mark.parametrize("file_format", ["mha", "h5", "omezarr"])
+def test_a_live_writers_backup_is_left_alone(tmp_path: Path, file_format: str) -> None:
+    """The pid in the name is the whole point: while its writer runs, the backup is that writer's
+    business (the publish it is about to make moves it back or drops it), so the entry stays
+    missing rather than resurrecting a version the run is replacing."""
+    _skip_unavailable(file_format)
+    dataset = Dataset(tmp_path / "store", file_format)
+    _kill_between_the_two_moves(dataset, "CASE_001", _volume(), _image_attributes())  # under THIS pid
+
+    fresh = Dataset(tmp_path / "store", file_format)
+    assert not fresh.is_dataset_exist("CT", "CASE_001")

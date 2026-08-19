@@ -34,7 +34,7 @@ import threading
 import time
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar, cast
@@ -889,6 +889,54 @@ def _writer_is_dead(pid: int) -> bool:
     return not psutil.pid_exists(pid)
 
 
+def _orphaned_backup_names(names: Iterable[str], entry: str) -> list[str]:
+    """Among ``names``, the backups a DEAD writer left of ``entry``: ``<entry>.replaced-<pid>``."""
+    marker = f"{entry}{_REPLACED_MARKER}"
+    kept = []
+    for candidate in names:
+        if not candidate.startswith(marker):
+            continue
+        pid = candidate[len(marker) :]
+        if pid.isdigit() and _writer_is_dead(int(pid)):
+            kept.append(candidate)
+    return kept
+
+
+def _recover_orphaned_backup(final: Path) -> bool:
+    """Put back the previous entry when a killed writer left it under its backup name alone.
+
+    A replacement moves the old entry aside as ``<name>.replaced-<pid>``, publishes the new one,
+    then drops the backup, and a failed publish moves it back. A writer killed BETWEEN the two moves
+    leaves the previous, complete entry under the backup name, which every listing hides
+    (:func:`is_staging_entry`): the output is preserved and not served, which reads as data loss.
+
+    Exactly one backup, from a writer that no longer runs, and no entry under the final name: that
+    backup IS the entry, so it goes back. Two backups, or a writer still running, is nobody's to
+    guess, and the entry stays missing.
+    """
+    if final.exists():
+        return False
+    try:
+        siblings = [path.name for path in final.parent.iterdir()]
+    except OSError:
+        return False
+    backups = _orphaned_backup_names(siblings, final.name)
+    if len(backups) != 1:
+        return False
+    try:
+        final.parent.joinpath(backups[0]).rename(final)
+    except OSError:
+        return False
+    warnings.warn(
+        f"'{final}' was missing and its previous version was recovered from '{backups[0]}': a writer "
+        "was killed between moving the entry aside and publishing its replacement. The entry is the one "
+        "that was there BEFORE that write; run the write again to replace it.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return True
+
+
 def _retire_dead_debris(final: Path) -> None:
     """Remove what earlier, DEAD writers of ``final`` left beside it.
 
@@ -1531,13 +1579,38 @@ class Dataset:
             dataset = self._create_entry(h5_group, temporary_name, attributes, shape=tuple(shape), dtype=dtype)
             return _H5DataStream(dataset, name)
 
+        def _recovered_key(self, h5_group: h5py.Group, name: str) -> str | None:
+            """The key ``name`` answers to when it is missing: its own, or the single backup a DEAD
+            writer left of it (see :func:`_recover_orphaned_backup`, the same rule inside a file).
+
+            An h5 file open for READING cannot be renamed in, so the backup is served under its own
+            key and put back at the next write open, which is when the move is legal.
+            """
+            if name in h5_group:
+                return name
+            backups = _orphaned_backup_names(list(h5_group.keys()), name)
+            if len(backups) != 1:
+                return None
+            warnings.warn(
+                f"'{name}' was missing from '{self.filename}' and its previous version was recovered from "
+                f"'{backups[0]}': a writer was killed between moving the entry aside and publishing its "
+                "replacement. The entry is the one that was there BEFORE that write; run the write again "
+                "to replace it.",
+                UserWarning,
+                stacklevel=3,
+            )
+            if not self.read:
+                h5_group.move(backups[0], name)
+                return name
+            return backups[0]
+
         def is_exist(self, group: str, name: str | None = None) -> bool:
             if self.h5 is not None:
                 if group in self.h5:
                     if isinstance(self.h5[group], h5py.Dataset):
                         return True
                     elif name is not None:
-                        return name in self.h5[group]
+                        return self._recovered_key(self.h5[group], name) is not None
                     else:
                         return False
             return False
@@ -1575,8 +1648,9 @@ class Dataset:
                 group = ""
             result = None
             if group == "":
-                if name in h5_group:
-                    result = h5_group[name]
+                key = self._recovered_key(h5_group, name)
+                if key is not None:
+                    result = h5_group[key]
             elif group == "*":
                 for k in h5_group.keys():
                     if isinstance(h5_group[k], h5py.Group):
@@ -1872,7 +1946,11 @@ class Dataset:
 
         def is_exist(self, group: str, name: str | None = None) -> bool:
             base = f"{self.filename}{group}"
-            return any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS)
+            if any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS):
+                return True
+            # A writer killed mid-replacement left the previous entry under its backup name, which
+            # every listing hides: it is the entry, and it goes back under it.
+            return any(_recover_orphaned_backup(Path(f"{base}.{ext}")) for ext in SUPPORTED_EXTENSIONS)
 
         def get_names(self, group: str) -> list[str]:
             raise NotImplementedError()
@@ -1951,6 +2029,9 @@ class Dataset:
             candidates = [Path(f"{base}.ome.zarr"), Path(f"{base}.zarr"), base]
             for candidate in candidates:
                 if candidate.is_dir():
+                    return candidate
+            for candidate in candidates:  # a writer killed mid-replacement left the previous store aside
+                if _recover_orphaned_backup(candidate):
                     return candidate
             raise NameError(f"OME-Zarr group '{name}' not found in '{self.filename}'.")
 
@@ -2651,7 +2732,12 @@ class Dataset:
         re-appends it on open.
         """
         path = f"{self.filename}{sub_directory}{name}"
-        return path if os.path.exists(f"{path}{'.h5' if self.file_format == 'h5' else ''}") else None
+        on_disk = f"{path}{'.h5' if self.file_format == 'h5' else ''}"
+        if os.path.exists(on_disk):
+            return path
+        # Absent is not always absent: a writer killed mid-replacement leaves the previous version
+        # under its backup name, which the listings hide.
+        return path if _recover_orphaned_backup(Path(on_disk)) else None
 
     def _resolve_entry(self, groups: str, name: str, action: Callable[[Dataset.AbstractFile, str, str], _T]) -> _T:
         """Run ``action`` on the open file holding ``(groups, name)``: THE place entry resolution lives.
