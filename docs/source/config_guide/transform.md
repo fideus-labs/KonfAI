@@ -303,9 +303,11 @@ That writes **one** entry named `template`, whatever the cohort's size.
 | `provenance` | `true` | Record the operator and the folded case list in the output's header: a cohort that silently changed between two runs writes a different volume under the same name, and nothing about the output would look wrong. |
 
 **Operators.** `Mean` folds one case at a time, so its working set is two
-regions whatever N is. `Median` needs every case per region, and stacks and
-sorts them on top: the plan says how many regions that is, and `memory_budget`
-sizes and refuses against it. `Concat` puts the cases side by side: the output
+regions whatever N is. `Median` needs every case per region and selects the middle
+with a network of element-wise comparisons up to five members, sorting the stack
+past that: what it holds therefore depends on how many cases the cohort has, the
+plan says how many regions that is, and `memory_budget` sizes and refuses against
+it. `Concat` puts the cases side by side: the output
 carries `N × C` channels. A custom operator must declare `voxel_local = True`: one that reads across space cannot stream and is refused outright. It should
 also declare `working_multiple` if it allocates over the buffer it is handed,
 or the plan promises a working set the run exceeds.

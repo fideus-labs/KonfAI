@@ -94,7 +94,7 @@ which region of the file a patch needs.
 | `CROP` | the source region is the target translated | the region, and reading it *is* the answer |
 | `REGRID` | a change of grid | the mapped region, plus the interpolation taps |
 | `GLOBAL_STAT` | needs whole-volume `Min`/`Max`/`Mean`/`Std` | the statistic once from disk, then the exact patch |
-| `SLAB` | a value map plus a side effect that needs the slab's place in the volume | nothing: read-side it falls back to `WHOLE_VOLUME`, it streams on the write side (`Mask`, `InferenceStack`) |
+| `SLAB` | a value map plus a side effect that needs the slab's place in the volume | nothing: read-side it falls back to `WHOLE_VOLUME`, it streams on the write side (`InferenceStack`) |
 | `WHOLE_VOLUME` | genuinely needs everything | the volume, the fallback |
 
 A chain streams when every stage is pointwise or a region kind (`HALO`,
@@ -133,21 +133,25 @@ extent that is 8× in 3D, against the single load streaming was avoiding. At pat
 
 | Kind | Transforms |
 | --- | --- |
-| `POINTWISE` | `Argmax`, `Softmax`, `Sum` (all with `dim=0`), `OneHot`, `MergeLabels`, `FlatLabel`, `SelectLabel`, `UnNormalize`, `Percentage`, `Variance`, `StandardDeviation`, `SegmentationDisagreement`, `Magnitude`, `TensorCast`, `Clip` with fixed bounds, `Standardize` with both `mean` and `std`, `Dilate(0)` |
+| `POINTWISE` | `Argmax`, `Softmax`, `Sum` (all with `dim=0`), `OneHot`, `MergeLabels`, `FlatLabel`, `SelectLabel`, `UnNormalize`, `Percentage`, `Variance`, `StandardDeviation`, `SegmentationDisagreement`, `Magnitude`, `TensorCast`, `Mask`, `Clip` with fixed bounds, `Standardize` with both `mean` and `std`, `Dilate(0)` |
 | `GLOBAL_STAT` | `Normalize`, `Standardize`, `Clip` with `'min'`/`'max'` bounds, `Statistics` |
 | `HALO` | `Dilate(n>0)`, `Gradient` |
 | `ORIENTATION` | `Flip`, `Permute`, `Canonical` on axis-aligned direction cosines |
 | `CROP` | `Crop`, once its box is on the case |
-| `REGRID` | `Resample`; `Padding` in `constant` mode (a translation into a filled, larger volume; `reflect`/`replicate` read the volume for their border and stay `WHOLE_VOLUME`) |
+| `REGRID` | `Resample`; `Padding` in every mode (`constant` is a translation into a filled, larger volume; `reflect` and `replicate` pull the border they mirror, which the region's own window carries) |
 
 Augmentations declare per **(case, draw)**, so two copies of one case can answer
 differently. `Permute`, `Flip` (with `vector_field: false`) and `Rotate` on a
 quarter turn are `ORIENTATION`; `ColorTransform` and its subclasses are
-`POINTWISE`; `Translate` is `HALO`. `Scale`, `Noise`, `CutOUT`, `Mask` and
-`Elastix` load the volume.
+`POINTWISE`; `Translate` is `HALO`. A free-angle `Rotate` and `Scale` are
+`REGRID`, pulling their own window through the affine; `Noise` and `CutOUT` are
+`POINTWISE`, their field and their box being functions of the voxel's position in
+the whole volume. The `Mask` DRAW and `Elastix` load the volume (the draw's output grid is the
+mask's own, which is already resident); the `Mask` TRANSFORM above is pointwise and reads its
+mask by region.
 
-The transforms that load the volume do so because their answer needs it: `Mask`,
-and `Clip`/`Standardize` under a `mask`, read a second full volume a patch cannot
+The transforms that load the volume do so because their answer needs it:
+`Clip` and `Standardize` under a `mask` read a second full volume a patch cannot
 locate itself in; `Clip` with percentile bounds and `HistogramMatching` need the
 whole histogram; `Argmax`, `Softmax` and `Sum` over a spatial `dim` reduce across
 the extent; `Canonical` on an oblique direction resamples.
