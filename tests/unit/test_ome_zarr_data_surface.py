@@ -144,9 +144,12 @@ def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path)
     # still comes from the sidecar.
     np.testing.assert_allclose(coarse.get_np_array("Spacing"), [4.0, 2.0, 2.0])
     np.testing.assert_allclose(coarse.get_np_array("Origin"), [11.0, 20.5, 30.5])
-    np.testing.assert_array_equal(coarse.get_np_array("Direction"), fine.get_np_array("Direction"))
+    direction = [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    np.testing.assert_array_equal(fine.get_np_array("Direction"), direction)
+    np.testing.assert_array_equal(coarse.get_np_array("Direction"), direction)
     # One rung per key, whichever level answered: a later write records the geometry once.
-    assert [key for key in coarse.keys() if key.startswith("Spacing")] == ["Spacing_0"]
+    for key in ("Spacing", "Origin", "Direction"):
+        assert [k for k in coarse.keys() if k.startswith(key)] == [f"{key}_0"]
 
 
 def test_default_downsampling_is_a_block_mean_not_a_gaussian(tmp_path: Path) -> None:

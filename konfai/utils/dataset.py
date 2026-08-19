@@ -2686,8 +2686,11 @@ class Dataset:
         block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what a scan that must never hold the
         volume iterates (the statistics fold, the quantile scan). A store that cannot serve bounded
         region reads (gzipped NIfTI, compressed MetaImage) is read whole ONCE and kept for every
-        pass the factory serves: decoding it once per block would cost more than holding it, and
-        holding it once is what such a store costs anyway."""
+        pass the factory serves: those formats have no bounded reader to use instead, a block read
+        decodes the whole volume anyway, so reading per block would hold the same peak N times over.
+        This is the declared whole-volume route, not a way around the streaming invariant: a case
+        that needs it plans as LOAD, and the plan refuses it when the volume does not fit the
+        budget, before a byte is written."""
         shape, _ = self.get_infos(groups, name)
         if len(shape) < 2 or not self.bounded_region_reads(groups, name):
             resident: list[np.ndarray] = []
