@@ -29,6 +29,8 @@ operator can accumulate.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -45,6 +47,12 @@ from konfai.utils.dataset import (
     _update_running_statistics,
 )
 from konfai.utils.errors import ReductionError
+
+#: How many members of a non-incremental fold are read at once. Their reads are independent and each
+#: one is a decode plus a chain replay; a fold that holds every member anyway pays no extra memory
+#: for overlapping them. Four rather than the cohort's size: the reads share the rank's thread budget
+#: with the numeric work they feed, and a wider pool only trades one queue for another.
+_MEMBER_READERS = 4
 
 #: Geometry keys compared between cases under ``grid: strict``. Direction is in because a flipped
 #: axis shows in neither extent nor spacing: averaging two volumes that disagree on it mirrors half
@@ -446,9 +454,31 @@ class CaseReduction:
         without it. The axis matters to any operator that places things side by side.
         """
         self.operator.start()
-        for manager in self.managers:
-            self.operator.accumulate(manager.read_region(region).unsqueeze(0))
+        for member in self._members(region):
+            self.operator.accumulate(member)
         return self.operator.finalize().squeeze(0)
+
+    def _members(self, region: tuple[slice, ...]) -> Iterator[torch.Tensor]:
+        """Each case's region, in cohort order, read one at a time or several at once.
+
+        A member's read is a decode plus a replay of that case's chain: minutes of one core while a
+        node has many, and the members are independent of each other. A fold that is NOT incremental
+        holds every member at once anyway -- the plan charges exactly that -- so reading them
+        together costs no memory that was not already budgeted, and the futures are consumed in
+        cohort order, so the operator sees the same members in the same order: the same bytes.
+
+        An incremental fold holds ONE member (that is what makes it incremental), so it reads one:
+        overlapping there would spend memory the plan did not charge.
+        """
+        readers = 1 if self.operator.incremental else min(len(self.managers), _MEMBER_READERS)
+        if readers < 2:
+            for manager in self.managers:
+                yield manager.read_region(region).unsqueeze(0)
+            return
+        with ThreadPoolExecutor(max_workers=readers) as pool:
+            pending = [pool.submit(manager.read_region, region) for manager in self.managers]
+            for future in pending:  # cohort order, whatever order they finish in
+                yield future.result().unsqueeze(0)
 
     def _folds(self, spatial: list[int]):
         """Every region's fold, in order: the loop both passes share."""
