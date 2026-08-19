@@ -685,22 +685,28 @@ def test_available_cpus_is_the_tighter_of_affinity_and_cgroup_quota(monkeypatch,
     assert bd.available_cpus() == 4
 
 
-def test_available_cpus_reads_a_cgroup_v1_quota(monkeypatch, tmp_path) -> None:
-    """cgroup v1 spells the same quota as two files under the cpu controller; -1 is unbounded."""
+@pytest.mark.parametrize("mount", ["cpu", "cpu,cpuacct"], ids=["symlinked-cpu", "joint-mount-only"])
+def test_available_cpus_reads_a_cgroup_v1_quota(monkeypatch, tmp_path, mount: str) -> None:
+    """cgroup v1 spells the same quota as two files under the cpu controller; -1 is unbounded.
+
+    The controller mounts under the name it is mounted with: most distributions mount the joint
+    ``cpu,cpuacct`` and drop a ``cpu`` symlink beside it, some only the joint one. Looking under
+    ``cpu`` alone found no quota file there and read the host's whole CPU count inside a container.
+    """
     from konfai.utils import budget as bd
 
     monkeypatch.setattr(bd.os, "sched_getaffinity", lambda pid: set(range(16)), raising=False)
     root = tmp_path / "cgroup"
-    (root / "cpu" / "docker" / "abc").mkdir(parents=True)
+    (root / mount / "docker" / "abc").mkdir(parents=True)
     proc = tmp_path / "proc_self_cgroup"
     proc.write_text("3:cpu,cpuacct:/docker/abc\n1:memory:/docker/abc\n")
     monkeypatch.setattr(bd, "_CGROUP_ROOT", str(root))
     monkeypatch.setattr(bd, "_PROC_SELF_CGROUP", str(proc))
-    (root / "cpu" / "docker" / "abc" / "cpu.cfs_quota_us").write_text("-1\n")
-    (root / "cpu" / "docker" / "abc" / "cpu.cfs_period_us").write_text("100000\n")
+    (root / mount / "docker" / "abc" / "cpu.cfs_quota_us").write_text("-1\n")
+    (root / mount / "docker" / "abc" / "cpu.cfs_period_us").write_text("100000\n")
     assert bd.available_cpus() == 16  # unbounded
-    (root / "cpu" / "docker" / "cpu.cfs_quota_us").write_text("250000\n")  # the ancestor's quota
-    (root / "cpu" / "docker" / "cpu.cfs_period_us").write_text("100000\n")
+    (root / mount / "docker" / "cpu.cfs_quota_us").write_text("250000\n")  # the ancestor's quota
+    (root / mount / "docker" / "cpu.cfs_period_us").write_text("100000\n")
     assert bd.available_cpus() == 3  # 2.5 CPUs round up
 
 

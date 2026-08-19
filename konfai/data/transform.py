@@ -53,6 +53,7 @@ from konfai.data.sampling import (
     coordinate_precision,
     gather,
     gather_separable,
+    sampling_dtype,
     separable_source_index,
     source_index,
     source_index_rows,
@@ -1311,15 +1312,20 @@ def _resample_with_sitk(
     reference.SetOrigin(np.asarray(region.origin_xyz, dtype=np.float64).tolist())
     reference.SetSpacing(np.asarray(region.spacing_xyz, dtype=np.float64).tolist())
     reference.SetDirection(np.asarray(region.direction_xyz, dtype=np.float64).ravel().tolist())
+    # A blend interpolates in the dtype the walk accumulates in, and torch makes the final cast:
+    # ITK would otherwise accumulate an integer payload in double and cast inside the filter, where
+    # one ulp of difference becomes a whole unit after the truncation both sides do. A nearest pick
+    # copies voxels, so it keeps the payload's own dtype, exactly as the walk does.
+    work = payload if mode == "nearest" else payload.type(sampling_dtype(payload))
     outputs = []
-    for channel in range(int(payload.shape[0])):
-        image = sitk.GetImageFromArray(np.ascontiguousarray(payload[channel].numpy()))
+    for channel in range(int(work.shape[0])):
+        image = sitk.GetImageFromArray(np.ascontiguousarray(work[channel].numpy()))
         image.SetOrigin(np.asarray(window_origin, dtype=np.float64).tolist())
         image.SetSpacing(np.asarray(source.spacing_xyz, dtype=np.float64).tolist())
         image.SetDirection(np.asarray(source.direction_xyz, dtype=np.float64).ravel().tolist())
         out = sitk.Resample(image, reference, transform, interpolator[mode], float(fill), image.GetPixelID())
         outputs.append(torch.from_numpy(sitk.GetArrayFromImage(out)))
-    return torch.stack(outputs, dim=0)
+    return torch.stack(outputs, dim=0).type(payload.dtype)
 
 
 class Resample(TransformInverse):
@@ -1865,12 +1871,16 @@ class Resample(TransformInverse):
         if axes is not None:
             order = blend_order(target, source)
             return gather_separable(sub_tensor, axes, region_starts, shape, mode, self.fill_value, order)
-        # On the HOST, ITK's own resampler is the fastest one there is, exact included: sitk.Resample
-        # over the same region, through the same stages, is 12x the torch walk per voxel on this
-        # arithmetic (27 vs 326 ns, measured, 12 threads) -- the walk is written for the GPU, where
-        # it is 40x faster again. Same rule (ITK's), same window, same fill; the two agree to the
-        # ulp, which is exactly how far a CPU and a CUDA run already agree. 'precision: fast' is a
-        # permission the GPU walk uses; on the host the exact answer is also the cheapest.
+        # On the HOST, ITK's own resampler is the fastest one there is: sitk.Resample over the same
+        # region, through the same stages, is 12x the torch walk per voxel on this arithmetic
+        # (27 vs 326 ns, measured, 12 threads) -- the walk is written for the GPU, where it is 40x
+        # faster again. Same rule (ITK's), same window, same fill, same working dtype, so the two
+        # agree to the ulp of the blend: as far as a CPU and a CUDA run already agree. On an INTEGER
+        # payload that ulp can straddle a truncation boundary, where it becomes one whole unit
+        # (measured: 2 voxels in 7560 through a rotation, pinned in test_sampling.py). A nearest
+        # pick copies voxels and has no such seam, which is what a label map takes.
+        # 'precision: fast' is a permission the GPU walk uses; on the host the exact answer is also
+        # the cheapest.
         if sub_tensor.device.type == "cpu" and sitk is not None:
             resampled = _resample_with_sitk(sub_tensor, region, source, stages, region_starts, mode, self.fill_value)
             if resampled is not None:

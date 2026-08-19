@@ -952,7 +952,8 @@ class DataStream(ABC):
         try:
             self._close(success)
             if success and (published := self.published_path) is not None:
-                _retire_dead_debris(published)
+                with contextlib.suppress(Exception):
+                    _retire_dead_debris(published)  # past the publish: housekeeping cannot fail the write
         finally:
             if self._file is not None:
                 self._file.__exit__(exc_type, value, traceback)
@@ -1843,7 +1844,8 @@ class Dataset:
                 staging = DataStream.staging_path(final)
                 sitk.WriteImage(data, staging)
                 os.replace(staging, final)
-                _retire_dead_debris(Path(final))
+                with contextlib.suppress(Exception):
+                    _retire_dead_debris(Path(final))  # past the publish: housekeeping cannot fail the write
             elif isinstance(data, sitk.Transform):
                 sitk.WriteTransform(data, f"{self.filename}{name}.itk.txt")
             elif self.is_vtk_polydata(data):
@@ -2105,9 +2107,11 @@ class Dataset:
             except BaseException:
                 if replaced.exists() and not final.exists():
                     replaced.rename(final)
+                shutil.rmtree(staging, ignore_errors=True)  # or a full second copy of the entry stays
                 raise
             shutil.rmtree(replaced, ignore_errors=True)
-            _retire_dead_debris(final)
+            with contextlib.suppress(Exception):
+                _retire_dead_debris(final)  # housekeeping past the publish: it cannot fail the write
 
         def open_data_stream(
             self,
