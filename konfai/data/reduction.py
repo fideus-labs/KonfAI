@@ -24,6 +24,7 @@ A reduction is an extension point: subclass :class:`Reduction`, reference it by 
 """
 
 from abc import ABC, abstractmethod
+from typing import ClassVar
 
 import torch
 
@@ -55,6 +56,15 @@ class Reduction(ABC):
     #: Buffers-worth this operator allocates on top of the regions it is handed (a stack, a sorted
     #: copy). The plan multiplies it into the peak it sizes regions against.
     working_multiple: float = 0.0
+
+    def working_multiple_for(self, cases: int) -> float:
+        """:attr:`working_multiple` for a fold of ``cases`` members, which is what the plan asks.
+
+        The attribute is the contract and the worst case; an operator whose route depends on the
+        count (``Median`` selects the middle by network up to five members, and sorts past that)
+        answers what THAT route holds, so the plan can cut taller slabs where the cheaper route runs.
+        """
+        return float(self.working_multiple)
 
     @abstractmethod
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
@@ -177,23 +187,65 @@ class Median(Reduction):
     voxel_local = True
     # ``torch.stack`` copies the buffer and the sort along the case axis returns values and
     # int64 indices over that: measured at 4x the stack it is handed (6 x 16 MiB float32 cases).
+    # A fold of three, four or five members takes the network instead and costs far less; the
+    # attribute is the worst case, :meth:`working_multiple_for` is what the plan asks.
     working_multiple = 4.0
+
+    #: What the selection networks below hold beside the members they are handed, measured on a
+    #: 24 MiB member (float32): the sort's own 4.0 is what anything wider still costs.
+    _NETWORK_MULTIPLE: ClassVar[dict[int, float]] = {1: 1.0, 2: 1.5, 3: 1.0, 4: 2.5, 5: 1.5}
+
+    def working_multiple_for(self, cases: int) -> float:
+        return self._NETWORK_MULTIPLE.get(cases, float(self.working_multiple))
+
+    @staticmethod
+    def _median_of_three(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+        return torch.maximum(torch.minimum(a, b), torch.minimum(torch.maximum(a, b), c))
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         dtype = _averaged_dtype(tensors[0].dtype)
-        if len(tensors) == 1:
-            return tensors[0].to(dtype)
-        # The sort along the case axis, and the middle read off it: what torch.quantile computes,
-        # without its interpolation machinery around it (1.5-2x on CPU, 3.5x on CUDA over three
-        # cases, measured), in the dtype the average belongs in, so a float64 cohort keeps its
-        # precision. The even-count middle is the same lerp quantile uses, so the two agree.
-        ranked = torch.stack(tensors, dim=0).to(dtype).sort(dim=0).values
-        cases = ranked.shape[0]
-        if cases % 2:
-            middle = ranked[cases // 2]
-        else:
-            middle = torch.lerp(ranked[cases // 2 - 1], ranked[cases // 2], 0.5)
-        return middle
+        members = [tensor.to(dtype) for tensor in tensors]
+        if len(members) == 1:
+            return members[0]
+        # Three to five members is what a fold has, and there the middle is SELECTED by a network of
+        # element-wise min/max rather than found by sorting the whole stack: same values to the bit,
+        # a fraction of the time (CUDA 7.20 -> 0.45 ms at three, 8.42 -> 1.10 at five; CPU 55 -> 26
+        # at three), and no stack to hold, which is what lets the planner cut taller slabs. Beyond
+        # five the sort is simpler and no slower: what torch.quantile computes without its
+        # interpolation machinery (1.5-2x on CPU, 3.5x on CUDA, measured).
+        low, high = self._middle_pair(members)
+        return low if low is high else torch.lerp(low, high, 0.5)
+
+    def _middle_pair(self, members: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """The one middle member of an odd fold (the same tensor twice), or the two an even fold
+        averages: by network up to five members, off a sorted stack past it."""
+        minimum, maximum = torch.minimum, torch.maximum
+        count = len(members)
+        if count == 2:
+            first, second = members
+            return minimum(first, second), maximum(first, second)
+        if count == 3:
+            middle = self._median_of_three(*members)
+            return middle, middle
+        if count == 4:
+            a, b, c, d = members
+            a, b = minimum(a, b), maximum(a, b)
+            c, d = minimum(c, d), maximum(c, d)
+            second, third = maximum(a, c), minimum(b, d)
+            return minimum(second, third), maximum(second, third)
+        if count == 5:
+            a, b, c, d, e = members
+            a, b = minimum(a, b), maximum(a, b)
+            c, d = minimum(c, d), maximum(c, d)
+            a, c = minimum(a, c), maximum(a, c)  # a is the fold's smallest: out of the running
+            b, d = minimum(b, d), maximum(b, d)  # d is its largest: out too
+            middle = self._median_of_three(b, c, e)
+            return middle, middle
+        ranked = torch.stack(members, dim=0).sort(dim=0).values
+        if count % 2:
+            middle = ranked[count // 2]
+            return middle, middle
+        return ranked[count // 2 - 1], ranked[count // 2]
 
 
 class Vote(Reduction):

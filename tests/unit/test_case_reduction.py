@@ -139,13 +139,14 @@ def test_averaging_keeps_a_floating_dtype_and_widens_an_integer_one(operator: Re
 def test_a_non_incremental_operator_holds_the_whole_cohort_per_region(tmp_path: Path) -> None:
     """One region per case, plus the output's, plus what the operator allocates over its buffer.
 
-    ``Median`` stacks the buffer into a new tensor and sorts a copy of that, so the buffer alone
-    under-states its peak threefold, and it is the operator a bare ``Reduce`` gets.
+    ``Median`` holds the cohort and what its route allocates beside it, so the buffer alone
+    under-states its peak, and it is the operator a bare ``Reduce`` gets. The route depends on the
+    cohort's SIZE (a network up to five members, a sort past it), so the plan asks for this cohort's.
     """
     engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Median", output="t"), [])
     plan = engine.plan()
     assert plan.incremental is False
-    assert plan.resident_regions == CASES + 1 + Median.working_multiple * CASES
+    assert plan.resident_regions == CASES + 1 + Median().working_multiple_for(CASES) * CASES
     assert "resident region" in plan.describe() and "CASE_000" in plan.describe()
 
 
@@ -490,7 +491,7 @@ def test_a_single_case_is_its_own_vote() -> None:
     "operator,output_channels,member_regions,why",
     [
         (Mean(), 1, 2, "one running accumulator and the region coming into it"),
-        (Median(), 1, 5 * CASES + 1, "the cohort, the stack it is copied into, quantile's copies, the output"),
+        (Median(), 1, int(3.5 * CASES) + 1, "the cohort, what the four-member network holds beside it, the output"),
         (Vote(), 1, 3 * CASES + 1, "same shape of work: a mode sorts a copy of the stack too"),
         (Concat(), CASES, 2 * CASES, "the cohort, and the concatenation that IS the output"),
     ],
@@ -515,10 +516,28 @@ def test_the_peak_is_charged_at_each_side_s_own_width(
         slab_rows=rows,
         incremental=operator.incremental,
         stat_pass=False,
-        working_multiple=operator.working_multiple,
+        working_multiple=operator.working_multiple_for(CASES),
     )
     member = rows * spatial[1] * spatial[2] * source_channels * 4
     assert plan.peak_bytes == member_regions * member, why
+
+
+@pytest.mark.parametrize("cases", [1, 2, 3, 4, 5, 6, 7])
+def test_median_selects_the_middle_instead_of_sorting_the_stack(cases: int) -> None:
+    """Up to five members the middle is SELECTED by a network of element-wise min/max; past that a
+    sort finds it. The values are the same to the bit either way -- ``torch.quantile`` is the
+    reference the docstring names -- and the network holds far less, which is what
+    ``working_multiple_for`` reports so the planner can cut taller slabs where it runs.
+
+    Measured on a 24 MiB member: at three members 7.20 ms and 3x the stack by sort against 0.45 ms
+    and 1x by network on CUDA, 55 ms against 26 on the host.
+    """
+    torch.manual_seed(3)
+    members = [torch.rand((1, 2, 4, 5)) for _ in range(cases)]
+    folded = Median()(members)
+
+    assert torch.equal(folded, torch.quantile(torch.stack(members, dim=0), 0.5, dim=0))
+    assert Median().working_multiple_for(cases) == {1: 1.0, 2: 1.5, 3: 1.0, 4: 2.5, 5: 1.5}.get(cases, 4.0)
 
 
 def test_a_vote_tie_goes_to_the_smallest_label_whatever_the_cohort_order() -> None:

@@ -423,7 +423,7 @@ class CaseReduction:
             source_channels=int(reference.base_shape[0]),
             slab_rows=self.slab_rows,
             incremental=self.operator.incremental,
-            working_multiple=float(self.operator.working_multiple),
+            working_multiple=float(self.operator.working_multiple_for(len(self.managers))),
             stat_pass=self._needs_stat_pass(),
             unbounded=self._unbounded_members(),
             refusal=self._first_refusal(),
