@@ -49,6 +49,8 @@ no longer stops a run. Two things a run already wrote come out differently, see 
 
 - **transform**: the plan prices the route on what the chain reads: a destination that does not
   exist yet is not a read, so h5 to mha and h5 to omezarr stream instead of loading
+- **transform**: `Crop` keeps the last row of foreground on every axis. The box carried the LAST
+  foreground index where the crop reads a margin, so the far row was cut off
 - **transform**: `Crop` finds its box by a bounded quantile scan (exactly `numpy.quantile`) instead
   of holding the volume, and the plan reads no voxel for a global statistic: the rank reads it at
   first access, a LOAD case on the volume it holds
@@ -146,6 +148,12 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   list; a caller that relied on the first failure raising mid-run reads the list instead.
 - **The auto memory budget is larger on a host that has streamed a cohort** and smaller under a
   SLURM grant that no cgroup enforces; the plan's header names which bound won.
+- **A `Crop` output is one voxel wider per axis than every earlier version wrote.** The box kept
+  the last foreground index as the far margin, so the crop stopped one row short and dropped that
+  row on each axis. Same config, same data: the volume this version writes is not the one an
+  earlier version wrote, and an output partly written before and resumed after mixes the two.
+  Run those outputs once with `--overwrite`, and re-derive anything (a model, a metric) that was
+  trained or measured on a cropped dataset if the missing row mattered.
 - **A streamed `.mha` written by an earlier version can carry mirrored geometry.** The streamed
   writer wrote the `Direction` where MetaIO expects its transpose, so an entry whose orientation
   is not symmetric (an oblique acquisition, an axis-permuting direction) reads back mirrored.

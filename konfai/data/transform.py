@@ -3869,7 +3869,9 @@ class Crop(TransformInverse):
             return shape
         box = self._foreground_box(source, group_src, name)
         for i, ((_, b), s) in enumerate(zip(box, shape, strict=False)):
-            box[i][1] = s - b
+            # The scan reports the LAST foreground index; the box carries the margin AFTER it, so
+            # the far margin is what lies past that row. Off by one, the crop cut it off.
+            box[i][1] = max(int(s - b - 1), 0)
         cache_attribute["box"] = box
         return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
 
