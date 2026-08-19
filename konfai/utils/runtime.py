@@ -994,11 +994,12 @@ def apply_cpu_thread_budget() -> None:
     """Give each rank a bounded share of the machine's cores instead of every library's every-core
     default -- torch's intraop pool AND ITK's, which does the host resample.
 
-    Past memory-bus saturation more intraop threads only add barrier contention; on a hybrid
-    24-core CPU the 498^3 separable gather measures 0.7 s at 12 threads and 67 s at 24. An
-    explicit ``OMP_NUM_THREADS`` keeps authority over torch (which already honors it at init) and
-    sizes ITK's pool the same. Otherwise each of the node's local ranks gets its share of
-    :func:`available_cpus`, capped at 12.
+    Each of the node's local ranks gets its share of :func:`available_cpus`, and the two pools take
+    that share differently. Torch's is capped at 12: past memory-bus saturation more intraop threads
+    only add barrier contention, and on a hybrid 24-core CPU the 498^3 separable gather measures
+    0.7 s at 12 threads and 67 s at 24. ITK's takes the share whole, because its resampler keeps
+    scaling with it (the same region: 10.98 s at 1 thread, 1.11 s at 12, 0.65 s at 24). An explicit
+    ``OMP_NUM_THREADS`` keeps authority over both (torch already honors it at init).
 
     Applied once per process, and never on macOS: torch documents ``set_num_threads`` as to be
     called before any parallel work, and the Python API runs several workflows in one process.
@@ -1010,13 +1011,20 @@ def apply_cpu_thread_budget() -> None:
     if sys.platform == "darwin" or _cpu_budget_applied:
         return
     explicit = os.environ.get("OMP_NUM_THREADS")
-    share = int(explicit) if explicit else max(1, min(available_cpus() // node_local_ranks(), 12))
+    cores = max(1, available_cpus() // node_local_ranks())
+    # The cap is torch's alone: past memory-bus saturation its intraop pool only adds barrier
+    # contention. ITK's pool is not the same animal -- its resampler, which does the host walk,
+    # keeps scaling to the whole share (a fold-sized region through a displacement field: 10.98 s
+    # at 1 thread, 1.11 s at 12, 0.65 s at 24), so capping it at 12 left a third of a 24-core node
+    # idle and cost 15 s on a measured fold.
+    share = int(explicit) if explicit else min(cores, 12)
+    itk_share = int(explicit) if explicit else cores
     if not explicit:
         torch.set_num_threads(share)
     try:
         import SimpleITK as sitk
 
-        sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(share)
+        sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(itk_share)
     except ImportError:
         pass
     # Marked applied only once it is: a raise above (a bad OMP_NUM_THREADS) leaves the next call free to retry.

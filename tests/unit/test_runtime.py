@@ -710,16 +710,21 @@ def test_available_cpus_reads_a_cgroup_v1_quota(monkeypatch, tmp_path, mount: st
     assert bd.available_cpus() == 3  # 2.5 CPUs round up
 
 
-def test_cpu_thread_budget_sizes_itks_pool_with_torchs(monkeypatch) -> None:
-    """ITK does the host resample: an unbounded ITK pool beside a bounded torch one is the same
-    oversubscription moved one library over."""
+def test_cpu_thread_budget_gives_itk_the_rank_share_torch_is_capped_out_of(monkeypatch) -> None:
+    """Both pools are bounded by the RANK's share, and they take it differently: torch's cap is
+    memory-bus saturation (0.7 s at 12 threads against 67 s at 24 for one gather), which ITK's
+    resampler does not hit (10.98 s at 1, 1.11 s at 12, 0.65 s at 24 for one region). Capping ITK
+    at torch's 12 left a third of a 24-core node idle; leaving it unbounded would oversubscribe the
+    node across ranks. The share, whole, is neither."""
     sitk = pytest.importorskip("SimpleITK")
     before = sitk.ProcessObject.GetGlobalDefaultNumberOfThreads()
     try:
         assert _budget_applied(monkeypatch, cores=24, ranks="4", omp=None) == [6]
-        assert sitk.ProcessObject.GetGlobalDefaultNumberOfThreads() == 6
+        assert sitk.ProcessObject.GetGlobalDefaultNumberOfThreads() == 6  # the share, under the cap
+        assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None) == [12]
+        assert sitk.ProcessObject.GetGlobalDefaultNumberOfThreads() == 24  # the whole share, over it
         assert _budget_applied(monkeypatch, cores=24, ranks="4", omp="20") == []
-        assert sitk.ProcessObject.GetGlobalDefaultNumberOfThreads() == 20
+        assert sitk.ProcessObject.GetGlobalDefaultNumberOfThreads() == 20  # OMP_NUM_THREADS rules both
     finally:
         sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(before)
 

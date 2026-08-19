@@ -64,8 +64,11 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   memory it holds and not the page cache, honours a SLURM grant, and reads `--mem=0` as the whole node
 - **runtime**: shards are balanced by bytes, and an inline run puts the caller's RNG (CPU and CUDA)
   and cudnn flags back
-- **runtime**: the per-rank thread share sizes ITK's pool along with torch's, and counts as applied
-  only once it is
+- **runtime**: the per-rank thread share bounds ITK's pool as well as torch's, and counts as applied
+  only once it is. The two take that share differently: torch's is capped at 12 (past memory-bus
+  saturation its intraop pool only adds contention), ITK's takes it whole, because its resampler
+  keeps scaling with it (one fold region: 10.98 s at 1 thread, 1.11 s at 12, 0.65 s at 24). Capping
+  ITK at torch's number left a third of a 24-core node idle: 15 s on a measured fold
 - **dataset**: a dead writer's debris is told apart portably (`psutil.pid_exists`), Windows included
 - **dataset**: a streamed `.mha` writes MetaIO's `TransformMatrix`, which is the TRANSPOSE of
   ITK's `Direction`: a non-symmetric orientation used to read back mirrored
@@ -108,6 +111,8 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   the host baseline did not finish in 1 h 47, at 4.5 GiB of VRAM, and the same bytes every run
 - **transform**: on a host with no GPU that `Resample` goes through ITK's own resampler, 27 ns per
   voxel against the host walk's 326: the full CPU fold of the same round, 2005 s to 892 s
+- **runtime**: ITK's pool takes the rank's whole share instead of torch's cap: on a 24-core node
+  the resample of a measured fold goes 61.1 s to 46.6 s, the round 104 s to 97 s
 - **omezarr**: a pyramid appended to a streamed store no longer rewrites level 0, the coarser
   levels are derived from it lazily (that round's update pass 103 s to 53 s, the 4.9 GB template's
   level 1 53 s to 4 s), and a store is created empty for zarr to fill (2.3 s where the rechunk took 14.4)
