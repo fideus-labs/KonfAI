@@ -133,7 +133,7 @@ extent that is 8× in 3D, against the single load streaming was avoiding. At pat
 
 | Kind | Transforms |
 | --- | --- |
-| `POINTWISE` | `Argmax`, `Softmax`, `Sum` (all with `dim=0`), `OneHot`, `MergeLabels`, `FlatLabel`, `SelectLabel`, `UnNormalize`, `Percentage`, `Variance`, `StandardDeviation`, `SegmentationDisagreement`, `Magnitude`, `TensorCast`, `Mask`, `Clip` with fixed bounds, `Standardize` with both `mean` and `std`, `Dilate(0)` |
+| `POINTWISE` | `Argmax`, `Softmax`, `Sum` (all with `dim=0`), `OneHot`, `MergeLabels`, `FlatLabel`, `SelectLabel`, `UnNormalize`, `Percentage`, `Variance`, `StandardDeviation`, `SegmentationDisagreement`, `Magnitude`, `TensorCast` to a value-preserving target (`float32`, `float64`), `Mask`, `Clip` with fixed bounds, `Standardize` with both `mean` and `std`, `Dilate(0)` |
 | `GLOBAL_STAT` | `Normalize`, `Standardize`, `Clip` with `'min'`/`'max'` bounds, `Statistics` |
 | `HALO` | `Dilate(n>0)`, `Gradient` |
 | `ORIENTATION` | `Flip`, `Permute`, `Canonical` on axis-aligned direction cosines |
