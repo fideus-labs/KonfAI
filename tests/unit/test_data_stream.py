@@ -584,6 +584,43 @@ def test_a_backup_orphaned_by_a_killed_writer_is_served_again(tmp_path: Path, fi
     assert Dataset(tmp_path / "store", file_format).is_dataset_exist("CT", "CASE_001")  # and it stays back
 
 
+def test_the_listing_names_a_case_whose_only_version_is_an_orphaned_backup(tmp_path: Path, monkeypatch) -> None:
+    """A listing that hid what the probe and the read recover would name fewer cases than the store
+    serves, and a run walking the listing would skip that case without a word."""
+    pytest.importorskip("h5py")
+    import konfai.utils.dataset as dataset_module
+
+    dataset = Dataset(tmp_path / "store", "h5")
+    dataset.write("CT", "CASE_000", _volume(), _image_attributes())
+    _kill_between_the_two_moves(dataset, "CASE_001", _volume(), _image_attributes())
+    monkeypatch.setattr(dataset_module, "_writer_is_dead", lambda pid: True)
+
+    fresh = Dataset(tmp_path / "store", "h5")
+    assert sorted(fresh.get_names("CT")) == ["CASE_000", "CASE_001"]
+
+
+@pytest.mark.parametrize("file_format", ["mha", "omezarr"])
+def test_recovery_never_lands_on_a_publish_that_won_the_race(tmp_path: Path, file_format: str, monkeypatch) -> None:
+    """A writer can publish between the moment recovery finds the entry missing and the moment it
+    puts the backup back. The move itself must refuse then, because a second existence check would
+    only move the window: the previous version must never land on top of the new one."""
+    _skip_unavailable(file_format)
+    import konfai.utils.dataset as dataset_module
+
+    published, backed_up = _volume(), _volume() * 0 + 7
+    dataset = Dataset(tmp_path / "store", file_format)
+    _kill_between_the_two_moves(dataset, "CASE_001", backed_up, _image_attributes())
+
+    def publish_then_answer(pid: int) -> bool:  # runs between the listing and the rename
+        Dataset(tmp_path / "store", file_format).write("CT", "CASE_001", published, _image_attributes())
+        return True
+
+    monkeypatch.setattr(dataset_module, "_writer_is_dead", publish_then_answer)
+    fresh = Dataset(tmp_path / "store", file_format)
+    assert fresh.is_dataset_exist("CT", "CASE_001")
+    np.testing.assert_array_equal(fresh.read_data("CT", "CASE_001")[0], published)
+
+
 @pytest.mark.parametrize("file_format", ["mha", "h5", "omezarr"])
 def test_a_live_writers_backup_is_left_alone(tmp_path: Path, file_format: str) -> None:
     """The pid in the name is the whole point: while its writer runs, the backup is that writer's

@@ -648,7 +648,14 @@ def test_the_inline_path_is_the_default(monkeypatch) -> None:
     assert spawned == []
 
 
-def _budget_applied(monkeypatch, cores: int, ranks: str | None, omp: str | None, platform: str = "linux") -> list[int]:
+def _budget_applied(
+    monkeypatch,
+    cores: int,
+    ranks: str | None,
+    omp: str | None,
+    platform: str = "linux",
+    world_size: int | None = None,
+) -> list[int]:
     calls: list[int] = []
     monkeypatch.setattr(rt, "_cpu_budget_applied", False)
     monkeypatch.setattr(rt.sys, "platform", platform)
@@ -658,7 +665,7 @@ def _budget_applied(monkeypatch, cores: int, ranks: str | None, omp: str | None,
         monkeypatch.delenv(key, raising=False)
         if value is not None:
             monkeypatch.setenv(key, value)
-    rt.apply_cpu_thread_budget()
+    rt.apply_cpu_thread_budget(world_size)
     return calls
 
 
@@ -733,6 +740,14 @@ def test_cpu_thread_budget_caps_torchs_every_core_default(monkeypatch) -> None:
     """torch defaults to one intraop thread per core; past bus saturation that only adds barrier
     contention (measured 0.7 s at 12 threads vs 67 s at 24 for the same gather)."""
     assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None) == [12]
+
+
+def test_cpu_thread_budget_falls_back_to_the_world_size(monkeypatch) -> None:
+    """``KONFAI_LOCAL_RANKS`` is the launcher's, and a direct ``execute_distributed_object`` call has
+    no launcher: without the world size standing in, the divisor is 1 and each of four ranks sizes
+    itself for the whole node, oversubscribing it fourfold."""
+    assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None, world_size=4) == [6]
+    assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None) == [12], "no count, no divisor"
 
 
 def test_cpu_thread_budget_splits_the_node_between_ranks(monkeypatch) -> None:
