@@ -278,7 +278,8 @@ def test_crop_finds_its_box_without_holding_the_volume(tmp_path: Path, monkeypat
     second.set_datasets([dataset])
     for crop in (first, second):
         attribute = _geometry()
-        assert crop.transform_shape("CT", "CASE", [30, 25, 20], attribute) == [int(b - a) for a, b in expected]
+        # b is the LAST foreground index, so the extent that keeps it is b - a + 1.
+        assert crop.transform_shape("CT", "CASE", [30, 25, 20], attribute) == [int(b - a + 1) for a, b in expected]
         assert np.array_equal(Crop._parse_box(attribute["box"])[:, 0], expected[:, 0])
     assert quantile_calls == [0.05], "one scan per volume, shared by every chain"
 
