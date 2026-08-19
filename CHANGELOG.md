@@ -126,11 +126,6 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   where the pass it replaces took 31 s) and `Median` reads the middle off a sort (1.5-2x on CPU,
   3.5x on CUDA); the folds a statistics pass computed are kept for the write pass when they fit
 - **transform**: a case is planned without listing the whole output directory
-- **reduction**: a fold that is not incremental reads its members up to four at a time. Each read is
-  a decode plus a replay of that case's chain, the members are independent, and such a fold holds
-  every member anyway, so nothing is spent that the plan did not already charge. The members reach
-  the operator in cohort order whatever order they arrive in, so the fold writes the same bytes: a
-  five-case fold of a compressed cohort through `Clip` and `Resample`, 2.39 s to 0.97 s
 - **dataset**: a volume's statistics come from one block walk, folded in cache-sized pieces, and a
   `.npy` entry answers its shape from the header instead of reading the array
 - **cli**: `import konfai` 0.9 to 0.08 s, `konfai --help` 2.9 to 0.3 s: torch, dicom and ome-zarr
@@ -157,9 +152,11 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   wrote. **An `Expand` output partly written before this version and resumed after it mixes the two
   rules**: the cases already on disk keep the old draws, the resumed ones get the new. Run those
   outputs once with `--overwrite`.
-- **A `Median` reduction may plan differently.** Its working set is four buffers of the fold instead
-  of two, so a cohort that streamed within a few percent of the budget may now be refused (a
-  reduction has no whole-volume path); the plan says so.
+- **A `Median` reduction plans differently, in both directions.** Its working set is now what its
+  route holds rather than one flat number: 1.0 of the cohort at three members and 1.5 at two or
+  five, where it was 2.0, so those fold in taller slabs than before; but 2.5 at four members and 4.0
+  past five, so a cohort of six that streamed within a few percent of the budget may now be refused
+  (a reduction has no whole-volume path). The plan says which it is.
 - **A failing case does not stop the run.** The rank finishes its shard and exits non-zero with the
   list; a caller that relied on the first failure raising mid-run reads the list instead.
 - **The auto memory budget is larger on a host that has streamed a cohort** and smaller under a
