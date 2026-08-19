@@ -88,7 +88,12 @@ no longer stops a run. Two things a run already wrote come out differently, see 
 - **omezarr**: a coarser level reads its own geometry. The sidecar describes the level the writer
   was handed, so taken at its word on level 1 it put level 0's spacing and origin on level 1's
   voxels: a volume read at `@1` came back four times too small in world coordinates
-- **reduction**: `Median` charges the working set its sort allocates (four buffers, measured)
+- **reduction**: `Median` selects the middle with a network of element-wise min/max up to five
+  members instead of sorting the stack, and charges what that route holds. Same values to the
+  bit (`torch.quantile` is the reference), a fraction of the time (three members: 7.20 to
+  0.45 ms on CUDA, 55 to 26 ms on the host) and a third of the working set, so the planner
+  cuts taller slabs for the same budget. A `Reduction` may now answer `working_multiple_for`
+  per cohort size; the class attribute stays the contract and the worst case
 - **transform**: a bare stage name past the `Expand` marker is the draw (`Flip`, `Mask`, `Permute`,
   `Foreign` exist as both); the qualified spelling still forces either
 - **transform**: the working set counts what the widest stage allocates; a `Save` cache the run
