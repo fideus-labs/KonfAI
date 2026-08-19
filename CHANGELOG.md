@@ -16,7 +16,7 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
-## v1.8.1 (2026-08-18)
+## v1.8.1 (2026-08-19)
 
 TRANSFORM, the dataset-preparation workflow, is the bulk of this release: the plan reads no voxel,
 more stages stream, the memory budget is right in a container and on a cluster, and one failing case
