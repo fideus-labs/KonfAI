@@ -65,6 +65,8 @@ no longer stops a run. Two things a run already wrote come out differently, see 
 - **runtime**: the per-rank thread share sizes ITK's pool along with torch's, and counts as applied
   only once it is
 - **dataset**: a dead writer's debris is told apart portably (`psutil.pid_exists`), Windows included
+- **dataset**: a streamed `.mha` writes MetaIO's `TransformMatrix`, which is the TRANSPOSE of
+  ITK's `Direction`: a non-symmetric orientation used to read back mirrored
 - **dataset**: an h5 replace keeps the old entry until the new one is in place; a streamed transform
   entry lands under the `.h5` name; an entry whose attributes fail is not left behind; one staging
   marker for every backend's temporary; the reader's own `ITK_*` keys do not travel with the volume
@@ -128,6 +130,12 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   list; a caller that relied on the first failure raising mid-run reads the list instead.
 - **The auto memory budget is larger on a host that has streamed a cohort** and smaller under a
   SLURM grant that no cgroup enforces; the plan's header names which bound won.
+- **A streamed `.mha` written by an earlier version can carry mirrored geometry.** The streamed
+  writer wrote the `Direction` where MetaIO expects its transpose, so an entry whose orientation
+  is not symmetric (an oblique acquisition, an axis-permuting direction) reads back mirrored.
+  Entries written whole are unaffected, as are symmetric orientations (an axis-aligned volume).
+  Compare the stored `TransformMatrix` against the source's `Direction`, and rewrite the affected
+  entries with this version.
 - **The written geometry sidecar no longer carries `ITK_*` keys** the reader had added; a consumer
   that read them from a KonfAI output finds them absent.
 - **A `Config.yml`, `Prediction.yml` or `Evaluation.yml` carrying a key nothing reads now warns**

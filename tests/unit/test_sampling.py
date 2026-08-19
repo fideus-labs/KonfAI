@@ -132,6 +132,41 @@ DEVICES = [torch.device("cpu")] + ([torch.device("cuda")] if torch.cuda.is_avail
 DEVICE_IDS = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 
 
+def test_the_host_resampler_and_the_walk_agree_on_an_integer_payload():
+    """A CPU run takes ITK's resampler and a CUDA run takes the walk, so what separates them is
+    what separates a laptop's answer from a card's.
+
+    Both blend in the same working dtype and both cast by truncating toward zero, so they agree to
+    the ulp of the blend -- and on an INTEGER payload that ulp is a whole unit wherever the blended
+    value lands on a truncation boundary. This pins the size of that seam (at most one unit, on a
+    handful of voxels) so a real divergence, which moves voxels by far more, cannot hide in it.
+    ``nearest`` copies voxels and must be exact, integers included.
+    """
+    from konfai.data.transform import _resample_with_sitk
+
+    image = _image(oblique=True)
+    counts = (sitk.GetArrayFromImage(image) * 4.0).astype(np.int16)
+    integer = sitk.GetImageFromArray(counts)
+    integer.CopyInformation(image)
+    grid = _grid(integer)
+    payload = torch.from_numpy(counts).unsqueeze(0)
+    for label, transform in (("euler", _euler(integer)), ("affine", _affine(integer))):
+        stages = decode_transform_stages(transform)  # a rotation: no separable form, so the host path serves it
+        target = grid.sub_grid((slice(4, 11), slice(0, SIZE[1]), slice(0, SIZE[2])))
+        window = source_window(target, grid, bound_of(stages, 3))
+        block = payload[(slice(None), *window)]
+        starts = [part.start for part in window]
+        for mode, tolerance in (("linear", 1), ("nearest", 0)):
+            host = _resample_with_sitk(block, target, grid, stages, starts, mode, 0.0)
+            walk = gather(
+                block, source_index(target, grid, stages, torch.device("cpu")), starts, list(grid.size_zyx), mode, 0.0
+            )
+            assert host is not None and host.dtype == walk.dtype == torch.int16, label
+            apart = (host.to(torch.int32) - walk.to(torch.int32)).abs()
+            assert int(apart.max()) <= tolerance, f"{label}/{mode}: {int(apart.max())} units apart"
+            assert int((apart > 0).sum()) <= apart.numel() // 500, f"{label}/{mode}: the seam is not a seam"
+
+
 @pytest.mark.parametrize("oblique", [False, True], ids=["axis-aligned", "oblique"])
 def test_the_whole_grid_matches_simpleitk(oblique: bool):
     device = torch.device("cpu")

@@ -156,7 +156,12 @@ def _cpu_cgroup_paths() -> list[tuple[Path, bool]]:
         if hierarchy == "0" and controllers == "":
             base, v2 = root, True
         elif "cpu" in controllers.split(","):
-            base, v2 = root / "cpu", False
+            # A v1 controller mounts under the name it is mounted with: on most distributions the
+            # joint "cpu,cpuacct" with a "cpu" symlink beside it, on some only the joint one.
+            mount = next((root / d for d in (controllers, "cpu") if (root / d).is_dir()), None)
+            if mount is None:
+                continue
+            base, v2 = mount, False
         else:
             continue
         leaf = base / path.lstrip("/")
