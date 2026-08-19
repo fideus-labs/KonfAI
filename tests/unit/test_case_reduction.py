@@ -29,7 +29,17 @@ import torch
 from konfai.data.case_reduction import CaseReduction, ReductionPlan, split_chain
 from konfai.data.patching import DatasetManager
 from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
-from konfai.data.transform import Clip, Dilate, Normalize, Reduce, Save, TensorCast, Transform, resolve_operator
+from konfai.data.transform import (
+    Clip,
+    Dilate,
+    Normalize,
+    Reduce,
+    Resample,
+    Save,
+    TensorCast,
+    Transform,
+    resolve_operator,
+)
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ReductionError, TransformError
 
@@ -545,25 +555,29 @@ def test_reading_the_members_at_once_writes_the_same_bytes_as_one_at_a_time(
 ) -> None:
     """A member's read is a decode plus a replay of that case's chain, and the members are
     independent, so a non-incremental fold -- which holds every member anyway -- reads several at
-    once. Every case's chain shares the same stage OBJECTS, so this is where a shared cache would
-    show: what it must produce is the same volume, to the byte, as reading one at a time.
+    once. Every case of a cohort replays the SAME stage objects, so this is where a shared cache
+    would show: what it must produce is the same volume, to the byte, as reading one at a time.
 
-    The pre-chain here is deliberately stateful across cases: ``Crop`` memoises a content-derived box
-    per case on the dataset, and ``Resample`` caches a grid per name.
+    The chain is stateful on purpose: ``Resample`` resolves and caches a grid per case name, which
+    the concurrent run reaches from several threads at once. Each run builds its own stages, or the
+    second would read a cache the first left warm and exercise nothing.
     """
     import konfai.data.case_reduction as case_reduction
 
-    pre = [Clip(0.0, 50.0)]
+    def chain() -> list[Transform]:
+        return [Clip(0.0, 50.0), Resample(spacing=[1.0, 1.0, 1.0])]
+
     monkeypatch.setattr(case_reduction, "_MEMBER_READERS", 1)
-    engine, destination, _volumes = _run(tmp_path, pre, Reduce(operator="Median", output="serial"), [])
+    engine, destination, _volumes = _run(tmp_path, chain(), Reduce(operator="Median", output="serial"), [])
     engine.materialize()
     one_at_a_time, _ = destination.read_data("CT", "serial")
 
     monkeypatch.setattr(case_reduction, "_MEMBER_READERS", 4)
-    engine, destination, _volumes = _run(tmp_path, pre, Reduce(operator="Median", output="together"), [])
+    engine, destination, _volumes = _run(tmp_path, chain(), Reduce(operator="Median", output="together"), [])
     engine.materialize()
     together, _ = destination.read_data("CT", "together")
 
+    assert one_at_a_time.size > 0
     np.testing.assert_array_equal(together, one_at_a_time)
 
 

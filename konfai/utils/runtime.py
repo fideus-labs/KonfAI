@@ -772,7 +772,7 @@ class DistributedObject(ABC):
         global_rank, local_rank = setup_gpu(world_size, rank, process_group=self.uses_collectives)
         if global_rank is None or local_rank is None:
             return
-        apply_cpu_thread_budget()
+        apply_cpu_thread_budget(world_size)
         with Log(self.name, global_rank):
             if torch.cuda.is_available() and _PYNVML_AVAILABLE:
                 pynvml.nvmlInit()
@@ -990,7 +990,7 @@ def execute_distributed_object(
 _cpu_budget_applied = False
 
 
-def apply_cpu_thread_budget() -> None:
+def apply_cpu_thread_budget(world_size: int | None = None) -> None:
     """Give each rank a bounded share of the machine's cores instead of every library's every-core
     default -- torch's intraop pool AND ITK's, which does the host resample.
 
@@ -1011,7 +1011,10 @@ def apply_cpu_thread_budget() -> None:
     if sys.platform == "darwin" or _cpu_budget_applied:
         return
     explicit = os.environ.get("OMP_NUM_THREADS")
-    cores = max(1, available_cpus() // node_local_ranks())
+    # The world size stands in for a launcher that published no KONFAI_LOCAL_RANKS: without it four
+    # ranks of a direct execute_distributed_object() call would each size themselves for the whole
+    # node and oversubscribe it fourfold.
+    cores = max(1, available_cpus() // node_local_ranks(world_size))
     # The cap is torch's alone: past memory-bus saturation its intraop pool only adds barrier
     # contention. ITK's pool is not the same animal -- its resampler, which does the host walk,
     # keeps scaling to the whole share (a fold-sized region through a displacement field: 10.98 s

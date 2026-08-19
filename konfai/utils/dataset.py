@@ -923,8 +923,18 @@ def _recover_orphaned_backup(final: Path) -> bool:
     backups = _orphaned_backup_names(siblings, final.name)
     if len(backups) != 1:
         return False
+    backup = final.parent.joinpath(backups[0])
     try:
-        final.parent.joinpath(backups[0]).rename(final)
+        # Never over a publish that landed while this was deciding. A second existence check would
+        # only move the window, so the move itself has to refuse: os.link fails EEXIST (and Windows
+        # rename fails outright), and a directory rename fails ENOTEMPTY against a complete store --
+        # a store is only ever published by renaming a full staging directory into place, so the
+        # final name is never an empty directory a rename could swallow.
+        if backup.is_dir() or os.name == "nt":
+            backup.rename(final)
+        else:
+            os.link(backup, final)
+            backup.unlink()
     except OSError:
         return False
     warnings.warn(
@@ -1627,6 +1637,10 @@ class Dataset:
                     # ``.tmp`` keys are in-flight (or hard-kill-orphaned) DataStream writes, not entries.
                     if isinstance(dataset, h5py.Dataset) and not is_staging_entry(dataset.name)
                 ]
+                # A backup a dead writer orphaned IS its entry (see _recover_orphaned_backup), and a
+                # listing that hid it while the probe and the read recover it would name fewer cases
+                # than the store serves: a run would silently skip one.
+                names.extend(self._orphaned_entries(h5_group, names))
             elif group == "*":
                 for k in h5_group.keys():
                     if isinstance(h5_group[k], h5py.Group):
@@ -1635,6 +1649,13 @@ class Dataset:
                 if group in h5_group:
                     names.extend(self.get_names("/".join(groups.split("/")[1:]), h5_group[group]))
             return names
+
+        @staticmethod
+        def _orphaned_entries(h5_group: h5py.Group, present: list[str]) -> list[str]:
+            """The names whose only version left in this group is one dead writer's backup."""
+            keys = list(h5_group.keys())
+            missing = {key.split(_REPLACED_MARKER)[0] for key in keys if _REPLACED_MARKER in key} - set(present)
+            return sorted(name for name in missing if len(_orphaned_backup_names(keys, name)) == 1)
 
         def get_group(self) -> list[str]:
             return list(self.h5.keys()) if self.h5 is not None else []
@@ -1949,8 +1970,12 @@ class Dataset:
             if any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS):
                 return True
             # A writer killed mid-replacement left the previous entry under its backup name, which
-            # every listing hides: it is the entry, and it goes back under it.
-            return any(_recover_orphaned_backup(Path(f"{base}.{ext}")) for ext in SUPPORTED_EXTENSIONS)
+            # every listing hides: it is the entry, and it goes back under it. Then the question is
+            # asked of disk again, because the recovery may have declined to a publish that landed
+            # meanwhile -- and that publish is an entry too.
+            for ext in SUPPORTED_EXTENSIONS:
+                _recover_orphaned_backup(Path(f"{base}.{ext}"))
+            return any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS)
 
         def get_names(self, group: str) -> list[str]:
             raise NotImplementedError()
@@ -2031,7 +2056,8 @@ class Dataset:
                 if candidate.is_dir():
                     return candidate
             for candidate in candidates:  # a writer killed mid-replacement left the previous store aside
-                if _recover_orphaned_backup(candidate):
+                _recover_orphaned_backup(candidate)
+                if candidate.is_dir():  # recovered here, or published by whoever won the race
                     return candidate
             raise NameError(f"OME-Zarr group '{name}' not found in '{self.filename}'.")
 
@@ -2736,8 +2762,10 @@ class Dataset:
         if os.path.exists(on_disk):
             return path
         # Absent is not always absent: a writer killed mid-replacement leaves the previous version
-        # under its backup name, which the listings hide.
-        return path if _recover_orphaned_backup(Path(on_disk)) else None
+        # under its backup name, which the listings hide. Asked of disk again after the attempt: the
+        # recovery declines to a publish that landed meanwhile, and that publish is the entry.
+        _recover_orphaned_backup(Path(on_disk))
+        return path if os.path.exists(on_disk) else None
 
     def _resolve_entry(self, groups: str, name: str, action: Callable[[Dataset.AbstractFile, str, str], _T]) -> _T:
         """Run ``action`` on the open file holding ``(groups, name)``: THE place entry resolution lives.

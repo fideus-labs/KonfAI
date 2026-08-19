@@ -49,8 +49,9 @@ no longer stops a run. Two things a run already wrote come out differently, see 
 
 - **transform**: the plan prices the route on what the chain reads: a destination that does not
   exist yet is not a read, so h5 to mha and h5 to omezarr stream instead of loading
-- **transform**: `Crop` keeps the last row of foreground on every axis. The box carried the LAST
-  foreground index where the crop reads a margin, so the far row was cut off
+- **transform**: `Crop` keeps the last row of foreground on every axis. The scan reports the last
+  foreground INDEX and the box carries the margin after it, so converting one into the other left
+  the far margin one voxel too large and the crop stopped short of that row
 - **transform**: `Crop` finds its box by a bounded quantile scan (exactly `numpy.quantile`) instead
   of holding the volume, and the plan reads no voxel for a global statistic: the rank reads it at
   first access, a LOAD case on the volume it holds
@@ -125,10 +126,11 @@ no longer stops a run. Two things a run already wrote come out differently, see 
   where the pass it replaces took 31 s) and `Median` reads the middle off a sort (1.5-2x on CPU,
   3.5x on CUDA); the folds a statistics pass computed are kept for the write pass when they fit
 - **transform**: a case is planned without listing the whole output directory
-- **reduction**: a fold that is not incremental reads its members several at a time. Each read is
+- **reduction**: a fold that is not incremental reads its members up to four at a time. Each read is
   a decode plus a replay of that case's chain, the members are independent, and such a fold holds
-  every member anyway, so nothing is spent that the plan did not already charge: a five-case fold
-  of a compressed cohort through `Clip` and `Resample`, 2.39 s to 0.97 s, the same bytes out
+  every member anyway, so nothing is spent that the plan did not already charge. The members reach
+  the operator in cohort order whatever order they arrive in, so the fold writes the same bytes: a
+  five-case fold of a compressed cohort through `Clip` and `Resample`, 2.39 s to 0.97 s
 - **dataset**: a volume's statistics come from one block walk, folded in cache-sized pieces, and a
   `.npy` entry answers its shape from the header instead of reading the array
 - **cli**: `import konfai` 0.9 to 0.08 s, `konfai --help` 2.9 to 0.3 s: torch, dicom and ome-zarr
