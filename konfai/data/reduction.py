@@ -121,7 +121,7 @@ class Mean(Reduction):
 
     def accumulate(self, tensor: torch.Tensor) -> None:
         if self._total is None:
-            self._total, self._dtype = tensor.float().clone(), tensor.dtype
+            self._total, self._dtype = tensor.to(torch.float32, copy=True), tensor.dtype
         else:
             self._total.add_(tensor.float())
         self._count += 1

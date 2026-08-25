@@ -54,6 +54,12 @@ def scheme(path: str | Path) -> str:
     return match.group(1) if match else ""
 
 
+def split_scheme(path: str) -> tuple[str, str]:
+    """``path`` as its ``scheme://`` prefix and what follows it; ``('', path)`` for a local path."""
+    match = _URI.match(path)
+    return (match.group(0), path[match.end() :]) if match else ("", path)
+
+
 def normalize(path: str | Path) -> str:
     """``path`` as KonfAI stores a root: a local path through ``Path.as_posix``, a URI untouched.
 
@@ -68,8 +74,14 @@ def join(root: str, *parts: str) -> str:
     return "/".join([root.rstrip("/"), *(str(part).strip("/") for part in parts if part)])
 
 
-def filesystem(path: str | Path, storage_options: dict[str, Any] | None = None) -> Any:
-    """The fsspec filesystem serving ``path``, opened with ``storage_options``."""
+def filesystem(path: str | Path) -> Any:
+    """The fsspec filesystem serving ``path``.
+
+    Opened with fsspec's own configuration and nothing else: it merges ``FSSPEC_<PROTO>_<KEY>`` from
+    the environment and ``~/.config/fsspec/*.json`` into every filesystem it builds, so a public S3
+    bucket is ``FSSPEC_S3_ANON=true`` and a private one the ``AWS_*`` variables botocore already
+    reads. KonfAI declares none of that itself.
+    """
     protocol = scheme(path)
     try:
         import fsspec
@@ -79,7 +91,7 @@ def filesystem(path: str | Path, storage_options: dict[str, Any] | None = None) 
             "Install it with: pip install konfai[omezarr]",
         ) from exc
     try:
-        return fsspec.filesystem(protocol, **(storage_options or {}))
+        return fsspec.filesystem(protocol)
     except ImportError as exc:
         extra = _SCHEME_EXTRAS.get(protocol)
         raise DatasetManagerError(
@@ -90,42 +102,40 @@ def filesystem(path: str | Path, storage_options: dict[str, Any] | None = None) 
         ) from exc
     except (TypeError, ValueError) as exc:
         raise DatasetManagerError(
-            f"'{protocol}://' refused the declared storage_options: {exc}.",
-            "storage_options is handed to the fsspec filesystem verbatim; check its key names"
-            " (anonymous S3 access is storage_options: {anon: true}).",
+            f"'{protocol}://' refused its fsspec configuration: {exc}.",
+            "Check the FSSPEC_" + protocol.upper() + "_* variables and ~/.config/fsspec/.",
         ) from exc
 
 
-def _ask(path: str | Path, storage_options: dict[str, Any] | None, question: str) -> bool:
+def _ask(path: str | Path, question: str) -> bool:
     """One yes/no question put to the remote filesystem. A filesystem that cannot be reached RAISES;
     only one that answers gets to say no."""
-    fs = filesystem(path, storage_options)
+    fs = filesystem(path)
     try:
         return bool(getattr(fs, question)(str(path)))
     except Exception as exc:
         raise _unreachable(path, "probed", exc) from exc
 
 
-def exists(path: str | Path, storage_options: dict[str, Any] | None = None) -> bool:
+def exists(path: str | Path) -> bool:
     """Whether ``path`` is there, asked of whichever filesystem owns it."""
-    return _ask(path, storage_options, "exists") if is_uri(path) else os.path.exists(path)
+    return _ask(path, "exists") if is_uri(path) else os.path.exists(path)
 
 
-def is_dir(path: str | Path, storage_options: dict[str, Any] | None = None) -> bool:
+def is_dir(path: str | Path) -> bool:
     """Whether ``path`` is a directory (a key prefix, on an object store)."""
-    return _ask(path, storage_options, "isdir") if is_uri(path) else os.path.isdir(path)
+    return _ask(path, "isdir") if is_uri(path) else os.path.isdir(path)
 
 
-def list_names(path: str | Path, storage_options: dict[str, Any] | None = None) -> list[str]:
+def list_names(path: str | Path) -> list[str]:
     """The names of ``path``'s direct children, sorted; ``[]`` when ``path`` is not a directory.
 
-    Never ``[]`` because the listing FAILED: a root behind an expired credential, a bucket that
-    denies listing and a typo in a URI all raise here, because each of them reads as an empty
-    cohort otherwise.
+    Never ``[]`` because the listing FAILED: an expired credential, a bucket that denies listing and
+    a typo in a URI all raise here, each of them reading as an empty cohort otherwise.
     """
     if not is_uri(path):
         return sorted(os.listdir(path)) if os.path.isdir(path) else []
-    fs, target = filesystem(path, storage_options), str(path)
+    fs, target = filesystem(path), str(path)
     try:
         if not fs.isdir(target):
             return []
@@ -164,7 +174,7 @@ def refuse_write(path: str | Path) -> None:
 def _unreachable(path: str | Path, action: str, exc: Exception) -> DatasetManagerError:
     return DatasetManagerError(
         f"'{path}' could not be {action}: {type(exc).__name__}: {exc}",
-        "Check the URI, the credentials the storage_options carry (anonymous access is"
-        " storage_options: {anon: true}) and that the bucket allows listing. A remote root that"
-        " cannot be reached is an error, never an empty cohort.",
+        "Check the URI, the credentials fsspec has for it (anonymous S3 access is"
+        " FSSPEC_S3_ANON=true) and that the bucket allows listing. A remote root that cannot be"
+        " reached is an error, never an empty cohort.",
     )

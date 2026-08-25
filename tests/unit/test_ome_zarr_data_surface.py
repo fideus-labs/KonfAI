@@ -79,6 +79,28 @@ def test_reader_returns_native_byte_order(tmp_path: Path) -> None:
     np.testing.assert_array_equal(patch, volume[:, :4])
 
 
+def test_a_big_endian_store_is_converted_by_the_copy_that_assembles_the_window(tmp_path: Path) -> None:
+    """The window is assembled into a native buffer, so no pass of its own walks every byte again."""
+    from konfai.utils.ome_zarr import _native_byteorder
+
+    store = _big_endian_store(tmp_path / "big_endian.ome.zarr", _volume())
+    patch, _ = read_ome_zarr_data_slice(store, (slice(None), slice(0, 4), slice(None), slice(None)))
+    assert patch.dtype.isnative
+    assert _native_byteorder(patch) is patch, "a second conversion would copy the whole window"
+
+
+def test_the_konfai_sidecar_is_read_once_and_not_once_per_region(tmp_path: Path) -> None:
+    """It is metadata, and a streamed run asks for it once per region: re-opening the store each
+    time is a read it never needed."""
+    from konfai.utils.ome_zarr import _konfai_attributes, clear_ome_zarr_cache
+
+    store = _big_endian_store(tmp_path / "big_endian.ome.zarr", _volume())
+    clear_ome_zarr_cache()
+    for row in range(4):
+        read_ome_zarr_data_slice(store, (slice(None), slice(row, row + 1), slice(None), slice(None)))
+    assert _konfai_attributes.cache_info() == (3, 1, 8, 1), "one read of the sidecar, three regions"
+
+
 def test_info_publishes_the_shape_the_reader_indexes(tmp_path: Path) -> None:
     """`shape` is the store's own axis order and `canonical_shape` is the reader's; sizing slices
     from the wrong one reads a transposed region with the right rank and no error."""
@@ -218,3 +240,98 @@ def test_a_chunk_stays_openable_whatever_plane_the_writer_declares() -> None:
 
 def test_a_writer_that_declares_nothing_leaves_the_store_its_own_default() -> None:
     assert _store_chunks([1, 8, 8, 8], None, np.float32) is None
+
+
+def _attributes() -> Attribute:
+    attribute = Attribute()
+    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
+    attribute["Spacing"] = np.asarray([1.0, 1.0, 1.0])
+    attribute["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
+    return attribute
+
+
+# ---------------------------------------------------------------- what a declared read plan buys
+
+
+def _sequence(cache, identity, steps):
+    """Feed ``steps`` to ``cache`` as reads of one-byte chunks; returns the chunks it decoded."""
+    decoded = []
+    for chunks in steps:
+        cache.begin(identity, frozenset(chunks))
+        for coords in chunks:
+            if cache.get((identity, coords)) is None:
+                decoded.append(coords)
+                cache.put((identity, coords), np.zeros(1, np.uint8))
+    return decoded
+
+
+def test_a_declared_plan_keeps_what_will_be_read_again() -> None:
+    """LRU is the best a cache can do without the future. With it, the chunk to drop is the one
+    whose next use is furthest away, which no policy can beat."""
+    from konfai.utils.ome_zarr import _DecodedChunkCache
+
+    steps = [{(0,)}, {(1,)}, {(2,)}, {(0,)}]  # (2,) is never wanted again, (0,) is
+    identity = ("store", "0")
+
+    lru = _DecodedChunkCache(2)
+    assert _sequence(lru, identity, steps) == [(0,), (1,), (2,), (0,)], "LRU drops the one it needs"
+
+    planned = _DecodedChunkCache(2)
+    planned.schedule(identity, [frozenset(step) for step in steps])
+    assert _sequence(planned, identity, steps) == [(0,), (1,), (2,)], "the plan keeps (0,)"
+
+
+def test_a_reader_that_deviates_from_its_plan_loses_it_and_nothing_else() -> None:
+    from konfai.utils.ome_zarr import _DecodedChunkCache
+
+    cache = _DecodedChunkCache(2)
+    identity = ("store", "0")
+    cache.schedule(identity, [frozenset({(0,)}), frozenset({(1,)})])
+    decoded = _sequence(cache, identity, [{(7,)}, {(8,)}, {(9,)}])  # nothing it declared
+    assert decoded == [(7,), (8,), (9,)]
+
+
+def test_forgetting_one_store_leaves_the_others_alone() -> None:
+    """Creating an output store used to drop every input's decoded chunks with it."""
+    from konfai.utils.ome_zarr import _DecodedChunkCache
+
+    cache = _DecodedChunkCache(1 << 20)
+    for store in ("source", "output"):
+        cache.put(((store, "0"), (0,)), np.zeros(8, np.uint8))
+    cache.forget("output")
+    assert cache.get((("source", "0"), (0,))) is not None
+    assert cache.get((("output", "0"), (0,))) is None
+
+
+def test_a_sweep_declares_the_regions_it_will_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep folds every block's pull map before it reads the first, so it can say what is
+    coming; a store that caches decoded blocks is the one thing that can use it."""
+    from konfai.data import patching as patching_module
+    from konfai.data.materialize import CaseMaterializer
+    from konfai.data.patching import DatasetManager, DatasetPatch
+    from konfai.data.transform import Clip, Save
+
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    declared: list[list] = []
+    monkeypatch.setattr(
+        Dataset, "plan_region_reads", lambda self, groups, name, windows: declared.append(list(windows))
+    )
+    rng = np.random.default_rng(0)
+    source = Dataset(tmp_path / "src", "mha")
+    source.write("CT", "CASE_000", (rng.random((1, 12, 8, 6)) * 100).astype(np.float32), _attributes())
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=source,
+        patch=DatasetPatch([4, 4, 4]),
+        transforms=[Clip(min_value=10.0, max_value=90.0), Save(f"{tmp_path / 'out'}:h5")],
+        data_augmentations_list=[],
+    )
+    CaseMaterializer(manager).materialize()
+
+    assert declared, "the sweep declared nothing"
+    windows = declared[0]
+    assert len(windows) == len(list(patching_module._sweep_targets([12, 8, 6], [3, 8, 6])))
+    assert all(len(window) == 4 for window in windows), "a window covers the channel axis too"

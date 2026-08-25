@@ -339,7 +339,10 @@ def _metric_sizing_budget(
     actually hands to resolve_patch."""
     data = DataMetric(memory_budget=memory_budget)
     data.datasets = {
-        "f": SimpleNamespace(get_names=lambda group: ["case"], get_infos=lambda group, name: ([1, 64, 64, 64], None))
+        "f": SimpleNamespace(
+            select_names=lambda group, requested: ["case"],
+            get_infos=lambda group, name: ([1, 64, 64, 64], None),
+        )
     }
     monkeypatch.setattr(DataMetric, "_resolve_dataset_sources", lambda self: {"CT": [("f", False)]}, raising=False)
     monkeypatch.setattr(budget, "available_memory_bytes", lambda: (100 * 2**30, "host"))

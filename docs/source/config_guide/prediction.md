@@ -80,7 +80,6 @@ Key fields:
 | Field | Type | Effect |
 | --- | --- | --- |
 | `dataset_filenames` | list[str] | Input dataset sources. |
-| `storage_options` | mapping | How a root named by a URI is reached, handed to fsspec verbatim (`{anon: true}` for a public S3 bucket). Ignored by local roots. |
 | `groups_src` | mapping | Input groups and preprocessing transforms. |
 | `augmentations` | mapping | Test-time augmentation definitions. |
 | `Patch` | mapping | Sliding-window or slice-wise inference setup. |

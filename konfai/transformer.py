@@ -46,6 +46,7 @@ from konfai.data.materialize import CaseMaterializer, Regime, Verdict
 from konfai.data.patching import (
     CASE_ELEMENT_BYTES,
     FALLBACK_INFLIGHT_FACTOR,
+    SWEEP_CLOCK,
     DatasetManager,
     save_destination,
 )
@@ -699,14 +700,10 @@ class Transformer(DistributedObject):
             entries.extend(planned)
             if item.kind == "case" and planned[0].verdict is Verdict.STREAM and item.engine.sub_cap_sweep():
                 sub_cap_sweeps = True
-        dropped: dict[str, int] = {}
+        # From the walk that already happened, never a walk of its own: a subset naming its cases
+        # never asked the roots what else they hold, and asking here is the listing it avoided.
         kept = set(self.dataset.case_names)
-        for group_src in self.dataset.groups_src:
-            available: set[str] = set()
-            for dataset in self.dataset.datasets.values():
-                if dataset.is_group_exist(group_src):
-                    available.update(dataset.get_names(group_src))
-            dropped[group_src] = len(available - kept)
+        dropped = {group: len(held - kept) for group, held in (self.dataset.cohort_names or {}).items()}
         dtype_hypothesis = f"{'/'.join(sorted(planned_dtypes)) or 'float32'} / source channels"
         return TransformPlan(
             entries,
@@ -893,6 +890,7 @@ class Transformer(DistributedObject):
         device = get_device(local_rank)
         chain_device = torch.device(f"cuda:{device}") if isinstance(device, int) else device
         started = time.monotonic()
+        SWEEP_CLOCK.reset()
         items = self._work_items()
         shard = self._shards[global_rank]
         counts: Counter[Verdict] = Counter()
@@ -930,6 +928,9 @@ class Transformer(DistributedObject):
             + (f", {len(failed)} FAILED" if failed else "")
             + f" -> outputs in {self.transform_path / 'outputs.json'}"
         )
+        clock = SWEEP_CLOCK.report()
+        if clock is not None:
+            print(clock)
         if failed:
             listed = "\n".join(f"  {group_dest}: '{what}': {reason}" for group_dest, what, reason in failed)
             raise TransformerError(

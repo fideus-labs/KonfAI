@@ -37,7 +37,6 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import itertools
-import json
 import operator
 import shutil
 import threading
@@ -51,7 +50,6 @@ import numpy as np
 
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.runtime import map_over_rank_pool
-from konfai.utils.uri import is_uri
 
 try:
     import zarr
@@ -77,24 +75,9 @@ _KONFAI_ATTR_KEY = "konfai"
 _SPATIAL = ("z", "y", "x")
 
 
-def _options_key(storage_options: dict[str, Any] | None) -> str:
-    """``storage_options`` as one hashable, order-independent key: the memos below are keyed by
-    path, and a path says nothing about the credentials it was reached with. JSON because the values
-    nest (a ``client_kwargs`` mapping)."""
-    return json.dumps(storage_options or {}, sort_keys=True, default=str)
-
-
-def _open_kwargs(store_path: str | Path, options_key: str) -> dict[str, Any]:
-    """What ``zarr.open_group`` takes for this store: ``storage_options`` only where they mean
-    something, so a local path opens on a zarr that has no such argument."""
-    options = json.loads(options_key)
-    return {"storage_options": options} if options and is_uri(store_path) else {}
-
-
-def _from_ngff_zarr(store_path: str | Path, options_key: str) -> Any:
-    """``ngff_zarr.from_ngff_zarr`` on a local path or a URI: the one place the two are the same
-    call. A URI reaches fsspec through ``storage_options``; a local path passes none."""
-    return ngff_zarr.from_ngff_zarr(str(store_path), **_open_kwargs(store_path, options_key))
+def _native_dtype(dtype: np.dtype) -> np.dtype:
+    """``dtype`` in the machine's own byte order."""
+    return dtype.newbyteorder("=") if dtype.byteorder == ">" else dtype
 
 
 def _native_byteorder(array: np.ndarray) -> np.ndarray:
@@ -109,7 +92,7 @@ def _native_byteorder(array: np.ndarray) -> np.ndarray:
     extension taking a pointer) sees the bytes swapped. Normalising once at the read boundary is
     what every caller would otherwise have to remember to do by hand.
     """
-    return array.astype(array.dtype.newbyteorder("="), copy=False) if array.dtype.byteorder == ">" else array
+    return array.astype(_native_dtype(array.dtype), copy=False)
 
 
 # NGFF RFC-5 types the component axis of a vector field, so a displacement field says what it is on
@@ -177,17 +160,25 @@ def _require_zarr_v3_for_rfc5() -> None:
         )
 
 
-def _read_konfai_attributes(store_path: str | Path, options_key: str = "{}") -> dict[str, Any]:
-    """Read KonfAI's proprietary ``Attribute`` sidecar from the store, if present."""
+def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
+    """KonfAI's proprietary ``Attribute`` sidecar from the store, if present.
+
+    A copy of a memoised read: it is metadata, and a streamed run asks for it once per region.
+    """
+    return dict(_konfai_attributes(str(store_path)))
+
+
+@lru_cache(maxsize=8)
+def _konfai_attributes(store_path: str) -> dict[str, Any]:
     try:
-        group = zarr.open_group(str(store_path), mode="r", **_open_kwargs(store_path, options_key))
+        group = zarr.open_group(store_path, mode="r")
         return dict(dict(group.attrs).get(_KONFAI_ATTR_KEY, {}).get("attributes", {}))
     except (KeyError, OSError, ValueError, TypeError):
         return {}
 
 
 @lru_cache(maxsize=8)
-def _load_image(store_path: str, level: int, options_key: str = "{}") -> Any:
+def _load_image(store_path: str, level: int) -> Any:
     """Return the ``NgffImage`` for ``level`` of an OME-Zarr store, memoised per (store, level).
 
     A streamed run reads one patch per call, and re-parsing the NGFF metadata and rebuilding the
@@ -203,7 +194,7 @@ def _load_image(store_path: str, level: int, options_key: str = "{}") -> Any:
     """
     _require_ngff_zarr()
     try:
-        multiscales = _from_ngff_zarr(store_path, options_key)
+        multiscales = ngff_zarr.from_ngff_zarr(str(store_path))
     except (KeyError, IndexError, OSError, TypeError, ValueError) as exc:
         raise DatasetManagerError(
             f"Cannot open OME-Zarr store '{store_path}' (level {level}).",
@@ -222,8 +213,12 @@ def _load_image(store_path: str, level: int, options_key: str = "{}") -> Any:
     return multiscales.images[level]
 
 
-def clear_ome_zarr_cache() -> None:
+def clear_ome_zarr_cache(store_path: str | Path | None = None) -> None:
     """Forget the memoised NGFF images, so a store replaced on disk is parsed afresh.
+
+    A named store forgets its own decoded chunks and read schedule and no one else's: creating an
+    output store used to drop every input's too, and a cohort paid that per case. The metadata
+    memos are cleared whatever the caller names, being one parse each to rebuild.
 
     The write paths here call it for their own output. Anything that materialises a store by other
     means (copying one over another, say) has to call it too: the memo is keyed on the path, and
@@ -233,11 +228,12 @@ def clear_ome_zarr_cache() -> None:
     _load_image.cache_clear()
     _level_path.cache_clear()
     _level_array.cache_clear()
+    _konfai_attributes.cache_clear()
     if _CHUNK_CACHE is not None:
-        _CHUNK_CACHE.clear()
+        _CHUNK_CACHE.forget(None if store_path is None else str(store_path))
 
 
-def is_displacement_field(store_path: str | Path, storage_options: dict[str, Any] | None = None) -> bool:
+def is_displacement_field(store_path: str | Path) -> bool:
     """Whether the store declares its component axis as an NGFF RFC-5 displacement field.
 
     This is what lets a DVF be read back as a transform rather than as a 3-channel image, and it is
@@ -250,7 +246,7 @@ def is_displacement_field(store_path: str | Path, storage_options: dict[str, Any
     if not _NGFF_ZARR_AVAILABLE:
         return False
     try:
-        metadata = _from_ngff_zarr(store_path, _options_key(storage_options)).metadata
+        metadata = ngff_zarr.from_ngff_zarr(str(store_path)).metadata
     except Exception:
         # "Not a displacement field" is the only answer this owes: it is asked purely to decide HOW to
         # read an entry, and an absent or unreadable store is not one either.
@@ -272,8 +268,50 @@ def _ordered(values: dict[str, float], dims: Sequence[str]) -> list[float]:
     return [float(values.get(axis, 1.0 if axis == "c" else 0.0)) for axis in dims]
 
 
+#: A chunk no declared read will ask for again, so the first to go.
+_NEVER_AGAIN = 1 << 62
+
+
+class _ReadSchedule:
+    """The chunks each of a caller's declared reads will touch, in the order it will read them.
+
+    LRU is the best a cache can do without the future. With it, the fewest decodes any policy can
+    reach is to evict the chunk whose next use is furthest away. Measured on a 513x1331x1776
+    resample cut into 40 blocks over 126 chunks of source, at a cache holding 39 of them: 173
+    decodes under LRU, 133 under this, 126 the floor.
+
+    Followed only while the reads match what was declared, and abandoned at the first that does
+    not: a caller that deviates loses the optimisation, never the answer.
+    """
+
+    def __init__(self, steps: list[frozenset[tuple]]) -> None:
+        self._steps = steps
+        self._cursor = -1
+        self._uses: dict[tuple, list[int]] = {}
+        for step, chunks in enumerate(steps):
+            for coords in chunks:
+                self._uses.setdefault(coords, []).append(step)
+        self._passed: dict[tuple, int] = dict.fromkeys(self._uses, 0)
+
+    def advance(self, chunks: frozenset[tuple]) -> bool:
+        """Move to the read about to happen; ``False`` when it is not the one declared."""
+        self._cursor += 1
+        return self._cursor < len(self._steps) and self._steps[self._cursor] == chunks
+
+    def next_use(self, coords: tuple) -> int:
+        """The step that reads ``coords`` next, ``_NEVER_AGAIN`` when none does."""
+        uses = self._uses.get(coords)
+        if uses is None:
+            return _NEVER_AGAIN
+        passed = self._passed[coords]
+        while passed < len(uses) and uses[passed] <= self._cursor:
+            passed += 1
+        self._passed[coords] = passed
+        return uses[passed] if passed < len(uses) else _NEVER_AGAIN
+
+
 class _DecodedChunkCache:
-    """Decoded chunks of OME-Zarr arrays, kept whole, evicted least-recently-used under a byte cap.
+    """Decoded chunks of OME-Zarr arrays, kept whole, evicted under a byte cap.
 
     zarr 3 has no chunk cache of its own: every read decodes every chunk it touches, in full, and a
     streamed run touches the same chunks region after region -- a 31-row slab of a 256-row chunk
@@ -289,6 +327,7 @@ class _DecodedChunkCache:
         self._entries: OrderedDict[tuple, np.ndarray] = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
+        self._schedules: dict[Any, _ReadSchedule] = {}
 
     def get(self, key: tuple) -> np.ndarray | None:
         with self._lock:
@@ -305,22 +344,50 @@ class _DecodedChunkCache:
                 return
             self._entries[key] = chunk
             self._bytes += chunk.nbytes
-            while self._bytes > self.capacity and self._entries:
-                _, evicted = self._entries.popitem(last=False)
-                self._bytes -= evicted.nbytes
+            self._trim()
 
     def set_capacity(self, capacity_bytes: int) -> None:
-        """Re-cap the cache, evicting least-recently-used entries down to the new ceiling."""
+        """Re-cap the cache, evicting down to the new ceiling."""
         with self._lock:
             self.capacity = int(capacity_bytes)
-            while self._bytes > self.capacity and self._entries:
-                _key, evicted = self._entries.popitem(last=False)
-                self._bytes -= evicted.nbytes
+            self._trim()
 
-    def clear(self) -> None:
+    def schedule(self, identity: Any, steps: list[frozenset[tuple]]) -> None:
+        """Declare the chunks the reads about to happen will touch, in order."""
         with self._lock:
-            self._entries.clear()
-            self._bytes = 0
+            self._schedules[identity] = _ReadSchedule(steps)
+
+    def begin(self, identity: Any, chunks: frozenset[tuple]) -> None:
+        """The chunks the read about to happen touches, which is what advances its schedule."""
+        with self._lock:
+            schedule = self._schedules.get(identity)
+            if schedule is not None and not schedule.advance(chunks):
+                del self._schedules[identity]
+
+    def forget(self, store_path: str | None = None) -> None:
+        """Drop what one store put here, or everything when no store is named."""
+        with self._lock:
+            if store_path is None:
+                self._entries.clear()
+                self._schedules.clear()
+                self._bytes = 0
+                return
+            for key in [key for key in self._entries if key[0][0] == store_path]:
+                self._bytes -= self._entries.pop(key).nbytes
+            for identity in [identity for identity in self._schedules if identity[0] == store_path]:
+                del self._schedules[identity]
+
+    def _trim(self) -> None:
+        """Down to the ceiling: the chunk whose next declared use is furthest away, oldest first
+        among those nothing declared. Held under ``self._lock``."""
+        while self._bytes > self.capacity and self._entries:
+            key = max(self._entries, key=self._next_use) if self._schedules else next(iter(self._entries))
+            self._bytes -= self._entries.pop(key).nbytes
+
+    def _next_use(self, key: tuple) -> int:
+        identity, coords = key
+        schedule = self._schedules.get(identity)
+        return _NEVER_AGAIN if schedule is None else schedule.next_use(coords)
 
 
 #: The floor the cache keeps whatever the budget: below a chunk or two it serves nothing and every
@@ -365,11 +432,33 @@ def _chunk_cache() -> _DecodedChunkCache:
 
 
 @lru_cache(maxsize=8)
-def _level_array(store_path: str, level_path: str, options_key: str = "{}") -> Any:
+def _level_array(store_path: str, level_path: str) -> Any:
     """The zarr array behind one level, opened once: chunk-wise reads go to it directly, not through
     the dask graph ngff-zarr wraps it in (which rebuilds a task per chunk per read)."""
     _require_zarr()
-    return zarr.open_group(store_path, mode="r", **_open_kwargs(store_path, options_key))[level_path]
+    return zarr.open_group(store_path, mode="r")[level_path]
+
+
+def _normalized_selection(index: tuple, shape: Sequence[int]) -> tuple[list[slice], list[int]]:
+    """``index`` as one unit-step slice per axis, and the axes an integer selection squeezes out."""
+    selections: list[slice] = []
+    squeeze: list[int] = []
+    for axis, item in enumerate(index):
+        if isinstance(item, int):
+            selections.append(slice(item, item + 1))
+            squeeze.append(axis)
+        else:
+            selections.append(slice(*item.indices(shape[axis])))
+    return selections, squeeze
+
+
+def _touched_chunks(selections: Sequence[slice], chunks: Sequence[int]) -> list[tuple]:
+    """The chunk coordinates a normalised selection covers."""
+    ranges = [
+        range(sel.start // ch, max(sel.start, sel.stop - 1) // ch + 1) if sel.stop > sel.start else range(0)
+        for sel, ch in zip(selections, chunks, strict=True)
+    ]
+    return list(itertools.product(*ranges))
 
 
 def _read_chunked(store_path: str, level_path: str, array: Any, index: tuple) -> np.ndarray:
@@ -381,27 +470,17 @@ def _read_chunked(store_path: str, level_path: str, array: Any, index: tuple) ->
     """
     cache = _chunk_cache()
     shape, chunks = array.shape, array.chunks
-    # Per axis: the selection, its span, and the chunk range it touches.
-    selections: list[slice] = []
-    squeeze: list[int] = []
-    for axis, item in enumerate(index):
-        if isinstance(item, int):
-            selections.append(slice(item, item + 1))
-            squeeze.append(axis)
-        else:
-            selections.append(slice(*item.indices(shape[axis])))
-    ranges = [
-        range(sel.start // ch, max(sel.start, sel.stop - 1) // ch + 1) if sel.stop > sel.start else range(0)
-        for sel, ch in zip(selections, chunks, strict=True)
-    ]
+    selections, squeeze = _normalized_selection(index, shape)
     out_shape = tuple(max(0, sel.stop - sel.start) for sel in selections)
-    out = np.empty(out_shape, dtype=array.dtype)
+    # In the machine's byte order from the start: a big-endian store is converted by the copy that
+    # assembles the window, where a pass of its own over the result is a second walk of every byte.
+    out = np.empty(out_shape, dtype=_native_dtype(array.dtype))
     if any(extent == 0 for extent in out_shape):
         return out.squeeze(axis=tuple(squeeze)) if squeeze else out
-    import itertools
 
     identity = (store_path, level_path)
-    wanted = list(itertools.product(*ranges))
+    wanted = list(_touched_chunks(selections, chunks))
+    cache.begin(identity, frozenset(wanted))
     missing = [coords for coords in wanted if cache.get((identity, coords)) is None]
     if missing:
         # ONE zarr read for the chunk-aligned hull of what is missing: zarr decodes the chunks of a
@@ -423,7 +502,7 @@ def _read_chunked(store_path: str, level_path: str, array: Any, index: tuple) ->
                 slice((c - lo_) * ch, min((c - lo_ + 1) * ch, extent - lo_ * ch))
                 for c, lo_, ch, extent in zip(coords, lo, chunks, shape, strict=True)
             )
-            cache.put(key, np.ascontiguousarray(decoded[piece]))
+            cache.put(key, np.ascontiguousarray(decoded[piece], dtype=out.dtype))
         del decoded
 
     def place(coords: tuple) -> None:
@@ -450,26 +529,71 @@ def _read_chunked(store_path: str, level_path: str, array: Any, index: tuple) ->
 
 
 @lru_cache(maxsize=8)
-def _level_path(store_path: str, level: int, options_key: str = "{}") -> str | None:
+def _level_path(store_path: str, level: int) -> str | None:
     """The zarr path of one level, from the store's multiscales metadata, memoised beside the image."""
     try:
-        datasets = _from_ngff_zarr(store_path, options_key).metadata.datasets
+        datasets = ngff_zarr.from_ngff_zarr(store_path).metadata.datasets
         return str(datasets[level if len(datasets) > 1 else 0].path)
     except Exception:
         return None
 
 
-def _read_level_window(store_path: str, level: int, image: Any, index: tuple, options_key: str = "{}") -> np.ndarray:
+def _read_level_window(store_path: str, level: int, image: Any, index: tuple) -> np.ndarray:
     """The window through the decoded-chunk cache when the level's array can be opened directly, else
     the plain lazy read: same values either way."""
-    level_path = _level_path(store_path, level, options_key)
+    level_path = _level_path(store_path, level)
     if level_path is not None:
         # Any failure to open the level directly means: read through the lazy array, as before.
         with contextlib.suppress(Exception):
-            array = _level_array(store_path, level_path, options_key)
+            array = _level_array(store_path, level_path)
             if tuple(array.shape) == tuple(image.data.shape):
                 return _read_chunked(store_path, level_path, array, index)
     return np.asarray(image.data[index])
+
+
+def _store_index(
+    dims: Sequence[str], canonical_shape: Sequence[int], slices: tuple[slice, ...], timepoint: int
+) -> tuple[int | slice, ...]:
+    """A KonfAI channel-first ``C[Z]YX`` selection as one per axis of the store, in its own order."""
+    if len(slices) != len(canonical_shape):
+        raise DatasetManagerError(f"Expected {len(canonical_shape)} slices, got {len(slices)}.")
+    normalized = [slice(*item.indices(size)) for item, size in zip(slices, canonical_shape, strict=True)]
+    spatial = dict(zip([axis for axis in _SPATIAL if axis in dims], normalized[1:], strict=True))
+    return tuple(
+        timepoint if axis == "t" else normalized[0] if axis == "c" else spatial.get(axis, slice(None)) for axis in dims
+    )
+
+
+def plan_ome_zarr_reads(
+    store_path: str | Path, windows: Sequence[tuple[slice, ...]], *, level: int = 0, timepoint: int = 0
+) -> None:
+    """Declare the ``C[Z]YX`` windows about to be read from a store, in the order they will be read.
+
+    What the decoded-chunk cache does with it: evict the chunk whose next declared use is furthest
+    away instead of the least recently used, which is the fewest decodes any policy can reach. The
+    gain is the whole of it where a miss is expensive -- a tight cache, or a store across a network,
+    where a miss is a download. Declaring nothing costs nothing: the cache stays LRU.
+    """
+    if not _NGFF_ZARR_AVAILABLE or not windows:
+        return
+    with contextlib.suppress(Exception):  # a store this cannot read is simply not scheduled
+        image = _load_image(str(store_path), level)
+        level_path = _level_path(str(store_path), level)
+        if level_path is None:
+            return
+        array = _level_array(str(store_path), level_path)
+        dims = [str(axis).lower() for axis in image.dims]
+        canonical_shape = _canonical_shape(dims, image.data.shape)
+        steps = [
+            frozenset(
+                _touched_chunks(
+                    _normalized_selection(_store_index(dims, canonical_shape, window, timepoint), array.shape)[0],
+                    array.chunks,
+                )
+            )
+            for window in windows
+        ]
+        _chunk_cache().schedule((str(store_path), level_path), steps)
 
 
 def read_ome_zarr_data_slice(
@@ -478,34 +602,13 @@ def read_ome_zarr_data_slice(
     *,
     level: int = 0,
     timepoint: int = 0,
-    storage_options: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Read a KonfAI channel-first ``C[Z]YX`` patch from an OME-Zarr store (lazy).
-
-    ``storage_options`` is handed to fsspec when ``store_path`` is a URI, so a cohort on object
-    storage is read by the same call as one on disk.
-    """
-    options_key = _options_key(storage_options)
-    image = _load_image(str(store_path), level, options_key)
+    """Read a KonfAI channel-first ``C[Z]YX`` patch from an OME-Zarr store (lazy)."""
+    image = _load_image(str(store_path), level)
     dims = [str(axis).lower() for axis in image.dims]
     canonical_shape = _canonical_shape(dims, image.data.shape)
-    if len(slices) != len(canonical_shape):
-        raise DatasetManagerError(f"Expected {len(canonical_shape)} slices, got {len(slices)}.")
-
-    normalized = [slice(*item.indices(size)) for item, size in zip(slices, canonical_shape, strict=True)]
-    spatial_slices = dict(zip([axis for axis in _SPATIAL if axis in dims], normalized[1:], strict=True))
-    index: list[int | slice] = []
-    for axis in dims:
-        if axis == "t":
-            index.append(timepoint)
-        elif axis == "c":
-            index.append(normalized[0])
-        elif axis in spatial_slices:
-            index.append(spatial_slices[axis])
-        else:
-            index.append(slice(None))
-
-    patch = _read_level_window(str(store_path), level, image, tuple(index), options_key)
+    index = _store_index(dims, canonical_shape, slices, timepoint)
+    patch = _read_level_window(str(store_path), level, image, index)
     remaining = [axis for axis, selection in zip(dims, index, strict=True) if not isinstance(selection, int)]
     wanted = [axis for axis in ("c", *_SPATIAL) if axis in remaining]
     patch = np.transpose(patch, [remaining.index(axis) for axis in wanted])
@@ -519,7 +622,7 @@ def read_ome_zarr_data_slice(
         "dtype": str(image.data.dtype),
         "scale": _ordered(dict(image.scale), dims),
         "translation": _ordered(dict(image.translation), dims),
-        "attributes": _read_konfai_attributes(store_path, options_key),
+        "attributes": _read_konfai_attributes(store_path),
     }
     return _native_byteorder(np.asarray(patch)), metadata
 
@@ -649,7 +752,7 @@ def update_konfai_attributes(store_path: str | Path, extra: dict[str, Any]) -> N
     # opposite is the plausible assumption: a foreign `zarr.open_group(mode="r")` reads back a bound
     # written this way on both sides of this line.
     group.attrs[_KONFAI_ATTR_KEY] = {"attributes": sidecar}
-    clear_ome_zarr_cache()
+    clear_ome_zarr_cache(store_path)
 
 
 def _type_component_axis(multiscales: Any, axis_type: str) -> None:
@@ -708,7 +811,7 @@ def create_ome_zarr_store(
     cannot infer, and a store whose chunks straddle it turns every region write into a
     read-modify-write.
     """
-    clear_ome_zarr_cache()
+    clear_ome_zarr_cache(store_path)
     _require_ngff_zarr()
     spatial_axes, scale_values, translation_values = _spatial_geometry(
         len(shape), f"shape {list(shape)}", spacing, origin
@@ -880,7 +983,7 @@ def append_ome_zarr_levels(
     if not scale_factors:
         return
     store = Path(store_path)
-    clear_ome_zarr_cache()
+    clear_ome_zarr_cache(store)
     field = is_displacement_field(store)
     base = ngff_zarr.from_ngff_zarr(str(store)).images[0]
     stored_chunks = tuple(int(size) for size in base.data.chunksize)
@@ -932,12 +1035,10 @@ def append_ome_zarr_levels(
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     zarr.consolidate_metadata(str(store))
-    clear_ome_zarr_cache()
+    clear_ome_zarr_cache(store)
 
 
-def get_ome_zarr_info(
-    store_path: str | Path, level: int = 0, storage_options: dict[str, Any] | None = None
-) -> dict[str, Any]:
+def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
     """OME-Zarr metadata, without reading pixel data.
 
     Three of these keys describe the same level in two different orders, and mixing them is the
@@ -950,11 +1051,10 @@ def get_ome_zarr_info(
     ``geometry`` exists so that never has to be reasoned about: it maps each axis NAME to its
     ``(scale, translation)``. Prefer it.
     """
-    options_key = _options_key(storage_options)
-    image = _load_image(str(store_path), level, options_key)
+    image = _load_image(str(store_path), level)
     dims = [str(axis).lower() for axis in image.dims]
     try:
-        n_levels = len(_from_ngff_zarr(store_path, options_key).images)
+        n_levels = len(ngff_zarr.from_ngff_zarr(str(store_path)).images)
     except (OSError, TypeError, ValueError):
         n_levels = 1
     return {
@@ -980,5 +1080,5 @@ def get_ome_zarr_info(
             )
         },
         "n_levels": n_levels,
-        "attributes": _read_konfai_attributes(store_path, options_key),
+        "attributes": _read_konfai_attributes(store_path),
     }

@@ -80,6 +80,12 @@ The figure is an estimate, computed from file headers (`prod(shape) × 4 bytes`
 per group), so it ignores the dtype you stored, size-changing transforms and
 augmented copies. It is a switch, not an allocator limit.
 
+It also bounds only the buffers the pipeline holds for your data. The
+interpreter, torch and its CUDA context, the model and each worker's own
+working set sit outside it, so the peak RSS a run reports is the budget plus a
+floor that does not move when the budget does: lowering the budget lowers the
+peak by roughly what you took off, never to the budget itself.
+
 ## What decides whether a chain streams
 
 Every transform declares how its output at one voxel depends on its input. That

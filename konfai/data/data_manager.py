@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, TypeAlias, cast
+from typing import TypeAlias, cast
 
 import numpy as np
 import torch
@@ -763,6 +763,31 @@ class Subset:
             return [i for i in range(len(names)) if i not in index]
         return sorted(index)
 
+    @staticmethod
+    def _excludes(selector: str | int) -> bool:
+        return isinstance(selector, str) and selector.startswith("~")
+
+    def _included_names(self, selector: str | int) -> set[str] | None:
+        """The cases ``selector`` keeps, or ``None`` when only the cohort can say which they are."""
+        if isinstance(selector, int) or self._is_slice_selector(selector):
+            return None  # a position, and positions are defined against the full sorted list
+        if os.path.exists(selector):
+            return set(self._read_names_from_file(selector))
+        return {selector}
+
+    def required_names(self) -> set[str] | None:
+        """The cases this subset keeps, when it can name them, or ``None`` when it needs the cohort.
+
+        A root is asked for these instead of for everything it holds. Exclusions do not appear:
+        they only remove from what the inclusions brought, and a subset that ONLY excludes is
+        defined against the full list, so it asks for it.
+        """
+        if self.requires_infos():
+            return None  # a subclass selecting on geometry: it is handed every case, and picks
+        selectors = self.subset if isinstance(self.subset, list) else [self.subset]
+        included = [self._included_names(s) for s in selectors if s is not None and not self._excludes(s)]
+        return None if not included or None in included else set().union(*included)  # type: ignore[arg-type]
+
     def __call__(self, names: list[str], infos: dict[str, tuple[list[int], Attribute]]) -> set[str]:
         names = sorted(names)
         size = len(names)
@@ -825,18 +850,17 @@ class DataSources(ABC):
         groups_src: Mapping[str, Group | GroupMetric | GroupOut],
         subset: Subset,
         memory_budget: str | float | None,
-        storage_options: dict[str, Any] | None = None,
     ) -> None:
         self.dataset_filenames = dataset_filenames
         self.groups_src = groups_src
         self.subset = subset
         self.memory_budget = memory_budget
-        #: How a remote root among ``dataset_filenames`` is reached, handed to fsspec verbatim
-        #: (``{anon: true}`` for a public S3 bucket). One mapping for every root of the run.
-        self.storage_options = dict(storage_options) if storage_options else None
         self.datasets: dict[str, Dataset] = {}
         #: The selected case names in run order; filled by :meth:`prepare`.
         self.case_names: list[str] = []
+        #: Per source group, every case the roots hold, when the walk read them; ``None`` when the
+        #: subset named its cases and the roots were never asked for the rest.
+        self.cohort_names: dict[str, set[str]] | None = None
         self._managers: dict[str, list[DatasetManager]] | None = None
 
     @property
@@ -918,6 +942,7 @@ class DataSources(ABC):
         if self.dataset_filenames is None or len(self.dataset_filenames) == 0:
             raise DatasetManagerError("No dataset filenames were provided")
         self.datasets = {}
+        requested = self.subset.required_names()
         for dataset_filename in self.dataset_filenames:
             if dataset_filename is None:
                 raise DatasetManagerError(
@@ -940,10 +965,10 @@ class DataSources(ABC):
                     f"Supported formats are: {', '.join(SUPPORTED_FORMATS)}",
                 )
 
-            dataset = Dataset(filename, file_format, storage_options=self.storage_options)
+            dataset = Dataset(filename, file_format)
             self.datasets[filename] = dataset
             for group in self.groups_src:
-                if dataset.is_group_exist(group):
+                if dataset.is_group_exist(group, requested):
                     datasets.setdefault(group, []).append((filename, append))
 
         for group_src in self.groups_src:
@@ -970,6 +995,11 @@ class DataSources(ABC):
             {} if subset_requires_infos else None
         )
         empty_infos: dict[str, tuple[list[int], Attribute]] = {}
+        requested = self.subset.required_names()
+        if requested is None:
+            roots = sorted({filename for entries in datasets.values() for filename, _ in entries})
+            print(f"[KonfAI] listing every case of {', '.join(sorted(datasets))} under {', '.join(roots)}")
+        cohort: dict[str, set[str]] = {}
         names: set[str] = set()
         for group in self.groups_src:
             names_by_group = set()
@@ -977,17 +1007,19 @@ class DataSources(ABC):
             if dataset_info is not None:
                 dataset_info[group] = {}
             for filename, _ in datasets[group]:
-                group_names = self.datasets[filename].get_names(group)
+                group_names = self.datasets[filename].select_names(group, requested)
                 names_by_group.update(group_names)
                 dataset_name[group][filename] = group_names
                 if dataset_info is not None:
                     dataset_info[group][filename] = {
                         name: self.datasets[filename].get_infos(group, name) for name in group_names
                     }
+            cohort[group] = set(names_by_group)
             if len(names) == 0:
                 names.update(names_by_group)
             else:
                 names = names.intersection(names_by_group)
+        self.cohort_names = cohort if requested is None else None
         if len(names) == 0:
             raise DatasetManagerError(
                 f"No data was found for groups {list(self.groups_src.keys())}: although each group contains data "
@@ -1159,9 +1191,8 @@ class Data(DataSources):
         data_augmentations_list: dict[str, DataAugmentationsList] | None = None,
         inline_augmentations: bool = False,
         validation_augmentations: bool = True,
-        storage_options: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(dataset_filenames, groups_src, subset, memory_budget, storage_options)
+        super().__init__(dataset_filenames, groups_src, subset, memory_budget)
         self.patch = patch
         self.validation = validation
         self.validation_augmentations = validation_augmentations
@@ -1387,8 +1418,9 @@ class Data(DataSources):
             )
         self.patch.patch_size[:] = [int(size) for size in patch_size]
         datasets = self._resolve_dataset_sources()
+        requested = self.subset.required_names()
         dataset_name = {
-            group: {filename: self.datasets[filename].get_names(group) for filename, _ in entries}
+            group: {filename: self.datasets[filename].select_names(group, requested) for filename, _ in entries}
             for group, entries in datasets.items()
         }
         self._build_partitions(dataset_name)
@@ -1674,7 +1706,6 @@ class DataTrain(Data):
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
         persistent_workers: bool | None = None,
-        storage_options: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             dataset_filenames,
@@ -1682,7 +1713,6 @@ class DataTrain(Data):
             subset,
             memory_budget,
             patch=patch,
-            storage_options=storage_options,
             # Training re-reads every case each epoch: cache when the dataset fits the
             # 'memory_budget' fit-test, stream when it does not.
             use_cache=True,
@@ -1718,7 +1748,6 @@ class DataPrediction(Data):
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
         persistent_workers: bool | None = None,
-        storage_options: dict[str, Any] | None = None,
     ) -> None:
 
         super().__init__(
@@ -1727,7 +1756,6 @@ class DataPrediction(Data):
             subset,
             memory_budget,
             patch=patch,
-            storage_options=storage_options,
             use_cache=False,
             batch_size=batch_size,
             validation=None,
@@ -1773,10 +1801,11 @@ class DataMetric(Data):
         # one patch every case then shares (a smaller case simply yields fewer patches).
         channels_by_name: dict[str, int] = {}
         spatial_by_name: dict[str, list[int]] = {}
+        requested = self.subset.required_names()
         for group, entries in sources.items():
             for filename, _append in entries:
                 dataset = self.datasets[filename]
-                for name in dataset.get_names(group):
+                for name in dataset.select_names(group, requested):
                     shape, _ = dataset.get_infos(group, name)
                     channels_by_name[name] = channels_by_name.get(name, 0) + int(shape[0])
                     spatial = [int(s) for s in shape[1:]]
@@ -1824,7 +1853,6 @@ class DataMetric(Data):
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
         persistent_workers: bool | None = None,
-        storage_options: dict[str, Any] | None = None,
     ) -> None:
 
         super().__init__(
@@ -1833,7 +1861,6 @@ class DataMetric(Data):
             subset,
             memory_budget,
             patch=None,
-            storage_options=storage_options,
             # Evaluation reads each case exactly once (no augmentations, one pass): a cache is never
             # re-read, it only fronts the whole dataset's RAM. Stream.
             use_cache=False,
@@ -1866,9 +1893,8 @@ class DataTransform(DataSources):
         groups_src: dict[str, GroupOut] = {"default": GroupOut()},
         memory_budget: str | float = "auto",
         subset: PredictionSubset = PredictionSubset(),
-        storage_options: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(dataset_filenames, groups_src, subset, memory_budget, storage_options)
+        super().__init__(dataset_filenames, groups_src, subset, memory_budget)
         #: The run's seed, set by the workflow before :meth:`prepare`. Stamped onto every ``Expand``
         #: below, which is where the only randomness of a transform run lives.
         self.manual_seed = 0

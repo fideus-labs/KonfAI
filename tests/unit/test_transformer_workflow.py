@@ -640,27 +640,37 @@ def test_the_console_says_the_plan_in_one_line_whatever_the_cohort_size(
 ) -> None:
     """TRANSFORM is the one workflow that plans, and it printed the whole plan: its per-case notes
     and case lists grow with the cohort, so a startup that should read like every other workflow's
-    (a line, then the bar) became a page. The console gets a summary that counts what it folds, and
-    the full plan opens the run's log."""
-    _write_source(tmp_path, cases=12)
-    _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"))
-    workflow = _build(tmp_path)
+    (a few lines, then the bar) became a page. The console gets a summary that counts what it folds,
+    and the full plan opens the run's log.
+
+    Asserted against the cohort rather than against a line count: what must not grow is the
+    startup, and a run over a thousand cases says exactly what a run over four says."""
     recorded: list[str] = []
 
-    def keep(message: str) -> Path:
-        recorded.append(message)
-        return tmp_path / "Transforms" / "TEST" / "log_0.txt"
+    def startup(root: Path, cases: int) -> list[str]:
+        root.mkdir()
+        _write_source(root, cases=cases)
+        _write_config(root, _STREAMABLE.format(out=root / "out"))
+        workflow = _build(root)
+        log = root / "Transforms" / "TEST" / "log_0.txt"
 
-    monkeypatch.setattr("konfai.transformer.record", keep)
+        def keep(message: str) -> Path:
+            recorded.append(message)
+            return log
 
-    workflow.setup(1)
+        monkeypatch.setattr("konfai.transformer.record", keep)
+        workflow.setup(1)
+        return [line for line in capsys.readouterr().out.splitlines() if line.strip()]
 
-    printed = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
-    assert len(printed) == 1, printed
-    assert "12 entr(ies): 12 STREAM" in printed[0]
-    assert "log_0.txt" in printed[0]
+    few = startup(tmp_path / "few", 4)
+    many = startup(tmp_path / "many", 12)
+
+    assert len(few) == len(many), (few, many)
+    assert many[0].startswith("[KonfAI] listing every case"), "the wait before the plan says what it is"
+    assert "12 entr(ies): 12 STREAM" in many[-1]
+    assert "log_0.txt" in many[-1]
     # Folded, not dropped: the line points at a plan the log actually holds.
-    assert len(recorded) == 1 and recorded[0].count("STREAM") >= 1
+    assert len(recorded) == 2 and recorded[-1].count("STREAM") >= 1
 
 
 def test_a_reduction_declared_in_yaml_folds_every_case_into_one_output(tmp_path: Path) -> None:

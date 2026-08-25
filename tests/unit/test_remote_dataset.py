@@ -143,26 +143,20 @@ def test_an_unreachable_remote_root_raises_instead_of_reporting_no_cases(
         dataset.get_names("CT")
 
 
-def test_a_remote_root_declares_how_it_is_reached(memory_root: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``storage_options`` is the dataset block's, and it reaches the reader that opens the store."""
-    from konfai.utils import ome_zarr as ome_zarr_module
+def test_konfai_declares_no_credentials_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fsspec merges ``FSSPEC_<PROTO>_<KEY>`` and ``~/.config/fsspec/*.json`` into every filesystem
+    it builds, so a public bucket is ``FSSPEC_S3_ANON=true`` and a private one the ``AWS_*``
+    variables. KonfAI hands it the protocol and nothing else, or it would override that."""
+    seen: dict = {}
+    original = fsspec.filesystem
 
-    _publish(memory_root, "CASE_000", "CT", np.zeros((1, 4, 4, 4), np.float32))
-    dataset = Dataset(memory_root, "omezarr", storage_options={"anon": True})
-    assert dataset.storage_options == {"anon": True}
+    def spy(protocol, **kwargs):
+        seen.update(protocol=protocol, kwargs=kwargs)
+        return original(protocol, **kwargs)
 
-    seen: list[dict | None] = []
-    original = ome_zarr_module.read_ome_zarr_data_slice
-
-    def spy(store_path, slices, **kwargs):
-        seen.append(kwargs.get("storage_options"))
-        # Through without them: fsspec's memory filesystem takes no 'anon', and what is under test
-        # is that the declared options reach this call, not what one of them means to one scheme.
-        return original(store_path, slices, **{**kwargs, "storage_options": None})
-
-    monkeypatch.setattr(ome_zarr_module, "read_ome_zarr_data_slice", spy)
-    dataset.read_data_slice("CT", "CASE_000", (slice(None), slice(0, 2), slice(None), slice(None)))
-    assert seen == [{"anon": True}]
+    monkeypatch.setattr(fsspec, "filesystem", spy)
+    uri.exists("memory://cohort/CASE_000")
+    assert seen == {"protocol": "memory", "kwargs": {}}
 
 
 # ---------------------------------------------------------------- what a remote root cannot do

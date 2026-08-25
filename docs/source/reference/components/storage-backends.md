@@ -38,20 +38,27 @@ any other transform kind is written whole.
 
 ## Reading a root from object storage
 
-A `dataset_filenames` entry may name a URI instead of a path, and
-`storage_options` on the same `Dataset:` block says how to reach it:
+A `dataset_filenames` entry may name a URI instead of a path:
 
 ```yaml
 Dataset:
   dataset_filenames:
     - s3://aind-open-data/exaSPIM_822174_..._processed_...:omezarr
-  storage_options: {anon: true}
 ```
 
-The mapping goes to fsspec verbatim, and it is the run's, not one entry's: every
-root reads with it, a stage's own reference grid or field store included. Install
-the filesystem for the scheme (`pip install "konfai[s3]"` for `s3://`); `fsspec`
-itself already comes with the OME-Zarr extra.
+KonfAI adds no configuration key for credentials, because fsspec already has one.
+It merges `FSSPEC_<PROTO>_<KEY>` from the environment and `~/.config/fsspec/*.json`
+into every filesystem it builds, and botocore reads the usual `AWS_*` variables
+under it. So a public bucket is
+
+```bash
+FSSPEC_S3_ANON=true konfai TRANSFORM --config Transform.yml
+```
+
+a private one is `AWS_PROFILE` or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, and
+a MinIO is `FSSPEC_S3_ENDPOINT_URL`. Install the filesystem for the scheme
+(`pip install "konfai[s3]"` for `s3://`); `fsspec` itself already comes with the
+OME-Zarr extra.
 
 Two limits, both deliberate. Only `:omezarr` reads a remote root: it addresses a
 store, where the other backends open a path. And a remote root is **read-only**,

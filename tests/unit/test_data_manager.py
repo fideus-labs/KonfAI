@@ -950,21 +950,28 @@ def test_prediction_subset_accepts_windows_style_case_list_paths(monkeypatch: py
     assert selected == {"CASE_000", "CASE_002"}
 
 
+class InfoCountingDataset:
+    """A root of two cases that counts the headers it was asked to read."""
+
+    def __init__(self) -> None:
+        self.info_calls = 0
+
+    @staticmethod
+    def get_names(group: str) -> list[str]:
+        assert group == "CT"
+        return ["CASE_000", "CASE_001"]
+
+    def select_names(self, group: str, requested: set[str] | None) -> list[str]:
+        assert requested is None, "neither subset here names its cases"
+        return self.get_names(group)
+
+    def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
+        assert group == "CT"
+        self.info_calls += 1
+        return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
+
+
 def test_builtin_subset_does_not_read_infos_during_common_name_resolution() -> None:
-    class InfoCountingDataset:
-        def __init__(self) -> None:
-            self.info_calls = 0
-
-        @staticmethod
-        def get_names(group: str) -> list[str]:
-            assert group == "CT"
-            return ["CASE_000", "CASE_001"]
-
-        def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
-            assert group == "CT"
-            self.info_calls += 1
-            return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
-
     dataset = DataPrediction(
         augmentations=None,
         groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
@@ -979,20 +986,6 @@ def test_builtin_subset_does_not_read_infos_during_common_name_resolution() -> N
 
 
 def test_custom_subset_can_still_request_infos_during_common_name_resolution() -> None:
-    class InfoCountingDataset:
-        def __init__(self) -> None:
-            self.info_calls = 0
-
-        @staticmethod
-        def get_names(group: str) -> list[str]:
-            assert group == "CT"
-            return ["CASE_000", "CASE_001"]
-
-        def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
-            assert group == "CT"
-            self.info_calls += 1
-            return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
-
     class InfoAwareSubset(PredictionSubset):
         def __init__(self) -> None:
             super().__init__(None)
@@ -1036,6 +1029,20 @@ def test_split_path_spec_supports_windows_paths_without_breaking_drive_letters()
     assert split_path_spec(r"C:\Dataset") == (r"C:\Dataset", None, "mha")
     assert split_path_spec(r"C:\Dataset:mha") == (r"C:\Dataset", None, "mha")
     assert split_path_spec(r"C:\Dataset:a:mha", allowed_flags={"a", "i"}) == (r"C:\Dataset", "a", "mha")
+
+
+def test_split_path_spec_keeps_a_uri_whole_including_its_level_suffix() -> None:
+    """The split runs from the right, and a scheme's own '://' is two colons on its left: parsed
+    without knowing it, 's3://bucket:omezarr@3' resolves to the root 's3' with the flag '//bucket',
+    which reads the wrong store, or none."""
+    assert split_path_spec("s3://bucket") == ("s3://bucket", None, "mha")
+    assert split_path_spec("s3://bucket:omezarr") == ("s3://bucket", None, "omezarr")
+    assert split_path_spec("s3://bucket/cohort:omezarr@3") == ("s3://bucket/cohort", None, "omezarr@3")
+    assert split_path_spec("memory://cohort:i:omezarr", allowed_flags={"a", "i"}) == (
+        "memory://cohort",
+        "i",
+        "omezarr",
+    )
 
 
 def test_a_case_present_in_two_roots_is_read_from_the_first_and_said_so() -> None:

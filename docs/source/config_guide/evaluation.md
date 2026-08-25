@@ -69,7 +69,6 @@ Common fields:
 | Field | Type | Effect |
 | --- | --- | --- |
 | `dataset_filenames` | list[str] | Pairs or merges the datasets needed for evaluation. |
-| `storage_options` | mapping | How a root named by a URI is reached, handed to fsspec verbatim (`{anon: true}` for a public S3 bucket). Ignored by local roots. |
 | `groups_src` | mapping | Defines how the compared tensors are loaded. |
 | `subset` | string / list / null | Restricts evaluated cases: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `validation` | string / list / null | Optional validation selector for a separate JSON report. Supports a case-list file, a list of case names, or a list of case-list files. |

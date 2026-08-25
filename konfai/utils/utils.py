@@ -26,6 +26,7 @@ from types import ModuleType
 
 import numpy as np
 
+from konfai.utils import uri
 from konfai.utils.errors import ConfigError, DatasetManagerError
 
 
@@ -524,20 +525,31 @@ def split_path_spec(
     allowed_flags: set[str] | None = None,
     supported_formats: list[str] | None = None,
 ) -> tuple[str, str | None, str]:
-    """Split a KonfAI ``path[:flag]:format`` spec without breaking Windows paths.
+    """Split a KonfAI ``path[:flag]:format`` spec over a path holding colons of its own.
 
     KonfAI accepts dataset-like strings such as:
 
     - ``./Dataset``
     - ``./Dataset:mha``
     - ``./Dataset:a:mha``
-    - ``C:\\Data\\Dataset:mha``
     - ``C:\\Data\\Dataset:a:mha``
+    - ``s3://bucket/cohort:omezarr@2``
 
-    Parsing is performed from the right so the drive separator in Windows paths
-    is preserved.
+    A URI's scheme comes off before the split and goes back on after it, and a Windows drive letter
+    is recognised where the split lands on one, so neither is read as a flag or as a format.
     """
+    root, spec = uri.split_scheme(value)
+    path, flag, file_format = _split_spec(spec, default_format, allowed_flags, supported_formats)
+    return root + path, flag, file_format
 
+
+def _split_spec(
+    value: str,
+    default_format: str,
+    allowed_flags: set[str] | None,
+    supported_formats: list[str] | None,
+) -> tuple[str, str | None, str]:
+    """The spec grammar itself, on a path that carries no scheme: parsed from the right."""
     formats = SUPPORTED_FORMATS if supported_formats is None else supported_formats
     parts = value.rsplit(":", 2)
 

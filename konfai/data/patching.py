@@ -28,6 +28,7 @@ import hashlib
 import itertools
 import queue
 import threading
+import time
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -477,6 +478,67 @@ def _sweep_pipeline_depth() -> int:
     return 1 if rank_cpu_share() > 1 else 0
 
 
+class SweepClock:
+    """Where a sweep's wall clock went, phase by phase, so none of it is unattributed.
+
+    A phase is accumulated by exactly one thread (the read by the producer, the write by the
+    writer, the rest by the sweep's own), so the additions need no lock, and the report is read
+    once both helpers have been joined. Two ``perf_counter`` calls per phase per block: the cost
+    is the report's own, not a mode the run has to be put into.
+    """
+
+    _END = object()
+
+    def __init__(self) -> None:
+        self._spent: dict[str, float] = {}
+
+    def reset(self) -> None:
+        self._spent = {}
+
+    def spent(self, name: str) -> float:
+        return self._spent.get(name, 0.0)
+
+    @contextlib.contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._spent[name] = self._spent.get(name, 0.0) + time.perf_counter() - start
+
+    def waiting(self, name: str, blocks: Iterable[Any]) -> Iterator[Any]:
+        """``blocks``, charging to ``name`` the time spent waiting for each one."""
+        blocks = iter(blocks)
+        while True:
+            with self.phase(name):
+                block = next(blocks, SweepClock._END)
+            if block is SweepClock._END:
+                return
+            yield block
+
+    def report(self, min_seconds: float = 1.0) -> str | None:
+        """One line accounting for the sweeps' wall clock, or ``None`` below ``min_seconds``.
+
+        The sum before the bar is the sweep's own thread and closes exactly: what its phases do
+        not name is ``other``, the part of the run nothing has explained yet. After the bar are
+        the read and the write themselves, which run beside that thread when the sweep pipelines
+        and inside its ``wait`` when it does not.
+        """
+        wall = self.spent("sweep")
+        if wall < min_seconds:
+            return None  # a sweep this short has nothing to account for, and says so by saying nothing
+        named = {phase: self.spent(phase) for phase in ("chain", "fetch", "wait(read)", "wait(write)")}
+        parts = " + ".join(f"{phase} {value:.1f}" for phase, value in named.items())
+        return (
+            f"[KonfAI] sweep {wall:.1f} s = {parts} + other {wall - sum(named.values()):.1f}"
+            f" | stages read {self.spent('read'):.1f} s, write {self.spent('write'):.1f} s"
+        )
+
+
+#: This rank's sweeps, summed over the cases it ran: the unit the report is about.
+SWEEP_CLOCK = SweepClock()
+
+
 class _ReadAhead:
     """One block's read running while the previous one is transformed and written.
 
@@ -550,7 +612,11 @@ class _WriteBehind:
             self._writer.write(key, region, block, header)
             return
         self.flush()  # one outstanding write, so the order is the sweep's and the memory is bounded
-        self._pending = self._pool.submit(self._writer.write, key, region, block, header)
+        self._pending = self._pool.submit(self._timed_write, key, region, block, header)
+
+    def _timed_write(self, key: Any, region: tuple[slice, ...], block: np.ndarray, header: Attribute) -> None:
+        with SWEEP_CLOCK.phase("write"):
+            self._writer.write(key, region, block, header)
 
     def flush(self) -> None:
         """Wait for the outstanding write, raising what it raised."""
@@ -2560,6 +2626,11 @@ class DatasetManager:
             else [self._region_spans(source, target) for target in targets]
         )
         ahead = depth if pulls else 0
+        if pulls:
+            # The store is told the whole sequence, so a decoded block a later region asks for again
+            # outlives one none does. A hint: see Dataset.plan_region_reads.
+            lead = [slice(None)] * (len(source.shape) - len(spatial))
+            source.dataset.plan_region_reads(source.group, source.entry, [(*lead, *spans[0]) for spans in pulls])
         sweeps = {key: sweep for key, sweep, _tail, _evolved in members}
         headers: dict[Any, Attribute] = {}
         writer = RegionWriter(lambda key, block, header: _open_sweep_stream(sweeps[key], block, spatial, tile, header))
@@ -2567,35 +2638,43 @@ class DatasetManager:
         def regions() -> Iterator[tuple[int, list[list[slice]], torch.Tensor, Attribute]]:
             for index, target in enumerate(targets):
                 spans = pulls[index] if pulls else self._region_spans(source, target)
-                tensor, attributes = self._read_streamed_region(source, spans)
+                with SWEEP_CLOCK.phase("read"):
+                    tensor, attributes = self._read_streamed_region(source, spans)
                 yield index, spans, tensor, attributes
 
         write = _WriteBehind(writer, depth)
         try:
-            with _ReadAhead(regions(), ahead) as blocks:
-                for index, spans, tensor, attributes in blocks:
-                    target = targets[index]
-                    tensor, region_attribute, keys_before = self._apply_streamed_region(
-                        source,
-                        spans,
-                        tensor,
-                        attributes,
-                        Attribute(reference.base_attributes),
-                        Attribute(evolved) if index == 0 else None,
-                    )
-                    for key, sweep, tail, member_evolved in members:
-                        member_tensor = tensor.clone() if len(members) > 1 else tensor
-                        scope = Attribute(region_attribute)
-                        for stage in tail:
-                            member_tensor = stage(self.name, member_tensor, scope)
-                        block = member_tensor.cpu().numpy()
-                        _require_channel_first(
-                            block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
-                        )
-                        if key not in headers:
-                            headers[key] = _sweep_header(member_evolved, scope, keys_before)
-                        write.write(key, (slice(0, int(block.shape[0])), *target), block, headers[key])
-            written = write.close()
+            with SWEEP_CLOCK.phase("sweep"):
+                with _ReadAhead(regions(), ahead) as blocks:
+                    for index, spans, tensor, attributes in SWEEP_CLOCK.waiting("wait(read)", blocks):
+                        target = targets[index]
+                        with SWEEP_CLOCK.phase("chain"):
+                            tensor, region_attribute, keys_before = self._apply_streamed_region(
+                                source,
+                                spans,
+                                tensor,
+                                attributes,
+                                Attribute(reference.base_attributes),
+                                Attribute(evolved) if index == 0 else None,
+                            )
+                        for key, sweep, tail, member_evolved in members:
+                            with SWEEP_CLOCK.phase("chain"):
+                                member_tensor = tensor.clone() if len(members) > 1 else tensor
+                                scope = Attribute(region_attribute)
+                                for stage in tail:
+                                    member_tensor = stage(self.name, member_tensor, scope)
+                            # Its own phase, not the chain's: on a device the chain only ENQUEUES,
+                            # and this is where the run waits for it as well as for the copy home.
+                            with SWEEP_CLOCK.phase("fetch"):
+                                block = member_tensor.cpu().numpy()
+                            _require_channel_first(
+                                block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
+                            )
+                            if key not in headers:
+                                headers[key] = _sweep_header(member_evolved, scope, keys_before)
+                            with SWEEP_CLOCK.phase("wait(write)"):
+                                write.write(key, (slice(0, int(block.shape[0])), *target), block, headers[key])
+                written = write.close()
             for key in written:
                 sweep = sweeps[key]
                 self._swept_entries.add((str(sweep.destination.filename), sweep.group, sweep.entry))

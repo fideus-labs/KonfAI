@@ -255,8 +255,7 @@ Under `Dataset:`:
 | Field | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `dataset_filenames` | list of `path[:format]` | `["./Dataset:mha"]` | Where cases are read. |
-| `memory_budget` | size string or number | `auto` | Per-rank ceiling. A bare number is GiB; `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. |
-| `storage_options` | mapping | `null` | How a root named by a URI is reached, handed to fsspec verbatim: `{anon: true}` for a public S3 bucket. One mapping for every root of the run, a stage's own reference or field store included. Ignored by local roots. A remote root wants a `memory_budget` that holds its working set: the store's chunk cache is a share of it, and a miss there is a download. |
+| `memory_budget` | size string or number | `auto` | Per-rank ceiling on the buffers the sweep holds, not on the process: peak RSS is this plus a floor (interpreter, torch, the chain's own working set). A bare number is GiB; `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. |
 | `subset` | string / list / null | `null` | Restricts which cases run: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. **Not** a nested mapping; a block written under it is refused. |
 | `groups_src` | mapping |: | The chains, keyed by source group then destination group. |
 

@@ -130,7 +130,6 @@ Common fields:
 | Field | Type | Default in code | Effect |
 | --- | --- | --- | --- |
 | `dataset_filenames` | list[str] | `["default\|./Dataset:mha"]` | Dataset sources and selection mode. |
-| `storage_options` | mapping | `null` | How a root named by a URI is reached, handed to fsspec verbatim (`{anon: true}` for a public S3 bucket). Ignored by local roots. |
 | `groups_src` | mapping | `{Labels: Group()}` | Maps on-disk groups to loaded tensors. The default binds a single group named `Labels`, which is almost never what you want: treat it as required. |
 | `augmentations` | mapping or null | one default augmentation list | Data augmentations sampled during training. |
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |

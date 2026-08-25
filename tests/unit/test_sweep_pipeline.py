@@ -30,7 +30,14 @@ import numpy as np
 import pytest
 from konfai.data import patching as patching_module
 from konfai.data.materialize import CaseMaterializer, Verdict
-from konfai.data.patching import DatasetManager, DatasetPatch, _ReadAhead, _sweep_pipeline_depth, _WriteBehind
+from konfai.data.patching import (
+    SWEEP_CLOCK,
+    DatasetManager,
+    DatasetPatch,
+    _ReadAhead,
+    _sweep_pipeline_depth,
+    _WriteBehind,
+)
 from konfai.data.transform import Clip, Save
 from konfai.utils.dataset import Attribute, Dataset
 
@@ -213,3 +220,45 @@ def test_a_pipelined_sweep_writes_the_bytes_the_sequential_one_writes(
     sequential = _sweep_into(tmp_path, "serial", monkeypatch, depth=0)
     pipelined = _sweep_into(tmp_path, "pipelined", monkeypatch, depth=1)
     np.testing.assert_array_equal(pipelined, sequential)
+
+
+# ---------------------------------------------------------------- and the clock closes on it
+
+
+@pytest.mark.parametrize("depth", [0, 1])
+def test_a_sweep_accounts_for_every_second_of_its_own_wall_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, depth: int
+) -> None:
+    """Optimising a stage while a third of the run is attributed to nothing is guesswork. The
+    sweep's own thread is fully decomposed, so what its phases do not name is a residual the
+    report prints rather than a gap it hides."""
+    SWEEP_CLOCK.reset()
+    _sweep_into(tmp_path, f"clocked_{depth}", monkeypatch, depth=depth)
+
+    wall = SWEEP_CLOCK.spent("sweep")
+    named = sum(SWEEP_CLOCK.spent(phase) for phase in ("chain", "fetch", "wait(read)", "wait(write)"))
+    assert wall > 0.0
+    assert 0.0 <= wall - named <= wall, "a phase is counted outside the sweep it belongs to"
+
+    report = SWEEP_CLOCK.report(min_seconds=0.0)
+    assert report is not None
+    for phase in ("chain", "fetch", "wait(read)", "wait(write)", "other", "read", "write"):
+        assert phase in report
+
+
+def test_a_serial_sweep_waits_out_the_read_it_does_not_overlap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no pipeline the read happens on the sweep's own thread, so the sweep waits exactly as
+    long as the read takes. Overlapping it is what the pipeline buys, and what the two numbers
+    diverging measures."""
+    SWEEP_CLOCK.reset()
+    _sweep_into(tmp_path, "serial_clock", monkeypatch, depth=0)
+
+    assert SWEEP_CLOCK.spent("wait(read)") >= SWEEP_CLOCK.spent("read") > 0.0
+
+
+def test_the_clock_sums_the_sweeps_a_rank_ran(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    SWEEP_CLOCK.reset()
+    _sweep_into(tmp_path, "first", monkeypatch, depth=0)
+    one = SWEEP_CLOCK.spent("sweep")
+    _sweep_into(tmp_path, "second", monkeypatch, depth=0)
+    assert SWEEP_CLOCK.spent("sweep") > one

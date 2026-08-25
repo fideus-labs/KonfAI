@@ -1079,7 +1079,16 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
 
         # A THIRD of the share: a pipelined sweep runs three of these at once, the decode of the
         # region being read, the assembly of the one before it, the encode of the one being written.
-        # Over the whole run, 6.7 s with the share, 6.4 at half, 6.1 at a third, 6.2 at a sixth.
+        # Re-measured under the split-thread sweep, where the chain no longer runs on the reading
+        # thread. 24 cores, ExaSPIM 513x1331x1776 through a stored affine, two runs per point,
+        # nothing else moved (a wrapper sets this alone, not OMP_NUM_THREADS, which would move ITK
+        # with it). Wall clock, host path then device path:
+        #   4  -> 12.1 / 13.4 s     4  -> 5.1 / 5.2 s
+        #   8  -> 10.7 / 11.1 s     8  -> 4.9 / 5.1 s
+        #   12 -> 11.0 / 11.3 s     12 -> 4.7 / 5.1 s
+        #   24 -> 11.0 / 12.3 s     24 -> 5.3 / 5.4 s
+        # A third wins or ties on both; starving it costs the host path 1.4 s and oversubscribing
+        # costs the reader its own throughput (read busy 4.4-4.6 s at 8, 5.1-5.2 s at 24).
         zarr.config.set({"async.concurrency": max(1, cores // 3)})
     except ImportError:
         pass
