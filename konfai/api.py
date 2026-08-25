@@ -116,10 +116,11 @@ def _launch(
     lock's exit restores to the caller's. ``ranks`` sizes the lock and stays the caller's own
     expression: the entry points do not all derive it from ``gpu``/``cpu`` the same way.
     """
-    from konfai.utils.runtime import execute_distributed_object
+    from konfai.utils.runtime import execute_distributed_object, restart_startup_clock
 
     with _one_workflow_at_a_time(ranks):
-        workflow = build()
+        with restart_startup_clock().phase("build"):  # this call's own clock, not the previous workflow's
+            workflow = build()
         execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
         return finish(workflow)
 

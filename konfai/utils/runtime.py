@@ -32,7 +32,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, contextmanager
+from contextlib import AbstractContextManager, closing, contextmanager
 from enum import Enum
 from functools import wraps
 from pathlib import Path
@@ -692,6 +692,72 @@ def seed_all(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+class StartupClock:
+    """Where a run's time went before its ranks start, phase by phase, in the sweep's format.
+
+    Built at the launcher's entry (:func:`run_distributed_app`), carried to the ranks on the
+    workflow object, reported once by rank 0 as it starts. The build's phases (``cases``: the
+    cohort listed, ``grids``: the managers built, ``model``: the network built) and the setup's
+    (``checkpoint``: the weights loaded) are taken out of ``build`` and ``setup``, which then read
+    as their remainders (the config bound, the workflow's own init; the loaders made); ``launch``
+    is spawn to the rank's start. The two stamps are ``time.time``: a rank reads them on another
+    node under a cluster launch, where a process counter means nothing; the phases are the
+    launcher's own and use the process counter.
+    """
+
+    def __init__(self) -> None:
+        from konfai.data.patching import SweepClock  # imports this module: bound at first use
+
+        self._phases = SweepClock()
+        self.started = time.time()
+        self.launched: float | None = None
+
+    def phase(self, name: str) -> AbstractContextManager[None]:
+        return self._phases.phase(name)
+
+    def spent(self, name: str) -> float:
+        return self._phases.spent(name)
+
+    def launch(self) -> None:
+        self.launched = time.time()
+
+    def report(self, min_seconds: float = 1.0) -> str | None:
+        """One line accounting for the wall clock since the launcher's entry, or ``None`` below
+        ``min_seconds``; ``other`` is what no phase names."""
+        now = time.time()
+        wall = now - self.started
+        if wall < min_seconds:
+            return None
+        nested = {name: self.spent(name) for name in ("cases", "grids", "model")}
+        named = {
+            "build": max(0.0, self.spent("build") - sum(nested.values())),
+            **nested,
+            "checkpoint": self.spent("checkpoint"),
+            "setup": max(0.0, self.spent("setup") - self.spent("checkpoint")),
+            "launch": 0.0 if self.launched is None else now - self.launched,
+        }
+        parts = " + ".join(f"{name} {value:.1f}" for name, value in named.items())
+        return f"[KonfAI] startup {wall:.1f} s = {parts} + other {wall - sum(named.values()):.1f}"
+
+
+_startup_clock: StartupClock | None = None
+
+
+def startup_clock() -> StartupClock:
+    """This process's startup clock, built on first use."""
+    global _startup_clock
+    if _startup_clock is None:
+        _startup_clock = StartupClock()
+    return _startup_clock
+
+
+def restart_startup_clock() -> StartupClock:
+    """A fresh startup clock: the Python API runs several workflows in one process, each its own."""
+    global _startup_clock
+    _startup_clock = StartupClock()
+    return _startup_clock
+
+
 class DistributedObject(ABC):
     """Base class for trainer, predictor, and evaluator distributed workflows."""
 
@@ -704,6 +770,8 @@ class DistributedObject(ABC):
         self.manual_seed: int | None = None
         self.name = name
         self.size = 1
+        #: The launcher's clock, handed over before the ranks start; rank 0 reports it.
+        self.startup_clock: StartupClock | None = None
 
     @abstractmethod
     def setup(self, world_size: int):
@@ -801,6 +869,8 @@ class DistributedObject(ABC):
             # honestly reads 0, and set_device would pin a GPU the launch explicitly excluded.
             if torch.cuda.is_available() and 0 <= local_rank < torch.cuda.device_count():
                 torch.cuda.set_device(local_rank)
+            if global_rank == 0 and self.startup_clock is not None and (startup := self.startup_clock.report()):
+                print(startup)
             try:
                 self.run_process(world_size, global_rank, local_rank, dataloaders)
             finally:
@@ -832,8 +902,10 @@ def run_distributed_app(
         previous_local_ranks = os.environ.get("KONFAI_LOCAL_RANKS")
         os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, local_ranks))
         try:
+            with restart_startup_clock().phase("build"):
+                workflow = func(*args, **kwargs_fun)
             execute_distributed_object(
-                func(*args, **kwargs_fun),
+                workflow,
                 gpu=bound.arguments.get("gpu", []),
                 cpu=bound.arguments.get("cpu", 1),
                 overwrite=bool(bound.arguments.get("overwrite", False)),
@@ -951,6 +1023,7 @@ def execute_distributed_object(
                 os.environ["KONFAI_OVERWRITE"] = "True"
                 os.environ["KONFAI_CLUSTER"] = "True"
 
+            clock = startup_clock()
             with distributed_object as configured_object:
                 with Log(configured_object.name, 0):
                     if configured_object.manual_seed is not None:
@@ -963,7 +1036,10 @@ def execute_distributed_object(
                                 "auto-requeue at the time limit. Relaunch manually with the RESUME command "
                                 "pointing at the latest checkpoint to continue training."
                             )
-                        configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
+                        with clock.phase("setup"):
+                            configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
+                        clock.launch()
+                        configured_object.startup_clock = clock
                         import submitit
 
                         executor = submitit.AutoExecutor(folder="./Cluster/")
@@ -983,11 +1059,14 @@ def execute_distributed_object(
                     world_size = len(gpu_ids)
                     if world_size == 0:
                         world_size = cpu_workers
-                    configured_object.setup(world_size)
+                    with clock.phase("setup"):
+                        configured_object.setup(world_size)
                     # Share tensors through /dev/shm files instead of one file descriptor per tensor:
                     # spawning a worker that pickles a loaded model can otherwise exhaust the process
                     # open-file limit ("Too many open files"), e.g. under Slicer's embedded Python.
                     mp.set_sharing_strategy("file_system")
+                    clock.launch()
+                    configured_object.startup_clock = clock
                     with TensorBoard(configured_object.name):
                         if _runs_inline(world_size):
                             configured_object(0)
@@ -1006,14 +1085,15 @@ _T = TypeVar("_T")
 
 _cpu_budget_applied = False
 _rank_pool: ThreadPoolExecutor | None = None
+_rank_pool_share = 0  # the share the pool was sized for
 _rank_pool_lock = threading.Lock()
 
 
 def _forget_rank_pool() -> None:
     """A forked child inherits the executor's bookkeeping and none of its threads: work submitted to
     it waits forever. The child builds its own on first use."""
-    global _rank_pool, _rank_pool_lock
-    _rank_pool, _rank_pool_lock = None, threading.Lock()
+    global _rank_pool, _rank_pool_share, _rank_pool_lock
+    _rank_pool, _rank_pool_share, _rank_pool_lock = None, 0, threading.Lock()
 
 
 if hasattr(os, "register_at_fork"):  # POSIX only: a platform without fork inherits nothing to forget
@@ -1039,13 +1119,19 @@ def rank_pool() -> ThreadPoolExecutor | None:
 
     ``None`` at a share of one, where the work stays on the calling thread.
     """
-    global _rank_pool
+    global _rank_pool, _rank_pool_share
     workers = rank_cpu_share()
     if workers <= 1:
         return None
     with _rank_pool_lock:
+        # The share changes within one process when a multi-rank build is followed by an inline
+        # single-rank workflow: the pool is rebuilt at the new size, the old one's idle threads let go.
+        if _rank_pool is not None and _rank_pool_share != workers:
+            _rank_pool.shutdown(wait=False)
+            _rank_pool = None
         if _rank_pool is None:
             _rank_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="konfai-rank")
+            _rank_pool_share = workers
     return _rank_pool
 
 

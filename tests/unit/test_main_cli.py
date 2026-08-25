@@ -41,6 +41,27 @@ def test_konfai_help_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     assert exc_info.value.code == 0
 
 
+def test_the_version_is_looked_up_only_when_asked_for(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """``importlib.metadata.version`` scans the installed distributions; every other invocation
+    builds the parser without paying for it."""
+    import importlib.metadata
+
+    looked_up: list[str] = []
+    real_version = importlib.metadata.version
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: looked_up.append(name) or real_version(name))
+
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "--no-such-flag"])
+    with pytest.raises(SystemExit):
+        main_module.main()
+    assert looked_up == []
+
+    monkeypatch.setattr(sys, "argv", ["konfai", "--version"])
+    with pytest.raises(SystemExit) as exited:
+        main_module.main()
+    assert exited.value.code == 0 and looked_up == ["konfai"]
+    assert capsys.readouterr().out.strip() == real_version("konfai")
+
+
 @pytest.mark.parametrize(
     ("argv", "exit_code"),
     [

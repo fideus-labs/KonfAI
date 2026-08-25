@@ -65,6 +65,7 @@ from konfai.utils.runtime import (
     get_memory,
     get_memory_info,
     memory_forecast,
+    startup_clock,
 )
 from konfai.utils.utils import SUPPORTED_FORMATS, OverlapSpec, resolve_patch, split_path_spec
 
@@ -768,11 +769,15 @@ class Subset:
         return isinstance(selector, str) and selector.startswith("~")
 
     def _included_names(self, selector: str | int) -> set[str] | None:
-        """The cases ``selector`` keeps, or ``None`` when only the cohort can say which they are."""
-        if isinstance(selector, int) or self._is_slice_selector(selector):
+        """The cases ``selector`` keeps, or ``None`` when only the cohort can say which they are.
+        Read in ``_resolve_selector``'s order, a file before a slice, so the walk asks for what the
+        selection then keeps."""
+        if isinstance(selector, int):
             return None  # a position, and positions are defined against the full sorted list
         if os.path.exists(selector):
             return set(self._read_names_from_file(selector))
+        if self._is_slice_selector(selector):
+            return None
         return {selector}
 
     def required_names(self) -> set[str] | None:
@@ -930,19 +935,28 @@ class DataSources(ABC):
     def _select_cases(self) -> tuple[list[str], dict[str, dict[str, list[str]]]]:
         """The case names common to every group and kept by ``subset``, in run order (sorted, or
         drawn once when ``subset.shuffle``), with the names each root holds per group."""
-        datasets = self._resolve_dataset_sources()
-        dataset_name, subset_names = self._resolve_common_names(datasets)
+        with startup_clock().phase("cases"):
+            requested = self.subset.required_names()
+            datasets = self._resolve_dataset_sources(requested)
+            dataset_name, subset_names = self._resolve_common_names(datasets, requested)
         names = sorted(subset_names)
         if self.subset.shuffle:
             names = random.sample(names, len(names))  # nosec B311
         return names, dataset_name
 
-    def _resolve_dataset_sources(self) -> dict[str, list[tuple[str, bool]]]:
+    def _resolve_dataset_sources(self, requested: set[str] | None = None) -> dict[str, list[tuple[str, bool]]]:
+        """The roots holding each source group, as ``(filename, append)`` in declaration order.
+
+        ``requested`` is what the subset can name (:meth:`Subset.required_names`), asked of a root
+        in place of its whole listing; ``None`` lists every case.
+        """
         datasets: dict[str, list[tuple[str, bool]]] = {}
         if self.dataset_filenames is None or len(self.dataset_filenames) == 0:
             raise DatasetManagerError("No dataset filenames were provided")
+        # A resolve after the first (the evaluation's sizing pass, an OOM re-plan) keeps each root's
+        # Dataset, and with it the listing it took and the headers it parsed.
+        kept = self.datasets
         self.datasets = {}
-        requested = self.subset.required_names()
         for dataset_filename in self.dataset_filenames:
             if dataset_filename is None:
                 raise DatasetManagerError(
@@ -965,7 +979,9 @@ class DataSources(ABC):
                     f"Supported formats are: {', '.join(SUPPORTED_FORMATS)}",
                 )
 
-            dataset = Dataset(filename, file_format)
+            dataset = kept.get(filename)
+            if dataset is None:
+                dataset = Dataset(filename, file_format)
             self.datasets[filename] = dataset
             for group in self.groups_src:
                 if dataset.is_group_exist(group, requested):
@@ -988,19 +1004,23 @@ class DataSources(ABC):
     def _resolve_common_names(
         self,
         datasets: dict[str, list[tuple[str, bool]]],
+        requested: set[str] | None,
     ) -> tuple[dict[str, dict[str, list[str]]], set[str]]:
+        """The names each root holds per group, and the cases every group holds that the subset
+        keeps; ``requested`` as in :meth:`_resolve_dataset_sources`."""
         dataset_name: dict[str, dict[str, list[str]]] = {}
         subset_requires_infos = self.subset.requires_infos()
         dataset_info: dict[str, dict[str, dict[str, tuple[list[int], Attribute]]]] | None = (
             {} if subset_requires_infos else None
         )
         empty_infos: dict[str, tuple[list[int], Attribute]] = {}
-        requested = self.subset.required_names()
         if requested is None:
             roots = sorted({filename for entries in datasets.values() for filename, _ in entries})
             print(f"[KonfAI] listing every case of {', '.join(sorted(datasets))} under {', '.join(roots)}")
         cohort: dict[str, set[str]] = {}
-        names: set[str] = set()
+        # Seeded from the first group, whatever it holds: an empty first group is a fact of the
+        # walk, not a walk that has not started, and it empties the intersection.
+        names: set[str] | None = None
         for group in self.groups_src:
             names_by_group = set()
             dataset_name[group] = {}
@@ -1015,52 +1035,59 @@ class DataSources(ABC):
                         name: self.datasets[filename].get_infos(group, name) for name in group_names
                     }
             cohort[group] = set(names_by_group)
-            if len(names) == 0:
-                names.update(names_by_group)
-            else:
-                names = names.intersection(names_by_group)
+            names = set(names_by_group) if names is None else names.intersection(names_by_group)
         self.cohort_names = cohort
-        if len(names) == 0:
+        if not names:
+            if requested is not None:
+                # The walk asked the roots for the subset's cases: what is missing is one of them.
+                raise self._subset_refusal(
+                    f"Subset requested: {', '.join(sorted(requested))}",
+                    *(f"Held by '{group}': {', '.join(sorted(found)) or 'none'}" for group, found in cohort.items()),
+                )
             raise DatasetManagerError(
                 f"No data was found for groups {list(self.groups_src.keys())}: although each group contains data "
                 "from a dataset, there are no common dataset names shared across all groups, the intersection is empty."
             )
 
-        subset_names: set[str] = set()
+        subset_names: set[str] | None = None
         for group in dataset_name:
-            subset_names_bygroup: set[str] = set()
+            subset_names_bygroup: set[str] | None = None
             for filename, append in datasets[group]:
                 resolved_subset = self.subset(
                     dataset_name[group][filename],
                     dataset_info[group][filename] if dataset_info is not None else empty_infos,
                 )
-                if append:
-                    subset_names_bygroup.update(resolved_subset)
-                elif len(subset_names_bygroup) == 0:
-                    subset_names_bygroup.update(resolved_subset)
+                # Seeded from the first root, not from the first NON-EMPTY one: an empty selection
+                # on a root is a member of the intersection, or the roots' order decides the run.
+                if subset_names_bygroup is None or append:
+                    subset_names_bygroup = (subset_names_bygroup or set()) | set(resolved_subset)
                 else:
                     subset_names_bygroup = subset_names_bygroup.intersection(resolved_subset)
-            if len(subset_names) == 0:
-                subset_names.update(subset_names_bygroup)
-            else:
-                subset_names = subset_names.intersection(subset_names_bygroup)
-
-        if len(subset_names) == 0:
-            raise DatasetManagerError(
-                "All data entries were excluded by the subset filter.",
-                f"Dataset entries found: {', '.join(names)}",
-                f"Subset object applied: {self.subset}",
-                f"Subset requested : {', '.join(subset_names)}",
-                "None of the dataset entries matched the given subset.",
-                "Please check your 'subset' configuration: it may be too restrictive or incorrectly formatted.",
-                "Examples of valid subset formats:",
-                "\tsubset: [0, 1]            # explicit indices",
-                "\tsubset: [./A.txt, ./B.txt]# union of multiple files",
-                "\tsubset: 0:10              # slice notation",
-                "\tsubset: ./Validation.txt  # external file",
-                "\tsubset: None              # to disable filtering",
+            subset_names_bygroup = subset_names_bygroup or set()
+            subset_names = (
+                set(subset_names_bygroup) if subset_names is None else subset_names.intersection(subset_names_bygroup)
             )
+
+        if not subset_names:
+            raise self._subset_refusal(f"Dataset entries found: {', '.join(sorted(names))}")
         return dataset_name, subset_names
+
+    def _subset_refusal(self, *found: str) -> DatasetManagerError:
+        """Nothing survives the subset: ``found`` says what the roots hold, then the subset and the
+        spellings it takes."""
+        return DatasetManagerError(
+            "All data entries were excluded by the subset filter.",
+            *found,
+            f"Subset object applied: {self.subset}",
+            "None of the dataset entries matched the given subset.",
+            "Please check your 'subset' configuration: it may be too restrictive or incorrectly formatted.",
+            "Examples of valid subset formats:",
+            "\tsubset: [0, 1]            # explicit indices",
+            "\tsubset: [./A.txt, ./B.txt]# union of multiple files",
+            "\tsubset: 0:10              # slice notation",
+            "\tsubset: ./Validation.txt  # external file",
+            "\tsubset: None              # to disable filtering",
+        )
 
     @staticmethod
     def _get_source_filename_by_group(
@@ -1094,23 +1121,24 @@ class DataSources(ABC):
         that holds it. ``index_offset`` keeps the manager index unique across the partitions
         :class:`Data` builds: the augmentations they share cache a case's draw by index."""
         source_filename_by_group = self._get_source_filename_by_group(dataset_name)
-        return {
-            group_dest: [
-                DatasetManager(
-                    index_offset + i,
-                    group_src,
-                    group_dest,
-                    name,
-                    self.datasets[source_filename_by_group[group_src][name]],
-                    patch=patch,
-                    transforms=self.groups_src[group_src][group_dest].transforms,
-                    data_augmentations_list=data_augmentations_list,
-                )
-                for i, name in enumerate(names)
-            ]
-            for group_src in self.groups_src
-            for group_dest in self.groups_src[group_src]
-        }
+        with startup_clock().phase("grids"):
+            return {
+                group_dest: [
+                    DatasetManager(
+                        index_offset + i,
+                        group_src,
+                        group_dest,
+                        name,
+                        self.datasets[source_filename_by_group[group_src][name]],
+                        patch=patch,
+                        transforms=self.groups_src[group_src][group_dest].transforms,
+                        data_augmentations_list=data_augmentations_list,
+                    )
+                    for i, name in enumerate(names)
+                ]
+                for group_src in self.groups_src
+                for group_dest in self.groups_src[group_src]
+            }
 
     def _params(self) -> dict[str, object]:
         return {
@@ -1342,8 +1370,8 @@ class Data(DataSources):
             return self._prepared_validation_mapping
         return [entry for entry in self._prepared_validation_mapping if entry[1] == 0]
 
-    def _resolve_dataset_sources(self) -> dict[str, list[tuple[str, bool]]]:
-        datasets = super()._resolve_dataset_sources()
+    def _resolve_dataset_sources(self, requested: set[str] | None = None) -> dict[str, list[tuple[str, bool]]]:
+        datasets = super()._resolve_dataset_sources(requested)
         # The augmentations get the roots of the first group resolved.
         for entries in datasets.values():
             for data_augmentations in self.data_augmentations_list.values():
@@ -1359,22 +1387,47 @@ class Data(DataSources):
         for key, data_augmentations in self.data_augmentations_list.items():
             data_augmentations.prepare(key)
         names, dataset_name = self._select_cases()
-        self.case_names, self._validation_names = self._split_train_validation_names(names, dataset_name)
-        self._build_partitions(dataset_name)
+        managers = counts = None
+        if isinstance(self.validation, float):
+            # A share by patch count, which only a built manager knows: every case is built once,
+            # in run order with the training draws, and the partitions are cut from that build.
+            managers = self._build_managers(names, dataset_name, self.patch, self._get_data_augmentations(True))
+            counts = self._case_entry_counts(managers)
+        self.case_names, self._validation_names = self._split_train_validation_names(names, counts)
+        split = len(self.case_names)
+        if managers is not None and (self.case_names, self._validation_names) != (names[:split], names[split:]):
+            managers = None  # not a cut of the run order: the built indices would not follow the partitions
+        self._build_partitions(dataset_name, managers)
 
-    def _build_partitions(self, dataset_name: dict[str, dict[str, list[str]]]) -> None:
+    def _build_partitions(
+        self, dataset_name: dict[str, dict[str, list[str]]], managers: dict[str, list[DatasetManager]] | None = None
+    ) -> None:
         """(Re)build the managers and patch mappings of both partitions from ``case_names`` and
         ``_validation_names``; the validation indices continue the training ones. Nothing is
-        assigned until both are built, so a failure leaves the dataset unprepared."""
-        managers, mapping = self._get_datasets(self.case_names, dataset_name, self._get_data_augmentations(True))
-        validation_managers, validation_mapping = self._get_datasets(
+        assigned until both are built, so a failure leaves the dataset unprepared.
+
+        ``managers`` are every selected case's, built in run order with the training draws: the
+        training partition is their head and, when validation keeps the draws, the validation
+        partition their tail, indices included. Unaugmented validation is built without them.
+        """
+        split = len(self.case_names)
+        training = validation = None
+        if managers is not None:
+            training = {group: cases[:split] for group, cases in managers.items()}
+            if self.validation_augmentations:
+                validation = {group: cases[split:] for group, cases in managers.items()}
+        training, mapping = self._get_datasets(
+            self.case_names, dataset_name, self._get_data_augmentations(True), managers=training
+        )
+        validation, validation_mapping = self._get_datasets(
             self._validation_names,
             dataset_name,
             self._get_data_augmentations(self.validation_augmentations),
-            index_offset=len(self.case_names),
+            index_offset=split,
+            managers=validation,
         )
-        self._managers, self._prepared_mapping = managers, mapping
-        self._validation_managers, self._prepared_validation_mapping = validation_managers, validation_mapping
+        self._managers, self._prepared_mapping = training, mapping
+        self._validation_managers, self._prepared_validation_mapping = validation, validation_mapping
 
     def worst_case_shape(self) -> list[int] | None:
         """Per-axis maximum spatial extent over every prepared case and augmentation copy.
@@ -1417,8 +1470,8 @@ class Data(DataSources):
                 "Call prepare() first; a dataset without 'patch' has no grid to re-cut.",
             )
         self.patch.patch_size[:] = [int(size) for size in patch_size]
-        datasets = self._resolve_dataset_sources()
         requested = self.subset.required_names()
+        datasets = self._resolve_dataset_sources(requested)
         dataset_name = {
             group: {filename: self.datasets[filename].select_names(group, requested) for filename, _ in entries}
             for group, entries in datasets.items()
@@ -1431,14 +1484,9 @@ class Data(DataSources):
         last = next(reversed(managers.values()), [])
         return [[manager.get_size(a) for a in range(nb_augmentation)] for manager in last]
 
-    def _get_case_entry_counts(
-        self,
-        names: list[str],
-        dataset_name: dict[str, dict[str, list[str]]],
-        data_augmentations_list: list[DataAugmentationsList],
-    ) -> list[int]:
-        managers = self._build_managers(names, dataset_name, self.patch, data_augmentations_list)
-        nb_augmentation = self._get_nb_augmentation(data_augmentations_list)
+    def _case_entry_counts(self, managers: dict[str, list[DatasetManager]]) -> list[int]:
+        """Per case, its ``(copy, patch)`` entries over the training draws: what the float split shares out."""
+        nb_augmentation = self._get_nb_augmentation(self._get_data_augmentations(True))
         return [int(sum(counts)) for counts in self._patch_counts(managers, nb_augmentation)]
 
     def _resolve_validation_indices(
@@ -1506,18 +1554,11 @@ class Data(DataSources):
     def _split_train_validation_names(
         self,
         subset_names: list[str],
-        dataset_name: dict[str, dict[str, list[str]]],
+        case_entry_counts: list[int] | None = None,
     ) -> tuple[list[str], list[str]]:
-        case_entry_counts = None
-        dataset_size = len(subset_names)
-        if isinstance(self.validation, float):
-            case_entry_counts = self._get_case_entry_counts(
-                subset_names,
-                dataset_name,
-                self._get_data_augmentations(True),
-            )
-            dataset_size = int(sum(case_entry_counts))
-
+        """The training and validation names, in run order; a float ``validation`` shares out
+        ``case_entry_counts`` (one per case, in that order) and takes the tail."""
+        dataset_size = len(subset_names) if case_entry_counts is None else int(sum(case_entry_counts))
         index = self._resolve_validation_indices(subset_names, case_entry_counts)
         index_set = set(index)
         validation_names = [name for i, name in enumerate(subset_names) if i in index_set]
@@ -1548,9 +1589,12 @@ class Data(DataSources):
         dataset_name: dict[str, dict[str, list[str]]],
         data_augmentations_list: list[DataAugmentationsList],
         index_offset: int = 0,
+        managers: dict[str, list[DatasetManager]] | None = None,
     ) -> tuple[dict[str, list[DatasetManager]], list[tuple[int, int, int]]]:
-        """A partition: its managers and its ``(case, copy, patch)`` mapping in loader order."""
-        managers = self._build_managers(names, dataset_name, self.patch, data_augmentations_list, index_offset)
+        """A partition: its managers (built here unless handed over) and its ``(case, copy, patch)``
+        mapping in loader order."""
+        if managers is None:
+            managers = self._build_managers(names, dataset_name, self.patch, data_augmentations_list, index_offset)
         nb_augmentation = self._get_nb_augmentation(data_augmentations_list)
         mapping: list[tuple[int, int, int]] = []
         # PREDICTION walks the mapping in order, and the copies of a TTA case must advance together
@@ -1795,13 +1839,13 @@ class DataMetric(Data):
         # An explicit patch or a non-reducible metric vetoes the sizing.
         if self.patch is not None or not self.auto_patch_allowed:
             return
-        sources = self._resolve_dataset_sources()
+        requested = self.subset.required_names()
+        sources = self._resolve_dataset_sources(requested)
         # Header-only scan: for each case, its resident bytes per spatial voxel is the sum of its
         # groups' channels (output + targets + masks all arrive as groups); the WORST case sizes the
         # one patch every case then shares (a smaller case simply yields fewer patches).
         channels_by_name: dict[str, int] = {}
         spatial_by_name: dict[str, list[int]] = {}
-        requested = self.subset.required_names()
         for group, entries in sources.items():
             for filename, _append in entries:
                 dataset = self.datasets[filename]

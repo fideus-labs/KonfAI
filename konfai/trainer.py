@@ -62,6 +62,7 @@ from konfai.utils.runtime import (
     run_distributed_app,
     safe_torch_load,
     seed_all,
+    startup_clock,
     synchronize_data,
 )
 from konfai.utils.utils import concretize_patch_size, size_free_axes
@@ -813,7 +814,8 @@ class Trainer(DistributedObject):
         self.it = 0
         self.it_validation = it_validation
         self.it_lr_update = it_lr_update
-        self.model = model.get_model(train=True)
+        with startup_clock().phase("model"):
+            self.model = model.get_model(train=True)
         self.ema_decay = ema_decay
         self.model_ema: torch.optim.swa_utils.AveragedModel | None = None
         self.data_log = data_log
@@ -876,9 +878,10 @@ class Trainer(DistributedObject):
                 statistics_path.unlink()
 
         state_dict = {}
-        if state != State.TRAIN:
-            state_dict = self._load()
-        self.model.load(state_dict, init=True, ema=False, override_lr=self.override_lr)
+        with startup_clock().phase("checkpoint"):
+            if state != State.TRAIN:
+                state_dict = self._load()
+            self.model.load(state_dict, init=True, ema=False, override_lr=self.override_lr)
         if self.ema_decay > 0:
             self.model_ema = AveragedModel(self.model, avg_fn=self._avg_fn)
             if state_dict is not None:

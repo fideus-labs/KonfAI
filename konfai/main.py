@@ -39,6 +39,19 @@ def _positive_int(value: str) -> int:
     return ivalue
 
 
+class _VersionAction(argparse.Action):
+    """``--version``: the installed version, looked up when asked for. ``importlib.metadata.version``
+    scans the installed distributions (17 ms cold), which every other invocation would pay at
+    parser construction."""
+
+    def __init__(self, option_strings: list[str], dest: str, help: str | None = None) -> None:
+        super().__init__(option_strings, dest, default=argparse.SUPPRESS, nargs=0, help=help)
+
+    def __call__(self, parser: argparse.ArgumentParser, namespace: Any, values: Any, option_string=None) -> None:
+        print(importlib.metadata.version("konfai"))
+        parser.exit()
+
+
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
     """The arguments TRAIN / RESUME / PREDICTION / EVALUATION share; TRANSFORM declares its own set."""
     parser.add_argument(
@@ -235,12 +248,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
     _add_predict(subparsers)
     _add_evaluate(subparsers)
     _add_transform(subparsers)
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=importlib.metadata.version("konfai"),
-        help="Print KonfAI version and exit.",
-    )
+    parser.add_argument("--version", action=_VersionAction, help="Print KonfAI version and exit.")
     _dispatch(parser, vars(parser.parse_args()))
 
 

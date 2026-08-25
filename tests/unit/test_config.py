@@ -22,6 +22,7 @@ keys), and the config env-var bookkeeping.
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -725,3 +726,241 @@ def test_strict_config_reports_a_yaml_syntax_error_as_a_config_error(write_confi
     write_config("Root:\n  kept: [1, 2\n")
     with pytest.raises(ConfigError, match=r"Invalid YAML syntax .* at line"), strict_config("Root"):
         raise AssertionError("refused before anything binds")
+
+
+# --------------------------------------------------------------------------------------
+# strict_config: one read, one write, the same bytes as a write per context
+# --------------------------------------------------------------------------------------
+
+
+class _Entry:
+    def __init__(self, value: int = 1, tags: list[str] = ["a", "b"]) -> None:
+        self.value, self.tags = value, tags
+
+
+@config("Optional")
+class _Optional:
+    def __init__(self, depth: int = 3) -> None:
+        self.depth = depth
+
+
+class _WideRoot:
+    """Every shape the binder writes back: primitives, a flat child, a keyed child, a dict of
+    objects the file holds and one it lacks, a dict of primitives, a list, a literal, an optional
+    left None."""
+
+    def __init__(
+        self,
+        kept: int = 0,
+        leaf: _Leaf = _Leaf(),
+        present: dict[str, _Entry] = {"only": _Entry()},
+        nested: _Nested = _Nested(),
+        entries: dict[str, _Entry] = {"first": _Entry(), "second": _Entry(5)},
+        weights: dict[str, float] = {"mae": 1.0, "ssim": 0.5},
+        shape: list[int] = [1, 256, 256],
+        mode: Literal["train", "eval"] = "train",
+        optional: _Optional | None = None,
+        name: str = "run",
+    ) -> None:
+        self.kept, self.leaf, self.present, self.nested, self.entries = kept, leaf, present, nested, entries
+        self.weights, self.shape, self.mode, self.optional, self.name = weights, shape, mode, optional, name
+
+
+_PARTIAL_WIDE_CONFIG = """Root:  # a comment on the root
+  name: bound  # a comment on a key
+  present:
+    only:
+      tags: [x, y]  # a flow-style list, a missing sibling key
+  shape: [2, 2, 2]
+  Nested:
+    width: 7
+"""
+
+
+def _binder_io(monkeypatch) -> dict[str, int]:
+    from konfai.utils import config as config_module
+
+    counts = {"loads": 0, "dumps": 0}
+    load, dump = config_module._load_tree, config_module.yaml.dump
+
+    def counted_load(filename):
+        counts["loads"] += 1
+        return load(filename)
+
+    def counted_dump(*args, **kwargs):
+        counts["dumps"] += 1
+        return dump(*args, **kwargs)
+
+    monkeypatch.setattr(config_module, "_load_tree", counted_load)
+    monkeypatch.setattr(config_module.yaml, "dump", counted_dump)
+    return counts
+
+
+def test_a_strict_block_reads_once_writes_once_and_the_bytes_a_write_per_context_produced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The block resolves every context against one in-memory tree and writes the file at its end.
+    The per-context path (a context outside any block loads and writes the file itself) is the
+    oracle: the resolved file must be byte-identical, key order and comments included."""
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    resolved: dict[str, bytes] = {}
+    for spelling in ("per_context", "strict_block"):
+        path = tmp_path / f"{spelling}.yml"
+        path.write_text(_PARTIAL_WIDE_CONFIG, encoding="utf-8")
+        monkeypatch.setenv("KONFAI_config_file", str(path))
+        counts = _binder_io(monkeypatch)
+        if spelling == "strict_block":
+            with strict_config("Root"):
+                root = apply_config("Root")(_WideRoot)()
+            assert (counts["loads"], counts["dumps"]) == (1, 1)
+        else:
+            root = apply_config("Root")(_WideRoot)()
+            assert counts["loads"] > 1 and counts["dumps"] > 1
+        assert (root.name, root.nested.width, root.present["only"].tags, root.shape) == (
+            "bound",
+            7,
+            ["x", "y"],
+            [2, 2, 2],
+        )
+        assert list(root.entries) == ["first", "second"] and root.optional is None
+        resolved[spelling] = path.read_bytes()
+    assert resolved["strict_block"] == resolved["per_context"]
+    # Comments and the flow style of what the file held are kept; what the contexts appended lands
+    # where the file-backed write-back put it: a context's own keys at its exit, after the keys the
+    # contexts opened inside it appended (``depth`` from the flat child, ``entries`` from the dict's
+    # entries, before ``kept``, which the root set first).
+    assert resolved["strict_block"].decode("utf-8") == (
+        "Root:  # a comment on the root\n"
+        "  name: bound  # a comment on a key\n"
+        "  present:\n"
+        "    only:\n"
+        "      tags: [x, y]  # a flow-style list, a missing sibling key\n"
+        "      value: 1\n"
+        "  shape: [2, 2, 2]\n"
+        "  Nested:\n"
+        "    width: 7\n"
+        "  depth: 1\n"
+        "  entries:\n"
+        "    first:\n"
+        "      value: 1\n"
+        "      tags:\n"
+        "      - a\n"
+        "      - b\n"
+        "    second:\n"
+        "      value: 1\n"
+        "      tags:\n"
+        "      - a\n"
+        "      - b\n"
+        "  kept: 0\n"
+        "  weights:\n"
+        "    mae: 1.0\n"
+        "    ssim: 0.5\n"
+        "  mode: train\n"
+        "  Optional: None\n"
+    )
+
+
+def test_a_strict_block_that_refuses_still_leaves_what_it_bound_on_disk(write_config) -> None:
+    """A context wrote its level before the block could report an unknown key; the block writes
+    the same resolved file before it reports."""
+    config_path = write_config("Root:\n  kep: 2\n")
+    with pytest.raises(ConfigError, match="Unknown key"), strict_config("Root"):
+        apply_config("Root")(_StrictRoot)()
+    written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    assert written["Root"] == {"kep": 2, "depth": 1, "kept": 0, "Nested": {"width": 2}}
+
+
+def test_a_strict_block_does_not_create_a_file_a_context_refused(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "missing.yml"
+    monkeypatch.setenv("KONFAI_config_file", str(config_path))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    with pytest.raises(ConfigError, match="does not exist"), strict_config("Root"):
+        apply_config("Root")(_StrictRoot)()
+    assert not config_path.exists()
+
+
+def test_a_strict_block_writes_the_file_a_context_materialized(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "generated.yml"
+    monkeypatch.setenv("KONFAI_config_file", str(config_path))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "default")
+    monkeypatch.setattr("builtins.input", _fail_input)
+    with strict_config("Root"):
+        root = apply_config("Root")(_StrictRoot)()
+    assert root.kept == 0
+    written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    assert written["Root"] == {"depth": 1, "kept": 0, "Nested": {"width": 2}}
+
+
+_EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+_WORKFLOWS = {
+    "Trainer": ("konfai.trainer", "Trainer", "TRAIN", {"KONFAI_CHECKPOINTS_DIRECTORY", "KONFAI_STATISTICS_DIRECTORY"}),
+    "Predictor": ("konfai.predictor", "Predictor", "PREDICTION", {"KONFAI_PREDICTIONS_DIRECTORY"}),
+    "Evaluator": ("konfai.evaluator", "Evaluator", "EVALUATION", {"KONFAI_EVALUATIONS_DIRECTORY"}),
+    "Transformer": ("konfai.transformer", "Transformer", "TRANSFORM", {"KONFAI_TRANSFORMS_DIRECTORY"}),
+}
+
+
+def _shipped_workflow_configs() -> list[str]:
+    return sorted(
+        str(path.relative_to(_EXAMPLES))
+        for path in _EXAMPLES.glob("*/*.yml")
+        if next(iter(ruamel.yaml.YAML().load(path.read_text(encoding="utf-8")))) in _WORKFLOWS
+    )
+
+
+def _bind_shipped_config(relative: str, workdir: Path, strict: bool, monkeypatch: pytest.MonkeyPatch) -> bytes:
+    """Bind a shipped example config on a copy under WORKDIR, over a synthetic cohort holding every
+    group the config names, the way its workflow builder does (STRICT) or one context at a time."""
+    import importlib
+
+    import numpy as np
+    from konfai.utils.dataset import Attribute, Dataset
+    from konfai.utils.runtime import configure_workflow_environment
+    from konfai.utils.utils import split_path_spec
+
+    example = _EXAMPLES / Path(relative).parent
+    workdir.mkdir(parents=True)
+    for entry in example.iterdir():
+        if entry.suffix in (".yml", ".py"):
+            (workdir / entry.name).write_bytes(entry.read_bytes())
+    config_path = workdir / Path(relative).name
+    tree = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    root = next(iter(tree))
+    attribute = Attribute()
+    attribute["Origin"], attribute["Spacing"], attribute["Direction"] = np.zeros(3), np.ones(3), np.eye(3).flatten()
+    monkeypatch.chdir(workdir)
+    for spec in tree[root]["Dataset"]["dataset_filenames"]:
+        filename, _flag, file_format = split_path_spec(spec, default_format="mha", allowed_flags={"a", "i"})
+        store = Dataset(filename, file_format)
+        for group in tree[root]["Dataset"]["groups_src"]:
+            for index in range(4):
+                store.write(group, f"CASE_{index:03d}", np.zeros((1, 2, 32, 32), np.float32), attribute)
+    module_name, class_name, state, path_env = _WORKFLOWS[root]
+    configure_workflow_environment(
+        config_path=config_path, root=root, state=state, path_env={key: workdir / key for key in path_env}
+    )
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.syspath_prepend(str(workdir))
+    for local in ("Model", "UnNormalize"):  # the examples' own modules, one per example
+        monkeypatch.delitem(sys.modules, local, raising=False)
+    workflow = getattr(importlib.import_module(module_name), class_name)
+    if strict:
+        with strict_config(root, refuse=False):
+            apply_config()(workflow)()
+    else:
+        apply_config()(workflow)()
+    return config_path.read_bytes()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("relative", _shipped_workflow_configs())
+def test_a_shipped_config_resolves_to_the_same_bytes_under_the_block_as_per_context(
+    relative: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every shipped workflow config, built as its workflow builds it (one strict block) and one
+    context at a time: the resolved file is byte-identical. Two of them gain keys the write-back
+    appends (Config_GAN.yml, Transform.yml), which is where the order of the appends shows."""
+    pytest.importorskip("SimpleITK")
+    per_context = _bind_shipped_config(relative, tmp_path / "per_context", False, monkeypatch)
+    strict_block = _bind_shipped_config(relative, tmp_path / "strict_block", True, monkeypatch)
+    assert strict_block == per_context

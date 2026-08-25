@@ -43,7 +43,7 @@ from konfai.data.data_manager import (
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import TensorCast, Transform, TransformLoader
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.runtime import State
+from konfai.utils.runtime import State, restart_startup_clock
 from konfai.utils.utils import split_path_spec
 
 # --------------------------------------------------------------------------------------
@@ -161,9 +161,9 @@ from konfai.data.data_manager import DataTrain
 
 names = [f"CASE_{i:03d}" for i in range(20)]
 data = DataTrain(augmentations=None, validation="0:4")
-data._resolve_dataset_sources = lambda: {}
-data._resolve_common_names = lambda datasets: ({}, set(names))
-data._get_datasets = lambda case_names, dataset_name, augmentations, index_offset=0: ({}, [])
+data._resolve_dataset_sources = lambda requested: {}
+data._resolve_common_names = lambda datasets, requested: ({}, set(names))
+data._get_datasets = lambda case_names, dataset_name, augmentations, index_offset=0, managers=None: ({}, [])
 random.seed(1234)
 data._prepare_datasets()
 print(";".join(data.case_names))
@@ -204,9 +204,9 @@ def test_train_split_shuffle_draws_from_sorted_names(monkeypatch):
 
     data = DataTrain(augmentations=None, validation="0:2")
     names = {"CASE_010", "CASE_002", "CASE_001", "CASE_005", "CASE_003"}
-    data._resolve_dataset_sources = lambda: {}
-    data._resolve_common_names = lambda datasets: ({}, names)
-    data._get_datasets = lambda case_names, dataset_name, augmentations, index_offset=0: ({}, [])
+    data._resolve_dataset_sources = lambda requested: {}
+    data._resolve_common_names = lambda datasets, requested: ({}, names)
+    data._get_datasets = lambda case_names, dataset_name, augmentations, index_offset=0, managers=None: ({}, [])
     data._prepare_datasets()
 
     assert captured["population"] == sorted(names)
@@ -224,7 +224,6 @@ def test_data_train_validation_accepts_mixed_case_names_and_case_files(tmp_path:
 
     train_names, validation_names = dataset._split_train_validation_names(
         ["CASE_000", "CASE_001", "CASE_002", "CASE_003"],
-        {},
     )
 
     assert train_names == ["CASE_000"]
@@ -239,7 +238,6 @@ def test_data_train_validation_none_keeps_full_dataset_for_training() -> None:
 
     train_names, validation_names = dataset._split_train_validation_names(
         ["CASE_000", "CASE_001", "CASE_002"],
-        {},
     )
 
     assert train_names == ["CASE_000", "CASE_001", "CASE_002"]
@@ -283,6 +281,63 @@ def test_data_train_prepare_skips_validation_augmentation_layout_when_disabled(t
     assert dataset._validation_managers is not None
     assert dataset.managers["CT"][0].total_augmentations == 1
     assert dataset._validation_managers["CT"][0].total_augmentations == 0
+
+
+@pytest.mark.parametrize(("validation_augmentations", "built"), [(True, 20), (False, 24)])
+def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, validation_augmentations: bool, built: int
+) -> None:
+    """The float split shares out patch counts, which only a built manager knows. Every case is
+    built once, in run order with the training draws, and the partitions are that build's head and
+    tail: same names, same indices, one draw per case. Validation without the draws is rebuilt
+    (2 cases x 2 groups more), never cut with them."""
+    pytest.importorskip("SimpleITK")
+    from konfai.data import data_manager as data_manager_module
+    from konfai.data.augmentation import Prob
+
+    names = [f"CASE_{index:03d}" for index in range(10)]
+    store = Dataset(tmp_path / "Dataset", "mha")
+    for name in names:
+        for group in ("CT", "SEG"):
+            store.write(group, name, np.zeros((1, 4, 4), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    constructed: list[tuple[str, int]] = []
+
+    class CountingManager(DatasetManager):
+        def __init__(self, index: int, group_src: str, group_dest: str, name: str, *args, **kwargs) -> None:
+            constructed.append((name, index))
+            super().__init__(index, group_src, group_dest, name, *args, **kwargs)
+
+    monkeypatch.setattr(data_manager_module, "DatasetManager", CountingManager)
+    monkeypatch.delenv("KONFAI_config_file")  # the draw binds its own defaults
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    augmentations = DataAugmentationsList(nb=1, data_augmentations={"Flip": Prob(1)})
+    dataset = DataTrain(
+        dataset_filenames=[f"{tmp_path / 'Dataset'}:mha"],
+        groups_src={
+            group: Group(groups_dest={group: GroupTransform(transforms=None, patch_transforms=None)})
+            for group in ("CT", "SEG")
+        },
+        augmentations={"DataAugmentation_0": augmentations},
+        patch=None,
+        subset=TrainSubset(shuffle=False),
+        validation=0.2,
+        validation_augmentations=validation_augmentations,
+    )
+    torch.manual_seed(0)
+    clock = restart_startup_clock()
+    dataset.prepare()
+
+    assert clock.spent("cases") > 0 and clock.spent("grids") > 0  # the startup line's phases
+    assert len(constructed) == built
+    assert (dataset.case_names, dataset._validation_names) == (names[:8], names[8:])
+    assert [manager.index for manager in dataset.managers["SEG"]] == list(range(8))
+    assert [(manager.name, manager.index) for manager in dataset._validation_managers["SEG"]] == [
+        ("CASE_008", 8),
+        ("CASE_009", 9),
+    ]
+    assert dataset._validation_managers["CT"][0].total_augmentations == int(validation_augmentations)
+    flip = augmentations.data_augmentations[0]
+    assert sorted(flip.who_index) == list(range(10))  # one draw per case, keyed by its run index
 
 
 # --------------------------------------------------------------------------------------
@@ -971,6 +1026,47 @@ class InfoCountingDataset:
         return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
 
 
+def test_an_evaluation_keeps_its_roots_across_its_two_resolves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``DataMetric.prepare`` resolves the sources twice (the sizing pass, then the selection) and a
+    re-plan resolves them again: one ``Dataset`` per root serves them all, so a header is parsed once
+    and answered from its cache after that."""
+    pytest.importorskip("SimpleITK")
+    from konfai.data.data_manager import DataMetric, GroupMetric, GroupTransformMetric
+
+    store = Dataset(tmp_path / "Dataset", "mha")
+    for index in range(4):
+        for group in ("CT", "SEG"):
+            store.write(
+                group, f"CASE_{index:03d}", np.zeros((1, 4, 4), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0])
+            )
+    counts = {"datasets": 0, "parsed": 0, "cached": 0}
+    dataset_init, dataset_get_infos = Dataset.__init__, Dataset.get_infos
+
+    def counting_init(self, *args, **kwargs):
+        counts["datasets"] += 1
+        dataset_init(self, *args, **kwargs)
+
+    def counting_get_infos(self, groups, name):
+        counts["cached" if (groups, name) in self._infos_cache else "parsed"] += 1
+        return dataset_get_infos(self, groups, name)
+
+    monkeypatch.setattr(Dataset, "__init__", counting_init)
+    monkeypatch.setattr(Dataset, "get_infos", counting_get_infos)
+    data = DataMetric(
+        dataset_filenames=[f"{tmp_path / 'Dataset'}:mha"],
+        groups_src={
+            group: GroupMetric(groups_dest={group: GroupTransformMetric(transforms=None)}) for group in ("CT", "SEG")
+        },
+    )
+    data.prepare()
+    assert counts == {"datasets": 1, "parsed": 8, "cached": 8}
+    roots = list(data.datasets.values())
+    data.patch = DatasetPatch(patch_size=[2, 2])
+    data.replan_patch([4, 4])
+    assert counts["datasets"] == 1 and counts["parsed"] == 8
+    assert list(data.datasets.values()) == roots  # the same objects, listing and headers included
+
+
 def test_builtin_subset_does_not_read_infos_during_common_name_resolution() -> None:
     dataset = DataPrediction(
         augmentations=None,
@@ -978,7 +1074,7 @@ def test_builtin_subset_does_not_read_infos_during_common_name_resolution() -> N
     )
     dataset.datasets = {"fake": cast(Dataset, InfoCountingDataset())}
 
-    dataset_name, subset_names = dataset._resolve_common_names({"CT": [("fake", True)]})
+    dataset_name, subset_names = dataset._resolve_common_names({"CT": [("fake", True)]}, None)
 
     assert dataset_name["CT"]["fake"] == ["CASE_000", "CASE_001"]
     assert subset_names == {"CASE_000", "CASE_001"}
@@ -1003,7 +1099,7 @@ def test_custom_subset_can_still_request_infos_during_common_name_resolution() -
     )
     dataset.datasets = {"fake": cast(Dataset, InfoCountingDataset())}
 
-    _dataset_name, subset_names = dataset._resolve_common_names({"CT": [("fake", True)]})
+    _dataset_name, subset_names = dataset._resolve_common_names({"CT": [("fake", True)]}, None)
 
     assert subset_names == {"CASE_000", "CASE_001"}
     assert subset.last_infos is not None

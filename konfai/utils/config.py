@@ -26,7 +26,7 @@ import time
 import types
 import typing
 import warnings
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -95,6 +95,77 @@ def _load_tree(filename: Path | str) -> dict:
     return {} if tree is None else tree
 
 
+def _write_tree(target: Path, tree: dict) -> None:
+    """Write TREE to TARGET atomically: a sibling temp file, then ``os.replace``, so a concurrent
+    independent launch reading the file never observes it truncated and binds all-defaults."""
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as yml:
+            yaml.dump(tree, yml)
+        # Windows can deny the replace while the target is briefly held (a virus scanner or an
+        # indexer touching the fresh file): retried a few times, then refused. Never an in-place
+        # rewrite, which a concurrent reader would see truncated and bind all-defaults from.
+        for attempt in range(5):
+            try:
+                os.replace(tmp, target)
+                break
+            except OSError as error:
+                if attempt == 4:
+                    raise ConfigError(
+                        f"Could not replace the config file '{target}' atomically: {error}.",
+                        "Release whatever holds the file (an editor, an indexer) and rerun; the file was left unchanged.",
+                    ) from error
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _merge_into(target: MutableMapping, source: Mapping) -> None:
+    """Fold SOURCE into TARGET in place: a mapping recurses, a value replaces, a ``None`` is not
+    written (a nested object's placeholder, materialized by its own context). A key TARGET lacks is
+    appended, so what a context sets lands after what the contexts opened inside it appended."""
+    for key, value in source.items():
+        existing = target.get(key)
+        if existing is value or value is None:
+            continue
+        if isinstance(value, Mapping):
+            if not isinstance(existing, MutableMapping):
+                existing = target[key] = {}
+            _merge_into(existing, value)
+        else:
+            target[key] = deepcopy(value)
+
+
+class _SharedTree:
+    """The config tree a ``strict_config`` block holds in memory.
+
+    Every ``Config`` context opened inside the block on this file reads and writes this one tree,
+    and the block writes the file once, when it ends. Outside a block a context loads and writes
+    the file itself.
+    """
+
+    def __init__(self, filename: Path, tree: dict) -> None:
+        self.filename = filename
+        self.tree = tree
+
+    def flush(self) -> None:
+        # A file no context created (refused as missing) is not created here either.
+        if self.filename.exists():
+            _write_tree(self.filename, self.tree)
+
+
+# The trees of the open strict_config() blocks, innermost last.
+_shared_trees: list[_SharedTree] = []
+
+
+def _shared_tree(filename: Path) -> _SharedTree | None:
+    for shared in reversed(_shared_trees):
+        if shared.filename == filename:
+            return shared
+    return None
+
+
 class _KeyLedger:
     """What the file holds against what the binder read, per level (dotted path) of the file."""
 
@@ -142,8 +213,14 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
     the workflow binds from the file: a key a later, lazily bound callable would read is unknown to
     it. On entry the file must hold ROOT: a missing root binds an all-defaults workflow and writes
     the whole block back over the user's file.
+
+    The file is read once here and written once when the block ends, whatever the number of
+    contexts opened inside it: they all resolve against the tree held in memory. A build of N
+    nested objects otherwise parses the file 2N+1 times and writes it N times (Config_GAN.yml, 7 KB,
+    76 objects: 153 parses and 76 dumps, 2.96 s of a 4.7 s build; 0.05 s held in memory).
     """
     filename = os.environ.get("KONFAI_config_file")
+    tree: dict = {}
     if filename and Path(filename).exists():
         tree = _load_tree(filename)
         if root not in tree:
@@ -154,11 +231,19 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
                 " block appended to the file in its place.",
             )
     ledger = _KeyLedger()
+    shared = _SharedTree(Path(filename), tree) if filename else None
     _ledgers.append(ledger)
+    if shared is not None:
+        _shared_trees.append(shared)
     try:
         yield
     finally:
         _ledgers.remove(ledger)
+        if shared is not None:
+            _shared_trees.remove(shared)
+            # Written whatever ended the block: what the contexts bound is on disk, as when each
+            # context wrote its own level.
+            shared.flush()
     if unknown := ledger.unknown(root):
         _report(
             refuse,
@@ -184,11 +269,15 @@ class Config:
     key : str
         Dot-separated path pointing to the configuration subtree to inspect or
         materialize.
+
+    Inside a :func:`strict_config` block the context reads the block's in-memory tree and folds
+    what it set back into it on exit; outside one it loads and writes the file itself.
     """
 
     def __init__(self, key: str) -> None:
         self.filename = Path(os.environ["KONFAI_config_file"])
         self.keys = [_unescape_key_component(part) for part in key.split(".")]
+        self._shared: _SharedTree | None = None
 
     def __enter__(self):
         if not self.filename.exists():
@@ -204,7 +293,8 @@ class Config:
                     "or set KONFAI_CONFIG_MODE=default.",
                 )
 
-        self.data = _load_tree(self.filename)
+        self._shared = _shared_tree(self.filename)
+        self.data = self._shared.tree if self._shared is not None else _load_tree(self.filename)
         self.config = self.data
 
         for key in self.keys:
@@ -212,6 +302,11 @@ class Config:
                 self.config = {key: {}}
 
             self.config = self.config[key]
+        if self._shared is not None and isinstance(self.config, collections.abc.MutableMapping):
+            # The context works on a copy of its level and folds it back on exit: what it sets is
+            # not seen by the contexts opened inside it, and lands after what they appended, as
+            # when every context read and wrote the file itself.
+            self.config = dict(self.config)
         for ledger in _ledgers:
             ledger.opened(tuple(self.keys), self.config if isinstance(self.config, collections.abc.Mapping) else ())
         return self
@@ -225,53 +320,19 @@ class Config:
             i -= 1
             return self.create_dictionary(data, keys, i)
 
-    def merge(self, dict1, dict2) -> dict:
-        result = deepcopy(dict1)
-
-        for key, value in dict2.items():
-            if isinstance(value, collections.abc.Mapping):
-                result[key] = self.merge(result.get(key, {}), value)
-            else:
-                if dict2[key] is not None:
-                    result[key] = deepcopy(dict2[key])
-        return result
-
     def __exit__(self, exc_type, value, traceback) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] == "remove":
             if os.path.exists(config_file()):
                 os.remove(config_file())
             return
+        # Only the visited subtree is folded back; the merge preserves the rest of the tree untouched.
+        subtree = self.create_dictionary(self.config, self.keys, len(self.keys) - 1)
+        if self._shared is not None:
+            _merge_into(self._shared.tree, subtree)
+            return
         data = _load_tree(self.filename)
-        # Only the currently visited subtree is rewritten; the recursive merge preserves the rest of the
-        # YAML file untouched. Write to a sibling temp file then os.replace (atomic on the same
-        # filesystem) so a concurrent independent launch reading this file never observes a truncated or
-        # empty config and silently binds all-defaults.
-        merged = self.merge(
-            data,
-            self.create_dictionary(self.config, self.keys, len(self.keys) - 1),
-        )
-        target = Path(self.filename)
-        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8") as yml:
-                yaml.dump(merged, yml)
-            # Windows can deny the replace while the target is briefly held (a virus scanner or an
-            # indexer touching the fresh file): retried a few times, then refused. Never an in-place
-            # rewrite, which a concurrent reader would see truncated and bind all-defaults from.
-            for attempt in range(5):
-                try:
-                    os.replace(tmp, target)
-                    break
-                except OSError as error:
-                    if attempt == 4:
-                        raise ConfigError(
-                            f"Could not replace the config file '{target}' atomically: {error}.",
-                            "Release whatever holds the file (an editor, an indexer) and rerun; the file was left unchanged.",
-                        ) from error
-                    time.sleep(0.05 * (attempt + 1))
-        finally:
-            if tmp.exists():
-                tmp.unlink()
+        _merge_into(data, subtree)
+        _write_tree(self.filename, data)
 
     @staticmethod
     def _get_input(name: str, default: str) -> str:

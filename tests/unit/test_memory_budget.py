@@ -344,7 +344,9 @@ def _metric_sizing_budget(
             get_infos=lambda group, name: ([1, 64, 64, 64], None),
         )
     }
-    monkeypatch.setattr(DataMetric, "_resolve_dataset_sources", lambda self: {"CT": [("f", False)]}, raising=False)
+    monkeypatch.setattr(
+        DataMetric, "_resolve_dataset_sources", lambda self, requested=None: {"CT": [("f", False)]}, raising=False
+    )
     monkeypatch.setattr(budget, "available_memory_bytes", lambda: (100 * 2**30, "host"))
     captured: dict[str, float] = {}
 

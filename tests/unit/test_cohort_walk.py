@@ -28,8 +28,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from konfai.data.data_manager import DataPrediction, Group, PredictionSubset, Subset
+from konfai.data.data_manager import DataPrediction, Group, GroupTransform, PredictionSubset, Subset
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.errors import DatasetManagerError
 
 pytest.importorskip("SimpleITK")
 
@@ -88,6 +89,14 @@ def test_a_subset_reading_its_names_from_a_file_names_them(tmp_path: Path) -> No
     names = tmp_path / "fold.txt"
     names.write_text("CASE_001\nCASE_004\n", encoding="utf-8")
     assert Subset(str(names)).required_names() == {"CASE_001", "CASE_004"}
+
+
+def test_a_names_file_spelled_like_a_slice_is_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The selection reads a file before it reads a slice (``_resolve_selector``); what the walk asks
+    the roots for must be what the selection then keeps."""
+    monkeypatch.chdir(tmp_path)
+    Path("0:4").write_text("CASE_001\n", encoding="utf-8")
+    assert Subset("0:4").required_names() == {"CASE_001"}
 
 
 def test_a_subset_selecting_on_geometry_still_gets_the_cohort() -> None:
@@ -215,3 +224,58 @@ def test_a_naming_subset_still_reports_the_cases_a_group_lacks(tmp_path: Path) -
     names, _ = data._select_cases()
     assert sorted(names) == ["CASE_002"]
     assert data.cohort_names == {"CT": {"CASE_002", "CASE_005"}, "SEG": {"CASE_002"}}
+
+
+@pytest.mark.parametrize("order", [("CT", "SEG"), ("SEG", "CT")])
+def test_a_requested_case_one_group_lacks_is_refused_as_a_subset_whatever_the_order(
+    tmp_path: Path, order: tuple[str, str]
+) -> None:
+    """CT holds every case and SEG the first four: asked for CASE_005 alone, the walk finds it in one
+    group and not the other, and the refusal names the subset and what each group holds. The same
+    refusal in both declaration orders: an empty first group used to read as a walk not started, so
+    the second group's find stood in for the intersection and the managers failed on a KeyError."""
+    dataset = Dataset(tmp_path / "cases", "mha")
+    for name in CASES:
+        dataset.write("CT", name, np.zeros((1, 2, 2, 2), np.float32), _attributes())
+    for name in CASES[:4]:
+        dataset.write("SEG", name, np.zeros((1, 2, 2, 2), np.float32), _attributes())
+    data = DataPrediction(
+        dataset_filenames=[f"{tmp_path / 'cases'}:mha"],
+        groups_src={
+            group: Group(groups_dest={group: GroupTransform(transforms=None, patch_transforms=None)}) for group in order
+        },
+        augmentations=None,
+        patch=None,
+        subset=PredictionSubset("CASE_005"),
+    )
+    with pytest.raises(DatasetManagerError) as refused:
+        data.prepare()
+    message = str(refused.value)
+    assert "excluded by the subset" in message and "Subset requested: CASE_005" in message
+    assert "Held by 'CT': CASE_005" in message and "Held by 'SEG': none" in message
+
+
+def test_a_groups_roots_are_intersected_from_the_first_root_whatever_it_holds(tmp_path: Path) -> None:
+    """A second root flagged ``:i`` keeps the cases both roots hold. A first root holding none of
+    the requested cases is a member of that intersection, not a blank the second root fills."""
+    first, second = Dataset(tmp_path / "first", "mha"), Dataset(tmp_path / "second", "mha")
+    for name in CASES[:4]:
+        first.write("CT", name, np.zeros((1, 2, 2, 2), np.float32), _attributes())
+    for name in CASES[2:]:
+        second.write("CT", name, np.zeros((1, 2, 2, 2), np.float32), _attributes())
+    roots = [f"{tmp_path / 'first'}:mha", f"{tmp_path / 'second'}:i:mha"]
+
+    def selected(subset) -> list[str]:
+        data = DataPrediction(
+            dataset_filenames=roots,
+            groups_src={"CT": Group()},
+            augmentations=None,
+            patch=None,
+            subset=PredictionSubset(subset),
+        )
+        names, _ = data._select_cases()
+        return sorted(names)
+
+    assert selected("CASE_003") == ["CASE_003"]
+    with pytest.raises(DatasetManagerError, match="excluded by the subset"):
+        selected("CASE_005")  # the second root alone holds it

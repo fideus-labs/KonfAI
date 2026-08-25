@@ -88,6 +88,7 @@ from konfai.utils.runtime import (
     description,
     run_distributed_app,
     safe_torch_load,
+    startup_clock,
 )
 from konfai.utils.utils import concretize_patch_size, env_flag, get_module, size_free_axes, split_path_spec
 from konfai.utils.vram import next_patch_candidate, usable_vram
@@ -1955,7 +1956,8 @@ class Predictor(DistributedObject):
             self.combine = apply_config(f"{konfai_root()}.{combine}")(getattr(module, name))()
 
         self.autocast = autocast
-        self.model = model.get_model(train=False)
+        with startup_clock().phase("model"):
+            self.model = model.get_model(train=False)
         self.it = 0
         self.outputs_dataset_loader = outputs_dataset if outputs_dataset else {}
         self.outputs_dataset = {
@@ -2065,7 +2067,8 @@ class Predictor(DistributedObject):
                 "KonfAI Apps, declare it via the 'models' field in app.json).",
                 "Without a checkpoint its weights are random and prediction would silently produce garbage.",
             )
-        self.model_composite.load(self._load())
+        with startup_clock().phase("checkpoint"):
+            self.model_composite.load(self._load())
 
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
 

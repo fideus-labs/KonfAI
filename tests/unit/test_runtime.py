@@ -793,6 +793,72 @@ def test_zarr_keeps_a_small_share_whole(monkeypatch, cores: int, expected: int) 
         zarr.config.set({"async.concurrency": previous})
 
 
+def test_the_startup_line_takes_the_nested_phases_out_and_closes_on_other() -> None:
+    """The sweep's format: disjoint phases, ``other`` closing the wall clock exactly. The cohort,
+    the grids and the model are inside the build, the checkpoint inside the setup."""
+    import time
+
+    clock = rt.StartupClock()
+    clock._phases._spent = {"build": 1.0, "cases": 0.2, "grids": 0.1, "model": 0.3, "setup": 0.5, "checkpoint": 0.2}
+    now = time.time()
+    clock.started, clock.launched = now - 3.0, now - 0.5
+    assert clock.report() == (
+        "[KonfAI] startup 3.0 s = build 0.4 + cases 0.2 + grids 0.1 + model 0.3 + checkpoint 0.2"
+        " + setup 0.3 + launch 0.5 + other 1.0"
+    )
+    clock.started = now - 0.4
+    assert clock.report() is None  # a startup this short has nothing to account for
+
+
+def test_rank_zero_reports_the_launchers_clock_as_it_starts(monkeypatch, capsys) -> None:
+    """The clock built at the launcher's entry crosses to the rank on the workflow object and is
+    printed once, by rank 0, before the run: build, setup and launch each charged where they ran."""
+    ran: list[tuple[int, rt.StartupClock | None]] = []
+
+    class FakeObject(rt.DistributedObject):
+        uses_collectives = False
+
+        def __init__(self) -> None:
+            super().__init__("fake-startup")
+
+        def setup(self, world_size: int) -> None:
+            self.dataloader = [[]]
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders) -> None:
+            ran.append((global_rank, self.startup_clock))
+
+    monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", "1")
+    clock = rt.restart_startup_clock()
+    clock.started -= 5.0  # a startup long enough to be reported
+    rt.execute_distributed_object(FakeObject(), gpu=None, cpu=1)
+
+    assert ran == [(0, clock)]
+    assert clock.spent("setup") > 0 and clock.launched is not None
+    line = capsys.readouterr().out.strip().splitlines()[-1]
+    assert line.startswith("[KonfAI] startup 5.") and "+ launch 0.0 +" in line and "+ other" in line
+
+
+def test_the_rank_pool_is_rebuilt_when_the_share_changes(monkeypatch) -> None:
+    """A multi-rank build followed by an inline single-rank workflow changes the share within one
+    process: the pool follows it instead of keeping the size of its first use."""
+    monkeypatch.setattr(rt, "_rank_pool", None)
+    monkeypatch.setattr(rt, "_rank_pool_share", 0)
+    monkeypatch.setenv("OMP_NUM_THREADS", "4")
+    four = rt.rank_pool()
+    assert four is not None and four._max_workers == 4
+    assert rt.rank_pool() is four
+    monkeypatch.setenv("OMP_NUM_THREADS", "8")
+    eight = rt.rank_pool()
+    assert eight is not four and eight is not None and eight._max_workers == 8
+    assert rt.rank_pool() is eight
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    assert rt.rank_pool() is None
+    eight.shutdown(wait=False)
+
+
 def _map_in_child() -> None:
     seen: list[int] = []
     rt.map_over_rank_pool(seen.append, [1, 2, 3])
