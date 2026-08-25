@@ -1045,12 +1045,54 @@ def test_inline_augmentations_disable_persistent_workers() -> None:
     assert without_augmentations.dataLoader_args["persistent_workers"] is True
 
 
-def test_data_prediction_disables_persistent_workers_by_default() -> None:
-    dataset = DataPrediction(augmentations=None)
+def test_data_prediction_disables_persistent_workers() -> None:
+    dataset = DataPrediction(augmentations=None, num_workers=2)
 
-    assert cast(int, dataset.dataLoader_args["num_workers"]) >= 1
+    assert dataset.dataLoader_args["num_workers"] == 2
     assert dataset.dataLoader_args["prefetch_factor"] == 2
     assert dataset.dataLoader_args["persistent_workers"] is False
+
+
+def _prepared_prediction(root: Path, file_format: str, **kwargs) -> DataPrediction:
+    """A prediction over two 8x8 cases stored in ``file_format``, its managers built."""
+    store = Dataset(root, file_format)
+    for name in ("CASE_000", "CASE_001"):
+        store.write("CT", name, np.zeros((1, 8, 8), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    dataset = DataPrediction(
+        augmentations=None,
+        dataset_filenames=[f"{root}:{file_format}"],
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        patch=DatasetPatch(patch_size=[4, 4], overlap=None),
+        subset=PredictionSubset(),
+        **kwargs,
+    )
+    dataset.prepare()
+    return dataset
+
+
+@pytest.mark.parametrize(
+    ("file_format", "spins_workers"),
+    [("mha", False), ("nii.gz", True)],
+    ids=["a region read decodes the region", "a region read decodes the volume"],
+)
+def test_prediction_spins_workers_only_where_a_patch_read_decodes_the_volume(
+    tmp_path: Path, file_format: str, spins_workers: bool
+) -> None:
+    """One pass in grid order: a batch costs more through shared memory than read in place, unless
+    the store has to decode the whole volume per patch, where the decodes then run in parallel."""
+    pytest.importorskip("SimpleITK")
+
+    dataset = _prepared_prediction(tmp_path / file_format, file_format)
+
+    assert (dataset.resolved_num_workers > 0) is spins_workers
+
+
+def test_an_explicit_worker_count_wins_over_the_read_route(tmp_path: Path) -> None:
+    pytest.importorskip("SimpleITK")
+
+    dataset = _prepared_prediction(tmp_path / "mha", "mha", num_workers=3)
+
+    assert dataset.resolved_num_workers == 3
 
 
 def test_data_prediction_forwards_its_declared_augmentations() -> None:

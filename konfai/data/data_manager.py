@@ -1336,9 +1336,9 @@ class Data(DataSources):
     def _configure_data_loading(self, use_cache: bool) -> None:
         """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
 
-        Called once from ``__init__`` with the declared ``use_cache`` and, when a ``memory_budget``
-        overrides it, again from ``get_data`` with the derived value. Caching preloads every case up
-        front, so it defaults to zero DataLoader workers; the streaming/buffer path spins workers up.
+        Called once from ``__init__`` with the declared ``use_cache``, again from ``prepare`` once
+        the managers say how each case is read, and, when a ``memory_budget`` overrides it, again
+        from ``get_data`` with the derived value.
         """
         self.use_cache = use_cache
         self.datasetIter = partial(
@@ -1355,7 +1355,7 @@ class Data(DataSources):
         if self.requires_single_process_loading:
             resolved_num_workers = 0
         elif resolved_num_workers is None:
-            resolved_num_workers = max(1, min(os.cpu_count() or 1, 4)) if not use_cache else 0
+            resolved_num_workers = self._default_num_workers(use_cache)
         self.resolved_num_workers: int = resolved_num_workers
         self.dataLoader_args: dict[str, object] = {
             "num_workers": resolved_num_workers,
@@ -1375,6 +1375,50 @@ class Data(DataSources):
             else:
                 persistent_workers = True
             self.dataLoader_args["persistent_workers"] = persistent_workers
+
+    def _default_num_workers(self, use_cache: bool) -> int:
+        """The worker count when the config names none.
+
+        A cache preloads every case up front and leaves the loader nothing to do. A one-pass
+        workflow walks each case once in grid order, and shipping a batch through shared memory
+        costs more than reading it in place. Workers pay for themselves in one place, where a
+        patch read decodes more than the patch it asks for, and the decodes then run in parallel.
+
+        Measured on a quiet 24-core host, three cases, whole PREDICTION runs, best of two
+        (``CUDA_VISIBLE_DEVICES=``), zero workers against four:
+        patches streaming off an uncompressed MetaImage 0.24 s / 0.34 s (2.5-D, patch
+        [1, 192, 192]), 0.14 s / 0.27 s (3-D, [32, 32, 32]), and 4.26 s / 4.89 s on the 2.5-D grid
+        with a five-layer convolutional net; the case buffered whole 0.17 s / 0.44 s; and, where
+        every patch decodes the volume, 18.1 s / 5.7 s.
+        """
+        if use_cache:
+            return 0
+        if self._reads_each_case_once and not self._patch_read_decodes_the_volume():
+            return 0
+        return max(1, min(os.cpu_count() or 1, 4))
+
+    def _patch_read_decodes_the_volume(self) -> bool:
+        """Whether reading one patch costs a whole-volume decode, on any case of any group.
+
+        Only where the patches are read from the store one by one AND the store cannot serve a
+        region (a compressed MetaImage, an NRRD, a gzipped NIfTI). A chain that cannot stream is
+        not that: it reads the case once into the loader's buffer and cuts its patches from RAM.
+
+        ``False`` before ``prepare``, where no manager can answer yet: only the worker default
+        reads this, and only ``get_data`` reads the default.
+        """
+        if self._managers is None:
+            return False
+        return any(
+            manager.can_stream_patch(0) and not manager.dataset.bounded_region_reads(manager.group_src, manager.name)
+            for managers in self._managers.values()
+            for manager in managers
+        )
+
+    def prepare(self) -> None:
+        super().prepare()
+        # The managers are what says how each case is read, which is what the worker default turns on.
+        self._configure_data_loading(self.use_cache)
 
     def _estimate_cached_bytes(self) -> int:
         """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read).
@@ -1400,10 +1444,11 @@ class Data(DataSources):
                     total += int(np.prod(manager.base_shape, dtype=np.int64)) * _CACHE_ELEMENT_BYTES * copies
         return total
 
-    #: Whether a ``memory_budget`` that fits may choose the cache. True for training (epochs
-    #: re-read every case); overridden False by the one-pass workflows, where a cache is never
-    #: re-read and the regime is always stream/buffer.
-    _budget_caches_when_fit = True
+    #: Whether the workflow reads each case exactly once. False for training, whose epochs
+    #: re-read every case; True for prediction and evaluation. A one-pass workflow never re-reads
+    #: a cache, so a fitting ``memory_budget`` does not choose one, and its loader has one region
+    #: read per patch to do, which costs less in place than through a worker.
+    _reads_each_case_once = False
 
     def _resolve_cache_regime(self, world_size: int) -> None:
         """Derive ``use_cache`` from ``memory_budget``. ``None`` means ``"auto"``.
@@ -1415,7 +1460,7 @@ class Data(DataSources):
         and the test reduces to "does the whole dataset fit the node". The decision is logged once
         here: ``get_data`` runs on the launcher alone, before any worker is spawned.
         """
-        if not self._budget_caches_when_fit:
+        if self._reads_each_case_once:
             # One-pass workflows (prediction, evaluation) read each case exactly once: a cache is
             # never re-read, so the regime is always stream/buffer and there is nothing to derive.
             return
@@ -1863,8 +1908,7 @@ class DataTrain(Data):
 class DataPrediction(Data):
     """Dataset configuration used by the prediction workflow."""
 
-    # One pass: each case is read once, a cache is never re-read, always stream/buffer.
-    _budget_caches_when_fit = False
+    _reads_each_case_once = True
 
     def __init__(
         self,
@@ -1911,8 +1955,7 @@ class DataMetric(Data):
     that needs the whole volume always gets it.
     """
 
-    # One pass: each case is read once, a cache is never re-read, always stream/buffer.
-    _budget_caches_when_fit = False
+    _reads_each_case_once = True
 
     #: Working copies a metric makes of the patch pair (float casts, the difference, a masked select):
     #: measured ~<= 2x the resident tensors; the sizing keeps this conservative and the 0.8 safety
