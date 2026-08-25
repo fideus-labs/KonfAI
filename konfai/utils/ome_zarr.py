@@ -213,6 +213,18 @@ def _load_image(store_path: str, level: int) -> Any:
     return multiscales.images[level]
 
 
+def store_identity(store_path: str | Path) -> str:
+    """The string a store is keyed by, wherever it is named.
+
+    A reader keys its decoded chunks by the path it was handed, which
+    :meth:`~konfai.utils.dataset.OmeZarrFile._path` builds with ``uri.join``, on forward slashes
+    whatever the platform. A writer names the same store with a ``Path``, and on Windows
+    ``str(Path)`` is backslashed, so the two spellings would not meet and a replaced store would keep
+    serving the chunks of the store it replaced. One spelling, taken here.
+    """
+    return str(store_path).replace("\\", "/")
+
+
 def clear_ome_zarr_cache(store_path: str | Path | None = None) -> None:
     """Forget the memoised NGFF images, so a store replaced on disk is parsed afresh.
 
@@ -230,7 +242,7 @@ def clear_ome_zarr_cache(store_path: str | Path | None = None) -> None:
     _level_array.cache_clear()
     _konfai_attributes.cache_clear()
     if _CHUNK_CACHE is not None:
-        _CHUNK_CACHE.forget(None if store_path is None else str(store_path))
+        _CHUNK_CACHE.forget(None if store_path is None else store_identity(store_path))
 
 
 def is_displacement_field(store_path: str | Path) -> bool:
@@ -519,7 +531,7 @@ def _read_chunked(store_path: str, level_path: str, array: Any, index: tuple) ->
     # In the machine's byte order from the start: a big-endian store is converted by the copy that
     # assembles the window, where a pass of its own over the result is a second walk of every byte.
     out = np.empty(out_shape, dtype=_native_dtype(array.dtype))
-    identity = (store_path, level_path)
+    identity = (store_identity(store_path), level_path)
     wanted = _touched_chunks(selections, chunks)
     # Begun before an empty selection returns: plan_ome_zarr_reads declared that read too, and a
     # schedule that misses one step ranks every later chunk against the wrong read.
@@ -654,7 +666,7 @@ def plan_ome_zarr_reads(
             )
             for window in windows
         ]
-        _chunk_cache().schedule((str(store_path), level_path), steps)
+        _chunk_cache().schedule((store_identity(store_path), level_path), steps)
 
 
 def read_ome_zarr_data_slice(

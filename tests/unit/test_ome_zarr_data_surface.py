@@ -19,7 +19,7 @@
 These cover what a hand-rolled store reader gets wrong, which is never the happy path: a big-endian
 source, a pyramid level that does not exist, and a downsampling default that changes the pixels."""
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 import pytest
@@ -542,3 +542,24 @@ def test_a_mask_companion_of_a_declared_sweep_is_decoded_once_where_lru_decodes_
     assert floor["CT"] == floor["Labels"] > 0, "the two stores are read alike"
     assert lru["CT"] > floor["CT"] and lru["Labels"] > floor["Labels"], "LRU re-decodes both"
     assert planned == floor, f"{planned} decodes against a floor of {floor}"
+
+
+def test_a_store_named_with_a_path_forgets_the_chunks_read_under_its_uri_spelling(tmp_path: Path) -> None:
+    """A reader keys decoded chunks by the string it was handed, which `OmeZarrFile._path` builds on
+    forward slashes whatever the platform; a writer names the same store with a `Path`, and on
+    Windows `str(Path)` is backslashed. Both go through one spelling, or a replaced store keeps
+    serving the chunks of the store it replaced (invisible on POSIX, where the two already agree).
+    """
+    from konfai.utils.ome_zarr import _chunk_cache, clear_ome_zarr_cache, store_identity
+
+    read_as = "C:/data/case/CT.ome.zarr"  # what uri.join gives on either platform
+    named_as = PureWindowsPath("C:/data/case/CT.ome.zarr")  # what a writer holds
+    assert str(named_as) != read_as, "this test is about the two spellings differing"
+    assert store_identity(named_as) == store_identity(read_as)
+
+    cache = _chunk_cache()
+    cache.forget()
+    cache.put(((read_as, "0"), (0, 0, 0)), np.zeros((2, 2, 2), dtype=np.uint8))
+    assert cache.get(((read_as, "0"), (0, 0, 0))) is not None
+    clear_ome_zarr_cache(named_as)
+    assert cache.get(((read_as, "0"), (0, 0, 0))) is None
