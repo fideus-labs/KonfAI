@@ -171,22 +171,22 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
 
     dataset_file = Dataset.DicomFile(str(tmp_path / "P000"), read=True)
 
-    # one COLD patch read costs exactly 1 discovery + 2 sorts. get_dicom_info is memoised, so the
-    # cache must be cleared for the spy to see the cold cost at all.
+    # one COLD patch read costs exactly 1 discovery + 1 sort (the headers, for the slice order).
+    # get_dicom_info is memoised, so the cache must be cleared for the spy to see the cold cost at all.
     calls["discover"] = calls["sort"] = 0
     dicom.get_dicom_info.cache_clear()
     data, _attr = dataset_file.file_to_data_slice("", "CT", sl)
     assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
     assert calls["discover"] == 1
-    assert calls["sort"] == 2
+    assert calls["sort"] == 1
 
-    # a WARM read of the same case re-discovers nothing; only the per-read slab sort (pixel
-    # loading of the selected files) remains
+    # a WARM read of the same case re-discovers nothing and sorts nothing: the selected files are
+    # decoded in the order the memoised info already holds them
     calls["discover"] = calls["sort"] = 0
     data, _attr = dataset_file.file_to_data_slice("", "CT", sl)
     assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
     assert calls["discover"] == 0
-    assert calls["sort"] == 1
+    assert calls["sort"] == 0
 
     # statistics over Z: 1 cold discovery, not O(Z); numerics preserved (Welford, ddof=1)
     calls["discover"] = calls["sort"] = 0

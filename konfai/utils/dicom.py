@@ -50,7 +50,7 @@ import os
 import re
 from collections.abc import Sequence
 from datetime import datetime
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -336,41 +336,47 @@ def read_volume(
     DatasetManagerError
         If pixel data cannot be read or slices have inconsistent shapes.
     """
-    slices = []
-    expected_shape: tuple[int, int] | None = None
+    return _decode_slices(datasets, (slice(None), slice(None)), apply_rescale)[np.newaxis]
 
+
+def _decode_slices(datasets: list[DicomDataset], window: tuple[slice, slice], apply_rescale: bool) -> np.ndarray:
+    """The ``window`` (rows, columns) of every slice, stacked ``(Z, y, x)`` in float32, into one buffer.
+
+    Each plane is cut to the window BEFORE the cast and the rescale, so a 64x64 patch of 512x512
+    slices pays for 64x64 of arithmetic and not 512x512. ``arr * slope + intercept``, elementwise on
+    the cut plane, is the same operation on the same values as on the whole one: bit-identical.
+    """
+    volume: np.ndarray | None = None
+    expected_shape: tuple[int, ...] | None = None
     for i, ds in enumerate(datasets):
         try:
-            arr = ds.pixel_array.astype(np.float32)
+            plane = ds.pixel_array
         except Exception as exc:
             raise DatasetManagerError(
                 f"Cannot read pixel data from DICOM slice {i}.",
                 f"Transfer syntax or compression may be unsupported: {exc}",
             ) from exc
-
         if expected_shape is None:
-            expected_shape = arr.shape
-        elif arr.shape != expected_shape:
+            expected_shape = plane.shape
+        elif plane.shape != expected_shape:
             raise DatasetManagerError(
-                f"Inconsistent slice shape at index {i}: expected {expected_shape}, got {arr.shape}.",
+                f"Inconsistent slice shape at index {i}: expected {expected_shape}, got {plane.shape}.",
                 "All slices in a series must have the same rows and columns.",
             )
-
+        arr = plane[window].astype(np.float32)
         if apply_rescale:
             slope = float(getattr(ds, "RescaleSlope", 1.0))
             intercept = float(getattr(ds, "RescaleIntercept", 0.0))
             arr = arr * slope + intercept
-
-        slices.append(arr)
-
-    if not slices:
+        if volume is None:
+            volume = np.empty((len(datasets), *arr.shape), dtype=np.float32)
+        volume[i] = arr
+    if volume is None:
         raise DatasetManagerError("Series contains no readable slices.")
-
-    volume = np.stack(slices, axis=0)  # (Z, Y, X)
-    return volume[np.newaxis]  # (1, Z, Y, X)
+    return volume
 
 
-@lru_cache(maxsize=64)
+@cache
 def get_dicom_info(
     directory: str | Path,
     *,
@@ -379,7 +385,10 @@ def get_dicom_info(
     """Read DICOM series shape and geometry without decoding pixel data.
 
     Memoised per directory: input DICOM is read-only for a run, so the series walk and header reads are
-    done once instead of on every patch read. Callers that mutate the result must copy it first.
+    done once instead of on every patch read. Unbounded, because a miss re-reads every slice header
+    (0.3 ms per slice, twice) where the record it rebuilds is 140 bytes per slice, and a cohort read
+    in any order but case by case would miss on every patch past a bound. ``write_dicom_series``
+    clears it. Callers that mutate the result must copy it first.
     """
     selected_uid, files = _select_series_files(directory, series_uid)
     datasets = sort_series(files, stop_before_pixels=True)
@@ -390,10 +399,11 @@ def get_dicom_info(
         columns = int(first.Columns)
     except AttributeError as exc:
         raise DatasetManagerError("DICOM Rows/Columns tags are required to determine the volume shape.") from exc
+    by_name = {str(path): path for path in files}  # the discovery's own Path objects, once each
     return {
         "series_uid": selected_uid,
         "files": files,
-        "sorted_files": [Path(ds.filename) for ds in datasets],
+        "sorted_files": [by_name[ds.filename] for ds in datasets],
         "shape": [1, len(datasets), rows, columns],
         "origin": origin,
         "spacing": spacing,
@@ -411,7 +421,8 @@ def read_dicom_series_slice(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Read only the selected DICOM slices and return updated patch geometry."""
     if info is None:
-        info = get_dicom_info(directory, series_uid=series_uid)
+        # Spelled as the backend spells it: functools.cache keys ``series_uid=None`` apart from its absence.
+        info = get_dicom_info(directory) if series_uid is None else get_dicom_info(directory, series_uid=series_uid)
     elif series_uid is not None and series_uid != info["series_uid"]:
         raise DatasetManagerError(
             f"series_uid '{series_uid}' does not match the provided info series '{info['series_uid']}'."
@@ -424,11 +435,11 @@ def read_dicom_series_slice(
     if list(channel_indices) not in ([0], []):
         raise DatasetManagerError("DICOM stores scalar data and supports only channel 0.")
 
-    z_indices = list(range(*normalized[1].indices(shape[1])))
-    selected_files = [info["sorted_files"][index] for index in z_indices]
-    datasets = sort_series(selected_files)
-    volume = read_volume(datasets, apply_rescale=apply_rescale)
-    volume = volume[normalized[0], :, normalized[2], normalized[3]]
+    _require_pydicom()
+    # ``sorted_files`` is in slice order already: the selection is read in that order, not sorted again.
+    z_indices = range(*normalized[1].indices(shape[1]))
+    datasets = [pydicom.dcmread(str(info["sorted_files"][index])) for index in z_indices]
+    volume = _decode_slices(datasets, (normalized[2], normalized[3]), apply_rescale)[np.newaxis][normalized[0]]
 
     direction_matrix = np.asarray(info["direction"], dtype=np.float64).reshape(3, 3)
     start_xyz = np.asarray([normalized[3].start, normalized[2].start, normalized[1].start], dtype=np.float64)
@@ -488,6 +499,7 @@ def write_dicom_series(
 
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
+    get_dicom_info.cache_clear()  # what this directory holds is about to change
     # Remove only slices previously written by this function (its zero-padded NNNNNN.dcm
     # naming), never unrelated DICOM files that may share the directory.
     for existing in root.glob("*.dcm"):

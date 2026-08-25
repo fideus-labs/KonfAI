@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -155,8 +155,8 @@ def box_with_mask(mask: sitk.Image, label: list[int], dilatations: list[int]) ->
 
     dilatations = [int(np.ceil(d / s)) for d, s in zip(dilatations, reversed(mask.GetSpacing()), strict=False)]
 
-    data = sitk.GetArrayFromImage(mask)
-    border = np.where(np.isin(sitk.GetArrayFromImage(mask), label))
+    data = sitk.GetArrayViewFromImage(mask)  # a view: the mask is read for its shape and its labels, not held
+    border = np.where(np.isin(data, label))
     box = []
     for w, dilatation, s in zip(border, dilatations, data.shape, strict=False):
         box.append([max(np.min(w) - dilatation, 0), min(np.max(w) + dilatation, s)])
@@ -205,10 +205,12 @@ def _grid_of_image(image: sitk.Image) -> Grid:
     )
 
 
-def _displacement_stage(grid: Grid, per_component: list[np.ndarray], order: int, what: str) -> DisplacementStage:
+def _displacement_stage(grid: Grid, values: np.ndarray, order: int, what: str) -> DisplacementStage:
+    """A stage over ``values``, component-first ``(rank, *grid)``, contiguous float64: one copy where
+    they are not that already, none where they are."""
     from konfai.data.geometry import DisplacementStage
 
-    values = np.stack([component.astype(np.float64, copy=False) for component in per_component])
+    values = np.ascontiguousarray(values, dtype=np.float64)
     if not np.isfinite(values).all():
         raise TransformError(
             f"{what} carries a non-finite displacement value, so no bound on its reach exists.",
@@ -236,18 +238,22 @@ def decode_transform_stages(transform: sitk.Transform) -> SpatialStages:
     from konfai.data.geometry import AffineStage
 
     if isinstance(transform, sitk.BSplineTransform):
+        # One copy per component, into the stack: the images stay alive for as long as the views do.
         coefficients = transform.GetCoefficientImages()
-        arrays = [sitk.GetArrayFromImage(component) for component in coefficients]
+        values = np.stack([sitk.GetArrayViewFromImage(component) for component in coefficients])
         return (
             _displacement_stage(
-                _grid_of_image(coefficients[0]), arrays, int(transform.GetOrder()), "this BSpline transform"
+                _grid_of_image(coefficients[0]), values, int(transform.GetOrder()), "this BSpline transform"
             ),
         )
     if isinstance(transform, sitk.DisplacementFieldTransform):
+        # One copy of the field: the view is (Z, Y, X, rank) with the components (x, y, z) fastest,
+        # and the stage's component-first float64 layout is written straight from it (measured
+        # 159 MiB of peak against 50 MiB of content on a 128^3 field through GetArrayFromImage,
+        # a per-component ascontiguousarray and a stack).
         field = transform.GetDisplacementField()
-        array = sitk.GetArrayFromImage(field)  # (Z, Y, X, rank), components (x, y, z)
-        components = [np.ascontiguousarray(array[..., k]) for k in range(array.shape[-1])]
-        return (_displacement_stage(_grid_of_image(field), components, 1, "this displacement field"),)
+        values = np.array(np.moveaxis(sitk.GetArrayViewFromImage(field), -1, 0), dtype=np.float64, order="C")
+        return (_displacement_stage(_grid_of_image(field), values, 1, "this displacement field"),)
     if transform.IsLinear():
         return (AffineStage(_linear_map(transform)),)
     raise TransformError(
@@ -255,6 +261,31 @@ def decode_transform_stages(transform: sitk.Transform) -> SpatialStages:
         " reaches into its source is unknown, so the region it must read is unbounded.",
         "Convert it to a displacement field when it is written, or use a rigid/affine/BSpline"
         " transform, which all decompose.",
+    )
+
+
+def read_transform_stages(dataset: Any, group: str, name: str) -> SpatialStages:
+    """The stored transform ``(group, name)`` of ``dataset`` as geometry stages in APPLICATION order.
+
+    A displacement entry becomes its stage straight from the array the store hands over, on the
+    grid its attributes describe: the field never passes through a SimpleITK image (a float32 store
+    widens to float64 exactly, where the image route copied it three times over on the way in and
+    once more on the way out). Every other entry decodes through :func:`decode_transform_stages`,
+    as does everything a store that serves transforms alone (``read_transform`` and nothing else)
+    hands over.
+    """
+    from konfai.data.geometry import Grid
+    from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, data_to_transform
+
+    read_data = getattr(dataset, "read_data", None)
+    if read_data is None:
+        return decode_transform_stages(dataset.read_transform(group, name))
+    data, attribute = read_data(group, name)
+    if DISPLACEMENT_FIELD_ATTRIBUTE not in attribute:
+        return decode_transform_stages(data_to_transform(data, attribute, name))
+    what = f"the displacement field '{group}' of case '{name}'"
+    return (
+        _displacement_stage(Grid.of([int(extent) for extent in np.shape(data)[1:]], attribute, what), data, 1, what),
     )
 
 

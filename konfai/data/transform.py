@@ -1623,7 +1623,7 @@ class Resample(TransformInverse):
         """This case's stored transforms, decoded and composed, in application order."""
         if name in self._stored:
             return self._stored[name]
-        from konfai.utils.ITK import decode_transform_stages, invert_stages
+        from konfai.utils.ITK import invert_stages, read_transform_stages
 
         _require_simpleitk()
         rank = self._source_grid(name).rank
@@ -1633,18 +1633,17 @@ class Resample(TransformInverse):
         # application order, so the declared list is reversed here to mean the same thing it did.
         for group in reversed(list(cast("dict[str, bool]", self.transforms))):
             invert = self.transforms[group] if self.transforms else False
-            stored = None
+            decoded = None
             for dataset in self.datasets:
                 if dataset.is_dataset_exist(group, name):
-                    stored = dataset.read_transform(group, name)
+                    decoded = read_transform_stages(dataset, group, name)
                     break
-            if stored is None:
+            if decoded is None:
                 raise TransformError(
                     f"'Resample' found no transform for case '{name}' in group '{group}'.",
                     "Every case needs an entry in every group named under 'transforms:'. Check the"
                     " group name, or drop the cases that have no transform with 'subset'.",
                 )
-            decoded = decode_transform_stages(stored)
             if invert:
                 inverted = invert_stages(decoded, rank)
                 if inverted is None:

@@ -231,6 +231,77 @@ class TestDicomReadVolume:
             dicom.read_volume([ds0, ds1])
 
 
+class TestDicomRegionDecode:
+    """A region decodes the window of each selected slice, and nothing of the rest of the plane."""
+
+    @staticmethod
+    def _former_slice_read(root: Path, region: tuple[slice, ...]) -> np.ndarray:
+        """The full-plane route: every selected plane cast and rescaled whole, stacked, then cut."""
+        import pydicom
+        from konfai.utils import dicom
+
+        info = dicom.get_dicom_info(root)
+        z_indices = range(*region[1].indices(info["shape"][1]))
+        planes = []
+        for index in z_indices:
+            ds = pydicom.dcmread(str(info["sorted_files"][index]))
+            arr = ds.pixel_array.astype(np.float32)
+            planes.append(arr * float(ds.RescaleSlope) + float(ds.RescaleIntercept))
+        return np.stack(planes, axis=0)[np.newaxis][region[0], :, region[2], region[3]]
+
+    def test_a_window_cut_before_the_rescale_is_bit_identical_to_the_whole_plane(self, tmp_path: Path) -> None:
+        pytest.importorskip("pydicom")
+        from konfai.utils import dicom
+
+        root = tmp_path / "CT"
+        volume = (np.random.default_rng(3).normal(size=(1, 6, 24, 20)) * 300 - 200).astype(np.float32)
+        dicom.write_dicom_series(root, volume, origin=(1.0, 2.0, 3.0), spacing=(0.7, 0.8, 2.5))
+        region = (slice(None), slice(1, 5), slice(3, 17), slice(2, 19))
+
+        got, *_ = dicom.read_dicom_series_slice(root, region)
+        want = self._former_slice_read(root, region)
+
+        assert got.dtype == want.dtype == np.float32
+        assert got.tobytes() == want.tobytes()
+        whole, *_ = dicom.read_dicom_series(root)
+        assert whole.tobytes() == self._former_slice_read(root, (slice(None),) * 4).tobytes()
+
+    def test_a_region_reads_its_slices_in_order_without_sorting_them_again(self, tmp_path: Path, monkeypatch) -> None:
+        """``sorted_files`` is in slice order: the selection is decoded in that order, once each."""
+        pytest.importorskip("pydicom")
+        from konfai.utils import dicom
+
+        root = tmp_path / "CT"
+        volume = np.arange(1 * 5 * 4 * 4, dtype=np.int16).reshape(1, 5, 4, 4)
+        dicom.write_dicom_series(root, volume, origin=(0.0,) * 3, spacing=(1.0,) * 3)
+        dicom.get_dicom_info(root)
+        sorts = {"count": 0}
+        real_sort = dicom.sort_series
+
+        def counting(*args, **kwargs):
+            sorts["count"] += 1
+            return real_sort(*args, **kwargs)
+
+        monkeypatch.setattr(dicom, "sort_series", counting)
+        got, *_ = dicom.read_dicom_series_slice(root, (slice(None), slice(1, 4, 2), slice(None), slice(None)))
+
+        np.testing.assert_array_equal(got, volume[:, 1:4:2])
+        assert sorts["count"] == 0
+
+    def test_the_series_info_memo_is_unbounded_and_a_write_clears_it(self, tmp_path: Path) -> None:
+        """A miss re-reads every slice header twice; a bound of 64 series missed on every patch of a
+        cohort read in any order but case by case. A write of a series is what changes a directory."""
+        pytest.importorskip("pydicom")
+        from konfai.utils import dicom
+
+        assert dicom.get_dicom_info.cache_info().maxsize is None
+        root = tmp_path / "CT"
+        dicom.write_dicom_series(root, np.zeros((1, 3, 4, 4), dtype=np.int16), origin=(0.0,) * 3, spacing=(1.0,) * 3)
+        assert dicom.get_dicom_info(root)["shape"] == [1, 3, 4, 4]
+        dicom.write_dicom_series(root, np.zeros((1, 5, 4, 4), dtype=np.int16), origin=(0.0,) * 3, spacing=(1.0,) * 3)
+        assert dicom.get_dicom_info(root)["shape"] == [1, 5, 4, 4]
+
+
 # ---------------------------------------------------------------------------
 # OME-Zarr tests (no real Zarr store: uses unittest.mock)
 # ---------------------------------------------------------------------------

@@ -751,3 +751,378 @@ def test_the_readers_own_itk_keys_do_not_travel_with_the_volume(tmp_path: Path) 
     _, attributes = image_to_data(read)
     assert attributes["Study"] == "phantom"
     assert not [key for key in attributes.keys() if key.startswith("ITK_")]
+
+
+# --------------------------------------------------------------------------------------
+# Region reads off the raw pixel block of an uncompressed MetaImage / NIfTI
+# --------------------------------------------------------------------------------------
+
+_BLOCK_ORIGIN, _BLOCK_SPACING = [10.0, -20.5, 30.25], [0.7, 1.3, 2.1]
+_BLOCK_DIRECTION = np.asarray([0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+# A rotation: ITK's index-to-world arithmetic and numpy's matrix product then differ by an ulp,
+# which the record of a region read keeps apart (one rung each).
+_BLOCK_ROTATED = np.asarray(
+    [[np.cos(0.3), -np.sin(0.3), 0.0], [np.sin(0.3), np.cos(0.3), 0.0], [0.0, 0.0, 1.0]]
+).reshape(-1)
+# What the block route serves, and what it leaves to ITK: the fixtures of the tests below.
+_BLOCK_SERVED = (
+    "scalar.mha",
+    "vector.mha",
+    "rotated.mha",
+    "scalar.nii",
+    "vector.nii",
+    "streamed.mha",
+    "streamed.nii",
+    "bigendian.mha",
+    "plane.mha",
+    "identity.nii",
+)
+_BLOCK_LEFT_TO_ITK = ("compressed.mha", "scalar.nii.gz", "detached.mhd", "scaled.nii", "scalar.nrrd")
+
+
+def _block_image(data: np.ndarray, direction: np.ndarray) -> "sitk.Image":
+    rank = data.ndim - 1
+    if data.shape[0] == 1:
+        image = sitk.GetImageFromArray(data[0])
+    else:
+        image = sitk.GetImageFromArray(np.moveaxis(data, 0, -1), isVector=True)
+    image.SetOrigin(_BLOCK_ORIGIN[:rank])
+    image.SetSpacing(_BLOCK_SPACING[:rank])
+    image.SetDirection(direction.reshape(3, 3)[:rank, :rank].reshape(-1).tolist())
+    image.SetMetaData("Study", "phantom")
+    return image
+
+
+def _write_block_fixture(root: Path, kind: str) -> tuple[Path, np.ndarray]:
+    """One file of ``kind`` under ``root``, and the channel-first array it holds."""
+    from konfai.utils.dataset import _MhaDataStream, _NiftiDataStream
+
+    rng = np.random.default_rng(len(kind))
+    scalar = (rng.normal(size=(1, 12, 14, 16)) * 100).astype(np.float32)
+    vector = (rng.normal(size=(3, 12, 14, 16)) * 100).astype(np.int16)
+    path = root / kind
+    if kind == "vector.mha":
+        sitk.WriteImage(_block_image(vector, _BLOCK_DIRECTION), str(path))
+        return path, vector
+    if kind == "rotated.mha":
+        sitk.WriteImage(_block_image(scalar, _BLOCK_ROTATED), str(path))
+        return path, scalar
+    if kind == "scalar.nii":
+        stored = rng.integers(0, 4000, size=scalar.shape).astype(np.uint16)
+        sitk.WriteImage(_block_image(stored, _BLOCK_DIRECTION), str(path))
+        return path, stored
+    if kind == "vector.nii":
+        stored = vector.astype(np.float32)
+        sitk.WriteImage(_block_image(stored, _BLOCK_DIRECTION), str(path))
+        return path, stored
+    if kind in ("streamed.mha", "streamed.nii"):
+        stored = vector if kind == "streamed.mha" else vector.astype(np.float32)
+        attributes = Attribute()
+        attributes["Origin"] = np.asarray(_BLOCK_ORIGIN)
+        attributes["Spacing"] = np.asarray(_BLOCK_SPACING)
+        attributes["Direction"] = _BLOCK_DIRECTION
+        stream_class = _MhaDataStream if kind == "streamed.mha" else _NiftiDataStream
+        with stream_class(str(path), list(stored.shape), stored.dtype, attributes) as stream:
+            stream.write_slice(tuple(slice(0, extent) for extent in stored.shape), stored)
+        return path, stored
+    if kind == "bigendian.mha":
+        header = (
+            "ObjectType = Image\nNDims = 3\nBinaryData = True\nBinaryDataByteOrderMSB = True\n"
+            "CompressedData = False\nTransformMatrix = "
+            + " ".join(str(v) for v in _BLOCK_DIRECTION.reshape(3, 3).T.reshape(-1))
+            + "\nOffset = "
+            + " ".join(str(v) for v in _BLOCK_ORIGIN)
+            + "\nElementSpacing = "
+            + " ".join(str(v) for v in _BLOCK_SPACING)
+            + "\nDimSize = 16 14 12\nElementType = MET_FLOAT\nElementDataFile = LOCAL\n"
+        )
+        path.write_bytes(header.encode() + scalar[0].astype(">f4").tobytes())
+        return path, scalar
+    if kind == "plane.mha":
+        sitk.WriteImage(_block_image(scalar[:, 0], _BLOCK_DIRECTION), str(path))
+        return path, scalar[:, 0]
+    if kind == "identity.nii":
+        # An origin at zero on an identity grid: NIfTI speaks RAS, so the header holds negative
+        # zeros, whose sign the record's text keeps or drops exactly as ITK's route does.
+        image = _block_image(scalar, np.eye(3).reshape(-1))
+        image.SetOrigin([0.0, 0.0, 0.0])
+        sitk.WriteImage(image, str(path))
+        return path, scalar
+    if kind == "scaled.nii":
+        import struct
+
+        stored = rng.integers(0, 4000, size=scalar.shape).astype(np.uint16)
+        sitk.WriteImage(_block_image(stored, _BLOCK_DIRECTION), str(path))
+        header = bytearray(path.read_bytes())
+        struct.pack_into("<2f", header, 112, 2.0, 10.0)  # scl_slope, scl_inter: ITK rescales to float
+        path.write_bytes(bytes(header))
+        return path, stored
+    writer = sitk.ImageFileWriter()
+    writer.SetFileName(str(path))
+    writer.SetUseCompression(kind in ("compressed.mha", "scalar.nii.gz"))
+    writer.Execute(_block_image(scalar, _BLOCK_DIRECTION))
+    return path, scalar
+
+
+def _block_backend(path: Path) -> Dataset.SitkFile:
+    return Dataset.SitkFile(f"{path.parent}/", True, path.name.split(".", 1)[1])
+
+
+def _block_region(data: np.ndarray, corner: bool = False) -> tuple[slice, ...]:
+    if corner:  # at the volume's own origin, where a zero coordinate keeps or loses its sign
+        return (slice(None), *(slice(0, 4) for _ in data.shape[1:]))
+    if data.ndim == 4:
+        return (slice(None), slice(3, 9), slice(2, 11), slice(5, 13))
+    return (slice(None), slice(2, 11), slice(5, 13))
+
+
+@pytest.mark.parametrize("corner", [False, True], ids=["interior", "corner"])
+@pytest.mark.parametrize("kind", _BLOCK_SERVED)
+def test_a_region_off_the_raw_block_is_the_one_itk_decodes(
+    tmp_path: Path, monkeypatch, kind: str, corner: bool
+) -> None:
+    """Same bytes, same dtype, same attribute record (keys, order, text) as ITK's streaming reader."""
+    from konfai.utils import dataset as dataset_module
+
+    path, data = _write_block_fixture(tmp_path, kind)
+    assert dataset_module._pixel_block(str(path)) is not None
+    assert Dataset.SitkFile._supports_region_read(str(path))
+    region = _block_region(data, corner)
+    backend = _block_backend(path)
+    got, attributes = backend.file_to_data_slice("", path.name.split(".", 1)[0], region)
+
+    monkeypatch.setattr(dataset_module, "_pixel_block", lambda path: None)
+    want, want_attributes = backend.file_to_data_slice("", path.name.split(".", 1)[0], region)
+
+    assert got.dtype == want.dtype and got.dtype.isnative
+    np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(got, data[region])
+    if data.shape[0] > 1 and path.suffix == ".nii":
+        # ITK aborts on a region of a vector NIfTI, so its route reads the volume whole and records
+        # the volume's origin; the block route records the region's, like every other format.
+        index_xyz = np.asarray([item.start for item in reversed(region[1:])], dtype=np.float64)
+        direction = want_attributes.get_np_array("Direction").reshape(3, 3)
+        expected = want_attributes.get_np_array("Origin") + direction @ (
+            index_xyz * want_attributes.get_np_array("Spacing")
+        )
+        np.testing.assert_array_equal(attributes.get_np_array("Origin"), expected)
+        rungs = ("Origin_0", "Origin_1")
+        assert {k: v for k, v in attributes.items() if k not in rungs} == {
+            k: v for k, v in want_attributes.items() if k not in rungs
+        }
+    else:
+        assert dict(attributes) == dict(want_attributes)
+
+
+@pytest.mark.parametrize("kind", _BLOCK_LEFT_TO_ITK)
+def test_a_file_the_block_route_declines_is_still_read_by_itk(tmp_path: Path, kind: str) -> None:
+    """Compressed, detached, rescaled, or another format: the block route steps aside, ITK answers."""
+    from konfai.utils import dataset as dataset_module
+
+    path, data = _write_block_fixture(tmp_path, kind)
+    assert dataset_module._pixel_block(str(path)) is None
+    region = _block_region(data)
+    got, attributes = _block_backend(path).file_to_data_slice("", path.name.split(".", 1)[0], region)
+
+    if kind == "scaled.nii":
+        np.testing.assert_array_equal(got, data[region].astype(np.float32) * 2.0 + 10.0)
+    else:
+        np.testing.assert_array_equal(got, data[region])
+    assert "Origin" in attributes
+
+
+def test_a_stepped_region_off_the_raw_block_reads_as_itk_reads_it_whole(tmp_path: Path, monkeypatch) -> None:
+    """A step ITK cannot extract is served whole and sliced: the block serves the same values and
+    keeps the record ITK's route leaves, the volume's own geometry."""
+    from konfai.utils import dataset as dataset_module
+
+    path, data = _write_block_fixture(tmp_path, "vector.mha")
+    region = (slice(0, 3, 2), slice(1, 12, 3), slice(0, 14, 2), slice(2, 16, 3))
+    backend = _block_backend(path)
+    got, attributes = backend.file_to_data_slice("", "vector", region)
+    monkeypatch.setattr(dataset_module, "_pixel_block", lambda path: None)
+    want, want_attributes = backend.file_to_data_slice("", "vector", region)
+
+    np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(got, data[region])
+    assert dict(attributes) == dict(want_attributes)
+
+
+def test_the_raw_block_header_is_read_once_and_follows_a_rewrite(tmp_path: Path, monkeypatch) -> None:
+    """ITK reads the header once per file, not once per region; a file rewritten under the same
+    name gets a record of its own."""
+    from konfai.utils import dataset as dataset_module
+
+    path, data = _write_block_fixture(tmp_path, "scalar.mha")
+    reads = {"header": 0}
+    real = sitk.ImageFileReader.ReadImageInformation
+
+    def counting(self):
+        reads["header"] += 1
+        return real(self)
+
+    monkeypatch.setattr(sitk.ImageFileReader, "ReadImageInformation", counting)
+    dataset_module._pixel_block_at.cache_clear()
+    backend = _block_backend(path)
+    for plane in range(10):
+        region = (slice(None), slice(plane, plane + 1), slice(None), slice(None))
+        got, _ = backend.file_to_data_slice("", "scalar", region)
+        np.testing.assert_array_equal(got, data[:, plane : plane + 1])
+    assert reads["header"] == 1
+
+    replaced = np.flip(data, axis=1).copy()
+    image = _block_image(replaced, _BLOCK_DIRECTION)
+    image.SetMetaData("Rewritten", "yes")  # a longer header: the stamp changes even on a coarse clock
+    sitk.WriteImage(image, str(path))
+    got, attributes = backend.file_to_data_slice("", "scalar", (slice(None), slice(0, 1), slice(None), slice(None)))
+    np.testing.assert_array_equal(got, replaced[:, 0:1])
+    assert attributes["Rewritten"] == "yes"
+    assert reads["header"] == 2
+
+
+def test_an_h5_sidecar_is_read_once_per_pooled_handle_and_dropped_with_it(tmp_path: Path, monkeypatch) -> None:
+    """A patch read costs one hyperslab: the entry's attributes are read off the handle on its first
+    read and copied after, and a write of the entry (which drops the handle) brings the new ones."""
+    dataset = Dataset(tmp_path / "Sidecar", "h5")
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([1.0, 2.0, 3.0])
+    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
+    attributes["Direction"] = np.eye(3).reshape(-1)
+    for index in range(12):
+        attributes[f"Key{index}"] = f"value {index}"
+    volume = np.arange(4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
+    dataset.write("CT", "P0", volume, attributes)
+    opens = {"attribute": 0}
+    real = h5py.AttributeManager.__getitem__
+
+    def counting(self, key):
+        opens["attribute"] += 1
+        return real(self, key)
+
+    monkeypatch.setattr(h5py.AttributeManager, "__getitem__", counting)
+    region = (slice(None), slice(1, 3), slice(0, 5), slice(2, 6))
+    records = [dataset.read_data_slice("CT", "P0", region)[1] for _ in range(10)]
+    _, whole = dataset.read_data("CT", "P0")
+
+    assert opens["attribute"] == len(attributes)
+    assert all(dict(record) == dict(attributes) for record in records)
+    assert dict(whole) == dict(attributes)
+    records[0]["Origin"] = np.asarray([9.0, 9.0, 9.0])  # a copy: the caller's edits stay the caller's
+    assert dataset.read_data_slice("CT", "P0", region)[1]["Origin"] == attributes["Origin"]
+
+    attributes["Study"] = "rewritten"
+    dataset.write("CT", "P0", volume + 1, attributes)
+    data, record = dataset.read_data_slice("CT", "P0", region)
+    np.testing.assert_array_equal(data, (volume + 1)[region])
+    assert record["Study"] == "rewritten"
+
+
+def _attribute_text_through_printing(value) -> str:
+    """The normalising door as it stood before the str fast path: every value through the printer."""
+    import sys
+
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+    if isinstance(value, np.generic | np.ndarray) and np.issubdtype(value.dtype, np.floating):
+        value = np.asarray(value, dtype=np.float64)[()] if isinstance(value, np.generic) else value.astype(np.float64)
+    with np.printoptions(threshold=sys.maxsize, floatmode="unique"):
+        return str(value).replace("\n", "")
+
+
+def _former_attribute_copy(attributes: dict) -> Attribute:
+    """``Attribute(attributes)`` as it stood: every key deep-copied, every value through the printer."""
+    import copy
+
+    copied = Attribute()
+    for k, v in attributes.items():
+        dict.__setitem__(copied, copy.deepcopy(k), _attribute_text_through_printing(v))
+    return copied
+
+
+def _attribute_fixture_values() -> dict:
+    return {
+        "Origin": np.asarray([10.0, -20.5, 30.25]),
+        "Spacing_0": np.asarray([0.7, 1.3, 2.1], dtype=np.float32),
+        "Direction_0": np.eye(3).reshape(-1),
+        "Long": np.arange(2000, dtype=np.float64) / 7,
+        "Mean": np.float32(0.1),
+        "Std": 0.30000000000000004,
+        "Count": 12,
+        "Flag": True,
+        "Nested": [[1.5, 2.0], [3.0, 4.25]],
+        "Tensor": torch.tensor([1.0, 2.5, 3.0]),
+        "Zero": torch.tensor(0.0),
+        "Text": "phantom\nstudy",
+        "Empty": "",
+        "Ints": np.asarray([1, 2, 3]),
+    }
+
+
+def test_copying_an_attribute_is_the_same_record_as_normalising_it_again() -> None:
+    """Every door yields the same text as the printing door did, key for key: from live values,
+    from a plain dict of text, and from an Attribute (a dict-level copy)."""
+    values = _attribute_fixture_values()
+    former = _former_attribute_copy(values)
+
+    from_values = Attribute(values)
+    from_text = Attribute(dict(from_values))
+    from_attribute = Attribute(from_values)
+
+    assert list(dict(from_values).items()) == list(dict(former).items())
+    assert list(dict(from_text).items()) == list(dict(former).items())
+    assert list(dict(from_attribute).items()) == list(dict(former).items())
+    assert all(type(v) is str for v in dict(from_attribute).values())
+    np.testing.assert_array_equal(from_attribute.get_np_array("Long"), values["Long"])
+    assert from_attribute["Text"] == "phantomstudy"
+    assert Attribute(None) == Attribute({}) == Attribute()
+
+
+def test_a_copied_attribute_is_independent_of_its_source() -> None:
+    source = Attribute(_attribute_fixture_values())
+    copied = Attribute(source)
+    copied["Origin"] = np.asarray([0.0, 0.0, 0.0])
+    copied.pop("Std")
+
+    assert source["Origin"] == Attribute(_attribute_fixture_values())["Origin"]
+    assert "Std" in source
+    assert source["Std"] == "0.30000000000000004"
+
+
+def test_assigning_text_keeps_it_as_it_is_but_for_newlines() -> None:
+    """The printing door stripped a str's newlines and nothing else; the fast path does the same."""
+    attributes = Attribute()
+    attributes["Study"] = "phantom\nstudy"
+    attributes["Path"] = "a b:c"
+    assert attributes["Study"] == "phantomstudy" == _attribute_text_through_printing("phantom\nstudy")
+    assert attributes["Path"] == "a b:c"
+
+
+# --------------------------------------------------------------------------------------
+# An array read off a map or an ITK buffer owns its bytes
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["scalar.mha", "scalar.nii", "vector.nii"])
+def test_a_full_plane_region_off_the_raw_block_owns_its_bytes(tmp_path: Path, kind: str) -> None:
+    """A slab of whole planes is contiguous on the map, so a copy that only guarantees contiguity
+    would hand back the map's own pages: read-only, and unmapped once the array holding them is
+    gone, under a tensor still pointing at them."""
+    path, data = _write_block_fixture(tmp_path, kind)
+    region = (slice(None), slice(2, 5), slice(None), slice(None))
+    got, _ = _block_backend(path).file_to_data_slice("", path.name.split(".", 1)[0], region)
+
+    assert not isinstance(got, np.memmap) and got.flags.owndata and got.flags.writeable
+    tensor = torch.from_numpy(got)  # what the streamed route does with it next
+    got += 1
+    np.testing.assert_array_equal(tensor.numpy(), data[region] + 1)
+
+
+def test_image_to_data_owns_the_vector_image_bytes_whatever_its_size() -> None:
+    """A vector image of one voxel is contiguous however its axes are moved: the array must still be
+    a copy, not a view into a buffer the image takes with it."""
+    image = sitk.GetImageFromArray(np.asarray([[[[1.0, 2.0, 3.0]]]], dtype=np.float32), isVector=True)
+    data, _ = image_to_data(image)
+    del image
+
+    assert data.flags.owndata and data.shape == (3, 1, 1, 1)
+    np.testing.assert_array_equal(data.reshape(-1), [1.0, 2.0, 3.0])

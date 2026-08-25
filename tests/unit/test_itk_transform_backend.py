@@ -214,3 +214,89 @@ def test_without_h5py_the_backend_names_the_extra_to_install(tmp_path: Path, mon
 
     with pytest.raises(DatasetManagerError, match="h5py"):
         Dataset(tmp_path / "out", "itktransform").write("Transform", "P000", _field(), _attributes())
+
+
+def test_a_region_read_opens_the_file_once_for_the_process(tmp_path: Path, monkeypatch) -> None:
+    """The header and the region come off one pooled handle: past the first region, no open at all."""
+    from konfai.utils import dataset as dataset_module
+
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Transform", "P000", _field(6), _attributes())
+    opens = {"count": 0}
+    real = dataset_module._open_h5
+
+    def counting(*args, **kwargs):
+        opens["count"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dataset_module, "_open_h5", counting)
+    for start in range(3):
+        region = (slice(0, 3), slice(start, start + 2), slice(1, 4), slice(2, 6))
+        got, _ = dataset.read_data_slice("Transform", "P000", region)
+        np.testing.assert_array_equal(got, _field(6)[region])
+    dataset.get_infos("Transform", "P000")
+
+    assert opens["count"] == 1
+
+
+@pytest.mark.parametrize(
+    "region",
+    [
+        (slice(0, 3), slice(6, 1, -2), slice(0, 9), slice(0, 11)),  # the leading axis reversed
+        (slice(0, 3), slice(1, 7, 2), slice(8, None, -3), slice(10, 2, -1)),  # every axis stepped or reversed
+        (slice(2, None, -1), slice(None), slice(None, None, -1), slice(None)),  # channels and rows reversed
+        (slice(0, 3), slice(2, 2), slice(0, 9), slice(0, 11)),  # an empty span of planes
+    ],
+    ids=["reversed-planes", "stepped-every-axis", "reversed-channels-rows", "empty"],
+)
+def test_a_stepped_or_reversed_region_is_the_whole_field_sliced(tmp_path: Path, region: tuple[slice, ...]) -> None:
+    """Whatever the slice does, the region is what slicing the whole field gives, read bounded."""
+    field = (np.random.default_rng(9).normal(size=(3, 7, 9, 11)) * 8).astype(np.float32)
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Transform", "P000", field, _attributes())
+
+    whole, _ = dataset.read_data("Transform", "P000")
+    got, _ = dataset.read_data_slice("Transform", "P000", region)
+
+    np.testing.assert_array_equal(got, np.asarray(whole)[region])
+    np.testing.assert_array_equal(got, field[region])
+
+
+def test_a_region_read_holds_its_planes_and_rows_and_not_the_rows_around_them(tmp_path: Path) -> None:
+    """A 8^3 region of a 64^3 field reads 8 rows of 8 planes (98 KB of parameters), not the 8 whole
+    planes those rows sit on (786 KB)."""
+    import tracemalloc
+
+    field = (np.random.default_rng(4).normal(size=(3, 64, 64, 64)) * 8).astype(np.float32)
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Transform", "P000", field, _attributes())
+    region = (slice(0, 3), slice(20, 28), slice(30, 38), slice(40, 48))
+    dataset.read_data_slice("Transform", "P000", region)  # the pooled handle, opened outside the trace
+
+    tracemalloc.start()
+    got, _ = dataset.read_data_slice("Transform", "P000", region)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    np.testing.assert_array_equal(got, field[region])
+    span_bytes = 8 * 8 * 64 * 3 * 8
+    assert peak < 4 * span_bytes, f"{peak} bytes at peak for a span of {span_bytes}"
+
+
+def test_a_whole_read_of_a_field_entry_is_what_itk_decodes_off_the_same_file(tmp_path: Path) -> None:
+    """The parameters are the field in float64: read as one span, they are the bytes ITK's transform
+    reader hands over, under the same attribute record."""
+    from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, image_to_data
+
+    field = (np.random.default_rng(11).normal(size=(3, 5, 7, 6)) * 8).astype(np.float32)
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Transform", "P000", field, _attributes())
+
+    data, attributes = dataset.read_data("Transform", "P000")
+    transform = sitk.ReadTransform(str(tmp_path / "out" / "P000" / "Transform.h5"))
+    want, want_attributes = image_to_data(sitk.DisplacementFieldTransform(transform).GetDisplacementField())
+    want_attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+
+    assert data.dtype == want.dtype == np.float64 and data.flags.c_contiguous
+    assert data.tobytes() == want.tobytes()
+    assert dict(attributes) == dict(want_attributes)

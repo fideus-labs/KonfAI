@@ -29,6 +29,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import sys
 import threading
 import time
@@ -84,10 +85,16 @@ def _get_h5_file_lock(filename: str) -> threading.RLock:
 
 class _PooledRead(NamedTuple):
     """An open read handle and the store it was opened on, as one thing: the two travel together through
-    eviction and re-insertion, so no site can pair a handle with a view it never had."""
+    eviction and re-insertion, so no site can pair a handle with a view it never had.
+
+    The sidecars travel with them: an entry's attributes, read off the handle once and kept for its
+    life, so a patch read costs one hyperslab and not one HDF5 attribute open per key on top (measured
+    15 opens, 327 us, on a 15-key sidecar beside a 222 us slice). A handle replaced or dropped takes
+    its sidecars with it, which is every way the store can have changed underneath them."""
 
     file: Any
     opened_on: tuple[int, int] | None
+    sidecars: dict[str, Attribute]
 
 
 class _H5ReadPool:
@@ -132,14 +139,14 @@ class _H5ReadPool:
         for remaining in reversed(range(self._OPEN_ATTEMPTS)):
             stamp = self._stamp(filename)
             try:
-                return _PooledRead(_open_h5(filename, "r", **open_kwargs), stamp)
+                return _PooledRead(_open_h5(filename, "r", **open_kwargs), stamp, {})
             except OSError:
                 if not remaining:
                     raise
                 time.sleep(self._OPEN_BACKOFF)
         raise AssertionError("unreachable: the last attempt either returns or raises")
 
-    def get(self, filename: str, **open_kwargs: Any) -> Any:
+    def get(self, filename: str, **open_kwargs: Any) -> _PooledRead:
         # Read before the open, never after: a write landing in between then leaves a stamp older than
         # the handle, and the next call reopens. The reverse would record a view it never had.
         stamp = self._stamp(filename)
@@ -163,7 +170,7 @@ class _H5ReadPool:
                 evicted.append((oldest, self._handles.pop(oldest)))
         for stale_name, stale in evicted:
             self._close_idle(stale_name, stale)
-        return pooled.file
+        return pooled
 
     def drop(self, filename: str) -> None:
         with self._guard:
@@ -225,6 +232,8 @@ def _attribute_text(value: Any) -> str:
     path of one chain disagree by that much (measured: a Min/Max rescale, 28% of voxels one ulp
     apart on CUDA).
     """
+    if type(value) is str:
+        return value.replace("\n", "")  # what the printing below does to a str, without entering it
     if isinstance(value, torch.Tensor):
         # Accept a tensor from any device: attributes are host-side strings, and finalize transforms
         # (Normalize, Statistics, ...) may hand over stats computed on a CUDA-resident volume.
@@ -284,13 +293,21 @@ class Attribute(dict[str, Any]):
     Values are text, always. Both doors normalize (assignment and construction), so an attribute
     built from a store's own sidecar, which JSON hands back as live lists, is the same thing as one
     assigned in Python. Anything less and a value can be stored and not written back out.
+
+    Copying one is a dict copy: its values are text already, and the streamed route of every
+    workflow copies the case's attributes three to five times per patch (measured 69 us for a
+    23-key copy through the normalising door, 2 us at dict level).
     """
 
     def __init__(self, attributes: dict[str, Any] | None = None) -> None:
         super().__init__()
-        attributes = attributes or {}
+        if not attributes:
+            return
+        if type(attributes) is Attribute:
+            super().update(attributes)
+            return
         for k, v in attributes.items():
-            super().__setitem__(copy.deepcopy(k), _attribute_text(v))
+            super().__setitem__(k if type(k) is str else copy.deepcopy(k), _attribute_text(v))
 
     @staticmethod
     def _is_stack_member(stored_key: str, key: str) -> bool:
@@ -708,13 +725,14 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     attributes["Origin"] = np.asarray(image.GetOrigin())
     attributes["Spacing"] = np.asarray(image.GetSpacing())
     attributes["Direction"] = np.asarray(image.GetDirection())
-    data = sitk.GetArrayFromImage(image)
-
     if image.GetNumberOfComponentsPerPixel() == 1:
-        data = np.expand_dims(data, 0)
-    else:
-        data = np.transpose(data, (len(data.shape) - 1, *list(range(len(data.shape) - 1))))
-    return data, attributes
+        return np.expand_dims(sitk.GetArrayFromImage(image), 0), attributes
+    # One copy, written channel-first straight off ITK's interleaved buffer: the array is contiguous
+    # for whatever holds it next, where the copy of the buffer transposed was a strided view every
+    # consumer needing a contiguous field copied again (a 3x128^3 float64 field: 50 MiB each time).
+    # np.array and not ascontiguousarray: a one-voxel image is contiguous however its axes are moved,
+    # and a view of ITK's buffer would outlive the image.
+    return np.array(np.moveaxis(sitk.GetArrayViewFromImage(image), -1, 0), order="C"), attributes
 
 
 def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
@@ -809,6 +827,21 @@ def _decode_transform(transform_type: str, name: str) -> sitk.Transform:
         if transform_type == type_tag:
             return factory()
     raise DatasetManagerError(f"Unsupported transform type '{transform_type}' for entry '{name}'.")
+
+
+def data_to_transform(data: np.ndarray, attributes: Attribute, name: str) -> sitk.Transform:
+    """The transform a stored entry holds: a displacement field is its image in float64, what
+    ``DisplacementFieldTransform`` requires, widened here exactly so the image is built once in that
+    type; any other entry is the parameter rows and type keys of ``_encode_transform_leaves``."""
+    if DISPLACEMENT_FIELD_ATTRIBUTE in attributes:
+        return sitk.DisplacementFieldTransform(data_to_image(np.asarray(data, dtype=np.float64), attributes))
+    transforms = []
+    for i, transform_type in enumerate(v for k, v in attributes.items() if k.endswith(":Transform_0")):
+        transform = _decode_transform(transform_type, name)
+        transform.SetFixedParameters(ast.literal_eval(attributes[f"{i}:FixedParameters"]))
+        transform.SetParameters(tuple(data[i]))
+        transforms.append(transform)
+    return sitk.CompositeTransform(transforms) if len(transforms) > 1 else transforms[0]
 
 
 def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
@@ -1191,8 +1224,6 @@ class _NiftiDataStream(DataStream):
     affine's first two rows are negated on the way out, the one convention this class owns."""
 
     def __init__(self, path: str, shape: list[int], dtype: np.dtype, attributes: Attribute) -> None:
-        import struct
-
         self.path = path
         self.published_path = Path(path)
         self._temporary_path = f"{path}.{self.temporary_suffix()}"
@@ -1378,6 +1409,198 @@ class _OmeZarrDataStream(DataStream):
 
 _T = TypeVar("_T")
 
+#: NumPy dtype of each element type the raw-block route reads (the inverses of the writers' tables).
+_NIFTI_DTYPES = {code: np.dtype(name) for name, code in _NIFTI_DATATYPES.items()}
+_MHA_DTYPES = {token: np.dtype(name) for name, token in _MHA_ELEMENT_TYPES.items()}
+#: How much of a file a MetaImage header is looked for in: MetaIO writes a few hundred bytes, user
+#: fields a few more; a header that runs past this is read by ITK.
+_MHA_HEADER_PROBE_BYTES = 1 << 16
+
+
+@functools.cache
+def _sitk_component_dtypes() -> dict[int, np.dtype]:
+    """The NumPy dtype ITK stores each of its scalar and vector pixel types in."""
+    kinds = (
+        ("UInt8", np.uint8),
+        ("Int8", np.int8),
+        ("UInt16", np.uint16),
+        ("Int16", np.int16),
+        ("UInt32", np.uint32),
+        ("Int32", np.int32),
+        ("UInt64", np.uint64),
+        ("Int64", np.int64),
+        ("Float32", np.float32),
+        ("Float64", np.float64),
+    )
+    return {getattr(sitk, f"sitk{prefix}{name}"): np.dtype(kind) for prefix in ("", "Vector") for name, kind in kinds}
+
+
+class _PixelBlock(NamedTuple):
+    """An uncompressed MetaImage or NIfTI as a memmap serves it: where its raw pixels start, how
+    they are stored, and what ITK reads in its header."""
+
+    offset: int
+    dtype: np.dtype  # as stored, byte order included
+    interleaved: bool  # MetaIO keeps a pixel's components together; NIfTI keeps each component's volume whole
+    shape: tuple[int, ...]  # channel-first
+    metadata: Attribute  # the header's own keys, as image_to_data imports them
+    probe: Any  # a one-voxel sitk.Image carrying the header's geometry: ITK's own index-to-world arithmetic
+
+    @property
+    def origin(self) -> np.ndarray:
+        return np.asarray(self.probe.GetOrigin())
+
+    @property
+    def spacing(self) -> np.ndarray:
+        return np.asarray(self.probe.GetSpacing())
+
+    @property
+    def direction(self) -> np.ndarray:
+        return np.asarray(self.probe.GetDirection())
+
+
+def _mha_raw_block(path: str) -> tuple[int, np.dtype] | None:
+    """Where an uncompressed local-data MetaImage keeps its pixels and how; ``None`` for any other."""
+    with open(path, "rb") as file:
+        head = file.read(_MHA_HEADER_PROBE_BYTES)
+    fields: dict[str, str] = {}
+    position = 0
+    while "ElementDataFile" not in fields:
+        end = head.find(b"\n", position)
+        if end < 0:
+            return None
+        key, separator, value = head[position:end].decode("latin-1").partition("=")
+        position = end + 1
+        if separator:
+            fields[key.strip()] = value.strip()
+    dtype = _MHA_DTYPES.get(fields.get("ElementType", ""))
+    if (
+        dtype is None
+        or fields["ElementDataFile"] != "LOCAL"
+        or "HeaderSize" in fields  # a seek MetaIO applies to LOCAL data too
+        or fields.get("BinaryData", "").lower() != "true"
+        or fields.get("CompressedData", "false").lower() != "false"
+    ):
+        return None
+    big_endian = fields.get("BinaryDataByteOrderMSB", fields.get("ElementByteOrderMSB", "false")).lower() == "true"
+    return position, dtype.newbyteorder(">" if big_endian else "<")
+
+
+def _nifti_raw_block(path: str) -> tuple[int, np.dtype] | None:
+    """Where a single-file uncompressed NIfTI-1 keeps its pixels and how; ``None`` for any other.
+
+    A stored intensity scaling (``scl_slope``/``scl_inter``) is left to ITK, which applies it and
+    promotes the pixel type; the block's bytes are then not the volume's values.
+    """
+    with open(path, "rb") as file:
+        header = file.read(348)
+    if len(header) < 348 or header[344:348] != b"n+1\x00":  # a .hdr/.img pair keeps its block elsewhere
+        return None
+    order = next((order for order in ("<", ">") if struct.unpack(f"{order}i", header[:4])[0] == 348), None)
+    if order is None:
+        return None
+    dtype = _NIFTI_DTYPES.get(struct.unpack(f"{order}h", header[70:72])[0])
+    (vox_offset,) = struct.unpack(f"{order}f", header[108:112])
+    slope, inter = struct.unpack(f"{order}2f", header[112:120])
+    if dtype is None or slope not in (0.0, 1.0) or inter != 0.0 or vox_offset < 352 or vox_offset != int(vox_offset):
+        return None
+    return int(vox_offset), dtype.newbyteorder(order)
+
+
+@functools.lru_cache(maxsize=4096)
+def _pixel_block_at(path: str, stamp: tuple[int, int]) -> _PixelBlock | None:
+    """The raw block of ``path`` as it was at ``stamp``, with its header read by ITK once.
+
+    Qualified against ITK's own reading of the header: the element type it reports must be the one
+    stored, and the file must hold every element the shape announces. A file that fails either is
+    read by ITK, which then answers for it, so a mismatch costs speed and never a wrong value.
+
+    The geometry and the metadata are taken off a one-voxel region ITK extracts, not off its header
+    read alone: ITK's NIfTI IO reads the header again before it reads pixels, and the direction it
+    then carries differs from the first read's in the sign of its zeros, which the record keeps as
+    text. A vector NIfTI, which ITK cannot extract a region of, is the one file whose record comes
+    from the header read.
+    """
+    del stamp  # part of the key: a rewritten file gets a record of its own
+    image_io = sitk.ImageFileReader.GetImageIOFromFileName(path)
+    if image_io == "MetaImageIO":
+        raw, interleaved = _mha_raw_block(path), True
+    elif image_io == "NiftiImageIO":
+        raw, interleaved = _nifti_raw_block(path), False
+    else:
+        return None
+    if raw is None:
+        return None
+    offset, dtype = raw
+    reader = sitk.ImageFileReader()
+    reader.SetFileName(path)
+    reader.ReadImageInformation()
+    rank = reader.GetDimension()
+    shape = (reader.GetNumberOfComponents(), *reversed(reader.GetSize()))
+    if (
+        rank not in (2, 3)
+        or _sitk_component_dtypes().get(reader.GetPixelID()) != dtype.newbyteorder("=")
+        or os.path.getsize(path) < offset + int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+    ):
+        return None
+    if not interleaved and shape[0] > 1:
+        probe = sitk.Image([1] * rank, sitk.sitkUInt8)
+        probe.SetOrigin(reader.GetOrigin())
+        probe.SetSpacing(reader.GetSpacing())
+        probe.SetDirection(reader.GetDirection())
+        for key in reader.GetMetaDataKeys():
+            probe.SetMetaData(key, reader.GetMetaData(key))
+    else:
+        reader.SetExtractIndex([0] * rank)
+        reader.SetExtractSize([1] * rank)
+        probe = reader.Execute()
+    metadata = Attribute()
+    for key in probe.GetMetaDataKeys():
+        if not key.startswith("ITK_"):  # the reader's own bookkeeping, as image_to_data drops it
+            metadata[key] = probe.GetMetaData(key)
+    return _PixelBlock(offset, dtype, interleaved, shape, metadata, probe)
+
+
+def _pixel_block(path: str) -> _PixelBlock | None:
+    """The raw block of ``path`` as it is now, or ``None`` when only ITK can read the file."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return _pixel_block_at(path, (info.st_mtime_ns, info.st_size))
+
+
+def _pixel_block_region(block: _PixelBlock, path: str, normalized: tuple[slice, ...]) -> np.ndarray:
+    """One region off the raw block, channel-first and in the native byte order: the bytes ITK
+    would decode, read through a memmap that touches the region's pages and no other.
+
+    A copy, always: a slab of whole planes is contiguous on the map, and an array that only
+    guaranteed contiguity would be the map's own pages, read-only and unmapped with the map."""
+    if block.interleaved:
+        mapped = np.memmap(path, block.dtype, "r", block.offset, (*block.shape[1:], block.shape[0]))
+        region = np.moveaxis(mapped[(*normalized[1:], normalized[0])], -1, 0)
+    else:
+        mapped = np.memmap(path, block.dtype, "r", block.offset, block.shape)
+        region = mapped[normalized]
+    return np.array(region, dtype=block.dtype.newbyteorder("="), order="C")
+
+
+def _pixel_block_attributes(block: _PixelBlock, index_xyz: list[int] | None) -> Attribute:
+    """The attributes ITK's route records: the header's keys, then the geometry, the origin being
+    the region's (at ``index_xyz``) as ITK's extract computes it, then the region's origin again as
+    the module computes it. ``None`` is the whole volume's record, as ``file_to_data`` returns it."""
+    attributes = Attribute(block.metadata)
+    if index_xyz is None:
+        attributes["Origin"] = block.origin
+    else:
+        attributes["Origin"] = np.asarray(block.probe.TransformIndexToPhysicalPoint(index_xyz))
+    attributes["Spacing"] = block.spacing
+    attributes["Direction"] = block.direction
+    if index_xyz is not None:
+        direction = block.direction.reshape(len(block.spacing), len(block.spacing))
+        attributes["Origin"] = block.origin + direction @ (np.asarray(index_xyz, dtype=np.float64) * block.spacing)
+    return attributes
+
 
 class Dataset:
     """Filesystem or HDF5-backed dataset abstraction used across KonfAI."""
@@ -1481,6 +1704,7 @@ class Dataset:
                 self.filename += ".h5"
             self.read = read
             self._lock: threading.RLock | None = None
+            self._sidecars: dict[str, Attribute] | None = None  # the pooled handle's, on a read open
 
         def __enter__(self):
             # A single HDF5 file cannot be opened concurrently from several threads:
@@ -1491,11 +1715,12 @@ class Dataset:
             self._lock.acquire()
             try:
                 if self.read:
-                    self.h5 = _h5_read_pool.get(
+                    pooled = _h5_read_pool.get(
                         self.filename,
                         rdcc_nbytes=self._READ_CHUNK_CACHE_BYTES,
                         rdcc_nslots=self._READ_CHUNK_CACHE_SLOTS,
                     )
+                    self.h5, self._sidecars = pooled.file, pooled.sidecars
                 else:
                     _h5_read_pool.drop(self.filename)
                     if not os.path.exists(self.filename):
@@ -1519,11 +1744,22 @@ class Dataset:
                     self._lock.release()
                     self._lock = None
 
+        def _sidecar(self, dataset: h5py.Dataset) -> Attribute:
+            """The entry's attributes, a copy of the pooled handle's record of them: one attribute open
+            per key on the first read of the entry through the handle, none after. A write handle is
+            not pooled and reads them off the file."""
+            if self._sidecars is None:
+                return Attribute(dict(dataset.attrs))
+            sidecar = self._sidecars.get(dataset.name)
+            if sidecar is None:
+                sidecar = self._sidecars[dataset.name] = Attribute(dict(dataset.attrs))
+            return Attribute(sidecar)
+
         def file_to_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
             dataset = self._get_dataset(groups, name)
             data = np.zeros(dataset.shape, dataset.dtype)
             dataset.read_direct(data)
-            return data, Attribute(dict(dataset.attrs))
+            return data, self._sidecar(dataset)
 
         def bounded_region_reads(self, name: str) -> bool:
             del name
@@ -1534,7 +1770,7 @@ class Dataset:
         def file_to_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
             dataset = self._get_dataset(groups, name)
             data = np.asarray(dataset[slices])
-            return data, Attribute(dict(dataset.attrs))
+            return data, self._sidecar(dataset)
 
         def data_to_file(
             self,
@@ -1713,10 +1949,7 @@ class Dataset:
 
         def get_infos(self, groups: str, name: str) -> tuple[list[int], Attribute]:
             dataset = self._get_dataset(groups, name)
-            return (
-                dataset.shape,
-                Attribute(dict(dataset.attrs)),
-            )
+            return dataset.shape, self._sidecar(dataset)
 
     class SitkFile(AbstractFile):
         def __init__(self, filename: str, read: bool, file_format: str) -> None:
@@ -1751,6 +1984,8 @@ class Dataset:
 
             Cached: the patch path asks this per read, and it opens the file to read a header.
             """
+            if _pixel_block(path) is not None:
+                return True  # a memmap of the raw block reads the region's pages and no other
             image_io = sitk.ImageFileReader.GetImageIOFromFileName(path)
             if image_io == "MetaImageIO":
                 # MetaImage announces compression in its ASCII header, ahead of ElementDataFile.
@@ -1787,6 +2022,22 @@ class Dataset:
             return matches[0] if matches else None
 
         def _file_to_image_slice(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+            block = _pixel_block(path)
+            if block is not None:
+                # The region's bytes off the file, where ITK's streaming reader decodes them through
+                # its pipeline: 3.5 ms against 0.09 ms for a 64^3 region of an uncompressed 256^3
+                # .mha, the same bytes. The record ITK's route leaves is kept: the region's origin
+                # for a direct slice, the volume's for a stepped one, which ITK reads whole.
+                normalized = self._normalize_slices(slices, list(block.shape))
+                if all(item.step > 0 for item in normalized):
+                    try:
+                        data = _pixel_block_region(block, path, normalized)
+                    except (OSError, ValueError):  # replaced under the stat: ITK answers for it
+                        pass
+                    else:
+                        index_xyz = [item.start for item in reversed(normalized[1:])]
+                        direct = self._supports_direct_slice(normalized)
+                        return data, _pixel_block_attributes(block, index_xyz if direct else None)
             reader = sitk.ImageFileReader()
             reader.SetFileName(path)
             reader.ReadImageInformation()
@@ -2408,9 +2659,19 @@ class Dataset:
             return f"{self.filename}{name}.h5"
 
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
+            header = None
+            if h5py.is_hdf5(self._path(name)):
+                with self._field_file(name) as file:
+                    header = self._field_header(file)
+                    if header is not None:
+                        # The parameters ARE the field, float64: one span off the file, where ITK's
+                        # transform reader holds the field twice before the array is even copied out
+                        # (a 128^3 field: +147 MiB of RSS through ITK, +100 MiB off the span).
+                        shape, attributes = header
+                        return self._field_region(file, shape[1:], (slice(None),) * 4, np.float64), attributes
             transform = sitk.ReadTransform(self._path(name))
             attributes = Attribute()
-            if "DisplacementFieldTransform" in transform.GetName():
+            if "DisplacementFieldTransform" in transform.GetName():  # a field in a text transform file
                 field = sitk.DisplacementFieldTransform(transform).GetDisplacementField()
                 data, attributes = image_to_data(field)
                 attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
@@ -2426,35 +2687,87 @@ class Dataset:
             shape, _attributes = self.get_infos("", name)
             return len(shape) == 4 and shape[0] == 3
 
-        def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
-            """A region of a displacement entry, decoded from the parameters it maps to alone.
+        @contextlib.contextmanager
+        def _field_file(self, name: str) -> Iterator[Any]:
+            """The entry's HDF5 file off the process's read pool: opened once per file, held while
+            a region is read, replaced by the pool when the file is rewritten."""
+            path = self._path(name)
+            with _get_h5_file_lock(path):
+                yield _h5_read_pool.get(path).file
 
-            The buffer is ``[z][y][x]`` with the component fastest, so a span of leading-axis rows
-            is one contiguous span of the parameters: read, reshaped, and sliced down to the exact
-            region: the peak is the row span, never the field.
+        @staticmethod
+        def _field_header(file: Any) -> tuple[list[int], Attribute] | None:
+            """Shape and geometry of a displacement entry off its fixed parameters (size, origin,
+            spacing, direction); ``None`` for a transform of another kind, which the whole read decodes."""
+            kind = bytes(file["TransformGroup/0/TransformType"][0])
+            if not kind.startswith(b"DisplacementFieldTransform"):
+                return None
+            fixed = np.asarray(file["TransformGroup/0/TransformFixedParameters"][()], dtype=np.float64)
+            attributes = Attribute()
+            attributes["Origin"] = fixed[3:6]
+            attributes["Spacing"] = fixed[6:9]
+            attributes["Direction"] = fixed[9:18]
+            attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+            size_xyz = [int(extent) for extent in fixed[0:3]]
+            return [3, *size_xyz[::-1]], attributes
+
+        @staticmethod
+        def _covered(item: slice, extent: int) -> tuple[int, int, slice]:
+            """The ``[low, high)`` range of an axis a slice touches, and the slice of that range it
+            takes: what a read of the range then subsamples, whichever way the slice runs."""
+            start, stop, step = item.indices(extent)
+            count = len(range(start, stop, step))
+            if count == 0:
+                return 0, 0, slice(0, 0, 1)
+            if step > 0:
+                return start, start + (count - 1) * step + 1, slice(0, None, step)
+            low, high = start + (count - 1) * step, start + 1
+            return low, high, slice(high - low - 1, None, step)
+
+        @classmethod
+        def _field_region(
+            cls, file: Any, spatial: list[int], slices: tuple[slice, ...], dtype: type = np.float32
+        ) -> np.ndarray:
+            """The region ``slices`` of the field, read as one HDF5 hyperslab of the parameters.
+
+            The buffer is ``[z][y][x]`` with the component fastest, so the rows of one plane the
+            region covers are one contiguous span, and the planes it covers are such spans a stride
+            apart: a hyperslab of ``count`` blocks reads them into one buffer, the bytes of the
+            region's planes and rows and no other (a 64^3 region of a 512^3 field reads 50 MB where
+            the leading-axis rows it sits on are 403 MB). A forward step on the leading axis is the
+            stride; every other step, and a reversed axis, subsamples the block after the read.
             """
-            shape, attributes = self.get_infos(group, name)
-            leading = slices[1].indices(shape[1]) if len(shape) == 4 else (0, 0, 1)
-            if (
-                len(shape) != 4
-                or shape[0] != 3
-                or DISPLACEMENT_FIELD_ATTRIBUTE not in attributes
-                or not h5py.is_hdf5(self._path(name))
-                or leading[2] < 0  # a reversed leading axis has no contiguous span to read
-            ):
-                data, attributes = self.file_to_data(group, name)
-                return data[slices], attributes
-            spatial = shape[1:]
-            row = 3 * int(np.prod(spatial[1:], dtype=np.int64))
-            with _open_h5(self._path(name), "r") as file:
-                span = file["TransformGroup/0/TransformParameters"][leading[0] * row : leading[1] * row]
-            block = np.moveaxis(span.reshape(leading[1] - leading[0], *spatial[1:], 3), -1, 0)
-            # The span is the axis WITHOUT its step: rows start..stop were read whole, so the step
-            # subsamples here, on the reshaped block.
-            return (
-                np.asarray(block[(slices[0], slice(None, None, leading[2]), *slices[2:])], dtype=np.float32),
-                attributes,
-            )
+            plane_low, plane_high, planes = cls._covered(slices[1], spatial[0])
+            row_low, row_high, rows = cls._covered(slices[2], spatial[1])
+            row_length = 3 * int(spatial[2])
+            plane_length = row_length * int(spatial[1])
+            if planes.step > 0:  # the hyperslab's stride: the planes in between are never read
+                stride, count, planes = planes.step, len(range(plane_low, plane_high, planes.step)), slice(None)
+            else:
+                stride, count = 1, plane_high - plane_low
+            block = (row_high - row_low) * row_length
+            span = np.empty(count * block, dtype=np.float64)
+            if span.size:
+                parameters = file["TransformGroup/0/TransformParameters"]
+                selection = parameters.id.get_space()
+                selection.select_hyperslab(
+                    (plane_low * plane_length + row_low * row_length,), (count,), (stride * plane_length,), (block,)
+                )
+                parameters.id.read(h5py.h5s.create_simple((span.size,)), selection, span)
+            region = span.reshape(count, row_high - row_low, int(spatial[2]), 3)[planes, rows, slices[3], slices[0]]
+            return np.ascontiguousarray(np.moveaxis(region, -1, 0), dtype=dtype)
+
+        def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+            """A region of a displacement entry, decoded from the parameters it maps to alone: the
+            header and the region come off one pooled handle, so a region read opens nothing."""
+            if h5py.is_hdf5(self._path(name)):
+                with self._field_file(name) as file:
+                    header = self._field_header(file)
+                    if header is not None and len(slices) == 4:
+                        shape, attributes = header
+                        return self._field_region(file, shape[1:], slices), attributes
+            data, attributes = self.file_to_data(group, name)
+            return data[slices], attributes
 
         def data_to_file(
             self,
@@ -2534,22 +2847,14 @@ class Dataset:
         def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
             # A legacy TEXT transform (`#Insight Transform File V1.0`) is served by the read side
             # too; only a real HDF5 file has the parameter datasets this fast path opens.
-            if not h5py.is_hdf5(self._path(name)):
+            header = None
+            if h5py.is_hdf5(self._path(name)):
+                with self._field_file(name) as file:
+                    header = self._field_header(file)
+            if header is None:
                 data, attributes = self.file_to_data(group, name)
                 return [int(extent) for extent in data.shape], attributes
-            with _open_h5(self._path(name), "r") as file:
-                kind = bytes(file["TransformGroup/0/TransformType"][0])
-                fixed = np.asarray(file["TransformGroup/0/TransformFixedParameters"][()], dtype=np.float64)
-            if not kind.startswith(b"DisplacementFieldTransform"):
-                data, attributes = self.file_to_data(group, name)
-                return [int(extent) for extent in data.shape], attributes
-            attributes = Attribute()
-            attributes["Origin"] = fixed[3:6]
-            attributes["Spacing"] = fixed[6:9]
-            attributes["Direction"] = fixed[9:18]
-            attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
-            size_xyz = [int(extent) for extent in fixed[0:3]]
-            return [3, *size_xyz[::-1]], attributes
+            return header
 
     class File:
         def __init__(
@@ -2962,20 +3267,8 @@ class Dataset:
     def read_transform(self, group: str, name: str) -> sitk.Transform:
         if not self.exists_on_disk():
             raise NameError(f"Dataset {self.filename} not found")
-        transform_parameters, attribute = self.read_data(group, name)
-        if DISPLACEMENT_FIELD_ATTRIBUTE in attribute:
-            # A displacement field carries no parameter vector to decode: the entry IS the transform,
-            # and the store said so (NGFF RFC-5). float64 is what DisplacementFieldTransform requires.
-            field = sitk.Cast(data_to_image(transform_parameters, attribute), sitk.sitkVectorFloat64)
-            return sitk.DisplacementFieldTransform(field)
-        transforms_type = [v for k, v in attribute.items() if k.endswith(":Transform_0")]
-        transforms = []
-        for i, transform_type in enumerate(transforms_type):
-            transform = _decode_transform(transform_type, name)
-            transform.SetFixedParameters(ast.literal_eval(attribute[f"{i}:FixedParameters"]))
-            transform.SetParameters(tuple(transform_parameters[i]))
-            transforms.append(transform)
-        return sitk.CompositeTransform(transforms) if len(transforms) > 1 else transforms[0]
+        data, attribute = self.read_data(group, name)
+        return data_to_transform(data, attribute, name)
 
     def read_image(self, group: str, name: str) -> sitk.Image:
         data, attribute = self.read_data(group, name)

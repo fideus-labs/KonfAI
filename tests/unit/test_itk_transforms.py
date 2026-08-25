@@ -86,3 +86,88 @@ def test_resample_transform_applies_displacement_in_physical_space() -> None:
     bright = torch.nonzero(out[0] > 0).tolist()
 
     assert bright == [[4, 4, 3]]  # moved 6 mm / 2 mm = 3 voxels along X, staying on z=4, y=4
+
+
+def _field_image(edge: int, seed: int = 0) -> tuple["sitk.Image", np.ndarray]:
+    """A displacement field image on a non-trivial grid, and its component-first float32 array."""
+    field = (np.random.default_rng(seed).normal(size=(3, edge, edge, edge)) * 4).astype(np.float32)
+    image = sitk.GetImageFromArray(np.moveaxis(field, 0, -1), isVector=True)
+    image.SetOrigin((7.0, -3.0, 10.0))
+    image.SetSpacing((1.5, 1.5, 2.0))
+    image.SetDirection((0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+    return image, field
+
+
+def test_decoding_a_displacement_field_copies_it_once() -> None:
+    """The stage's float64 component-first values are written straight off ITK's buffer: the same
+    values as the copy, the transpose per component and the stack, at one copy's worth of peak."""
+    import tracemalloc
+
+    from konfai.utils.ITK import decode_transform_stages
+
+    image, field = _field_image(64)
+    transform = sitk.DisplacementFieldTransform(sitk.Cast(image, sitk.sitkVectorFloat64))
+    tracemalloc.start()
+    (stage,) = decode_transform_stages(transform)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert stage.values.dtype == np.float64 and stage.values.flags.c_contiguous
+    np.testing.assert_array_equal(stage.values, field.astype(np.float64))
+    np.testing.assert_array_equal(stage.grid.origin_xyz, image.GetOrigin())
+    assert peak < 2 * stage.values.nbytes, f"{peak} bytes at peak for {stage.values.nbytes} of values"
+
+
+def test_a_stored_displacement_entry_decodes_to_the_stage_the_image_route_gives(tmp_path) -> None:
+    """Straight from the store's array, on the grid its attributes describe: the same stage, bit
+    for bit, as reading the entry as a transform and decoding that."""
+    from konfai.utils.dataset import Attribute, Dataset
+    from konfai.utils.ITK import decode_transform_stages, read_transform_stages
+
+    image, field = _field_image(6, seed=2)
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray(image.GetOrigin())
+    attributes["Spacing"] = np.asarray(image.GetSpacing())
+    attributes["Direction"] = np.asarray(image.GetDirection())
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Transform", "P000", field, attributes)
+
+    (direct,) = read_transform_stages(dataset, "Transform", "P000")
+    (through_itk,) = decode_transform_stages(dataset.read_transform("Transform", "P000"))
+
+    assert direct.order == through_itk.order == 1
+    assert direct.grid.size_zyx == through_itk.grid.size_zyx
+    for axis in ("origin_xyz", "spacing_xyz", "direction_xyz"):
+        np.testing.assert_array_equal(getattr(direct.grid, axis), getattr(through_itk.grid, axis))
+    assert direct.values.tobytes() == through_itk.values.tobytes()
+
+
+def test_a_store_serving_transforms_alone_still_decodes() -> None:
+    """The smallest thing a stored-transform Resample asks of a dataset is read_transform: a store
+    that offers nothing else is decoded through it."""
+    from konfai.data.geometry import AffineStage
+    from konfai.utils.ITK import read_transform_stages
+
+    translation = sitk.TranslationTransform(3, (6.0, 0.0, 0.0))
+
+    class _TransformStore:
+        def read_transform(self, group: str, name: str) -> "sitk.Transform":
+            return translation
+
+    (stage,) = read_transform_stages(_TransformStore(), "reg", "case")
+    assert isinstance(stage, AffineStage)
+    np.testing.assert_array_equal(stage.map.translation, [6.0, 0.0, 0.0])
+
+
+def test_box_with_mask_reads_the_mask_as_a_view() -> None:
+    from konfai.utils.ITK import box_with_mask
+
+    mask = np.zeros((20, 30, 40), dtype=np.uint8)
+    mask[3:9, 10:20, 5:35] = 2
+    image = sitk.GetImageFromArray(mask)
+    image.SetSpacing((1.0, 2.0, 0.5))
+
+    box = box_with_mask(image, [2], [2, 2, 2])
+
+    # (z, y, x): a 2 mm dilation is 4 voxels at 0.5 mm, 1 at 2 mm, 2 at 1 mm
+    assert box.tolist() == [[0, 12], [9, 20], [3, 36]]
