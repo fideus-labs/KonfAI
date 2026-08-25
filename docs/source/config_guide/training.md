@@ -59,8 +59,8 @@ konfai TRAIN -y --config Config.yml \
 | `epochs` | int | `100` | No | Number of training epochs. |
 | `it_validation` | int or null | `None` | No | Validation and checkpoint interval in iterations. |
 | `it_lr_update` | int or null | `None` | No | Scheduler-step interval in iterations. `None` steps once per epoch (it resolves to the training dataloader's length). Every resolved config on disk carries this key. |
-| `autocast` | bool | `false` | No | Enables AMP during training. |
-| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). cuDNN picks its kernels by layout: with `autocast` the shipped Segmentation example predicts 1.25x faster; the kernels chosen differ, so labels can move at boundaries (3199 of 58.4 million voxels in fp32 on that example). |
+| `autocast` | bool | `false` | No | Enables AMP during training. On a 3D UNet (five levels to 256 channels, 96 cubed patches, batch 2, twenty 128 cubed cases, one RTX PRO 5000) an epoch runs 11.7 s against 27.0 s in fp32. |
+| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). cuDNN picks its kernels by layout: with `autocast` the shipped Segmentation example predicts 1.25x faster, and the 3D UNet above trains an epoch in 10.0 s against 11.7 s; the kernels chosen differ, so labels can move at boundaries (3199 of 58.4 million voxels in fp32 on that example). |
 | `gradient_checkpoints` | list or null | `None` | No | Activates gradient checkpointing on selected modules. |
 | `gpu_checkpoints` | list or null | `None` | No | Pins selected modules to dedicated GPUs. |
 | `ema_decay` | float | `0` | No | Enables exponential moving average tracking when greater than zero. |
@@ -93,6 +93,21 @@ Common nested fields used by built-in and local models:
 | `outputs_criterions` | mapping | Usually | Declares losses and metrics attached to specific model outputs. |
 | `ModelPatch` | mapping or null | Optional | Enables a second, model-level patch inside the network (a config key named `ModelPatch`, distinct from `Dataset.Patch`). |
 | `dim` | int | Model-dependent | Declares whether the network operates in 2D or 3D. |
+
+### `optimizer`
+
+`name` selects a class from `torch.optim`; the rest of the section is that
+class's own signature, so a resolved config carries every one of its keys.
+
+`fused` and `foreach` both left at `None` ask for the widest batched step the
+optimizer implements: fused where torch has one, foreach otherwise. The run
+decides, not the parameters: a run that places the graph on a GPU takes the
+batched step, a CPU run keeps torch's own default. On the Segmentation example
+(1.93 M parameters in 40 tensors, one RTX PRO 5000) an AdamW step costs
+0.059 ms of host time fused against 0.188 ms foreach, in two kernels against
+eight. A fused step sums in another order, so its parameters drift from the
+foreach ones: 3.7e-05 after 100 steps, 8.3e-06 of their own scale. Write
+`fused: false` to pin the foreach step.
 
 ### `outputs_criterions`
 

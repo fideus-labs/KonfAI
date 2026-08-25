@@ -49,8 +49,8 @@ When multiple checkpoints are provided, the predictor combines them using the
 | `train_name` | string | `"name"` | Yes in practice | Names the prediction run and output folder. |
 | `manual_seed` | int or null | `None` | No | Optional seed. |
 | `gpu_checkpoints` | list or null | `None` | No | Module placement optimization. |
-| `autocast` | bool | `false` | No | Enables AMP during inference. On the shipped Segmentation example: 4.2 s to 2.7 s, 11110 of 58.4 million label voxels change, at boundaries. |
-| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). With `autocast`, 2.7 s to 2.2 s on the same example and no further voxel changes; alone, no gain and 3199 voxels moved by the kernels cuDNN then picks. |
+| `autocast` | bool | `false` | No | Enables AMP during inference. On the shipped Segmentation example: 4.2 s to 2.7 s, 11110 of 58.4 million label voxels change, at boundaries. On a 3D UNet (five levels to 256 channels, 96 cubed patches, batch 2, twenty 128 cubed cases): 4.8 s to 2.9 s. |
+| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). With `autocast`, 2.7 s to 2.2 s on the same example and no further voxel changes, and 2.9 s to 2.4 s on the 3D UNet above; alone, no gain and 3199 voxels moved by the kernels cuDNN then picks. |
 | `data_log` | list or null | `None` | No | Optional TensorBoard logging. |
 | `check_training_transforms` | bool | `true` | No | Warns when a model input is not preprocessed the way its checkpoint trained on it. See [The training-chain check](#the-training-chain-check). |
 
