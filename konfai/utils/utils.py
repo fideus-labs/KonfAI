@@ -418,6 +418,10 @@ def storage_form(path: Path) -> str:
     return "" if path.is_dir() else path.suffix
 
 
+#: Longest first, so `.ome.zarr` wins over its `.zarr` tail wherever a name is matched or stripped.
+STORE_FORMS = sorted(_STORE_FORMS, key=len, reverse=True)
+
+
 def is_store_name(name: str) -> bool:
     """Whether ``name`` is spelled as an OME-Zarr store, by its extension alone: no disk is probed."""
     lowered = name.lower()

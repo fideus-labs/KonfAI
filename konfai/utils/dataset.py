@@ -58,7 +58,13 @@ from konfai import current_date
 from konfai.utils import uri
 from konfai.utils.budget import format_bytes, per_rank_budget_bytes
 from konfai.utils.errors import DatasetManagerError
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, directory_volume_form, is_store_name, split_format_level
+from konfai.utils.utils import (
+    STORE_FORMS,
+    SUPPORTED_EXTENSIONS,
+    directory_volume_form,
+    is_store_name,
+    split_format_level,
+)
 
 _h5_file_locks: dict[str, threading.RLock] = {}
 _h5_file_locks_guard = threading.Lock()
@@ -2418,7 +2424,9 @@ class Dataset:
             if writing:
                 uri.refuse_write(self.filename)
                 return f"{base}.ome.zarr"
-            candidates = [f"{base}.ome.zarr", f"{base}.zarr", base]
+            # Every spelling is_store_name accepts, or a root whose first case names one of the
+            # others is detected as omezarr at setup and then fails to resolve.
+            candidates = [f"{base}{form}" for form in STORE_FORMS] + [base]
             for candidate in candidates:
                 if uri.is_dir(candidate):
                     return candidate
@@ -2572,10 +2580,9 @@ class Dataset:
         def get_group(self) -> list[str]:
             groups = []
             for name in uri.list_names(self.filename):
-                if name.endswith(".ome.zarr"):
-                    groups.append(name.removesuffix(".ome.zarr"))
-                elif name.endswith(".zarr"):
-                    groups.append(name.removesuffix(".zarr"))
+                form = next((form for form in STORE_FORMS if name.lower().endswith(form)), None)
+                if form is not None:
+                    groups.append(name[: -len(form)])
             return sorted(groups)
 
         def is_exist(self, group: str, name: str | None = None) -> bool:

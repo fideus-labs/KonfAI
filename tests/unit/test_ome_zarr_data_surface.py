@@ -683,3 +683,19 @@ def test_a_declared_patch_epoch_decodes_fewer_chunks_than_recency_alone(
     lru, planned = epoch(False), epoch(True)
 
     assert sum(planned.values()) < sum(lru.values()), f"{planned} against LRU's {lru}"
+
+
+def test_a_store_named_in_any_accepted_spelling_resolves_and_lists(tmp_path: Path) -> None:
+    """`is_store_name` accepts five spellings, so all five have to resolve: a root whose entry is
+    named with one the reader does not try is accepted at setup and then raises `NameError` on its
+    first read, while `get_group` reports no groups at all."""
+    from konfai.utils.utils import STORE_FORMS, is_store_name
+
+    for form in STORE_FORMS:
+        root = tmp_path / form.strip(".")
+        (root / "CASE").mkdir(parents=True)
+        create_ome_zarr_store(root / "CASE" / f"CT{form}", (1, 2, 3, 4), "<u1", spacing=[1.0, 1.0, 1.0])
+        assert is_store_name(f"CT{form}"), form
+        dataset = Dataset(str(root), "omezarr")
+        assert dataset.get_group() == ["CT"], form
+        assert dataset.is_dataset_exist("CT", "CASE"), form
