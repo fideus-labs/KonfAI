@@ -459,14 +459,22 @@ class CaseReduction:
         written against (see :class:`~konfai.data.reduction.Reduction`)), and the result comes back
         without it. The axis matters to any operator that places things side by side.
         """
-        self.operator.start()
+        with SWEEP_CLOCK.phase("chain"):
+            self.operator.start()
         for manager in self.managers:
             # No name holds the region past its accumulate: one that did would keep a second member
             # region resident, which the plan does not price (1162 MiB against 778 on a 5 x 384 MiB
-            # float32 cohort folded whole).
-            self.operator.accumulate(self._member_region(manager, region))
+            # float32 cohort folded whole). The read stays outside the phase, and the argument dies
+            # with the frame that times the fold of it.
+            self._accumulate(self._member_region(manager, region))
         with SWEEP_CLOCK.phase("chain"):
             return self.operator.finalize().squeeze(0)
+
+    def _accumulate(self, member: torch.Tensor) -> None:
+        """Fold one member region in, on the run's clock: an incremental operator does the
+        reduction's own arithmetic here, and the region dies with this frame."""
+        with SWEEP_CLOCK.phase("chain"):
+            self.operator.accumulate(member)
 
     def _member_region(self, manager: DatasetManager, region: tuple[slice, ...]) -> torch.Tensor:
         """One member's region, in the stack-axis layout every operator is written against."""

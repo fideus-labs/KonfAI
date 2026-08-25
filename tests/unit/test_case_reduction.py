@@ -21,6 +21,7 @@ never assembled, that a cases which does not agree on its grid is refused before
 and that a chain continues after the reduction."""
 
 import itertools
+import time
 import weakref
 from pathlib import Path
 
@@ -664,12 +665,37 @@ def test_a_reduction_accounts_for_every_second_of_its_own_wall_clock(tmp_path: P
     assert engine.materialize() is True
 
     wall = SWEEP_CLOCK.spent("sweep")
-    named = sum(SWEEP_CLOCK.spent(phase) for phase in ("chain", "fetch", "wait(read)", "wait(write)"))
+    phases = {phase: SWEEP_CLOCK.spent(phase) for phase in ("chain", "fetch", "wait(read)", "wait(write)")}
     assert wall > 0.0
-    assert 0.0 <= wall - named <= wall, "a phase is counted outside the fold it belongs to"
+    # Every phase of the line is recorded, or the report accounts for the run by leaving it out.
+    assert all(spent > 0.0 for spent in phases.values()), phases
+    assert 0.0 <= wall - sum(phases.values()) <= wall, "a phase is counted outside the fold it belongs to"
     # No pipeline: the store's own seconds are the seconds the fold stands still.
     assert SWEEP_CLOCK.spent("wait(read)") >= SWEEP_CLOCK.spent("read") > 0.0
     assert SWEEP_CLOCK.spent("wait(write)") >= SWEEP_CLOCK.spent("write") > 0.0
+
+
+def test_the_fold_charges_the_operator_s_own_work_to_the_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An incremental operator does the reduction in ``accumulate``, not in ``finalize``.
+
+    Timed around ``finalize`` alone, the line credited a ``Mean`` or a ``Std`` with the last
+    division and left every addition it made in ``other``: the phase that is supposed to say what
+    the reduction costs under-reported it by the whole of the fold.
+    """
+    delay = 0.02
+    accumulate = Mean.accumulate
+
+    def slow(self: Mean, member: torch.Tensor) -> None:
+        time.sleep(delay)
+        accumulate(self, member)
+
+    monkeypatch.setattr(Mean, "accumulate", slow)
+    SWEEP_CLOCK.reset()
+    engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Mean", output="timed"), [])
+    assert engine.materialize() is True
+
+    assert SWEEP_CLOCK.spent("chain") >= CASES * delay
+    assert SWEEP_CLOCK.spent("read") < CASES * delay, "the member reads are not the operator's work"
 
 
 def test_an_incremental_fold_holds_one_member_region_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
