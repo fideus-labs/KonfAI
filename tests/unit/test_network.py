@@ -29,9 +29,19 @@ import pytest
 import torch
 from konfai.metric.schedulers import Constant, PolyLRScheduler
 from konfai.network.blocks import Add
-from konfai.network.network import Measure, ModuleArgsDict, Network, _channels_last
+from konfai.network.network import CriterionsAttr, Measure, ModuleArgsDict, Network, _channels_last
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError, MeasureError
+
+
+class _BatchItem:
+    """One group of a collated batch, as ``Network.forward`` reads it."""
+
+    def __init__(self, tensor: torch.Tensor, is_input: bool) -> None:
+        self.tensor = tensor
+        self.is_input = is_input
+        self.attribute = [Attribute()]
+
 
 # --------------------------------------------------------------------------------------
 # ModuleArgsDict branch routing (named_forward / forward)
@@ -351,14 +361,11 @@ def test_get_loss_pairs_every_accumulated_loss_with_its_own_weight_under_a_narro
 # --------------------------------------------------------------------------------------
 
 
-class _CriterionAttr:
-    def __init__(self) -> None:
-        self.start = 0
-        self.stop = None
-        self.schedulers = {Constant(1.0): 1}
-        self.group = 0
-        self.is_loss = True
-        self.accumulation = True
+def _criterion_attr(start: int = 0, accumulation: bool = False) -> CriterionsAttr:
+    """A criterion's wiring metadata with its schedulers resolved, as ``CriterionsLoader`` leaves it."""
+    attributes = CriterionsAttr(start=start, accumulation=accumulation)
+    attributes.schedulers = {Constant(): None}
+    return attributes
 
 
 def _make_accumulating_measure(scaler) -> tuple[Measure, torch.Tensor]:
@@ -366,7 +373,7 @@ def _make_accumulating_measure(scaler) -> tuple[Measure, torch.Tensor]:
     measure = Measure.__new__(Measure)
     criterion = torch.nn.MSELoss()
     key = f"out:tgt:{criterion.__class__.__name__}"
-    measure.outputs_criterions = {"out": {"tgt": {criterion: _CriterionAttr()}}}
+    measure.outputs_criterions = {"out": {"tgt": {criterion: _criterion_attr(accumulation=True)}}}
     measure._loss = {0: {key: Measure.Loss(criterion.__class__.__name__, "out", "tgt", 0, True, True)}}
     measure._targets = {}
     measure.scaler = scaler
@@ -401,12 +408,6 @@ def test_accumulation_backward_without_scaler_is_plain_backward() -> None:
     assert torch.count_nonzero(output.grad) > 0
 
 
-class _PlainLossAttr(_CriterionAttr):
-    def __init__(self) -> None:
-        super().__init__()
-        self.accumulation = False  # a normal, non-accumulation loss in the SAME numeric group
-
-
 def test_accumulation_backward_not_refired_by_plain_loss_in_same_group() -> None:
     """A plain (non-accumulation) loss sharing the numeric group must NOT re-fire the accumulation
     backward: the accumulated backward runs exactly once, for the accumulation loss itself."""
@@ -416,7 +417,10 @@ def test_accumulation_backward_not_refired_by_plain_loss_in_same_group() -> None
     measure = Measure.__new__(Measure)
     acc_crit = torch.nn.MSELoss()
     plain_crit = torch.nn.L1Loss()
-    measure.outputs_criterions = {"out": {"tgt": {acc_crit: _CriterionAttr(), plain_crit: _PlainLossAttr()}}}
+    # The plain loss is a normal, non-accumulation loss in the SAME numeric group.
+    measure.outputs_criterions = {
+        "out": {"tgt": {acc_crit: _criterion_attr(accumulation=True), plain_crit: _criterion_attr()}}
+    }
     measure._loss = {
         0: {
             f"out:tgt:{acc_crit.__class__.__name__}": Measure.Loss("MSELoss", "out", "tgt", 0, True, True),
@@ -776,8 +780,7 @@ def test_composite_criteria_are_scheduled_on_the_owning_networks_counter() -> No
     """A composite root never steps its own _it (only networks owning measure+optimizer do), so
     criteria scheduled on the root's counter freeze at 0: start/stop windows and loss-weight
     schedulers of a GAN never fire. Measure.update must receive the OWNING network's _it."""
-    from konfai.metric.schedulers import Constant
-    from konfai.network.network import CriterionsAttr, Measure
+    from konfai.network.network import Measure
 
     class Generator(Network):
         def __init__(self) -> None:
@@ -792,8 +795,7 @@ def test_composite_criteria_are_scheduled_on_the_owning_networks_counter() -> No
     root = Gan()
     sub = next(net for name, net in root.get_networks().items() if name.endswith(".Generator"))
     measure = Measure("Generator", {})
-    attr = CriterionsAttr()
-    attr.schedulers = {Constant(): None}
+    attr = _criterion_attr()
     measure.outputs_criterions = {"Generator.Head": {"CT": {torch.nn.L1Loss(): attr}}}
     measure.init(root, ["CT"])
     sub.measure = measure
@@ -811,13 +813,7 @@ def test_composite_criteria_are_scheduled_on_the_owning_networks_counter() -> No
 
     sub.measure.update = recording_update  # type: ignore[method-assign]
 
-    class _BatchItem:
-        def __init__(self, tensor):
-            self.tensor = tensor
-            self.is_input = True
-            self.attribute = [Attribute()]
-
-    batch = {"CT": _BatchItem(torch.ones(1, 1, 4, 4))}
+    batch = {"CT": _BatchItem(torch.ones(1, 1, 4, 4), True)}
     for _step in range(3):
         root.forward(batch)
         root.backward(root)
@@ -832,8 +828,7 @@ def test_a_target_group_is_moved_once_per_forward_and_not_for_a_criterion_outsid
     """Measure.update ran once per completed output group and moved the group's target each time: the
     shipped Segmentation config uploaded SEG twice per step, a deep-supervision config once per head,
     and a criterion outside its start/stop window still paid for the upload it never read."""
-    from konfai.metric.schedulers import Constant
-    from konfai.network.network import CriterionsAttr, Measure
+    from konfai.network.network import Measure
 
     class Net(Network):
         def __init__(self) -> None:
@@ -841,16 +836,13 @@ def test_a_target_group_is_moved_once_per_forward_and_not_for_a_criterion_outsid
             self.add_module("Logits", torch.nn.Conv2d(1, 3, 1))
             self.add_module("Softmax", torch.nn.Softmax(dim=1))
 
-    def attr(start: int = 0) -> CriterionsAttr:
-        attributes = CriterionsAttr(start=start)
-        attributes.schedulers = {Constant(): None}
-        return attributes
-
     model = Net()
     measure = Measure("Net", {})
     measure.outputs_criterions = {
-        "Logits": {"SEG": {torch.nn.CrossEntropyLoss(): attr(), torch.nn.MSELoss(): attr(start=5)}},
-        "Softmax": {"SEG": {torch.nn.L1Loss(): attr()}},
+        "Logits": {
+            "SEG": {torch.nn.CrossEntropyLoss(): _criterion_attr(), torch.nn.MSELoss(): _criterion_attr(start=5)}
+        },
+        "Softmax": {"SEG": {torch.nn.L1Loss(): _criterion_attr()}},
     }
     measure.init(model, ["SEG"])
     model.measure = measure
@@ -867,12 +859,6 @@ def test_a_target_group_is_moved_once_per_forward_and_not_for_a_criterion_outsid
 
     monkeypatch.setattr(torch.Tensor, "to", counting_to)
 
-    class _BatchItem:
-        def __init__(self, tensor: torch.Tensor, is_input: bool) -> None:
-            self.tensor = tensor
-            self.is_input = is_input
-            self.attribute = [Attribute()]
-
     batch = {"CT": _BatchItem(torch.randn(2, 1, 4, 4), True), "SEG": _BatchItem(seg, False)}
     model.forward(batch)
     assert len(moved) == 1, "one upload for the two output groups reading SEG"
@@ -882,16 +868,15 @@ def test_a_target_group_is_moved_once_per_forward_and_not_for_a_criterion_outsid
     model.forward(batch)
     assert len(moved) == 2, "the next forward uploads again (a new batch in the run)"
 
-    measure.outputs_criterions["Logits"]["SEG"] = {torch.nn.MSELoss(): attr(start=50)}
-    measure.outputs_criterions["Softmax"]["SEG"] = {torch.nn.L1Loss(): attr(start=50)}
+    measure.outputs_criterions["Logits"]["SEG"] = {torch.nn.MSELoss(): _criterion_attr(start=50)}
+    measure.outputs_criterions["Softmax"]["SEG"] = {torch.nn.L1Loss(): _criterion_attr(start=50)}
     model.forward(batch)
     assert len(moved) == 2, "every criterion outside its window: nothing uploaded"
 
 
 def test_forward_charges_the_criteria_to_the_clock_apart_from_the_walk() -> None:
     from konfai.data.patching import SweepClock
-    from konfai.metric.schedulers import Constant
-    from konfai.network.network import CriterionsAttr, Measure
+    from konfai.network.network import Measure
 
     class Net(Network):
         def __init__(self) -> None:
@@ -900,18 +885,11 @@ def test_forward_charges_the_criteria_to_the_clock_apart_from_the_walk() -> None
 
     model = Net()
     measure = Measure("Net", {})
-    attr = CriterionsAttr()
-    attr.schedulers = {Constant(): None}
+    attr = _criterion_attr()
     measure.outputs_criterions = {"Head": {"CT": {torch.nn.L1Loss(): attr}}}
     measure.init(model, ["CT"])
     model.measure = measure
     model.init_outputs_group()
-
-    class _BatchItem:
-        def __init__(self, tensor: torch.Tensor, is_input: bool) -> None:
-            self.tensor = tensor
-            self.is_input = is_input
-            self.attribute = [Attribute()]
 
     batch = {"CT": _BatchItem(torch.ones(1, 1, 4, 4), True)}
     clock = SweepClock()
@@ -929,8 +907,7 @@ def test_measure_update_moves_the_criterion_onto_the_outputs_device_once() -> No
     A criterion with its own tensors (``CrossEntropyLoss(weight=...)``) stayed on CPU while the batch
     trained on cuda:0 and every step raised 'Expected all tensors to be on the same device'. Measure
     must move the criterion onto the output's device, and only when the device changes."""
-    from konfai.metric.schedulers import Constant
-    from konfai.network.network import CriterionsAttr, Measure
+    from konfai.network.network import Measure
 
     class Net(Network):
         def __init__(self) -> None:
@@ -939,8 +916,7 @@ def test_measure_update_moves_the_criterion_onto_the_outputs_device_once() -> No
 
     model = Net()
     criterion = torch.nn.CrossEntropyLoss(weight=torch.tensor([1.0, 5.0, 10.0]))
-    attr = CriterionsAttr()
-    attr.schedulers = {Constant(): None}
+    attr = _criterion_attr()
     measure = Measure("Net", {})
     measure.outputs_criterions = {"Head": {"SEG": {criterion: attr}}}
     measure.init(model, ["SEG"])

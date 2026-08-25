@@ -413,6 +413,12 @@ class Measure:
         self._targets: dict[tuple[str, torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
 
     def _target(self, group: str, tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+        # Not on the step's critical path. Issued instead when the batch arrives, the epoch is 20.4 s
+        # against 20.2 on the shipped 2D example and 28.3 against 27.3 on a 3D UNet, and only the
+        # phase carrying the wait moves (``criteria`` to ``forward``). Made free outright (pinned
+        # memory, an asynchronous copy) the line's host wall falls from 24.0 s an epoch to 0.007 and
+        # the epoch still does not move: the host meets the device once a step anyway, where Dice
+        # reads its lowest label back.
         moved = self._targets.get((group, device))
         if moved is None or moved[0] is not tensor:
             moved = (tensor, tensor.to(device).detach())

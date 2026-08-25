@@ -492,7 +492,9 @@ class _Trainer:
         below ``min_seconds``. ``forward`` is the graph walk alone, the criteria being timed inside it;
         what no phase names is ``other``, so the sum closes on the wall clock. On a device a phase
         is the time its kernels took to enqueue: the device's own time lands where the host next
-        waits for it (the loss read, a checkpoint's host copy, the validation)."""
+        waits for it, so ``criteria`` carries the forward's kernels: its first target upload waits on
+        them, 13.8 s of a 20.2 s epoch on the shipped 2D example. The rest lands at the loss read, a
+        checkpoint's host copy and the validation."""
         wall = clock.spent("epoch")
         if wall < min_seconds:
             return None
