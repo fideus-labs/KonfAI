@@ -312,6 +312,7 @@ def test_a_single_node_gloo_world_is_pinned_to_the_loopback_interface(monkeypatc
     assert os.environ["GLOO_SOCKET_IFNAME"] in {name for _, name in rt.socket.if_nameindex()}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="setup_gpu builds no process group on Windows")
 def test_an_explicit_gloo_interface_keeps_authority(monkeypatch):
     monkeypatch.setenv("GLOO_SOCKET_IFNAME", "eth0")
     monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
