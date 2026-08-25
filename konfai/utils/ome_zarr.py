@@ -441,8 +441,10 @@ class _DecodedChunkCache:
 
 
 #: The least the cache is worth: below a chunk or two of a large store, a region touching more
-#: chunks than it holds decodes them again. Kept while the budget allows it; a budget under it is
-#: not exceeded for the cache's sake, and the plan says the cache is under the floor.
+#: chunks than it holds decodes them again. It is what an undeclared budget's share is raised to; a
+#: declared budget never gives the cache more than its share, and the plan says when that is under
+#: the floor. A cache allowed the floor out of a 128 MiB budget took the budget whole, while the
+#: sweep went on sizing its regions against the same 128 MiB: the run was priced at 2x its budget.
 CHUNK_CACHE_FLOOR = 256 << 20
 #: The share of a DECLARED per-rank budget the cache may take. A third, because a budget is spent on
 #: what the chain holds as well, and the cache is the cheapest of the three to give up.
@@ -466,14 +468,13 @@ def set_chunk_cache_budget(budget_bytes: float | None) -> int:
 
 
 def _chunk_cache_capacity() -> int:
-    """What the cache may hold: a third of the declared budget, the floor where a third is under it,
-    the budget itself where even the floor is over it; a share of what this process may allocate
-    when nothing was declared."""
+    """What the cache may hold: its share of the declared budget, never more, so a budget under the
+    floor bounds the cache instead of the floor taking the budget whole; a share of what this process
+    may allocate when nothing was declared, where the floor is what makes the cache worth having."""
     from konfai.utils.budget import available_memory_bytes
 
     if _chunk_cache_budget is not None:
-        share = int(_chunk_cache_budget * _CHUNK_CACHE_BUDGET_SHARE)
-        return min(_chunk_cache_budget, max(CHUNK_CACHE_FLOOR, share))
+        return int(_chunk_cache_budget * _CHUNK_CACHE_BUDGET_SHARE)
     return max(CHUNK_CACHE_FLOOR, int(available_memory_bytes()[0] * 0.05))
 
 

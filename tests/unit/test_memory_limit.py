@@ -21,10 +21,10 @@ past the cap fails where the process runs, not in a reader's judgement. The cap 
 floor measured here (torch + SimpleITK + the workflow modules, in an identically pinned
 environment) plus what the route is allowed above it, and the child reports the peak RSS it reached.
 
-Two ceilings, because they bound two different things. The address space carries the whole-file
-mapping every uncompressed-MetaImage region read creates (``_pixel_block_region``) on top of the
-working set, so it is the looser of the two; the resident set is the working set itself, and it is
-what a budget is about. A route that read a case whole instead of streaming it breaks both.
+Two ceilings, because they bound two different things. The address space carries the maps a region
+read and a region write hold on top of the working set, so it is the looser of the two; the resident
+set is the working set itself, and it is what a budget is about. A route that read a case whole
+instead of streaming it breaks both.
 """
 
 import json
@@ -45,10 +45,15 @@ pytestmark = pytest.mark.skipif(
 #: Address space a route may map above the interpreter floor, as a multiple of its declared budget.
 #: Measured minima on the cohort below: 1.25x (PREDICTION), 1.9x (EVALUATION), 2.0x (TRANSFORM).
 _ADDRESS_SPACE_MULTIPLE = 3
-#: Resident bytes a route may hold above the interpreter floor, same unit. Measured over a 666 MiB
-#: floor: 0.88x (PREDICTION), 1.35x (TRANSFORM), 1.31x (EVALUATION at 128 MiB), 0.55x (at 512 MiB).
+#: Resident bytes a route may hold above the interpreter floor, as a multiple of its declared budget
+#: and over the floor below. Measured over a 666 MiB interpreter floor: 0.67x (PREDICTION), 0.20x
+#: (TRANSFORM at 512 MiB), 0.79x (at 128), 0.67x (at 64), 1.31x (EVALUATION at 128), 0.55x (at 512).
 #: A whole-volume read of the cohort's case is 2 x 78 MiB before its working copies: over both.
 _RESIDENT_MULTIPLE = 2
+#: What a route holds that no budget shrinks: the workflow's objects, the chain's stages, the store
+#: handles, the allocator's slack. Measured at 25 to 27 MiB on this cohort, which is what
+#: ``konfai.data.patching.SWEEP_ENGINE_FLOOR_BYTES`` declares and the TRANSFORM plan's header prints.
+_ENGINE_FLOOR = 32 * (1 << 20)
 
 _MIB = 1 << 20
 #: 2 groups x 20.5 M voxels of float32: over the 17.9 M the 512 MiB sizing allows, so both budgets
@@ -133,7 +138,8 @@ def route():
     chain = [Resample(spacing=[2.0, 2.0, 2.0]), Gradient()]
     if whole:
         chain.append(Standardize())  # GLOBAL_STAT: no region serves it, the case goes whole-volume
-    out = ROOT / ("OutWhole" if whole else "Out")
+    # One output per run: an existing one is a resume, and a run that resumed would measure nothing.
+    out = ROOT / f"Out_{BUDGET.replace('!', '_')}"
     konfai.transform(
         "MEMORY_LIMIT",
         f"{ROOT / 'Dataset'}:mha",
@@ -286,10 +292,12 @@ def floor(cohort: Path) -> dict:
 
 def _within_its_budget(source: str, budget_bytes: int, floor: dict, cohort: Path) -> dict:
     """Run one route under the cap its budget earns it, and hold it to the resident ceiling."""
-    measured = _run(source, _cap(floor, _ADDRESS_SPACE_MULTIPLE * budget_bytes), f"{budget_bytes}b", cohort)
+    measured = _run(
+        source, _cap(floor, _ENGINE_FLOOR + _ADDRESS_SPACE_MULTIPLE * budget_bytes), f"{budget_bytes}b", cohort
+    )
     assert measured["outcome"] == "ok", measured["detail"]
     held = (measured["resident_kib"] - floor["resident_kib"]) * 1024
-    assert held <= _RESIDENT_MULTIPLE * budget_bytes, (
+    assert held <= _ENGINE_FLOOR + _RESIDENT_MULTIPLE * budget_bytes, (
         f"held {held / _MIB:.0f} MiB above the interpreter floor for a budget of {budget_bytes / _MIB:.0f} MiB"
     )
     return measured
@@ -304,13 +312,34 @@ def test_a_streamed_evaluation_holds_the_budget_it_declared(budget_mib: int, flo
     assert "disjoint patches" in measured["log"] and "halo of 3" in measured["log"]
 
 
-def test_a_streamed_transform_holds_the_budget_it_declared(floor: dict, cohort: Path) -> None:
-    """Resample (REGRID) then Gradient (HALO): a chain that streams, so the sweep sizes its slabs
-    from the budget and the case is never resident."""
-    _within_its_budget(_TRANSFORM, 128 * _MIB, floor, cohort)
+def test_a_streamed_transform_tracks_the_budget_it_declared(floor: dict, cohort: Path) -> None:
+    """Resample (REGRID) then Gradient (HALO): a chain that streams, so the sweep sizes its regions
+    from the budget and the case is never resident.
 
+    Not only inside the budget but FOLLOWING it. A sizing that priced the landed rows alone held the
+    same 173 MiB at 512, 128 and 32 MiB alike, because what this chain holds is what its regions pull
+    (four source voxels per landed one) and what Gradient allocates over them (eight volumes-worth),
+    neither of which the landed rows say anything about.
+    """
+    held = {}
+    for budget_mib in (512, 128, 64):
+        measured = _within_its_budget(_TRANSFORM, budget_mib * _MIB, floor, cohort)
+        held[budget_mib] = (measured["resident_kib"] - floor["resident_kib"]) * 1024
+
+    assert held[64] < held[128] < held[512], f"flat against the budget: {held}"
     plan = (cohort / "Transforms" / "MEMORY_LIMIT" / "log_0.txt").read_text(encoding="utf-8")
     assert "1 STREAM" in plan and "0 WHOLE-VOLUME" in plan
+
+
+def test_a_transform_refuses_a_budget_no_region_of_its_chain_fits(floor: dict, cohort: Path) -> None:
+    """The floor of the sizing is a refusal, not a one-row sweep: one row of this landing pulls four
+    rows of the source and Gradient allocates eight of them over it, so a 1 MiB budget buys nothing
+    and the message says what the smallest region holds."""
+    measured = _run(_TRANSFORM, _cap(floor, 256 * _MIB), "1MiB", cohort)
+
+    assert measured["outcome"] == "TransformerError", measured
+    assert "1.00 MiB" in measured["detail"] and "no region of 'CT' fits" in measured["detail"]
+    assert not (cohort / "Out_1MiB").exists(), "refused before a byte"
 
 
 def test_a_patched_prediction_holds_the_budget_it_declared(floor: dict, cohort: Path) -> None:
@@ -335,4 +364,4 @@ def test_a_transform_refuses_a_case_its_budget_cannot_hold_whole(floor: dict, co
 
     assert measured["outcome"] == "TransformerError", measured
     assert "1.00 MiB" in measured["detail"]
-    assert not (cohort / "OutWhole").exists(), "refused before a byte"
+    assert not (cohort / "Out_1MiB_whole").exists(), "refused before a byte"

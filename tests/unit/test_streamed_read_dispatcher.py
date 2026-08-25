@@ -380,6 +380,15 @@ def test_a_saved_clip_bound_is_the_cases_statistic_not_the_regions(streaming_dat
     assert float(attribute["Max"]) == float(volume.max())
 
 
+def _one_row_budget(manager: DatasetManager) -> float:
+    """The smallest budget this chain sweeps under: what one row of its landing holds, priced by the
+    production rule rather than restated here."""
+    segment = (manager.sweep_segments(0) or [])[-1]
+    tile = manager._sweep_shape(segment.landing, segment.plans, 1)
+    depth = patching._sweep_pipeline_depth()
+    return float(manager.sweep_block_bytes(segment.landing, segment.channels, segment.plans, tile, depth))
+
+
 def test_the_predicted_read_factor_prices_the_route_not_the_answer(streaming_dataset_stub) -> None:
     """A pointwise chain reads the source once; a store without bounded reads decodes it per slab.
 
@@ -407,9 +416,10 @@ def test_the_predicted_read_factor_prices_the_route_not_the_answer(streaming_dat
         def bounded_region_reads(self, group_src: str, name: str) -> bool:
             return False
 
-    # A tiny budget cuts the sweep into 8 one-row slabs, each decoding the whole store.
+    # A budget that holds one row and no more cuts the sweep into 8 one-row slabs, each decoding
+    # the whole store.
     unbounded = manager(_Unbounded(volume))
-    unbounded.set_memory_budget(1024.0)
+    unbounded.set_memory_budget(_one_row_budget(unbounded))
     assert CaseMaterializer(unbounded).predicted_stream_read_factor(0) == pytest.approx(8.0)
 
 
@@ -637,8 +647,9 @@ def test_the_read_factor_grows_as_the_budget_cuts_finer_slabs(streaming_dataset_
         transforms=[Dilate(2)],
         data_augmentations_list=[],
     )
+    one_row = _one_row_budget(manager)
     factors = []
-    for budget in (None, 64_000.0, 16_000.0, 8_000.0):
+    for budget in (None, 8 * one_row, 3 * one_row, one_row):
         manager.set_memory_budget(budget)
         factors.append(CaseMaterializer(manager).predicted_stream_read_factor(0))
     # The ~1.0 first factor holds only while the no-budget sweep covers the volume in ONE slab;

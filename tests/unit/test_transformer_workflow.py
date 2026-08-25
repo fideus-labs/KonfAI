@@ -1043,7 +1043,9 @@ def test_a_run_time_fallback_refusal_names_the_budget_it_broke(tmp_path: Path, m
 
     _write_source(tmp_path)
     config_path = _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"))
-    config_path.write_text(config_path.read_text().replace("memory_budget: auto", "memory_budget: 1KiB"))
+    # Between the smallest region this chain can sweep (1.56 KiB) and the whole volume it falls
+    # back to (7.50 KiB): the plan streams, and only the fallback the failure forces is over budget.
+    config_path.write_text(config_path.read_text().replace("memory_budget: auto", "memory_budget: 4KiB"))
     workflow = _build(tmp_path)
     workflow.setup(1)
     monkeypatch.setattr(
@@ -1053,7 +1055,7 @@ def test_a_run_time_fallback_refusal_names_the_budget_it_broke(tmp_path: Path, m
     )
 
     with (
-        pytest.raises(TransformerError, match=r"exceeds the per-rank budget \(1.00 KiB\)"),
+        pytest.raises(TransformerError, match=r"exceeds the per-rank budget \(4.00 KiB\)"),
         pytest.warns(UserWarning),
     ):
         workflow.run_process(1, 0, 0, [])
@@ -1696,10 +1698,10 @@ _SNAPSHOT_SUMMARY = (
 )
 
 _SNAPSHOT_REPORT = """\
-[KonfAI] plan over 2 rank(s) | per-rank budget 96.00 KiB ('98304b', per rank: x2 = 192.00 KiB on the node) | decoded-chunk cache 96.00 KiB of it (under the 256.00 MiB floor: a region touching more OME-Zarr chunks than it holds decodes them again) | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed float32 / source channels until the first slab
+[KonfAI] plan over 2 rank(s) | per-rank budget 96.00 KiB ('98304b', per rank: x2 = 192.00 KiB on the node) | held beside the regions: engine ~32.00 MiB, decoded-chunk cache up to 32.00 KiB (under the 256.00 MiB floor: a region touching more OME-Zarr chunks than it holds decodes them again) | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed float32 / source channels until the first slab
 [KonfAI] 1 case(s) of 'CT' are DROPPED: the run keeps the cases every groups_src shares, minus what 'subset' excludes.
   CT -> A (Clip -> Write <tmp>/out_a:h5): 3 case(s) -- 1 STREAM, 1 LOAD, 0 WHOLE-VOLUME, 1 SKIP (output already written)
-    (1 case(s)) LOAD: fits the per-rank budget (~64.00 KiB vs 96.00 KiB); streaming would read ~4.0x the source
+    (1 case(s)) LOAD: fits the per-rank budget (~64.00 KiB vs 96.00 KiB); streaming would read ~2.0x the source
   CT -> B (Clip -> Standardize -> Write <tmp>/out_b:h5): 3 case(s) -- 0 STREAM, 0 LOAD, 3 WHOLE-VOLUME, 0 SKIP (output already written)
     (3 case(s)) WHOLE-VOLUME: stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.
     worst fallback case ~= 96.00 KiB vs per-rank budget 96.00 KiB
@@ -1733,10 +1735,10 @@ def test_the_plan_text_is_the_snapshot(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_the_plan_bounds_the_chunk_cache_by_the_budget_and_says_when_it_is_under_the_floor(tmp_path: Path) -> None:
-    """The store's decoded-chunk cache is part of what the process holds: a third of the budget,
-    never more than the budget, and the header names it. Under the floor the cache cannot keep a
-    region's chunks, and the header says that rather than the run paying every decode twice in
-    silence."""
+    """The store's decoded-chunk cache is part of what the process holds: a third of the budget and
+    never more, whatever the floor, because the sizing spends the rest on regions. Under the floor
+    the cache cannot keep a region's chunks, and the header says that rather than the run paying
+    every decode twice in silence."""
     from konfai.utils import ome_zarr
 
     _write_source(tmp_path)
@@ -1745,13 +1747,13 @@ def test_the_plan_bounds_the_chunk_cache_by_the_budget_and_says_when_it_is_under
     try:
         config_path.write_text(text.replace("memory_budget: auto", "memory_budget: 98304b"))
         report = _build(tmp_path).compute_plan().report()
-        assert ome_zarr._chunk_cache().capacity == 98304
-        assert "decoded-chunk cache 96.00 KiB of it (under the 256.00 MiB floor:" in report
+        assert ome_zarr._chunk_cache().capacity == 98304 // 3
+        assert "decoded-chunk cache up to 32.00 KiB (under the 256.00 MiB floor:" in report
 
         config_path.write_text(text.replace("memory_budget: auto", "memory_budget: 3GiB"))
         report = _build(tmp_path).compute_plan().report()
         assert ome_zarr._chunk_cache().capacity == 1 << 30
-        assert "decoded-chunk cache 1.00 GiB of it | " in report
+        assert "decoded-chunk cache up to 1.00 GiB" in report
     finally:
         ome_zarr.set_chunk_cache_budget(None)
 

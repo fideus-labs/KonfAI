@@ -503,16 +503,17 @@ def _chunk_cache_restored():
 @pytest.mark.parametrize(
     ("declared", "capacity"),
     [
-        (64 << 20, 64 << 20),  # under the floor: the budget itself, never more than it
-        (512 << 20, 256 << 20),  # a third would be under the floor: the floor
+        (64 << 20, (64 << 20) // 3),  # a third, well under the floor: the rest is the regions'
+        (512 << 20, (512 << 20) // 3),  # a third, still under the floor
         (3 << 30, 1 << 30),  # a third
     ],
 )
-def test_the_chunk_cache_takes_a_third_of_the_budget_and_never_more_than_it(
+def test_the_chunk_cache_takes_a_third_of_a_declared_budget_and_no_floor_raises_it(
     declared: int, capacity: int, _chunk_cache_restored: None
 ) -> None:
-    """The cache is part of what the process holds, so a budget it exceeded would be exceeded
-    before a region was read."""
+    """The cache is part of what the process holds, so a budget it exceeded would be exceeded before
+    a region was read; and a floor raising it to the whole budget priced a 128 MiB run at 2x its
+    budget, the sweep going on sizing its regions against the same 128 MiB."""
     from konfai.utils import ome_zarr
 
     assert ome_zarr.set_chunk_cache_budget(declared) == capacity
@@ -711,8 +712,8 @@ def test_a_declared_budget_bounds_the_chunk_cache_in_prediction_and_evaluation(
     ome_zarr.set_chunk_cache_budget(None)
     assert ome_zarr._chunk_cache().capacity >= ome_zarr.CHUNK_CACHE_FLOOR
     _build_evaluator(tmp_path, monkeypatch)
-    assert ome_zarr._chunk_cache().capacity == 64 << 20
+    assert ome_zarr._chunk_cache().capacity == (64 << 20) // 3
 
     ome_zarr.set_chunk_cache_budget(None)
     _build_predictor(tmp_path, monkeypatch)
-    assert ome_zarr._chunk_cache().capacity == 64 << 20
+    assert ome_zarr._chunk_cache().capacity == (64 << 20) // 3

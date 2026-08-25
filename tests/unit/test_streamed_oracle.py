@@ -55,7 +55,7 @@ from konfai.data.augmentation import CutOUT, DataAugmentation, Elastix, Noise, R
 from konfai.data.augmentation import Flip as FlipDraw
 from konfai.data.case_reduction import CaseReduction
 from konfai.data.materialize import CaseMaterializer, Regime, Verdict
-from konfai.data.patching import DatasetManager
+from konfai.data.patching import DatasetManager, SweepSegment
 from konfai.data.transform import (
     Clip,
     Crop,
@@ -70,7 +70,7 @@ from konfai.data.transform import (
     Write,
 )
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import PatchError, TransformError
+from konfai.utils.errors import DatasetManagerError, PatchError, TransformError
 from oracle_support import (
     AUGMENTATION_ATOL,
     CASE_NAME,
@@ -117,23 +117,40 @@ def _budget_for(manager: DatasetManager, shape: Sequence[int], route: Route) -> 
     """The smallest per-rank budget under which the sweep cuts regions of ``route``'s height.
 
     Found by bisecting the production sizing rule rather than by restating it: the test says how
-    tall a region should be, and ``_sweep_rows`` says what budget buys it. A stage that lands on
-    another grid than it reads gets a height close to the one asked, which is all the matrix needs.
+    tall a region should be, and ``_sweep_tile`` says what budget buys it. Asked with the landing
+    and the pull maps the sweep itself will use, because that is what the budget is spent on.
     """
     if route.height is None:
         return None
-    channels, spatial = int(shape[0]), [int(extent) for extent in shape[1:]]
-    rows = max(1, int(route.height * spatial[0]))
+    # Every copy the run will sweep, each with the landing and the pull maps of its own chain: a
+    # draw that samples through an affine pulls more than the shared prefix, and the budget the
+    # matrix asks for is the one that buys the height on all of them.
+    augmented = manager._expand is not None
+    copies = [0] if not augmented else list(range(1, int(manager._expand.nb) + 1))
+    segments = {a: manager.sweep_segments(a, augmented) or [] for a in copies}
+    rows = max(1, int(route.height * int(manager.shapes[copies[0]][0])))
     low, high = 1.0, float(2**48)
     for _ in range(64):
         middle = (low + high) / 2
         manager.set_memory_budget(middle)
-        if manager._sweep_rows(spatial, channels) < rows:
+        if min(_sweep_height(manager, sweeps) for sweeps in segments.values()) < rows:
             low = middle
         else:
             high = middle
     manager.set_memory_budget(None)
     return high
+
+
+def _sweep_height(manager: DatasetManager, segments: Sequence[SweepSegment]) -> int:
+    """The shortest region the sizing buys these segments under the budget the manager currently
+    carries; zero where one of them does not fit, which is below every height the routes ask for."""
+    heights = []
+    for segment in segments:
+        try:
+            heights.append(manager._sweep_tile(segment.landing, segment.channels, segment.plans)[0])
+        except DatasetManagerError:
+            return 0
+    return min(heights, default=0)
 
 
 # ---------------------------------------------------------------- driving one case both ways

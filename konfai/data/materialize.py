@@ -32,7 +32,6 @@ import sys
 import warnings
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import NamedTuple
 
 if sys.version_info >= (3, 11):
     from enum import StrEnum
@@ -54,7 +53,9 @@ from konfai.data.patching import (
     FALLBACK_INFLIGHT_FACTOR,
     AugmentedStage,
     DatasetManager,
+    SweepSegment,
     _PendingSweep,
+    _pull_block_voxels,
     _ReadStagePlan,
     _stage_failures_explained,
     _stage_name,
@@ -63,23 +64,8 @@ from konfai.data.patching import (
 )
 from konfai.data.transform import LocalityKind, Reduce, Resample, Save, Transform
 from konfai.utils.budget import format_bytes
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import Attribute
 from konfai.utils.errors import PatchError
-
-
-class _SweepSegment(NamedTuple):
-    """One segment the streamed route sweeps: where it reads from, what it lands, how it pulls."""
-
-    dataset: Dataset
-    group: str
-    entry: str
-    source_shape: list[int]
-    landing: list[int]
-    plans: tuple[_ReadStagePlan, ...]
-
-    @property
-    def channels(self) -> int:
-        return int(self.source_shape[0])
 
 
 class Verdict(StrEnum):
@@ -418,7 +404,7 @@ class CaseMaterializer:
         manager = self.manager
         if not any(
             extent < segment.landing[axis]
-            for segment in self._sweep_segments() or []
+            for segment in self.manager.sweep_segments() or []
             for axis, extent in enumerate(manager._sweep_tile(segment.landing, segment.channels, segment.plans))
         ):
             return False
@@ -478,56 +464,17 @@ class CaseMaterializer:
             self._peak_case_bytes = peak * CASE_ELEMENT_BYTES
         return self._peak_case_bytes
 
-    def working_multiple(self) -> float:
-        """What the whole-volume path allocates beyond the case and its in-flight copy, in
-        volumes-worth: the largest a stage of the chain declares (``Transform.working_multiple``)."""
-        return max(
-            (float(stage.working_multiple) for stage in self.manager.transforms if isinstance(stage, Transform)),
-            default=0.0,
-        )
-
     def fallback_working_set_bytes(self) -> int:
         """The bytes a whole-volume fallback of this case holds at its peak: the case, its in-flight
         copy, and the widest stage's own buffers, all sized on the largest intermediate."""
-        return int(self.peak_case_bytes() * (FALLBACK_INFLIGHT_FACTOR + self.working_multiple()))
-
-    def _sweep_segments(self, a: int = 0, apply_augmentations: bool = False) -> list[_SweepSegment] | None:
-        """Every segment the streamed route sweeps: one per unsatisfied ``Save`` (each sweeps ITS
-        source) plus the head past the last boundary, which is read only if stages follow it.
-        ``None`` when the chain cannot stream at all."""
-        source = self.manager._resolve_patch_stream_source(a, apply_augmentations)
-        if source is None:
-            return None
-        segments = [
-            _SweepSegment(
-                sweep.source_dataset,
-                sweep.source_group,
-                sweep.source_entry,
-                [int(extent) for extent in sweep.source_shape],
-                list(sweep.out_spatial),
-                sweep.stage_plans,
-            )
-            for sweep in source.pending_sweeps
-        ]
-        if source.stage_plans:
-            segments.append(
-                _SweepSegment(
-                    source.dataset,
-                    source.group,
-                    source.entry,
-                    list(source.shape),
-                    list(source.stage_plans[-1].out_shape),
-                    source.stage_plans,
-                )
-            )
-        return segments
+        return int(self.peak_case_bytes() * (FALLBACK_INFLIGHT_FACTOR + self.manager.working_multiple()))
 
     def predicted_stream_read_factor(self, a: int = 0, apply_augmentations: bool = False) -> float | None:
         """About how many times the streamed route reads the source (a halo re-reads its overlap, a
         regrid pulls each slab's window, a store without bounded reads decodes the volume once per
         slab), from the plan's own pull maps: the number the route is chosen with. ``None`` when the
         chain cannot stream."""
-        segments = self._sweep_segments(a, apply_augmentations)
+        segments = self.manager.sweep_segments(a, apply_augmentations)
         if segments is None:
             return None
         # Priced by the dominant segment: a max, not a sum -- the segments read different stores,
@@ -535,7 +482,7 @@ class CaseMaterializer:
         factors = [self._segment_read_factor(segment) for segment in segments]
         return max(factors) if factors else 1.0
 
-    def _segment_read_factor(self, segment: _SweepSegment) -> float:
+    def _segment_read_factor(self, segment: SweepSegment) -> float:
         """One segment's reads over its source's voxels, block by block through the plan's own pulls."""
         tile = self.manager._sweep_tile(segment.landing, segment.channels, segment.plans)
         targets = list(_sweep_targets(segment.landing, tile))
@@ -545,10 +492,5 @@ class CaseMaterializer:
         dataset, group, entry = segment.dataset, segment.group, segment.entry
         if dataset.is_dataset_exist(group, entry) and not dataset.bounded_region_reads(group, entry):
             return float(max(1, len(targets)))  # every block decodes the whole store
-        read = 0
-        for target in targets:
-            span = list(target)
-            for plan in reversed(segment.plans):
-                span = list(plan.pull(tuple(span))) if plan.pull is not None else span
-            read += int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
+        read = sum(_pull_block_voxels(segment.landing, tile, segment.plans))
         return float(read) / float(max(1, int(np.prod(segment.source_shape[1:], dtype=np.int64))))

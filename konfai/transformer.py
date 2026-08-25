@@ -47,6 +47,7 @@ from konfai.data.patching import (
     CASE_ELEMENT_BYTES,
     FALLBACK_INFLIGHT_FACTOR,
     SWEEP_CLOCK,
+    SWEEP_ENGINE_FLOOR_BYTES,
     DatasetManager,
     save_destination,
 )
@@ -164,12 +165,18 @@ class TransformPlan:
         return "\n".join(lines)
 
     def _header(self) -> str:
-        cache = f" | decoded-chunk cache {format_bytes(self.chunk_cache_bytes)} of it" if self.chunk_cache_bytes else ""
-        if 0 < self.chunk_cache_bytes < CHUNK_CACHE_FLOOR:
-            cache += (
+        # What a rank holds that the region sizing does not take out of the budget: said here rather
+        # than left to be discovered in a resident set.
+        beside = [f"engine ~{format_bytes(SWEEP_ENGINE_FLOOR_BYTES)}"]
+        if self.chunk_cache_bytes:
+            under = (
                 f" (under the {format_bytes(CHUNK_CACHE_FLOOR)} floor: a region touching more OME-Zarr"
                 " chunks than it holds decodes them again)"
+                if self.chunk_cache_bytes < CHUNK_CACHE_FLOOR
+                else ""
             )
+            beside.append(f"decoded-chunk cache up to {format_bytes(self.chunk_cache_bytes)}{under}")
+        cache = " | held beside the regions: " + ", ".join(beside)
         return (
             f"[KonfAI] plan over {self.world_size} rank(s) | per-rank budget"
             f" {format_bytes(self.budget_bytes)} ({self.budget_desc}){cache}"

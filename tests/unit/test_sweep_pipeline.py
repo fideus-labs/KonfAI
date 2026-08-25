@@ -37,7 +37,7 @@ from konfai.data.patching import (
     _ReadAhead,
     _stage_failure,
     _sweep_pipeline_depth,
-    _sweep_resident_slabs,
+    _sweep_resident_regions,
     _WriteBehind,
 )
 from konfai.data.transform import Clip, LocalityKind, PatchLocality, RegionContext, Resample, Save, Transform
@@ -425,7 +425,7 @@ def test_a_pipelined_sweep_holds_no_more_blocks_than_the_height_rule_prices(
     ahead, the one the reader holds while the queue is full, and the one being written behind.
     Counted here as blocks between their read and their write, with a writer slower than the
     reader so the queue fills and the reader blocks on it."""
-    from konfai.data.patching import RegionWriter, _sweep_resident_slabs
+    from konfai.data.patching import RegionWriter, _sweep_resident_regions
 
     depth = 1
     monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
@@ -459,13 +459,14 @@ def test_a_pipelined_sweep_holds_no_more_blocks_than_the_height_rule_prices(
 
     assert counts["peak"] >= depth + 2, "the pipeline did not overlap: nothing was measured"
     # The block in the chain is two slabs (pulled and landed); every other block in flight is one.
-    assert counts["peak"] + 1 <= _sweep_resident_slabs(depth), f"{counts['peak']} blocks in flight"
+    assert counts["peak"] + 1 <= sum(_sweep_resident_regions(depth)), f"{counts['peak']} blocks in flight"
 
 
-def test_the_height_rule_prices_the_blocks_each_depth_holds() -> None:
-    """The block in the chain (pulled and landed), ``depth`` queued ahead, one in the reader's hand
-    while the queue is full, one written behind: none past depth 0, and no more than that."""
-    assert [_sweep_resident_slabs(depth) for depth in range(4)] == [2, 5, 6, 7]
+def test_the_sizing_prices_the_regions_and_blocks_each_depth_holds() -> None:
+    """Pulled regions: the one in the chain, ``depth`` queued ahead, one in the reader's hand while
+    the queue is full. Landed blocks: the one being landed and the one written behind. None past
+    depth 0, and no more than that."""
+    assert [_sweep_resident_regions(depth) for depth in range(4)] == [(1, 1), (3, 2), (4, 2), (5, 2)]
 
 
 # ---------------------------------------------------------------- the publish is a write, and is waited for

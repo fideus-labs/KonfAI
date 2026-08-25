@@ -52,9 +52,10 @@ from konfai.data.transform import (
     split_expand,
     stat_seed_valid,
 )
+from konfai.utils.budget import format_bytes
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream, as_channel_first
-from konfai.utils.errors import ConfigError, PatchError, TransformError
+from konfai.utils.errors import ConfigError, DatasetManagerError, PatchError, TransformError
 from konfai.utils.runtime import preserved_rng, rank_cpu_share, seed_all
 from konfai.utils.utils import (
     OverlapSpec,
@@ -91,10 +92,15 @@ _STREAM_STAT_KEYS = frozenset(_STREAM_STATS)
 # VOLUME it allows is what DatasetManager._sweep_tile then shapes into the block actually read.
 SWEEP_SLAB_ROWS = 64
 
-# What a sweep holds per row while in flight (the pulled source region and the landed block) and
-# the bytes each element travels as (float32 through the chain). See DatasetManager._sweep_rows.
-# A pipelined sweep holds more: _sweep_resident_slabs counts them.
-_SWEEP_RESIDENT_SLABS = 2
+# The bytes each element travels as through a sweep (float32). What a sweep holds in those elements
+# is _sweep_resident_regions, and DatasetManager.sweep_block_bytes prices it.
+#
+# What a streamed case holds beside its regions, whatever they are: the manager's state, the chain's
+# stage objects, the store handles, the allocator's slack. Measured as the resident set above the
+# interpreter floor that the priced regions do not account for, on the memory-limit cohort: 25 MiB
+# (a bare Write), 8 (Gradient), 11 (Resample), 27 (Resample then Gradient). A floor the sizing cannot
+# lower, so the TRANSFORM plan's header states it instead of leaving it to be found in a resident set.
+SWEEP_ENGINE_FLOOR_BYTES = 32 << 20
 #: The most blocks a sweep keeps in flight, whatever the budget leaves room for: past a second
 #: one the jitter it absorbs is already absorbed (DatasetManager._sweep_depth).
 _SWEEP_MAX_DEPTH = 3
@@ -503,16 +509,15 @@ def _cubic_tile(spatial: list[int], voxels: int, align: int) -> list[int]:
     ]
 
 
-def _pull_voxels(spatial: list[int], tile: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> int:
-    """The source voxels a decomposition into ``tile`` blocks materialises, from the plans' own pull
-    maps: closed form, no voxel read."""
-    total = 0
+def _pull_block_voxels(spatial: list[int], tile: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> Iterator[int]:
+    """The source voxels each block of a decomposition into ``tile`` materialises, from the plans'
+    own pull maps: closed form, no voxel read. Their sum is what the decomposition reads, their
+    largest what one block of it holds."""
     for target in _sweep_targets(spatial, tile):
         span = list(target)
         for plan in reversed(plans):
             span = list(plan.pull(tuple(span))) if plan.pull is not None else span
-        total += int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
-    return total
+        yield int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
 
 
 def _sweep_pipeline_depth() -> int:
@@ -521,11 +526,27 @@ def _sweep_pipeline_depth() -> int:
     return 1 if rank_cpu_share() > 1 else 0
 
 
-def _sweep_resident_slabs(depth: int) -> int:
-    """How many blocks' worth a sweep of pipeline ``depth`` holds at once: the pulled region and
-    the landed block of the one in the chain, and, pipelined, the ``depth`` blocks queued ahead,
-    the one the reader holds while the queue is full, and the one being written behind."""
-    return _SWEEP_RESIDENT_SLABS + (depth + 2 if depth else 0)
+def _sweep_resident_regions(depth: int) -> tuple[int, int]:
+    """How many pulled source regions and how many landed blocks a sweep of pipeline ``depth`` holds
+    at once: the region the chain is running on, and, pipelined, the ``depth`` queued ahead of it
+    plus the one the reader holds while the queue is full; against the block being landed and,
+    pipelined, the one being written behind it."""
+    return (1, 1) if depth < 1 else (depth + 2, 2)
+
+
+class SweepSegment(NamedTuple):
+    """One segment the streamed route sweeps: where it reads from, what it lands, how it pulls."""
+
+    dataset: Dataset
+    group: str
+    entry: str
+    source_shape: list[int]
+    landing: list[int]
+    plans: tuple["_ReadStagePlan", ...]
+
+    @property
+    def channels(self) -> int:
+        return int(self.source_shape[0])
 
 
 class SweepClock:
@@ -2654,17 +2675,61 @@ class DatasetManager:
         )
         return sweep, evolved, None
 
+    def sweep_segments(self, a: int = 0, apply_augmentations: bool = False) -> list[SweepSegment] | None:
+        """Every segment the streamed route sweeps: one per unsatisfied ``Save`` (each sweeps ITS
+        source) plus the head past the last boundary, which is read only if stages follow it.
+        ``None`` when the chain cannot stream at all.
+
+        Public because three consumers ask the same question of one plan: what the run will sweep,
+        what the plan prices it at, and whether the budget holds a region of it.
+        """
+        source = self._resolve_patch_stream_source(a, apply_augmentations)
+        if source is None:
+            return None
+        segments = [
+            SweepSegment(
+                sweep.source_dataset,
+                sweep.source_group,
+                sweep.source_entry,
+                [int(extent) for extent in sweep.source_shape],
+                list(sweep.out_spatial),
+                sweep.stage_plans,
+            )
+            for sweep in source.pending_sweeps
+        ]
+        if source.stage_plans:
+            segments.append(
+                SweepSegment(
+                    source.dataset,
+                    source.group,
+                    source.entry,
+                    list(source.shape),
+                    list(source.stage_plans[-1].out_shape),
+                    source.stage_plans,
+                )
+            )
+        return segments
+
     def can_stream_patch(self, a: int, apply_augmentations: bool = True) -> bool:
-        return self._resolve_patch_stream_source(a, apply_augmentations) is not None
+        return self.stream_refusal(a, apply_augmentations) is None
 
     def stream_refusal(self, a: int = 0, apply_augmentations: bool = True) -> str | None:
         """Why this copy cannot stream (the reified refusal) or ``None`` when it can.
 
         Resolves the plan (a probe, never a write) and hands back the first stage-level reason the
-        planner met: the whole-volume fallback stays available, but it stops being silent."""
-        if self._resolve_patch_stream_source(a, apply_augmentations) is not None:
-            return None
-        return self._stream_refusals.get((a, apply_augmentations), "the chain cannot stream.")
+        planner met, or, past that, the budget one: a chain whose smallest region does not fit is
+        not a chain that streams, and routing it away here is what makes the whole-volume pass
+        price and refuse it before a byte is written, instead of the sweep meeting it at its first
+        slab. The whole-volume fallback stays available, but neither refusal is silent."""
+        segments = self.sweep_segments(a, apply_augmentations)
+        if segments is None:
+            return self._stream_refusals.get((a, apply_augmentations), "the chain cannot stream.")
+        try:
+            for segment in segments:
+                self._sweep_tile(segment.landing, segment.channels, segment.plans)
+        except DatasetManagerError as refusal:
+            return str(refusal.args[0])
+        return None
 
     @property
     def spatial_shape(self) -> list[int]:
@@ -2743,9 +2808,6 @@ class DatasetManager:
         replay where the fold will run. CPU collapses to None: opt-in only, because this same
         machinery loads training cases inside DataLoader workers, where a CUDA default is wrong."""
         self._chain_device = device if device is not None and device.type != "cpu" else None
-
-    def _device_budget(self, budget_bytes: float | None) -> float | None:
-        return device_capped_budget(budget_bytes, self._chain_device)
 
     def _set_rewrite(self, rewrite: bool) -> None:
         """The rewrite knob the materialization engine sets for one call: under it every
@@ -2996,59 +3058,117 @@ class DatasetManager:
         second block in flight recovers 0.5 s of a 6.7 s run and a third recovers none.
         """
         depth = _sweep_pipeline_depth()
-        while depth and depth < _SWEEP_MAX_DEPTH and self._sweep_tile(spatial, channels, plans, depth + 1) == tile:
+        while depth and depth < _SWEEP_MAX_DEPTH and self._keeps_the_block(spatial, channels, plans, tile, depth + 1):
             depth += 1
         return depth
 
-    def _sweep_rows(self, spatial: list[int], channels: int, depth: int | None = None) -> int:
-        """How many rows one sweep region spans on the landing's first axis: the cap
-        (``SWEEP_SLAB_ROWS`` on a CPU, taller on a GPU as its memory allows), lowered by the budget
-        (half of it over everything a sweep of this ``depth`` holds at once:
-        :func:`_sweep_resident_slabs`), never below one row. Sized on the source's channels at four
-        bytes each: the landed block's are not known before the first region, and the fallback
-        budget check refuses on real shapes.
+    def _keeps_the_block(
+        self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"], tile: list[int], depth: int
+    ) -> bool:
+        """Whether a queue of ``depth`` still leaves the sweep exactly ``tile``: a deeper one the
+        budget cannot hold refuses, and a refusal here is the answer no, not the sweep's failure."""
+        try:
+            return self._sweep_tile(spatial, channels, plans, depth) == tile
+        except DatasetManagerError:
+            return False
 
-        This is the HEIGHT rule alone; :meth:`_sweep_tile` turns the volume it allows into the block
-        the sweep actually reads.
+    def _sweep_rows(self, spatial: list[int], channels: int, depth: int | None = None) -> int:
+        """The tallest region the sweep will cut whatever the budget: ``SWEEP_SLAB_ROWS`` on a CPU,
+        taller on a GPU as its free memory allows. What the budget then affords is
+        :meth:`_sweep_tile`'s.
         """
         cap = max(1, int(SWEEP_SLAB_ROWS))
-        resident = _sweep_resident_slabs(_sweep_pipeline_depth() if depth is None else depth)
         plane = int(np.prod(spatial[1:], dtype=np.int64)) * max(1, int(channels)) * _SWEEP_ELEMENT_BYTES
         if plane > 0 and self._chain_device is not None and self._chain_device.type == "cuda":
             # On a GPU the transfers and launches per region are the cost: taller regions, as far as
             # a quarter of the free device memory allows (measured +10-20 % at 500^3 over 64 rows).
+            resident = sum(_sweep_resident_regions(_sweep_pipeline_depth() if depth is None else depth))
             free_bytes, _total = torch.cuda.mem_get_info(self._chain_device)
             cap = max(cap, min(_SWEEP_SLAB_ROWS_DEVICE, int(free_bytes * 0.25 / (plane * resident))))
-        budget = self._sweep_budget_bytes
-        if not budget or budget <= 0:
-            return cap
-        if plane <= 0:
-            return cap
-        return max(1, min(cap, int(budget * 0.5 / (plane * resident))))
+        return cap
 
-    def _sweep_tile(
-        self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"] = (), depth: int | None = None
-    ) -> list[int]:
-        """The block one sweep region covers: the volume :meth:`_sweep_rows` allows, in the shape
-        that pulls the least.
+    def _sweep_shape(self, spatial: list[int], plans: Sequence["_ReadStagePlan"], rows: int) -> list[int]:
+        """The block ``rows`` rows of the landing become: the slab itself, or the cube of the same
+        volume where that pulls less.
 
         A region pulls the BOUNDING BOX of its own image under the chain's maps, so a slab spanning
         the trailing plane pays that plane's extent for every degree of shear where a cube pays its
         side: 1.79x the image against 1.09x on a 513x1331x1776 rigid+affine. Both are priced against
-        the plans' own pull maps (:func:`_pull_voxels`), and the cube wins only by
+        the plans' own pull maps (:func:`_pull_block_voxels`), and the cube wins only by
         ``_SWEEP_TILE_MARGIN``: the decomposition is also the shape a store gets chunked in. Without
         plans, the slab.
         """
         from konfai.utils.ome_zarr import CHUNK_SPATIAL_TILE
 
-        rows = self._sweep_rows(spatial, channels, depth)
         slab = [min(int(rows), int(spatial[0])), *(int(extent) for extent in spatial[1:])]
         voxels = int(rows) * int(np.prod(spatial[1:], dtype=np.int64))
         cube = _cubic_tile(spatial, voxels, CHUNK_SPATIAL_TILE)
         if cube == slab or not plans:
             return slab
-        cheaper = _pull_voxels(spatial, cube, plans) <= _pull_voxels(spatial, slab, plans) * _SWEEP_TILE_MARGIN
+        pulled = sum(_pull_block_voxels(spatial, cube, plans))
+        cheaper = pulled <= sum(_pull_block_voxels(spatial, slab, plans)) * _SWEEP_TILE_MARGIN
         return cube if cheaper else slab
+
+    def sweep_block_bytes(
+        self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"], tile: list[int], depth: int
+    ) -> int:
+        """What a sweep decomposed into ``tile`` holds at its peak: the source regions it has pulled
+        and the blocks it has landed, both counted by :func:`_sweep_resident_regions`, plus what the
+        widest stage of the chain allocates on top of the largest of them
+        (``Transform.working_multiple``). The landed block's channels are not known before the first
+        region, so the source's stand in, at ``_SWEEP_ELEMENT_BYTES`` each. Beside this, and outside
+        it, a streamed case holds ``SWEEP_ENGINE_FLOOR_BYTES`` the decomposition cannot lower.
+
+        Public because the sizing holds this figure to the budget and a caller sizing a budget for a
+        decomposition asks for it: one price, not two that drift apart.
+        """
+        pulled, landed = _sweep_resident_regions(depth)
+        block = int(np.prod(tile, dtype=np.int64))
+        pull = max(_pull_block_voxels(spatial, tile, plans), default=block) if plans else block
+        held = pulled * pull + landed * block + self.working_multiple() * max(pull, block)
+        return int(held * max(1, int(channels)) * _SWEEP_ELEMENT_BYTES)
+
+    def working_multiple(self) -> float:
+        """What this chain allocates beyond what it is handed, in volumes-worth: the largest a stage
+        declares (``Transform.working_multiple``)."""
+        return max(
+            (float(stage.working_multiple) for stage in self.transforms if isinstance(stage, Transform)), default=0.0
+        )
+
+    def _sweep_tile(
+        self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"] = (), depth: int | None = None
+    ) -> list[int]:
+        """The block one sweep region covers: the tallest the cap allows that still holds inside the
+        budget, in the shape that pulls the least (:meth:`_sweep_shape`).
+
+        The budget is what a sweep may HOLD, so it is the priced block (:meth:`sweep_block_bytes`)
+        that is held to it, never the landed rows alone: a REGRID pulling eight source voxels per
+        landed one, or a stage declaring eight volumes-worth of buffers, costs what it costs. The
+        search is over the height, because that is the one free parameter of the decomposition.
+        """
+        depth = _sweep_pipeline_depth() if depth is None else depth
+        cap = self._sweep_rows(spatial, channels, depth)
+        budget = self._sweep_budget_bytes
+        if not budget or budget <= 0:
+            return self._sweep_shape(spatial, plans, cap)
+        low, high = 1, cap  # low is never taken as affordable: the refusal below answers for it
+        while low < high:
+            middle = (low + high + 1) // 2
+            tile = self._sweep_shape(spatial, plans, middle)
+            if self.sweep_block_bytes(spatial, channels, plans, tile, depth) <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        tile = self._sweep_shape(spatial, plans, low)
+        held = self.sweep_block_bytes(spatial, channels, plans, tile, depth)
+        if held > budget:
+            raise DatasetManagerError(
+                f"'{self.name}': no region of '{self.group_src}' fits the per-rank memory budget"
+                f" ({format_bytes(budget)}): the smallest one this chain can sweep holds"
+                f" {format_bytes(held)}.",
+                "Raise 'memory_budget'.",
+            )
+        return tile
 
     def _get_streamed_data(
         self,

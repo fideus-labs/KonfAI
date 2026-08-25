@@ -29,9 +29,17 @@ import pytest
 import torch
 from konfai.data import patching as patching_module
 from konfai.data.materialize import CaseMaterializer, Verdict
-from konfai.data.patching import DatasetManager, DatasetPatch, _cubic_tile, _pull_voxels, _sweep_targets
+from konfai.data.patching import (
+    DatasetManager,
+    DatasetPatch,
+    _cubic_tile,
+    _pull_block_voxels,
+    _sweep_pipeline_depth,
+    _sweep_targets,
+)
 from konfai.data.transform import Resample, Save
 from konfai.utils.dataset import Attribute, Dataset, _store_chunks
+from konfai.utils.errors import DatasetManagerError
 
 pytest.importorskip("SimpleITK")
 
@@ -47,7 +55,7 @@ def _attributes(direction: np.ndarray | None = None) -> Attribute:
 
 
 #: The landing, and the height rule these tests pin, chosen so the two decompositions are far apart:
-#: the slab reads 2.40x the source where the cube reads 0.91x (printed by _pull_voxels below).
+#: the slab reads 2.40x the source where the cube reads 0.91x (printed by _pull_block_voxels below).
 LANDING = (48, 128, 128)
 ROWS = 12
 
@@ -157,7 +165,7 @@ def test_a_sheared_resample_takes_the_cube_and_reads_less_for_it(
     tile = manager._sweep_tile(spatial, 1, plans)
 
     assert tile != slab, "a 20-degree x-z shear makes the full-plane slab the expensive decomposition"
-    assert _pull_voxels(spatial, tile, plans) < _pull_voxels(spatial, slab, plans)
+    assert sum(_pull_block_voxels(spatial, tile, plans)) < sum(_pull_block_voxels(spatial, slab, plans))
 
 
 def test_an_axis_aligned_chain_prices_the_two_the_same_and_keeps_the_slab(
@@ -175,6 +183,60 @@ def test_an_axis_aligned_chain_prices_the_two_the_same_and_keeps_the_slab(
     manager = _manager(source, [resample, Save(f"{tmp_path / 'out'}:h5")])
 
     assert manager._sweep_tile(list(LANDING), 1, _sweep_plans(manager)) == [ROWS, *LANDING[1:]]
+
+
+# ---------------------------------------------------------------- what the budget buys
+
+
+def _priced(manager: DatasetManager, plans, rows: int) -> int:
+    """What a decomposition of ``rows`` rows holds, priced as the sizing prices it."""
+    tile = manager._sweep_shape(list(LANDING), plans, rows)
+    return manager.sweep_block_bytes(list(LANDING), 1, plans, tile, _sweep_pipeline_depth())
+
+
+def _block_voxels(manager: DatasetManager, plans) -> int:
+    """The landed voxels of the block the sizing picks under the budget the manager carries."""
+    return int(np.prod(manager._sweep_tile(list(LANDING), 1, plans), dtype=np.int64))
+
+
+def test_the_sizing_takes_the_tallest_region_the_budget_holds(tmp_path: Path) -> None:
+    """The budget is spent, not halved and spent: what the chosen block holds fits, and one row more
+    does not."""
+    source, _volume = _sheared_fixture(tmp_path)
+    manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
+    budget = _priced(manager, (), 5)
+    manager.set_memory_budget(float(budget))
+
+    rows = manager._sweep_tile(list(LANDING), 1)[0]
+    assert _priced(manager, (), rows) <= budget < _priced(manager, (), rows + 1)
+
+
+def test_a_regrid_pays_for_what_it_pulls_and_not_for_what_it_lands(tmp_path: Path) -> None:
+    """The bytes a region costs are the source's box under the chain's maps, so the same budget buys
+    a resample onto a sheared grid a smaller block than it buys a chain that reads where it lands."""
+    source, _volume = _sheared_fixture(tmp_path)
+    resample = Resample(reference="TARGET", reference_group="GRID", reference_dataset=f"{tmp_path / 'ref'}:h5")
+    regrid = _manager(source, [resample, Save(f"{tmp_path / 'out'}:h5")])
+    pointwise = _manager(source, [Save(f"{tmp_path / 'flat'}:h5")])
+    plans = _sweep_plans(regrid)
+    budget = float(_priced(pointwise, (), 8))
+    regrid.set_memory_budget(budget)
+    pointwise.set_memory_budget(budget)
+
+    assert _priced(regrid, plans, 8) > _priced(pointwise, (), 8), "the shear pulls more than it lands"
+    assert _block_voxels(regrid, plans) < _block_voxels(pointwise, ())
+
+
+def test_a_budget_no_region_fits_refuses_with_both_figures(tmp_path: Path) -> None:
+    """A budget one row of the landing does not fit is not a one-row sweep: it is a refusal naming
+    the budget and what the smallest region holds, so the reader knows what to raise it to."""
+    source, _volume = _sheared_fixture(tmp_path)
+    manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
+    manager.set_memory_budget(_priced(manager, (), 1) / 2.0)
+
+    with pytest.raises(DatasetManagerError, match=r"no region of 'CT' fits the per-rank memory budget"):
+        manager._sweep_tile(list(LANDING), 1)
+    assert manager.stream_refusal(0) is not None, "and the plan routes the case away from streaming"
 
 
 # ---------------------------------------------------------------- the values are still the values
