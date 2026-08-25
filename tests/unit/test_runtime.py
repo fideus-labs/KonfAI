@@ -32,6 +32,7 @@ from konfai.evaluator import Evaluator
 from konfai.predictor import Predictor
 from konfai.trainer import Trainer
 from konfai.utils.errors import ConfigError
+from konfai.utils.ome_zarr import _zarr_v3_available
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -782,6 +783,8 @@ def test_zarr_keeps_a_small_share_whole(monkeypatch, cores: int, expected: int) 
     """A third of a 24-core share is the measured point; a third of four cores is one chunk in
     flight, which on a remote root is the whole of the read's parallelism."""
     zarr = pytest.importorskip("zarr")
+    if not _zarr_v3_available():  # 2.x has no config object, and no async reader to share the cores with
+        pytest.skip("zarr 2.x has no async reader to size")
     previous = zarr.config.get("async.concurrency")
     try:
         _budget_applied(monkeypatch, cores=cores, ranks=None, omp=None)
