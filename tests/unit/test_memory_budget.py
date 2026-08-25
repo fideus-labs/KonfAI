@@ -681,7 +681,7 @@ def test_a_halo_metric_no_longer_vetoes_the_patched_evaluation(tmp_path: Path, m
         state=State.EVALUATION,
         path_env={"KONFAI_EVALUATIONS_DIRECTORY": tmp_path / "Evaluations"},
     )
-    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
     with strict_config("Evaluator", refuse=False):
         evaluator = apply_config()(Evaluator)()
 
