@@ -1192,9 +1192,10 @@ def test_a_chain_through_its_own_save_cache_is_priced_as_bounded(tmp_path: Path)
 
 
 def test_the_working_set_counts_the_widest_stages_own_buffers(tmp_path: Path) -> None:
-    """The estimators guarding the budget were 2 to 4.5x optimistic: a Gradient's whole-volume
-    call holds eight volumes beside its input and output. A stage declares what it allocates
-    (working_multiple), and the plan sizes the fallback working set with it."""
+    """The estimators guarding the budget were 2 to 4.5x optimistic: a Gradient's whole-volume call
+    holds several volumes beside its input and output. A stage declares what it allocates
+    (working_multiple) and the plan sizes the fallback working set with it, so this reads the
+    declaration rather than a number: re-measuring a stage must not need a test edit."""
     from konfai.data.patching import CASE_ELEMENT_BYTES, FALLBACK_INFLIGHT_FACTOR
     from konfai.data.transform import Gradient
 
@@ -1208,8 +1209,8 @@ def test_the_working_set_counts_the_widest_stages_own_buffers(tmp_path: Path) ->
     plan = _build(tmp_path).compute_plan()
     entry = plan.entries[0]
     case = 12 * 10 * 8 * CASE_ELEMENT_BYTES
-    assert Gradient.working_multiple == 8.0
-    assert entry.working_set_bytes == case * (FALLBACK_INFLIGHT_FACTOR + 8.0)
+    assert Gradient.working_multiple > 0.0, "the widest stage of this chain declares its buffers"
+    assert entry.working_set_bytes == case * (FALLBACK_INFLIGHT_FACTOR + Gradient.working_multiple)
     assert "widest stage" in plan.report()
 
 

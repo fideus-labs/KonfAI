@@ -54,7 +54,7 @@ from konfai.data.transform import (
 )
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
-from konfai.utils.errors import ConfigError, PatchError
+from konfai.utils.errors import ConfigError, PatchError, TransformError
 from konfai.utils.runtime import preserved_rng, rank_cpu_share, seed_all
 from konfai.utils.utils import (
     OverlapSpec,
@@ -93,8 +93,11 @@ SWEEP_SLAB_ROWS = 64
 
 # What a sweep holds per row while in flight (the pulled source region and the landed block) and
 # the bytes each element travels as (float32 through the chain). See DatasetManager._sweep_rows.
-# A pipelined sweep holds one more of each: see _sweep_pipeline_depth.
+# A pipelined sweep holds one more of each: see _sweep_pipeline_depth and _sweep_depth.
 _SWEEP_RESIDENT_SLABS = 2
+#: The most blocks a sweep keeps in flight, whatever the budget leaves room for: past a second
+#: one the jitter it absorbs is already absorbed (DatasetManager._sweep_depth).
+_SWEEP_MAX_DEPTH = 3
 #: The region height cap when the chain runs on a GPU (bounded by free device memory as well).
 _SWEEP_SLAB_ROWS_DEVICE = 256
 #: How much less a cubic block must read for the sweep to take it (``DatasetManager._sweep_tile``).
@@ -593,6 +596,37 @@ class _ReadAhead:
             yield block
 
 
+class _HostLanding:
+    """The host buffers a device chain's blocks come home into, reused rather than reallocated.
+
+    A fresh allocation per block pays first-touch on pages the transfer overwrites whole, so the
+    pageable copy faults page by page: measured on a 216 MiB block, 2.4 GiB/s into a new buffer
+    against 10.1 GiB/s into one already resident. Two slots, because the writer holds exactly one
+    block while the sweep fills the next, and that is what the sweep already keeps live.
+
+    A block already on the host is handed over as it is: copying one would cost the host chain
+    exactly what this saves on the device one.
+    """
+
+    _SLOTS = 2
+
+    def __init__(self) -> None:
+        self._slots: list[torch.Tensor] = [torch.empty(0, dtype=torch.uint8) for _ in range(_HostLanding._SLOTS)]
+        self._next = 0
+
+    def take(self, tensor: torch.Tensor) -> np.ndarray:
+        """``tensor``'s values on the host, in a buffer this owns (or its own, if it is host-side)."""
+        if tensor.device.type == "cpu":
+            return tensor.numpy()
+        slot, self._next = self._next, (self._next + 1) % _HostLanding._SLOTS
+        needed = tensor.nelement() * tensor.element_size()
+        if self._slots[slot].nelement() < needed:
+            self._slots[slot] = torch.empty(needed, dtype=torch.uint8)
+        landing = self._slots[slot][:needed].view(tensor.dtype).view(tensor.shape)
+        landing.copy_(tensor)
+        return landing.numpy()
+
+
 class _WriteBehind:
     """A sweep's :class:`RegionWriter`, driven from one thread that is not the sweep's.
 
@@ -646,6 +680,42 @@ class _WriteBehind:
 
     def _on_writer(self, work: Callable[..., Any], *args: Any) -> Any:
         return work(*args) if self._pool is None else self._pool.submit(work, *args).result()
+
+
+def _torch_dtype_hint(error: BaseException) -> str | None:
+    """The config change that answers ``error``, when it is a dtype torch has no kernel for.
+
+    torch ships none for several dtypes a store legitimately holds: ``uint16`` is what microscopy
+    writes, and torch implements for it neither comparison, nor flip, nor arithmetic, nor scalar
+    fill. A chain that touches such a payload raises deep inside a stage with nothing but the
+    missing operator's name, where what the reader needs is the dtype and the line that fixes it.
+    """
+    text = str(error)
+    if not isinstance(error, NotImplementedError) or "not implemented for" not in text or text.count("'") < 2:
+        return None
+    return (
+        f"torch has no kernel for a '{text.rsplit(chr(39), 2)[-2]}' payload: put a cast at the head"
+        " of the chain (TensorCast, dtype float32, or int32 to keep every value exact) so the stages"
+        " work in a dtype torch implements. The store keeps its own."
+    )
+
+
+@contextlib.contextmanager
+def _stage_failures_explained() -> Iterator[None]:
+    """Re-raise what a chain raised with the config change that answers it, where there is one."""
+    try:
+        yield
+    except NotImplementedError as error:
+        hint = _torch_dtype_hint(error)
+        if hint is None:
+            raise
+        raise TransformError(str(error), hint) from error
+
+
+def _stage_failure(error: BaseException) -> str:
+    """What a chain raised, with the hint appended where one applies."""
+    hint = _torch_dtype_hint(error)
+    return f"{type(error).__name__}: {error}" + (f". {hint}" if hint else "")
 
 
 def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -> Attribute:
@@ -2613,9 +2683,10 @@ class DatasetManager:
         the first block with the header the whole-volume pass would leave. Returns the keys written
         and, when the pass failed, why: every stream is then aborted; an interrupt is re-raised."""
         spatial = list(reference.out_spatial)
-        tile = self._sweep_tile(spatial, int(reference.source_shape[0]), source.stage_plans)
+        channels = int(reference.source_shape[0])
+        tile = self._sweep_tile(spatial, channels, source.stage_plans)
         targets = list(_sweep_targets(spatial, tile))
-        depth = _sweep_pipeline_depth()
+        depth = self._sweep_depth(spatial, channels, source.stage_plans, tile)
         # Reading ahead means the reading thread must touch no stage of the chain, so the pull maps
         # are folded here, before it starts. A stage that sizes its window from the data it reads
         # (a displacement field: the sizing read IS the sampling read) cannot be folded ahead, and
@@ -2642,38 +2713,37 @@ class DatasetManager:
                     tensor, attributes = self._read_streamed_region(source, spans)
                 yield index, spans, tensor, attributes
 
-        write = _WriteBehind(writer, depth)
+        write, landing = _WriteBehind(writer, depth), _HostLanding()
         try:
-            with SWEEP_CLOCK.phase("sweep"):
-                with _ReadAhead(regions(), ahead) as blocks:
-                    for index, spans, tensor, attributes in SWEEP_CLOCK.waiting("wait(read)", blocks):
-                        target = targets[index]
+            with SWEEP_CLOCK.phase("sweep"), _ReadAhead(regions(), ahead) as blocks:
+                for index, spans, tensor, attributes in SWEEP_CLOCK.waiting("wait(read)", blocks):
+                    target = targets[index]
+                    with SWEEP_CLOCK.phase("chain"):
+                        tensor, region_attribute, keys_before = self._apply_streamed_region(
+                            source,
+                            spans,
+                            tensor,
+                            attributes,
+                            Attribute(reference.base_attributes),
+                            Attribute(evolved) if index == 0 else None,
+                        )
+                    for key, sweep, tail, member_evolved in members:
                         with SWEEP_CLOCK.phase("chain"):
-                            tensor, region_attribute, keys_before = self._apply_streamed_region(
-                                source,
-                                spans,
-                                tensor,
-                                attributes,
-                                Attribute(reference.base_attributes),
-                                Attribute(evolved) if index == 0 else None,
-                            )
-                        for key, sweep, tail, member_evolved in members:
-                            with SWEEP_CLOCK.phase("chain"):
-                                member_tensor = tensor.clone() if len(members) > 1 else tensor
-                                scope = Attribute(region_attribute)
-                                for stage in tail:
-                                    member_tensor = stage(self.name, member_tensor, scope)
-                            # Its own phase, not the chain's: on a device the chain only ENQUEUES,
-                            # and this is where the run waits for it as well as for the copy home.
-                            with SWEEP_CLOCK.phase("fetch"):
-                                block = member_tensor.cpu().numpy()
-                            _require_channel_first(
-                                block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
-                            )
-                            if key not in headers:
-                                headers[key] = _sweep_header(member_evolved, scope, keys_before)
-                            with SWEEP_CLOCK.phase("wait(write)"):
-                                write.write(key, (slice(0, int(block.shape[0])), *target), block, headers[key])
+                            member_tensor = tensor.clone() if len(members) > 1 else tensor
+                            scope = Attribute(region_attribute)
+                            for stage in tail:
+                                member_tensor = stage(self.name, member_tensor, scope)
+                        # Its own phase, not the chain's: on a device the chain only ENQUEUES,
+                        # and this is where the run waits for it as well as for the copy home.
+                        with SWEEP_CLOCK.phase("fetch"):
+                            block = landing.take(member_tensor)
+                        _require_channel_first(
+                            block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
+                        )
+                        if key not in headers:
+                            headers[key] = _sweep_header(member_evolved, scope, keys_before)
+                        with SWEEP_CLOCK.phase("wait(write)"):
+                            write.write(key, (slice(0, int(block.shape[0])), *target), block, headers[key])
                 written = write.close()
             for key in written:
                 sweep = sweeps[key]
@@ -2683,7 +2753,7 @@ class DatasetManager:
             write.abort(exception)
             if not isinstance(exception, Exception):
                 raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
-            return set(), f"{type(exception).__name__}: {exception}"
+            return set(), _stage_failure(exception)
         finally:
             write.shutdown()
 
@@ -2698,7 +2768,25 @@ class DatasetManager:
         warnings.warn(f"{self._sweep_failure} Falling back to the whole-volume path.", stacklevel=3)
         return False
 
-    def _sweep_rows(self, spatial: list[int], channels: int) -> int:
+    def _sweep_depth(
+        self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"], tile: list[int]
+    ) -> int:
+        """How many blocks to keep in flight, raised only while that changes nothing but the clock.
+
+        A deeper queue absorbs the jitter between stages of uneven cost, and it is paid in resident
+        blocks, which the sizing takes out of the block. Raised only while the block it allows is
+        still ``tile``: a smaller block is a different decomposition, which re-chunks the output
+        (the tile IS the store's chunk shape) and, on a map that does not factorise, moves the
+        written values. Where the block is bounded by something other than the budget, the extra
+        blocks are free, and the cap is what bounds them: on a 513x1331x1776 sweep in 40 blocks, a
+        second block in flight recovers 0.5 s of a 6.7 s run and a third recovers none.
+        """
+        depth = _sweep_pipeline_depth()
+        while depth and depth < _SWEEP_MAX_DEPTH and self._sweep_tile(spatial, channels, plans, depth + 1) == tile:
+            depth += 1
+        return depth
+
+    def _sweep_rows(self, spatial: list[int], channels: int, depth: int | None = None) -> int:
         """How many rows one sweep region spans on the landing's first axis: the cap
         (``SWEEP_SLAB_ROWS`` on a CPU, taller on a GPU as its memory allows), lowered by the budget
         (half of it over everything a pipelined sweep holds: the pulled region and the landed block,
@@ -2710,7 +2798,7 @@ class DatasetManager:
         the sweep actually reads.
         """
         cap = max(1, int(SWEEP_SLAB_ROWS))
-        resident = _SWEEP_RESIDENT_SLABS + 2 * _sweep_pipeline_depth()
+        resident = _SWEEP_RESIDENT_SLABS + 2 * (_sweep_pipeline_depth() if depth is None else depth)
         plane = int(np.prod(spatial[1:], dtype=np.int64)) * max(1, int(channels)) * _SWEEP_ELEMENT_BYTES
         if plane > 0 and self._chain_device is not None and self._chain_device.type == "cuda":
             # On a GPU the transfers and launches per region are the cost: taller regions, as far as
@@ -2724,7 +2812,9 @@ class DatasetManager:
             return cap
         return max(1, min(cap, int(budget * 0.5 / (plane * resident))))
 
-    def _sweep_tile(self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"] = ()) -> list[int]:
+    def _sweep_tile(
+        self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"] = (), depth: int | None = None
+    ) -> list[int]:
         """The block one sweep region covers: the volume :meth:`_sweep_rows` allows, in the shape
         that pulls the least.
 
@@ -2737,7 +2827,7 @@ class DatasetManager:
         """
         from konfai.utils.ome_zarr import CHUNK_SPATIAL_TILE
 
-        rows = self._sweep_rows(spatial, channels)
+        rows = self._sweep_rows(spatial, channels, depth)
         slab = [min(int(rows), int(spatial[0])), *(int(extent) for extent in spatial[1:])]
         voxels = int(rows) * int(np.prod(spatial[1:], dtype=np.int64))
         cube = _cubic_tile(spatial, voxels, CHUNK_SPATIAL_TILE)

@@ -720,13 +720,18 @@ class Clip(Transform):
         # Restricted to float32 (integer tensors reject float bounds; float16/float64 would compare
         # at a different precision than the float()-cast scatter in the else branch below) and to
         # non-NaN bounds: a NaN bound (from a dynamic min/max/percentile over data containing NaN)
-        # makes clamp_ propagate NaN to the whole tensor, whereas the fallback scatter no-ops on it
+        # makes clamp_ propagate NaN to the whole tensor, whereas the fallback fill no-ops on it
         # (NaN comparisons are False). Every other case takes that fallback, unchanged.
+        #
+        # The fallback fills through the MASK it already has. Indexing by torch.where(mask) is
+        # nonzero(as_tuple=True): one int64 array per dimension, one entry per selected voxel,
+        # built to address a scalar store. On a 384^3 block that is 610 MB at half the voxels and
+        # 1.5 GB at all of them, beside a 113 MB block.
         if tensor.dtype == torch.float32 and min_value == min_value and max_value == max_value:
             tensor.clamp_(min=min_value, max=max_value)
         else:
-            tensor[torch.where(tensor.float() < min_value)] = min_value
-            tensor[torch.where(tensor.float() > max_value)] = max_value
+            tensor.masked_fill_(tensor.float() < min_value, min_value)
+            tensor.masked_fill_(tensor.float() > max_value, max_value)
         if self.save_clip_min:
             cache_attribute["Min"] = min_value
         if self.save_clip_max:
@@ -1308,27 +1313,43 @@ def _resample_with_sitk(
     # The window's own origin: the source origin moved by the window's start along each axis.
     start_index = np.asarray(list(reversed(region_starts)), dtype=np.float64)  # (x, y, z)
     window_origin = source.index_to_world.apply(start_index)
-    reference = sitk.Image([int(e) for e in reversed(region.size_zyx)], sitk.sitkFloat32)
-    reference.SetOrigin(np.asarray(region.origin_xyz, dtype=np.float64).tolist())
-    reference.SetSpacing(np.asarray(region.spacing_xyz, dtype=np.float64).tolist())
-    reference.SetDirection(np.asarray(region.direction_xyz, dtype=np.float64).ravel().tolist())
+    # The target grid is given to the filter, not carried by an image standing in for it: a
+    # reference image is read for its geometry and never for its pixels, so allocating and
+    # zero-filling a region's worth of them is a copy nothing reads.
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetSize([int(e) for e in reversed(region.size_zyx)])
+    resampler.SetOutputOrigin(np.asarray(region.origin_xyz, dtype=np.float64).tolist())
+    resampler.SetOutputSpacing(np.asarray(region.spacing_xyz, dtype=np.float64).tolist())
+    resampler.SetOutputDirection(np.asarray(region.direction_xyz, dtype=np.float64).ravel().tolist())
+    resampler.SetTransform(transform)
+    resampler.SetInterpolator(interpolator[mode])
+    resampler.SetDefaultPixelValue(float(fill))
     # A blend interpolates in the dtype the walk accumulates in, and torch makes the final cast:
     # ITK would otherwise accumulate an integer payload in double and cast inside the filter, where
     # one ulp of difference becomes a whole unit after the truncation both sides do. A nearest pick
     # copies voxels, so it keeps the payload's own dtype, exactly as the walk does.
     #
-    # Per CHANNEL: ITK takes one component at a time, so only one is ever held in the wider dtype
-    # (5.23 GB against 6.46 GB on a 4-channel 192x640x640 uint16 region).
+    # The filter is ASKED for that dtype instead of being handed a region converted into it. ITK
+    # interpolates in double from either, so the values are the same, and the conversion that was a
+    # copy of the whole region becomes the filter's own output.
     working_dtype = payload.dtype if mode == "nearest" else sampling_dtype(payload)
-    outputs = []
+    blend_pixel_id = {torch.float32: sitk.sitkFloat32, torch.float64: sitk.sitkFloat64}.get(working_dtype)
+    if mode != "nearest" and blend_pixel_id is None:
+        return None  # a working dtype with no ITK pixel type of its own: the walk takes it
+    # One output, in the payload's dtype, written channel by channel: ITK takes one component at a
+    # time, so only one is ever held in the wider dtype, and the cast that lands it is the copy out.
+    result = torch.empty((int(payload.shape[0]), *(int(e) for e in region.size_zyx)), dtype=payload.dtype)
+    landing = result.numpy()
     for channel in range(int(payload.shape[0])):
-        image = sitk.GetImageFromArray(np.ascontiguousarray(payload[channel].type(working_dtype).numpy()))
+        image = sitk.GetImageFromArray(np.ascontiguousarray(payload[channel].numpy()))
         image.SetOrigin(np.asarray(window_origin, dtype=np.float64).tolist())
         image.SetSpacing(np.asarray(source.spacing_xyz, dtype=np.float64).tolist())
         image.SetDirection(np.asarray(source.direction_xyz, dtype=np.float64).ravel().tolist())
-        out = sitk.Resample(image, reference, transform, interpolator[mode], float(fill), image.GetPixelID())
-        outputs.append(torch.from_numpy(sitk.GetArrayFromImage(out)))
-    return torch.stack(outputs, dim=0).type(payload.dtype)
+        resampler.SetOutputPixelType(image.GetPixelID() if mode == "nearest" else blend_pixel_id)
+        # Held: a view borrows the image's buffer, and a temporary's is freed under it.
+        resampled = resampler.Execute(image)
+        np.copyto(landing[channel], sitk.GetArrayViewFromImage(resampled), casting="unsafe")
+    return result
 
 
 class Resample(TransformInverse):
@@ -2398,7 +2419,12 @@ class MergeLabels(Transform):
 
 
 class Gradient(Transform):
-    working_multiple = 8.0  # one derivative per axis, their squares, and the magnitude
+    #: The one destination the differences are written into, one channel per spatial axis. Measured
+    #: as VmHWM around the call on a 256^3 float32 block, beyond what it is handed and what it
+    #: returns: 3.0 flattened (where the destination is working memory) and 0.0 per_dim (where the
+    #: destination IS the output). Was 7.8 and 2.9 when each difference was allocated, padded into
+    #: a second buffer and stacked into a third.
+    working_multiple = 3.0
 
     def __init__(self, per_dim: bool = False):
         super().__init__()
@@ -2410,31 +2436,29 @@ class Gradient(Transform):
         return PatchLocality(LocalityKind.HALO, halo=(1,))
 
     @staticmethod
-    def _image_gradient_2d(image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        dx = image[:, 1:, :] - image[:, :-1, :]
-        dy = image[:, :, 1:] - image[:, :, :-1]
-        return torch.nn.ConstantPad2d((0, 0, 0, 1), 0)(dx), torch.nn.ConstantPad2d((0, 1, 0, 0), 0)(dy)
+    def _differences(image: torch.Tensor) -> torch.Tensor:
+        """The first difference along each spatial axis, written where it belongs.
 
-    @staticmethod
-    def _image_gradient_3d(
-        image: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        dx = image[:, 1:, :, :] - image[:, :-1, :, :]
-        dy = image[:, :, 1:, :] - image[:, :, :-1, :]
-        dz = image[:, :, :, 1:] - image[:, :, :, :-1]
-        return (
-            torch.nn.ConstantPad3d((0, 0, 0, 0, 0, 1), 0)(dx),
-            torch.nn.ConstantPad3d((0, 0, 0, 1, 0, 0), 0)(dy),
-            torch.nn.ConstantPad3d((0, 1, 0, 0, 0, 0), 0)(dz),
-        )
+        One destination, not three differences plus three copies of them padded plus a stack of
+        those: the far edge is the zero the destination is created with, and each difference is
+        subtracted straight into its own slice of it.
+        """
+        rank = len(image.shape) - 1
+        out = torch.zeros((image.shape[0], rank, *image.shape[1:]), dtype=image.dtype, device=image.device)
+        for axis in range(rank):
+            ahead, behind = [slice(None)] * (rank + 1), [slice(None)] * (rank + 1)
+            ahead[1 + axis], behind[1 + axis] = slice(1, None), slice(None, -1)
+            landing: list[Any] = [slice(None), axis, *[slice(None)] * rank]
+            landing[2 + axis] = slice(None, -1)
+            torch.sub(image[tuple(ahead)], image[tuple(behind)], out=out[tuple(landing)])
+        return out
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        result = torch.stack(
-            (Gradient._image_gradient_3d(tensor) if len(tensor.shape) == 4 else Gradient._image_gradient_2d(tensor)),
-            dim=1,
-        ).squeeze(0)
+        result = Gradient._differences(tensor).squeeze(0)
         if not self.per_dim:
-            result = torch.sigmoid(result * 3)
+            # In place where the dtype has the arithmetic: an integer difference has no sigmoid of
+            # its own and takes the widening one, exactly as it did.
+            result = result.mul_(3).sigmoid_() if result.is_floating_point() else torch.sigmoid(result * 3)
             result = result.norm(dim=0)
             result = torch.unsqueeze(result, 0)
 
@@ -2490,12 +2514,13 @@ class FlatLabel(Transform):
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        # Filled through the mask, not through the indices of what it selects: see Clip.
         data = torch.zeros_like(tensor)
         if self.labels:
             for label in self.labels:
-                data[torch.where(tensor == label)] = 1
+                data.masked_fill_(tensor == label, 1)
         else:
-            data[torch.where(tensor > 0)] = 1
+            data.masked_fill_(tensor > 0, 1)
         return data
 
 
@@ -3052,7 +3077,12 @@ class Flip(TransformInverse):
 
 
 class Canonical(TransformInverse):
-    """Reorient a volume onto the canonical (LPS) direction cosines.
+    """Reorient a volume onto RAS, the orientation NIfTI is canonical in.
+
+    The pipeline writes direction cosines in the SimpleITK convention, where the identity is LPS, so
+    RAS is ``diag(-1, -1, 1)`` there: a volume already in LPS IS reoriented by this stage. That is
+    the same target as nibabel's ``as_closest_canonical``, which is what the NIfTI tooling around a
+    dataset expects.
 
     An orthogonal reorientation is a signed permutation of the axes: an exact index remap (values only
     change place, so whole-volume statistics survive); only an oblique direction is resampled. A remap

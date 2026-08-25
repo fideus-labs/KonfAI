@@ -1149,7 +1149,9 @@ class _ItkTransformDataStream(DataStream):
                 "A transform file writes full-width leading-axis slabs, and this region is not one.",
                 "This is a bug if it was reached: the streamed write dispatcher finalizes full rows.",
             )
-        block = np.moveaxis(np.asarray(data, dtype=np.float64), 0, -1).ravel()
+        # One buffer: the cast and the transpose are the same pass. Casting first materialises the
+        # slab in float64, and ravelling the transposed VIEW of that materialises it again.
+        block = np.ascontiguousarray(np.moveaxis(data, 0, -1), dtype=np.float64).ravel()
         offset = 3 * int(leading.start or 0) * int(np.prod(self._spatial[2:], dtype=np.int64))
         self._parameters[offset : offset + block.size] = block
 
@@ -2473,7 +2475,8 @@ class Dataset:
                 spatial = [int(extent) for extent in array.shape[1:]]
                 file, parameters = _create_itk_transform_file(staging, spatial, attributes)
                 with file:
-                    parameters[:] = np.moveaxis(array.astype(np.float64), 0, -1).ravel()
+                    # One buffer, as in _ItkTransformDataStream.write_slice.
+                    parameters[:] = np.ascontiguousarray(np.moveaxis(array, 0, -1), dtype=np.float64).ravel()
             os.replace(staging, final)
             try:  # one entry per name: a `.tfm` left under the same stem would double it
                 os.remove(os.path.join(self.filename, f"{name}.tfm"))

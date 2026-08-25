@@ -35,11 +35,13 @@ from konfai.data.patching import (
     DatasetManager,
     DatasetPatch,
     _ReadAhead,
+    _stage_failure,
     _sweep_pipeline_depth,
     _WriteBehind,
 )
 from konfai.data.transform import Clip, Save
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.errors import TransformError
 
 pytest.importorskip("SimpleITK")
 
@@ -262,3 +264,44 @@ def test_the_clock_sums_the_sweeps_a_rank_ran(tmp_path: Path, monkeypatch: pytes
     one = SWEEP_CLOCK.spent("sweep")
     _sweep_into(tmp_path, "second", monkeypatch, depth=0)
     assert SWEEP_CLOCK.spent("sweep") > one
+
+
+# ---------------------------------------------------------------- and what it says when it cannot
+
+
+def test_a_dtype_torch_has_no_kernel_for_names_itself_and_its_remedy() -> None:
+    """torch ships no kernel for several dtypes a store legitimately holds: uint16 is what
+    microscopy writes, and torch implements for it neither comparison, nor flip, nor arithmetic,
+    nor scalar fill. The stage then raises with the missing operator's name and nothing else, where
+    the reader needs the dtype and the one config line that fixes it."""
+    reason = _stage_failure(NotImplementedError("\"index_put\" not implemented for 'UInt16'"))
+
+    assert "index_put" in reason, "what torch said is kept"
+    assert "'UInt16'" in reason and "TensorCast" in reason, "the dtype, and what to do about it"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("no space left on device"),
+        NotImplementedError("this backend serves no region writes"),  # no dtype to name
+    ],
+)
+def test_every_other_failure_is_reported_as_it_was_raised(error: Exception) -> None:
+    reason = _stage_failure(error)
+    assert reason == f"{type(error).__name__}: {error}"
+
+
+def test_a_uint16_case_through_a_chain_torch_cannot_run_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end, on the dtype a microscopy store actually hands the sweep."""
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    source = Dataset(tmp_path / "src", "mha")
+    source.write(
+        "CT", "CASE_000", (np.arange(14 * 10 * 8).reshape(1, 14, 10, 8) % 900).astype(np.uint16), _attributes()
+    )
+    manager = _manager(source, [Clip(min_value=10.0, max_value=90.0), Save(f"{tmp_path / 'out'}:h5")], tmp_path)
+
+    with pytest.warns(UserWarning, match="TensorCast"), pytest.raises(TransformError, match="TensorCast"):
+        CaseMaterializer(manager).materialize()

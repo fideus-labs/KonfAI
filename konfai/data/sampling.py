@@ -665,19 +665,22 @@ def gather(
     # of what it costs: grid_sample takes NORMALISED coordinates, so it divides by the extent of the
     # tensor handed to it, and a region is handed a window. The two agree to ~1e-5 instead of
     # exactly. Deliberate, and asked for: 4x on a warp.
-    local_axes = []
-    for array_axis in range(rank):
-        axis = rank - 1 - array_axis
-        extent = window_zyx[array_axis]
-        shifted = coordinates_xyz[..., axis] - float(source_starts_zyx[array_axis])
-        local_axes.append((2.0 * shifted + 1.0) / extent - 1.0)
     # grid_sample orders the last dimension (x, y, z): the mirror of the array axes, which is the
     # order the coordinates already arrive in. The grid counts voxels in float32 WHATEVER the
     # payload: a half grid quantizes a coordinate at ~2^-11 of the window extent: 0.06 voxel on a
     # 512 axis, far past the ~1e-5 band above, and the window is upcast with it because
     # grid_sample takes one dtype. sampling_dtype's keep-half trade was measured for the values.
+    #
+    # Each axis is normalised straight into the grid it belongs in. Keeping them and stacking them
+    # first holds the whole grid twice, once in the coordinates' float64 and once in the cast of
+    # it, where the cast is what the assignment does anyway.
     blend_dtype = torch.float32 if work.dtype in (torch.float16, torch.bfloat16) else work.dtype
-    sampling = torch.stack([local_axes[rank - 1 - axis] for axis in range(rank)], dim=-1).to(blend_dtype)
+    sampling = torch.empty((*coordinates_xyz.shape[:-1], rank), dtype=blend_dtype, device=coordinates_xyz.device)
+    for array_axis in range(rank):
+        axis = rank - 1 - array_axis
+        extent = window_zyx[array_axis]
+        shifted = coordinates_xyz[..., axis] - float(source_starts_zyx[array_axis])
+        sampling[..., axis] = (2.0 * shifted + 1.0) / extent - 1.0
     out = torch.nn.functional.grid_sample(
         work.to(blend_dtype).unsqueeze(0),
         sampling.unsqueeze(0),

@@ -57,6 +57,7 @@ from konfai.data.patching import (
     Stage,
     _PendingSweep,
     _ReadStagePlan,
+    _stage_failures_explained,
     _stage_name,
     _sweep_targets,
 )
@@ -206,6 +207,10 @@ class CaseMaterializer:
         across calls) and only the copy's draw and the per-copy stages run per copy, writing their
         Saves under the copy's name.
         """
+        with _stage_failures_explained():
+            self._assemble_and_write_chain(a)
+
+    def _assemble_and_write_chain(self, a: int) -> None:
         manager = self.manager
         if manager._expand is None:
             manager.load(manager.transforms, [], load_augmentations=False)

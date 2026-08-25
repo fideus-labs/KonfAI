@@ -103,6 +103,28 @@ once, tiles patches, and streams the output. Use `KonfAIInference` in a chain
 when the inference is one stage of a larger transform and a later stage
 consumes its result. There is no `-tb`: the workflow emits no scalars.
 
+### Where the run's time went
+
+A run that swept for more than a second closes with a second line accounting for
+it, phase by phase:
+
+```text
+[KonfAI] sweep 6.2 s = chain 5.3 + fetch 0.1 + wait(read) 0.5 + wait(write) 0.3 + other 0.0 | stages read 5.4 s, write 4.1 s
+```
+
+The sum before the bar is the sweep's own thread and it closes exactly: what the
+named phases do not account for is `other`, so a large `other` is a part of the
+run nothing has explained yet. `chain` is the transforms, `fetch` the copy home
+from a device (on a GPU the chain only enqueues, so this is where the run waits
+for it too), and the two `wait` figures are the sweep blocked on a block it does
+not have yet, or on the previous write.
+
+After the bar are the read and the write themselves. They run beside the sweep's
+thread when it pipelines, so `read 5.4 s` against `wait(read) 0.5 s` means 4.9 s
+of reading was hidden behind the chain. The longest of the three stages is the
+floor the run cannot go below; when one of them is close to the wall clock, that
+is the one to work on.
+
 ## Read the plan before you read anything else
 
 Every run plans first, and a run that proceeds opens its log with that plan,
@@ -240,6 +262,34 @@ a byte is read:
   level and the closest of them. The read is what the binder did, not a
   grammar kept beside it: whatever a stage's constructor names is legal there,
   and a stage that resolves nowhere is refused by the loader before that.
+
+### A dtype the stages cannot work in
+
+The chain is handed the payload in the dtype the store holds, so a store's dtype
+reaches the stages unchanged. torch has no kernel for some of them: `uint16`,
+which is what a lot of microscopy is written in, has neither comparison, nor
+flip, nor arithmetic, nor scalar fill, so a chain that touches the payload fails
+on the first block:
+
+```text
+NotImplementedError: "index_put" not implemented for 'UInt16'. torch has no kernel
+for a 'UInt16' payload: put a cast at the head of the chain (TensorCast, dtype
+float32, or int32 to keep every value exact) so the stages work in a dtype torch
+implements. The store keeps its own.
+```
+
+That is the whole fix, one stage at the head of the chain:
+
+```yaml
+transforms:
+  TensorCast: {dtype: int32, inverse: false}   # int32 holds every uint16 exactly; float32 too
+  Clip: {min_value: 0.0, max_value: 40000.0}
+  Write: {dataset: ./Out:omezarr}
+```
+
+A chain that never touches the payload with torch does not need it: a `Resample`
+alone goes out to ITK, which reads `uint16` perfectly well. The cast is not free,
+so it belongs in the chain that needs it rather than in the read.
 
 ## Fields
 
