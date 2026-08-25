@@ -914,6 +914,26 @@ def test_a_region_off_the_raw_block_is_the_one_itk_decodes(
         assert dict(attributes) == dict(want_attributes)
 
 
+def test_every_patch_of_a_grid_records_what_itk_records(tmp_path: Path, monkeypatch) -> None:
+    """The geometry a record carries is printed once for the file; each patch keeps its own origin.
+
+    Character for character against ITK's own reader, on every patch of a grid: a record built from
+    the file's printed geometry says the same thing as one printed per patch."""
+    from konfai.utils import dataset as dataset_module
+
+    path, _ = _write_block_fixture(tmp_path, "rotated.mha")
+    backend = _block_backend(path)
+    windows = [
+        (slice(None), slice(z, z + 4), slice(y, y + 4), slice(x, x + 4)) for z in (0, 5) for y in (0, 6) for x in (0, 7)
+    ]
+    got = [backend.file_to_data_slice("", "rotated", window)[1] for window in windows]
+    monkeypatch.setattr(dataset_module, "_pixel_block", lambda path: None)
+    want = [backend.file_to_data_slice("", "rotated", window)[1] for window in windows]
+
+    assert [dict(record) for record in got] == [dict(record) for record in want]
+    assert len({record["Origin"] for record in got}) == len(windows)
+
+
 @pytest.mark.parametrize("kind", _BLOCK_LEFT_TO_ITK)
 def test_a_file_the_block_route_declines_is_still_read_by_itk(tmp_path: Path, kind: str) -> None:
     """Compressed, detached, rescaled, or another format: the block route steps aside, ITK answers."""

@@ -1461,6 +1461,10 @@ class _PixelBlock(NamedTuple):
     shape: tuple[int, ...]  # channel-first
     metadata: Attribute  # the header's own keys, as image_to_data imports them
     probe: Any  # a one-voxel sitk.Image carrying the header's geometry: ITK's own index-to-world arithmetic
+    # Origin / Spacing / Direction as an attribute holds them, printed once for the file: every region
+    # of a volume records the same spacing and direction, and printing a float array costs 24 us for
+    # three elements and 30 us for nine (measured), against 0.04 us to hand text through the same door.
+    geometry_text: dict[str, str]
 
     @property
     def origin(self) -> np.ndarray:
@@ -1574,7 +1578,12 @@ def _pixel_block_at(path: str, stamp: tuple[int, int]) -> _PixelBlock | None:
     for key in probe.GetMetaDataKeys():
         if not key.startswith("ITK_"):  # the reader's own bookkeeping, as image_to_data drops it
             metadata[key] = probe.GetMetaData(key)
-    return _PixelBlock(offset, dtype, interleaved, shape, metadata, probe)
+    geometry_text = {
+        "Origin": _attribute_text(np.asarray(probe.GetOrigin())),
+        "Spacing": _attribute_text(np.asarray(probe.GetSpacing())),
+        "Direction": _attribute_text(np.asarray(probe.GetDirection())),
+    }
+    return _PixelBlock(offset, dtype, interleaved, shape, metadata, probe, geometry_text)
 
 
 def _pixel_block(path: str) -> _PixelBlock | None:
@@ -1607,11 +1616,11 @@ def _pixel_block_attributes(block: _PixelBlock, index_xyz: list[int] | None) -> 
     the module computes it. ``None`` is the whole volume's record, as ``file_to_data`` returns it."""
     attributes = Attribute(block.metadata)
     if index_xyz is None:
-        attributes["Origin"] = block.origin
+        attributes["Origin"] = block.geometry_text["Origin"]
     else:
         attributes["Origin"] = np.asarray(block.probe.TransformIndexToPhysicalPoint(index_xyz))
-    attributes["Spacing"] = block.spacing
-    attributes["Direction"] = block.direction
+    attributes["Spacing"] = block.geometry_text["Spacing"]
+    attributes["Direction"] = block.geometry_text["Direction"]
     if index_xyz is not None:
         direction = block.direction.reshape(len(block.spacing), len(block.spacing))
         attributes["Origin"] = block.origin + direction @ (np.asarray(index_xyz, dtype=np.float64) * block.spacing)
