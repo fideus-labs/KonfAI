@@ -31,7 +31,9 @@ classifiers = [
 ]
 
 dependencies = [
-  "torch",
+  # 2.3 is the first torch with the unsigned dtypes: a uint16 store (what microscopy writes) reaches
+  # torch.from_numpy on the read route, and torch.uint16 is named where a label map's sign is read.
+  "torch>=2.3",
   "tqdm",
   "numpy",
   "ruamel.yaml",

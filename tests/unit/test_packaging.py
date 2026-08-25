@@ -180,6 +180,19 @@ def _packages_find_config() -> dict:
 
 
 @pytest.mark.skipif(tomllib is None, reason="requires tomllib (Python 3.11+) or the tomli backport")
+def test_the_declared_torch_floor_covers_the_dtypes_the_pipeline_reads() -> None:
+    """A uint16 store reaches ``torch.from_numpy``, and ``torch.uint16`` is named where a label
+    map's sign is read: both are torch 2.3. Without a floor, pip is free to resolve an older torch
+    and the run fails on a dtype instead of at install time."""
+    assert tomllib is not None
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    torch_requirement = next(dep for dep in pyproject["project"]["dependencies"] if dep.startswith("torch"))
+    floor = torch_requirement.removeprefix("torch>=")
+    assert floor != torch_requirement, f"no lower bound on torch: {torch_requirement!r}"
+    assert tuple(int(part) for part in floor.split(".")) >= (2, 3)
+
+
+@pytest.mark.skipif(tomllib is None, reason="requires tomllib (Python 3.11+) or the tomli backport")
 def test_wheel_excludes_sibling_packages_but_keeps_namespace_subpackages() -> None:
     config = _packages_find_config()
     packages = find_namespace_packages(where=str(_REPO_ROOT), include=config["include"], exclude=config["exclude"])
