@@ -297,6 +297,7 @@ def _gloo_rendezvous(monkeypatch) -> dict[str, object]:
     return initialized
 
 
+@pytest.mark.skipif(os.name == "nt", reason="setup_gpu builds no process group on Windows")
 def test_a_single_node_gloo_world_is_pinned_to_the_loopback_interface(monkeypatch):
     """gloo resolves the host's name to choose an interface, and a macOS runner's ``.local`` name
     resolves to nothing: the single-node world rendezvous over the loopback that carries it."""
@@ -321,6 +322,7 @@ def test_an_explicit_gloo_interface_keeps_authority(monkeypatch):
     assert os.environ["GLOO_SOCKET_IFNAME"] == "eth0"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="setup_gpu builds no process group on Windows")
 def test_a_multi_node_gloo_world_is_left_to_its_own_interface(monkeypatch):
     """Off this host the loopback reaches no other rank: only a localhost rendezvous is pinned."""
     monkeypatch.delenv("GLOO_SOCKET_IFNAME", raising=False)
