@@ -40,7 +40,7 @@ from konfai.data.patching import (
     _sweep_resident_slabs,
     _WriteBehind,
 )
-from konfai.data.transform import Clip, Save
+from konfai.data.transform import Clip, LocalityKind, PatchLocality, RegionContext, Resample, Save, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 
@@ -223,6 +223,49 @@ def test_a_pipelined_sweep_writes_the_bytes_the_sequential_one_writes(
     sequential = _sweep_into(tmp_path, "serial", monkeypatch, depth=0)
     pipelined = _sweep_into(tmp_path, "pipelined", monkeypatch, depth=1)
     np.testing.assert_array_equal(pipelined, sequential)
+
+
+class _DeclaredThenHanded(Transform):
+    """A per-voxel stage logging the regions declared to it and the ones it is then handed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[tuple[str, RegionContext]] = []
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.POINTWISE)
+
+    def plan_region_reads(self, name: str, contexts) -> None:
+        self.events.extend(("declared", context) for context in contexts)
+
+    def stream_region(self, name: str, tensor, context: RegionContext, cache_attribute: Attribute):
+        self.events.append(("handed", context))
+        return tensor
+
+    def __call__(self, name: str, tensor, cache_attribute: Attribute):
+        return tensor
+
+
+def test_a_sweep_declares_to_each_stage_the_regions_it_will_hand_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stage reading a companion volume beside its region (a mask) declares those reads from what
+    the sweep tells it ahead: the contexts ``stream_region`` will be handed, all of them before the
+    first, in the order they come. And in the stage's own space: through a resample after it, the
+    regions it sees are the source hulls the landing's blocks pull, not the blocks."""
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr(patching_module, "_sweep_pipeline_depth", lambda: 0)
+    source = Dataset(tmp_path / "src", "mha")
+    source.write("CT", "CASE_000", np.ones((1, 14, 10, 8), np.float32), _attributes())
+    stage = _DeclaredThenHanded()
+    chain = [stage, Resample(shape=[7, 5, 4]), Save(f"{tmp_path / 'out'}:h5")]
+    assert CaseMaterializer(_manager(source, chain, tmp_path)).materialize() is Verdict.STREAM
+
+    declared = [context for kind, context in stage.events if kind == "declared"]
+    handed = [context for kind, context in stage.events if kind == "handed"]
+    assert len(handed) > 1 and declared == handed
+    assert [kind for kind, _context in stage.events[: len(declared)]] == ["declared"] * len(declared)
+    assert {context.source_shape for context in handed} == {(14, 10, 8)}, "its own input, not the landing"
 
 
 # ---------------------------------------------------------------- and the clock closes on it

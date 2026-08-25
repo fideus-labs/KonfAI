@@ -16,12 +16,13 @@
 
 """Tensor and image transforms used in KonfAI preprocessing and postprocessing."""
 
+import contextlib
 import inspect
 import os
 import tempfile
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing import current_process, get_context
@@ -370,6 +371,18 @@ class Transform(NeedDevice, ABC):
         """
         del context
         return self(name, tensor, cache_attribute)
+
+    def plan_region_reads(self, name: str, contexts: Sequence[RegionContext]) -> None:
+        """Declare, before a sweep reads its first region, what :meth:`stream_region` will read
+        beside the tensor it is handed: ``contexts`` are the ones it will be handed, in that order.
+
+        A stage reading a companion volume per region (a mask) maps each context to the window it
+        will read and declares the sequence to the dataset holding it
+        (:meth:`~konfai.utils.dataset.Dataset.plan_region_reads`): a store that caches decoded
+        blocks then keeps what a later region asks for again and drops what none does. A hint:
+        neither what is read nor its values depend on it. The base declares nothing.
+        """
+        del name, contexts
 
     @abstractmethod
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -2389,17 +2402,22 @@ class Mask(Transform):
         reader.SetExtractSize([int(part.stop - (part.start or 0)) for part in reversed(spatial)])
         return torch.as_tensor(sitk.GetArrayFromImage(reader.Execute())).unsqueeze(0)
 
+    def _mask_dataset(self, name: str) -> Dataset:
+        """The dataset holding the case's mask group."""
+        for dataset in self.datasets:
+            if dataset.is_dataset_exist(self.path, name):
+                return dataset
+        raise TransformError(f"'Mask' found no mask '{self.path}' for case '{name}' in any dataset.")
+
     def _mask(self, name: str, slices: tuple[slice, ...] | None) -> torch.Tensor | np.ndarray:
         """The case's mask, or the ``slices`` region of it: a ``.mha`` mask is read whole for the
         whole-volume path and by region for a region, a dataset mask likewise."""
         if self.path.endswith(".mha"):
             return self._cached_mha() if slices is None else self._mha_region(slices)
-        for dataset in self.datasets:
-            if dataset.is_dataset_exist(self.path, name):
-                if slices is None:
-                    return dataset.read_data(self.path, name)[0]
-                return dataset.read_data_slice(self.path, name, slices)[0]
-        raise TransformError(f"'Mask' found no mask '{self.path}' for case '{name}' in any dataset.")
+        dataset = self._mask_dataset(name)
+        if slices is None:
+            return dataset.read_data(self.path, name)[0]
+        return dataset.read_data_slice(self.path, name, slices)[0]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return self._apply(tensor, self._mask(name, None))
@@ -2410,16 +2428,10 @@ class Mask(Transform):
         if name in self._aligned:
             return
         expected = tuple(int(extent) for extent in context.source_shape)
-        stored: tuple[int, ...] | None = None
         if self.path.endswith(".mha"):
             stored = self._mha_extent()
         else:
-            for dataset in self.datasets:
-                if dataset.is_dataset_exist(self.path, name):
-                    stored = tuple(int(extent) for extent in dataset.get_infos(self.path, name)[0][1:])
-                    break
-        if stored is None:
-            raise TransformError(f"'Mask' found no mask '{self.path}' for case '{name}' in any dataset.")
+            stored = tuple(int(extent) for extent in self._mask_dataset(name).get_infos(self.path, name)[0][1:])
         if stored != expected:
             raise TransformError(
                 f"'Mask' reads '{self.path}' for case '{name}' region by region, but the mask's extent"
@@ -2428,6 +2440,19 @@ class Mask(Transform):
                 " first, or apply the Mask before the stages that change the grid.",
             )
         self._aligned.add(name)
+
+    @staticmethod
+    def _window(context: RegionContext) -> tuple[slice, ...]:
+        """The part of the mask a region reads: every channel, where the region sits in the input."""
+        return (slice(None), *context.source)
+
+    def plan_region_reads(self, name: str, contexts: Sequence[RegionContext]) -> None:
+        # A hint declares nothing it cannot find: a missing mask is the first region's error to
+        # raise, inside the sweep, where the case falls back. SimpleITK plans nothing for a .mha.
+        if self.path.endswith(".mha"):
+            return
+        with contextlib.suppress(TransformError):
+            self._mask_dataset(name).plan_region_reads(self.path, name, [self._window(c) for c in contexts])
 
     def stream_region(
         self,
@@ -2439,7 +2464,7 @@ class Mask(Transform):
         # Only the region's part of the mask, 1-channel and far smaller than the output; the mask
         # is checked to sit on the stage input's grid before its first region is trusted.
         self._check_aligned(name, context)
-        return self._apply(tensor, self._mask(name, (slice(None), *context.source)))
+        return self._apply(tensor, self._mask(name, self._window(context)))
 
 
 class Dilate(Transform):

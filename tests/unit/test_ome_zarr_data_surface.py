@@ -455,12 +455,38 @@ class _CountingArray:
         return self._array[index]
 
 
+def _two_stores(root: Path) -> None:
+    """A CT and a Labels mask on one 48x128x128 grid, both chunked 16x32x32 (48 chunks of 64 KiB
+    each), and the 20-degree rotated grid a resample lands them on."""
+    landing = (48, 128, 128)
+    region = [1, 16, 32, 32]
+    rng = np.random.default_rng(0)
+    source = Dataset(root / "src", "omezarr")
+    for group, volume in (
+        ("CT", (rng.random((1, *landing)) * 100).astype(np.float32)),
+        ("Labels", (rng.random((1, *landing)) > 0.5).astype(np.float32)),
+    ):
+        stream = source.open_data_stream(group, "CASE_000", list(volume.shape), volume.dtype, _attributes(), region)
+        assert stream is not None
+        with stream:
+            stream.write_slice(tuple(slice(0, extent) for extent in volume.shape), volume)
+    angle = np.deg2rad(20.0)
+    rotated = _attributes()
+    rotated["Direction"] = np.asarray(
+        [[np.cos(angle), 0.0, np.sin(angle)], [0.0, 1.0, 0.0], [-np.sin(angle), 0.0, np.cos(angle)]]
+    ).reshape(-1)
+    Dataset(root / "ref", "h5").write("GRID", "TARGET", np.zeros((1, *landing), np.float32), rotated)
+
+
 def _sweep_with_a_mask_companion(
-    root: Path, monkeypatch: pytest.MonkeyPatch, *, declared: bool, capacity_chunks: int, label: str
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, declared: str, capacity_chunks: int, label: str
 ) -> dict[str, int]:
-    """One sweep of CT through a Mask (reading Labels beside it) and a rotated resample, both
-    stores chunked alike, the decoded-chunk cache holding ``capacity_chunks``; the chunks decoded
-    per store."""
+    """One sweep of CT through a Mask (reading Labels beside it) and a rotated resample over the
+    stores of :func:`_two_stores`, one thread (the cache sees the read's own order), the
+    decoded-chunk cache holding ``capacity_chunks``; the chunks decoded per store. ``declared``
+    is what tells the cache its future: ``"nothing"`` (LRU), ``"source"`` (the sweep's own reads,
+    the mask ranked by recency) or ``"both"`` (the mask's reads too)."""
+    from konfai.data import patching as patching_module
     from konfai.data.materialize import CaseMaterializer, Verdict
     from konfai.data.patching import DatasetManager, DatasetPatch
     from konfai.data.transform import Mask, Resample, Save
@@ -489,9 +515,14 @@ def _sweep_with_a_mask_companion(
         return _CountingArray(level_array(store_path, level_path), decoded[group])
 
     with monkeypatch.context() as patched:
+        patched.setenv("OMP_NUM_THREADS", "1")
+        patched.setattr(patching_module, "SWEEP_SLAB_ROWS", 12)
+        patched.setattr(patching_module, "_sweep_pipeline_depth", lambda: 0)
         patched.setattr(ome_zarr, "_level_array", counting)
-        if not declared:
+        if declared == "nothing":
             patched.setattr(Dataset, "plan_region_reads", lambda self, groups, name, windows: None)
+        elif declared == "source":
+            patched.setattr(Mask, "plan_region_reads", lambda self, name, contexts: None)
         cache = ome_zarr._chunk_cache()
         previous = cache.capacity
         cache.forget()
@@ -511,33 +542,10 @@ def test_a_mask_companion_of_a_declared_sweep_is_decoded_once_where_lru_decodes_
     declared, through a 20-degree resample whose cubic blocks pull each chunk of both stores from
     several regions. At a cache holding two thirds of the two stores together, the declared source
     decodes each chunk once and so does the companion beside it, where LRU decodes both again."""
-    from konfai.data import patching as patching_module
-
-    monkeypatch.setenv("OMP_NUM_THREADS", "1")  # one thread: the cache sees the read's own order
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 12)
-    monkeypatch.setattr(patching_module, "_sweep_pipeline_depth", lambda: 0)
-    landing = (48, 128, 128)
-    region = [1, 16, 32, 32]  # both stores chunked to it: 48 chunks of 64 KiB each
-    rng = np.random.default_rng(0)
-    source = Dataset(tmp_path / "src", "omezarr")
-    for group, volume in (
-        ("CT", (rng.random((1, *landing)) * 100).astype(np.float32)),
-        ("Labels", (rng.random((1, *landing)) > 0.5).astype(np.float32)),
-    ):
-        stream = source.open_data_stream(group, "CASE_000", list(volume.shape), volume.dtype, _attributes(), region)
-        assert stream is not None
-        with stream:
-            stream.write_slice(tuple(slice(0, extent) for extent in volume.shape), volume)
-    angle = np.deg2rad(20.0)
-    rotated = _attributes()
-    rotated["Direction"] = np.asarray(
-        [[np.cos(angle), 0.0, np.sin(angle)], [0.0, 1.0, 0.0], [-np.sin(angle), 0.0, np.cos(angle)]]
-    ).reshape(-1)
-    Dataset(tmp_path / "ref", "h5").write("GRID", "TARGET", np.zeros((1, *landing), np.float32), rotated)
-
-    floor = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared=True, capacity_chunks=96, label="all")
-    lru = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared=False, capacity_chunks=64, label="lru")
-    planned = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared=True, capacity_chunks=64, label="plan")
+    _two_stores(tmp_path)
+    floor = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared="both", capacity_chunks=96, label="all")
+    lru = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared="nothing", capacity_chunks=64, label="lru")
+    planned = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared="both", capacity_chunks=64, label="plan")
 
     assert floor["CT"] == floor["Labels"] > 0, "the two stores are read alike"
     assert lru["CT"] > floor["CT"] and lru["Labels"] > floor["Labels"], "LRU re-decodes both"
@@ -563,3 +571,31 @@ def test_a_store_named_with_a_path_forgets_the_chunks_read_under_its_uri_spellin
     assert cache.get(((read_as, "0"), (0, 0, 0))) is not None
     clear_ome_zarr_cache(named_as)
     assert cache.get(((read_as, "0"), (0, 0, 0))) is None
+
+
+@pytest.mark.parametrize(("capacity_chunks", "beats_lru"), [(39, True), (24, False)])
+def test_a_declared_companion_shares_a_tight_cache_with_the_source_it_is_read_beside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capacity_chunks: int, beats_lru: bool
+) -> None:
+    """Under the 64 chunks that hold both stores' futures, the source alone declared pins its own
+    while the companion, ranked by recency, is decoded again where the source is kept for a use
+    regions away: 44 + 105 at 39 chunks, 96 + 138 at 24 (LRU: 90 + 90 and 96 + 96). Both
+    declared, each is evicted by its own next use: 66 + 66 and 100 + 96. Neither reaches its 44
+    with the other's future to keep in a cache under one store: the misses are Belady's over the
+    two stores' interleaved reads (58 + 58 at 39 against an oracle's 58 + 54, 84 + 74 at 24
+    against 84 + 78), and the decodes above them are the chunk-aligned hull a sparse miss decodes
+    again (``_assemble_window``), which at 24, under one region's two hulls, is what puts the
+    count four over LRU's while the misses stay under it (158 against 176)."""
+    _two_stores(tmp_path)
+
+    def sweep(declared: str) -> dict[str, int]:
+        return _sweep_with_a_mask_companion(
+            tmp_path, monkeypatch, declared=declared, capacity_chunks=capacity_chunks, label=declared
+        )
+
+    lru, alone, both = sweep("nothing"), sweep("source"), sweep("both")
+    assert sum(both.values()) < sum(alone.values()), f"{both} against {alone} with the source alone declared"
+    assert both["Labels"] < alone["Labels"], "the companion is no longer sacrificed to the source's future"
+    assert both["Labels"] <= lru["Labels"], "and decoded no more than under LRU"
+    if beats_lru:
+        assert sum(both.values()) < sum(lru.values()), f"{both} against LRU's {lru}"

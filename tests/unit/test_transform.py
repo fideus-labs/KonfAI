@@ -981,6 +981,44 @@ def test_a_streamed_mask_refuses_a_mask_off_the_stage_input_grid(tmp_path: Path)
     assert out.shape == (1, 2, 8, 8)
 
 
+def test_a_streamed_mask_declares_the_windows_of_the_mask_it_will_read(tmp_path: Path, monkeypatch) -> None:
+    """Handed the contexts a sweep will hand ``stream_region``, a dataset mask declares to its
+    dataset the windows ``stream_region`` then reads, in that order. A ``.mha`` mask has no dataset
+    to declare to; a mask no dataset holds declares nothing and raises nothing, the first region's
+    read being what raises."""
+    pytest.importorskip("SimpleITK")
+    store = Dataset(tmp_path / "source", "mha")
+    store.write("MASK", "CASE", np.ones((1, 8, 8, 8), dtype=np.uint8), _geometry())
+    declared: list = []
+    read: list = []
+    read_slice = Dataset.read_data_slice
+    monkeypatch.setattr(
+        Dataset, "plan_region_reads", lambda self, g, n, windows: declared.append((g, n, list(windows)))
+    )
+    monkeypatch.setattr(
+        Dataset, "read_data_slice", lambda self, g, n, s: (read.append(s), read_slice(self, g, n, s))[1]
+    )
+    contexts = [
+        RegionContext(
+            source=(slice(z, z + 2), slice(0, 8), slice(0, 8)),
+            target=(slice(z, z + 2), slice(0, 8), slice(0, 8)),
+            source_shape=(8, 8, 8),
+            target_shape=(8, 8, 8),
+        )
+        for z in (0, 2)
+    ]
+    mask = Mask(path="MASK")
+    mask.set_datasets([store])
+    mask.plan_region_reads("CASE", contexts)
+    for context in contexts:
+        mask.stream_region("CASE", torch.ones(1, 2, 8, 8), context, Attribute())
+    assert declared == [("MASK", "CASE", read)] and len(read) == 2
+
+    mask.plan_region_reads("ABSENT", contexts)
+    Mask(path=str(tmp_path / "none.mha")).plan_region_reads("CASE", contexts)
+    assert len(declared) == 1
+
+
 def test_a_streamed_mha_mask_is_read_by_region_and_never_held_whole(tmp_path: Path, monkeypatch) -> None:
     """A ``.mha`` file mask is one file for every case: the whole-volume path reads it once, the
     streamed path reads each region's part of it and never the whole (a mask read whole beside a

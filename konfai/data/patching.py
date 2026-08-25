@@ -150,6 +150,8 @@ class Stage(Protocol):
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
     ) -> torch.Tensor: ...
 
+    def plan_region_reads(self, name: str, contexts: Sequence[RegionContext]) -> None: ...
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor: ...
 
 
@@ -227,6 +229,9 @@ class AugmentedStage:
         del cache_attribute  # a draw reads no case metadata; the place is what it may need
         return self.augmentation.stream_region(name, self.index, self.a, tensor, context)
 
+    def plan_region_reads(self, name: str, contexts: Sequence[RegionContext]) -> None:
+        """A draw reads no companion volume beside its region: nothing to declare."""
+
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
     ) -> None:
@@ -294,6 +299,10 @@ class _ReadStagePlan:
     out_shape: tuple[int, ...]
     pull: Callable[[tuple[slice, ...]], list[slice]] | None
     run_pull: Callable[[tuple[slice, ...]], list[slice]] | None = None
+
+    def region_context(self, source: Sequence[slice], target: Sequence[slice]) -> RegionContext:
+        """Where one region of this stage sits: the part of its input read, the part of its output due."""
+        return RegionContext(tuple(source), tuple(target), tuple(self.in_shape), tuple(self.out_shape))
 
 
 def device_capped_budget(budget_bytes: float | None, device: "torch.device | None") -> float | None:
@@ -2782,6 +2791,13 @@ class DatasetManager:
             # outlives one none does. A hint: see Dataset.plan_region_reads.
             lead = [slice(None)] * (len(source.shape) - len(spatial))
             source.dataset.plan_region_reads(source.group, source.entry, [(*lead, *spans[0]) for spans in pulls])
+            # And each stage the regions it will be handed, in the same order, so one reading a
+            # companion volume beside them (Mask) declares those reads too.
+            for index, (stage, plan) in enumerate(zip(source.stages, source.stage_plans, strict=True)):
+                if plan.kind is LocalityKind.CROP:
+                    continue  # handed no region: its remap is its action
+                contexts = [plan.region_context(spans[index], spans[index + 1]) for spans in pulls]
+                stage.plan_region_reads(self.name, contexts)
         sweeps = {key: sweep for key, sweep, _tail, _evolved in members}
         headers: dict[Any, Attribute] = {}
         writer = RegionWriter(lambda key, block, header: _open_sweep_stream(sweeps[key], block, spatial, tile, header))
@@ -3112,12 +3128,7 @@ class DatasetManager:
                 # The span is handed over rather than dropped: a stage reading a second aligned
                 # volume needs to know WHICH part of it lines up with this region, and the
                 # dispatcher is the only thing that knows. The default hook ignores it.
-                tensor = stage.stream_region(
-                    self.name,
-                    tensor,
-                    RegionContext(tuple(source), tuple(target), tuple(plan.in_shape), tuple(plan.out_shape)),
-                    cache_attribute,
-                )
+                tensor = stage.stream_region(self.name, tensor, plan.region_context(source, target), cache_attribute)
                 continue
             # A region stage's geometry writes describe the region's extent, not the volume's: give it
             # a throwaway scope, and write the case-level answer once from the FULL shape below
@@ -3126,12 +3137,7 @@ class DatasetManager:
             if plan.kind is not LocalityKind.CROP:
                 # A HALO stage is handed the ENLARGED region it asked for, and told so: what it
                 # returns is cropped back to the target just below.
-                tensor = stage.stream_region(
-                    self.name,
-                    tensor,
-                    RegionContext(tuple(source), tuple(target), tuple(plan.in_shape), tuple(plan.out_shape)),
-                    scoped,
-                )
+                tensor = stage.stream_region(self.name, tensor, plan.region_context(source, target), scoped)
                 if plan.kind is LocalityKind.HALO:
                     lead = tensor.dim() - len(target)
                     crop = [slice(t.start - s.start, t.stop - s.start) for t, s in zip(target, source, strict=False)]

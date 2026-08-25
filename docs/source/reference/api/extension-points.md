@@ -172,6 +172,17 @@ The rule stops at the region stage. A pointwise stage needs no extra method: a k
 it adds reaches the case on its own, which is how `TensorCast` keeps the source
 dtype its `inverse()` reads.
 
+A stage that reads a second volume beside its region (`Mask` reads its mask where
+the region sits) overrides `stream_region(name, tensor, context, cache_attribute)`:
+`context` says which part of the input the tensor covers and which part of the
+output is due. It may also override `plan_region_reads(name, contexts)`: a sweep
+calls it once, before its first region, with the contexts `stream_region` will
+then be handed in that order, and the stage declares the windows it will read to
+the dataset holding them (`Dataset.plan_region_reads`), so a store that caches
+decoded chunks evicts by next use rather than by recency. A hint: neither what is
+read nor its values depend on it, and the patch route, whose order is the
+DataLoader's, never calls it.
+
 What a declaration costs you:
 
 - A streamed patch must equal what the whole-volume path produces on the same
