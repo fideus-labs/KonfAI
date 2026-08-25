@@ -23,10 +23,17 @@ an axis-aligned grid passes a map that is wrong in exactly the ways this stage c
 import sys
 from pathlib import Path
 
+import konfai.data.transform as transform_module
 import numpy as np
 import pytest
 import torch
-from konfai.data.transform import LocalityKind, RegionContext, Resample, _SitkInput
+from konfai.data.transform import (
+    LocalityKind,
+    RegionContext,
+    Resample,
+    _optional_image_filler,
+    _SitkInput,
+)
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
 
@@ -643,6 +650,26 @@ class TestTheHostRouteReusesItsInputImage:
             assert np.array_equal(sitk.GetArrayViewFromImage(image), other)
         holder.drop()
         assert holder.filled(array) is not first
+
+    def test_a_simpleitk_without_the_in_place_fill_is_still_a_simpleitk(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The fill is a private symbol of the wrapper: optional on its own.
+
+        Guarded in the same clause as the package, a SimpleITK not exporting it made the whole
+        module read as no SimpleITK at all, and every stage needing one refused with an install
+        hint for a package that is installed.
+        """
+        import SimpleITK.SimpleITK as core
+
+        monkeypatch.delattr(core, "_SetImageFromArray")
+        assert _optional_image_filler() is None
+        assert transform_module.sitk is not None
+
+        monkeypatch.setattr(transform_module, "_set_image_from_array", None)
+        holder = _SitkInput()
+        array = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        first = holder.filled(array)
+        assert holder.filled(array + 1.0) is not first
+        assert np.array_equal(sitk.GetArrayViewFromImage(holder.filled(array + 1.0)), array + 1.0)
 
     def test_a_sweep_keeps_the_image_and_a_whole_volume_call_does_not(self):
         image = _image()

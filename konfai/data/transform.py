@@ -34,10 +34,8 @@ import torch
 
 try:
     import SimpleITK as sitk
-    from SimpleITK.SimpleITK import _SetImageFromArray as _set_image_from_array
 except ImportError:
     sitk = None  # type: ignore[assignment]
-    _set_image_from_array = None
 import torch.nn.functional as F
 
 from konfai import cuda_visible_devices
@@ -70,6 +68,23 @@ from konfai.utils.errors import ReductionError, TransformError
 from konfai.utils.ITK import _require_simpleitk
 from konfai.utils.runtime import NeedDevice
 from konfai.utils.utils import get_module, split_path_spec
+
+
+def _optional_image_filler() -> Any:
+    """SimpleITK's own in-place array fill (``_SetImageFromArray``), or ``None``.
+
+    A private symbol, so it is optional on its own: guarded together with the package, a SimpleITK
+    that does not export it would have read as no SimpleITK at all. Its caller
+    (:class:`_SitkInput`) allocates a fresh image instead when it is missing.
+    """
+    try:
+        from SimpleITK.SimpleITK import _SetImageFromArray
+    except ImportError:
+        return None
+    return _SetImageFromArray
+
+
+_set_image_from_array = _optional_image_filler() if sitk is not None else None
 
 
 class LocalityKind(Enum):
