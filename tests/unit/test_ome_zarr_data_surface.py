@@ -422,7 +422,7 @@ def test_a_chunk_of_the_window_being_assembled_outlives_the_rest_of_it() -> None
 def test_an_empty_declared_read_still_advances_its_schedule(tmp_path: Path) -> None:
     """A region a pull map folds to nothing (a block outside the source) is declared like any other;
     a reader that returned before counting it would rank every later chunk against the wrong read."""
-    from konfai.utils.ome_zarr import _chunk_cache, plan_ome_zarr_reads
+    from konfai.utils.ome_zarr import _chunk_cache, plan_ome_zarr_reads, store_identity
 
     store = tmp_path / "planned.ome.zarr"
     write_ome_zarr(store, _volume(), spacing=[1.0, 1.0, 1.0], chunks=[1, 4, 12, 16])
@@ -430,7 +430,7 @@ def test_an_empty_declared_read_still_advances_its_schedule(tmp_path: Path) -> N
     first = (slice(0, 1), slice(0, 4), slice(0, 12), slice(0, 16))
     second = (slice(0, 1), slice(4, 8), slice(0, 12), slice(0, 16))
     plan_ome_zarr_reads(store, [empty, first, second])
-    identity = next(identity for identity in _chunk_cache()._schedules if identity[0] == str(store))
+    identity = next(i for i in _chunk_cache()._schedules if i[0] == store_identity(store))
 
     assert read_ome_zarr_data_slice(store, empty)[0].shape == (1, 0, 12, 16)
     read_ome_zarr_data_slice(store, first)
