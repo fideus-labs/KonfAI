@@ -2518,6 +2518,19 @@ class Dilate(Transform):
         return data.to(tensor.dtype)
 
 
+def _forget_model_channel_counts(cache_attribute: Attribute) -> None:
+    """Take ``number_of_channels_per_model`` off a case's state, as folding the model axis does.
+
+    The key describes the ensemble the fold consumed: once the models' channels are one map it
+    describes an input that no longer exists, and a later ``Sum`` or ``MergeLabels`` reading it off
+    the written store would take the ensemble branch on a one-channel map. The whole-volume pass
+    pops it from the live attribute it writes the header from; a streamed region pops it from a
+    scope that is thrown away, so the case-level state has to say it here.
+    """
+    if "number_of_channels_per_model" in cache_attribute:
+        cache_attribute.pop_tensor("number_of_channels_per_model")
+
+
 class Sum(Transform):
     def __init__(self, dim: int = 0) -> None:
         super().__init__()
@@ -2533,6 +2546,12 @@ class Sum(Transform):
             reason=f"dim {self.dim} reduces a spatial axis, which spans the whole extent; dim: 0"
             " reduces the channels and streams",
         )
+
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
+        del source_spatial_shape, name
+        _forget_model_channel_counts(cache_attribute)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "number_of_channels_per_model" in cache_attribute:
@@ -2567,6 +2586,12 @@ class MergeLabels(Transform):
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Merges the leading model axis per voxel; spatial support is a single voxel.
         return PatchLocality(LocalityKind.POINTWISE)
+
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
+        del source_spatial_shape, name
+        _forget_model_channel_counts(cache_attribute)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "number_of_channels_per_model" not in cache_attribute:

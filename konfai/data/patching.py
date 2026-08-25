@@ -53,7 +53,7 @@ from konfai.data.transform import (
     stat_seed_valid,
 )
 from konfai.utils.config import apply_config, config
-from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.dataset import Attribute, Dataset, DataStream, as_channel_first
 from konfai.utils.errors import ConfigError, PatchError, TransformError
 from konfai.utils.runtime import preserved_rng, rank_cpu_share, seed_all
 from konfai.utils.utils import (
@@ -784,11 +784,14 @@ def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -
     return attributes
 
 
-def _require_channel_first(block: np.ndarray, spatial: list[int], what: str) -> None:
-    """Refuse a block that lost the channel-first layout. Writing it anyway is the worst outcome
-    available: the header would take the block's first spatial extent for a channel count and
-    publish a store of that many "channels", raising nothing, while the whole-volume path
-    returns the right rank: the two would silently disagree."""
+def _channel_first_block(block: np.ndarray, spatial: list[int], header: Attribute, what: str) -> np.ndarray:
+    """The block a region write ships: channel-first, single-channel where the header says so
+    (:func:`as_channel_first`, the rule the whole-volume write applies), else refused.
+
+    Writing another rank anyway is the worst outcome available: the header would take the block's
+    first spatial extent for a channel count and publish a store of that many "channels", raising
+    nothing, while the whole-volume path returns the right rank: the two would silently disagree."""
+    block = as_channel_first(block, header)
     if block.ndim != len(spatial) + 1:
         raise PatchError(
             f"{what} returned a rank-{block.ndim} block where the channel-first layout needs rank"
@@ -797,6 +800,7 @@ def _require_channel_first(block: np.ndarray, spatial: list[int], what: str) -> 
             " stays C[Z]YX; only then does a region write mean the same thing as the"
             " whole-volume pass.",
         )
+    return block
 
 
 def _open_sweep_stream(
@@ -2354,25 +2358,29 @@ class DatasetManager:
     def _plan_read_stage(
         self, stage: Stage, loc: PatchLocality, shape: list[int], evolved: Attribute
     ) -> "_ReadStagePlan":
-        """One stage's slot in the composed plan: its shapes, its pull map, and (for a region stage)
-        the geometry it leaves for the stages after it (``write_stream_cache_attribute``)."""
+        """One stage's slot in the composed plan: its shapes, its pull map, and the case state it
+        leaves for the stages after it and for the header the sweep ships
+        (``write_stream_cache_attribute``, stated by every stage, region or not: a fold of the
+        channel axis consumes a key that describes an input the output no longer has)."""
         if not loc.kind.is_region:
-            return _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), None)
-        if loc.kind is LocalityKind.HALO:
-            return _ReadStagePlan(
+            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), None)
+        elif loc.kind is LocalityKind.HALO:
+            plan = _ReadStagePlan(
                 loc.kind, tuple(shape), tuple(shape), _HaloPull(_halo_radii(loc.halo, len(shape)), list(shape))
             )
-        # ORIENTATION / CROP / REGRID: the stage's own remap, on the state the stages before it left.
-        pull = _RemapPull(stage.stream_region_source, list(shape), Attribute(evolved), self.name)
-        measured = getattr(stage, "measured_region_source", None)
-        run_pull = (
-            _RemapPull(measured, list(shape), Attribute(evolved), self.name)
-            if measured is not None and getattr(stage, "measures_at_run", False)
-            else None
-        )
-        out = self._stage_out_shape(stage, shape, Attribute(evolved))
+        else:
+            # ORIENTATION / CROP / REGRID: the stage's own remap, on the state the stages before it left.
+            pull = _RemapPull(stage.stream_region_source, list(shape), Attribute(evolved), self.name)
+            measured = getattr(stage, "measured_region_source", None)
+            run_pull = (
+                _RemapPull(measured, list(shape), Attribute(evolved), self.name)
+                if measured is not None and getattr(stage, "measures_at_run", False)
+                else None
+            )
+            out = self._stage_out_shape(stage, shape, Attribute(evolved))
+            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull, run_pull)
         stage.write_stream_cache_attribute(evolved, list(shape), self.name)
-        return _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull, run_pull)
+        return plan
 
     def _stage_out_shape(self, stage: Stage, shape: list[int], attribute: Attribute) -> list[int]:
         """The spatial shape one stage folds ``shape`` to: a transform's map or a draw's own.
@@ -2900,11 +2908,14 @@ class DatasetManager:
                         # and this is where the run waits for it as well as for the copy home.
                         with SWEEP_CLOCK.phase("fetch"):
                             block = landing.take(member_tensor)
-                        _require_channel_first(
-                            block, spatial, f"A stage of the chain writing '{member.sweep.group}/{member.sweep.entry}'"
-                        )
                         if member.key not in headers:
                             headers[member.key] = _sweep_header(member.evolved, scope, keys_before)
+                        block = _channel_first_block(
+                            block,
+                            spatial,
+                            headers[member.key],
+                            f"A stage of the chain writing '{member.sweep.group}/{member.sweep.entry}'",
+                        )
                         with SWEEP_CLOCK.phase("wait(write)"):
                             write.write(
                                 member.key, (slice(0, int(block.shape[0])), *target), block, headers[member.key]

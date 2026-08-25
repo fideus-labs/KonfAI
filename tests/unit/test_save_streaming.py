@@ -24,7 +24,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Clip, Permute, Save, Standardize, Transform
 from konfai.utils.dataset import Attribute, Dataset
@@ -276,40 +275,6 @@ def test_an_interrupted_sweep_aborts_its_stream_and_does_not_fall_back(
     assert not manager._sweep_failed
     assert not list((tmp_path / "cache").glob("**/*.tmp"))
     assert not Dataset(tmp_path / "cache", "mha").is_dataset_exist("CT", "CASE_000")
-
-
-def test_a_rank_dropping_stage_refuses_instead_of_writing_a_broadcast_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`Sum(dim=0)` drops the leading axis, so its slab is no longer C[Z]YX.
-
-    Written anyway, the header takes the slab's first spatial extent for a channel count and
-    publishes that many broadcast copies: a store whose rank disagrees with the whole-volume path,
-    with no exception raised. It must refuse and fall back instead."""
-    from konfai.data import patching as patching_module
-    from konfai.data.transform import Sum
-
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 2)
-    rng = np.random.default_rng(0)
-    volume = rng.random((5, 12, 10, 8)).astype(np.float32)
-    source = Dataset(tmp_path / "source", "h5")
-    source.write("CT", "CASE_000", volume, Attribute())
-
-    manager = DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=source,
-        patch=None,
-        transforms=[Sum(dim=0), Save(f"{tmp_path / 'out'}:h5")],
-        data_augmentations_list=[],
-    )
-    with pytest.warns(UserWarning, match="Falling back to the whole-volume path"):
-        assert CaseMaterializer(manager).materialize() is Verdict.WHOLE_VOLUME
-
-    written, _ = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")
-    np.testing.assert_allclose(written, volume.sum(axis=0), rtol=1e-6)
 
 
 def test_kill_switch_keeps_the_whole_volume_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

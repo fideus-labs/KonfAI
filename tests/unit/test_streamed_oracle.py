@@ -63,11 +63,9 @@ from konfai.data.transform import (
     Flip,
     Gradient,
     Mask,
-    MergeLabels,
     Reduce,
     Resample,
     Save,
-    Sum,
     Transform,
     Write,
 )
@@ -99,11 +97,6 @@ GEOMETRIES = {
 }
 #: The one the tests that vary something OTHER than the geometry run on.
 MAIN = "rank3-seed11"
-
-#: Two POINTWISE stages no sweep can honour: both fold the leading model axis and hand back a volume
-#: without it, so their block is no longer C[Z]YX. They leave the matrix (there is no streamed store
-#: to compare) and their refusal is pinned on its own below.
-_RANK_DROPPING = ("Sum", "MergeLabels")
 
 
 @dataclass(frozen=True)
@@ -218,18 +211,13 @@ def _assert_same(got: Written, want: Written, atol: float, rtol: float = 0.0) ->
 # ---------------------------------------------------------------- the cases the matrix runs
 
 
-def _sweepable_cases(geometry: str) -> list[StageCase]:
-    """What a sweep can be asked for on this geometry: what the read side streams, less the two
-    stages whose block is not channel-first, which are pinned as a refusal of their own below."""
-    return [
-        case for case in streamable_cases(GEOMETRIES[geometry]) if type(case.transform).__name__ not in _RANK_DROPPING
-    ]
-
-
 def _matrix() -> list[tuple[str, StageCase, Route]]:
     """Every (geometry, built-in, decomposition) the property is proven on."""
     return [
-        (geometry, case, route) for geometry in GEOMETRIES for case in _sweepable_cases(geometry) for route in ROUTES
+        (geometry, case, route)
+        for geometry in GEOMETRIES
+        for case in streamable_cases(GEOMETRIES[geometry])
+        for route in ROUTES
     ]
 
 
@@ -298,29 +286,6 @@ def test_a_swept_case_equals_the_whole_volume_case(
     # would pass on a sweep that never decomposed anything.
     assert streamed.regions >= (2 if route.height == 0.0 else 1)
     _assert_same(streamed, whole, case.atol, case.rtol)
-
-
-def test_every_read_streamable_builtin_is_in_the_matrix() -> None:
-    """The matrix follows the DECLARATIONS, so a newly streamable built-in joins it the day it lands
-    and one that quietly retreats to WHOLE_VOLUME leaves a hole this states rather than hides."""
-    for name, geometry in GEOMETRIES.items():
-        swept = {type(case.transform).__name__ for case in _sweepable_cases(name)}
-        declared = {type(case.transform).__name__ for case in streamable_cases(geometry)}
-        assert swept == declared - set(_RANK_DROPPING) and swept
-
-
-@pytest.mark.parametrize("stage", [MergeLabels(), Sum(0)], ids=_RANK_DROPPING)
-def test_a_rank_dropping_pointwise_stage_refuses_the_sweep_and_says_why(
-    stage: Transform, cases: dict[str, Dataset], tmp_path: Path
-) -> None:
-    """Both declare POINTWISE and hand back a volume without its leading axis, so no region write
-    can mean what the whole-volume write means. The sweep must refuse with the layout it needed and
-    fall back, not publish a store whose rank disagrees with the other route's."""
-    manager = _manager(cases[MAIN], "Ensemble", [stage, Save(f"{tmp_path / 'out'}:h5")])
-    with pytest.warns(UserWarning, match="Falling back to the whole-volume path"):
-        assert CaseMaterializer(manager).materialize() is Verdict.WHOLE_VOLUME
-    assert manager._sweep_failure is not None
-    assert "channel-first" in manager._sweep_failure and "rank 4" in manager._sweep_failure
 
 
 # ---------------------------------------------------------------- the dtypes a store holds

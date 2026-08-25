@@ -659,6 +659,22 @@ def is_an_image(attributes: Attribute) -> bool:
     return "Origin" in attributes and "Spacing" in attributes and "Direction" in attributes
 
 
+def as_channel_first(data: np.ndarray, attributes: Attribute) -> np.ndarray:
+    """Give back its channel axis to a block that folded it away, where the header says it did.
+
+    A stage may hand back a volume without its channel axis (``Sum(dim=0)`` and ``MergeLabels`` fold
+    the leading axis, which in a TRANSFORM chain is the channel one). An array with as many axes as
+    the geometry has spatial axes IS a single-channel image: read as channel-first it would be a 2-D
+    image with a plane's worth of channels, refused by ITK or, worse, stored that way in silence.
+
+    The header is what declares the spatial rank, so a block that comes with none is handed back
+    untouched: only the caller knows whether it can be written as it is or must be refused.
+    """
+    if "Spacing" in attributes and data.ndim == len(attributes.get_np_array("Spacing")):
+        return data[None]
+    return data
+
+
 def data_to_image(data: np.ndarray, attributes: Attribute) -> sitk.Image:
     """Convert a NumPy array and KonfAI attributes into a SimpleITK image."""
     if isinstance(data, torch.Tensor):
@@ -3073,17 +3089,8 @@ class Dataset:
         attributes: Attribute | None = None,
     ) -> None:
         attributes = attributes if attributes is not None else Attribute()
-        # A stage may hand back a volume without its channel axis (``Sum(dim=0)`` and
-        # ``MergeLabels`` fold the leading axis, which in a TRANSFORM chain is the channel one).
-        # An array with as many axes as the geometry has spatial axes IS a single-channel image,
-        # and is written as one: read as channel-first it would be a 2-D image with a plane's worth
-        # of channels, refused by ITK or, worse, stored that way in silence.
-        if (
-            isinstance(data, np.ndarray)
-            and "Spacing" in attributes
-            and data.ndim == len(attributes.get_np_array("Spacing"))
-        ):
-            data = data[None]
+        if isinstance(data, np.ndarray):
+            data = as_channel_first(data, attributes)
         target, entry = self._write_target(group, name)
         with target as file:
             file.data_to_file(entry, data, attributes)
