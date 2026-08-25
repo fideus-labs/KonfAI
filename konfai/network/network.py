@@ -301,7 +301,8 @@ class Measure:
 
         def set_window(self, n: int) -> None:
             """Keep at least the last ``n`` values and weights. Grows only; until it is called the
-            history is unbounded."""
+            history is unbounded. A window widened mid-run holds what it had until ``n`` more values
+            arrive: the reads in between average the values held, fewer than they ask for."""
             if self._values.maxlen is not None and self._values.maxlen >= n:
                 return
             self._values = deque(self._values, maxlen=n)

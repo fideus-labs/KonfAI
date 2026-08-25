@@ -369,7 +369,12 @@ class DataAugmentation(NeedDevice, ABC):
 
     @abstractmethod
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        pass
+        """Copy ``a`` of case ``index`` drawn from ``tensor``: a fresh tensor or a view of it.
+
+        ``tensor`` is the case itself, or another draw's output, and every copy the draw did not
+        select aliases it: nothing may be written into it. A draw that must work in place clones
+        first, as ``Foreign`` does.
+        """
 
     def inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         if a in self.who_index[index]:
@@ -467,33 +472,104 @@ class EulerTransform(DataAugmentation):
         """Copy *a*'s affine, in the normalised coordinates ``affine_grid`` spans over ``shape``."""
         return self.matrix[index][a]
 
+    #: How far inside the grid a mapped box must lie, in voxels, for the float32 coordinates built
+    #: from it to lie inside too: the GEMM and the scaling to voxels err by a few float32 ulps of
+    #: the extent (under 2e-6 of it), and a coordinate within an ulp of the far face folds to its
+    #: mirror. The larger of the two margins applies.
+    _INTERIOR_MARGIN = 1e-3
+    _INTERIOR_MARGIN_RELATIVE = 1e-5
+
     @staticmethod
-    def _source_coordinates(matrix: torch.Tensor, target: tuple[slice, ...], full: tuple[int, ...]) -> torch.Tensor:
+    def _mapped_box(
+        matrix: torch.Tensor, target: tuple[slice, ...], full: tuple[int, ...]
+    ) -> list[tuple[float, float]]:
+        """Where the region's corners map to, per array axis, in source voxel indices of the full
+        grid: the hull of the affine image of the region's box, in float64."""
+        n = len(full)
+        affine = matrix[0].to(torch.float64).numpy()
+
+        def normalised(position: int, extent: int) -> float:
+            # affine_grid's coordinate of a voxel of the FULL extent (a singleton axis sits at 0).
+            return -1.0 + 2.0 * position / (extent - 1) if extent > 1 else 0.0
+
+        # The region's first and last voxel per axis, in (x, y, z): affine_grid's order.
+        ends = np.array(
+            [
+                [normalised(part.start, extent), normalised(part.stop - 1, extent)]
+                for part, extent in zip(target, full, strict=True)
+            ]
+        )[::-1]
+        box = WorldBox(ends[:, 0], ends[:, 1]).image_under(AffineMap(affine[:n, :n], affine[:n, n]))
+        return [
+            (
+                float((box.low_xyz[n - 1 - axis] + 1.0) / 2.0 * float(extent - 1)),
+                float((box.high_xyz[n - 1 - axis] + 1.0) / 2.0 * float(extent - 1)),
+            )
+            for axis, extent in enumerate(full)
+        ]
+
+    @classmethod
+    def _interior(cls, box: list[tuple[float, float]], full: tuple[int, ...]) -> bool:
+        """Whether every coordinate of a region mapping to ``box`` lies in ``[0, extent - 1]``."""
+        for (low, high), extent in zip(box, full, strict=True):
+            span = float(extent - 1)
+            margin = max(cls._INTERIOR_MARGIN, cls._INTERIOR_MARGIN_RELATIVE * span)
+            if extent < 2 or low < margin or high > span - margin:
+                return False
+        return True
+
+    @staticmethod
+    def _source_coordinates(
+        matrix: torch.Tensor, target: tuple[slice, ...], full: tuple[int, ...], device: torch.device | None = None
+    ) -> torch.Tensor:
         """Where each target voxel samples from, in source VOXEL indices of the full grid, per axis in
-        array order: ``[*region_shape, n]``. Reflected into the volume as ``padding_mode='reflection'``
-        would (``align_corners=True``: mirrored about the outer voxel centres) and clipped."""
+        array order: ``[*region_shape, n]``, on ``device``. Reflected into the volume as
+        ``padding_mode='reflection'`` would (``align_corners=True``: mirrored about the outer voxel
+        centres) and clipped.
+
+        In place past the affine map: each step is the op it always was, rounded once, on the one
+        tensor, where a chain of full-grid temporaries moved ~200 bytes per voxel for a 12-byte
+        result (measured 867 MiB of growth for an 81 MiB result at 192^3). A region whose mapped
+        box is interior skips the reflection and the clip: both are the identity on ``[0, n - 1]``.
+        """
         n = len(full)
         # affine_grid's own base grid, restricted to the region: linspace over the FULL extent (a
-        # singleton axis sits at 0, as affine_grid places it).
+        # singleton axis sits at 0, as affine_grid places it). Built on the host and moved, so every
+        # device meshes the same bits.
         axes = [
-            (torch.linspace(-1.0, 1.0, extent, dtype=torch.float32) if extent > 1 else torch.zeros(1))[part]
+            (torch.linspace(-1.0, 1.0, extent, dtype=torch.float32) if extent > 1 else torch.zeros(1))[part].to(device)
             for extent, part in zip(full, target, strict=True)
         ]
         mesh = torch.meshgrid(*axes, indexing="ij")
         # affine_grid orders a coordinate (x, y, z): the last array axis first.
         homogeneous = torch.stack([*reversed(mesh), torch.ones_like(mesh[0])], dim=-1)
-        source = homogeneous.reshape(-1, n + 1) @ matrix[0, :n, :].T.to(torch.float32)
-        source = source.reshape(*[part.stop - part.start for part in target], n).flip(-1)  # back to array order
-        extents = torch.tensor([float(extent - 1) for extent in full], dtype=torch.float32)
-        index = (source + 1.0) / 2.0 * extents
+        weights = matrix[0, :n, :].T
+        if device is None or device.type == "cpu":
+            source = homogeneous.reshape(-1, n + 1) @ weights.to(torch.float32)
+        else:
+            # In float64 on a device: a float32 matmul there follows the process's TF32 setting,
+            # ten bits of mantissa, a thousandth of a voxel on a 512 axis. Sixteen flops per voxel.
+            source = (homogeneous.reshape(-1, n + 1).to(torch.float64) @ weights.to(device, torch.float64)).to(
+                torch.float32
+            )
+        del homogeneous, mesh
+        index = source.reshape(*[part.stop - part.start for part in target], n).flip(-1)  # back to array order
+        del source
+        extents = torch.tensor([float(extent - 1) for extent in full], dtype=torch.float32, device=device)
+        index.add_(1.0).div_(2.0).mul_(extents)
+        if EulerTransform._interior(EulerTransform._mapped_box(matrix, target, full), full):
+            return index
         # reflect_coordinates(in, 0, 2 * (size - 1)) then clip, as torch's kernel does.
         span = extents.clamp(min=1.0)
-        magnitude = index.abs()
+        magnitude = index.abs_()
         extra = torch.remainder(magnitude, span)
-        flips = torch.floor(magnitude / span)
-        reflected = torch.where(flips.remainder(2) == 0, extra, span - extra)
-        reflected = torch.where(extents > 0, reflected, torch.zeros_like(reflected))
-        return torch.minimum(torch.maximum(reflected, torch.zeros_like(reflected)), extents)
+        flips = magnitude.div_(span).floor_()
+        mirrored = torch.sub(span, extra)
+        reflected = torch.where(flips.remainder_(2) == 0, extra, mirrored, out=extra)
+        del flips, mirrored
+        reflected.masked_fill_(extents <= 0, 0.0)
+        torch.maximum(reflected, torch.zeros((), dtype=torch.float32, device=device), out=reflected)
+        return torch.minimum(reflected, extents, out=reflected)
 
     def _sample_region(
         self,
@@ -511,7 +587,7 @@ class EulerTransform(DataAugmentation):
         reads back from.
         """
         mode = "nearest" if not block.dtype.is_floating_point else "bilinear"
-        coordinates = self._source_coordinates(matrix, target, full).to(block.device)
+        coordinates = self._source_coordinates(matrix, target, full, block.device)
         starts = torch.tensor([float(part.start) for part in source], dtype=torch.float32, device=block.device)
         sizes = torch.tensor(
             [float(part.stop - part.start - 1) for part in source], dtype=torch.float32, device=block.device
@@ -543,28 +619,11 @@ class EulerTransform(DataAugmentation):
         widened by one voxel for the interpolation taps and to what a reflection at the border
         reads back from, clamped to the volume."""
         full = tuple(int(extent) for extent in source_spatial_shape)
-        n = len(full)
-        matrix = self._grid_matrix(index, a, list(full))[0].to(torch.float64).numpy()
-
-        def normalised(position: int, extent: int) -> float:
-            # affine_grid's coordinate of a voxel of the FULL extent (a singleton axis sits at 0).
-            return -1.0 + 2.0 * position / (extent - 1) if extent > 1 else 0.0
-
-        # The region's first and last voxel per axis, in (x, y, z): affine_grid's order.
-        ends = np.array(
-            [
-                [normalised(part.start, extent), normalised(part.stop - 1, extent)]
-                for part, extent in zip(target_slices, full, strict=True)
-            ]
-        )[::-1]
-        box = WorldBox(ends[:, 0], ends[:, 1]).image_under(AffineMap(matrix[:n, :n], matrix[:n, n]))
+        box = self._mapped_box(self._grid_matrix(index, a, list(full)), tuple(target_slices), full)
         pull: list[slice] = []
-        for axis in range(n):
+        for axis, (low, high) in enumerate(box):
             extent = full[axis]
-            span = float(extent - 1)
-            low = float((box.low_xyz[n - 1 - axis] + 1.0) / 2.0 * span) - 1.0  # (x, y, z) back to array order
-            high = float((box.high_xyz[n - 1 - axis] + 1.0) / 2.0 * span) + 1.0
-            low, high = _reflect_interval(low, high, span)
+            low, high = _reflect_interval(low - 1.0, high + 1.0, float(extent - 1))
             start = max(0, int(np.floor(low)))
             stop = min(extent, int(np.ceil(high)) + 1)
             pull.append(slice(start, max(stop, start + 1)))
@@ -820,8 +879,10 @@ class Foreign(DataAugmentation):
             yield
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+        # A class from another framework may write into what it is handed. The tensor is the
+        # case's own, shared by every copy, so the class alone is handed a copy of it.
         with self._seeded(self.seeds[index][a]):
-            result = self.transform(tensor)
+            result = self.transform(tensor.clone())
         if not isinstance(result, torch.Tensor):
             result = torch.as_tensor(np.asarray(result))
         if list(result.shape) != list(tensor.shape):
@@ -1120,12 +1181,9 @@ class CutOUT(PlacedDraw):
         result = masks[0]
         for mask in masks[1:]:
             result = torch.logical_or(result, mask)
-        result = result.unsqueeze(0).repeat([tensor.shape[0], *[1 for _ in range(len(tensor.shape) - 1)]])
-        return torch.where(
-            result.to(tensor.device) == 1,
-            tensor,
-            torch.tensor(self.value).to(tensor.device),
-        )
+        # The bool mask broadcasts over the channels: repeated C times and re-tested against 1 it
+        # was a copy and a pass over C times the volume (measured 54-60 ms at 8x128^3, 34-40 without).
+        return torch.where(result.unsqueeze(0).to(tensor.device), tensor, torch.tensor(self.value).to(tensor.device))
 
 
 class Elastix(DataAugmentation):
@@ -1134,8 +1192,17 @@ class Elastix(DataAugmentation):
         super().__init__()
         self.grid_spacing = grid_spacing
         self.max_displacement = max_displacement
+        #: Per case index, per selected copy: the sampling grid grid_sample reads, 12 bytes per
+        #: voxel of the copy. Kept for the run of the draw (every group of the case samples through
+        #: it) and dropped with the draw in :meth:`reset_state`.
         self.displacement_fields: dict[int, list[torch.Tensor]] = {}
-        self.displacement_fields_true: dict[int, list[torch.Tensor]] = {}
+
+    def reset_state(self, index: int | None = None) -> None:
+        super().reset_state(index)
+        if index is None:
+            self.displacement_fields.clear()
+        else:
+            self.displacement_fields.pop(index, None)
 
     @staticmethod
     def _format_loc(new_locs, shape):
@@ -1147,7 +1214,6 @@ class Elastix(DataAugmentation):
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         print(f"[KonfAI] Compute Displacement Field for index {index}")
         self.displacement_fields[index] = []
-        self.displacement_fields_true[index] = []
         for i, (shape, cache_attribute) in enumerate(zip(shapes, caches_attribute, strict=False)):
             shape = shape
             dim = len(shape)
@@ -1188,7 +1254,6 @@ class Elastix(DataAugmentation):
             control_points *= 2 * self.max_displacement
             bspline_transform.SetParameters(control_points.flatten().tolist())
             displacement = sitk.GetArrayFromImage(displacement_filter.Execute(bspline_transform))
-            self.displacement_fields_true[index].append(displacement)
             new_locs = grid + torch.unsqueeze(torch.from_numpy(displacement), 0).type(torch.float32)
             self.displacement_fields[index].append(Elastix._format_loc(new_locs, shape))
             print(f"[KonfAI] Compute in progress : {(i + 1) / len(shapes) * 100:.2f} %")

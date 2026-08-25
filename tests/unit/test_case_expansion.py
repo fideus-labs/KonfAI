@@ -671,3 +671,42 @@ def test_a_foreign_draw_after_the_marker_falls_back_and_each_copy_carries_its_ow
     assert not np.array_equal(copies[0], copies[1]), "the two copies took the same draw"
     for a, written in enumerate(copies):
         np.testing.assert_allclose(written, foreign.compute("CASE_000", 0, a, clipped.clone()).numpy(), atol=1e-6)
+
+
+def test_a_copy_s_records_are_refolded_once_per_change_of_copy_not_per_patch(tmp_path: Path) -> None:
+    """Consecutive patches of one copy share its records: the chain is re-folded when the copy
+    read changes (or a fold or a whole-volume call moved the records), not before every patch.
+    Copies times stages folds over a case read copy by copy, not patches times stages."""
+    from konfai.data.patching import DatasetPatch
+
+    source = _source(tmp_path)
+    permute = _draw(Permute(prob_permute=[0.5, 0.5]))
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=source,
+        patch=DatasetPatch(patch_size=[4, 6, 6]),
+        transforms=[Expand(nb=3, pattern="{name}_r{a:02d}", seed=0), permute, Resample(shape=[6, 6, 6])],
+        data_augmentations_list=[],
+    )
+    folds: list[int] = []
+    fold = manager._fold_case_state
+    manager._fold_case_state = lambda *args: folds.append(1) or fold(*args)  # type: ignore[method-assign]
+    patches = 0
+    for a in (1, 2, 3):
+        for index in range(manager.get_size(a)):
+            manager.get_data(index, a, [], True)
+            patches += 1
+    assert patches > 3
+    assert len(folds) == 3 * 2, f"{len(folds)} folds for {patches} patches of 3 copies through 2 stages"
+    # A change of copy re-folds, and a whole-volume call in between moves the records again.
+    manager.get_data(0, 1, [], True)
+    assert len(folds) == 4 * 2
+    manager.get_data(1, 1, [], True)
+    assert len(folds) == 4 * 2
+    base = torch.from_numpy(source.read_data("CT", "CASE_000")[0].copy())
+    manager._apply_chain(base, [Resample(shape=[6, 6, 6])], _image_attributes(), "CASE_000")
+    manager.get_data(0, 1, [], True)
+    assert len(folds) == 5 * 2

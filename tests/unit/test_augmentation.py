@@ -456,3 +456,148 @@ def test_mask_reads_pixels_only_on_first_compute(tmp_path: Path, monkeypatch: py
     augmentation._compute("case", 0, 0, torch.ones((1, 2, 2)))
     augmentation._compute("case", 0, 0, torch.ones((1, 2, 2)))
     assert read_count == 1
+
+
+# --------------------------------------------------------------------------------------
+# The copies of a case, and what a draw allocates for them
+# --------------------------------------------------------------------------------------
+
+
+def _source_coordinates_reference(
+    matrix: torch.Tensor, target: tuple[slice, ...], full: tuple[int, ...]
+) -> torch.Tensor:
+    """``EulerTransform._source_coordinates`` as it was written, one temporary per step: the oracle
+    the in-place spelling is held bit for bit against."""
+    n = len(full)
+    axes = [
+        (torch.linspace(-1.0, 1.0, extent, dtype=torch.float32) if extent > 1 else torch.zeros(1))[part]
+        for extent, part in zip(full, target, strict=True)
+    ]
+    mesh = torch.meshgrid(*axes, indexing="ij")
+    homogeneous = torch.stack([*reversed(mesh), torch.ones_like(mesh[0])], dim=-1)
+    source = homogeneous.reshape(-1, n + 1) @ matrix[0, :n, :].T.to(torch.float32)
+    source = source.reshape(*[part.stop - part.start for part in target], n).flip(-1)
+    extents = torch.tensor([float(extent - 1) for extent in full], dtype=torch.float32)
+    index = (source + 1.0) / 2.0 * extents
+    span = extents.clamp(min=1.0)
+    magnitude = index.abs()
+    extra = torch.remainder(magnitude, span)
+    flips = torch.floor(magnitude / span)
+    reflected = torch.where(flips.remainder(2) == 0, extra, span - extra)
+    reflected = torch.where(extents > 0, reflected, torch.zeros_like(reflected))
+    return torch.minimum(torch.maximum(reflected, torch.zeros_like(reflected)), extents)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_euler_source_coordinates_are_bitwise_the_chain_of_temporaries(seed: int) -> None:
+    """The fused, in-place coordinate build equals the step-by-step one bit for bit, on random
+    rotations in 2D and 3D, over regions that stay interior (where the reflection is skipped) and
+    regions that cross the border (where it runs), and on a singleton axis."""
+    from konfai.data.augmentation import EulerTransform, _rotation_2d_matrix, _rotation_3d_matrix
+
+    generator = torch.Generator().manual_seed(seed)
+    for full in ((9, 11, 13), (17, 15), (1, 9, 11)):
+        n = len(full)
+        angles = torch.rand(n if n == 3 else 1, generator=generator) * (0.6 if seed % 2 else 6.0)
+        matrix = torch.unsqueeze((_rotation_3d_matrix if n == 3 else _rotation_2d_matrix)(angles), 0)
+        whole = tuple(slice(0, extent) for extent in full)
+        centre = tuple(slice(extent // 3, extent - extent // 3) for extent in full)
+        interior = [
+            EulerTransform._interior(EulerTransform._mapped_box(matrix, region, full), full)
+            for region in (whole, centre)
+        ]
+        if n == 3 and full[0] > 1 and seed % 2:
+            assert interior[1], "a small central region under a small rotation must be interior"
+        assert not interior[0] or full[0] > 1
+        for region in (whole, centre):
+            got = EulerTransform._source_coordinates(matrix, region, full)
+            assert torch.equal(got, _source_coordinates_reference(matrix, region, full)), (full, region)
+
+
+def test_euler_source_coordinates_build_on_the_block_s_device() -> None:
+    """Handed a device, the coordinates are built there rather than built on the host and moved.
+    The float32 matmul then runs on that device: how far its last bit lands from the host's is
+    measured below, and the interpolation it feeds is grid_sample's own tolerance."""
+    from konfai.data.augmentation import EulerTransform, _rotation_3d_matrix
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    matrix = torch.unsqueeze(_rotation_3d_matrix(torch.tensor([0.3, -0.2, 0.1])), 0)
+    full = (9, 11, 13)
+    whole = tuple(slice(0, extent) for extent in full)
+    on_device = EulerTransform._source_coordinates(matrix, whole, full, torch.device("cuda"))
+    assert on_device.device.type == "cuda"
+    host = EulerTransform._source_coordinates(matrix, whole, full)
+    assert (on_device.cpu() - host).abs().max().item() <= 1e-5 * max(full)
+
+
+def test_cutout_broadcasts_its_mask_over_the_channels() -> None:
+    """One bool mask over the volume, broadcast over the channels: the same voxels are cut, in
+    every channel, as when the mask was repeated per channel and re-tested against 1."""
+    draw = CutOUT(1.0, 0.5, -7.0)
+    draw._state_init(0, [[6, 7, 8]], [Attribute()])
+    tensor = torch.rand((3, 6, 7, 8))
+    got = draw._apply(0, 0, tensor, (0, 0, 0), (6, 7, 8))
+    centre = draw.centers[0][0]
+    cut = torch.ones((6, 7, 8), dtype=torch.bool)
+    for axis, extent in enumerate((6, 7, 8)):
+        positions = torch.arange(extent, dtype=torch.float32)
+        shape = [1, 1, 1]
+        shape[axis] = -1
+        cut &= (((positions + 0.5) / extent - centre[axis]).abs() < 0.25).reshape(shape)
+    want = torch.where((~cut).unsqueeze(0).repeat(3, 1, 1, 1) == 1, tensor, torch.tensor(-7.0))
+    assert torch.equal(got, want)
+    assert bool((got == -7.0).any()) and bool((got == tensor).any())
+
+
+def test_elastix_keeps_one_sampling_grid_per_copy_and_drops_it_with_the_draw() -> None:
+    """The draw keeps grid_sample's sampling grid and nothing beside it: the float64 displacement
+    it was built from (24 bytes per voxel per copy, read by nothing) is gone, and reset_state
+    drops the copies' grids with the draw they belonged to."""
+    pytest.importorskip("SimpleITK")
+    draw = Elastix(grid_spacing=8, max_displacement=4)
+    shapes = [[12, 12, 12] for _ in range(3)]
+    draw._state_init(0, shapes, [Attribute() for _ in shapes])
+    assert not hasattr(draw, "displacement_fields_true")
+    assert [tuple(grid.shape) for grid in draw.displacement_fields[0]] == [(1, 12, 12, 12, 3)] * 3
+    kept = sum(grid.numel() * grid.element_size() for grid in draw.displacement_fields[0])
+    assert kept == 3 * 12**3 * 3 * 4
+    draw.reset_state(0)
+    assert 0 not in draw.displacement_fields
+    draw._state_init(1, shapes[:1], [Attribute()])
+    draw.reset_state()
+    assert not draw.displacement_fields
+
+
+def test_an_augmentation_group_is_handed_the_case_not_a_clone_of_it(tmp_path: Path) -> None:
+    """The copies of a case start as the case tensor itself: a draw that selects a copy hands
+    back a tensor of its own, one that does not leaves the case's, and nothing is cloned for
+    either. The case tensor is what it was before the draws ran."""
+    from konfai.data.augmentation import DataAugmentationsList
+    from konfai.data.patching import DatasetManager
+    from konfai.utils.dataset import Dataset
+
+    dataset = Dataset(tmp_path / "source", "h5")
+    attributes = Attribute()
+    attributes["Origin"] = np.zeros(3)
+    attributes["Spacing"] = np.ones(3)
+    attributes["Direction"] = np.eye(3).reshape(-1)
+    dataset.write("CT", "CASE", np.random.default_rng(0).random((1, 6, 7, 8)).astype(np.float32), attributes)
+    flip = Flip(f_prob=[1.0, 1.0, 1.0])
+    flip.load(0.5)
+    group = DataAugmentationsList(nb=8)
+    group.data_augmentations = [flip]
+    manager = DatasetManager(0, "CT", "CT", "CASE", dataset, None, [], [group])
+    manager._load([])
+    before = manager.data[0].clone()
+    manager._load_augmentation_group(1, group)
+    selected = flip.who_index[0]
+    assert 0 < len(selected) < 8, "the fixture wants selected and unselected copies"
+    for slot in range(8):
+        copy = manager.augmented_data[slot + 1]
+        if slot in selected:
+            assert copy.data_ptr() != manager.data[0].data_ptr()
+            assert torch.equal(copy, torch.flip(before, dims=[1, 2, 3]))
+        else:
+            assert copy is manager.data[0]
+    assert torch.equal(manager.data[0], before)

@@ -490,7 +490,9 @@ class _Trainer:
     def _epoch_report(clock: SweepClock, min_seconds: float = 1.0) -> str | None:
         """One line accounting for the epoch's wall clock, in the sweep report's format, or ``None``
         below ``min_seconds``. ``forward`` is the graph walk alone, the criteria being timed inside it;
-        what no phase names is ``other``, so the sum closes on the wall clock."""
+        what no phase names is ``other``, so the sum closes on the wall clock. On a device a phase
+        is the time its kernels took to enqueue: the device's own time lands where the host next
+        waits for it (the loss read, a checkpoint's host copy, the validation)."""
         wall = clock.spent("epoch")
         if wall < min_seconds:
             return None

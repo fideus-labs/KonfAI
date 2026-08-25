@@ -1865,6 +1865,10 @@ class DatasetManager:
         self._stream_refusals: dict[tuple[int, bool], str] = {}
         self._stream_evolved: dict[tuple[int, bool], Attribute] = {}
         self._stream_attributes_persisted: set[int] = set()
+        # Whose chain state the stages' per-case records hold: the stream source last re-folded
+        # for a patch replay (_refold_copy_records), or None once any fold or whole-volume call
+        # moved them.
+        self._records_source: _PatchStreamSource | None = None
         # A GLOBAL_STAT stage's whole-volume statistic is read on the process that runs the chain,
         # at first data access, never by a plan probe: the plan checks the source can provide it
         # (headers only) and the run reads it once. ``_statistics_deferred`` remembers that a plan
@@ -1903,6 +1907,7 @@ class DatasetManager:
         # An augmented copy's stream source is only as good as the draw it was planned for: a halo is
         # the draw's own, and a re-draw is a new one. Drop every plan, so the next request replans
         # against the draw the copies actually carry.
+        self._records_source = None
         self._patch_stream_sources.clear()
         self._stream_refusals.clear()
         self._stream_evolved.clear()
@@ -2025,6 +2030,7 @@ class DatasetManager:
         expansion fallback with a copy's name: the entry is the only thing that differs between
         assembling a case and assembling one of its copies.
         """
+        self._records_source = None  # a stage re-records the case it is called on
         for transform_function in transforms:
             tensor = transform_function(self.name, tensor, attribute)
             if isinstance(transform_function, Save):
@@ -2047,7 +2053,12 @@ class DatasetManager:
         if all(index in self.augmented_data for index in indices):
             return
 
-        a_data = [self.data[0].clone() for _ in range(data_augmentations.nb)]
+        # The case tensor itself, once per copy. A draw hands back a fresh tensor or a view of what
+        # it was given and writes nothing into it (Foreign clones for a class that might), so a
+        # copy a draw did not select IS the case, as copy 0 already is. A clone per copy was a
+        # memcpy of the case dropped unread: 640 MiB and 0.22 s for 10 copies of a 64 MiB case,
+        # per group, per case, per epoch under inline augmentation (measured).
+        a_data = [self.data[0] for _ in range(data_augmentations.nb)]
         for data_augmentation in data_augmentations.data_augmentations:
             if data_augmentation.groups is None or self.group_dest in data_augmentation.groups:
                 a_data = data_augmentation(self.name, self.index, a_data)
@@ -2300,6 +2311,7 @@ class DatasetManager:
         its fold as ``transform_shape``, an :class:`AugmentedStage` as its draw's ``stream_shape``.
         Shape only: the geometry transition is :meth:`_fold_case_state`'s half.
         """
+        self._records_source = None  # transform_shape records the case state it is handed
         if isinstance(stage, Transform):
             return [int(e) for e in stage.transform_shape(self.group_src, self.name, list(shape), attribute)]
         return [int(e) for e in cast(AugmentedStage, stage).stream_shape(list(shape))]
@@ -2989,7 +3001,7 @@ class DatasetManager:
         """Patch-native region chain: one target patch replayed through the composed region plans,
         padded back to ``patch_size`` like the whole-volume path (see ``_replay_streamed_region``,
         which a Save sweep drives with slab targets instead of patch targets)."""
-        if self._expand is not None:
+        if self._expand is not None and self._records_source is not stream_source:
             self._refold_copy_records(a, stream_source)
         target_slices = tuple(self.patch.read_slices(a, index, self.shapes[a]))
         # Each patch re-runs the chain from the state the whole-volume pass started from: the case as
@@ -3015,6 +3027,10 @@ class DatasetManager:
         sweeps re-plan before sweeping and the whole-volume path re-records at call time; the
         patch replay is the consumer left over, and reading two copies interleaved would otherwise
         hand one copy the other's grids. Headers only: no voxel is read.
+
+        Once per change of copy, not per patch: consecutive patches nearly always belong to one
+        copy, and ``_records_source`` says whose records the stages hold until a fold or a
+        whole-volume call moves them.
         """
         if not stream_source.stages:
             return
@@ -3022,6 +3038,7 @@ class DatasetManager:
         state = Attribute(self.cache_attributes_bak[a])
         for stage in stream_source.stages:
             shape = self._fold_case_state(stage, shape, state)
+        self._records_source = stream_source
 
     def _replay_streamed_region(
         self,
