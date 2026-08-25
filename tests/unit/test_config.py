@@ -25,6 +25,7 @@ import functools
 import os
 import sys
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -998,11 +999,17 @@ _WORKFLOWS = {
 
 
 def _shipped_workflow_configs() -> list[str]:
-    return sorted(
-        str(path.relative_to(_EXAMPLES))
-        for path in _EXAMPLES.glob("*/*.yml")
-        if next(iter(ruamel.yaml.YAML().load(path.read_text(encoding="utf-8")))) in _WORKFLOWS
-    )
+    """Every shipped config whose first key names a workflow.
+
+    This feeds a parametrize, so it runs at collection: an example that is empty (no mapping at
+    all) or opens on a sequence is not one of these files, and must not take the module's
+    collection down with it."""
+    relatives = []
+    for path in _EXAMPLES.glob("*/*.yml"):
+        tree = ruamel.yaml.YAML().load(path.read_text(encoding="utf-8"))
+        if isinstance(tree, Mapping) and next(iter(tree), None) in _WORKFLOWS:
+            relatives.append(str(path.relative_to(_EXAMPLES)))
+    return sorted(relatives)
 
 
 def _bind_shipped_config(relative: str, workdir: Path, strict: bool, monkeypatch: pytest.MonkeyPatch) -> bytes:
