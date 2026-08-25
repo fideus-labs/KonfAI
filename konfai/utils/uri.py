@@ -74,14 +74,6 @@ def join(root: str, *parts: str) -> str:
     return "/".join([root.rstrip("/"), *(str(part).strip("/") for part in parts if part)])
 
 
-def _is_registered(protocol: str) -> bool:
-    """Whether fsspec knows an implementation for ``protocol``, installed or not: the registry it
-    builds a filesystem from (already built, or known and waiting for its package)."""
-    from fsspec.registry import known_implementations, registry
-
-    return protocol in registry or protocol in known_implementations
-
-
 def filesystem(path: str | Path) -> Any:
     """The fsspec filesystem serving ``path``.
 
@@ -98,28 +90,28 @@ def filesystem(path: str | Path) -> Any:
             f"Reading a dataset from '{protocol}://' needs fsspec.",
             "Install it with: pip install konfai[omezarr]",
         ) from exc
+    # Routing first, arguments second: `get_filesystem_class` answers whether the protocol reaches an
+    # implementation at all (ValueError if nothing registers it, ImportError naming the package if
+    # something does), so what `filesystem` then refuses is the configuration and nothing else.
     try:
-        return fsspec.filesystem(protocol)
+        fsspec.get_filesystem_class(protocol)
+    except ValueError as exc:
+        raise DatasetManagerError(
+            f"No filesystem is registered for '{protocol}://' ({exc}).",
+            f"Install the fsspec implementation for {protocol}, or check the scheme for a typo.",
+        ) from exc
     except ImportError as exc:
         extra = _SCHEME_EXTRAS.get(protocol)
         raise DatasetManagerError(
             f"No filesystem is installed for '{protocol}://' ({exc}).",
-            f"Install it with: pip install konfai[{extra}]"
-            if extra
-            else f"Install the fsspec implementation for {protocol}.",
+            f"Install it with: pip install konfai[{extra}]" if extra else str(exc),
         ) from exc
+    try:
+        return fsspec.filesystem(protocol)
     except (TypeError, ValueError) as exc:
-        # A scheme nothing registers is not a configuration to check: the variables it would point
-        # at do not exist for it. Asked of fsspec's own registry, because the same exception types
-        # carry a configuration's own refusal, and its wording is not an interface.
-        unknown = not _is_registered(protocol)
         raise DatasetManagerError(
-            f"No filesystem is registered for '{protocol}://' ({exc})."
-            if unknown
-            else f"'{protocol}://' refused its fsspec configuration: {exc}.",
-            f"Install the fsspec implementation for {protocol}, or check the scheme for a typo."
-            if unknown
-            else "Check the FSSPEC_" + protocol.upper() + "_* variables and ~/.config/fsspec/.",
+            f"'{protocol}://' refused its fsspec configuration: {exc}.",
+            "Check the FSSPEC_" + protocol.upper() + "_* variables and ~/.config/fsspec/.",
         ) from exc
 
 
