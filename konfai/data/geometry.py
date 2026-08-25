@@ -467,10 +467,18 @@ class DisplacementStage:
     def __getstate__(self) -> dict:
         state = dict(self.__dict__)
         state["_tensors"] = {}
+        state.pop("bound_xyz", None)
         return state
 
-    @property
+    @cached_property
     def bound_xyz(self) -> np.ndarray:
+        """``sup |values|`` per component: one pass over the field, kept for the stage's life.
+
+        Every pull map asks for it (per patch, per plan block, per pushed slab), and the pass costs
+        72 ms and a values-sized temporary on a 3x160x256x256 field: a thousand patches recomputed
+        one constant 3-vector for 73 s. ``cached_property`` writes through ``__dict__``, which a
+        frozen dataclass allows; the entry is dropped from the pickle beside ``_tensors``.
+        """
         return np.abs(self.values.reshape(self.values.shape[0], -1)).max(axis=1)
 
     def bound(self) -> TransformBound:

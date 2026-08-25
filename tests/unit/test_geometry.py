@@ -181,3 +181,27 @@ class TestTransformBound:
         # Any map of the form affine + bounded wiggle stays inside.
         images = affine.apply(points) + rng.uniform(-1.0, 1.0, size=(500, 3)) * residual
         assert np.all(images >= mapped.low_xyz - 1e-9) and np.all(images <= mapped.high_xyz + 1e-9)
+
+
+class TestDisplacementStageBound:
+    def test_the_bound_is_one_pass_per_stage_and_stays_out_of_the_pickle(self, monkeypatch):
+        import pickle
+
+        from konfai.data.geometry import DisplacementStage
+
+        values = np.random.RandomState(5).normal(0.0, 3.0, (3, 6, 7, 8))
+        stage = DisplacementStage(_grid(), values, 1)
+        passes: list[int] = []
+        absolute = np.abs
+        monkeypatch.setattr(np, "abs", lambda *args, **kwargs: passes.append(1) or absolute(*args, **kwargs))
+        first = stage.bound_xyz
+        for _ in range(5):
+            stage.bound()
+            assert stage.bound_xyz is first
+        assert len(passes) == 1
+        monkeypatch.undo()
+        np.testing.assert_array_equal(first, np.abs(values).reshape(3, -1).max(axis=1))
+        # The cache is per instance, not per pickle: a rank rebuilds it from the values it receives.
+        assert "bound_xyz" not in stage.__getstate__()
+        again = pickle.loads(pickle.dumps(stage))
+        np.testing.assert_array_equal(again.bound_xyz, first)

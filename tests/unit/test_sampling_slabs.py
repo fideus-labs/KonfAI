@@ -201,3 +201,89 @@ def test_fast_precision_is_close_and_scoped():
     assert (exact - fast.double()).abs().max().item() < 5e-3
     again = source_index(target, source, stages, torch.device("cpu"))
     assert torch.equal(exact, again)  # the exact walk is untouched by having entered the context
+
+
+def test_the_default_budget_is_probed_once_per_second_not_per_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The walk's default budget reads the cgroup, /proc and the device once per TTL, not once per
+    patch; a budget handed in is never probed for. Slabbing changes no value, so a stale second
+    changes none either."""
+    from konfai.data import sampling
+    from konfai.utils import budget as budget_module
+
+    probes: list[int] = []
+    probe = budget_module.available_memory_bytes
+    monkeypatch.setattr(budget_module, "available_memory_bytes", lambda: probes.append(1) or probe())
+    clock = [1000.0]
+    monkeypatch.setattr(sampling, "_now", lambda: clock[0])
+    sampling._default_budgets.clear()
+    try:
+        grid = _grid((21, 13, 17))
+        rows = walk_rows(grid, (), torch.device("cpu"))
+        for _ in range(50):
+            assert walk_rows(grid, (), torch.device("cpu")) == rows
+        assert len(probes) == 1
+        clock[0] += sampling._BUDGET_TTL_SECONDS + 0.01
+        walk_rows(grid, (), torch.device("cpu"))
+        assert len(probes) == 2
+        walk_rows(grid, (), torch.device("cpu"), budget_bytes=50_000)
+        assert len(probes) == 2
+    finally:
+        sampling._default_budgets.clear()
+
+
+def _diagonal_stage(matrix_diagonal, translation) -> AffineStage:
+    return AffineStage(AffineMap(np.diag(np.asarray(matrix_diagonal, dtype=np.float64)), np.asarray(translation)))
+
+
+@pytest.mark.parametrize(
+    "stages",
+    [
+        [_diagonal_stage([1.0, 1.0, 1.0], RNG.normal(0, 5, 3))],
+        [_diagonal_stage(RNG.uniform(0.5, 1.5, 3), [0.0, 0.0, 0.0])],
+        [
+            _diagonal_stage([1.0, 1.0, 1.0], RNG.normal(0, 5, 3)),
+            _diagonal_stage(RNG.uniform(0.5, 1.5, 3), [0.0, 0.0, 0.0]),
+        ],
+        [_diagonal_stage([1.0, -1.0, 1.0], RNG.normal(0, 5, 3)), _diagonal_stage([1.0, 1.0, 1.0], RNG.normal(0, 5, 3))],
+    ],
+    ids=["translation", "scale", "translation-then-scale", "flip-then-translation"],
+)
+def test_a_diagonal_stored_map_walks_bitwise_what_the_general_path_walks(stages) -> None:
+    """A translation, an axis-aligned scale and their composition fold to an exactly diagonal map,
+    and the per-axis coordinates are the general walk's own numbers: the fold is the walk's
+    ``pending``, applied per component with the zero columns left out."""
+    from konfai.data.sampling import separable_source_index
+    from konfai.data.sampling import source_index as walk
+
+    for trial in range(3):
+        directions = np.diag(RNG.choice([-1.0, 1.0], 3)), np.eye(3)
+        target = Grid((9, 8, 7), RNG.uniform(-30, 30, 3), RNG.uniform(0.4, 2.5, 3), directions[trial % 2])
+        source = Grid((8, 6, 9), RNG.uniform(-30, 30, 3), RNG.uniform(0.4, 2.5, 3), directions[(trial + 1) % 2])
+        axes = separable_source_index(target, source, stages, torch.device("cpu"))
+        assert axes is not None
+        coordinates = walk(target, source, stages, torch.device("cpu"))
+        for array_axis, axis_values in enumerate(axes):
+            component = 3 - 1 - array_axis
+            picked = coordinates.movedim(-1, 0)[component]
+            broadcast_shape = [1, 1, 1]
+            broadcast_shape[array_axis] = -1
+            assert torch.equal(picked, axis_values.reshape(broadcast_shape).expand_as(picked)), (
+                f"axis {array_axis} drifted at trial {trial}"
+            )
+
+
+def test_a_map_that_does_not_factorise_is_refused() -> None:
+    """A rotation, and any displacement stage, take the general walk: the separable form has no
+    term for them, and a tolerance would admit a map whose two forms disagree in the last bit."""
+    from konfai.data.sampling import separable_source_index
+
+    target, source = _grid((9, 8, 7)), _grid((8, 6, 9))
+    theta = 0.3
+    rotation = np.array([[np.cos(theta), -np.sin(theta), 0], [np.sin(theta), np.cos(theta), 0], [0, 0, 1.0]])
+    assert (
+        separable_source_index(target, source, [AffineStage(AffineMap(rotation, np.zeros(3)))], torch.device("cpu"))
+        is None
+    )
+    assert separable_source_index(target, source, [_field((5, 5, 5), 1)], torch.device("cpu")) is None
+    quiet = DisplacementStage(_grid((5, 5, 5)), np.zeros((3, 5, 5, 5)), 1)
+    assert separable_source_index(target, source, [quiet], torch.device("cpu")) is None

@@ -20,6 +20,7 @@ import inspect
 import os
 import tempfile
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -32,8 +33,10 @@ import torch
 
 try:
     import SimpleITK as sitk
+    from SimpleITK.SimpleITK import _SetImageFromArray as _set_image_from_array
 except ImportError:
     sitk = None  # type: ignore[assignment]
+    _set_image_from_array = None
 import torch.nn.functional as F
 
 from konfai import cuda_visible_devices
@@ -1282,6 +1285,39 @@ class _ReferenceGrid(_TargetGrid):
         return f"reference '{self.entry}'" + (" (per case)" if "{case}" in self.entry else "")
 
 
+class _SitkInput:
+    """ITK's input image for :func:`_resample_with_sitk`, reused across the regions of a sweep.
+
+    ``GetImageFromArray`` allocates and zero-fills a new image per array, and the fresh mapping
+    pays its page faults: 44-48 ms per 113 MiB against 6-9 ms filled in place (SimpleITK 2.5.5,
+    a resample executed between two fills). The image is filled in place while the regions keep
+    one shape and dtype and replaced when they do not; only one is ever held, the old dropped
+    before the next is allocated. The whole-volume call drops it on its way out: what is held
+    between calls is a region, never a case.
+
+    The fill is the primitive the wrapper itself calls, ``_SetImageFromArray``
+    (SimpleITK/SimpleITK#2683 asks for it as an ``outputImage`` argument). It checks the byte
+    length only, so the shape and dtype key is what keeps a same-length array from being
+    reinterpreted.
+    """
+
+    def __init__(self) -> None:
+        self._image: Any = None
+        self._key: tuple[tuple[int, ...], str] | None = None
+
+    def filled(self, array: np.ndarray) -> Any:
+        key = (tuple(array.shape), array.dtype.str)
+        if _set_image_from_array is None or key != self._key:
+            self.drop()
+            self._image, self._key = sitk.GetImageFromArray(array), key
+        else:
+            _set_image_from_array(array, self._image)
+        return self._image
+
+    def drop(self) -> None:
+        self._image = self._key = None
+
+
 def _resample_with_sitk(
     payload: torch.Tensor,
     region: Grid,
@@ -1290,6 +1326,7 @@ def _resample_with_sitk(
     region_starts: list[int],
     mode: str,
     fill: float,
+    sitk_input: _SitkInput | None = None,
 ) -> torch.Tensor | None:
     """One region of a resample through ITK's own filter, on the host.
 
@@ -1342,7 +1379,8 @@ def _resample_with_sitk(
     result = torch.empty((int(payload.shape[0]), *(int(e) for e in region.size_zyx)), dtype=payload.dtype)
     landing = result.numpy()
     for channel in range(int(payload.shape[0])):
-        image = sitk.GetImageFromArray(np.ascontiguousarray(payload[channel].numpy()))
+        array = np.ascontiguousarray(payload[channel].numpy())
+        image = sitk.GetImageFromArray(array) if sitk_input is None else sitk_input.filled(array)
         image.SetOrigin(np.asarray(window_origin, dtype=np.float64).tolist())
         image.SetSpacing(np.asarray(source.spacing_xyz, dtype=np.float64).tolist())
         image.SetDirection(np.asarray(source.direction_xyz, dtype=np.float64).ravel().tolist())
@@ -1351,6 +1389,27 @@ def _resample_with_sitk(
         resampled = resampler.Execute(image)
         np.copyto(landing[channel], sitk.GetArrayViewFromImage(resampled), casting="unsafe")
     return result
+
+
+@dataclass(frozen=True)
+class _StoredMap:
+    """What the plan keeps of a case's decoded stored transform: its bound, and whether the map IS
+    the bound's affine part (every stage affine, folded exactly as the walk folds them).
+
+    The decoded stages are not kept. A dense field is a values-sized array per case, and the
+    launcher decodes every case as the plan is built: 50 cases of a 160x256x256 field were 11.7 GiB
+    resident and serialised to every rank. The bound is three vectors, and it is all a pull map
+    needs; the stages are decoded again where a region of their case is sampled, one case at a time
+    (:meth:`Resample._stored_stages`).
+    """
+
+    bound: TransformBound
+    affine: bool
+
+
+def _stages_bytes(stages: SpatialStages) -> int:
+    """What decoded stages hold: a dense field's values, an affine map next to nothing."""
+    return sum(stage.values.nbytes for stage in stages if isinstance(stage, DisplacementStage))
 
 
 class Resample(TransformInverse):
@@ -1486,12 +1545,30 @@ class Resample(TransformInverse):
         self._grids: dict[str, Grid] = {}
         #: Per case: the geometry keys its header did not carry (see :meth:`Grid.from_header`).
         self._assumed: dict[str, frozenset[str]] = {}
-        self._stored: dict[str, SpatialStages] = {}
+        #: Per case: what the plan keeps of its stored map (see :class:`_StoredMap`).
+        self._maps: dict[str, _StoredMap] = {}
+        #: The decoded stages of the last cases sampled, most recent last, within
+        #: ``stored_stage_bytes``. Not pickled: a rank decodes what it samples, not the cohort.
+        self._stored: OrderedDict[str, SpatialStages] = OrderedDict()
         #: The last field window read, kept for the sampler: sizing a region's source window reads
         #: the very field slab the sampler needs next, so one slot makes the two one read.
         self._field_window: tuple[str, object, DisplacementStage] | None = None
+        # ITK's input image on the host route, filled in place from one region to the next.
+        self._sitk_input = _SitkInput()
         self._refusal: str | None = None
         self._probed = False
+
+    def __getstate__(self) -> dict:
+        state = dict(self.__dict__)
+        state["_stored"] = OrderedDict()
+        state["_field_window"] = None
+        state["_sitk_input"] = _SitkInput()
+        return state
+
+    #: Bytes of decoded stages kept across cases: the affine maps of a whole cohort (a few hundred
+    #: bytes each) and the dense fields of the last two or three, so a fold reading N members per
+    #: region does not decode a member per region.
+    stored_stage_bytes = 512 << 20
 
     @staticmethod
     def _target_from(
@@ -1599,7 +1676,17 @@ class Resample(TransformInverse):
         whatever the region. Answers True when the question cannot be settled from the headers."""
         try:
             source, target = self._grids_of(name)
-            return separable_source_index(target, source, self._stages(name, target), torch.device("cpu")) is None
+            if self.displacement is not None:
+                return True
+            stages: SpatialStages = ()
+            if self.transforms is not None:
+                # From the plan's record, no decode: an all-affine map IS the bound's affine part,
+                # folded as the walk folds it, so the separable test answers what the run's will.
+                stored = self._stored_map(name)
+                if not stored.affine:
+                    return True
+                stages = (AffineStage(stored.bound.affine),)
+            return separable_source_index(target, source, stages, torch.device("cpu")) is None
         except Exception:  # nosec B110 - a map this cannot read is priced as the general path
             return True
 
@@ -1620,9 +1707,36 @@ class Resample(TransformInverse):
     # ------------------------------------------------------------------ the map
 
     def _stored_stages(self, name: str) -> SpatialStages:
-        """This case's stored transforms, decoded and composed, in application order."""
-        if name in self._stored:
-            return self._stored[name]
+        """This case's stored transforms, decoded and composed, in application order.
+
+        The last cases' stages are held, most recent last, within ``stored_stage_bytes``: a run
+        samples its cases one after the other, a fold reads its members region by region, and
+        a loader interleaving cases through a dense field decodes at each switch past the bound.
+        """
+        stages = self._stored.pop(name, None)
+        if stages is None:
+            stages = self._decode_stored(name)
+        self._stored[name] = stages
+        held = sum(_stages_bytes(kept) for kept in self._stored.values())
+        while len(self._stored) > 1 and held > self.stored_stage_bytes:
+            held -= _stages_bytes(self._stored.popitem(last=False)[1])
+        return stages
+
+    def _stored_map(self, name: str) -> _StoredMap:
+        """The plan's record of this case's stored map, decoded once and kept without its stages."""
+        stored = self._maps.get(name)
+        if stored is None:
+            stages = self._stored.get(name)
+            if stages is None:
+                stages = self._decode_stored(name)
+            rank = self._source_grid(name).rank
+            stored = self._maps[name] = _StoredMap(
+                bound_of(stages, rank), all(isinstance(stage, AffineStage) for stage in stages)
+            )
+        return stored
+
+    def _decode_stored(self, name: str) -> SpatialStages:
+        """This case's stored transforms read and decoded, application order, nothing kept."""
         from konfai.utils.ITK import invert_stages, read_transform_stages
 
         _require_simpleitk()
@@ -1656,8 +1770,7 @@ class Resample(TransformInverse):
                     )
                 decoded = inverted
             stages.extend(decoded)
-        self._stored[name] = tuple(stages)
-        return self._stored[name]
+        return tuple(stages)
 
     def _field_stage(self, name: str, region: Grid) -> DisplacementStage:
         """The declared field over ``region``, read on its own grid and no wider: once.
@@ -1682,8 +1795,10 @@ class Resample(TransformInverse):
         return stage
 
     def stream_abort(self, name: str) -> None:
+        self._stored.pop(name, None)
         if self._field_window is not None and self._field_window[0] == name:
             self._field_window = None
+        self._sitk_input.drop()
 
     def _stages(self, name: str, region: Grid) -> SpatialStages:
         """The whole map over one target region, in application order."""
@@ -1703,7 +1818,7 @@ class Resample(TransformInverse):
                 "a field's reach is unknown before its values are read; nothing bounds it from headers."
             )
         if self.transforms is not None:
-            folded = bound_of(self._stored_stages(name), rank).after(folded)
+            folded = self._stored_map(name).bound.after(folded)
         return folded
 
     def _pricing_bound(self, name: str) -> TransformBound:
@@ -1718,7 +1833,7 @@ class Resample(TransformInverse):
         rank = self._source_grid(name).rank
         folded = TransformBound.exact(AffineMap.identity(rank))
         if self.transforms is not None:
-            folded = bound_of(self._stored_stages(name), rank).after(folded)
+            folded = self._stored_map(name).bound.after(folded)
         return folded
 
     # ------------------------------------------------------------------ the contract
@@ -1747,7 +1862,7 @@ class Resample(TransformInverse):
         if self.transforms is None:
             return
         try:
-            self._stored_stages(name)
+            self._stored_map(name)
         except TransformError:
             raise
         except Exception as error:  # a corrupt store fails both routes; name the case and the cure
@@ -1866,23 +1981,37 @@ class Resample(TransformInverse):
         # The same call the streamed path makes, over one region that happens to be the whole grid:
         # equality between the two paths is then a property of the code, not a claim about it.
         whole = tuple(slice(0, extent) for extent in target.size_zyx)
-        result = self._sample(name, tensor, whole, [0] * source.rank)
+        try:
+            result = self._sample(name, tensor, whole, [0] * source.rank)
+        finally:
+            self._sitk_input.drop()  # a whole volume is never held past its call
         self.write_stream_cache_attribute(cache_attribute, shape, name)
         return result
 
     def _sample(
-        self, name: str, sub_tensor: torch.Tensor, target_slices: tuple[slice, ...], region_starts: list[int]
+        self,
+        name: str,
+        sub_tensor: torch.Tensor,
+        target_slices: tuple[slice, ...],
+        region_starts: list[int],
+        budget_bytes: float | None = None,
     ) -> torch.Tensor:
         # 'fast' walks the coordinates in float32 for the whole sample: an opt-in the stage's
         # declaration made for its own data. The default context is the bit-exact float64 walk.
         if self.precision == "fast":
             with coordinate_precision(torch.float32):
-                return self._sample_in_context(name, sub_tensor, target_slices, region_starts)
-        return self._sample_in_context(name, sub_tensor, target_slices, region_starts)
+                return self._sample_in_context(name, sub_tensor, target_slices, region_starts, budget_bytes)
+        return self._sample_in_context(name, sub_tensor, target_slices, region_starts, budget_bytes)
 
     def _sample_in_context(
-        self, name: str, sub_tensor: torch.Tensor, target_slices: tuple[slice, ...], region_starts: list[int]
+        self,
+        name: str,
+        sub_tensor: torch.Tensor,
+        target_slices: tuple[slice, ...],
+        region_starts: list[int],
+        budget_bytes: float | None = None,
     ) -> torch.Tensor:
+        """One region's resample; ``budget_bytes`` bounds the walk's slabs (the machine's when None)."""
         source, target = self._grids_of(name)
         region = target.sub_grid(target_slices)
         stages = self._stages(name, region)
@@ -1906,7 +2035,9 @@ class Resample(TransformInverse):
         # 'precision: fast' is a permission the GPU walk uses; on the host the exact answer is also
         # the cheapest.
         if sub_tensor.device.type == "cpu" and sitk is not None:
-            resampled = _resample_with_sitk(sub_tensor, region, source, stages, region_starts, mode, self.fill_value)
+            resampled = _resample_with_sitk(
+                sub_tensor, region, source, stages, region_starts, mode, self.fill_value, self._sitk_input
+            )
             if resampled is not None:
                 return resampled
         # The walk's coordinate tensor is float64 x rank: on a large region it dwarfs the gathered
@@ -1915,18 +2046,23 @@ class Resample(TransformInverse):
         # indices stay global to the region, the gather's window and starts are the region's own,
         # so every row of every slab is the very tensor the single pass produces.
         rows_total = int(region.size_zyx[0])
-        rows = walk_rows(region, stages, sub_tensor.device)
+        rows = walk_rows(region, stages, sub_tensor.device, budget_bytes)
         if rows >= rows_total:
             coordinates = source_index(region, source, stages, sub_tensor.device)
             return gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value)
-        parts = []
+        # Each slab lands in the one output as it is gathered. Slabs held for a cat were a second
+        # output resident at the join, on exactly the regions that are large against the budget.
+        out = torch.empty(
+            (int(sub_tensor.shape[0]), *(int(extent) for extent in region.size_zyx)),
+            dtype=sub_tensor.dtype,
+            device=sub_tensor.device,
+        )
         for start in range(0, rows_total, rows):
-            coordinates = source_index_rows(
-                region, source, stages, sub_tensor.device, start, min(rows_total, start + rows)
-            )
-            parts.append(gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value))
+            stop = min(rows_total, start + rows)
+            coordinates = source_index_rows(region, source, stages, sub_tensor.device, start, stop)
+            out[:, start:stop] = gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value)
             del coordinates
-        return torch.cat(parts, dim=1)
+        return out
 
     def _mode(self, tensor: torch.Tensor) -> str:
         """``nearest``, ``linear`` or ``cubic``: what a sampler asks before it blends anything.

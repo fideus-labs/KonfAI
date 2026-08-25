@@ -23,7 +23,7 @@ an axis-aligned grid passes a map that is wrong in exactly the ways this stage c
 import numpy as np
 import pytest
 import torch
-from konfai.data.transform import LocalityKind, RegionContext, Resample
+from konfai.data.transform import LocalityKind, RegionContext, Resample, _SitkInput
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
 
@@ -422,3 +422,188 @@ def test_cubic_saturates_overshoot_instead_of_wrapping() -> None:
     dark, bright = out[..., : out.shape[-1] // 2 - 2], out[..., out.shape[-1] // 2 + 2 :]
     assert int(dark.max()) <= 50
     assert int(bright.min()) >= 200
+
+
+class _FieldPerCase:
+    """A dense field per case, built from the case's name: what a cohort's transform group answers."""
+
+    def is_dataset_exist(self, group: str, name: str) -> bool:
+        del name
+        return group == "reg"
+
+    def read_transform(self, group: str, name: str) -> "sitk.Transform":
+        del group
+        rng = np.random.RandomState(int(name.rsplit("_", 1)[1]))
+        image = sitk.GetImageFromArray(rng.normal(0.0, 2.0, (*SIZE, 3)), isVector=True)
+        return sitk.DisplacementFieldTransform(image)
+
+
+def test_the_plan_keeps_a_case_s_bound_and_the_run_holds_one_case_s_stages():
+    """Planning a cohort of dense fields keeps three vectors per case, not the fields: the object
+    that crosses mp.spawn does not grow with the cohort, and a rank holds the stages of the case it
+    is sampling and of no other."""
+    import pickle
+
+    image = _image(oblique=False)
+    attribute = _attribute(image)
+    field_bytes = int(np.prod(SIZE)) * 3 * 8
+
+    def planned(cases: int) -> Resample:
+        stage = Resample(transforms={"reg": False})
+        stage.set_datasets([_FieldPerCase()])
+        for case in range(cases):
+            stage.transform_shape("", f"CASE_{case:03d}", list(SIZE), Attribute(attribute))
+        return stage
+
+    one, ten = planned(1), planned(10)
+    assert not one._stored and not ten._stored, "the plan must not hold decoded stages"
+    assert len(ten._maps) == 10
+    assert len(pickle.dumps(ten)) < field_bytes, "the pickle carries a field's values"
+    assert len(pickle.dumps(ten)) - len(pickle.dumps(one)) < 9 * 1024, "a case is its grid and its bound"
+
+    volume = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
+    first = ten("CASE_003", volume, Attribute(attribute))
+    assert set(ten._stored) == {"CASE_003"}
+    ten("CASE_007", volume, Attribute(attribute))
+    assert set(ten._stored) == {"CASE_003", "CASE_007"}, "the last cases' stages are held, within the bound"
+    ten.stored_stage_bytes = 1
+    ten("CASE_005", volume, Attribute(attribute))
+    assert set(ten._stored) == {"CASE_005"}, "past the bound, the slot follows the case being sampled"
+    # The same values as a stage that decoded the map once and kept it.
+    kept = planned(10)
+    kept._stored["CASE_003"] = kept._decode_stored("CASE_003")
+    torch.testing.assert_close(first, kept("CASE_003", volume, Attribute(attribute)), rtol=0.0, atol=0.0)
+    # What a rank receives holds no stages either; it decodes what it samples.
+    rank = pickle.loads(pickle.dumps(ten))
+    assert not rank._stored and set(rank._maps) == set(ten._maps)
+    torch.testing.assert_close(rank("CASE_003", volume, Attribute(attribute)), first, rtol=0.0, atol=0.0)
+
+
+def test_the_slabbed_walk_lands_each_slab_in_the_one_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Above the walk budget the general path gathers slab by slab, and each slab is written into
+    the output as it lands: bit for bit the single pass, with no parts held for a cat."""
+    from konfai.data import transform as transform_module
+
+    image = _image(oblique=True)
+    attribute = _attribute(image)
+    volume = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
+    # Cubic: the host resampler declines it, so the walk serves the region on the CPU too.
+    stage = _stage(image, _euler(image), interpolation="cubic")
+    whole = stage(CASE, volume, Attribute(attribute))
+    monkeypatch.setattr(transform_module, "walk_rows", lambda *args, **kwargs: 5)
+    joins: list[int] = []
+    cat = torch.cat
+    monkeypatch.setattr(torch, "cat", lambda *args, **kwargs: joins.append(1) or cat(*args, **kwargs))
+    slabbed = stage(CASE, volume, Attribute(attribute))
+    assert torch.equal(slabbed, whole)
+    assert not joins
+
+
+def _diagonal_maps(image) -> list[tuple[str, "sitk.Transform"]]:
+    translation = sitk.TranslationTransform(3, (2.3, -1.7, 0.9))
+    scale = sitk.ScaleTransform(3, (1.15, 0.9, 1.3))
+    scale.SetCenter(image.TransformContinuousIndexToPhysicalPoint([(s - 1) / 2 for s in image.GetSize()]))
+    return [
+        ("translation", translation),
+        ("scale", scale),
+        ("translation-then-scale", sitk.CompositeTransform([translation, scale])),
+    ]
+
+
+def test_a_diagonal_stored_map_resamples_separably_within_the_routes_it_replaces() -> None:
+    """A stored translation, an axis-aligned scale or their composition factorises: the region is
+    read one axis at a time, from the very coordinates the general walk computes, and no coordinate
+    per voxel is built. The values stay within the rounding of the two routes that served these
+    maps before, the general walk and the host resampler, both kept here as oracles: measured at
+    most 1.3e-6 of the range against the walk (grid_sample's normalisation) and 4.3e-8 against ITK
+    (one float32 ulp) on a float32 blend, one unit on at most 0.23% of the voxels of an int16
+    blend, and nothing at all on a nearest pick, where every route copies the same voxel.
+    """
+    from konfai.data.sampling import gather, source_index
+    from konfai.data.transform import _resample_with_sitk
+
+    image = _image(oblique=False)
+    counts = (_phantom() * 4.0).astype(np.int16)
+    for array in (_phantom(), counts):
+        payload = sitk.GetImageFromArray(array)
+        payload.CopyInformation(image)
+        attribute = _attribute(payload)
+        volume = torch.from_numpy(array).unsqueeze(0)
+        span = float(array.max() - array.min())
+        for label, transform in _diagonal_maps(payload):
+            for mode in ("linear", "nearest"):
+                stage = _stage(payload, transform, interpolation=mode)
+                assert stage.slab_height_sensitive(CASE) is False, label
+                got = stage(CASE, volume, Attribute(attribute))
+                source, target = stage._grids_of(CASE)
+                stages = stage._stages(CASE, target)
+                walk = gather(
+                    volume, source_index(target, source, stages, torch.device("cpu")), [0, 0, 0], list(SIZE), mode, 0.0
+                )
+                host = _resample_with_sitk(volume, target, source, stages, [0, 0, 0], mode, 0.0)
+                assert host is not None
+                if mode == "nearest":
+                    assert torch.equal(got, walk) and torch.equal(got, host), label
+                    continue
+                for name, other, band in (("walk", walk, 3e-6), ("host", host, 1e-7)):
+                    apart = (got.double() - other.double()).abs()
+                    if array.dtype == np.int16:
+                        assert float(apart.max()) <= 1.0, f"{label}/{name}: {float(apart.max())} units apart"
+                        assert int((apart > 0).sum()) <= apart.numel() // 200, f"{label}/{name}: the seam is not a seam"
+                    else:
+                        assert float(apart.max()) <= band * span, f"{label}/{name}: {float(apart.max()):.3g}"
+    rotated = _stage(image, _euler(image))
+    assert rotated.slab_height_sensitive(CASE) is True
+
+
+def test_a_diagonal_stored_map_matches_simpleitk_on_a_label_map() -> None:
+    """The external oracle for the separable route through a stored map: a nearest pick through a
+    translation and a scale lands every label where sitk.Resample lands it, byte for byte."""
+    labels = (np.abs(_phantom()) % 7).astype(np.uint8)
+    image = sitk.GetImageFromArray(labels)
+    image.CopyInformation(_image(oblique=False))
+    volume = torch.from_numpy(labels).unsqueeze(0)
+    for label, transform in _diagonal_maps(image):
+        stage = _stage(image, transform)
+        got = stage(CASE, volume, _attribute(image)).squeeze(0).numpy()
+        want = sitk.GetArrayFromImage(sitk.Resample(image, image, transform, sitk.sitkNearestNeighbor, 0.0))
+        np.testing.assert_array_equal(got, want, err_msg=label)
+
+
+class TestTheHostRouteReusesItsInputImage:
+    """ITK's input image is filled in place from one region to the next, replaced on a change of
+    shape or dtype (a same-length array is never reinterpreted), and never held past a whole-volume
+    call or across a pickle."""
+
+    def test_one_shape_fills_the_image_in_place_and_another_replaces_it(self):
+        holder = _SitkInput()
+        array = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        first = holder.filled(array)
+        assert holder.filled(array + 1.0) is first
+        assert np.array_equal(sitk.GetArrayViewFromImage(first), array + 1.0)
+        for other in (array.view(np.int32), array.reshape(3, 2, 4)):  # the same 96 bytes
+            image = holder.filled(other)
+            assert image is not first
+            assert image.GetSize() == other.shape[::-1]
+            assert np.array_equal(sitk.GetArrayViewFromImage(image), other)
+        holder.drop()
+        assert holder.filled(array) is not first
+
+    def test_a_sweep_keeps_the_image_and_a_whole_volume_call_does_not(self):
+        image = _image()
+        attribute = _attribute(image)
+        volume = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
+        stage = _stage(image, _euler(image))  # never separable: the host route runs ITK
+        target = (slice(0, 4), slice(0, SIZE[1]), slice(0, SIZE[2]))
+        source = tuple(stage.stream_region_source(CASE, target, list(SIZE), Attribute(attribute)))
+        context = RegionContext(source, target, tuple(SIZE), tuple(SIZE))
+        stage.stream_region(CASE, volume[(slice(None), *source)], context, Attribute(attribute))
+        held = stage._sitk_input._image
+        assert held is not None
+        stage.stream_region(CASE, volume[(slice(None), *source)], context, Attribute(attribute))
+        assert stage._sitk_input._image is held
+        assert stage.__getstate__()["_sitk_input"]._image is None
+        stage.stream_abort(CASE)
+        assert stage._sitk_input._image is None
+        stage(CASE, volume, Attribute(attribute))
+        assert stage._sitk_input._image is None
