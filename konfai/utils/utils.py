@@ -447,6 +447,12 @@ def storage_form(path: Path) -> str:
     return "" if path.is_dir() else path.suffix
 
 
+def is_store_name(name: str) -> bool:
+    """Whether ``name`` is spelled as an OME-Zarr store, by its extension alone: no disk is probed."""
+    lowered = name.lower()
+    return any(lowered.endswith(form) for form in _STORE_FORMS)
+
+
 def directory_volume_form(path: Path) -> str | None:
     """The form a directory that is ITSELF one volume is read under, or ``None`` for a plain one.
 

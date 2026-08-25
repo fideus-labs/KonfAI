@@ -1003,3 +1003,14 @@ def test_a_streamed_mha_mask_is_read_by_region_and_never_held_whole(tmp_path: Pa
     monkeypatch.undo()
     whole = Mask(path=str(path), value_outside=-1)("CASE", torch.ones(1, 8, 8, 8), Attribute())
     np.testing.assert_array_equal(whole[0, :, 0, 0].numpy(), [-1, -1, 1, 1, 1, 1, -1, -1])
+
+
+@pytest.mark.parametrize("dtype", [torch.uint16, torch.bool, torch.uint8, torch.int16, torch.float16])
+def test_inference_stack_median_picks_the_same_element_whatever_the_dtype(dtype: torch.dtype) -> None:
+    """torch has no median kernel for uint16, uint32, uint64 or bool: the stack is widened for those
+    alone, and the element picked is the one the widened median picks."""
+    stack = torch.tensor([[7, 1], [3, 5], [9, 0]]).to(dtype)
+    expected = torch.median(stack.float(), dim=0).values.to(dtype)
+    reduced = InferenceStack(dataset="", name="pred", mode="median")._reduce(stack)
+    assert reduced.dtype == dtype
+    assert torch.equal(reduced, expected)

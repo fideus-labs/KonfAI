@@ -775,3 +775,44 @@ def test_cpu_thread_budget_skips_macos(monkeypatch) -> None:
     """On macOS set_num_threads intermittently crashes libomp once any parallel region ran (CI
     SIGSEGV, whichever workflow called it first); the default stays."""
     assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None, platform="darwin") == []
+
+
+@pytest.mark.parametrize("cores,expected", [(24, 8), (12, 4), (4, 4), (2, 2), (1, 1)])
+def test_zarr_keeps_a_small_share_whole(monkeypatch, cores: int, expected: int) -> None:
+    """A third of a 24-core share is the measured point; a third of four cores is one chunk in
+    flight, which on a remote root is the whole of the read's parallelism."""
+    zarr = pytest.importorskip("zarr")
+    previous = zarr.config.get("async.concurrency")
+    try:
+        _budget_applied(monkeypatch, cores=cores, ranks=None, omp=None)
+        assert zarr.config.get("async.concurrency") == expected
+    finally:
+        zarr.config.set({"async.concurrency": previous})
+
+
+def _map_in_child() -> None:
+    seen: list[int] = []
+    rt.map_over_rank_pool(seen.append, [1, 2, 3])
+    sys.exit(0 if sorted(seen) == [1, 2, 3] else 1)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="forking a threaded process is a Linux contract")
+def test_a_forked_child_builds_its_own_rank_pool(monkeypatch) -> None:
+    """A child inherits the executor's bookkeeping and none of its threads, so work handed to it
+    waits forever; DataLoader workers fork the rank."""
+    import multiprocessing
+
+    monkeypatch.setenv("OMP_NUM_THREADS", "4")
+    monkeypatch.setattr(rt, "_rank_pool", None)
+    warmed: list[int] = []
+    rt.map_over_rank_pool(warmed.append, [1, 2, 3])  # the parent's pool exists and has run
+
+    child = multiprocessing.get_context("fork").Process(target=_map_in_child)
+    child.start()
+    child.join(30)
+    hung = child.is_alive()
+    if hung:
+        child.kill()
+        child.join()
+    assert not hung, "the child's read waits on threads it does not have"
+    assert child.exitcode == 0

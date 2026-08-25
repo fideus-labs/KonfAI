@@ -55,7 +55,7 @@ except ImportError:
 from konfai import current_date
 from konfai.utils import uri
 from konfai.utils.errors import DatasetManagerError
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, directory_volume_form, split_format_level
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, directory_volume_form, is_store_name, split_format_level
 
 _h5_file_locks: dict[str, threading.RLock] = {}
 _h5_file_locks_guard = threading.Lock()
@@ -271,6 +271,11 @@ def _divisor_tile(extent: int, cap: int) -> int:
         return max(1, extent)
     divisor = next((candidate for candidate in range(cap, 0, -1) if extent % candidate == 0), 1)
     return divisor if divisor * 4 >= cap else extent
+
+
+def _is_listed_name(name: str) -> bool:
+    """Whether ``name`` is one component of a directory listing, which is how a root spells its cases."""
+    return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
 
 
 class Attribute(dict[str, Any]):
@@ -2133,7 +2138,7 @@ class Dataset:
             data: sitk.Image | sitk.Transform | np.ndarray,
             attributes: Attribute | None = None,
         ) -> None:
-            from konfai.utils.ome_zarr import write_ome_zarr
+            from konfai.utils.ome_zarr import clear_ome_zarr_cache, write_ome_zarr
 
             attributes = attributes or Attribute()
             # Two ways to say "this is a field": hand over a DisplacementFieldTransform, or mark the
@@ -2184,6 +2189,8 @@ class Dataset:
                 shutil.rmtree(staging, ignore_errors=True)  # or a full second copy of the entry stays
                 raise
             shutil.rmtree(replaced, ignore_errors=True)
+            # The reader memoises decoded chunks by path, and this path now holds another store.
+            clear_ome_zarr_cache(final)
             with contextlib.suppress(Exception):
                 _retire_dead_debris(final)  # housekeeping past the publish: it cannot fail the write
 
@@ -2641,7 +2648,12 @@ class Dataset:
         return path, path.endswith("/")
 
     def rebase(self, prefix: Path) -> None:
-        """Prepend ``prefix`` to this dataset's path, re-deriving ``is_directory`` from the format."""
+        """Prepend ``prefix`` to this dataset's path, re-deriving ``is_directory`` from the format.
+
+        A rebased root is an output root, and ``prefix / uri`` folds the scheme's second slash away:
+        refused as a remote root before it can stop looking like one.
+        """
+        uri.refuse_write(self.filename)
         self.filename, self.is_directory = Dataset._normalize_path(prefix / self.filename, self.file_format)
 
     @staticmethod
@@ -2651,6 +2663,11 @@ class Dataset:
         extension itself). Probes the first case's entries only: cheap, and cases share one layout."""
         if not uri.is_dir(root):
             return None
+        if uri.is_uri(root):
+            # Only the store backend reads a remote root, and a store is told by its name: a
+            # remote entry is never probed as a path, which on a bare name asks the working directory.
+            names = Dataset._first_case_entries(root)
+            return "omezarr" if any(is_store_name(name.name) for name in names) else None
         for entry in Dataset._first_case_entries(root):
             volume = directory_volume_form(entry)
             if volume is not None:
@@ -3065,7 +3082,8 @@ class Dataset:
         answers its selection. A root holding one entry per case is opened once per case it HOLDS
         to enumerate, and once per case the caller ASKED for to answer this, which is the whole
         difference between a wide root and a narrow subset. A root that is one entry answers
-        either from the single listing it already takes.
+        either from the single listing it already takes. A name is probed only as the listing
+        would have spelled it: one path component, so ``case/`` or ``./case`` selects nothing.
         """
         if requested is None or not self.is_directory:
             names = self.get_names(groups)
@@ -3076,7 +3094,7 @@ class Dataset:
                 name
                 for sub_directory in self._get_sub_directories(groups)
                 for name in requested
-                if self._holds(sub_directory, group, name)
+                if _is_listed_name(name) and self._holds(sub_directory, group, name)
             }
         )
 

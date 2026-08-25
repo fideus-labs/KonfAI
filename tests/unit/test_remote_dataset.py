@@ -179,3 +179,41 @@ def test_an_unknown_scheme_names_itself(memory_root: str) -> None:
     del memory_root
     with pytest.raises(DatasetManagerError, match="quicksand"):
         uri.exists("quicksand://bucket/key")
+
+
+def test_a_probe_the_filesystem_cannot_answer_raises(memory_root: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """fsspec's ``isdir`` and ``exists`` answer False on any failure, so a denied bucket would read
+    as an absent one: every probe here goes through ``info`` and raises on anything but absence."""
+
+    def denied(*_args, **_kwargs):
+        raise PermissionError("AccessDenied")
+
+    monkeypatch.setattr(fsspec.filesystem("memory").__class__, "info", denied)
+
+    for probe in (uri.exists, uri.is_dir, uri.list_names):
+        with pytest.raises(DatasetManagerError, match="could not be"):
+            probe(f"{memory_root}/CASE_000")
+
+
+def test_an_absent_remote_key_is_absent_and_not_an_error(memory_root: str) -> None:
+    assert not uri.exists(f"{memory_root}/CASE_404")
+    assert not uri.is_dir(f"{memory_root}/CASE_404")
+    assert uri.list_names(f"{memory_root}/CASE_404") == []
+
+
+def test_a_remote_cohort_is_told_to_be_a_store_by_its_entries_names(memory_root: str) -> None:
+    """Detection never probes a remote entry as a local path: a bare name would ask the working
+    directory, and the answer would change with it."""
+    _publish(memory_root, "CASE_000", "CT", np.zeros((1, 4, 4, 4), np.float32))
+
+    assert Dataset._detect_directory_store_format(f"{memory_root}/") == "omezarr"
+    assert Dataset(memory_root, "mha").file_format == "omezarr"
+
+
+def test_rebasing_a_remote_root_is_refused_before_it_stops_looking_remote() -> None:
+    """``prefix / 's3://bucket'`` is ``prefix/s3:/bucket``: a local directory named after a scheme."""
+    from pathlib import Path
+
+    dataset = Dataset("memory://bucket/out", "mha")
+    with pytest.raises(DatasetManagerError, match="writes only to local ones"):
+        dataset.rebase(Path("/runs/Predictions/run"))

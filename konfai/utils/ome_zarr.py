@@ -298,6 +298,11 @@ class _ReadSchedule:
         self._cursor += 1
         return self._cursor < len(self._steps) and self._steps[self._cursor] == chunks
 
+    @property
+    def done(self) -> bool:
+        """Whether the read just begun is the last one declared."""
+        return self._cursor >= len(self._steps) - 1
+
     def next_use(self, coords: tuple) -> int:
         """The step that reads ``coords`` next, ``_NEVER_AGAIN`` when none does."""
         uses = self._uses.get(coords)
@@ -361,8 +366,8 @@ class _DecodedChunkCache:
         """The chunks the read about to happen touches, which is what advances its schedule."""
         with self._lock:
             schedule = self._schedules.get(identity)
-            if schedule is not None and not schedule.advance(chunks):
-                del self._schedules[identity]
+            if schedule is not None and (not schedule.advance(chunks) or schedule.done):
+                del self._schedules[identity]  # deviated from, or read to its end: nothing left to plan
 
     def forget(self, store_path: str | None = None) -> None:
         """Drop what one store put here, or everything when no store is named."""

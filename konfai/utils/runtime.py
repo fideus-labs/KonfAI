@@ -996,6 +996,16 @@ _rank_pool: ThreadPoolExecutor | None = None
 _rank_pool_lock = threading.Lock()
 
 
+def _forget_rank_pool() -> None:
+    """A forked child inherits the executor's bookkeeping and none of its threads: work submitted to
+    it waits forever. The child builds its own on first use."""
+    global _rank_pool, _rank_pool_lock
+    _rank_pool, _rank_pool_lock = None, threading.Lock()
+
+
+os.register_at_fork(after_in_child=_forget_rank_pool)
+
+
 def rank_cpu_share(world_size: int | None = None) -> int:
     """The cores this rank may use: the node's, divided between its local ranks, or exactly
     ``OMP_NUM_THREADS`` when that is set.
@@ -1088,8 +1098,10 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
         #   12 -> 11.0 / 11.3 s     12 -> 4.7 / 5.1 s
         #   24 -> 11.0 / 12.3 s     24 -> 5.3 / 5.4 s
         # A third wins or ties on both; starving it costs the host path 1.4 s and oversubscribing
-        # costs the reader its own throughput (read busy 4.4-4.6 s at 8, 5.1-5.2 s at 24).
-        zarr.config.set({"async.concurrency": max(1, cores // 3)})
+        # costs the reader its own throughput (read busy 4.4-4.6 s at 8, 5.1-5.2 s at 24). A share
+        # of a few cores keeps them all, up to four: a third of it is one chunk in flight, and on a
+        # remote root that is the whole of the read's parallelism.
+        zarr.config.set({"async.concurrency": max(min(cores, 4), cores // 3)})
     except ImportError:
         pass
     # Marked applied only once it is: a raise above (a bad OMP_NUM_THREADS) leaves the next call free to retry.

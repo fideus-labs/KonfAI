@@ -40,7 +40,7 @@ _URI = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]+)://")
 
 #: The pip extra carrying each scheme's fsspec implementation. A scheme absent from here is named
 #: in the refusal without an install hint.
-_SCHEME_EXTRAS = {"s3": "s3", "s3a": "s3", "gs": "gcs", "gcs": "gcs", "abfs": "azure", "az": "azure"}
+_SCHEME_EXTRAS = {"s3": "s3", "s3a": "s3"}
 
 
 def is_uri(path: str | Path) -> bool:
@@ -107,24 +107,33 @@ def filesystem(path: str | Path) -> Any:
         ) from exc
 
 
-def _ask(path: str | Path, question: str) -> bool:
-    """One yes/no question put to the remote filesystem. A filesystem that cannot be reached RAISES;
-    only one that answers gets to say no."""
+def _info(path: str | Path, action: str) -> dict[str, Any] | None:
+    """What the remote filesystem knows of ``path``, ``None`` when it holds nothing there.
+
+    Asked through ``info`` and not through ``exists``/``isdir``: fsspec answers those ``False`` on
+    any failure, so a denied bucket and a missing key read alike. A filesystem that cannot be
+    reached RAISES; only one that answers gets to say no.
+    """
     fs = filesystem(path)
     try:
-        return bool(getattr(fs, question)(str(path)))
+        return dict(fs.info(str(path)))
+    except FileNotFoundError:
+        return None
     except Exception as exc:
-        raise _unreachable(path, "probed", exc) from exc
+        raise _unreachable(path, action, exc) from exc
 
 
 def exists(path: str | Path) -> bool:
     """Whether ``path`` is there, asked of whichever filesystem owns it."""
-    return _ask(path, "exists") if is_uri(path) else os.path.exists(path)
+    return _info(path, "probed") is not None if is_uri(path) else os.path.exists(path)
 
 
 def is_dir(path: str | Path) -> bool:
     """Whether ``path`` is a directory (a key prefix, on an object store)."""
-    return _ask(path, "isdir") if is_uri(path) else os.path.isdir(path)
+    if not is_uri(path):
+        return os.path.isdir(path)
+    info = _info(path, "probed")
+    return info is not None and info.get("type") == "directory"
 
 
 def list_names(path: str | Path) -> list[str]:
@@ -135,10 +144,10 @@ def list_names(path: str | Path) -> list[str]:
     """
     if not is_uri(path):
         return sorted(os.listdir(path)) if os.path.isdir(path) else []
+    if not is_dir(path):
+        return []
     fs, target = filesystem(path), str(path)
     try:
-        if not fs.isdir(target):
-            return []
         children = fs.ls(target, detail=False)
     except Exception as exc:
         raise _unreachable(path, "listed", exc) from exc

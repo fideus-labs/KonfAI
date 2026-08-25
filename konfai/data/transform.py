@@ -1299,7 +1299,7 @@ def _resample_with_sitk(
     grid; the stages one composite transform (:func:`~konfai.utils.ITK.encode_transform_stages`),
     applied by ``sitk.Resample`` in the direction KonfAI's walk applies it (target point through
     the stages to the source point). Channels are resampled one by one, which is what ITK does
-    for a vector image anyway. ``None`` for a payload ITK has no pixel type for (bool, bf16).
+    for a vector image anyway. ``None`` for a payload ITK has no pixel type for (bool, f16, bf16).
     """
     from konfai.utils.ITK import encode_transform_stages
 
@@ -1330,8 +1330,9 @@ def _resample_with_sitk(
     # copies voxels, so it keeps the payload's own dtype, exactly as the walk does.
     #
     # The filter is ASKED for that dtype instead of being handed a region converted into it. ITK
-    # interpolates in double from either, so the values are the same, and the conversion that was a
-    # copy of the whole region becomes the filter's own output.
+    # interpolates in double from either, so the values are the same for every dtype float32 carries
+    # exactly (an int32 or int64 past 2^24 blends from its exact values where the cast rounded them),
+    # and the conversion that was a copy of the whole region becomes the filter's own output.
     working_dtype = payload.dtype if mode == "nearest" else sampling_dtype(payload)
     blend_pixel_id = {torch.float32: sitk.sitkFloat32, torch.float64: sitk.sitkFloat64}.get(working_dtype)
     if mode != "nearest" and blend_pixel_id is None:
@@ -3613,12 +3614,16 @@ class InferenceStack(Transform):
         return _tensors.float().cpu().numpy()
 
     def _reduce(self, tensors: torch.Tensor) -> torch.Tensor:
-        # A median SELECTS: the wide copy of the whole stack bought nothing, since the element
-        # picked is the same under any monotone cast and comes back in its own dtype. The mean has
-        # to accumulate wider, and torch materialises that copy however it is spelled.
-        return (
-            torch.median(tensors, dim=0).values if self.mode == "median" else tensors.float().mean(0).to(tensors.dtype)
-        )
+        if self.mode != "median":
+            # The mean has to accumulate wider, and torch materialises that copy however it is spelled.
+            return tensors.float().mean(0).to(tensors.dtype)
+        # A median SELECTS: the element picked is the same under any monotone cast and comes back in
+        # its own dtype, so the stack is widened only where torch has no median kernel for it
+        # (uint16, uint32, uint64, bool).
+        try:
+            return torch.median(tensors, dim=0).values
+        except NotImplementedError:
+            return torch.median(tensors.float(), dim=0).values.to(tensors.dtype)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if tensors.shape[0] == 1:

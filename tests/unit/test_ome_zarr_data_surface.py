@@ -335,3 +335,26 @@ def test_a_sweep_declares_the_regions_it_will_read(tmp_path: Path, monkeypatch: 
     windows = declared[0]
     assert len(windows) == len(list(patching_module._sweep_targets([12, 8, 6], [3, 8, 6])))
     assert all(len(window) == 4 for window in windows), "a window covers the channel axis too"
+
+
+def test_an_entry_written_whole_over_another_is_read_back_as_written(tmp_path: Path) -> None:
+    """The reader memoises decoded chunks by path; a whole-volume write that replaces the store
+    under that path must forget them, as the streamed write does."""
+    dataset = Dataset(tmp_path / "cohort", "omezarr")
+    dataset.write("CT", "CASE", np.ones((1, 8, 8, 8), np.float32), _attributes())
+    assert float(dataset.read_data("CT", "CASE")[0].mean()) == 1.0
+    dataset.write("CT", "CASE", np.full((1, 8, 8, 8), 2.0, np.float32), _attributes())
+    assert float(dataset.read_data("CT", "CASE")[0].mean()) == 2.0
+
+
+def test_a_plan_read_to_its_end_is_retired() -> None:
+    """A cohort declares one plan per case source; one that outlived its sweep would rank every
+    later store's chunks as never wanted again."""
+    from konfai.utils.ome_zarr import _DecodedChunkCache
+
+    cache = _DecodedChunkCache(4)
+    identity = ("store", "0")
+    steps = [{(0,)}, {(1,)}]
+    cache.schedule(identity, [frozenset(step) for step in steps])
+    _sequence(cache, identity, steps)
+    assert not cache._schedules

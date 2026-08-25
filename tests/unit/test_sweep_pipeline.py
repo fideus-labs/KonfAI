@@ -305,3 +305,38 @@ def test_a_uint16_case_through_a_chain_torch_cannot_run_says_so(
 
     with pytest.warns(UserWarning, match="TensorCast"), pytest.raises(TransformError, match="TensorCast"):
         CaseMaterializer(manager).materialize()
+
+
+def test_a_serial_sweep_charges_its_writes_where_a_pipelined_one_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The figure after the bar is the write itself, on one thread or another."""
+    SWEEP_CLOCK.reset()
+    _sweep_into(tmp_path, "serial_write", monkeypatch, depth=0)
+
+    assert SWEEP_CLOCK.spent("wait(write)") >= SWEEP_CLOCK.spent("write") > 0.0
+
+
+def test_a_save_into_the_h5_file_the_sweep_reads_still_lands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The h5 backend holds a per-file lock for a stream's whole life, on the thread that opened it.
+    A sweep reading that file on another thread would wait for a close its own read holds up."""
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr(patching_module, "_sweep_pipeline_depth", lambda: 1)
+    rng = np.random.default_rng(0)
+    source = Dataset(tmp_path / "store", "h5")
+    # Twenty blocks: more than the pipeline reads before its first write opens the stream.
+    volume = (rng.random((1, 60, 10, 8)) * 100).astype(np.float32)
+    source.write("CT", "CASE_000", volume, _attributes())
+    manager = _manager(
+        source, [Clip(min_value=10.0, max_value=90.0), Save(f"{tmp_path / 'store'}:h5", group="CACHE")], tmp_path
+    )
+
+    verdicts: list = []
+    worker = threading.Thread(target=lambda: verdicts.append(CaseMaterializer(manager).materialize()), daemon=True)
+    worker.start()
+    worker.join(60)
+
+    assert not worker.is_alive(), "the sweep never finished: its read waits on the lock its own stream holds"
+    assert verdicts == [Verdict.STREAM]
+    cached, _ = Dataset(tmp_path / "store", "h5").read_data("CACHE", "CASE_000")
+    np.testing.assert_array_equal(cached, np.clip(volume, 10.0, 90.0))

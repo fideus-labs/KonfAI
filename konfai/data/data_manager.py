@@ -858,8 +858,8 @@ class DataSources(ABC):
         self.datasets: dict[str, Dataset] = {}
         #: The selected case names in run order; filled by :meth:`prepare`.
         self.case_names: list[str] = []
-        #: Per source group, every case the roots hold, when the walk read them; ``None`` when the
-        #: subset named its cases and the roots were never asked for the rest.
+        #: Per source group, the cases the walk found: every case the roots hold, or, under a subset
+        #: naming its cases, those of them the roots hold. ``None`` before :meth:`prepare`.
         self.cohort_names: dict[str, set[str]] | None = None
         self._managers: dict[str, list[DatasetManager]] | None = None
 
@@ -1019,7 +1019,7 @@ class DataSources(ABC):
                 names.update(names_by_group)
             else:
                 names = names.intersection(names_by_group)
-        self.cohort_names = cohort if requested is None else None
+        self.cohort_names = cohort
         if len(names) == 0:
             raise DatasetManagerError(
                 f"No data was found for groups {list(self.groups_src.keys())}: although each group contains data "

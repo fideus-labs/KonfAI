@@ -643,7 +643,7 @@ class _WriteBehind:
 
     def write(self, key: Any, region: tuple[slice, ...], block: np.ndarray, header: Attribute) -> None:
         if self._pool is None:
-            self._writer.write(key, region, block, header)
+            self._timed_write(key, region, block, header)
             return
         self.flush()  # one outstanding write, so the order is the sweep's and the memory is bounded
         self._pending = self._pool.submit(self._timed_write, key, region, block, header)
@@ -716,6 +716,14 @@ def _stage_failure(error: BaseException) -> str:
     """What a chain raised, with the hint appended where one applies."""
     hint = _torch_dtype_hint(error)
     return f"{type(error).__name__}: {error}" + (f". {hint}" if hint else "")
+
+
+def _shares_h5_file(source: Dataset, destination: Dataset) -> bool:
+    """Whether a read of ``source`` and a stream into ``destination`` can open the same h5 file.
+    By root: a directory root holds one file per case, and the same root is the same file."""
+    return (
+        source.file_format == "h5" and destination.file_format == "h5" and source.store_root == destination.store_root
+    )
 
 
 def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -> Attribute:
@@ -2687,6 +2695,11 @@ class DatasetManager:
         tile = self._sweep_tile(spatial, channels, source.stage_plans)
         targets = list(_sweep_targets(spatial, tile))
         depth = self._sweep_depth(spatial, channels, source.stage_plans, tile)
+        if any(_shares_h5_file(source.dataset, sweep.destination) for _key, sweep, _tail, _evolved in members):
+            # The h5 backend holds a per-file lock for a stream's whole life, on the thread that
+            # opened it: a read of that file from any other thread waits for the close that the
+            # read itself stands in the way of. One thread, where the lock re-enters.
+            depth = 0
         # Reading ahead means the reading thread must touch no stage of the chain, so the pull maps
         # are folded here, before it starts. A stage that sizes its window from the data it reads
         # (a displacement field: the sizing read IS the sampling read) cannot be folded ahead, and

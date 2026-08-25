@@ -700,8 +700,9 @@ class Transformer(DistributedObject):
             entries.extend(planned)
             if item.kind == "case" and planned[0].verdict is Verdict.STREAM and item.engine.sub_cap_sweep():
                 sub_cap_sweeps = True
-        # From the walk that already happened, never a walk of its own: a subset naming its cases
-        # never asked the roots what else they hold, and asking here is the listing it avoided.
+        # From the walk that already happened, never a walk of its own: under a subset naming its
+        # cases the roots were asked about those alone, and asking for the rest is the listing it
+        # avoided. What that walk found and the run does not keep is a requested case one group lacks.
         kept = set(self.dataset.case_names)
         dropped = {group: len(held - kept) for group, held in (self.dataset.cohort_names or {}).items()}
         dtype_hypothesis = f"{'/'.join(sorted(planned_dtypes)) or 'float32'} / source channels"

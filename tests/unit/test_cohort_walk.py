@@ -187,3 +187,31 @@ def test_a_subset_that_cannot_name_its_cases_still_reads_the_cohort_once(
     names, opens = _walk(tmp_path, file_format, "0:2", CASES, monkeypatch)
     assert names == ["CASE_000", "CASE_001"]
     assert opens == (len(CASES) if file_format == "mha" else 1)
+
+
+def test_a_name_no_listing_produces_selects_nothing(tmp_path: Path) -> None:
+    """The narrow path probes disk for the names it was asked for, and disk answers ``case/`` and
+    ``./case`` as it answers ``case``; the listing never spells a case that way, so neither does
+    the selection."""
+    dataset = _root(tmp_path, "mha")
+    assert dataset.select_names("CT", {"CASE_002/", "./CASE_003", "CASE_004"}) == ["CASE_004"]
+
+
+def test_a_naming_subset_still_reports_the_cases_a_group_lacks(tmp_path: Path) -> None:
+    """A requested case one group's roots do not hold is dropped by the intersection; the walk
+    keeps what it found so the plan can say so."""
+    dataset = Dataset(tmp_path / "cases", "mha")
+    for name in CASES:
+        dataset.write("CT", name, np.zeros((1, 2, 2, 2), np.float32), _attributes())
+    for name in CASES[:4]:
+        dataset.write("SEG", name, np.zeros((1, 2, 2, 2), np.float32), _attributes())
+    data = DataPrediction(
+        dataset_filenames=[f"{tmp_path / 'cases'}:mha"],
+        groups_src={"CT": Group(), "SEG": Group()},
+        augmentations=None,
+        patch=None,
+        subset=PredictionSubset(["CASE_002", "CASE_005"]),
+    )
+    names, _ = data._select_cases()
+    assert sorted(names) == ["CASE_002"]
+    assert data.cohort_names == {"CT": {"CASE_002", "CASE_005"}, "SEG": {"CASE_002"}}
