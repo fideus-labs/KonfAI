@@ -176,10 +176,10 @@ class TransformPlan:
                 else ""
             )
             beside.append(f"decoded-chunk cache up to {format_bytes(self.chunk_cache_bytes)}{under}")
-        cache = " | held beside the regions: " + ", ".join(beside)
+        held_beside = " | held beside the regions: " + ", ".join(beside)
         return (
             f"[KonfAI] plan over {self.world_size} rank(s) | per-rank budget"
-            f" {format_bytes(self.budget_bytes)} ({self.budget_desc}){cache}"
+            f" {format_bytes(self.budget_bytes)} ({self.budget_desc}){held_beside}"
             f" | fallback working set = case x {CASE_ELEMENT_BYTES} B x ({FALLBACK_INFLIGHT_FACTOR}"
             f" + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed"
             f" {self.dtype_hypothesis} until the first slab"

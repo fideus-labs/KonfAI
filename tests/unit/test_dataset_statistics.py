@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 import pytest
 from konfai.utils import dataset as dataset_module
+from konfai.utils.budget import set_per_rank_budget
 from konfai.utils.dataset import (
     Dataset,
     _finalize_running_statistics,
@@ -35,6 +36,7 @@ from konfai.utils.dataset import (
     _update_pieces,
     _update_running_statistics,
 )
+from konfai.utils.errors import DatasetManagerError
 
 sitk = pytest.importorskip("SimpleITK")
 
@@ -325,3 +327,76 @@ def test_a_block_is_folded_in_pieces_along_its_first_spatial_axis(monkeypatch: p
     assert all(np.shares_memory(piece, block) for piece in pieces)
     vector = _volume((50,))
     assert [piece.shape for piece in _update_pieces(vector)] == [(50,)]
+
+
+# ---------------------------------------------------------------- the budget is the read grain
+
+
+@pytest.fixture
+def budgeted_scan(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pieces of about a hundred elements, so a block of the small volumes below snaps to whole rows
+    rather than to the one piece the whole volume is; and the published budget put back after."""
+    monkeypatch.setattr(dataset_module, "_STATISTICS_UPDATE_ELEMENTS", 100)
+    yield
+    set_per_rank_budget(None)
+
+
+def _scan_blocks(dataset: Dataset, monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, ...]]:
+    """The shapes a scan of ``CT/P0`` reads, and the statistics it answers with."""
+    blocks: list[tuple[int, ...]] = []
+    real = Dataset.read_data_slice
+
+    def counted(self: Dataset, groups: str, name: str, slices: tuple[slice, ...]) -> Any:
+        data, attributes = real(self, groups, name, slices)
+        blocks.append(data.shape)
+        return data, attributes
+
+    monkeypatch.setattr(Dataset, "read_data_slice", counted)
+    return blocks
+
+
+def test_a_declared_budget_is_what_the_scan_reads_a_block_of(
+    tmp_path: Path, image_attributes, monkeypatch: pytest.MonkeyPatch, budgeted_scan: None
+) -> None:
+    """A fixed read grain made a whole-volume scan cost the same whatever the budget said: 95.6 MiB
+    of resident set over a 78 MiB case at 512, 128 and 32 MiB alike."""
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "P0", _volume((1, 64, 40, 40)), image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    read = {}
+    for budget in (None, 3 * 4 * 32 * 40 * 40, 3 * 4 * 8 * 40 * 40):
+        set_per_rank_budget(budget)
+        blocks = _scan_blocks(dataset, monkeypatch)
+        dataset.read_data_statistics("CT", "P0")
+        read[budget] = max(shape[1] for shape in blocks)
+
+    assert read[3 * 4 * 8 * 40 * 40] < read[3 * 4 * 32 * 40 * 40] <= read[None]
+
+
+def test_the_scan_answers_the_same_whatever_the_budget_read_it_in(
+    tmp_path: Path, image_attributes, budgeted_scan: None
+) -> None:
+    """The budget is how much is held, never what is computed: the fold sees the same pieces in the
+    same order whatever the read grain, because a block is a whole number of them."""
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "P0", _volume((1, 64, 40, 40)), image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    set_per_rank_budget(None)
+    reference = dataset.read_data_statistics("CT", "P0")
+
+    for budget in (3 * 4 * 32 * 40 * 40, 3 * 4 * 8 * 40 * 40, 3 * 4 * 4 * 40 * 40):
+        set_per_rank_budget(budget)
+        got = dataset.read_data_statistics("CT", "P0")
+        for key in _KEYS:
+            np.testing.assert_array_equal(got[key], reference[key], err_msg=f"{key} at {budget} B")
+
+
+def test_a_budget_the_shortest_block_of_a_scan_exceeds_is_refused(
+    tmp_path: Path, image_attributes, budgeted_scan: None
+) -> None:
+    """The floor of the read grain is the fold's own piece, so a budget under it refuses naming both
+    figures rather than reading a block it cannot hold."""
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "P0", _volume((1, 64, 40, 40)), image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    set_per_rank_budget(4096)
+
+    with pytest.raises(DatasetManagerError, match=r"over the per-rank memory budget \(4.00 KiB\)"):
+        dataset.read_data_statistics("CT", "P0")

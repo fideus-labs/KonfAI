@@ -56,6 +56,7 @@ except ImportError:
 
 from konfai import current_date
 from konfai.utils import uri
+from konfai.utils.budget import format_bytes, per_rank_budget_bytes
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.utils import SUPPORTED_EXTENSIONS, directory_volume_form, is_store_name, split_format_level
 
@@ -376,23 +377,44 @@ class Attribute(dict[str, Any]):
         return key in self and self[key] == value
 
 
-#: Elements a block of ``Dataset.iter_data_blocks`` holds: the read grain of a scan (the statistics
-#: fold, the quantile scan), whatever the backend.
+#: Elements a block of ``Dataset.iter_data_blocks`` holds when no budget was declared: the read grain
+#: of a scan (the statistics fold, the quantile scan), whatever the backend.
 _STATISTICS_CHUNK_ELEMENTS = 8_000_000
+#: Blocks a scan holds at its peak: the map of the one being read, its copy, and the copy the fold has
+#: not released yet, a generator reading the next while its caller still names the last. Measured at
+#: 95.6 MiB of resident set for a 30.5 MiB block over a 78 MiB case.
+_STATISTICS_BLOCKS_IN_FLIGHT = 3
+#: The bytes a scanned element is priced at, as everything else the budget sizes prices them.
+_STATISTICS_ELEMENT_BYTES = 4
 #: Elements one running-statistics update takes at once: its float64 temporaries then stay in cache,
 #: where a whole block's stream through memory. Below the block on purpose: the block is the READ
 #: grain, and a chunked store decodes a chunk once per read that touches it.
 _STATISTICS_UPDATE_ELEMENTS = 1 << 18
 
 
-def _statistics_chunk_length(shape: list[int] | tuple[int, ...], axis: int, budget: int) -> int:
-    """How far along ``axis`` a chunk may reach to hold about ``budget`` elements.
-
-    A chunk spans every other axis whole (channels included), so the per-step cost is the volume
-    divided by ``axis``; the length is that budget over the per-step cost, floored to one step.
+def _statistics_block_elements() -> int:
+    """Elements one block of a whole-volume scan may hold: its share of the budget this rank
+    published, since :data:`_STATISTICS_BLOCKS_IN_FLIGHT` of them are in flight at the peak. A fixed
+    read grain made a scan cost the same 95.6 MiB whatever the budget said. Without a declared
+    budget, the grain that keeps a chunked store's decode whole.
     """
-    per_step = int(np.prod([extent for other, extent in enumerate(shape) if other != axis], dtype=np.int64))
-    return max(1, budget // max(1, per_step))
+    budget = per_rank_budget_bytes()
+    if budget is None:
+        return _STATISTICS_CHUNK_ELEMENTS
+    return max(
+        1, min(_STATISTICS_CHUNK_ELEMENTS, int(budget / (_STATISTICS_BLOCKS_IN_FLIGHT * _STATISTICS_ELEMENT_BYTES)))
+    )
+
+
+def _statistics_plane_elements(shape: list[int] | tuple[int, ...], axis: int) -> int:
+    """What one step along ``axis`` costs: a chunk spans every other axis whole (channels included)."""
+    return int(np.prod([extent for other, extent in enumerate(shape) if other != axis], dtype=np.int64))
+
+
+def _statistics_chunk_length(shape: list[int] | tuple[int, ...], axis: int, budget: int) -> int:
+    """How far along ``axis`` a chunk may reach to hold about ``budget`` elements: that budget over
+    the per-step cost, floored to one step."""
+    return max(1, budget // max(1, _statistics_plane_elements(shape, axis)))
 
 
 def _update_pieces(block: np.ndarray) -> Iterator[np.ndarray]:
@@ -1228,10 +1250,10 @@ class _RawBlockStream(DataStream):
     the block through a map whose pages this process does not keep.
 
     A shared file mapping holds every page written through it resident until it is unmapped, so a
-    stream over a volume ends up holding the whole volume, budget or no budget: +87 MiB of resident
-    set over a 78 MiB .mha swept in ten regions. Each written region is handed back to the kernel
-    instead (``MADV_DONTNEED``), which leaves the bytes in the page cache to be written out and
-    takes them out of this process's resident set: +8 MiB, one region's worth, over the same sweep.
+    stream over a volume ends up holding the whole volume, budget or no budget: 64 MiB of resident
+    growth over a 64 MiB volume written in sixteen slabs. Each written region is handed back to the
+    kernel instead (``MADV_DONTNEED``), which leaves the bytes in the page cache to be written out
+    and takes them out of this process's resident set: 0 MiB over the same sixteen slabs.
     """
 
     def __init__(self, path: str, header: bytes, dtype: np.dtype, shape: Sequence[int]) -> None:
@@ -1255,7 +1277,7 @@ class _RawBlockStream(DataStream):
         region[...] = values
         if _MADV_DONTNEED is None:
             return
-        first = self._offset + region.__array_interface__["data"][0] - self._block.ctypes.data
+        first = self._offset + region.ctypes.data - self._block.ctypes.data
         span = sum((extent - 1) * stride for extent, stride in zip(region.shape, region.strides, strict=True))
         page = first - first % mmap.PAGESIZE
         with contextlib.suppress(OSError):  # a filesystem whose pages cannot be dropped keeps them
@@ -3271,7 +3293,20 @@ class Dataset:
                 yield resident[0]
 
             return whole
-        rows = _statistics_chunk_length(shape, 1, _STATISTICS_CHUNK_ELEMENTS)
+        # A whole number of update pieces, so the fold sees the same sequence of pieces in the same
+        # order whatever the read grain: the running mean and std are then the budget's business
+        # only in how much is held, never in what they answer.
+        piece = _statistics_chunk_length(shape, 1, _STATISTICS_UPDATE_ELEMENTS)
+        rows = max(piece, _statistics_chunk_length(shape, 1, _statistics_block_elements()) // piece * piece)
+        budget = per_rank_budget_bytes()
+        plane = _statistics_plane_elements(shape, 1)
+        held = rows * plane * _STATISTICS_BLOCKS_IN_FLIGHT * _STATISTICS_ELEMENT_BYTES
+        if budget is not None and held > budget:
+            raise DatasetManagerError(
+                f"'{name}': the shortest block a whole-volume scan of '{groups}' can read holds"
+                f" {format_bytes(held)}, over the per-rank memory budget ({format_bytes(budget)}).",
+                "Raise 'memory_budget'.",
+            )
 
         def slabs() -> Iterator[np.ndarray]:
             for start in range(0, int(shape[1]), rows):
