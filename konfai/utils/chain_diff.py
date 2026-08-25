@@ -121,6 +121,25 @@ def _stage_name(classpath: str) -> str:
     return classpath.split(":")[-1].split(".")[-1].split("/")[0]
 
 
+def _stage_identity(classpath: str) -> str:
+    """The module-qualified class a chain key names: what decides whether two stages are the same.
+
+    A bare name is the built-in the loader resolves it to (:meth:`TransformLoader.get_transform`:
+    ``konfai.data.transform`` first, ``konfai.data.augmentation`` second, which is the order that
+    holds before the ``Expand`` marker this comparison stops at), so ``Normalize`` and
+    ``konfai.data.transform:Normalize`` are one stage; two ``Normalize`` from different modules are
+    two, and reading one chain's values says nothing about the other's.
+    """
+    from konfai.data import augmentation, transform
+
+    module, separator, _ = classpath.rpartition(":")
+    name = _stage_name(classpath)
+    if separator:
+        return f"{module}:{name}"
+    home = transform if hasattr(transform, name) else augmentation
+    return f"{home.__name__}:{name}"
+
+
 def _groups(dataset: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, Any]]:
     """Every ``(group_src, group_dest)`` group a ``Dataset`` tree declares, in declaration order."""
     groups = {}
@@ -138,17 +157,26 @@ def _alters_values(classpath: str) -> bool:
     """
     from konfai.data import transform
 
-    module, separator, _ = classpath.rpartition(":")
-    if separator and module != transform.__name__:
+    module, _, name = _stage_identity(classpath).rpartition(":")
+    if module != transform.__name__:
         return True
-    stage = getattr(transform, _stage_name(classpath), None)
+    stage = getattr(transform, name, None)
     if not isinstance(stage, type) or not issubclass(stage, transform.Transform):
         return True
     return stage.alters_values
 
 
-def _stages(chain: Any) -> list[tuple[str, dict[str, Any]]]:
-    """The stages of one chain that shape what the model reads, as ``(class, arguments)``."""
+@dataclass(frozen=True)
+class _Stage:
+    """One chain stage as it is compared: the class it names and the arguments that shape values."""
+
+    name: str
+    identity: str
+    arguments: dict[str, Any]
+
+
+def _stages(chain: Any) -> list[_Stage]:
+    """The stages of one chain that shape what the model reads."""
     stages = []
     for classpath, arguments in _mapping(chain).items():
         name = _stage_name(str(classpath))
@@ -157,35 +185,39 @@ def _stages(chain: Any) -> list[tuple[str, dict[str, Any]]]:
         if not _alters_values(str(classpath)):
             continue
         given = _plain(_mapping(arguments))
-        stages.append((name, {key: value for key, value in given.items() if key != _OUTPUT_ONLY_ARGUMENT}))
+        arguments = {key: value for key, value in given.items() if key != _OUTPUT_ONLY_ARGUMENT}
+        stages.append(_Stage(name, _stage_identity(str(classpath)), arguments))
     return stages
 
 
 def _stage_differences(
     group: str,
     chain: str,
-    trained: list[tuple[str, dict[str, Any]]],
-    applied: list[tuple[str, dict[str, Any]]],
+    trained: list[_Stage],
+    applied: list[_Stage],
 ) -> Iterator[ChainDifference]:
     """Walk two chains of one group position by position, yielding where they disagree."""
     for index in range(max(len(trained), len(applied))):
         if index >= len(trained):
             yield ChainDifference(
-                group, chain, index, applied[index][0], "applied here, absent from the training chain"
+                group, chain, index, applied[index].name, "applied here, absent from the training chain"
             )
             continue
         if index >= len(applied):
-            yield ChainDifference(group, chain, index, trained[index][0], "in the training chain, not applied here")
+            yield ChainDifference(group, chain, index, trained[index].name, "in the training chain, not applied here")
             continue
-        (trained_stage, trained_arguments), (applied_stage, applied_arguments) = trained[index], applied[index]
-        if trained_stage != applied_stage:
-            detail = f"the training chain has '{trained_stage}' at this position"
-            yield ChainDifference(group, chain, index, applied_stage, detail)
+        trained_stage, applied_stage = trained[index], applied[index]
+        if trained_stage.identity != applied_stage.identity:
+            # Two classes of the same name, from two modules: the short name names neither of them.
+            named = trained_stage.name == applied_stage.name
+            here = applied_stage.identity if named else applied_stage.name
+            there = trained_stage.identity if named else trained_stage.name
+            yield ChainDifference(group, chain, index, here, f"the training chain has '{there}' at this position")
             continue
         details = []
-        for key in sorted(trained_arguments.keys() | applied_arguments.keys()):
-            before, after = trained_arguments.get(key, _UNSET), applied_arguments.get(key, _UNSET)
+        for key in sorted(trained_stage.arguments.keys() | applied_stage.arguments.keys()):
+            before, after = trained_stage.arguments.get(key, _UNSET), applied_stage.arguments.get(key, _UNSET)
             if before != after:
                 details.append(f"{key}: {before!r} in training, {after!r} here")
         if details:
-            yield ChainDifference(group, chain, index, applied_stage, "; ".join(details))
+            yield ChainDifference(group, chain, index, applied_stage.name, "; ".join(details))

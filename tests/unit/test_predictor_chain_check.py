@@ -124,6 +124,12 @@ def test_a_shipped_example_preprocesses_its_inputs_the_way_it_trained(
             "'CT:CT' transforms[0] Normalize: the training chain has 'Clip' at this position",
             id="another-stage-at-the-same-position",
         ),
+        pytest.param(
+            {"custom_a:Normalize": {"min_value": 0}},
+            {"custom_b:Normalize": {"min_value": 0}},
+            "'CT:CT' transforms[0] custom_b:Normalize: the training chain has 'custom_a:Normalize' at this position",
+            id="the-same-class-name-from-another-module",
+        ),
     ],
 )
 def test_a_differing_stage_is_named_with_its_group_index_and_arguments(
@@ -167,6 +173,11 @@ def test_a_differing_stage_is_named_with_its_group_index_and_arguments(
             {"Clip": {"min_value": 0}},
             {"konfai.data.transform:Clip": {"min_value": 0}},
             id="the-module-qualified-spelling-of-one-stage",
+        ),
+        pytest.param(
+            {"Noise": {"prob": 1}},
+            {"konfai.data.augmentation:Noise": {"prob": 1}},
+            id="the-module-qualified-spelling-of-a-draw-declared-before-the-marker",
         ),
     ],
 )
