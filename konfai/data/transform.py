@@ -1117,6 +1117,38 @@ class _TargetGrid(ABC):
         """The target named as a refusal or a plan line names it."""
 
 
+class _StageRoot:
+    """A dataset root a STAGE declares (a reference grid's store, a field's), opened lazily.
+
+    Building a :class:`Dataset` probes its store, and on a remote root that needs credentials the
+    stage does not have at construction: they are declared on the DATASET block and reach it through
+    :meth:`adopt`. So the spec is held as text until first use.
+    """
+
+    def __init__(self, spec: str | None, default_format: str = "mha") -> None:
+        self._spec: tuple[str, str] | None = None
+        if spec is not None and str(spec).strip():
+            filename, _flag, file_format = split_path_spec(str(spec), default_format=default_format)
+            self._spec = (filename, file_format)
+        self._storage_options: dict[str, Any] | None = None
+        self._dataset: Dataset | None = None
+
+    @property
+    def declared(self) -> bool:
+        """Whether a root was named at all: asked before anything is opened."""
+        return self._spec is not None
+
+    def adopt(self, roots: list[Dataset]) -> None:
+        """Take the run's own access to remote storage, before the root is opened."""
+        self._storage_options = next((root.storage_options for root in roots if root.storage_options), None)
+
+    def get(self) -> Dataset | None:
+        if self._spec is not None and self._dataset is None:
+            filename, file_format = self._spec
+            self._dataset = Dataset(filename, file_format, storage_options=self._storage_options)
+        return self._dataset
+
+
 class _OwnGrid(_TargetGrid):
     """No change of grid: the map moves what the voxels hold, not where they are."""
 
@@ -1190,18 +1222,17 @@ class _ReferenceGrid(_TargetGrid):
         self.group = group
         # A root of its own, or the run's: left out, the grid to adopt is one member of the very
         # cohort being brought together.
-        self.dataset: Dataset | None = None
-        if dataset is not None and str(dataset).strip():
-            filename, _flag, file_format = split_path_spec(str(dataset), default_format="mha")
-            self.dataset = Dataset(Path(filename), file_format)
+        self.root = _StageRoot(dataset)
         self.roots: list[Dataset] = []
         self._grids: dict[str, Grid] = {}
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
         self.roots = list(datasets)
+        self.root.adopt(datasets)
 
     def _roots(self) -> list[Dataset]:
-        return [self.dataset] if self.dataset is not None else list(self.roots)
+        own = self.root.get()
+        return [own] if own is not None else list(self.roots)
 
     def _group_in(self, dataset: Dataset) -> str:
         """Which group of ``dataset`` holds the reference: the declared one, or its only one."""
@@ -1316,10 +1347,13 @@ def _resample_with_sitk(
     # ITK would otherwise accumulate an integer payload in double and cast inside the filter, where
     # one ulp of difference becomes a whole unit after the truncation both sides do. A nearest pick
     # copies voxels, so it keeps the payload's own dtype, exactly as the walk does.
-    work = payload if mode == "nearest" else payload.type(sampling_dtype(payload))
+    #
+    # Per CHANNEL: ITK takes one component at a time, so only one is ever held in the wider dtype
+    # (5.23 GB against 6.46 GB on a 4-channel 192x640x640 uint16 region).
+    working_dtype = payload.dtype if mode == "nearest" else sampling_dtype(payload)
     outputs = []
-    for channel in range(int(work.shape[0])):
-        image = sitk.GetImageFromArray(np.ascontiguousarray(work[channel].numpy()))
+    for channel in range(int(payload.shape[0])):
+        image = sitk.GetImageFromArray(np.ascontiguousarray(payload[channel].type(working_dtype).numpy()))
         image.SetOrigin(np.asarray(window_origin, dtype=np.float64).tolist())
         image.SetSpacing(np.asarray(source.spacing_xyz, dtype=np.float64).tolist())
         image.SetDirection(np.asarray(source.direction_xyz, dtype=np.float64).ravel().tolist())
@@ -1512,6 +1546,7 @@ class Resample(TransformInverse):
         # A field declared by group alone lives beside the cases, so it looks in the same roots.
         if self.displacement is not None:
             self.displacement.roots = list(datasets)
+            self.displacement.root.adopt(datasets)
 
     # ------------------------------------------------------------------ the two grids
 
@@ -2596,11 +2631,8 @@ class _DisplacementSource:
         # A root of its own, or none: with no ``field`` path the fields are a GROUP of the run's own
         # dataset_filenames, one entry per case, which is how a cohort registered in place stores
         # them, beside the volumes they were solved on.
-        self.dataset: Dataset | None = None
-        if field is not None and str(field).strip():
-            filename, _flag, file_format = split_path_spec(str(field), default_format="mha")
-            self.dataset = Dataset(Path(filename), file_format)
-        elif group is None:
+        self.root = _StageRoot(field)
+        if not self.root.declared and group is None:
             raise TransformError(
                 "'Resample' has neither a 'field' path nor a group to find the fields in.",
                 "Name the store. Resample: {field: ./DVF:omezarr}: or, for fields stored beside"
@@ -2623,7 +2655,8 @@ class _DisplacementSource:
             return self._scan_ok
         try:
             group = self.group_for(None)
-            roots = [self.dataset] if self.dataset is not None else list(self.roots)
+            own = self.root.get()
+            roots = [own] if own is not None else list(self.roots)
             for root in roots:
                 for entry in root.get_names(group):
                     root.get_infos(group, entry)
@@ -2636,24 +2669,26 @@ class _DisplacementSource:
     def group_for(self, name: str | None) -> str:
         if self.group is not None:
             return self.group
-        if self.dataset is None:  # unreachable: a source with no path was given a group to use
+        own = self.root.get()
+        if own is None:  # unreachable: a source with no path was given a group to use
             raise TransformError(
                 "'Resample' has no field store of its own and no group to look for one in.",
                 "Name the group the fields are in: Resample: {field_group: DVF}.",
             )
-        groups = [str(group) for group in self.dataset.get_group()]
+        groups = [str(group) for group in own.get_group()]
         if len(groups) == 1:
             return groups[0]
         where = f"the field for case '{name}'" if name is not None else "the fields"
         raise TransformError(
-            f"'Resample' cannot tell which group of '{self.dataset.filename}' holds {where}: it has {len(groups)}.",
+            f"'Resample' cannot tell which group of '{own.filename}' holds {where}: it has {len(groups)}.",
             "Name it: Resample: {field: ./DVF:omezarr, field_group: DVF}.",
         )
 
     def _root_for(self, name: str | None) -> Dataset:
         """The store this case's field is in: the declared one, or whichever run root holds it."""
-        if self.dataset is not None:
-            return self.dataset
+        own = self.root.get()
+        if own is not None:
+            return own
         group = self.group_for(name)
         for root in self.roots:
             if name is None or root.is_dataset_exist(group, name):

@@ -345,6 +345,7 @@ class _CrossFrameStore:
     def __init__(self, reference: "sitk.Image", transform: "sitk.Transform") -> None:
         self.reference = reference
         self.transform = transform
+        self.storage_options = None  # a local root, as every Dataset says of itself
 
     def is_dataset_exist(self, group: str, name: str) -> bool:
         del name

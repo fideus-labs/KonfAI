@@ -65,6 +65,9 @@ fid = ["scipy", "torchvision"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
 omezarr = ["zarr", "ngff-zarr>=0.38", "dask"]
+# Reading a dataset root from S3: s3fs is the fsspec implementation, aiohttp the transport
+# aiobotocore drives it over. fsspec itself already comes with the OME-Zarr extra, through dask.
+s3 = ["s3fs", "aiohttp"]
 export = ["onnx", "onnxruntime", "onnxscript"]
 all = [
   "konfai[itk]",
@@ -78,6 +81,7 @@ all = [
   "konfai[cluster]",
   "konfai[dicom]",
   "konfai[omezarr]",
+  "konfai[s3]",
   "konfai[export]",
   "konfai[smp]"
 ]

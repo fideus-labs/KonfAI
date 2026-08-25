@@ -32,6 +32,7 @@ import sys
 import warnings
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from typing import NamedTuple
 
 if sys.version_info >= (3, 11):
     from enum import StrEnum
@@ -51,17 +52,32 @@ import torch
 from konfai.data.patching import (
     CASE_ELEMENT_BYTES,
     FALLBACK_INFLIGHT_FACTOR,
-    SWEEP_SLAB_ROWS,
     AugmentedStage,
     DatasetManager,
     Stage,
     _PendingSweep,
     _ReadStagePlan,
     _stage_name,
+    _sweep_targets,
 )
 from konfai.data.transform import LocalityKind, Reduce, Resample, Save, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PatchError
+
+
+class _SweepSegment(NamedTuple):
+    """One segment the streamed route sweeps: where it reads from, what it lands, how it pulls."""
+
+    dataset: Dataset
+    group: str
+    entry: str
+    source_shape: list[int]
+    landing: list[int]
+    plans: tuple[_ReadStagePlan, ...]
+
+    @property
+    def channels(self) -> int:
+        return int(self.source_shape[0])
 
 
 class Verdict(StrEnum):
@@ -384,12 +400,16 @@ class CaseMaterializer:
         return targets
 
     def sub_cap_sweep(self) -> bool:
-        """Whether this case sweeps below the default slab height AND a stage of its chain can show
-        it in the values: a resample whose map does not factorise, or a draw that samples through an
-        affine (a free rotation, a scale). Pointwise and separable chains land the same bytes at any
-        height."""
+        """Whether this case's landing is swept in more than one block AND a stage of its chain can
+        show it in the values: a resample whose map does not factorise, or a draw that samples
+        through an affine (a free rotation, a scale). Pointwise and separable chains land the same
+        bytes whatever the decomposition."""
         manager = self.manager
-        if manager._sweep_rows(list(manager.shapes[0]), int(manager.base_shape[0])) >= SWEEP_SLAB_ROWS:
+        if not any(
+            extent < segment.landing[axis]
+            for segment in self._sweep_segments() or []
+            for axis, extent in enumerate(manager._sweep_tile(segment.landing, segment.channels, segment.plans))
+        ):
             return False
         for stage in manager.chain_stages(0):
             if isinstance(stage, Resample) and stage.slab_height_sensitive(manager.name):
@@ -460,19 +480,15 @@ class CaseMaterializer:
         copy, and the widest stage's own buffers, all sized on the largest intermediate."""
         return int(self.peak_case_bytes() * (FALLBACK_INFLIGHT_FACTOR + self.working_multiple()))
 
-    def predicted_stream_read_factor(self, a: int = 0, apply_augmentations: bool = False) -> float | None:
-        """About how many times the streamed route reads the source (a halo re-reads its overlap, a
-        regrid pulls each slab's window, a store without bounded reads decodes the volume once per
-        slab), from the plan's own pull maps: the number the route is chosen with. ``None`` when the
-        chain cannot stream."""
+    def _sweep_segments(self, a: int = 0, apply_augmentations: bool = False) -> list[_SweepSegment] | None:
+        """Every segment the streamed route sweeps: one per unsatisfied ``Save`` (each sweeps ITS
+        source) plus the head past the last boundary, which is read only if stages follow it.
+        ``None`` when the chain cannot stream at all."""
         source = self.manager._resolve_patch_stream_source(a, apply_augmentations)
         if source is None:
             return None
-        # Each unsatisfied Save sweeps ITS source; past the last boundary the chain reads the
-        # materialized cache. The route is priced by the dominant segment: a max, not a sum --
-        # the segments read different stores, and one that re-reads is the cost either way.
-        factors = [
-            self._segment_read_factor(
+        segments = [
+            _SweepSegment(
                 sweep.source_dataset,
                 sweep.source_group,
                 sweep.source_entry,
@@ -482,37 +498,46 @@ class CaseMaterializer:
             )
             for sweep in source.pending_sweeps
         ]
-        # The head segment past the last boundary is read only if stages follow it: a chain
-        # ending on a Write leaves nothing to read from the destination, which does not exist yet.
         if source.stage_plans:
-            landed = list(source.stage_plans[-1].out_shape)
-            factors.append(
-                self._segment_read_factor(
-                    source.dataset, source.group, source.entry, list(source.shape), landed, source.stage_plans
+            segments.append(
+                _SweepSegment(
+                    source.dataset,
+                    source.group,
+                    source.entry,
+                    list(source.shape),
+                    list(source.stage_plans[-1].out_shape),
+                    source.stage_plans,
                 )
             )
+        return segments
+
+    def predicted_stream_read_factor(self, a: int = 0, apply_augmentations: bool = False) -> float | None:
+        """About how many times the streamed route reads the source (a halo re-reads its overlap, a
+        regrid pulls each slab's window, a store without bounded reads decodes the volume once per
+        slab), from the plan's own pull maps: the number the route is chosen with. ``None`` when the
+        chain cannot stream."""
+        segments = self._sweep_segments(a, apply_augmentations)
+        if segments is None:
+            return None
+        # Priced by the dominant segment: a max, not a sum -- the segments read different stores,
+        # and one that re-reads is the cost either way.
+        factors = [self._segment_read_factor(segment) for segment in segments]
         return max(factors) if factors else 1.0
 
-    def _segment_read_factor(
-        self,
-        dataset: Dataset,
-        group: str,
-        entry: str,
-        source_shape: list[int],
-        landed: list[int],
-        plans: tuple[_ReadStagePlan, ...],
-    ) -> float:
-        """One segment's reads over its source's voxels, slab by slab through the plan's own pulls."""
-        rows = self.manager._sweep_rows(list(landed), int(source_shape[0]))
+    def _segment_read_factor(self, segment: _SweepSegment) -> float:
+        """One segment's reads over its source's voxels, block by block through the plan's own pulls."""
+        tile = self.manager._sweep_tile(segment.landing, segment.channels, segment.plans)
+        targets = list(_sweep_targets(segment.landing, tile))
         # A source that is not on disk yet is a Save cache this run sweeps first, onto a store that
         # serves region writes, and every such store serves bounded reads: priced as bounded, not
         # as the pessimistic answer a missing entry gets.
+        dataset, group, entry = segment.dataset, segment.group, segment.entry
         if dataset.is_dataset_exist(group, entry) and not dataset.bounded_region_reads(group, entry):
-            return float(max(1, -(-landed[0] // rows)))  # every slab decodes the whole store
+            return float(max(1, len(targets)))  # every block decodes the whole store
         read = 0
-        for start in range(0, landed[0], rows):
-            span = [slice(start, min(start + rows, landed[0])), *(slice(0, extent) for extent in landed[1:])]
-            for plan in reversed(plans):
+        for target in targets:
+            span = list(target)
+            for plan in reversed(segment.plans):
                 span = list(plan.pull(tuple(span))) if plan.pull is not None else span
             read += int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
-        return float(read) / float(max(1, int(np.prod(source_shape[1:], dtype=np.int64))))
+        return float(read) / float(max(1, int(np.prod(segment.source_shape[1:], dtype=np.int64))))

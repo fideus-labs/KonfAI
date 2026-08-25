@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import Any, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -825,11 +825,15 @@ class DataSources(ABC):
         groups_src: Mapping[str, Group | GroupMetric | GroupOut],
         subset: Subset,
         memory_budget: str | float | None,
+        storage_options: dict[str, Any] | None = None,
     ) -> None:
         self.dataset_filenames = dataset_filenames
         self.groups_src = groups_src
         self.subset = subset
         self.memory_budget = memory_budget
+        #: How a remote root among ``dataset_filenames`` is reached, handed to fsspec verbatim
+        #: (``{anon: true}`` for a public S3 bucket). One mapping for every root of the run.
+        self.storage_options = dict(storage_options) if storage_options else None
         self.datasets: dict[str, Dataset] = {}
         #: The selected case names in run order; filled by :meth:`prepare`.
         self.case_names: list[str] = []
@@ -936,7 +940,7 @@ class DataSources(ABC):
                     f"Supported formats are: {', '.join(SUPPORTED_FORMATS)}",
                 )
 
-            dataset = Dataset(filename, file_format)
+            dataset = Dataset(filename, file_format, storage_options=self.storage_options)
             self.datasets[filename] = dataset
             for group in self.groups_src:
                 if dataset.is_group_exist(group):
@@ -1155,8 +1159,9 @@ class Data(DataSources):
         data_augmentations_list: dict[str, DataAugmentationsList] | None = None,
         inline_augmentations: bool = False,
         validation_augmentations: bool = True,
+        storage_options: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(dataset_filenames, groups_src, subset, memory_budget)
+        super().__init__(dataset_filenames, groups_src, subset, memory_budget, storage_options)
         self.patch = patch
         self.validation = validation
         self.validation_augmentations = validation_augmentations
@@ -1669,6 +1674,7 @@ class DataTrain(Data):
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
         persistent_workers: bool | None = None,
+        storage_options: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             dataset_filenames,
@@ -1676,6 +1682,7 @@ class DataTrain(Data):
             subset,
             memory_budget,
             patch=patch,
+            storage_options=storage_options,
             # Training re-reads every case each epoch: cache when the dataset fits the
             # 'memory_budget' fit-test, stream when it does not.
             use_cache=True,
@@ -1711,6 +1718,7 @@ class DataPrediction(Data):
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
         persistent_workers: bool | None = None,
+        storage_options: dict[str, Any] | None = None,
     ) -> None:
 
         super().__init__(
@@ -1719,6 +1727,7 @@ class DataPrediction(Data):
             subset,
             memory_budget,
             patch=patch,
+            storage_options=storage_options,
             use_cache=False,
             batch_size=batch_size,
             validation=None,
@@ -1815,6 +1824,7 @@ class DataMetric(Data):
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
         persistent_workers: bool | None = None,
+        storage_options: dict[str, Any] | None = None,
     ) -> None:
 
         super().__init__(
@@ -1823,6 +1833,7 @@ class DataMetric(Data):
             subset,
             memory_budget,
             patch=None,
+            storage_options=storage_options,
             # Evaluation reads each case exactly once (no augmentations, one pass): a cache is never
             # re-read, it only fronts the whole dataset's RAM. Stream.
             use_cache=False,
@@ -1855,8 +1866,9 @@ class DataTransform(DataSources):
         groups_src: dict[str, GroupOut] = {"default": GroupOut()},
         memory_budget: str | float = "auto",
         subset: PredictionSubset = PredictionSubset(),
+        storage_options: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(dataset_filenames, groups_src, subset, memory_budget)
+        super().__init__(dataset_filenames, groups_src, subset, memory_budget, storage_options)
         #: The run's seed, set by the workflow before :meth:`prepare`. Stamped onto every ``Expand``
         #: below, which is where the only randomness of a transform run lives.
         self.manual_seed = 0

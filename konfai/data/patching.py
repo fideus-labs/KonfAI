@@ -25,9 +25,13 @@ the DataLoader. Writing that chain to disk for the dataset-preparation workflow 
 import contextlib
 import copy
 import hashlib
+import itertools
+import queue
+import threading
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import Any, Protocol, TypeGuard, cast
@@ -50,7 +54,7 @@ from konfai.data.transform import (
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, PatchError
-from konfai.utils.runtime import preserved_rng, seed_all
+from konfai.utils.runtime import preserved_rng, rank_cpu_share, seed_all
 from konfai.utils.utils import (
     OverlapSpec,
     best_sweep_axis,
@@ -80,16 +84,21 @@ _STREAM_STATS = {
 }
 _STREAM_STAT_KEYS = frozenset(_STREAM_STATS)
 
-# Rows per Save-sweep slab: full-plane slabs keep the materialization bounded to a window while the
-# composed region reads stay chunk-friendly. A declared memory_budget can only LOWER the height
-# (see DatasetManager._sweep_rows); this constant is the cap and the no-budget default on a CPU.
+# Rows per Save-sweep region: what bounds the materialization to a window while the composed region
+# reads stay chunk-friendly. A declared memory_budget can only LOWER the height (see
+# DatasetManager._sweep_rows); this constant is the cap and the no-budget default on a CPU. The
+# VOLUME it allows is what DatasetManager._sweep_tile then shapes into the block actually read.
 SWEEP_SLAB_ROWS = 64
 
-# What a sweep holds per row while in flight (the pulled source slab and the landed block) and
+# What a sweep holds per row while in flight (the pulled source region and the landed block) and
 # the bytes each element travels as (float32 through the chain). See DatasetManager._sweep_rows.
+# A pipelined sweep holds one more of each: see _sweep_pipeline_depth.
 _SWEEP_RESIDENT_SLABS = 2
-#: The slab height cap when the chain runs on a GPU (bounded by free device memory as well).
+#: The region height cap when the chain runs on a GPU (bounded by free device memory as well).
 _SWEEP_SLAB_ROWS_DEVICE = 256
+#: How much less a cubic block must read for the sweep to take it (``DatasetManager._sweep_tile``).
+#: A sheared map measures 0.61 on a 513x1331x1776 rigid+affine; an unsheared one, the margin alone.
+_SWEEP_TILE_MARGIN = 0.8
 _SWEEP_ELEMENT_BYTES = 4
 
 #: What a whole-volume fallback holds while a case is in flight (the assembled tensor plus one
@@ -323,10 +332,15 @@ class RegionWriter:
 
     ``write`` opens the stream for a key on its first block (through ``open_stream``, so a refusal
     surfaces where the caller can say why) and writes the block; ``close`` publishes every stream,
-    ``abort`` drops every partial entry and is safe after a failure or an interrupt. Writes are
-    synchronous on purpose: measured on a 300^3 float32 case to OME-Zarr, a slab in flight on a
-    background thread was 50 % slower than writing in place (the compression competes with the next
-    slab's compute), and it held one more block.
+    ``abort`` drops every partial entry and is safe after a failure or an interrupt.
+
+    Writes here are synchronous, and whether the caller should keep them so depends on where its
+    compute runs. On a host chain the two contend: measured on a 300^3 float32 case to OME-Zarr, a
+    slab in flight on a background thread was 50 % slower than writing in place, the compression
+    competing with the next slab's compute. On a DEVICE chain the compute is not the host's, and
+    the same trade inverts: a 513x1331x1776 resample on a GPU went from 8.2 s to 6.2 s with the
+    write one block behind, and a host resample of the same case stayed at 13.0 s either way.
+    :class:`_WriteBehind` is what a sweep wraps this in to take that trade; nothing here assumes it.
     """
 
     def __init__(self, open_stream: Callable[[Any, np.ndarray, Attribute], DataStream]) -> None:
@@ -385,7 +399,7 @@ class _PatchStreamSource:
 
 @dataclass(frozen=True)
 class _PendingSweep:
-    """One unsatisfied :class:`Save` and the segment that feeds it: the sweep reads each slab of the
+    """One unsatisfied :class:`Save` and the segment that feeds it: the sweep reads each block of the
     Save's space through the segment (re-planned at sweep time) and region-writes it to
     ``destination``. ``entry``/``source_entry`` are the destination and source entry names (the
     copy's own behind an :class:`Expand`); ``copy_stage_start`` is where the per-copy part of the
@@ -401,16 +415,171 @@ class _PendingSweep:
     source_entry: str
     source_shape: list[int]
     out_spatial: tuple[int, ...]
-    # The case state the segment replays from (copied per slab).
+    # The case state the segment replays from (copied per block).
     base_attributes: Attribute = field(repr=False)
     copy_stage_start: int = 0
     stage_plans: tuple[_ReadStagePlan, ...] = ()
 
 
-def _sweep_targets(spatial: list[int], rows: int) -> Iterator[tuple[slice, ...]]:
-    """The sweep's slabs: whole rows of the landing's first axis, full extent on the rest."""
-    for start in range(0, spatial[0], rows):
-        yield (slice(start, min(start + rows, spatial[0])), *(slice(0, extent) for extent in spatial[1:]))
+def _sweep_targets(spatial: list[int], tile: Sequence[int]) -> Iterator[tuple[slice, ...]]:
+    """The sweep's regions: ``tile``-sized blocks of the landing, innermost axis fastest.
+
+    The order is the source's: consecutive blocks differ on the axis stored contiguously, so the
+    chunks one block decodes are the chunks the next one reads.
+    """
+    steps = [max(1, int(step)) for step in tile]
+    for corner in itertools.product(*(range(0, extent, step) for extent, step in zip(spatial, steps, strict=True))):
+        yield tuple(
+            slice(start, min(start + step, extent)) for start, step, extent in zip(corner, steps, spatial, strict=True)
+        )
+
+
+def _cubic_tile(spatial: list[int], voxels: int, align: int) -> list[int]:
+    """The block of at most ``voxels`` closest to a cube inside ``spatial``, aligned to ``align``.
+
+    ``align`` keeps a block a whole number of store chunks wide, so a region write never becomes a
+    read-modify-write (:func:`konfai.utils.dataset._store_chunks`); an axis shorter than one step is
+    taken whole. Why a cube: :meth:`DatasetManager._sweep_tile`.
+    """
+    tile = [max(1, int(extent)) for extent in spatial]
+    budget = float(max(1, voxels))
+    # Shortest axis first: an axis under the ideal side takes its whole extent and hands its slack
+    # to the others, which only raises the side, so once one axis is over it every later one is too.
+    free = sorted(range(len(spatial)), key=lambda axis: tile[axis])
+    for taken, axis in enumerate(free):
+        side = budget ** (1.0 / (len(free) - taken))
+        if tile[axis] > side:
+            for remaining in free[taken:]:
+                tile[remaining] = max(1, min(tile[remaining], int(side)))
+            break
+        budget /= tile[axis]
+    return [
+        extent if extent >= spatial[axis] or extent < align else extent - extent % align
+        for axis, extent in enumerate(tile)
+    ]
+
+
+def _pull_voxels(spatial: list[int], tile: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> int:
+    """The source voxels a decomposition into ``tile`` blocks materialises, from the plans' own pull
+    maps: closed form, no voxel read."""
+    total = 0
+    for target in _sweep_targets(spatial, tile):
+        span = list(target)
+        for plan in reversed(plans):
+            span = list(plan.pull(tuple(span))) if plan.pull is not None else span
+        total += int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
+    return total
+
+
+def _sweep_pipeline_depth() -> int:
+    """How many blocks a sweep keeps in flight beside the one it is transforming: one ahead and one
+    behind, or none when the rank owns a single core (``OMP_NUM_THREADS=1`` means a serial run)."""
+    return 1 if rank_cpu_share() > 1 else 0
+
+
+class _ReadAhead:
+    """One block's read running while the previous one is transformed and written.
+
+    The consumer drains IN ORDER, so a stage object is touched by one thread at a time: the read
+    stages by the producer, the tail by the consumer, disjoint by construction. At most ``depth``
+    blocks wait, and a consumer that leaves early stops the producer.
+    """
+
+    _DONE = object()
+
+    def __init__(self, blocks: Iterator[Any], depth: int) -> None:
+        self._blocks = blocks
+        self._depth = depth
+        self._queue: queue.Queue = queue.Queue(maxsize=max(1, depth))
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._produce, name="konfai-sweep-read", daemon=True)
+
+    def __enter__(self) -> Iterator[Any]:
+        if self._depth < 1:
+            return self._blocks
+        self._thread.start()
+        return self._consume()
+
+    def __exit__(self, exc_type, value, traceback) -> None:
+        if self._depth < 1:
+            return
+        # To the end marker, whether the consumer stopped early or an error cut it short: a producer
+        # blocked on a full queue cannot reach its own end, and cannot then be joined.
+        self._stop.set()
+        while self._queue.get()[0] is not _ReadAhead._DONE:
+            pass
+        self._thread.join()
+
+    def _produce(self) -> None:
+        try:
+            for block in self._blocks:
+                self._queue.put((block, None))
+                if self._stop.is_set():
+                    break
+        except BaseException as error:  # re-raised in the consumer's thread, where the sweep is
+            self._queue.put((None, error))
+        self._queue.put((_ReadAhead._DONE, None))
+
+    def _consume(self) -> Iterator[Any]:
+        while True:
+            block, error = self._queue.get()
+            if block is _ReadAhead._DONE:
+                self._queue.put((block, None))  # left for __exit__, which drains to it
+                return
+            if error is not None:
+                raise error
+            yield block
+
+
+class _WriteBehind:
+    """A sweep's :class:`RegionWriter`, driven from one thread that is not the sweep's.
+
+    One worker and one outstanding write, so the order stays the sweep's and the store's own
+    encoder keeps its concurrency. EVERY call goes to that thread, not only the writes: the h5
+    backend holds a per-file ``RLock`` across a stream's whole life, and a release from a thread
+    that did not take it raises.
+    """
+
+    def __init__(self, writer: RegionWriter, depth: int) -> None:
+        self._writer = writer
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="konfai-sweep-write") if depth else None
+        self._pending: Future | None = None
+
+    def write(self, key: Any, region: tuple[slice, ...], block: np.ndarray, header: Attribute) -> None:
+        if self._pool is None:
+            self._writer.write(key, region, block, header)
+            return
+        self.flush()  # one outstanding write, so the order is the sweep's and the memory is bounded
+        self._pending = self._pool.submit(self._writer.write, key, region, block, header)
+
+    def flush(self) -> None:
+        """Wait for the outstanding write, raising what it raised."""
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            pending.result()
+
+    def close(self) -> set[Any]:
+        """Publish every stream and answer which keys were written."""
+        self.flush()
+        return self._on_writer(self._publish)
+
+    def abort(self, error: BaseException) -> None:
+        """Drop every partial entry, whatever the outstanding write did."""
+        with contextlib.suppress(Exception):
+            self.flush()
+        self._on_writer(self._writer.abort, error)
+
+    def shutdown(self) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
+
+    def _publish(self) -> set[Any]:
+        written = self._writer.opened
+        self._writer.close()
+        return written
+
+    def _on_writer(self, work: Callable[..., Any], *args: Any) -> Any:
+        return work(*args) if self._pool is None else self._pool.submit(work, *args).result()
 
 
 def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -> Attribute:
@@ -424,32 +593,32 @@ def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -
 
 
 def _require_channel_first(block: np.ndarray, spatial: list[int], what: str) -> None:
-    """Refuse a slab that lost the channel-first layout. Writing it anyway is the worst outcome
-    available: the header would take the slab's first spatial extent for a channel count and
+    """Refuse a block that lost the channel-first layout. Writing it anyway is the worst outcome
+    available: the header would take the block's first spatial extent for a channel count and
     publish a store of that many "channels", raising nothing, while the whole-volume path
     returns the right rank: the two would silently disagree."""
     if block.ndim != len(spatial) + 1:
         raise PatchError(
-            f"{what} returned a rank-{block.ndim} slab where the channel-first layout needs rank"
+            f"{what} returned a rank-{block.ndim} block where the channel-first layout needs rank"
             f" {len(spatial) + 1} (C, {', '.join(str(extent) for extent in spatial)}).",
-            "A transform that reduces the leading axis must keep it (`keepdim=True`), so a slab"
+            "A transform that reduces the leading axis must keep it (`keepdim=True`), so a block"
             " stays C[Z]YX; only then does a region write mean the same thing as the"
             " whole-volume pass.",
         )
 
 
 def _open_sweep_stream(
-    sweep: _PendingSweep, block: np.ndarray, spatial: list[int], rows: int, attributes: Attribute
+    sweep: _PendingSweep, block: np.ndarray, spatial: list[int], tile: Sequence[int], attributes: Attribute
 ) -> DataStream:
-    """One region-write stream shaped for the sweep: the store chunks on whole slabs (channels
-    included), so no region write ever pays a read-modify-write."""
+    """One region-write stream shaped for the sweep: the store chunks divide the block the sweep
+    writes (channels included), so no region write ever pays a read-modify-write."""
     stream = sweep.destination.open_data_stream(
         sweep.group,
         sweep.entry,
         [int(block.shape[0]), *spatial],
         block.dtype,
         attributes,
-        region_shape=[int(block.shape[0]), rows, *spatial[1:]],
+        region_shape=[int(block.shape[0]), *(int(extent) for extent in tile)],
     )
     if stream is None:
         raise PatchError(
@@ -2371,48 +2540,73 @@ class DatasetManager:
         evolved: Attribute,
         members: list[tuple[Any, _PendingSweep, list[Stage], Attribute]],
     ) -> tuple[set[Any], str | None]:
-        """The slab loop every sweep runs: each slab of REFERENCE's landing is read once through
-        SOURCE (its first slab against EVOLVED, so a region stage recording geometry nowhere the
+        """The block loop every sweep runs: each block of REFERENCE's landing is read once through
+        SOURCE (its first block against EVOLVED, so a region stage recording geometry nowhere the
         case can read refuses here, as the patch path does), then every member ``(key, sweep, tail,
-        evolved)`` applies its tail to the slab and region-writes it into its own stream, opened on
-        the first slab with the header the whole-volume pass would leave. Returns the keys written
+        evolved)`` applies its tail to the block and region-writes it into its own stream, opened on
+        the first block with the header the whole-volume pass would leave. Returns the keys written
         and, when the pass failed, why: every stream is then aborted; an interrupt is re-raised."""
         spatial = list(reference.out_spatial)
-        rows = self._sweep_rows(spatial, int(reference.source_shape[0]))
+        tile = self._sweep_tile(spatial, int(reference.source_shape[0]), source.stage_plans)
+        targets = list(_sweep_targets(spatial, tile))
+        depth = _sweep_pipeline_depth()
+        # Reading ahead means the reading thread must touch no stage of the chain, so the pull maps
+        # are folded here, before it starts. A stage that sizes its window from the data it reads
+        # (a displacement field: the sizing read IS the sampling read) cannot be folded ahead, and
+        # that chain reads where it samples.
+        pulls = (
+            []
+            if any(plan.run_pull is not None for plan in source.stage_plans)
+            else [self._region_spans(source, target) for target in targets]
+        )
+        ahead = depth if pulls else 0
         sweeps = {key: sweep for key, sweep, _tail, _evolved in members}
         headers: dict[Any, Attribute] = {}
-        writer = RegionWriter(lambda key, block, header: _open_sweep_stream(sweeps[key], block, spatial, rows, header))
+        writer = RegionWriter(lambda key, block, header: _open_sweep_stream(sweeps[key], block, spatial, tile, header))
+
+        def regions() -> Iterator[tuple[int, list[list[slice]], torch.Tensor, Attribute]]:
+            for index, target in enumerate(targets):
+                spans = pulls[index] if pulls else self._region_spans(source, target)
+                tensor, attributes = self._read_streamed_region(source, spans)
+                yield index, spans, tensor, attributes
+
+        write = _WriteBehind(writer, depth)
         try:
-            for slab_index, target in enumerate(_sweep_targets(spatial, rows)):
-                tensor, slab_attribute, keys_before = self._replay_streamed_region(
-                    source,
-                    target,
-                    Attribute(reference.base_attributes),
-                    Attribute(evolved) if slab_index == 0 else None,
-                )
-                for key, sweep, tail, member_evolved in members:
-                    member_tensor = tensor.clone() if len(members) > 1 else tensor
-                    scope = Attribute(slab_attribute)
-                    for stage in tail:
-                        member_tensor = stage(self.name, member_tensor, scope)
-                    block = member_tensor.cpu().numpy()
-                    _require_channel_first(
-                        block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
+            with _ReadAhead(regions(), ahead) as blocks:
+                for index, spans, tensor, attributes in blocks:
+                    target = targets[index]
+                    tensor, region_attribute, keys_before = self._apply_streamed_region(
+                        source,
+                        spans,
+                        tensor,
+                        attributes,
+                        Attribute(reference.base_attributes),
+                        Attribute(evolved) if index == 0 else None,
                     )
-                    if key not in headers:
-                        headers[key] = _sweep_header(member_evolved, scope, keys_before)
-                    writer.write(key, (slice(0, int(block.shape[0])), *target), block, headers[key])
-            written = writer.opened
-            writer.close()
+                    for key, sweep, tail, member_evolved in members:
+                        member_tensor = tensor.clone() if len(members) > 1 else tensor
+                        scope = Attribute(region_attribute)
+                        for stage in tail:
+                            member_tensor = stage(self.name, member_tensor, scope)
+                        block = member_tensor.cpu().numpy()
+                        _require_channel_first(
+                            block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
+                        )
+                        if key not in headers:
+                            headers[key] = _sweep_header(member_evolved, scope, keys_before)
+                        write.write(key, (slice(0, int(block.shape[0])), *target), block, headers[key])
+            written = write.close()
             for key in written:
                 sweep = sweeps[key]
                 self._swept_entries.add((str(sweep.destination.filename), sweep.group, sweep.entry))
             return written, None
         except BaseException as exception:
-            writer.abort(exception)
+            write.abort(exception)
             if not isinstance(exception, Exception):
                 raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
             return set(), f"{type(exception).__name__}: {exception}"
+        finally:
+            write.shutdown()
 
     def _sweep_failed_because(self, sweep: _PendingSweep, reason: str) -> bool:
         """Record why a sweep gave up, warn, and answer ``False``: the one exit for all of them.
@@ -2426,25 +2620,52 @@ class DatasetManager:
         return False
 
     def _sweep_rows(self, spatial: list[int], channels: int) -> int:
-        """How many rows one sweep slab holds: the cap (``SWEEP_SLAB_ROWS`` on a CPU, taller on a GPU
-        as its memory allows), lowered by the budget (half of it over the pulled slab plus the landed
-        block), never below one row. Sized on the source's channels at four bytes each: the landed
-        block's are not known before the first slab, and the fallback budget check refuses on real
-        shapes.
+        """How many rows one sweep region spans on the landing's first axis: the cap
+        (``SWEEP_SLAB_ROWS`` on a CPU, taller on a GPU as its memory allows), lowered by the budget
+        (half of it over everything a pipelined sweep holds: the pulled region and the landed block,
+        plus the one read ahead and the one written behind), never below one row. Sized on the
+        source's channels at four bytes each: the landed block's are not known before the first
+        region, and the fallback budget check refuses on real shapes.
+
+        This is the HEIGHT rule alone; :meth:`_sweep_tile` turns the volume it allows into the block
+        the sweep actually reads.
         """
         cap = max(1, int(SWEEP_SLAB_ROWS))
+        resident = _SWEEP_RESIDENT_SLABS + 2 * _sweep_pipeline_depth()
         plane = int(np.prod(spatial[1:], dtype=np.int64)) * max(1, int(channels)) * _SWEEP_ELEMENT_BYTES
         if plane > 0 and self._chain_device is not None and self._chain_device.type == "cuda":
-            # On a GPU the transfers and launches per slab are the cost: taller slabs, as far as a
-            # quarter of the free device memory allows (measured +10-20 % at 500^3 over 64 rows).
+            # On a GPU the transfers and launches per region are the cost: taller regions, as far as
+            # a quarter of the free device memory allows (measured +10-20 % at 500^3 over 64 rows).
             free_bytes, _total = torch.cuda.mem_get_info(self._chain_device)
-            cap = max(cap, min(_SWEEP_SLAB_ROWS_DEVICE, int(free_bytes * 0.25 / (plane * _SWEEP_RESIDENT_SLABS))))
+            cap = max(cap, min(_SWEEP_SLAB_ROWS_DEVICE, int(free_bytes * 0.25 / (plane * resident))))
         budget = self._sweep_budget_bytes
         if not budget or budget <= 0:
             return cap
         if plane <= 0:
             return cap
-        return max(1, min(cap, int(budget * 0.5 / (plane * _SWEEP_RESIDENT_SLABS))))
+        return max(1, min(cap, int(budget * 0.5 / (plane * resident))))
+
+    def _sweep_tile(self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"] = ()) -> list[int]:
+        """The block one sweep region covers: the volume :meth:`_sweep_rows` allows, in the shape
+        that pulls the least.
+
+        A region pulls the BOUNDING BOX of its own image under the chain's maps, so a slab spanning
+        the trailing plane pays that plane's extent for every degree of shear where a cube pays its
+        side: 1.79x the image against 1.09x on a 513x1331x1776 rigid+affine. Both are priced against
+        the plans' own pull maps (:func:`_pull_voxels`), and the cube wins only by
+        ``_SWEEP_TILE_MARGIN``: the decomposition is also the shape a store gets chunked in. Without
+        plans, the slab.
+        """
+        from konfai.utils.ome_zarr import CHUNK_SPATIAL_TILE
+
+        rows = self._sweep_rows(spatial, channels)
+        slab = [min(int(rows), int(spatial[0])), *(int(extent) for extent in spatial[1:])]
+        voxels = int(rows) * int(np.prod(spatial[1:], dtype=np.int64))
+        cube = _cubic_tile(spatial, voxels, CHUNK_SPATIAL_TILE)
+        if cube == slab or not plans:
+            return slab
+        cheaper = _pull_voxels(spatial, cube, plans) <= _pull_voxels(spatial, slab, plans) * _SWEEP_TILE_MARGIN
+        return cube if cheaper else slab
 
     def _get_streamed_data(
         self,
@@ -2569,8 +2790,55 @@ class DatasetManager:
         cache_attribute: Attribute,
         case_attribute: Attribute | None,
     ) -> tuple[torch.Tensor, Attribute, set[str]]:
-        """Read the source region a target region pulls (the region stages' pull maps folded back to
-        the stored volume) and run the chain forward on it, each stage on the region pair the fold
+        """Read the source region a target region pulls and run the chain forward on it.
+
+        Three steps, separable because only the middle one touches the store and only the last one
+        touches a stage: :meth:`_region_spans` folds the pull maps back to the stored volume,
+        :meth:`_read_streamed_region` reads what they name, :meth:`_apply_streamed_region` runs the
+        chain over it. A sweep drives the three on different threads (see :class:`_ReadAhead`).
+        """
+        spans = self._region_spans(stream_source, target_slices)
+        tensor, attributes = self._read_streamed_region(stream_source, spans)
+        return self._apply_streamed_region(stream_source, spans, tensor, attributes, cache_attribute, case_attribute)
+
+    def _region_spans(self, stream_source: _PatchStreamSource, target_slices: tuple[slice, ...]) -> list[list[slice]]:
+        """The region each stage of the chain reads for ``target_slices``, the last being the target
+        itself and the first the window to read from the store.
+
+        Closed form, from the plans' own pull maps, EXCEPT for a stage that sizes its window from the
+        data (``run_pull``, a displacement field): that one reads, and its sizing read is also its
+        sampling read, so its spans cannot be folded ahead of the chain.
+        """
+        spans: list[list[slice]] = [list(target_slices)]
+        for plan in reversed(stream_source.stage_plans):
+            pull = plan.run_pull or plan.pull
+            spans.append(pull(tuple(spans[-1])) if pull is not None else list(spans[-1]))
+        spans.reverse()
+        return spans
+
+    def _read_streamed_region(
+        self, stream_source: _PatchStreamSource, spans: list[list[slice]]
+    ) -> tuple[torch.Tensor, Attribute]:
+        """The stored region ``spans[0]`` names, on the chain's device. The store and nothing else:
+        no stage of the chain is touched here, which is what lets a sweep read one block ahead."""
+        n_prefix = len(stream_source.shape) - len(spans[-1])
+        data_slices = tuple([slice(None)] * n_prefix + spans[0])
+        data, attributes = stream_source.dataset.read_data_slice(stream_source.group, stream_source.entry, data_slices)
+        tensor = torch.from_numpy(data)
+        if self._chain_device is not None:
+            tensor = tensor.to(self._chain_device)
+        return tensor, attributes
+
+    def _apply_streamed_region(
+        self,
+        stream_source: _PatchStreamSource,
+        spans: list[list[slice]],
+        tensor: torch.Tensor,
+        attributes: Attribute,
+        cache_attribute: Attribute,
+        case_attribute: Attribute | None,
+    ) -> tuple[torch.Tensor, Attribute, set[str]]:
+        """The chain forward over a region already read, each stage on the region pair the fold
         computed for it: HALO reads the enlarged region and is cropped back, ORIENTATION remaps what
         it read, a CROP's remap is its action (not re-applied), REGRID interpolates to its target
         extent, a per-voxel stage is told where its region sits. ``cache_attribute`` is the region's
@@ -2578,26 +2846,12 @@ class DatasetManager:
         case-level geometry (from the full shape). Returns the tensor, the evolved scope, and the
         keys the scope held before (what the chain added is what the caller may persist).
         """
-        stages, plans = stream_source.stages, stream_source.stage_plans
-        n_prefix = len(stream_source.shape) - len(target_slices)
-
-        spans: list[list[slice]] = [list(target_slices)]
-        for plan in reversed(plans):
-            pull = plan.run_pull or plan.pull
-            spans.append(pull(tuple(spans[-1])) if pull is not None else list(spans[-1]))
-        spans.reverse()
-
-        data_slices = tuple([slice(None)] * n_prefix + spans[0])
-        data, attributes = stream_source.dataset.read_data_slice(stream_source.group, stream_source.entry, data_slices)
-        tensor = torch.from_numpy(data)
-        if self._chain_device is not None:
-            tensor = tensor.to(self._chain_device)
-
         cache_attribute.update(attributes)
         cache_attribute["StatisticsSeeded"] = 1.0  # same contract as the pointwise route above
         keys_before = set(cache_attribute.keys())
 
-        for stage, plan, source, target in zip(stages, plans, spans[:-1], spans[1:], strict=True):
+        plans = stream_source.stage_plans
+        for stage, plan, source, target in zip(stream_source.stages, plans, spans[:-1], spans[1:], strict=True):
             if not plan.kind.is_region:
                 # The span is handed over rather than dropped: a stage reading a second aligned
                 # volume needs to know WHICH part of it lines up with this region, and the

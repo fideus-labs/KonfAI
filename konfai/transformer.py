@@ -54,6 +54,7 @@ from konfai.utils.budget import format_bytes, node_local_ranks
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformerError
+from konfai.utils.ome_zarr import set_chunk_cache_budget
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -681,8 +682,10 @@ class Transformer(DistributedObject):
             # An explicit budget is per rank and never divided: the node holds N of them.
             budget_desc += f", per rank: x{node_ranks} = {format_bytes(per_rank_budget * node_ranks)} on the node"
         # Resolved before anything is planned, because a reduction sizes its regions against it --
-        # the plan must measure the same run setup() will enforce.
+        # the plan must measure the same run setup() will enforce. The store's decoded-chunk cache
+        # is bounded here too: it is part of what the process holds.
         self._budget_bytes = per_rank_budget
+        set_chunk_cache_budget(per_rank_budget)
         entries: list[TransformPlanEntry] = []
         probed: set[tuple[str, str]] = set()
         planned_dtypes: set[str] = set()
@@ -719,10 +722,10 @@ class Transformer(DistributedObject):
     #: What a streamed case whose slabs the budget lowered below the default height, and whose chain
     #: interpolates through per-voxel coordinates, is told: its values differ from a taller-slab run.
     _SUB_CAP_NOTE = (
-        "the budget lowers the sweep slab height below the default, and a stage of the chain"
-        " interpolates through per-voxel coordinates (a resample whose map does not factorise,"
-        " a free rotation): the streamed values then differ from a taller-slab run by ~1e-5 of"
-        " the data's range"
+        "the landing is swept in more than one block, and a stage of the chain interpolates"
+        " through per-voxel coordinates (a resample whose map does not factorise, a free"
+        " rotation): the streamed values then differ from an undecomposed run by ~1e-5 of the"
+        " data's range"
     )
 
     def _plan_notes(self, sub_cap_sweeps: bool) -> list[str]:

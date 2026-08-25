@@ -23,7 +23,7 @@ keys), and the config env-var bookkeeping.
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 import ruamel.yaml
@@ -351,6 +351,26 @@ def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_confi
     assert root.voxels == 8 and isinstance(root.voxels, int)
     assert root.percent == "20%"
     assert list(root.per_axis) == [10, 20, 0] and isinstance(root.per_axis, list)  # not the string "[10, 20, 0]"
+
+
+def test_apply_config_binds_a_free_mapping_and_writes_it_back(write_config) -> None:
+    """A ``dict[str, Any]`` key is a mapping the caller owns, not a block the binder walks.
+
+    ``storage_options`` is the case that made it matter: fsspec takes its own keyword names, of its
+    own types, and the binder has no business coercing them. It must also survive the write-back, or
+    the second run of a config reads its own erased copy and reaches the store anonymously.
+    """
+    config_path = write_config("Root:\n  options:\n    anon: true\n    default_block_size: 8388608\n")
+
+    class Root:
+        def __init__(self, options: dict[str, Any] | None = None) -> None:
+            self.options = options
+
+    root = apply_config("Root")(Root)()
+
+    assert root.options == {"anon": True, "default_block_size": 8388608}
+    written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    assert dict(written["Root"]["options"]) == {"anon": True, "default_block_size": 8388608}
 
 
 def test_apply_config_refuses_a_nested_block_where_a_value_is_expected(write_config) -> None:

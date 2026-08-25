@@ -36,6 +36,43 @@ any other transform kind is written whole.
 `pip install "konfai[imaging]"` installs every backend at once
 (`SimpleITK, h5py, pydicom, zarr, ngff-zarr`).
 
+## Reading a root from object storage
+
+A `dataset_filenames` entry may name a URI instead of a path, and
+`storage_options` on the same `Dataset:` block says how to reach it:
+
+```yaml
+Dataset:
+  dataset_filenames:
+    - s3://aind-open-data/exaSPIM_822174_..._processed_...:omezarr
+  storage_options: {anon: true}
+```
+
+The mapping goes to fsspec verbatim, and it is the run's, not one entry's: every
+root reads with it, a stage's own reference grid or field store included. Install
+the filesystem for the scheme (`pip install "konfai[s3]"` for `s3://`); `fsspec`
+itself already comes with the OME-Zarr extra.
+
+Two limits, both deliberate. Only `:omezarr` reads a remote root: it addresses a
+store, where the other backends open a path. And a remote root is **read-only**,
+because publishing an entry is a rename and an object store has none: point the
+`Write:` at a local path.
+
+Give a remote run a `memory_budget` that holds its working set. The store's
+decoded-chunk cache is a share of that budget, and a cache miss on a remote root
+is a download where a local one is a decode. The same pair of brains, the same
+chain, the same link at 1.6 MB/s: 1.898 GB downloaded in 19:12 with the cache at
+a share of free RAM, 2.573 GB in 38:34 with it bounded to a third of a declared
+4 GiB. The output was identical either way; only the number of times a chunk was
+fetched changed.
+
+A root that cannot be reached raises and names the reason. That is the whole
+point of routing these probes rather than leaving them on `os`: `os.path.exists`
+answers False for an `s3://` root and `os.listdir` raises `FileNotFoundError`, so
+a mistyped bucket, an expired credential and a listing-denied prefix would each
+read as an empty cohort, and the run would finish successfully having written
+nothing.
+
 The extras column above is the summary; {doc}`../../getting-started/installation`
 is the canonical home for the optional-extras table.
 

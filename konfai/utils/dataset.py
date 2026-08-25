@@ -53,6 +53,7 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 
 from konfai import current_date
+from konfai.utils import uri
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.utils import SUPPORTED_EXTENSIONS, directory_volume_form, split_format_level
 
@@ -237,19 +238,16 @@ def _attribute_text(value: Any) -> str:
 def _store_chunks(shape: list[int], region_shape: list[int] | None, dtype: Any) -> tuple[int, ...] | None:
     """Chunks a store should use, given the region shape its writer declared.
 
-    A region write that straddles a chunk becomes a read-modify-write of the whole chunk, so the
-    writer's own region is the honest starting point. Taking it verbatim is not: a slab sweep
-    declares the whole trailing plane, which at 2048x2048 float32 is a gigabyte in one chunk (past
-    what zarr will hold in a single buffer at 4096x4096), and every later partial read pays it,
-    including readers that are not KonfAI.
+    A region write that straddles a chunk becomes a read-modify-write of it, so the writer's own
+    region is the starting point; verbatim it is a gigabyte in one chunk at 2048x2048 float32, paid
+    by every later partial read. A region that fits ``CHUNK_TARGET_BYTES`` is taken as it stands; one
+    that does not is cut on EVERY axis longer than ``CHUNK_SPATIAL_TILE`` at once, the shape that
+    writes fastest (2.4 GB into a (1, 128, 128, 128) uint16 store takes 2.18 s, into
+    (1, 128, 640, 128) 3.53 s).
 
-    So an axis the region covers END TO END is tiled, and an axis where the region is a strict
-    sub-range keeps the writer's size. Tiling a fully-covered axis cannot split a region write, since
-    every chunk along it falls inside one region either way; splitting a partial axis is exactly the
-    read-modify-write this exists to avoid. Innermost axes go first, so the chunk stays long on the
-    axis the writer actually advances along.
-
-    ``None`` when the writer declared nothing: the store keeps its own default rather than a guess.
+    A covered axis may be cut anywhere; a partial one only into a DIVISOR of the region, since a
+    writer advancing in blocks of its declared size starts every block at a multiple of it. One whose
+    largest usable divisor would be a sliver is left long. ``None`` when the writer declared nothing.
     """
     from konfai.utils.ome_zarr import CHUNK_SPATIAL_TILE, CHUNK_TARGET_BYTES
 
@@ -257,12 +255,22 @@ def _store_chunks(shape: list[int], region_shape: list[int] | None, dtype: Any) 
         return None
     chunk = [max(1, min(int(region), int(extent))) for region, extent in zip(region_shape, shape, strict=True)]
     itemsize = max(1, np.dtype(dtype).itemsize)
-    covered = [axis for axis, extent in enumerate(shape) if chunk[axis] >= int(extent)]
-    for axis in reversed(covered):
-        if int(np.prod(chunk, dtype=np.int64)) * itemsize <= CHUNK_TARGET_BYTES:
-            break
-        chunk[axis] = min(chunk[axis], CHUNK_SPATIAL_TILE)
-    return tuple(chunk)
+    if int(np.prod(chunk, dtype=np.int64)) * itemsize <= CHUNK_TARGET_BYTES:
+        return tuple(chunk)
+    return tuple(
+        min(extent, CHUNK_SPATIAL_TILE) if extent >= int(shape[axis]) else _divisor_tile(extent, CHUNK_SPATIAL_TILE)
+        for axis, extent in enumerate(chunk)
+    )
+
+
+def _divisor_tile(extent: int, cap: int) -> int:
+    """The largest divisor of ``extent`` that is at most ``cap``, or ``extent`` when that divisor
+    would be a sliver (under a quarter of the cap): a chunk axis of one voxel is worse than a long
+    one."""
+    if extent <= cap:
+        return max(1, extent)
+    divisor = next((candidate for candidate in range(cap, 0, -1) if extent % candidate == 0), 1)
+    return divisor if divisor * 4 >= cap else extent
 
 
 class Attribute(dict[str, Any]):
@@ -2034,12 +2042,15 @@ class Dataset:
             level: int = 0,
             scale_factors: list[int] | None = None,
             downsample_method: str | None = None,
+            storage_options: dict[str, Any] | None = None,
         ) -> None:
             self.filename = filename if filename.endswith("/") else f"{filename}/"
             self.read = read
             self.level = level
             self.scale_factors = list(scale_factors) if scale_factors else None
             self.downsample_method = downsample_method
+            #: How this store is reached; ``None`` on a local one, where it means nothing.
+            self.storage_options = dict(storage_options) if storage_options else None
 
         def __enter__(self):
             return self
@@ -2047,18 +2058,22 @@ class Dataset:
         def __exit__(self, exc_type, value, traceback):
             return None
 
-        def _path(self, name: str, *, writing: bool = False) -> Path:
-            base = Path(self.filename) / name
+        def _path(self, name: str, *, writing: bool = False) -> str:
+            """Where entry ``name``'s store sits: text, because a remote one is a URI and ``Path``
+            eats the second slash of one."""
+            base = uri.join(self.filename, name)
             if writing:
-                return Path(f"{base}.ome.zarr")
-            candidates = [Path(f"{base}.ome.zarr"), Path(f"{base}.zarr"), base]
+                uri.refuse_write(self.filename)
+                return f"{base}.ome.zarr"
+            candidates = [f"{base}.ome.zarr", f"{base}.zarr", base]
             for candidate in candidates:
-                if candidate.is_dir():
+                if uri.is_dir(candidate, self.storage_options):
                     return candidate
-            for candidate in candidates:  # a writer killed mid-replacement left the previous store aside
-                _recover_orphaned_backup(candidate)
-                if candidate.is_dir():  # recovered here, or published by whoever won the race
-                    return candidate
+            if not uri.is_uri(self.filename):
+                for candidate in candidates:  # a writer killed mid-replacement left the previous store aside
+                    _recover_orphaned_backup(Path(candidate))
+                    if os.path.isdir(candidate):  # recovered here, or published by whoever won the race
+                        return candidate
             raise NameError(f"OME-Zarr group '{name}' not found in '{self.filename}'.")
 
         @staticmethod
@@ -2073,7 +2088,7 @@ class Dataset:
             # Marked here and not in file_to_data_slice: that one is the streamed path, called once per
             # patch, and re-reading the store's metadata per patch is exactly the overhead _load_image
             # is memoised to avoid. A transform is only ever rebuilt from a whole entry.
-            if is_displacement_field(self._path(name)):
+            if is_displacement_field(self._path(name), self.storage_options):
                 attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
             return data, attributes
 
@@ -2081,7 +2096,9 @@ class Dataset:
             from konfai.utils.ome_zarr import read_ome_zarr_data_slice
 
             path = self._path(name)
-            data, metadata = read_ome_zarr_data_slice(path, slices, level=self.level)
+            data, metadata = read_ome_zarr_data_slice(
+                path, slices, level=self.level, storage_options=self.storage_options
+            )
             attributes = self._attributes(metadata)
             shape = metadata["shape"]
             normalized = tuple(slice(*item.indices(size)) for item, size in zip(slices, shape, strict=True))
@@ -2169,8 +2186,8 @@ class Dataset:
 
             if len(shape) not in (3, 4):
                 return None
-            final_path = self._path(name, writing=True)
-            store_path = Path(f"{final_path}.{DataStream.temporary_suffix()}")
+            final_path = Path(self._path(name, writing=True))
+            store_path = final_path.with_name(f"{final_path.name}.{DataStream.temporary_suffix()}")
             array = create_ome_zarr_store(
                 store_path,
                 shape,
@@ -2195,15 +2212,12 @@ class Dataset:
             return self.get_group()
 
         def get_group(self) -> list[str]:
-            root = Path(self.filename)
-            if not root.is_dir():
-                return []
             groups = []
-            for path in root.iterdir():
-                if path.name.endswith(".ome.zarr"):
-                    groups.append(path.name.removesuffix(".ome.zarr"))
-                elif path.name.endswith(".zarr"):
-                    groups.append(path.name.removesuffix(".zarr"))
+            for name in uri.list_names(self.filename, self.storage_options):
+                if name.endswith(".ome.zarr"):
+                    groups.append(name.removesuffix(".ome.zarr"))
+                elif name.endswith(".zarr"):
+                    groups.append(name.removesuffix(".zarr"))
             return sorted(groups)
 
         def is_exist(self, group: str, name: str | None = None) -> bool:
@@ -2216,7 +2230,7 @@ class Dataset:
         def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
             from konfai.utils.ome_zarr import get_ome_zarr_info, is_displacement_field
 
-            metadata = get_ome_zarr_info(self._path(name), level=self.level)
+            metadata = get_ome_zarr_info(self._path(name), level=self.level, storage_options=self.storage_options)
             axes = [str(axis).lower() for axis in metadata["axes"]]
             axis_sizes = dict(zip(axes, metadata["shape"], strict=True))
             shape = [axis_sizes.get("c", 1), *[axis_sizes[axis] for axis in ("z", "y", "x") if axis in axis_sizes]]
@@ -2227,7 +2241,7 @@ class Dataset:
             # regions is an ordinary 3-channel image. This is the once-per-case call (Dataset caches
             # it), not the per-patch one, which is why the check belongs here and not in
             # file_to_data_slice.
-            if is_displacement_field(self._path(name)):
+            if is_displacement_field(self._path(name), self.storage_options):
                 attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
             return shape, attributes
 
@@ -2525,6 +2539,7 @@ class Dataset:
             level: int = 0,
             scale_factors: list[int] | None = None,
             downsample_method: str | None = None,
+            storage_options: dict[str, Any] | None = None,
         ) -> None:
             self.filename = filename
             self.read = read
@@ -2533,14 +2548,26 @@ class Dataset:
             self.level = level
             self.scale_factors = scale_factors
             self.downsample_method = downsample_method
+            self.storage_options = storage_options
 
         def __enter__(self) -> Dataset.AbstractFile:
-            if self.file_format == "h5":
-                self.file = Dataset.H5File(self.filename, self.read)
-            elif self.file_format == "omezarr":
+            if self.file_format == "omezarr":
                 self.file = Dataset.OmeZarrFile(
-                    self.filename, self.read, self.level, self.scale_factors, self.downsample_method
+                    self.filename,
+                    self.read,
+                    self.level,
+                    self.scale_factors,
+                    self.downsample_method,
+                    self.storage_options,
                 )
+            elif uri.is_uri(self.filename):
+                # OME-Zarr addresses a store; every other backend opens a path.
+                raise DatasetManagerError(
+                    f"'{self.filename}' is a remote root, which only ':omezarr' can read.",
+                    "Declare the root as ':omezarr', or copy the dataset locally first.",
+                )
+            elif self.file_format == "h5":
+                self.file = Dataset.H5File(self.filename, self.read)
             elif self.file_format == "dicom":
                 self.file = Dataset.DicomFile(self.filename, self.read)
             elif self.file_format == "itktransform":
@@ -2560,7 +2587,10 @@ class Dataset:
         file_format: str,
         scale_factors: list[int] | None = None,
         downsample_method: str | None = None,
+        storage_options: dict[str, Any] | None = None,
     ) -> None:
+        #: How a remote root is reached, handed to fsspec verbatim; ignored on a local one.
+        self.storage_options = dict(storage_options) if storage_options else None
         base_format, self.level = split_format_level(file_format)
         normalized_format = base_format.lower().removeprefix(".").replace("_", "-")
         file_format = {"ome-zarr": "omezarr", "zarr": "omezarr"}.get(normalized_format, normalized_format)
@@ -2570,7 +2600,9 @@ class Dataset:
         # every supported extension): an OME-Zarr / Zarr / DICOM store is a directory whose type is
         # knowable from its structure, so a ``:mha`` token never forces it to be mis-read. The token then
         # only carries the WRITE format and the OME-Zarr pyramid level (``@N``).
-        detected = Dataset._detect_directory_store_format(self.filename) if self.is_directory else None
+        detected = (
+            Dataset._detect_directory_store_format(self.filename, self.storage_options) if self.is_directory else None
+        )
         if detected is not None:
             self.file_format = detected
         # Write-side pyramid, declared by the Save/Write that owns this destination. Refused here
@@ -2590,6 +2622,11 @@ class Dataset:
         #: ``(group, name)``: computed once per volume, whatever the number of chains reading it.
         self.case_facts: dict[tuple[str, str], dict[str, Any]] = {}
 
+    def _open(self, filename: str, read: bool) -> Dataset.File:
+        """One entry's backing file, opened as this dataset's root is reached: the one place the
+        root's storage options are handed on."""
+        return Dataset.File(filename, read, self.file_format, self.level, storage_options=self.storage_options)
+
     @staticmethod
     def _normalize_path(filename: str | Path, file_format: str) -> tuple[str, bool]:
         # A single-store h5 is one file, every other backend a directory of cases: only the latter gets the
@@ -2597,7 +2634,7 @@ class Dataset:
         # directory-flagged h5 (which would write the hidden dotfile ``<dir>/.h5``). ``as_posix`` keeps the
         # separator forward on every OS, so the stored filename (and the trailing-slash marker) is the same
         # on Windows, where ``prefix / name`` would otherwise render backslashes.
-        path = Path(filename).as_posix()
+        path = uri.normalize(filename)
         if file_format != "h5" and not path.endswith("/"):
             path += "/"
         return path, path.endswith("/")
@@ -2607,35 +2644,57 @@ class Dataset:
         self.filename, self.is_directory = Dataset._normalize_path(prefix / self.filename, self.file_format)
 
     @staticmethod
-    def _detect_directory_store_format(root: str) -> str | None:
+    def _detect_directory_store_format(root: str, storage_options: dict[str, Any] | None = None) -> str | None:
         """Detect a directory dataset's store backend from disk (``omezarr`` / ``dicom``), independent of the
         format token; ``None`` when it is plain per-file volumes (the SitkFile path, which auto-detects the
         extension itself). Probes the first case's entries only: cheap, and cases share one layout."""
-        base = Path(root)
-        if not base.is_dir():
+        if not uri.is_dir(root, storage_options):
             return None
-        # No sort: any case is representative of the layout, and sorting lists the whole
-        # directory for one probe (a resume over N written cases would pay it N times).
-        case = next((child for child in base.iterdir() if child.is_dir()), None)
-        if case is None:
-            return None
-        for entry in sorted(case.iterdir()):
+        for entry in Dataset._first_case_entries(root, storage_options):
             volume = directory_volume_form(entry)
             if volume is not None:
                 return "dicom" if volume == "" else "omezarr"
         return None
 
+    @staticmethod
+    def _first_case_entries(root: str, storage_options: dict[str, Any] | None) -> list[Path]:
+        """What ``root``'s first case directory holds, empty when it has none.
+
+        Unsorted on a local root: any case is representative of the layout, and ``iterdir`` stops at
+        the first directory where a listing materialises the whole of a resume's output tree. A
+        remote listing is one request either way, and arrives sorted.
+        """
+        if uri.is_uri(root):
+            cases = (name for name in uri.list_names(root, storage_options))
+            case = next((name for name in cases if uri.is_dir(uri.join(root, name), storage_options)), None)
+            return (
+                [] if case is None else [Path(name) for name in uri.list_names(uri.join(root, case), storage_options)]
+            )
+        case_path = next((child for child in Path(root).iterdir() if child.is_dir()), None)
+        return [] if case_path is None else sorted(case_path.iterdir())
+
     @property
-    def path_on_disk(self) -> Path:
-        """Where the store lives: its root directory, or the ``.h5`` file for a single-file store
-        (named with or without the suffix, as the backend opens it)."""
-        root = Path(self.filename)
-        if self.file_format == "h5" and root.suffix != ".h5":
-            return root.with_name(f"{root.name}.h5")
+    def store_root(self) -> str:
+        """Where the store lives, as text: its root directory, or the ``.h5`` file for a single-file
+        store (named with or without the suffix, as the backend opens it).
+
+        Text, because ``Path`` eats the second slash of a URI; :attr:`path_on_disk` is the local-only
+        view, for the callers that manipulate the path.
+        """
+        root = self.filename
+        if self.file_format == "h5" and not root.endswith(".h5"):
+            return f"{root}.h5"
         return root
 
+    @property
+    def path_on_disk(self) -> Path:
+        """:attr:`store_root` as a path. Local roots only: a URI has no filesystem path."""
+        return Path(self.store_root)
+
     def exists_on_disk(self) -> bool:
-        return self.path_on_disk.exists()
+        """Whether the store is there, asked of whichever filesystem owns it. A remote root that
+        cannot be reached raises; only one that answers gets to say no."""
+        return uri.exists(self.store_root, self.storage_options)
 
     def concurrent_write_safe(self) -> bool:
         """Whether writes to different entries land in disjoint files, so a background writer may
@@ -2654,6 +2713,8 @@ class Dataset:
         A directory dataset routes any sub-directory prefix of ``group`` into the file path (one file
         per case); a single store keeps one file and a ``group/name`` entry.
         """
+        # Ahead of the makedirs below, which would take a URI for a directory name.
+        uri.refuse_write(self.filename)
         self._names_cache.clear()
         self._infos_cache.clear()
         self.case_facts.clear()
@@ -2759,8 +2820,10 @@ class Dataset:
         """
         path = f"{self.filename}{sub_directory}{name}"
         on_disk = f"{path}{'.h5' if self.file_format == 'h5' else ''}"
-        if os.path.exists(on_disk):
+        if uri.exists(on_disk, self.storage_options):
             return path
+        if uri.is_uri(on_disk):
+            return None  # no writer of a remote root, so no backup of one to recover
         # Absent is not always absent: a writer killed mid-replacement leaves the previous version
         # under its backup name, which the listings hide. Asked of disk again after the attempt: the
         # recovery declines to a publish that landed meanwhile, and that publish is the entry.
@@ -2781,10 +2844,10 @@ class Dataset:
             for sub_directory in self._get_sub_directories(groups):
                 path = self._case_path(sub_directory, name)
                 if path is not None:
-                    with Dataset.File(path, True, self.file_format, self.level) as file:
+                    with self._open(path, True) as file:
                         return action(file, "", groups.split("/")[-1])
             raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
-        with Dataset.File(self.filename, True, self.file_format, self.level) as file:
+        with self._open(self.filename, True) as file:
             return action(file, groups, name)
 
     def read_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
@@ -2916,11 +2979,11 @@ class Dataset:
                 path = self._case_path(sub_directory, name)
                 if path is None:
                     continue
-                with Dataset.File(path, True, self.file_format, self.level) as file:
+                with self._open(path, True) as file:
                     if file.is_exist(entry_group):
                         return True
             return False
-        with Dataset.File(self.filename, True, self.file_format, self.level) as file:
+        with self._open(self.filename, True) as file:
             # A wildcard group is a path pattern; only the store's own listing expands it.
             return name in file.get_names(group) if "*" in group else file.is_exist(group, name)
 
@@ -2930,8 +2993,9 @@ class Dataset:
         if len(groups.split("/")) == 1:
             sub_directories.append(sub_directory)
         elif group == "*":
-            for k in os.listdir(f"{self.filename}{sub_directory}"):
-                if not os.path.isfile(f"{self.filename}{sub_directory}{k}"):
+            root = f"{self.filename}{sub_directory}"
+            for k in uri.list_names(root, self.storage_options):
+                if uri.is_dir(f"{root}{k}", self.storage_options):
                     sub_directories.extend(
                         self._get_sub_directories(
                             "/".join(groups.split("/")[1:]),
@@ -2940,7 +3004,7 @@ class Dataset:
                     )
         else:
             sub_directory = f"{sub_directory}{group}/"
-            if os.path.exists(f"{self.filename}{sub_directory}"):
+            if uri.exists(f"{self.filename}{sub_directory}", self.storage_options):
                 sub_directories.extend(self._get_sub_directories("/".join(groups.split("/")[1:]), sub_directory))
         return sub_directories
 
@@ -2952,19 +3016,14 @@ class Dataset:
         if self.is_directory:
             for sub_directory in self._get_sub_directories(groups):
                 group = groups.split("/")[-1]
-                if os.path.exists(f"{self.filename}{sub_directory}"):
-                    for name in sorted(os.listdir(f"{self.filename}{sub_directory}")):
-                        if os.path.isfile(f"{self.filename}{sub_directory}{name}") or self.file_format != "h5":
-                            with Dataset.File(
-                                f"{self.filename}{sub_directory}{name}",
-                                True,
-                                self.file_format,
-                                self.level,
-                            ) as file:
-                                if file.is_exist(group):
-                                    names.append(name.replace(".h5", "") if self.file_format == "h5" else name)
+                root = f"{self.filename}{sub_directory}"
+                for name in uri.list_names(root, self.storage_options):
+                    if self.file_format != "h5" or not uri.is_dir(f"{root}{name}", self.storage_options):
+                        with self._open(f"{root}{name}", True) as file:
+                            if file.is_exist(group):
+                                names.append(name.replace(".h5", "") if self.file_format == "h5" else name)
         else:
-            with Dataset.File(self.filename, True, self.file_format, self.level) as file:
+            with self._open(self.filename, True) as file:
                 names = file.get_names(groups)
 
         sorted_names = sorted(names)
@@ -2977,12 +3036,13 @@ class Dataset:
         if self.is_directory:
             if self.file_format in {"dicom", "omezarr"}:
                 groups_set = set()
-                root_path = Path(self.filename)
-                for case_path in root_path.iterdir() if root_path.is_dir() else []:
-                    if case_path.is_dir():
-                        with Dataset.File(str(case_path), True, self.file_format, self.level) as dataset_file:
+                for case in uri.list_names(self.filename, self.storage_options):
+                    case_path = uri.join(self.filename, case)
+                    if uri.is_dir(case_path, self.storage_options):
+                        with self._open(case_path, True) as dataset_file:
                             groups_set.update(dataset_file.get_group())
                 return sorted(groups_set)
+            uri.refuse_remote_walk(self.filename, self.file_format)
             groups_set = set()
             for root_dir, _, files in os.walk(self.filename):
                 for file in files:
@@ -2995,7 +3055,7 @@ class Dataset:
                     groups_set.add("/".join(parts))
             groups = list(groups_set)
         else:
-            with Dataset.File(self.filename, True, self.file_format, self.level) as dataset_file:
+            with self._open(self.filename, True) as dataset_file:
                 groups = dataset_file.get_group()
         return list(groups)
 

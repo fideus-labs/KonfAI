@@ -27,14 +27,16 @@ import socket
 import subprocess  # nosec B404
 import sys
 import tempfile
+import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from enum import Enum
 from functools import wraps
 from pathlib import Path
-from typing import Any, TextIO, TypedDict, cast
+from typing import Any, TextIO, TypedDict, TypeVar, cast
 
 import numpy as np
 import psutil
@@ -987,7 +989,52 @@ def execute_distributed_object(
             torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = previous_cudnn
 
 
+_T = TypeVar("_T")
+
 _cpu_budget_applied = False
+_rank_pool: ThreadPoolExecutor | None = None
+_rank_pool_lock = threading.Lock()
+
+
+def rank_cpu_share(world_size: int | None = None) -> int:
+    """The cores this rank may use: the node's, divided between its local ranks, or exactly
+    ``OMP_NUM_THREADS`` when that is set.
+
+    One number for every consumer: torch's intraop pool, ITK's, zarr's, :func:`rank_pool`. The world
+    size stands in for a launcher that published no ``KONFAI_LOCAL_RANKS``.
+    """
+    explicit = os.environ.get("OMP_NUM_THREADS")
+    if explicit:
+        return max(1, int(explicit))
+    return max(1, available_cpus() // node_local_ranks(world_size))
+
+
+def rank_pool() -> ThreadPoolExecutor | None:
+    """The rank's shared worker pool, for the host-side GIL-releasing work inside ONE case: sharding
+    cases over ranks does nothing for a cohort of one.
+
+    ``None`` at a share of one, where the work stays on the calling thread.
+    """
+    global _rank_pool
+    workers = rank_cpu_share()
+    if workers <= 1:
+        return None
+    with _rank_pool_lock:
+        if _rank_pool is None:
+            _rank_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="konfai-rank")
+    return _rank_pool
+
+
+def map_over_rank_pool(work: Callable[[_T], None], items: Sequence[_T]) -> None:
+    """Run ``work`` over ``items`` on the rank's pool, in the caller's thread when there is none.
+    Every exception is raised, the first one first: a region half written is not a region."""
+    pool = rank_pool()
+    if pool is None or len(items) < 2:
+        for item in items:
+            work(item)
+        return
+    for future in [pool.submit(work, item) for item in items]:
+        future.result()
 
 
 def apply_cpu_thread_budget(world_size: int | None = None) -> None:
@@ -1011,23 +1058,29 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
     if sys.platform == "darwin" or _cpu_budget_applied:
         return
     explicit = os.environ.get("OMP_NUM_THREADS")
-    # The world size stands in for a launcher that published no KONFAI_LOCAL_RANKS: without it four
-    # ranks of a direct execute_distributed_object() call would each size themselves for the whole
-    # node and oversubscribe it fourfold.
-    cores = max(1, available_cpus() // node_local_ranks(world_size))
+    cores = rank_cpu_share(world_size)
     # The cap is torch's alone: past memory-bus saturation its intraop pool only adds barrier
     # contention. ITK's pool is not the same animal -- its resampler, which does the host walk,
     # keeps scaling to the whole share (a fold-sized region through a displacement field: 10.98 s
     # at 1 thread, 1.11 s at 12, 0.65 s at 24), so capping it at 12 left a third of a 24-core node
     # idle and cost 15 s on a measured fold.
     share = int(explicit) if explicit else min(cores, 12)
-    itk_share = int(explicit) if explicit else cores
+    itk_share = cores
     if not explicit:
         torch.set_num_threads(share)
     try:
         import SimpleITK as sitk
 
         sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(itk_share)
+    except ImportError:
+        pass
+    try:
+        import zarr
+
+        # A THIRD of the share: a pipelined sweep runs three of these at once, the decode of the
+        # region being read, the assembly of the one before it, the encode of the one being written.
+        # Over the whole run, 6.7 s with the share, 6.4 at half, 6.1 at a third, 6.2 at a sixth.
+        zarr.config.set({"async.concurrency": max(1, cores // 3)})
     except ImportError:
         pass
     # Marked applied only once it is: a raise above (a bad OMP_NUM_THREADS) leaves the next call free to retry.

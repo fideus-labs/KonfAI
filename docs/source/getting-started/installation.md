@@ -38,6 +38,7 @@ everything, `[dev]` adds the test, lint and docs tooling.
 | `hdf5` | `h5py` | HDF5-backed datasets |
 | `dicom` | `pydicom` | DICOM series, see {doc}`../reference/components/storage-backends` |
 | `omezarr` | `zarr`, `ngff-zarr` | OME-Zarr / OME-NGFF, see {doc}`../reference/components/storage-backends` |
+| `s3` | `s3fs`, `aiohttp` | reading a dataset root from `s3://`, see {doc}`../reference/components/storage-backends` |
 | `tensorboard` | `tensorboard` | TensorBoard logging |
 | `monitoring` | `nvidia-ml-py` | GPU monitoring |
 | `smp` | `segmentation-models-pytorch` | the SMP model bridge, **required by `examples/Synthesis`** |

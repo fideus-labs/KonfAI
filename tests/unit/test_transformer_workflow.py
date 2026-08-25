@@ -1203,8 +1203,8 @@ def test_the_working_set_counts_the_widest_stages_own_buffers(tmp_path: Path) ->
     assert "widest stage" in plan.report()
 
 
-def test_the_slab_height_note_is_printed_only_where_it_can_matter(tmp_path: Path) -> None:
-    """A budget that lowers the slab height changes no byte of a pointwise or separable chain; the
+def test_the_decomposition_note_is_printed_only_where_it_can_matter(tmp_path: Path) -> None:
+    """Sweeping a landing in several blocks changes no byte of a pointwise or separable chain; the
     plan says so only for a chain that interpolates through per-voxel coordinates."""
     rng = np.random.default_rng(3)
     source = Dataset(tmp_path / "source", "mha")
@@ -1232,7 +1232,7 @@ def test_the_slab_height_note_is_printed_only_where_it_can_matter(tmp_path: Path
         )
         plan = _build(tmp_path).compute_plan()
         assert plan.entries[0].verdict == "STREAM", plan.entries[0].reason
-        assert any("slab height" in note for note in plan.notes) is sensitive, (chain, plan.notes)
+        assert any("more than one block" in note for note in plan.notes) is sensitive, (chain, plan.notes)
 
 
 def test_a_bare_name_past_the_marker_is_the_draw(tmp_path: Path) -> None:
@@ -1665,7 +1665,7 @@ _SNAPSHOT_REPORT = """\
 [KonfAI] plan over 2 rank(s) | per-rank budget 96.00 KiB ('98304b', per rank: x2 = 192.00 KiB on the node) | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed float32 / source channels until the first slab
 [KonfAI] 1 case(s) of 'CT' are DROPPED: the run keeps the cases every groups_src shares, minus what 'subset' excludes.
   CT -> A (Clip -> Write <tmp>/out_a:h5): 3 case(s) -- 1 STREAM, 1 LOAD, 0 WHOLE-VOLUME, 1 SKIP (output already written)
-    (1 case(s)) LOAD: fits the per-rank budget (~64.00 KiB vs 96.00 KiB); streaming would read ~2.0x the source
+    (1 case(s)) LOAD: fits the per-rank budget (~64.00 KiB vs 96.00 KiB); streaming would read ~3.0x the source
   CT -> B (Clip -> Standardize -> Write <tmp>/out_b:h5): 3 case(s) -- 0 STREAM, 0 LOAD, 3 WHOLE-VOLUME, 0 SKIP (output already written)
     (3 case(s)) WHOLE-VOLUME: stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.
     worst fallback case ~= 96.00 KiB vs per-rank budget 96.00 KiB

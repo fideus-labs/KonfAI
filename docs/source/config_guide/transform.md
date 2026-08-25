@@ -27,15 +27,24 @@ Transformer:
 That writes `./Out/<case>/CT_iso.ome.zarr/` for every case in `./Raw`, one slab
 at a time: the whole volume is never held in memory.
 
-A streamed OME-Zarr write chunks the store the way it was written: one chunk is
-`[C, slab_rows, Y, X]`, tiled down to at most `128 x 128` in-plane once that
-exceeds 32 MiB, so a large plane lands as `[C, slab_rows, 128, 128]`.
-`slab_rows` follows the budget (64 without one, fewer under a tight
-`memory_budget`), so the layout of the store depends on the machine that wrote
-it. A training reader cutting `32^3` patches from that store decompresses those
-chunks, `slab_rows x 128 x 128` voxels for a 32-row patch. A case written whole
-(`LOAD`, `WHOLE-VOLUME`) declares no region shape and keeps `ngff-zarr`'s
-default chunking.
+A streamed OME-Zarr write chunks the store the way it was written: the chunk is
+the block the sweep writes, cut to at most `128` on every axis longer than that
+once it exceeds 32 MiB. A full-plane slab therefore lands as
+`[C, slab_rows, 128, 128]`, and a case swept in cubic blocks as
+`[C, 128, 128, 128]`. `slab_rows` follows the budget (64 without one, fewer
+under a tight `memory_budget`), so the layout of the store depends on the
+machine that wrote it. A training reader cutting `32^3` patches from that store
+decompresses those chunks. A case written whole (`LOAD`, `WHOLE-VOLUME`)
+declares no region shape and keeps `ngff-zarr`'s default chunking.
+
+Which shape the sweep writes in is decided by what it reads. A region pulls the
+bounding box of its own image under the chain's maps, so a slab spanning the
+whole trailing plane pays that plane's extent for every degree of shear a map
+carries: on a `513 x 1331 x 1776` volume resampled through a rigid+affine of a
+few degrees, full-plane slabs read `1.79x` the source where cubic blocks of the
+same resident size read `1.07x`. The plan prices both against its own pull maps
+and takes the cube when it reads at least a fifth less; an axis-aligned chain
+prices them the same and keeps the slab.
 
 ## Running it
 
@@ -247,6 +256,7 @@ Under `Dataset:`:
 | --- | --- | --- | --- |
 | `dataset_filenames` | list of `path[:format]` | `["./Dataset:mha"]` | Where cases are read. |
 | `memory_budget` | size string or number | `auto` | Per-rank ceiling. A bare number is GiB; `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. |
+| `storage_options` | mapping | `null` | How a root named by a URI is reached, handed to fsspec verbatim: `{anon: true}` for a public S3 bucket. One mapping for every root of the run, a stage's own reference or field store included. Ignored by local roots. A remote root wants a `memory_budget` that holds its working set: the store's chunk cache is a share of it, and a miss there is a download. |
 | `subset` | string / list / null | `null` | Restricts which cases run: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. **Not** a nested mapping; a block written under it is refused. |
 | `groups_src` | mapping |: | The chains, keyed by source group then destination group. |
 
