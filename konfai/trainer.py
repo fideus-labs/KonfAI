@@ -888,6 +888,7 @@ class Trainer(DistributedObject):
         it_validation: int | None = None,
         it_lr_update: int | None = None,
         autocast: bool = False,
+        channels_last: bool = False,
         gradient_checkpoints: list[str] | None = None,
         gpu_checkpoints: list[str] | None = None,
         ema_decay: float = 0,
@@ -911,6 +912,7 @@ class Trainer(DistributedObject):
         self._vram_patch_candidate: list[int] | None = None
         self._downsampling_factor: list[int] | None = None
         self.autocast = autocast
+        self.channels_last = channels_last
         self.epochs = epochs
         self.epoch = 0
         self.override_lr: float | None = None
@@ -1073,6 +1075,8 @@ class Trainer(DistributedObject):
             dataloaders (list[DataLoader]): Training and validation dataloaders.
         """
         model = Network.to(self.model, local_rank * self.size) if len(cuda_visible_devices()) else self.model
+        if self.channels_last:
+            Network.set_channels_last(model)
         if dist.is_initialized():
             ddp_kwargs: dict[str, object] = {"static_graph": True}
             if len(cuda_visible_devices()) and self.size == 1:
@@ -1082,6 +1086,8 @@ class Trainer(DistributedObject):
             model = Model(model)
         if self.model_ema is not None:
             self.model_ema.module = Network.to(self.model_ema.module, local_rank * self.size)
+            if self.channels_last:
+                Network.set_channels_last(self.model_ema.module)
         device = local_rank * self.size if len(cuda_visible_devices()) else None
         # Round a free patch axis up to the model's valid input multiple before the first step, so the
         # network's skips align instead of crashing on a non-divisible extent; every rank rounds the

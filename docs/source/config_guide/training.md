@@ -60,6 +60,7 @@ konfai TRAIN -y --config Config.yml \
 | `it_validation` | int or null | `None` | No | Validation and checkpoint interval in iterations. |
 | `it_lr_update` | int or null | `None` | No | Scheduler-step interval in iterations. `None` steps once per epoch (it resolves to the training dataloader's length). Every resolved config on disk carries this key. |
 | `autocast` | bool | `false` | No | Enables AMP during training. |
+| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). cuDNN picks its kernels by layout: with `autocast` the shipped Segmentation example predicts 1.25x faster; the kernels chosen differ, so labels can move at boundaries (3199 of 58.4 million voxels in fp32 on that example). |
 | `gradient_checkpoints` | list or null | `None` | No | Activates gradient checkpointing on selected modules. |
 | `gpu_checkpoints` | list or null | `None` | No | Pins selected modules to dedicated GPUs. |
 | `ema_decay` | float | `0` | No | Enables exponential moving average tracking when greater than zero. |

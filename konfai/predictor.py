@@ -2008,6 +2008,7 @@ class Predictor(DistributedObject):
         manual_seed: int | None = None,
         gpu_checkpoints: list[str] | None = None,
         autocast: bool = False,
+        channels_last: bool = False,
         outputs_dataset: dict[str, OutputDatasetLoader] | None = {"default|Default": OutputDatasetLoader()},
         data_log: list[str] | None = None,
     ) -> None:
@@ -2034,6 +2035,7 @@ class Predictor(DistributedObject):
             self.combine = apply_config(f"{konfai_root()}.{combine}")(getattr(module, name))()
 
         self.autocast = autocast
+        self.channels_last = channels_last
         with startup_clock().phase("model"):
             self.model = model.get_model(train=False)
         self.it = 0
@@ -2210,6 +2212,8 @@ class Predictor(DistributedObject):
             if len(cuda_visible_devices())
             else self.model_composite
         )
+        if self.channels_last:
+            Network.set_channels_last(model_composite)
         if len(cuda_visible_devices()):
             # Co-locate the output writers with the model so their reduction/transforms know the GPU.
             for output_dataset in self.outputs_dataset.values():

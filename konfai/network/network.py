@@ -634,6 +634,15 @@ def _flat_downsampling(module: torch.nn.Module, ndim: int) -> list[int]:
     return factor
 
 
+def _channels_last(tensor: torch.Tensor) -> torch.Tensor:
+    """``tensor`` in the channels-last layout of its rank, untouched when it has none (a vector, a plane)."""
+    if tensor.dim() == 4:
+        return tensor.contiguous(memory_format=torch.channels_last)
+    if tensor.dim() == 5:
+        return tensor.contiguous(memory_format=torch.channels_last_3d)
+    return tensor
+
+
 class ModuleArgsDict(torch.nn.Module, ABC):
     """Named module graph container supporting KonfAI branch routing metadata."""
 
@@ -665,6 +674,8 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
     def __init__(self) -> None:
         super().__init__()
+        #: Whether this graph's convolutions run channels-last: set by :meth:`Network.set_channels_last`.
+        self._channels_last = False
         self._modulesArgs: dict[str, ModuleArgsDict.ModuleArgs] = {}
         self._training = NetState.TRAIN
 
@@ -825,6 +836,10 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         self, *inputs: torch.Tensor, attributes: list[list[Attribute]] | None = None
     ) -> Iterator[tuple[str, torch.Tensor]]:
         if len(inputs) > 0:
+            if self._channels_last:
+                # Once, as the graph is entered: cuDNN hands a channels-last input's output back in
+                # that layout, so converting again at every module only recopies what it kept.
+                inputs = tuple(_channels_last(tensor) for tensor in inputs)
             branchs: dict[str, torch.Tensor] = {}
             attribute_branchs: dict[str, list[Attribute]] = {}
             for i, sinput in enumerate(inputs):
@@ -1672,6 +1687,22 @@ class Network(ModuleArgsDict, ABC):
     @_function_network()
     def get_networks(self) -> Self:
         return self
+
+    @staticmethod
+    def set_channels_last(module: ModuleArgsDict) -> ModuleArgsDict:
+        """Lay the graph's convolution weights out channels-last, and its inputs as they enter.
+
+        cuDNN picks its kernels by layout: under autocast the shipped Segmentation example predicts
+        in 2.2 s against 2.7 s in the default layout (fp32: 4.1 against 4.2 s, where the kernels
+        chosen differ on 3199 of 58.4 million label voxels). Off by default, so the default layout
+        is what a run gets unless it asks.
+        """
+        for tensor in (*module.parameters(), *module.buffers()):
+            tensor.data = _channels_last(tensor.data)  # a 4-D and a 5-D weight each take their own layout
+        for submodule in module.modules():
+            if isinstance(submodule, ModuleArgsDict):
+                submodule._channels_last = True
+        return module
 
     @staticmethod
     def to(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):

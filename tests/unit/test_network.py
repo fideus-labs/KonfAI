@@ -29,7 +29,7 @@ import pytest
 import torch
 from konfai.metric.schedulers import Constant, PolyLRScheduler
 from konfai.network.blocks import Add
-from konfai.network.network import Measure, ModuleArgsDict, Network
+from konfai.network.network import Measure, ModuleArgsDict, Network, _channels_last
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError, MeasureError
 
@@ -960,3 +960,46 @@ def test_measure_update_moves_the_criterion_onto_the_outputs_device_once() -> No
     measure.update("Head", output, batch, it=1, nb_patch=1, training=True)
 
     assert moved_to == [output.device], "one move onto the output's device, not one per step"
+
+
+def test_channels_last_lays_out_every_weight_and_every_input_of_its_rank() -> None:
+    """The layout reaches the nested graph's 4-D and 5-D weights and the inputs as they enter a
+    module (a CPU conv may hand its output back contiguous: the input is what the graph owes);
+    a tensor with no such layout (a vector) is handed on as it is."""
+
+    class _Probe(torch.nn.Module):
+        def __init__(self, memory_format: torch.memory_format) -> None:
+            super().__init__()
+            self.memory_format, self.seen = memory_format, []
+
+        def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+            self.seen.append(tensor.is_contiguous(memory_format=self.memory_format))
+            return tensor
+
+    class _Inner3d(ModuleArgsDict):
+        def __init__(self) -> None:
+            super().__init__()
+            self.add_module("Probe", _Probe(torch.channels_last_3d))
+            self.add_module("Conv3", torch.nn.Conv3d(2, 2, 3, padding=1))
+
+    class _Graph(ModuleArgsDict):
+        def __init__(self) -> None:
+            super().__init__()
+            self.add_module("Probe", _Probe(torch.channels_last), in_branch=[0], out_branch=[0])
+            self.add_module("Conv2", torch.nn.Conv2d(2, 2, 3, padding=1), in_branch=[0], out_branch=[0])
+            self.add_module("Deep", _Inner3d(), in_branch=[1], out_branch=[1])
+
+    graph = _Graph()
+    plane, volume = torch.randn(1, 2, 8, 8), torch.randn(1, 2, 4, 8, 8)
+    before = dict(graph.named_forward(plane, volume))
+    assert graph["Probe"].seen == [False] and graph["Deep"]["Probe"].seen == [False]
+    Network.set_channels_last(graph)
+
+    assert graph["Conv2"].weight.is_contiguous(memory_format=torch.channels_last)
+    assert graph["Deep"]["Conv3"].weight.is_contiguous(memory_format=torch.channels_last_3d)
+    assert graph._channels_last and graph["Deep"]._channels_last
+    after = dict(graph.named_forward(plane, volume))
+    assert graph["Probe"].seen == [False, True] and graph["Deep"]["Probe"].seen == [False, True]
+    for name in before:
+        torch.testing.assert_close(after[name], before[name], rtol=1e-5, atol=1e-6)
+    assert _channels_last(torch.zeros(3)).dim() == 1

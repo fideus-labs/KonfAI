@@ -49,7 +49,8 @@ When multiple checkpoints are provided, the predictor combines them using the
 | `train_name` | string | `"name"` | Yes in practice | Names the prediction run and output folder. |
 | `manual_seed` | int or null | `None` | No | Optional seed. |
 | `gpu_checkpoints` | list or null | `None` | No | Module placement optimization. |
-| `autocast` | bool | `false` | No | Enables AMP during inference. |
+| `autocast` | bool | `false` | No | Enables AMP during inference. On the shipped Segmentation example: 4.2 s to 2.7 s, 11110 of 58.4 million label voxels change, at boundaries. |
+| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). With `autocast`, 2.7 s to 2.2 s on the same example and no further voxel changes; alone, no gain and 3199 voxels moved by the kernels cuDNN then picks. |
 | `data_log` | list or null | `None` | No | Optional TensorBoard logging. |
 
 ## `Predictor.Model`
