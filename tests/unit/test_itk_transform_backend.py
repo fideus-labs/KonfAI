@@ -262,6 +262,31 @@ def test_a_stepped_or_reversed_region_is_the_whole_field_sliced(tmp_path: Path, 
     np.testing.assert_array_equal(got, field[region])
 
 
+def test_a_field_carrying_more_than_float32_reads_the_same_whole_and_by_region(tmp_path: Path) -> None:
+    """The file keeps ITK's double, the pipeline carries float32. A value that needs more than 24
+    bits is rounded once, at the read, so the whole route and the region route hold the same one."""
+    import h5py
+
+    field = (np.random.default_rng(3).normal(size=(3, 4, 5, 6)) * 8).astype(np.float32)
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Transform", "P000", field, _attributes())
+
+    path = tmp_path / "out" / "P000" / "Transform.h5"
+    with h5py.File(path, "r+") as file:
+        parameters = file["TransformGroup/0/TransformParameters"]
+        exact = np.asarray(parameters[()], dtype=np.float64)
+        exact += np.float64(2.0) ** -30  # below one float32 ulp of these values: it cannot survive
+        parameters[...] = exact
+    assert not np.array_equal(exact, exact.astype(np.float32).astype(np.float64))
+
+    whole, _ = dataset.read_data("Transform", "P000")
+    region = (slice(0, 3), slice(1, 3), slice(2, 5), slice(0, 4))
+    got, _ = dataset.read_data_slice("Transform", "P000", region)
+
+    assert np.asarray(whole).dtype == got.dtype == np.float32
+    np.testing.assert_array_equal(got, np.asarray(whole)[region])
+
+
 def test_a_region_read_holds_its_planes_and_rows_and_not_the_rows_around_them(tmp_path: Path) -> None:
     """A 8^3 region of a 64^3 field reads 8 rows of 8 planes (98 KB of parameters), not the 8 whole
     planes those rows sit on (786 KB)."""
@@ -284,8 +309,8 @@ def test_a_region_read_holds_its_planes_and_rows_and_not_the_rows_around_them(tm
 
 
 def test_a_whole_read_of_a_field_entry_is_what_itk_decodes_off_the_same_file(tmp_path: Path) -> None:
-    """The parameters are the field in float64: read as one span, they are the bytes ITK's transform
-    reader hands over, under the same attribute record."""
+    """The parameters are the field: read as one span, they are the values ITK's transform reader
+    hands over, under the same attribute record, at the dtype the pipeline carries."""
     from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, image_to_data
 
     field = (np.random.default_rng(11).normal(size=(3, 5, 7, 6)) * 8).astype(np.float32)
@@ -297,6 +322,6 @@ def test_a_whole_read_of_a_field_entry_is_what_itk_decodes_off_the_same_file(tmp
     want, want_attributes = image_to_data(sitk.DisplacementFieldTransform(transform).GetDisplacementField())
     want_attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
 
-    assert data.dtype == want.dtype == np.float64 and data.flags.c_contiguous
-    assert data.tobytes() == want.tobytes()
+    assert data.dtype == np.float32 and want.dtype == np.float64 and data.flags.c_contiguous
+    assert data.tobytes() == want.astype(np.float32).tobytes()
     assert dict(attributes) == dict(want_attributes)

@@ -2664,11 +2664,13 @@ class Dataset:
                 with self._field_file(name) as file:
                     header = self._field_header(file)
                     if header is not None:
-                        # The parameters ARE the field, float64: one span off the file, where ITK's
-                        # transform reader holds the field twice before the array is even copied out
-                        # (a 128^3 field: +147 MiB of RSS through ITK, +100 MiB off the span).
+                        # The parameters ARE the field: one span off the file, where ITK's transform
+                        # reader holds the field twice before the array is even copied out (a 128^3
+                        # field: +147 MiB of RSS through ITK, +100 MiB off the span). Read at the
+                        # dtype a region read takes, so the two routes carry the same values: the
+                        # file keeps ITK's double, the pipeline does not.
                         shape, attributes = header
-                        return self._field_region(file, shape[1:], (slice(None),) * 4, np.float64), attributes
+                        return self._field_region(file, shape[1:], (slice(None),) * 4), attributes
             transform = sitk.ReadTransform(self._path(name))
             attributes = Attribute()
             if "DisplacementFieldTransform" in transform.GetName():  # a field in a text transform file
