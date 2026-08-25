@@ -992,12 +992,14 @@ class Trainer(DistributedObject):
             if state != State.TRAIN:
                 state_dict = self._load()
             self.model.load(state_dict, init=True, ema=False, override_lr=self.override_lr)
-        if self.ema_decay > 0:
-            self.model_ema = AveragedModel(self.model, **self._ema_update())
-            if state_dict is not None:
-                self.model_ema.module.load(state_dict, init=False, ema=True)
-                if "Model_EMA_n_averaged" in state_dict:
-                    self.model_ema.n_averaged.fill_(cast(int, state_dict["Model_EMA_n_averaged"]))
+            # The EMA weights are restored from the same checkpoint: the startup line accounts for
+            # them where the reader looks for the weights, not in what setup does around them.
+            if self.ema_decay > 0:
+                self.model_ema = AveragedModel(self.model, **self._ema_update())
+                if state_dict is not None:
+                    self.model_ema.module.load(state_dict, init=False, ema=True)
+                    if "Model_EMA_n_averaged" in state_dict:
+                        self.model_ema.n_averaged.fill_(cast(int, state_dict["Model_EMA_n_averaged"]))
 
         (statistics_directory() / self.name).mkdir(exist_ok=True)
         shutil.copyfile(self.config_path_src, self.config_namefile)

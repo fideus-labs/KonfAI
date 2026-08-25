@@ -508,6 +508,50 @@ def test_ema_runs_torchs_fused_rule_and_matches_the_per_tensor_one(monkeypatch) 
     assert Trainer._ema_update(cast(Any, stub)) == {"avg_fn": stub._avg_fn}
 
 
+def test_restoring_the_ema_weights_is_charged_to_the_checkpoint_phase(tmp_path: Path, monkeypatch) -> None:
+    """The EMA copy is restored from the same checkpoint as the model, and the startup line
+    accounts for it there: reported under ``setup`` it would read as the loaders' cost."""
+    import time
+
+    from konfai.utils.runtime import restart_startup_clock
+
+    class _SlowLoad:
+        def load(self, state_dict: dict, **kwargs) -> None:
+            del state_dict, kwargs
+            time.sleep(0.05)
+
+    monkeypatch.setattr(trainer_module, "checkpoints_directory", lambda: tmp_path / "Checkpoints")
+    monkeypatch.setattr(trainer_module, "statistics_directory", lambda: tmp_path / "Statistics")
+    monkeypatch.setattr(trainer_module, "konfai_state", lambda: "TRAIN")
+    monkeypatch.setattr(
+        trainer_module,
+        "AveragedModel",
+        lambda model, **kwargs: SimpleNamespace(module=_SlowLoad(), n_averaged=torch.zeros(1, dtype=torch.long)),
+    )
+    (tmp_path / "Statistics").mkdir()
+    config_path = tmp_path / "Config.yml"
+    config_path.write_text("Trainer:\n", encoding="utf-8")
+
+    trainer = cast(Any, Trainer.__new__(Trainer))
+    trainer.name = "RUN"
+    trainer.size = 1
+    trainer.it = 0
+    trainer.ema_decay = 0.999
+    trainer.model_ema = None
+    trainer.override_lr = None
+    trainer.model = cast(Any, SimpleNamespace(load=lambda *args, **kwargs: None))
+    trainer.dataset = cast(Any, SimpleNamespace(get_data=lambda world_size: ([], [], [])))
+    trainer.config_path_src = config_path
+    trainer.config_namefile = tmp_path / "Statistics" / "RUN" / "Config_0.yml"
+
+    clock = restart_startup_clock()
+    with clock.phase("setup"):
+        trainer.setup(1)
+
+    assert trainer.model_ema is not None
+    assert clock.spent("checkpoint") >= 0.05
+
+
 # ---- RESUME LR override ----
 
 # Resume/fine-tune learning-rate override semantics for ``Network.load``.
