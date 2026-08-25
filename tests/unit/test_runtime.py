@@ -287,6 +287,54 @@ def test_a_workflow_without_collectives_gets_its_rank_and_no_process_group(monke
     assert rt.DistributedObject.uses_collectives is True
 
 
+def _gloo_rendezvous(monkeypatch) -> dict[str, object]:
+    """Drive ``setup_gpu`` down its gloo branch and report what it passed to torch."""
+    initialized: dict[str, object] = {}
+    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(rt.dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(rt.dist, "init_process_group", lambda **kwargs: initialized.update(kwargs))
+    monkeypatch.setenv("KONFAI_MASTER_PORT", "29500")
+    return initialized
+
+
+def test_a_single_node_gloo_world_is_pinned_to_the_loopback_interface(monkeypatch):
+    """gloo resolves the host's name to choose an interface, and a macOS runner's ``.local`` name
+    resolves to nothing: the single-node world rendezvous over the loopback that carries it."""
+    monkeypatch.delenv("GLOO_SOCKET_IFNAME", raising=False)
+    monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
+    initialized = _gloo_rendezvous(monkeypatch)
+
+    assert rt.setup_gpu(2, 0) == (0, 0)
+
+    assert initialized["backend"] == "gloo"
+    assert initialized["init_method"] == "tcp://localhost:29500"
+    assert os.environ["GLOO_SOCKET_IFNAME"] in {name for _, name in rt.socket.if_nameindex()}
+
+
+def test_an_explicit_gloo_interface_keeps_authority(monkeypatch):
+    monkeypatch.setenv("GLOO_SOCKET_IFNAME", "eth0")
+    monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
+    _gloo_rendezvous(monkeypatch)
+
+    rt.setup_gpu(2, 0)
+
+    assert os.environ["GLOO_SOCKET_IFNAME"] == "eth0"
+
+
+def test_a_multi_node_gloo_world_is_left_to_its_own_interface(monkeypatch):
+    """Off this host the loopback reaches no other rank: only a localhost rendezvous is pinned."""
+    monkeypatch.delenv("GLOO_SOCKET_IFNAME", raising=False)
+    monkeypatch.setenv("SLURM_JOB_NODELIST", "node[001-002]")
+    monkeypatch.setattr(rt.shutil, "which", lambda _name: "/usr/bin/scontrol")
+    monkeypatch.setattr(rt.subprocess, "check_output", lambda *_args, **_kwargs: "node001\nnode002\n")
+    initialized = _gloo_rendezvous(monkeypatch)
+
+    rt.setup_gpu(2, 0)
+
+    assert initialized["init_method"] == "tcp://node001:29500"
+    assert "GLOO_SOCKET_IFNAME" not in os.environ
+
+
 def test_synchronize_data_no_dist(monkeypatch):
     """Without an active process group the local data is returned as-is."""
     monkeypatch.setattr(rt.dist, "is_initialized", lambda: False)
