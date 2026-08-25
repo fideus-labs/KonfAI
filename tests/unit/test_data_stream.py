@@ -19,6 +19,7 @@ indistinguishable from a whole-volume ``write``, remove partial entries on failu
 that cannot serve region writes."""
 
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -632,3 +633,32 @@ def test_a_live_writers_backup_is_left_alone(tmp_path: Path, file_format: str) -
 
     fresh = Dataset(tmp_path / "store", file_format)
     assert not fresh.is_dataset_exist("CT", "CASE_001")
+
+
+def _resident_bytes() -> int:
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith("VmRSS"):
+            return int(line.split()[1]) * 1024
+    return 0
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/status is Linux's")
+@pytest.mark.parametrize("file_format", ["mha", "nii"])
+def test_a_raw_block_stream_does_not_hold_what_it_has_written(tmp_path: Path, file_format: str) -> None:
+    """A written region goes to the page cache, not to this process's resident set: a shared map
+    keeps every page written through it until it is unmapped, which makes a stream of a volume hold
+    the volume whatever budget sized its regions."""
+    slab = np.full((1, 4, 512, 512), 3.5, dtype=np.float32)  # 4 MiB, sixteen of them
+    volume = [1, 16 * slab.shape[1], *slab.shape[2:]]
+    dataset = Dataset(tmp_path / "streamed", file_format)
+    stream = dataset.open_data_stream("CT", "CASE_001", volume, slab.dtype, _image_attributes())
+    assert stream is not None
+    with stream:
+        before = _resident_bytes()
+        for start in range(0, volume[1], slab.shape[1]):
+            spatial = (slice(start, start + slab.shape[1]), slice(0, volume[2]), slice(0, volume[3]))
+            stream.write_slice((slice(0, 1), *spatial), slab)
+        held = _resident_bytes() - before
+
+    assert held < 4 * slab.nbytes, f"held {held / (1 << 20):.0f} MiB of a {16 * slab.nbytes / (1 << 20):.0f} MiB volume"
+    np.testing.assert_array_equal(dataset.read_data("CT", "CASE_001")[0], np.broadcast_to(3.5, volume))
