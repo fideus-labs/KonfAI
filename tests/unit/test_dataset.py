@@ -1137,6 +1137,32 @@ def test_a_full_plane_region_off_the_raw_block_owns_its_bytes(tmp_path: Path, ki
     np.testing.assert_array_equal(tensor.numpy(), data[region] + 1)
 
 
+#: A three-plane slab of the twelve-plane fixture, as a share of the block the read must map. A
+#: NIfTI vector volume stores each channel whole, one after the other, so a slab of it reaches from
+#: the first channel's first plane to the last channel's last: the span IS the block.
+_SLAB_SHARE_OF_THE_BLOCK = {"scalar.mha": 0.25, "scalar.nii": 0.25, "vector.mha": 0.25, "vector.nii": 1.0}
+
+
+@pytest.mark.parametrize("kind", sorted(_SLAB_SHARE_OF_THE_BLOCK))
+def test_a_region_read_maps_the_smallest_span_that_holds_it(tmp_path: Path, kind: str, monkeypatch) -> None:
+    """The address space a run needs follows the regions its budget sized, not the source's size."""
+    path, data = _write_block_fixture(tmp_path, kind)
+    mapped: list[int] = []
+    original = np.memmap
+
+    def spy(*args, **kwargs):
+        block = original(*args, **kwargs)
+        mapped.append(block.nbytes)
+        return block
+
+    monkeypatch.setattr(np, "memmap", spy)
+    region = (slice(None), slice(2, 5), slice(None), slice(None))
+    got, _ = _block_backend(path).file_to_data_slice("", path.name.split(".", 1)[0], region)
+
+    np.testing.assert_array_equal(got, data[region])
+    assert mapped == [int(data.nbytes * _SLAB_SHARE_OF_THE_BLOCK[kind])]
+
+
 def test_image_to_data_owns_the_vector_image_bytes_whatever_its_size() -> None:
     """A vector image of one voxel is contiguous however its axes are moved: the array must still be
     a copy, not a view into a buffer the image takes with it."""

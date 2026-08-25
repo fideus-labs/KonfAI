@@ -1614,6 +1614,22 @@ def _pixel_block(path: str) -> _PixelBlock | None:
     return _pixel_block_at(path, (info.st_mtime_ns, info.st_size))
 
 
+def _mapped_band(path: str, dtype: np.dtype, offset: int, shape: Sequence[int], axis: int, index: slice) -> np.ndarray:
+    """The raw block mapped over ``index`` of ``axis`` alone, the axes above it holding one element
+    each, indexed as the block is.
+
+    Mapping the block whole makes the address space a run needs follow the file's size rather than
+    the budget its regions were sized against: 400 MiB of peak address space for a 128 MiB budget on
+    a 156 MiB source against 256 MiB on the same run at 78 MiB. Only the outermost axis holding more
+    than one element narrows the map: a region spanning it whole reaches from the block's first
+    plane to its last whatever the axes below select.
+    """
+    plane = int(np.prod(shape[axis + 1 :], dtype=np.int64)) * dtype.itemsize
+    start = int(index.start or 0)
+    rows = (int(shape[axis]) if index.stop is None else int(index.stop)) - start
+    return np.memmap(path, dtype, "r", offset + start * plane, (*shape[:axis], rows, *shape[axis + 1 :]))
+
+
 def _pixel_block_region(block: _PixelBlock, path: str, normalized: tuple[slice, ...]) -> np.ndarray:
     """One region off the raw block, channel-first and in the native byte order: the bytes ITK
     would decode, read through a memmap that touches the region's pages and no other.
@@ -1621,11 +1637,16 @@ def _pixel_block_region(block: _PixelBlock, path: str, normalized: tuple[slice, 
     A copy, always: a slab of whole planes is contiguous on the map, and an array that only
     guaranteed contiguity would be the map's own pages, read-only and unmapped with the map."""
     if block.interleaved:
-        mapped = np.memmap(path, block.dtype, "r", block.offset, (*block.shape[1:], block.shape[0]))
-        region = np.moveaxis(mapped[(*normalized[1:], normalized[0])], -1, 0)
+        # MetaIO's channel axis is the fastest, so the block is spatial-first.
+        shape, index = [*block.shape[1:], block.shape[0]], [*normalized[1:], normalized[0]]
     else:
-        mapped = np.memmap(path, block.dtype, "r", block.offset, block.shape)
-        region = mapped[normalized]
+        shape, index = list(block.shape), list(normalized)
+    axis = next((k for k, extent in enumerate(shape) if extent > 1), 0)
+    mapped = _mapped_band(path, block.dtype, block.offset, shape, axis, index[axis])
+    # The band starts where its own slice does, so of that slice only the step still reads on it.
+    region = mapped[(*index[:axis], slice(None, None, index[axis].step), *index[axis + 1 :])]
+    if block.interleaved:
+        region = np.moveaxis(region, -1, 0)
     return np.array(region, dtype=block.dtype.newbyteorder("="), order="C")
 
 
