@@ -74,6 +74,14 @@ def join(root: str, *parts: str) -> str:
     return "/".join([root.rstrip("/"), *(str(part).strip("/") for part in parts if part)])
 
 
+def _is_registered(protocol: str) -> bool:
+    """Whether fsspec knows an implementation for ``protocol``, installed or not: the registry it
+    builds a filesystem from (already built, or known and waiting for its package)."""
+    from fsspec.registry import known_implementations, registry
+
+    return protocol in registry or protocol in known_implementations
+
+
 def filesystem(path: str | Path) -> Any:
     """The fsspec filesystem serving ``path``.
 
@@ -101,9 +109,10 @@ def filesystem(path: str | Path) -> Any:
             else f"Install the fsspec implementation for {protocol}.",
         ) from exc
     except (TypeError, ValueError) as exc:
-        # fsspec says "Protocol not known" for a scheme nothing registers, and that is not a
-        # configuration to check: the variables it would point at do not exist for it.
-        unknown = "not known" in str(exc).lower()
+        # A scheme nothing registers is not a configuration to check: the variables it would point
+        # at do not exist for it. Asked of fsspec's own registry, because the same exception types
+        # carry a configuration's own refusal, and its wording is not an interface.
+        unknown = not _is_registered(protocol)
         raise DatasetManagerError(
             f"No filesystem is registered for '{protocol}://' ({exc})."
             if unknown

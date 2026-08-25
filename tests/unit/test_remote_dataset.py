@@ -174,6 +174,30 @@ def test_an_unregistered_scheme_is_not_reported_as_a_configuration_to_check() ->
     assert "FSSPEC_" not in message
 
 
+def test_which_refusal_a_scheme_gets_is_read_off_the_registry_not_off_the_wording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same exception types carry both refusals, and only the registry tells them apart.
+
+    Classified on the text of the exception, a registered filesystem refusing a bucket it does not
+    know was reported as a scheme nothing implements (install something), and any wording fsspec
+    changes turns an unregistered scheme into configuration variables the user cannot write.
+    """
+    fsspec = pytest.importorskip("fsspec")
+
+    def refuse(protocol: str, **kwargs: object) -> object:
+        raise ValueError(f"bucket for {protocol} not known to this endpoint")
+
+    monkeypatch.setattr(fsspec, "filesystem", refuse)
+    with pytest.raises(DatasetManagerError) as configured:
+        uri.filesystem("memory://bucket/key")
+    with pytest.raises(DatasetManagerError) as unregistered:
+        uri.filesystem("nosuchproto://bucket/key")
+
+    assert "refused its fsspec configuration" in " ".join(str(part) for part in configured.value.args)
+    assert "No filesystem is registered" in " ".join(str(part) for part in unregistered.value.args)
+
+
 def test_a_remote_root_in_a_format_that_reads_files_is_refused(memory_root: str) -> None:
     """Only the store backend reads a URI; the others open a path, and a path is what a URI is not."""
     with pytest.raises(DatasetManagerError, match="only ':omezarr' can read"):
