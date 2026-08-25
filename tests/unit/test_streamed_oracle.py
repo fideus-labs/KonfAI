@@ -113,7 +113,7 @@ class Route:
 ROUTES = (Route("one-region", None), Route("few-regions", 0.25), Route("row-regions", 0.0))
 
 
-def _budget_for(manager: DatasetManager, shape: Sequence[int], route: Route) -> float | None:
+def _budget_for(manager: DatasetManager, route: Route) -> float | None:
     """The smallest per-rank budget under which the sweep cuts regions of ``route``'s height.
 
     Found by bisecting the production sizing rule rather than by restating it: the test says how
@@ -198,7 +198,7 @@ def _sweep(
     """Write ``stage`` over the case region by region, cut as ``route`` says, and read back what landed."""
     stage.set_datasets([dataset])
     manager = _manager(dataset, group, [stage, Save(f"{destination}:h5")])
-    budget = _budget_for(manager, dataset.get_infos(group, CASE_NAME)[0], route)
+    budget = _budget_for(manager, route)
     with monkeypatch.context() as context:
         regions = _count_regions(context)
         verdict = CaseMaterializer(manager).materialize(fallback_budget_bytes=budget)
@@ -513,7 +513,7 @@ def test_a_streamed_copy_equals_the_whole_volume_copy(name: str, copies: int, ro
     augmentation.load(1.0)
 
     streamed = _expanded(dataset, augmentation, copies, tmp_path / "streamed")
-    budget = _budget_for(streamed, dataset.get_infos("Intensity", CASE_NAME)[0], route)
+    budget = _budget_for(streamed, route)
     outcomes = CaseMaterializer(streamed).materialize_copies(list(range(1, copies + 1)), fallback_budget_bytes=budget)
     whole = _expanded(dataset, augmentation, copies, tmp_path / "whole")
     for a in range(1, copies + 1):
@@ -552,7 +552,7 @@ def test_a_transform_after_the_marker_reads_its_companion_where_the_block_sits(r
 
     mask.set_datasets([dataset])
     streamed = _manager(dataset, "Intensity", chain(tmp_path / "streamed"))
-    budget = _budget_for(streamed, dataset.get_infos("Intensity", CASE_NAME)[0], route)
+    budget = _budget_for(streamed, route)
     outcomes = CaseMaterializer(streamed).materialize_copies([1, 2], fallback_budget_bytes=budget)
     assert set(outcomes.values()) == {(Verdict.STREAM, Regime.SHARED)}
 

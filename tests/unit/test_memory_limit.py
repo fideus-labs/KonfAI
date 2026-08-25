@@ -46,8 +46,8 @@ pytestmark = pytest.mark.skipif(
 #: Measured minima on the cohort below: 1.25x (PREDICTION), 1.9x (EVALUATION), 2.0x (TRANSFORM).
 _ADDRESS_SPACE_MULTIPLE = 3
 #: Resident bytes a route may hold above the interpreter floor, as a multiple of its declared budget
-#: and over the floor below. Measured over a 666 MiB interpreter floor: 0.67x (PREDICTION), 0.20x
-#: (TRANSFORM at 512 MiB), 0.79x (at 128), 0.67x (at 64), 1.31x (EVALUATION at 128), 0.55x (at 512).
+#: and over the floor below. Measured over a 667 MiB interpreter floor: 0.41x (PREDICTION at 128
+#: MiB), 0.33x / 1.05x / 1.17x (TRANSFORM at 512, 128, 64), 0.55x / 1.42x (EVALUATION at 512, 128).
 #: A whole-volume read of the cohort's case is 2 x 78 MiB before its working copies: over both.
 _RESIDENT_MULTIPLE = 2
 #: What a route holds that no budget shrinks: the workflow's objects, the chain's stages, the store
