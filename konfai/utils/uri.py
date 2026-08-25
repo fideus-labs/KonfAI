@@ -101,9 +101,16 @@ def filesystem(path: str | Path) -> Any:
             else f"Install the fsspec implementation for {protocol}.",
         ) from exc
     except (TypeError, ValueError) as exc:
+        # fsspec says "Protocol not known" for a scheme nothing registers, and that is not a
+        # configuration to check: the variables it would point at do not exist for it.
+        unknown = "not known" in str(exc).lower()
         raise DatasetManagerError(
-            f"'{protocol}://' refused its fsspec configuration: {exc}.",
-            "Check the FSSPEC_" + protocol.upper() + "_* variables and ~/.config/fsspec/.",
+            f"No filesystem is registered for '{protocol}://' ({exc})."
+            if unknown
+            else f"'{protocol}://' refused its fsspec configuration: {exc}.",
+            f"Install the fsspec implementation for {protocol}, or check the scheme for a typo."
+            if unknown
+            else "Check the FSSPEC_" + protocol.upper() + "_* variables and ~/.config/fsspec/.",
         ) from exc
 
 

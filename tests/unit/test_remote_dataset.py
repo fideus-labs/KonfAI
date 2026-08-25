@@ -162,6 +162,18 @@ def test_konfai_declares_no_credentials_of_its_own(monkeypatch: pytest.MonkeyPat
 # ---------------------------------------------------------------- what a remote root cannot do
 
 
+def test_an_unregistered_scheme_is_not_reported_as_a_configuration_to_check() -> None:
+    """fsspec answers "Protocol not known" for a scheme nothing registers, and the variables the
+    configuration hint names do not exist for it: pointing a user at them sends them looking for a
+    setting they cannot write."""
+    pytest.importorskip("fsspec")
+    with pytest.raises(DatasetManagerError) as raised:
+        uri.filesystem("nosuchproto://bucket/key")
+    message = " ".join(str(part) for part in raised.value.args)
+    assert "No filesystem is registered for 'nosuchproto://'" in message
+    assert "FSSPEC_" not in message
+
+
 def test_a_remote_root_in_a_format_that_reads_files_is_refused(memory_root: str) -> None:
     """Only the store backend reads a URI; the others open a path, and a path is what a URI is not."""
     with pytest.raises(DatasetManagerError, match="only ':omezarr' can read"):
