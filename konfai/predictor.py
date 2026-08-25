@@ -58,6 +58,7 @@ from konfai.data.patching import (
     _halo_radii,
     _HaloPull,
     _RemapPull,
+    blend_axes,
     blend_overlap,
 )
 
@@ -350,12 +351,13 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         overlap: int | float | str | list[int | float | str] | None,
         nb_data_augmentation: int,
     ) -> None:
-        # EMPTY, not just missing: the caller drops the axes of extent 1, so a case with nothing tiled
-        # arrives as []. That is a single patch covering the volume: no combine applies, and a blend
-        # window built on no axis leaves max() nothing to take.
-        if patch_size and overlap is not None:
+        # Nothing tiled (no axis longer than one voxel) is a single patch covering the volume: no combine
+        # applies. Anything else keeps EVERY axis, the untiled ones as a single broadcast entry, because
+        # the accumulator reads one window per spatial axis (see blend_axes).
+        if patch_size and any(size > 1 for size in patch_size) and overlap is not None:
             if self.patch_combine is not None:
-                self.patch_combine.set_patch_config(patch_size, blend_overlap(overlap, patch_size))
+                axes = blend_axes(patch_size)
+                self.patch_combine.set_patch_config(axes, blend_overlap(overlap, axes))
         else:
             self.patch_combine = None
         self.nb_data_augmentation = nb_data_augmentation
@@ -1585,7 +1587,7 @@ class _Predictor:
         patch_size, overlap = self.dataset.get_patch_config()
         for output_dataset in self.outputs_dataset.values():
             output_dataset.set_patch_config(
-                [size for size in patch_size if size > 1] if patch_size else None,
+                patch_size,
                 overlap,
                 np.max(
                     [

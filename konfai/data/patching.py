@@ -928,6 +928,17 @@ class PathCombine(ABC):
         """Return the 1-D blend weight along one axis (length ``size``, ``overlap`` voxels tapered per side)."""
 
 
+def blend_axes(patch_size: list[int]) -> list[int]:
+    """The blend window's axes for a ``patch_size``: every axis kept, a free (0) or singleton (1) axis
+    as a single broadcast entry.
+
+    ``Accumulator`` reads one window per spatial axis of the volume, and the window has to broadcast
+    against the patch at any axis position. Dropping the untiled axes shortens the list, so the
+    window is looked up on the wrong axis (or not at all).
+    """
+    return [size if size > 1 else 1 for size in patch_size]
+
+
 def blend_overlap(overlap: "int | float | str | list[int | float | str]", patch_size: list[int]) -> list[int]:
     """Per-axis blend overlap for a concrete ``patch_size`` (int broadcast, ``%``/fraction resolved).
 
@@ -1845,10 +1856,7 @@ class ModelPatch(Patch):
             self.patch_combine = apply_config(key)(getattr(module, name))()
         if self.patch_size is not None and self.overlap is not None:
             if self.patch_combine is not None:
-                # Keep every axis so the weight broadcasts against the patch whatever the axis position
-                # (dropping trailing axes misaligns the broadcast); a singleton (1) or free (0) axis
-                # carries a uniform weight, a >1 axis its tapered window.
-                kept = [i if i > 1 else 1 for i in self.patch_size]
+                kept = blend_axes(self.patch_size)
                 self.patch_combine.set_patch_config(kept, blend_overlap(self.overlap, kept))
         else:
             self.patch_combine = None

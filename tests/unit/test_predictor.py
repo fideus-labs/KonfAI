@@ -23,11 +23,15 @@ re-raised), but only when the destination serves disjoint files per entry
 ever written from two threads. Pure ``threading``/``queue``, no fork and no signals, so the behaviour
 is the same on Linux, macOS and Windows."""
 
+import math
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 from konfai.data.augmentation import Flip
+from konfai.data.patching import blend_axes
 from konfai.predictor import PREDICTION_CLOCK, _AsyncWriter
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import PredictorError
@@ -120,3 +124,69 @@ def test_a_built_in_reduction_binds_from_its_own_block_like_a_custom_one(write_c
     assert isinstance(output.reduction, Mean)
     block = ruamel.yaml.YAML().load(path.read_text())["Predictor"]["outputs_dataset"]["L"]["OutputDataset"]
     assert "Mean" in block
+
+
+def _output_dataset(write_config, monkeypatch, name: str = "L"):
+    """An output dataset with its declared blend window built, as ``prepare`` leaves it."""
+    from konfai.predictor import OutSameAsGroupDataset
+
+    write_config(f"Predictor:\n  outputs_dataset:\n    {name}:\n      OutputDataset: {{}}\n")
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    output = OutSameAsGroupDataset(
+        same_as_group="a:b",
+        dataset_filename="./Out:mha",
+        before_reduction_transforms={},
+        after_reduction_transforms={},
+        final_transforms={},
+    )
+    output.prepare(name)
+    return output
+
+
+def _configure_blend(output, patch_size, overlap) -> None:
+    """Hand ``output`` the run's patch config the way the prediction loop does."""
+    from konfai.predictor import _Predictor
+
+    _Predictor(
+        world_size=1,
+        global_rank=0,
+        local_rank=0,
+        autocast=False,
+        predict_path=Path("."),
+        data_log=None,
+        outputs_dataset={"L": output},
+        model_composite=SimpleNamespace(module=SimpleNamespace(get_networks=dict)),
+        dataloader_prediction=SimpleNamespace(
+            dataset=SimpleNamespace(get_patch_config=lambda: (patch_size, overlap), data_augmentations_list=[])
+        ),
+    )
+
+
+@pytest.mark.parametrize("patch_size", [[1, 4, 3], [4, 1, 3], [4, 4, 1]])
+def test_a_singleton_patch_axis_still_carries_its_blend_window(write_config, monkeypatch, patch_size) -> None:
+    """A 2.5-D grid tiles one axis a voxel at a time. The accumulator reads one window per spatial axis,
+    so the untiled axes have to be handed over too, as a single broadcast entry: dropping them leaves the
+    trailing axis with no window at all."""
+    output = _output_dataset(write_config, monkeypatch)
+    _configure_blend(output, patch_size, 1)
+    assert [window.numel() for window in output.patch_combine.windows_1d] == blend_axes(patch_size)
+
+
+@pytest.mark.parametrize("patch_size", [[1, 3, 3], [3, 1, 3], [3, 3, 1]])
+def test_a_grid_with_a_singleton_patch_axis_reassembles_its_case(write_config, monkeypatch, patch_size) -> None:
+    """The same grid, blended: the loader drops the singleton axis of each patch, the accumulator puts it
+    back, and the case comes out of the blend as it went in."""
+    from konfai.data.patching import Accumulator
+    from konfai.utils.utils import get_patch_slices_from_shape
+
+    output = _output_dataset(write_config, monkeypatch)
+    _configure_blend(output, patch_size, 0)
+
+    shape = [6, 6, 6]  # tiles exactly at overlap 0: no padded border patch to crop
+    volume = torch.arange(math.prod(shape), dtype=torch.float32).reshape(1, *shape)
+    slices = get_patch_slices_from_shape(patch_size, shape, 0)
+    accumulator = Accumulator(slices, patch_size, output.patch_combine, batch=False)
+    for index, patch in enumerate(slices):
+        selector = tuple(s.start if s.stop - s.start == 1 else s for s in patch)
+        accumulator.add_layer(index, volume[(slice(None), *selector)].clone())
+    assert torch.equal(accumulator.assemble(), volume)
