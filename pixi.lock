@@ -1980,7 +1980,7 @@ packages:
 - pypi: ./
   name: konfai
   requires_dist:
-  - torch
+  - torch>=2.3
   - tqdm
   - numpy
   - ruamel-yaml
