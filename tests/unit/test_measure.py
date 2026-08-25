@@ -75,6 +75,18 @@ def test_a_criterion_accepts_the_integer_label_map_a_segmentation_target_is(crit
     assert torch.isfinite(loss).all()
 
 
+def test_the_lowest_label_of_a_pair_of_maps_is_the_lowest_of_both() -> None:
+    """``bincount`` takes no negative index, so the bins are offset by the smallest label ANY map
+    holds: reducing each map's own minimum must keep the smaller of the two."""
+    predicted = torch.tensor([[[-1, 0, 2]]])
+    reference = torch.tensor([[[-3, 0, 2]]])
+
+    (_, _), offset, nan_bin, _ = Dice._bins([predicted, reference], None)
+
+    assert (offset, nan_bin) == (-3, 0)
+    assert Dice._bins([reference, predicted], None)[1] == -3
+
+
 class TestOnGrid:
     def test_a_target_on_the_output_grid_is_handed_back_as_is(self):
         # No resample on the output's own grid: the integer label map keeps its dtype and its storage,
