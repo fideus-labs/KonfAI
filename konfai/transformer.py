@@ -53,11 +53,11 @@ from konfai.data.patching import (
 )
 from konfai.data.transform import Save, split_expand
 from konfai.utils import uri
-from konfai.utils.budget import format_bytes, node_local_ranks
+from konfai.utils.budget import format_bytes, node_local_ranks, set_per_rank_budget
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
-from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, set_chunk_cache_budget
+from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, bound_chunk_cache
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -735,7 +735,8 @@ class Transformer(DistributedObject):
         # the plan must measure the same run setup() will enforce. The store's decoded-chunk cache
         # is bounded here too: it is part of what the process holds.
         self._budget_bytes = per_rank_budget
-        chunk_cache_bytes = set_chunk_cache_budget(per_rank_budget)
+        set_per_rank_budget(per_rank_budget)
+        chunk_cache_bytes = bound_chunk_cache()
         entries: list[TransformPlanEntry] = []
         probed: set[tuple[str, str]] = set()
         planned_dtypes: set[str] = set()

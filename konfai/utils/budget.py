@@ -75,6 +75,25 @@ class MemoryBudget:
         return self.total_bytes / max(1, world_size) if self.shared_across_ranks else self.total_bytes
 
 
+#: This rank's share of the budget, as the workflow that resolved it published it. Some consumers of
+#: a budget sit inside a ``Dataset``, which a workflow reaches through doors that carry no budget (a
+#: transform reading a companion volume, a statistics scan, a store's decoded-chunk cache): they read
+#: it from here instead of every door growing a parameter for them.
+_per_rank_bytes: float | None = None
+
+
+def set_per_rank_budget(budget_bytes: float | None) -> None:
+    """Publish this rank's budget. ``None`` (or a non-positive figure) means none was declared, which
+    is what every consumer falls back to its own default on."""
+    global _per_rank_bytes
+    _per_rank_bytes = float(budget_bytes) if budget_bytes and budget_bytes > 0 else None
+
+
+def per_rank_budget_bytes() -> float | None:
+    """This rank's declared budget, or ``None`` when none was."""
+    return _per_rank_bytes
+
+
 def _positive_int_env(name: str) -> int | None:
     """The environment variable NAME as a positive int; ``None`` when unset, zero or not a number."""
     try:

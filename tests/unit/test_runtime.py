@@ -941,6 +941,7 @@ def test_a_forked_child_builds_its_own_rank_pool(monkeypatch) -> None:
 def test_a_rank_bounds_the_chunk_cache_by_its_own_share_of_the_budget(monkeypatch) -> None:
     """A spawned rank is a new process: a bound the launcher set is a module global it never sees,
     so the rank sets it at its own entry, from the budget every workflow's dataset resolves."""
+    from konfai.utils import budget as budget_module
     from konfai.utils import ome_zarr
 
     class FakeBudget:
@@ -968,7 +969,8 @@ def test_a_rank_bounds_the_chunk_cache_by_its_own_share_of_the_budget(monkeypatc
     monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
     monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", "1")
-    monkeypatch.setattr(ome_zarr, "_chunk_cache_budget", None)
+    monkeypatch.setattr(budget_module, "_per_rank_bytes", None)
     rt.execute_distributed_object(FakeObject(), gpu=None, cpu=1)
 
-    assert ome_zarr._chunk_cache_budget == 96 << 20
+    assert budget_module.per_rank_budget_bytes() == 96 << 20
+    assert ome_zarr._chunk_cache().capacity == ome_zarr.chunk_cache_capacity()

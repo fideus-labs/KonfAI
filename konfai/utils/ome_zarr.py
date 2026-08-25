@@ -450,31 +450,25 @@ CHUNK_CACHE_FLOOR = 256 << 20
 #: what the chain holds as well, and the cache is the cheapest of the three to give up.
 _CHUNK_CACHE_BUDGET_SHARE = 1 / 3
 
-_chunk_cache_budget: int | None = None
 
-
-def set_chunk_cache_budget(budget_bytes: float | None) -> int:
-    """Bound the decoded-chunk cache by the run's per-rank memory budget, and answer the capacity
-    it has from now on: the cache is part of what the process holds, so it never exceeds the
-    budget. ``None``, or no call at all, leaves it the share of free RAM an undeclared budget means
-    everywhere else.
-    """
-    global _chunk_cache_budget
-    _chunk_cache_budget = int(budget_bytes) if budget_bytes and budget_bytes > 0 else None
-    capacity = _chunk_cache_capacity()
+def bound_chunk_cache() -> int:
+    """Resize the decoded-chunk cache to the budget this rank published
+    (:func:`~konfai.utils.budget.set_per_rank_budget`) and answer its capacity from now on."""
+    capacity = chunk_cache_capacity()
     if _CHUNK_CACHE is not None:
         _CHUNK_CACHE.set_capacity(capacity)
     return capacity
 
 
-def _chunk_cache_capacity() -> int:
+def chunk_cache_capacity() -> int:
     """What the cache may hold: its share of the declared budget, never more, so a budget under the
     floor bounds the cache instead of the floor taking the budget whole; a share of what this process
     may allocate when nothing was declared, where the floor is what makes the cache worth having."""
-    from konfai.utils.budget import available_memory_bytes
+    from konfai.utils.budget import available_memory_bytes, per_rank_budget_bytes
 
-    if _chunk_cache_budget is not None:
-        return int(_chunk_cache_budget * _CHUNK_CACHE_BUDGET_SHARE)
+    declared = per_rank_budget_bytes()
+    if declared is not None:
+        return int(declared * _CHUNK_CACHE_BUDGET_SHARE)
     return max(CHUNK_CACHE_FLOOR, int(available_memory_bytes()[0] * 0.05))
 
 
@@ -484,7 +478,7 @@ _CHUNK_CACHE: _DecodedChunkCache | None = None
 def _chunk_cache() -> _DecodedChunkCache:
     global _CHUNK_CACHE
     if _CHUNK_CACHE is None:
-        _CHUNK_CACHE = _DecodedChunkCache(_chunk_cache_capacity())
+        _CHUNK_CACHE = _DecodedChunkCache(chunk_cache_capacity())
     return _CHUNK_CACHE
 
 

@@ -66,7 +66,7 @@ from konfai import (
     transforms_directory,
 )
 from konfai.utils import State  # also the re-export ``konfai.utils.runtime.State`` callers import
-from konfai.utils.budget import available_cpus, node_local_ranks
+from konfai.utils.budget import available_cpus, node_local_ranks, set_per_rank_budget
 from konfai.utils.errors import ConfigError, KonfAIError
 from konfai.utils.utils import env_flag
 
@@ -843,11 +843,12 @@ class DistributedObject(ABC):
         Set here, on the rank: a spawned rank is a new process, and a bound set by the launcher is
         a module global the child never sees.
         """
-        from konfai.utils.ome_zarr import set_chunk_cache_budget
+        from konfai.utils.ome_zarr import bound_chunk_cache
 
         dataset = getattr(self, "dataset", None)
         if dataset is not None and hasattr(dataset, "resolved_budget"):
-            set_chunk_cache_budget(dataset.resolved_budget().per_rank_bytes(node_local_ranks(world_size)))
+            set_per_rank_budget(dataset.resolved_budget().per_rank_bytes(node_local_ranks(world_size)))
+            bound_chunk_cache()
 
     def __call__(self, rank: int | None = None) -> None:
         world_size = self.world_size

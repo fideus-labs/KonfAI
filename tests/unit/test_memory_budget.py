@@ -31,7 +31,7 @@ from konfai.data.data_manager import (
     DataTrain,
 )
 from konfai.utils import budget, runtime
-from konfai.utils.budget import AUTO_MEMORY_SAFETY_FRACTION, parse_memory_budget_bytes
+from konfai.utils.budget import AUTO_MEMORY_SAFETY_FRACTION, parse_memory_budget_bytes, set_per_rank_budget
 from konfai.utils.errors import ConfigError
 
 # --------------------------------------------------------------------------------------
@@ -497,7 +497,8 @@ def _chunk_cache_restored():
     from konfai.utils import ome_zarr
 
     yield
-    ome_zarr.set_chunk_cache_budget(None)
+    set_per_rank_budget(None)
+    ome_zarr.bound_chunk_cache()
 
 
 @pytest.mark.parametrize(
@@ -516,7 +517,8 @@ def test_the_chunk_cache_takes_a_third_of_a_declared_budget_and_no_floor_raises_
     budget, the sweep going on sizing its regions against the same 128 MiB."""
     from konfai.utils import ome_zarr
 
-    assert ome_zarr.set_chunk_cache_budget(declared) == capacity
+    set_per_rank_budget(declared)
+    assert ome_zarr.bound_chunk_cache() == capacity
     assert ome_zarr._chunk_cache().capacity == capacity
 
 
@@ -526,7 +528,8 @@ def test_an_undeclared_budget_leaves_the_chunk_cache_its_share_of_free_ram(
     from konfai.utils import ome_zarr
 
     monkeypatch.setattr(budget, "available_memory_bytes", lambda: (100 * 2**30, "host"))
-    assert ome_zarr.set_chunk_cache_budget(None) == 5 * 2**30
+    set_per_rank_budget(None)
+    assert ome_zarr.bound_chunk_cache() == 5 * 2**30
 
 
 _WORKFLOW_ENV = (
@@ -709,11 +712,13 @@ def test_a_declared_budget_bounds_the_chunk_cache_in_prediction_and_evaluation(
         monkeypatch.delenv(key)
     _tiny_cohort(tmp_path)
 
-    ome_zarr.set_chunk_cache_budget(None)
+    set_per_rank_budget(None)
+    ome_zarr.bound_chunk_cache()
     assert ome_zarr._chunk_cache().capacity >= ome_zarr.CHUNK_CACHE_FLOOR
     _build_evaluator(tmp_path, monkeypatch)
     assert ome_zarr._chunk_cache().capacity == (64 << 20) // 3
 
-    ome_zarr.set_chunk_cache_budget(None)
+    set_per_rank_budget(None)
+    ome_zarr.bound_chunk_cache()
     _build_predictor(tmp_path, monkeypatch)
     assert ome_zarr._chunk_cache().capacity == (64 << 20) // 3

@@ -75,12 +75,12 @@ from konfai.data.transform import (
     TransformLoader,
 )
 from konfai.network.network import Model, ModelLoader, NetState, Network
-from konfai.utils.budget import node_local_ranks, resolve_memory_budget
+from konfai.utils.budget import node_local_ranks, resolve_memory_budget, set_per_rank_budget
 from konfai.utils.chain_diff import dataset_tree, input_chain_differences, training_dataset_tree
 from konfai.utils.config import _escape_key_component, apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, KonfAIError, PredictorError
-from konfai.utils.ome_zarr import set_chunk_cache_budget
+from konfai.utils.ome_zarr import bound_chunk_cache
 from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
@@ -2053,7 +2053,8 @@ class Predictor(DistributedObject):
         self.datasets_filename = []
         self.predict_path = predictions_directory() / self.name
         per_rank_budget = self.dataset.resolved_budget().per_rank_bytes(node_local_ranks())
-        set_chunk_cache_budget(per_rank_budget)
+        set_per_rank_budget(per_rank_budget)
+        bound_chunk_cache()
         for output_dataset in self.outputs_dataset.values():
             output_dataset.set_memory_budget(per_rank_budget)
             self.datasets_filename.append(output_dataset.filename)

@@ -25,6 +25,7 @@ import pytest
 from konfai.data.materialize import Regime, Verdict
 from konfai.data.reduction import Mean
 from konfai.data.transform import Reduce
+from konfai.utils.budget import set_per_rank_budget
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformerError
 
@@ -1755,7 +1756,8 @@ def test_the_plan_bounds_the_chunk_cache_by_the_budget_and_says_when_it_is_under
         assert ome_zarr._chunk_cache().capacity == 1 << 30
         assert "decoded-chunk cache up to 1.00 GiB" in report
     finally:
-        ome_zarr.set_chunk_cache_budget(None)
+        set_per_rank_budget(None)
+        ome_zarr.bound_chunk_cache()
 
 
 @pytest.mark.parametrize(
