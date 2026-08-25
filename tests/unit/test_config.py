@@ -21,6 +21,7 @@ Covers ``Config`` file handling and error messages, ``apply_config`` type bindin
 keys), and the config env-var bookkeeping.
 """
 
+import functools
 import os
 import sys
 import threading
@@ -283,6 +284,30 @@ def test_apply_config_rejects_unknown_boolean_string(write_config) -> None:
 
     with pytest.raises(ConfigError, match="expected bool"):
         apply_config("Root")(Root)()
+
+
+def test_predictor_binds_check_training_transforms_from_the_file(write_config, monkeypatch) -> None:
+    """``check_training_transforms: false`` under ``Predictor:`` reaches the constructor.
+
+    The key silences the warning a prediction raises when a model input is not preprocessed the way
+    its checkpoint trained on it; bound off ``Predictor``'s own signature here, so a rename of the
+    parameter shows up as a key that no longer binds. The body is captured rather than run: what is
+    at stake is the binding, not the workflow.
+    """
+    from konfai.predictor import Predictor
+
+    write_config("Predictor:\n  check_training_transforms: false\n")
+    bound: dict[str, object] = {}
+
+    @functools.wraps(Predictor.__init__)
+    def capture(_self, **kwargs) -> None:
+        bound.update(kwargs)
+
+    monkeypatch.setattr(Predictor, "__init__", capture)
+
+    apply_config()(Predictor)()
+
+    assert bound["check_training_transforms"] is False
 
 
 def test_apply_config_instantiates_dict_of_nested_objects(write_config) -> None:
