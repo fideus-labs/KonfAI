@@ -585,6 +585,9 @@ def test_an_augmentation_group_is_handed_the_case_not_a_clone_of_it(tmp_path: Pa
     dataset.write("CT", "CASE", np.random.default_rng(0).random((1, 6, 7, 8)).astype(np.float32), attributes)
     flip = Flip(f_prob=[1.0, 1.0, 1.0])
     flip.load(0.5)
+    # The selection is drawn from the global RNG, so the seed is the fixture: at 0.5 over eight
+    # copies one run in 128 selects all of them or none, and the case below covers neither.
+    torch.manual_seed(0)
     group = DataAugmentationsList(nb=8)
     group.data_augmentations = [flip]
     manager = DatasetManager(0, "CT", "CT", "CASE", dataset, None, [], [group])
