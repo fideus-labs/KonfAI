@@ -1122,14 +1122,15 @@ def rank_pool() -> ThreadPoolExecutor | None:
     """
     global _rank_pool, _rank_pool_share
     workers = rank_cpu_share()
-    if workers <= 1:
-        return None
     with _rank_pool_lock:
         # The share changes within one process when a multi-rank build is followed by an inline
         # single-rank workflow: the pool is rebuilt at the new size, the old one's idle threads let go.
+        # A share of one keeps no pool at all, so the threads go with it.
         if _rank_pool is not None and _rank_pool_share != workers:
             _rank_pool.shutdown(wait=False)
-            _rank_pool = None
+            _rank_pool, _rank_pool_share = None, 0
+        if workers <= 1:
+            return None
         if _rank_pool is None:
             _rank_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="konfai-rank")
             _rank_pool_share = workers

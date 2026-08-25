@@ -905,9 +905,13 @@ def test_the_rank_pool_is_rebuilt_when_the_share_changes(monkeypatch) -> None:
     eight = rt.rank_pool()
     assert eight is not four and eight is not None and eight._max_workers == 8
     assert rt.rank_pool() is eight
+    # A share of one keeps no pool: the one built for the wider share is let go with its threads,
+    # instead of idling for the rest of the process.
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     assert rt.rank_pool() is None
-    eight.shutdown(wait=False)
+    assert rt._rank_pool is None
+    with pytest.raises(RuntimeError):
+        eight.submit(int)
 
 
 def _map_in_child() -> None:
