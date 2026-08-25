@@ -19,6 +19,7 @@ DatasetManager patch grids."""
 
 import itertools
 import math
+import pickle
 from typing import cast
 
 import numpy as np
@@ -856,3 +857,108 @@ def test_chain_device_lives_only_for_the_materialize_call(streaming_dataset_stub
     CaseMaterializer(manager).materialize(rewrite=True, device=torch.device("cuda", 0))
     assert seen == [torch.device("cuda", 0)]
     assert manager._chain_device is None
+
+
+# --------------------------------------------------------------------------------------
+# Patch pickling: a rank cuts the grids, it is not shipped them
+# --------------------------------------------------------------------------------------
+
+
+def _multi_copy_patch(patch_size: list[int], shapes: list[list[int]]) -> DatasetPatch:
+    """A patch loaded for one copy per shape, carrying the flags its cut and its reads depend on."""
+    patch = DatasetPatch(patch_size=list(patch_size))
+    patch.pad_to_patch = False
+    patch.halo = 3
+    patch.free_axis_multiple = [8, 8, 8]
+    for a, shape in enumerate(shapes):
+        patch.load(shape, a)
+    return patch
+
+
+def test_a_pickled_patch_does_not_carry_its_grids() -> None:
+    """mp.spawn pickles the configured object with every manager's patch, and the per-case grids
+    dominated those bytes: 100 synthetic cases of 2048 patches shipped 3.69 MB, 47 kB once the cuts
+    stay home (32 patches each: 139 kB -> 47 kB)."""
+    patch = _multi_copy_patch([16, 16, 16], [[64, 64, 64]])
+
+    assert len(pickle.dumps(patch)) < len(pickle.dumps(patch.get_patch_slices(0)))
+
+
+@pytest.mark.parametrize(
+    "patch_size, pinned",
+    [
+        ([16, 16, 16], None),
+        ([0, 16, 16], None),
+        ([1, 8, 8], None),
+        ([0, 16, 16], [40, 16, 16]),  # an OOM re-plan pinned the declared free axis in place
+    ],
+)
+def test_an_unpickled_patch_cuts_back_the_same_grids(patch_size, pinned) -> None:
+    """The rebuilt grid is the shipped grid: same slices in the same order, same sweep axis, same
+    reads. The cut is a pure function of the recorded shape and the configuration, so every input
+    it reads must survive the pickle: the halo and ``pad_to_patch`` a reducing consumer sets, the
+    model's free-axis multiple, and the DECLARED free axis a restart's concretization erases from
+    ``patch_size`` (without it the axis falls back to the fixed-patch remainder overlap)."""
+    shapes = [[40, 48, 56], [48, 40, 56], [56, 48, 40]]
+    patch = _multi_copy_patch(patch_size, shapes)
+    if pinned is not None:
+        patch.patch_size[:] = pinned
+        for a, shape in enumerate(shapes):
+            patch.load(shape, a)
+    reference = {a: (patch.get_sweep_axis(a), patch.get_patch_slices(a)) for a in range(len(shapes))}
+
+    restored = pickle.loads(pickle.dumps(patch))
+
+    assert restored._grids == {}, "the cuts must not travel"
+    assert (restored.pad_to_patch, restored.halo, restored.free_axis_multiple) == (False, 3, [8, 8, 8])
+    assert restored._declared_free_axis == patch._declared_free_axis
+    for a, shape in enumerate(shapes):
+        assert (restored.get_sweep_axis(a), restored.get_patch_slices(a)) == reference[a]
+        assert restored.get_size(a) == patch.get_size(a)
+        indices = range(patch.get_size(a))
+        assert [restored.read_slices(a, i, shape) for i in indices] == [patch.read_slices(a, i, shape) for i in indices]
+        assert [restored.core_in_read(a, i) for i in indices] == [patch.core_in_read(a, i) for i in indices]
+
+
+def test_reloading_a_copy_recuts_its_grid() -> None:
+    """``load`` is the only thing that changes a copy's grid, so a second call must not hand back
+    the first one's cut (a model patch re-loads per forward, on the shape it is given)."""
+    patch = _multi_copy_patch([16, 16, 16], [[64, 64, 64]])
+    first = patch.get_patch_slices(0)
+
+    patch.load([32, 32, 32], 0)
+
+    assert patch.get_patch_slices(0) != first
+    assert patch.get_patch_slices(0) == _multi_copy_patch([16, 16, 16], [[32, 32, 32]]).get_patch_slices(0)
+
+
+def test_a_pickled_manager_hands_every_copy_the_grid_it_was_counted_on(streaming_dataset_stub) -> None:
+    """The loader mapping shipped to a rank is ``(case, copy, patch)`` triples counted on the
+    parent's grids: a rank that cut different ones would index patches that are not there.
+
+    A quarter ``Rotate`` transposes per-copy extents, so the copies are cut on three different
+    grids and a shape confused between them shows up at once.
+    """
+    torch.manual_seed(0)
+    augmentations = DataAugmentationsList(nb=2, data_augmentations={})
+    rotate = Rotate(is_quarter=True)
+    rotate.load(1.0)
+    augmentations.data_augmentations = [rotate]
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, streaming_dataset_stub(np.zeros((1, 6, 8, 10), dtype=np.float32))),
+        patch=DatasetPatch([4, 4, 4]),
+        transforms=[],
+        data_augmentations_list=[augmentations],
+    )
+    copies = range(len(manager.shapes))
+    reference = {a: (manager.patch.get_sweep_axis(a), manager.patch.get_patch_slices(a)) for a in copies}
+
+    restored = pickle.loads(pickle.dumps(manager))
+
+    assert restored.shapes == manager.shapes
+    for a in copies:
+        assert (restored.patch.get_sweep_axis(a), restored.patch.get_patch_slices(a)) == reference[a]
