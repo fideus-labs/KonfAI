@@ -21,6 +21,7 @@ never assembled, that a cases which does not agree on its grid is refused before
 and that a chain continues after the reduction."""
 
 import itertools
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -669,3 +670,27 @@ def test_a_reduction_accounts_for_every_second_of_its_own_wall_clock(tmp_path: P
     # No pipeline: the store's own seconds are the seconds the fold stands still.
     assert SWEEP_CLOCK.spent("wait(read)") >= SWEEP_CLOCK.spent("read") > 0.0
     assert SWEEP_CLOCK.spent("wait(write)") >= SWEEP_CLOCK.spent("write") > 0.0
+
+
+def test_an_incremental_fold_holds_one_member_region_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``resident_regions == 2`` is a promise about what is alive, not only about what is planned.
+
+    A name in the fold loop still holding the region the accumulator has already folded keeps a
+    second one resident: one member region over the priced peak, which on a 5 x 384 MiB float32
+    cohort folded whole measured 1162 MiB against 778.
+    """
+    alive: list[weakref.ref] = []
+    read_region = DatasetManager.read_region
+
+    def counted(self, target, a=0, apply_augmentations=False):
+        tensor = read_region(self, target, a, apply_augmentations)
+        alive.append(weakref.ref(tensor))
+        resident = sum(1 for reference in alive if reference() is not None)
+        assert resident == 1, f"{resident} member regions alive while reading the next one"
+        return tensor
+
+    monkeypatch.setattr(DatasetManager, "read_region", counted)
+    engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Mean", output="one_at_a_time"), [])
+    assert engine.plan().resident_regions == 2
+    assert engine.materialize() is True
+    assert len(alive) > CASES, "the fold read fewer regions than it has cases"
