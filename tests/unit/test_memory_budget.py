@@ -514,7 +514,7 @@ def _workflow_config(root: Path, asset: str, replacements: dict[str, str], batch
     return path
 
 
-def _build_evaluator(root: Path):
+def _build_evaluator(root: Path, monkeypatch: pytest.MonkeyPatch):
     from konfai.evaluator import Evaluator
     from konfai.utils.config import apply_config, strict_config
     from konfai.utils.runtime import State, configure_workflow_environment
@@ -531,7 +531,7 @@ def _build_evaluator(root: Path):
         state=State.EVALUATION,
         path_env={"KONFAI_EVALUATIONS_DIRECTORY": root / "Evaluations"},
     )
-    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
     with strict_config("Evaluator", refuse=False):
         return apply_config()(Evaluator)()
 
@@ -553,7 +553,7 @@ def _build_predictor(root: Path, monkeypatch: pytest.MonkeyPatch):
         state=State.PREDICTION,
         path_env={"KONFAI_PREDICTIONS_DIRECTORY": root / "PredictionsOut"},
     )
-    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
     with strict_config("Predictor", refuse=False):
         return apply_config()(Predictor)()
 
@@ -574,7 +574,7 @@ def test_a_declared_budget_bounds_the_chunk_cache_in_prediction_and_evaluation(
 
     ome_zarr.set_chunk_cache_budget(None)
     assert ome_zarr._chunk_cache().capacity >= ome_zarr.CHUNK_CACHE_FLOOR
-    _build_evaluator(tmp_path)
+    _build_evaluator(tmp_path, monkeypatch)
     assert ome_zarr._chunk_cache().capacity == 64 << 20
 
     ome_zarr.set_chunk_cache_budget(None)
