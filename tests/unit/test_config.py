@@ -962,7 +962,7 @@ def test_a_shipped_config_resolves_to_the_same_bytes_under_the_block_as_per_cont
     context at a time: the resolved file is byte-identical. Two of them gain keys the write-back
     appends (Config_GAN.yml, Transform.yml), which is where the order of the appends shows."""
     pytest.importorskip("SimpleITK")
-    if relative.startswith("Synthesis/"):
+    if Path(relative).parent.name == "Synthesis":
         # Its Model.py imports segmentation_models_pytorch, an extra the example declares and the
         # suite does not: binding the config imports the model.
         pytest.importorskip("segmentation_models_pytorch")
