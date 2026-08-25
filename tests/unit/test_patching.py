@@ -638,6 +638,34 @@ def test_trim_kept_boxes_partition_the_volume(shape, patch, overlap):
     assert int(hits.max()) == 1, f"{int((hits > 1).sum())} voxel(s) written by more than one patch"
 
 
+def test_trim_kept_boxes_are_cached_per_axis_position_not_per_patch():
+    """A kept box is the product of one span per axis, so the cache holds one span per (axis,
+    start): sum(n_d) entries for prod(n_d) patches, and the grid's starts are read off the slices
+    once. Keyed per patch, every patch missed and each miss re-sorted the starts of every patch:
+    O(P^2) over a case (15.6 s for 18,000 thin 2.5D patches, 16 ms here, measured).
+
+    The boxes themselves come from the same window nonzero run, checked against a derivation that
+    reads the windows position by position.
+    """
+    shape, patch, overlap = [20, 22, 24], [8, 8, 8], 4
+    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    combine = Trim()
+    combine.set_patch_config(patch, overlap)
+    accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
+
+    starts = [sorted({s[dim].start for s in accumulator.patch_slices}) for dim in range(len(shape))]
+    expected = {}
+    for dim, axis_starts in enumerate(starts):
+        for position, start in enumerate(axis_starts):
+            ones = combine.window(dim, position, len(axis_starts)).nonzero().flatten()
+            expected[dim, start] = slice(int(ones[0]), int(ones[-1]) + 1)
+    boxes = [accumulator._kept_box(patch_slice) for patch_slice in accumulator.patch_slices]
+
+    assert boxes == [tuple(expected[dim, s.start] for dim, s in enumerate(p)) for p in accumulator.patch_slices]
+    assert len(accumulator._kept) == sum(len(axis_starts) for axis_starts in starts) < len(slices)
+    assert [list(positions) for positions in accumulator._positions()] == starts
+
+
 def test_trim_keeps_the_patch_whole_when_there_is_nothing_to_trim():
     """An overlap at least as wide as the patch leaves no central band; keep the patch instead.
 
@@ -646,6 +674,33 @@ def test_trim_keeps_the_patch_whole_when_there_is_nothing_to_trim():
     """
     for size, overlap in ((4, 4), (3, 4), (1, 2), (2, 3)):
         assert torch.equal(Trim()._window_1d(size, overlap), torch.ones(size)), (size, overlap)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.int16, torch.uint8])
+def test_border_patches_pad_with_the_patch_minimum_kept_on_the_device(dtype):
+    """Under ``pad_value=None`` a border patch pads with its own minimum (a uint8 map with zero).
+
+    The minimum is filled from the 0-d device tensor, never read back through ``.item()``, which
+    drained the CUDA stream once per padded patch: 37 of the 64 patches of a 100^3 case at 32^3,
+    measured, and none now. The values are those of the ``.item()`` spelling to the bit, which is
+    the oracle here (a padded patch keeps every band, on every axis that pads).
+    """
+    torch.manual_seed(0)
+    shape = [7, 9, 10]
+    data = (torch.randn(2, *shape) * 40).to(dtype)
+    patch = DatasetPatch(patch_size=[4, 4, 4], overlap=0)
+    assert patch.pad_value is None
+    patch.load(shape)
+
+    padded = 0
+    for index in range(patch.get_size()):
+        plan = patch.get_read_plan(list(data.shape), index, 0, True)
+        window = data[plan.data_slices]
+        pad_with = 0 if dtype is torch.uint8 else float(window.min().item())
+        oracle = torch.nn.functional.pad(window, plan.constant_padding, "constant", pad_with)
+        padded += any(plan.constant_padding)
+        assert torch.equal(patch.get_data(data, index, 0, True), oracle)
+    assert padded > 0
 
 
 @pytest.mark.parametrize("sweep_axis", [0, 1, 2])

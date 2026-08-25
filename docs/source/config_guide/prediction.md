@@ -165,6 +165,28 @@ device; only a transcendental-terminated float chain (Softmax/Sigmoid) can diffe
 GPU window and a CPU whole-volume run. Set `KONFAI_STREAMED_WRITES=0` to force the whole-volume path
 globally (ops/debug or exact bit-reproducibility against a CPU run).
 
+### Where the run's time went
+
+A run whose loop took more than a second closes with a line accounting for it, phase
+by phase, in the same shape as the transform workflow's sweep line:
+
+```text
+[KonfAI] prediction 84.2 s = fetch 3.1 + forward 41.5 + blend 22.0 + finalize(stream) 9.8 + finalize(case) 0.0 + drain 1.2 + other 6.6 | writer 30.4 s, waited on 8.9 s
+```
+
+The sum before the bar is the loop's own thread and it closes exactly: what the named
+phases do not account for is `other`. `fetch` is the wait for the loader's next batch,
+`forward` the model, `blend` a patch's inverses and its blend into the accumulator (the
+copy home included when the case accumulates on the host), the two `finalize` figures
+the slabs and the cases handed to the writer, and `drain` the writes still queued when
+the loop ends. On a GPU the loop only enqueues the forward and the blend, so the device's
+time is waited for where a result crosses to the host.
+
+After the bar is the writer: its own thread's time, and how long the loop stood waiting
+on it inside the finalize phases. The background writer overlaps the disk with the next
+forward only while its queue has room; `waited on` close to `writer` means the
+destination is the floor of the run, and the writer has become synchronous.
+
 ## Examples
 
 See:

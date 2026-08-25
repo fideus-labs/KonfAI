@@ -23,12 +23,25 @@ re-raised), but only when the destination serves disjoint files per entry
 ever written from two threads. Pure ``threading``/``queue``, no fork and no signals, so the behaviour
 is the same on Linux, macOS and Windows."""
 
+import time
+
 import pytest
 import torch
 from konfai.data.augmentation import Flip
-from konfai.predictor import _AsyncWriter
+from konfai.predictor import PREDICTION_CLOCK, _AsyncWriter
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import PredictorError
+
+
+def test_async_writer_charges_its_writes_to_the_writer_s_own_phase() -> None:
+    """The writer thread is the one thread charging ``write``, so the report can set the writer's
+    time beside how long the loop waited on it: a submission into a queue with room is no wait."""
+    PREDICTION_CLOCK.reset()
+    writer = _AsyncWriter()
+    writer.submit(lambda: time.sleep(0.05))
+    writer.close()
+    assert PREDICTION_CLOCK.spent("write") >= 0.05
+    assert PREDICTION_CLOCK.spent("wait(write)") == 0.0
 
 
 def test_async_writer_runs_in_order_and_surfaces_failures() -> None:

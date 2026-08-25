@@ -123,7 +123,13 @@ class Mean(Reduction):
         if self._total is None:
             self._total, self._dtype = tensor.to(torch.float32, copy=True), tensor.dtype
         else:
-            self._total.add_(tensor.float())
+            # Promoted inside the add kernel, whose cast to float32 is the one float() made: the
+            # same bits, without the float32 copy of the member that float() put beside the total
+            # (64 MiB per 32 MiB fp16 member: one allocation per member on CUDA, none here,
+            # measured; the CPU iterator casts into a temporary either way). A member wider than
+            # float32 would be added at its own width and rounded after, so it is narrowed first.
+            promoted = torch.promote_types(torch.float32, tensor.dtype) is torch.float32
+            self._total.add_(tensor if promoted else tensor.float())
         self._count += 1
 
     def finalize(self) -> torch.Tensor:
@@ -255,27 +261,52 @@ class Vote(Reduction):
     """
 
     voxel_local = True
-    # The sorted copy of the stack, and one stack-sized mask beside it.
+    # What the running best holds beside the members: two counts, the best label, the mask
+    # deciding it and the comparisons behind it, 2 x itemsize + 6 bytes per voxel (measured 6 to
+    # 9 on uint8 and int16 members, at two and at six members). A fixed set of planes, so as a
+    # share of the cohort it shrinks with the count: 16 bytes over the plan's 4 per member, and
+    # the attribute is the two-member fold, the worst case.
     working_multiple = 2.0
+
+    def working_multiple_for(self, cases: int) -> float:
+        return 4.0 / cases if cases > 1 else 0.0
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         if len(tensors) == 1:
             return tensors[0]
         # NOT torch.mode: its tie-break is the smallest label on CPU and the LARGEST on CUDA
-        # (measured: 19% of a six-member fold differed by device), so a --gpu reduce and a CPU
-        # reduce wrote different label maps under one provenance. Sorted along the case axis and
-        # counted member by member, the first count that is not beaten IS the smallest label with
-        # the most votes, on every device. Per voxel this is cases^2 comparisons over the stack and
-        # nothing else: no unique over the volume (a sort of every voxel, 31 s per 512^3 on a
-        # CPU where this takes 2 s), no per-label count planes.
-        ranked = torch.stack(tensors, dim=0).sort(dim=0).values
-        best, best_count = ranked[0], (ranked == ranked[0]).sum(dim=0, dtype=torch.int16)
-        for member in ranked[1:]:
-            count = (ranked == member).sum(dim=0, dtype=torch.int16)
-            better = count > best_count
+        # (measured: 16% of a six-member fold differed by device), so a --gpu reduce and a CPU
+        # reduce wrote different label maps under one provenance. Every member is a candidate
+        # counted against the others, and the running best keeps a strictly larger count or the
+        # same count on a smaller label: the smallest label with the most votes, on every device
+        # and whatever the members' order. Per voxel this is cases^2 comparisons and nothing else:
+        # no stack sorted along the case axis (whose int64 indices alone were 8 bytes per voxel and
+        # member: a 128-row slab of six 512x512 uint8 members peaked 1920 MiB sorted, 256 MiB
+        # here, 64 -> 11 ms on CUDA, measured), no unique over the volume, no per-label planes.
+        best, best_votes = tensors[0], self._votes_for(0, tensors)
+        for index in range(1, len(tensors)):
+            member, votes = tensors[index], self._votes_for(index, tensors)
+            better = (votes > best_votes) | ((votes == best_votes) & (member < best))
             best = torch.where(better, member, best)
-            best_count = torch.where(better, count, best_count)
+            best_votes = torch.where(better, votes, best_votes)
         return best
+
+    @staticmethod
+    def _votes_for(index: int, tensors: list[torch.Tensor]) -> torch.Tensor:
+        """How many members hold member ``index``'s label, per voxel: its own vote and every
+        equal one.
+
+        Counted in uint8 from the mask viewed as uint8 (a bool is one byte holding 0 or 1): the
+        same dtype on both sides of the add, so the CPU iterator adds in place where a bool into
+        a wider count went through a cast temporary (1156 -> 784 ms per six-member int16 slab on
+        the host, 29 -> 21 ms on CUDA, measured). int16 past 255 members, where uint8 would wrap.
+        """
+        member = tensors[index]
+        votes = torch.ones_like(member, dtype=torch.uint8 if len(tensors) < 256 else torch.int16)
+        for other_index, other in enumerate(tensors):
+            if other_index != index:
+                votes.add_((other == member).view(torch.uint8))
+        return votes
 
 
 class Concat(Reduction):

@@ -19,9 +19,20 @@ from typing import Any, ClassVar, cast
 import numpy as np
 import pytest
 import torch
+import tqdm
 from konfai.data.data_manager import BatchDataItem, DatasetIter
+from konfai.data.patching import SweepClock
+from konfai.data.transform import TransformInverse
 from konfai.network.network import Network
-from konfai.predictor import Mean, ModelComposite, OutSameAsGroupDataset, _colocate_loaded_modules, _Predictor
+from konfai.predictor import (
+    PREDICTION_CLOCK,
+    Mean,
+    ModelComposite,
+    OutSameAsGroupDataset,
+    _colocate_loaded_modules,
+    _prediction_report,
+    _Predictor,
+)
 from konfai.utils.dataset import Attribute
 
 
@@ -70,6 +81,44 @@ def test_model_composite_streams_ensemble_through_a_single_loaded_model() -> Non
     assert isinstance(streamed_model, DummyPredictNetwork)
     assert streamed_model.load_history == [1.0, 3.0]
     assert streamed_model.load_name_history == ["DummyPredictNetwork", "DummyPredictNetwork"]
+
+
+def test_model_composite_hands_over_a_lone_model_output_and_folds_an_ensemble_in_place() -> None:
+    """A single-model run hands the model's own output on: dividing it by one copied every batch
+    output (56 MiB per [1, 14, 128^3] fp16 patch; 2 allocations per forward measured against 1).
+    An ensemble's mean is folded into the first output in place, the same values as the
+    out-of-place quotient to the bit.
+    """
+
+    class RecordingNetwork(DummyPredictNetwork):
+        def forward(self, batch_sample, output_layers=[]):  # type: ignore[override]
+            self.last = next(iter(batch_sample.values())).tensor * self.scale
+            return [("out", self.last)]
+
+    def batch() -> dict[str, BatchDataItem]:
+        torch.manual_seed(0)
+        return {
+            "input": BatchDataItem(
+                name=["CASE_000"],
+                tensor=torch.randn(1, 1, 4, 4, dtype=torch.float16),
+                attribute=[Attribute()],
+                x=[0],
+                a=[0],
+                p=[0],
+                is_input=True,
+            )
+        }
+
+    composite = ModelComposite(RecordingNetwork(), Mean())
+    composite.load([{"scale": 3.0}])
+    output = composite(batch(), ["out"])[0][2]
+    assert output is cast(RecordingNetwork, composite["Model_0"]).last
+
+    composite = ModelComposite(RecordingNetwork(), Mean())
+    composite.load([{"scale": 1.0}, {"scale": 3.0}, {"scale": 5.0}])
+    folded = composite(batch(), ["out"])[0][2]
+    outputs = [batch()["input"].tensor * scale for scale in (1.0, 3.0, 5.0)]
+    assert torch.equal(folded, (outputs[0] + outputs[1] + outputs[2]) / 3)
 
 
 def test_model_composite_runs_a_weightless_model_without_a_checkpoint() -> None:
@@ -256,6 +305,153 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
     assert accumulator._result.device.type == "cpu"
 
 
+def _single_patch_dataset_iter() -> DatasetIter:
+    """A dataset double whose one case is one 2x2 patch, swept along axis 0, with no patch transform."""
+
+    class DummyPatch:
+        patch_size: ClassVar[list[int]] = [2, 2]
+
+        @staticmethod
+        def get_patch_slices(index_augmentation: int):
+            del index_augmentation
+            return [(slice(0, 2), slice(0, 2))]
+
+        @staticmethod
+        def get_sweep_axis(index_augmentation: int) -> int:
+            del index_augmentation
+            return 0
+
+    class DummyManager:
+        name = "CASE_000"
+        patch = DummyPatch()
+        cache_attributes: ClassVar[list[Attribute]] = [Attribute({"Origin": [0.0, 0.0]})]
+
+    class DummyGroupTransform:
+        patch_transforms: ClassVar[list[object]] = []
+
+    class DummyDatasetIter:
+        groups_src: ClassVar[dict[str, dict[str, object]]] = {"src": {"dest": DummyGroupTransform()}}
+
+        @staticmethod
+        def get_dataset_from_index(group_dest: str, index: int):
+            assert group_dest == "dest"
+            assert index == 0
+            return DummyManager()
+
+    return cast(DatasetIter, DummyDatasetIter())
+
+
+def _three_patch_dataset_iter(patch_transforms: list[object]) -> DatasetIter:
+    """A dataset double whose one case is three 2x2 patches down axis 0, mirroring ``patch_transforms``."""
+
+    class DummyPatch:
+        patch_size: ClassVar[list[int]] = [2, 2]
+
+        @staticmethod
+        def get_patch_slices(index_augmentation: int):
+            del index_augmentation
+            return [(slice(row, row + 2), slice(0, 2)) for row in (0, 2, 4)]
+
+        @staticmethod
+        def get_sweep_axis(index_augmentation: int) -> int:
+            del index_augmentation
+            return 0
+
+    class DummyManager:
+        name = "CASE_000"
+        patch = DummyPatch()
+        cache_attributes: ClassVar[list[Attribute]] = [Attribute({"Origin": [0.0, 0.0]})]
+
+    class DummyGroupTransform:
+        pass
+
+    group = DummyGroupTransform()
+    group.patch_transforms = patch_transforms  # type: ignore[attr-defined]
+
+    class DummyDatasetIter:
+        groups_src: ClassVar[dict[str, dict[str, object]]] = {"src": {"dest": group}}
+
+        @staticmethod
+        def get_dataset_from_index(group_dest: str, index: int):
+            assert group_dest == "dest"
+            assert index == 0
+            return DummyManager()
+
+    return cast(DatasetIter, DummyDatasetIter())
+
+
+def test_patch_headers_are_copied_only_for_a_patch_inverse_to_undo_on() -> None:
+    """One header per (case, augmentation), at index 0, unless a patch-level inverse reads one per
+    patch: then every patch gets a copy of its own, taken before any inverse ran, so what one
+    inverse pushes never reaches the next patch's. On a grid of 18,000 thin 2.5D patches with
+    nothing to undo the copies cost 473 ms and 18,000 dicts held per (case, augmentation),
+    measured; 17 ms and one header now.
+    """
+
+    class Undo(TransformInverse):
+        def __init__(self) -> None:
+            super().__init__(inverse=True)
+            self.undone_on: list[Attribute] = []
+
+        def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+            return tensor
+
+        def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+            cache_attribute["Undone"] = 1
+            self.undone_on.append(cache_attribute)
+            return tensor
+
+    def output_dataset() -> OutSameAsGroupDataset:
+        return OutSameAsGroupDataset(
+            same_as_group="src:dest",
+            dataset_filename="./Output:mha",
+            group="out",
+            patch_combine=None,
+            reduction="Mean",
+        )
+
+    plain = output_dataset()
+    for index_patch in range(3):
+        plain.add_layer(0, 0, index_patch, torch.zeros(1, 2, 2), _three_patch_dataset_iter([]), Attribute())
+    assert list(plain.attributes[0][0]) == [0]
+
+    undo = Undo()
+    inverted = output_dataset()
+    for index_patch in range(3):
+        inverted.add_layer(0, 0, index_patch, torch.zeros(1, 2, 2), _three_patch_dataset_iter([undo]), Attribute())
+    headers = inverted.attributes[0][0]
+    assert list(headers) == [0, 1, 2]
+    assert [undone is headers[index_patch] for index_patch, undone in enumerate(undo.undone_on)] == [True] * 3
+    assert all("Undone_0" in header and "Undone_1" not in header for header in headers.values())
+
+
+def test_get_output_hands_the_assembled_volume_on_as_a_view() -> None:
+    """One model chunk: the assembled volume reaches the reduction without a copy.
+
+    Stacking a lone chunk copied it: 448 MiB and 54 ms per copy of a [14, 256^3] fp16 case,
+    measured, once per augmentation. No reduction writes into what it is handed (a Mean of one is
+    the member itself, a fold of several copies first, Median/Vote/Concat build a new tensor), so
+    the accumulator's own buffer, which assemble() has already let go of, can be the answer.
+    """
+    output_dataset = OutSameAsGroupDataset(
+        same_as_group="src:dest",
+        dataset_filename="./Output:mha",
+        group="out",
+        patch_combine=None,
+        reduction="Mean",
+    )
+    dataset = _single_patch_dataset_iter()
+    output_dataset.add_layer(0, 0, 0, torch.arange(12, dtype=torch.float32).reshape(3, 2, 2), dataset, Attribute())
+    assembled = output_dataset.output_layer_accumulator[0][0]._result
+    assert assembled is not None
+
+    stacked = output_dataset._get_output(0, 0, [3], dataset)
+
+    assert stacked.shape == (1, 3, 2, 2)
+    assert stacked.data_ptr() == assembled.data_ptr()
+    assert torch.equal(stacked[0], torch.arange(12, dtype=torch.float32).reshape(3, 2, 2))
+
+
 def test_predict_log_skips_measure_sync_when_tensorboard_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     predictor = _Predictor.__new__(_Predictor)
     predictor_any = cast(Any, predictor)
@@ -274,9 +470,10 @@ def test_predict_log_skips_measure_sync_when_tensorboard_is_disabled(monkeypatch
     predictor._predict_log({})
 
 
-def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_outputs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _loop_doubles(batches: int) -> tuple[_Predictor, Any, dict[str, Any], Any]:
+    """A ``_Predictor`` over ``batches`` identical one-patch batches of one case, two outputs done at
+    every batch, no TensorBoard: the doubles the loop tests drive."""
+
     class DummyPredictionDataset:
         def __init__(self) -> None:
             self.labels: list[str] = []
@@ -360,7 +557,7 @@ def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_out
             is_input=True,
         )
     }
-    loader = DummyPredictionLoader([batch], dataset)
+    loader = DummyPredictionLoader([batch] * batches, dataset)
     outputs_dataset = {"out_a": DummyOutputDataset(), "out_b": DummyOutputDataset()}
     model_composite = DummyComposite()
 
@@ -376,6 +573,13 @@ def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_out
     predictor_any.it = 0
     predictor_any.dataset = dataset
     predictor_any.tb = None
+    return predictor, dataset, outputs_dataset, model_composite
+
+
+def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predictor, dataset, outputs_dataset, model_composite = _loop_doubles(batches=1)
 
     log_calls: list[int] = []
     monkeypatch.setattr(predictor, "_predict_log", lambda batch_sample: log_calls.append(len(batch_sample)))
@@ -388,6 +592,63 @@ def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_out
     assert model_composite.eval_calls == 1
     assert outputs_dataset["out_a"].writes == 1
     assert outputs_dataset["out_b"].writes == 1
+
+
+def test_prediction_loop_refreshes_its_status_every_tenth_batch_and_clocks_its_phases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bar's status (an NVML query, two psutil calls and a forced redraw: 95 us per batch,
+    measured) is set every ``_DESCRIPTION_EVERY`` batches without a redraw; the bar redraws on its
+    own clock. The loop charges ``PREDICTION_CLOCK``: the fetch of each batch, the forward, the
+    case finalize, and the run's wall, which bounds their sum; a run under a second reports nothing.
+    """
+    predictor, _dataset, outputs_dataset, _model_composite = _loop_doubles(batches=25)
+    monkeypatch.setattr(predictor, "_predict_log", lambda batch_sample: None)
+    described: list[str] = []
+    monkeypatch.setattr("konfai.predictor.description", lambda model: described.append("status") or "status")
+    refreshes: list[bool] = []
+    set_description = tqdm.tqdm.set_description
+
+    def recording(self, desc=None, refresh=True):
+        refreshes.append(refresh)
+        return set_description(self, desc, refresh)
+
+    monkeypatch.setattr(tqdm.tqdm, "set_description", recording)
+
+    predictor.run()
+
+    assert outputs_dataset["out_a"].writes == 25
+    assert len(described) == 1 + 3, "the bar's own description, then batches 0, 10 and 20"
+    assert refreshes == [False] * 3
+    clock = PREDICTION_CLOCK
+    assert clock.spent("fetch") > 0 and clock.spent("forward") > 0 and clock.spent("finalize(case)") > 0
+    assert clock.spent("prediction") >= clock.spent("fetch") + clock.spent("forward") + clock.spent("finalize(case)")
+    assert _prediction_report(clock) is None
+
+
+def test_prediction_report_closes_on_the_loop_s_own_thread() -> None:
+    """The sum before the bar is the loop's thread and closes exactly (what no phase names is
+    ``other``); after it, the writer's own time and how long the loop waited on it."""
+    clock = SweepClock()
+    spent = {
+        "prediction": 10.0,
+        "fetch": 1.0,
+        "forward": 5.0,
+        "blend": 2.0,
+        "finalize(stream)": 0.6,
+        "finalize(case)": 0.2,
+        "drain": 0.2,
+        "write": 3.0,
+        "wait(write)": 0.5,
+    }
+    clock._spent = dict(spent)
+
+    assert _prediction_report(clock) == (
+        "[KonfAI] prediction 10.0 s = fetch 1.0 + forward 5.0 + blend 2.0 + finalize(stream) 0.6"
+        " + finalize(case) 0.2 + drain 0.2 + other 1.0 | writer 3.0 s, waited on 0.5 s"
+    )
+    clock._spent = {"prediction": 0.9}
+    assert _prediction_report(clock) is None
 
 
 def test_gate_approved_blend_falls_back_to_cpu_when_the_allocation_fails() -> None:

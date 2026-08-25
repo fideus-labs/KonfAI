@@ -1008,10 +1008,13 @@ class Accumulator:
         # of a 122-channel whole-body segmentation ≈ tens of GB) was the dominant reassembly RAM cost.
         self._result: torch.Tensor | None = None
         self._weighted: torch.Tensor | None = None
-        # Blend-weight geometry: fixed for the accumulator's life, so it survives _reset.
+        # Blend-weight geometry: fixed for the accumulator's life, so it survives _reset. The grid,
+        # the shares and the kept spans are all per (axis, start): sum(n_d) entries for a grid of
+        # prod(n_d) patches, and one dict lookup per patch and axis to find them.
         self._geometry: tuple[list[list[torch.Tensor]], list[torch.Tensor]] | None = None
+        self._grid: list[dict[int, int]] | None = None
         self._shares: dict[tuple[int, int, int, torch.dtype, torch.device], torch.Tensor] = {}
-        self._boxes: dict[tuple[int, ...], tuple[slice, ...]] = {}
+        self._kept: dict[tuple[int, int], slice] = {}
 
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
         """Blend one patch in; returns the slabs this completes (none for the whole-volume base)."""
@@ -1067,19 +1070,19 @@ class Accumulator:
     def _kept_box(self, patch_slice: tuple[slice, ...]) -> tuple[slice, ...]:
         """The sub-box a selection keeps of this patch: the run of ones in its window, per axis.
 
-        Pure geometry, so it is read once from the host-side windows and cached per grid position.
-        Deriving it from the share instead would read a device tensor: a host sync on every patch,
-        which costs more than the weighting it replaces.
+        Pure geometry, so it is read once from the host-side windows and cached per grid position
+        along each axis. Deriving it from the share instead would read a device tensor: a host sync
+        on every patch, which costs more than the weighting it replaces.
         """
-        key = tuple(s.start for s in patch_slice)
-        if key not in self._boxes:
+        return tuple(self._kept_span(dim, s.start) for dim, s in enumerate(patch_slice))
+
+    def _kept_span(self, dim: int, start: int) -> slice:
+        key = (dim, start)
+        if key not in self._kept:
             windows, _ = self._weight_geometry()
-            box = []
-            for dim, s in enumerate(patch_slice):
-                kept = windows[dim][self._starts(dim).index(s.start)].nonzero().flatten()
-                box.append(slice(int(kept[0]), int(kept[-1]) + 1))
-            self._boxes[key] = tuple(box)
-        return self._boxes[key]
+            kept = windows[dim][self._position(dim, start)].nonzero().flatten()
+            self._kept[key] = slice(int(kept[0]), int(kept[-1]) + 1)
+        return self._kept[key]
 
     def _weight_geometry(self) -> tuple[list[list[torch.Tensor]], list[torch.Tensor]]:
         """Per axis: the blend window, and its sum over the patch grid.
@@ -1099,7 +1102,7 @@ class Accumulator:
             combine = cast(PathCombine, self.patch_combine)
             windows, totals = [], []
             for dim, extent in enumerate(self.shape):
-                starts = self._starts(dim)
+                starts = list(self._positions()[dim])
                 length = self.patch_slices[0][dim].stop - self.patch_slices[0][dim].start
                 per_position, total = [], torch.zeros(extent)
                 for position, start in enumerate(starts):
@@ -1113,9 +1116,25 @@ class Accumulator:
             self._geometry = (windows, totals)
         return self._geometry
 
-    def _starts(self, dim: int) -> list[int]:
-        """The patch grid's positions along one axis, in order."""
-        return sorted({patch[dim].start for patch in self.patch_slices})
+    def _positions(self) -> list[dict[int, int]]:
+        """Per axis, the patch grid's starts in order, each mapped to its position along the axis.
+
+        One pass over the slices for the accumulator's life. Rebuilding the sorted starts per patch
+        made every lookup O(P): 0.07 ms per patch at P = 1331 and 15.6 s over a case of 18,000
+        thin 2.5D patches, against 16 ms for that case here.
+        """
+        if self._grid is None:
+            self._grid = [
+                {
+                    start: position
+                    for position, start in enumerate(sorted({patch[dim].start for patch in self.patch_slices}))
+                }
+                for dim in range(len(self.shape))
+            ]
+        return self._grid
+
+    def _position(self, dim: int, start: int) -> int:
+        return self._positions()[dim][start]
 
     def _share(self, dim: int, start: int, data: torch.Tensor) -> torch.Tensor:
         """This patch's fraction of the blend weight along one axis, ``w / sum_k w``, cached per axis."""
@@ -1123,7 +1142,7 @@ class Accumulator:
         key = (dim, start, extent, data.dtype, data.device)
         if key not in self._shares:
             windows, totals = self._weight_geometry()
-            window = windows[dim][self._starts(dim).index(start)]
+            window = windows[dim][self._position(dim, start)]
             share = window[:extent] / totals[dim][start : start + extent]
             self._shares[key] = share.to(device=data.device, dtype=data.dtype)
         return self._shares[key]
@@ -1663,16 +1682,7 @@ class Patch(ABC):
         if any(plan.reflect_padding):
             data_sliced = F.pad(data_sliced, plan.reflect_padding, "reflect")
         if any(plan.constant_padding):
-            data_sliced = F.pad(
-                data_sliced,
-                plan.constant_padding,
-                "constant",
-                (
-                    0
-                    if data_sliced.dtype == torch.uint8
-                    else (self.pad_value if self.pad_value is not None else float(data.min().item()))
-                ),
-            )
+            data_sliced = self._pad_constant(data_sliced, plan.constant_padding)
         if self.patch_size is not None and not all(p == 0 for p in self.patch_size):
             for d in [i for i, v in enumerate(reversed(self.patch_size)) if v == 1]:
                 data_sliced = torch.squeeze(data_sliced, dim=len(data_sliced.shape) - d - 1)
@@ -1681,6 +1691,29 @@ class Patch(ABC):
             if plan.concatenate_extend_slice
             else data_sliced
         )
+
+    def _pad_constant(self, data: torch.Tensor, padding: tuple[int, ...]) -> torch.Tensor:
+        """``data`` padded (``F.pad`` pair order) with the configured value, a uint8 map with zero,
+        and anything else with its own minimum when no value is configured.
+
+        That minimum never leaves the device: the bands are filled from the 0-d tensor after a zero
+        pad. Reading it back through ``.item()`` drained the CUDA stream once per padded patch (37
+        of the 64 patches of a 100^3 case at 32^3, measured), each a wait for every kernel queued
+        before it.
+        """
+        if data.dtype == torch.uint8:
+            return F.pad(data, padding, "constant", 0)
+        if self.pad_value is not None:
+            return F.pad(data, padding, "constant", self.pad_value)
+        padded = F.pad(data, padding, "constant", 0)
+        lowest = data.min()
+        for pair, (before, after) in enumerate(zip(padding[::2], padding[1::2], strict=True)):
+            dim = padded.dim() - 1 - pair
+            if before:
+                padded.narrow(dim, 0, before).copy_(lowest)
+            if after:
+                padded.narrow(dim, padded.shape[dim] - after, after).copy_(lowest)
+        return padded
 
     def get_data(self, data: torch.Tensor, index: int, a: int, is_input: bool) -> list[torch.Tensor]:
         plan = self.get_read_plan(list(data.shape), index, a, is_input)

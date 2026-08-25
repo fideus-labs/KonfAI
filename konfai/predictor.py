@@ -54,6 +54,7 @@ from konfai.data.patching import (
     SlabAligner,
     SlabRegionStream,
     StreamingAccumulator,
+    SweepClock,
     _halo_radii,
     _HaloPull,
     _RemapPull,
@@ -93,6 +94,14 @@ from konfai.utils.runtime import (
 from konfai.utils.utils import concretize_patch_size, env_flag, get_module, size_free_axes, split_path_spec
 from konfai.utils.vram import next_patch_candidate, usable_vram
 
+#: This rank's prediction loop, phase by phase, summed over the cases it ran: the unit the line
+#: at the end of a run accounts for (see ``_prediction_report``).
+PREDICTION_CLOCK = SweepClock()
+
+#: Batches between two refreshes of the progress bar's status. The status is an NVML query, two
+#: psutil calls and a forced redraw (95 us per batch, measured) that no batch needs to be current.
+_DESCRIPTION_EVERY = 10
+
 
 class _AsyncWriter:
     """A background thread owning one output dataset's disk writes, in submission order.
@@ -119,7 +128,8 @@ class _AsyncWriter:
                 if operation is None:
                     return
                 if self._error is None:
-                    operation()
+                    with PREDICTION_CLOCK.phase("write"):
+                        operation()
             except BaseException as error:  # kept and re-raised on the loop thread
                 self._error = error
             finally:
@@ -232,15 +242,21 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         return torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
 
     def _submit_write(self, operation: Callable[[], None]) -> None:
-        """Run ``operation`` on the background writer, or inline when the destination must stay serial."""
+        """Run ``operation`` on the background writer, or inline when the destination must stay serial.
+
+        Charged to ``wait(write)`` either way: inline, the write IS the wait, and a submission
+        blocks once the writer's queue is full, which is where a slow destination turns the
+        background writer synchronous with nothing else to show it.
+        """
         if self._async_writes is None:
             self._async_writes = self._torch_device().type == "cuda"
-        if not self._async_writes:
-            operation()
-            return
-        if self._writer is None:
-            self._writer = _AsyncWriter()
-        self._writer.submit(operation)
+        with PREDICTION_CLOCK.phase("wait(write)"):
+            if not self._async_writes:
+                operation()
+                return
+            if self._writer is None:
+                self._writer = _AsyncWriter()
+            self._writer.submit(operation)
 
     def finalize_writes(self) -> None:
         """Drain and stop the background writer; every submitted write is on disk when this returns."""
@@ -568,23 +584,21 @@ class OutSameAsGroupDataset(OutputDataset):
         attribute: Attribute | None = None,
         number_of_channels_per_model: list[int] | None = None,
     ):
-        self._ensure_case_state(
-            index_dataset, index_augmentation, layer, dataset, attribute, number_of_channels_per_model
-        )
-        for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms):
-            if isinstance(transform, TransformInverse) and transform.apply_inverse:
-                layer = transform.inverse(
-                    self.names[index_dataset],
-                    layer,
-                    self.attributes[index_dataset][index_augmentation][index_patch],
-                )
-        accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
-        slabs = self._blend_patch(index_dataset, index_patch, layer, accumulator)
+        with PREDICTION_CLOCK.phase("blend"):
+            self._ensure_case_state(
+                index_dataset, index_augmentation, layer, dataset, attribute, number_of_channels_per_model
+            )
+            attributes = self.attributes[index_dataset][index_augmentation]
+            for transform in self._patch_inverses(dataset):
+                layer = transform.inverse(self.names[index_dataset], layer, attributes[index_patch])
+            accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
+            slabs = self._blend_patch(index_dataset, index_patch, layer, accumulator)
         if not self._stream_plans.get(index_dataset):
             return
-        self._advance_stream(
-            index_dataset, index_augmentation, accumulator, slabs, number_of_channels_per_model, dataset
-        )
+        with PREDICTION_CLOCK.phase("finalize(stream)"):
+            self._advance_stream(
+                index_dataset, index_augmentation, accumulator, slabs, number_of_channels_per_model, dataset
+            )
 
     def _ensure_case_state(
         self,
@@ -638,7 +652,14 @@ class OutSameAsGroupDataset(OutputDataset):
                 # large case pays it: say so, once per distinct path.
                 path = "whole-volume" if plan is None else "buffered (the prefix streams, the tail runs whole-volume)"
                 self._report_once(path, f"streaming: case '{input_dataset.name}' takes the {path} path.")
-        self.attributes[index_dataset][index_augmentation] = {}
+        # Everything past this point reads the header at index 0; a patch-level inverse reads one
+        # per patch, each undone on a copy of its own taken before any inverse ran. Only then are
+        # the copies made: on a grid of 18,000 thin 2.5D patches with nothing to undo they cost
+        # 473 ms and as many dicts held per (case, augmentation), measured.
+        attributes = self.attributes[index_dataset][index_augmentation] = {0: source_attribute}
+        if self._patch_inverses(dataset):
+            for i in range(1, len(input_dataset.patch.get_patch_slices(index_augmentation))):
+                attributes[i] = Attribute(source_attribute)
 
         accumulator_type = StreamingAccumulator if self._stream_plans[index_dataset] else Accumulator
         self.output_layer_accumulator[index_dataset][index_augmentation] = accumulator_type(
@@ -649,8 +670,14 @@ class OutSameAsGroupDataset(OutputDataset):
             sweep_axis=input_dataset.patch.get_sweep_axis(index_augmentation),
         )
 
-        for i in range(len(input_dataset.patch.get_patch_slices(index_augmentation))):
-            self.attributes[index_dataset][index_augmentation][i] = Attribute(source_attribute)
+    def _patch_inverses(self, dataset: DatasetIter) -> list[TransformInverse]:
+        """The patch-level transforms of the mirrored group that each patch is passed back through,
+        last applied first."""
+        return [
+            transform
+            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms)
+            if isinstance(transform, TransformInverse) and transform.apply_inverse
+        ]
 
     def _blend_patch(
         self, index_dataset: int, index_patch: int, layer: torch.Tensor, accumulator: Accumulator
@@ -1334,7 +1361,11 @@ class OutSameAsGroupDataset(OutputDataset):
             # gate) whether the whole finalize chain stays on the GPU or moves back to the host.
             results.append(layer)
 
-        # Mean, Median -> [1, C, ...] | Concat -> [M, C, ...]
+        # Mean, Median -> [1, C, ...] | Concat -> [M, C, ...]. A lone chunk stacks as a view: the copy
+        # torch.stack made was the assembled volume, 448 MiB and 54 ms for a [14, 256^3] fp16 case
+        # (measured), once per augmentation. No reduction writes into what it is handed.
+        if len(results) == 1:
+            return results[0].unsqueeze(0)
         return torch.stack(results, dim=0)
 
     def _reduction_device(self, chunk: torch.Tensor, nb_chunks: int = 1) -> torch.device:
@@ -1477,6 +1508,35 @@ class OutputDatasetLoader:
         )()
 
 
+def _prediction_report(clock: SweepClock, min_seconds: float = 1.0) -> str | None:
+    """One line accounting for the prediction loop's wall clock, in the sweep report's shape, or
+    ``None`` below ``min_seconds``.
+
+    The sum before the bar is the loop's own thread and closes exactly: what its phases do not
+    name (the logging, the progress bar, the bookkeeping between them) is ``other``. ``fetch`` is
+    the wait for the loader's next batch, ``blend`` a patch's inverses and its blend into the
+    accumulator (the copy home included on the host route), the two ``finalize`` the slabs and the
+    cases handed to the writer, ``drain`` the writes still queued when the loop ends. On a GPU the
+    loop only enqueues the forward and the blend; the device's time is waited for where a result
+    crosses to the host.
+
+    After the bar is the writer: its own thread's time, and how long the loop stood waiting on it
+    inside the finalize phases (a full queue, or the write itself when the destination keeps it
+    inline). A slow destination shows there, as the wait that turns the background writer
+    synchronous, which nothing reported before.
+    """
+    wall = clock.spent("prediction")
+    if wall < min_seconds:
+        return None
+    phases = ("fetch", "forward", "blend", "finalize(stream)", "finalize(case)", "drain")
+    named = {phase: clock.spent(phase) for phase in phases}
+    parts = " + ".join(f"{phase} {value:.1f}" for phase, value in named.items())
+    return (
+        f"[KonfAI] prediction {wall:.1f} s = {parts} + other {wall - sum(named.values()):.1f}"
+        f" | writer {clock.spent('write'):.1f} s, waited on {clock.spent('wait(write)'):.1f} s"
+    )
+
+
 class _Predictor:
     """
     Internal class that runs distributed inference over a dataset using a composite model.
@@ -1581,17 +1641,24 @@ class _Predictor:
         self.model_composite.eval()
         self.model_composite.module.set_state(NetState.PREDICTION)
         self.dataloader_prediction.dataset.load("Prediction")
+        PREDICTION_CLOCK.reset()
         try:
-            self._run_batches()
+            with PREDICTION_CLOCK.phase("prediction"):
+                self._run_batches()
         finally:
             # Every submitted write must be on disk before the run returns: including on the error
             # path, where the drain also closes the sinks the abort operations enqueued.
-            for output_dataset in self.outputs_dataset.values():
-                output_dataset.finalize_writes()
+            with PREDICTION_CLOCK.phase("prediction"), PREDICTION_CLOCK.phase("drain"):
+                for output_dataset in self.outputs_dataset.values():
+                    output_dataset.finalize_writes()
+        if self.global_rank == 0:
+            clock = _prediction_report(PREDICTION_CLOCK)
+            if clock is not None:
+                print(clock)
 
     def _run_batches(self) -> None:
         with tqdm.tqdm(
-            iterable=enumerate(self.dataloader_prediction),
+            iterable=enumerate(PREDICTION_CLOCK.waiting("fetch", self.dataloader_prediction)),
             leave=True,
             desc=f"Prediction : {description(self.model_composite)}",
             total=len(self.dataloader_prediction),
@@ -1599,11 +1666,12 @@ class _Predictor:
         ) as batch_iter:
             with torch.inference_mode():
                 with torch.amp.autocast("cuda", enabled=self.autocast):
-                    for _, batch_sample in batch_iter:
-                        outputs = self.model_composite(
-                            batch_sample,
-                            list(self.outputs_dataset.keys()),
-                        )
+                    for batch_index, batch_sample in batch_iter:
+                        with PREDICTION_CLOCK.phase("forward"):
+                            outputs = self.model_composite(
+                                batch_sample,
+                                list(self.outputs_dataset.keys()),
+                            )
                         self._predict_log(batch_sample)
                         for name, number_of_channels_per_model, output in outputs:
                             output_dataset = self.outputs_dataset[name]
@@ -1629,13 +1697,20 @@ class _Predictor:
                                     number_of_channels_per_model,
                                 )
                                 if output_dataset.is_done(index):
-                                    output_dataset.write_prediction(
-                                        index,
-                                        batch_sample[group].name[i],
-                                        output_dataset.get_output(index, number_of_channels_per_model, self.dataset),
-                                    )
+                                    with PREDICTION_CLOCK.phase("finalize(case)"):
+                                        output_dataset.write_prediction(
+                                            index,
+                                            batch_sample[group].name[i],
+                                            output_dataset.get_output(
+                                                index, number_of_channels_per_model, self.dataset
+                                            ),
+                                        )
 
-                        batch_iter.set_description(f"Prediction : {description(self.model_composite)}")
+                        if batch_index % _DESCRIPTION_EVERY == 0:
+                            # The bar redraws on its own clock; the status only has to be there by then.
+                            batch_iter.set_description(
+                                f"Prediction : {description(self.model_composite)}", refresh=False
+                            )
                         self.it += 1
 
     def _predict_log(
@@ -1884,7 +1959,10 @@ class ModelComposite(Network):
                         sum_acc[key].add_(tensor)
                     count[key] += 1
             for key, acc in sum_acc.items():
-                final_outputs.append((key, channels[key], (acc / count[key])))
+                # The sum was folded in place into the first model's output; a lone model's is the
+                # answer as it stands. Dividing by one copied the batch output (56 MiB per
+                # [1, 14, 128^3] fp16 patch, 512 MiB at 122 channels), on every single-model run.
+                final_outputs.append((key, channels[key], acc if count[key] == 1 else acc.div_(count[key])))
         else:
             aggregated = defaultdict(list)
             for model_index in range(n_replicas):

@@ -501,7 +501,7 @@ def test_a_single_case_is_its_own_vote() -> None:
     [
         (Mean(), 1, 2, "one running accumulator and the region coming into it"),
         (Median(), 1, int(3.5 * CASES) + 1, "the cohort, what the four-member network holds beside it, the output"),
-        (Vote(), 1, 3 * CASES + 1, "same shape of work: a mode sorts a copy of the stack too"),
+        (Vote(), 1, CASES + 5, "the cohort, the fixed planes the running best holds beside it, the output"),
         (Concat(), CASES, 2 * CASES, "the cohort, and the concatenation that IS the output"),
     ],
     ids=["mean", "median", "vote", "concat"],
@@ -549,6 +549,35 @@ def test_median_selects_the_middle_instead_of_sorting_the_stack(cases: int) -> N
     assert Median().working_multiple_for(cases) == {1: 1.0, 2: 1.5, 3: 1.0, 4: 2.5, 5: 1.5}.get(cases, 4.0)
 
 
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.bfloat16, torch.uint8, torch.int16, torch.int32, torch.int64, torch.float64]
+)
+def test_mean_promotes_each_member_inside_the_add(dtype: torch.dtype) -> None:
+    """A member is added at its own dtype and the kernel casts it to float32 on the way: the
+    float() that ran first materialised a float32 copy of the member beside the total (64 MiB per
+    32 MiB fp16 member; one allocation per member on CUDA, none now, measured). That spelling is
+    the oracle here, dtype by dtype: the same bits, float64 included, which the fold still narrows
+    first because the kernel would otherwise add at 64 bits and round after.
+    """
+    torch.manual_seed(0)
+    if dtype.is_floating_point:
+        members = [(torch.randn(1, 1, 3, 5, 7, dtype=torch.float64) * 1e3).to(dtype) for _ in range(4)]
+    else:
+        bound = min(torch.iinfo(dtype).max, 2**30)
+        members = [
+            torch.randint(max(torch.iinfo(dtype).min, -bound), bound, (1, 1, 3, 5, 7), dtype=dtype) for _ in range(4)
+        ]
+
+    total = members[0].to(torch.float32, copy=True)
+    for member in members[1:]:
+        total.add_(member.float())
+    oracle = total.div_(len(members)).to(dtype if dtype.is_floating_point else torch.float32)
+
+    folded = Mean()(members)
+    assert folded.dtype is oracle.dtype
+    assert torch.equal(folded, oracle)
+
+
 def test_a_vote_tie_goes_to_the_smallest_label_whatever_the_cohort_order() -> None:
     """The reproducibility half of Vote's contract, which its docstring promises out loud.
 
@@ -564,6 +593,38 @@ def test_a_vote_tie_goes_to_the_smallest_label_whatever_the_cohort_order() -> No
     # A majority still beats the smallest label: the tie rule is a tie-breaker, not a preference.
     counted = [torch.full((1, 1, 2, 2), value, dtype=torch.uint8) for value in (9, 2, 9)]
     assert int(Vote()(counted).flatten()[0]) == 9
+
+
+def _vote_by_sorting(tensors: list[torch.Tensor]) -> torch.Tensor:
+    """The stack sorted along the case axis and counted member by member: the spelling Vote
+    shipped with, kept as the oracle of its labels and its tie rule."""
+    ranked = torch.stack(tensors, dim=0).sort(dim=0).values
+    best, best_count = ranked[0], (ranked == ranked[0]).sum(dim=0, dtype=torch.int16)
+    for member in ranked[1:]:
+        count = (ranked == member).sum(dim=0, dtype=torch.int16)
+        better = count > best_count
+        best = torch.where(better, member, best)
+        best_count = torch.where(better, count, best_count)
+    return best
+
+
+@pytest.mark.parametrize("cases", [2, 3, 4, 6, 7])
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int16, torch.int32, torch.float32])
+def test_vote_counts_every_candidate_instead_of_sorting_the_stack(cases: int, dtype: torch.dtype) -> None:
+    """The label with the most votes, the smallest on a tie, found by a running best over each
+    member's count: no stack and no sort, whose int64 indices alone were 8 bytes per voxel and
+    member. Measured on a 128-row slab of six 512x512 uint8 members on CUDA: 1920 MiB and 64 ms
+    sorted, 256 MiB and 11 ms here; on the host, 351 -> 127 ms at two members. The sorted
+    spelling is the oracle: the same labels to the bit on cohorts drawn from four labels, where
+    most voxels tie.
+    """
+    torch.manual_seed(cases)
+    members = [torch.randint(0, 4, (1, 1, 5, 6, 7)).to(dtype) for _ in range(cases)]
+    voted = Vote()(members)
+    assert voted.dtype is dtype
+    assert torch.equal(voted, _vote_by_sorting(members))
+    assert Vote().working_multiple_for(cases) == 4.0 / cases
+    assert Vote().working_multiple_for(1) == 0.0
 
 
 def test_a_budget_with_room_folds_the_whole_volume(tmp_path: Path) -> None:
