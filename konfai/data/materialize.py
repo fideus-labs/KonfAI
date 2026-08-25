@@ -30,7 +30,7 @@ reason live on the manager, because a streamed read of a pending ``Save`` sweeps
 import contextlib
 import sys
 import warnings
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -54,12 +54,12 @@ from konfai.data.patching import (
     FALLBACK_INFLIGHT_FACTOR,
     AugmentedStage,
     DatasetManager,
-    Stage,
     _PendingSweep,
     _ReadStagePlan,
     _stage_failures_explained,
     _stage_name,
     _sweep_targets,
+    _SweepMember,
 )
 from konfai.data.transform import LocalityKind, Reduce, Resample, Save, Transform
 from konfai.utils.dataset import Attribute, Dataset
@@ -307,7 +307,7 @@ class CaseMaterializer:
                 routes[a] = CopyRoute(Regime.SOLO, reason)
             elif not per_copy:
                 routes[a] = CopyRoute(Regime.SOLO)  # nothing left to write: its own path writes nothing
-            elif len(per_copy) == 1 and self._pointwise_tail(per_copy[0]):
+            elif len(per_copy) == 1 and self._pointwise_tail(per_copy[0].tail_plans):
                 routes[a] = CopyRoute(Regime.SHARED, sweep=per_copy[0])
             else:
                 routes[a] = CopyRoute(Regime.SOLO, self._solo_reason(per_copy))
@@ -318,11 +318,11 @@ class CaseMaterializer:
         return routes
 
     @staticmethod
-    def _pointwise_tail(sweep: _PendingSweep) -> bool:
-        """Whether everything per-copy in this sweep is a pure value map on its slab: a pointwise
-        tail pulls exactly the slab the shared prefix landed on, so every such copy can consume one
-        read; a region draw pulls its own geometry and a GLOBAL_STAT reads a statistic of ITS input."""
-        return all(plan.kind is LocalityKind.POINTWISE for plan in sweep.stage_plans[sweep.copy_stage_start :])
+    def _pointwise_tail(plans: Sequence[_ReadStagePlan]) -> bool:
+        """Whether a copy's per-copy stages are pure value maps on their slab: a pointwise tail pulls
+        exactly the slab the shared prefix landed on, so every such copy can consume one read; a
+        region draw pulls its own geometry and a GLOBAL_STAT reads a statistic of ITS input."""
+        return all(plan.kind is LocalityKind.POINTWISE for plan in plans)
 
     @staticmethod
     def _solo_reason(per_copy: list[_PendingSweep]) -> str:
@@ -330,9 +330,7 @@ class CaseMaterializer:
         if len(per_copy) > 1:
             return "the copy's chain crosses more than one per-copy Save, so it sweeps its own passes."
         sweep = per_copy[0]
-        for stage, plan in zip(
-            sweep.stages[sweep.copy_stage_start :], sweep.stage_plans[sweep.copy_stage_start :], strict=False
-        ):
+        for stage, plan in zip(sweep.tail_stages, sweep.tail_plans, strict=False):
             if plan.kind is not LocalityKind.POINTWISE:
                 return (
                     f"stage '{_stage_name(stage)}' of this copy declares {plan.kind.name},"
@@ -369,11 +367,17 @@ class CaseMaterializer:
         )
         if source is None:
             return set()
-        members: list[tuple[int, _PendingSweep, list[Stage], Attribute]] = []
+        members: list[_SweepMember] = []
         for a, sweep in shared:
             planned, evolved, _reason = manager._replan_sweep(sweep)
-            if planned is not None:
-                members.append((a, sweep, list(sweep.stages[sweep.copy_stage_start :]), evolved))
+            if planned is None:
+                continue
+            tail_plans = planned.stage_plans[sweep.copy_stage_start :]
+            # Re-planned against the materialized source, so re-checked here: the shared block is a
+            # tail stage's region only while every one of them is pointwise. A copy left out takes
+            # its own pass, where its tail reads its own geometry.
+            if self._pointwise_tail(tail_plans):
+                members.append(_SweepMember(a, sweep, evolved, sweep.tail_stages, tail_plans))
         if not members:
             return set()
         written, failure = manager._sweep(source, reference, prefix_evolved, members)

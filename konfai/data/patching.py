@@ -432,6 +432,38 @@ class _PendingSweep:
     copy_stage_start: int = 0
     stage_plans: tuple[_ReadStagePlan, ...] = ()
 
+    @property
+    def tail_stages(self) -> tuple[Stage, ...]:
+        """The per-copy part of the segment: what a copy applies to a block the copies share."""
+        return tuple(self.stages[self.copy_stage_start :])
+
+    @property
+    def tail_plans(self) -> tuple[_ReadStagePlan, ...]:
+        """The probe-time plans of :attr:`tail_stages`."""
+        return self.stage_plans[self.copy_stage_start :]
+
+
+@dataclass(frozen=True)
+class _SweepMember:
+    """One stream a sweep writes: the key it is reported under, the :class:`Save` it lands in, the
+    case state its plan leaves (its header), and the per-copy tail it applies to each block.
+
+    ``stages``/``stage_plans`` name the tail in the same shape as a :class:`_PatchStreamSource`'s
+    chain, so the block dispatch is the one the stages before the marker take. Every tail plan is
+    POINTWISE (``CaseMaterializer._pointwise_tail``): the block a member is handed IS its region,
+    which is what lets the copies share one read pass."""
+
+    key: Any
+    sweep: _PendingSweep
+    evolved: Attribute = field(repr=False)
+    stages: tuple[Stage, ...] = ()
+    stage_plans: tuple[_ReadStagePlan, ...] = ()
+
+    def region_spans(self, target: tuple[slice, ...]) -> list[list[slice]]:
+        """The region each tail stage reads for a block of the landing: the block itself, for all of
+        them, a pointwise stage pulling exactly what it is handed."""
+        return [list(target) for _ in range(len(self.stages) + 1)]
+
 
 def _sweep_targets(spatial: list[int], tile: Sequence[int]) -> Iterator[tuple[slice, ...]]:
     """The sweep's regions: ``tile``-sized blocks of the landing, innermost axis fastest.
@@ -2719,7 +2751,7 @@ class DatasetManager:
             return self._sweep_failed_because(
                 sweep, refusal or "the segment feeding it no longer plans against its materialized source."
             )
-        _written, failure = self._sweep(source, sweep, evolved, [(None, sweep, [], evolved)])
+        _written, failure = self._sweep(source, sweep, evolved, [_SweepMember(None, sweep, evolved)])
         if failure is not None:
             return self._sweep_failed_because(sweep, failure)
         return True
@@ -2758,20 +2790,20 @@ class DatasetManager:
         source: _PatchStreamSource,
         reference: _PendingSweep,
         evolved: Attribute,
-        members: list[tuple[Any, _PendingSweep, list[Stage], Attribute]],
+        members: list[_SweepMember],
     ) -> tuple[set[Any], str | None]:
         """The block loop every sweep runs: each block of REFERENCE's landing is read once through
         SOURCE (its first block against EVOLVED, so a region stage recording geometry nowhere the
-        case can read refuses here, as the patch path does), then every member ``(key, sweep, tail,
-        evolved)`` applies its tail to the block and region-writes it into its own stream, opened on
-        the first block with the header the whole-volume pass would leave. Returns the keys written
-        and, when the pass failed, why: every stream is then aborted; an interrupt is re-raised."""
+        case can read refuses here, as the patch path does), then every :class:`_SweepMember`
+        applies its tail to the block and region-writes it into its own stream, opened on the first
+        block with the header the whole-volume pass would leave. Returns the keys written and, when
+        the pass failed, why: every stream is then aborted; an interrupt is re-raised."""
         spatial = list(reference.out_spatial)
         channels = int(reference.source_shape[0])
         tile = self._sweep_tile(spatial, channels, source.stage_plans)
         targets = list(_sweep_targets(spatial, tile))
         depth = self._sweep_depth(spatial, channels, source.stage_plans, tile)
-        if any(_shares_h5_file(source.dataset, sweep.destination) for _key, sweep, _tail, _evolved in members):
+        if any(_shares_h5_file(source.dataset, member.sweep.destination) for member in members):
             # The h5 backend holds a per-file lock for a stream's whole life, on the thread that
             # opened it: a read of that file from any other thread waits for the close that the
             # read itself stands in the way of. One thread, where the lock re-enters.
@@ -2798,7 +2830,12 @@ class DatasetManager:
                     continue  # handed no region: its remap is its action
                 contexts = [plan.region_context(spans[index], spans[index + 1]) for spans in pulls]
                 stage.plan_region_reads(self.name, contexts)
-        sweeps = {key: sweep for key, sweep, _tail, _evolved in members}
+        # A member's tail reads on the landing, whose regions are the targets: known whether or not
+        # the prefix folds its own pulls ahead.
+        for member in members:
+            for stage, plan in zip(member.stages, member.stage_plans, strict=True):
+                stage.plan_region_reads(self.name, [plan.region_context(target, target) for target in targets])
+        sweeps = {member.key: member.sweep for member in members}
         headers: dict[Any, Attribute] = {}
         writer = RegionWriter(lambda key, block, header: _open_sweep_stream(sweeps[key], block, spatial, tile, header))
 
@@ -2823,23 +2860,35 @@ class DatasetManager:
                             Attribute(reference.base_attributes),
                             Attribute(evolved) if index == 0 else None,
                         )
-                    for key, sweep, tail, member_evolved in members:
+                    for member in members:
                         with SWEEP_CLOCK.phase("chain"):
                             member_tensor = tensor.clone() if len(members) > 1 else tensor
                             scope = Attribute(region_attribute)
-                            for stage in tail:
-                                member_tensor = stage(self.name, member_tensor, scope)
+                            # Dispatched exactly as the stages before the marker are, so a tail stage
+                            # reading a companion volume (Mask) or drawing from the voxel's place
+                            # (Noise, CutOUT) is told where its block sits instead of taking it for
+                            # the whole volume.
+                            member_tensor = self._run_streamed_stages(
+                                member.stages,
+                                member.stage_plans,
+                                member.region_spans(target),
+                                member_tensor,
+                                scope,
+                                None,
+                            )
                         # Its own phase, not the chain's: on a device the chain only ENQUEUES,
                         # and this is where the run waits for it as well as for the copy home.
                         with SWEEP_CLOCK.phase("fetch"):
                             block = landing.take(member_tensor)
                         _require_channel_first(
-                            block, spatial, f"A stage of the chain writing '{sweep.group}/{sweep.entry}'"
+                            block, spatial, f"A stage of the chain writing '{member.sweep.group}/{member.sweep.entry}'"
                         )
-                        if key not in headers:
-                            headers[key] = _sweep_header(member_evolved, scope, keys_before)
+                        if member.key not in headers:
+                            headers[member.key] = _sweep_header(member.evolved, scope, keys_before)
                         with SWEEP_CLOCK.phase("wait(write)"):
-                            write.write(key, (slice(0, int(block.shape[0])), *target), block, headers[key])
+                            write.write(
+                                member.key, (slice(0, int(block.shape[0])), *target), block, headers[member.key]
+                            )
                 # The publish is a write too (an OME-Zarr pyramid is derived here), and it is waited for.
                 with SWEEP_CLOCK.phase("wait(write)"):
                     written = write.close()
@@ -3110,20 +3159,40 @@ class DatasetManager:
         cache_attribute: Attribute,
         case_attribute: Attribute | None,
     ) -> tuple[torch.Tensor, Attribute, set[str]]:
-        """The chain forward over a region already read, each stage on the region pair the fold
-        computed for it: HALO reads the enlarged region and is cropped back, ORIENTATION remaps what
-        it read, a CROP's remap is its action (not re-applied), REGRID interpolates to its target
-        extent, a per-voxel stage is told where its region sits. ``cache_attribute`` is the region's
-        scope, evolved by the chain; ``case_attribute``, when given, receives each region stage's
-        case-level geometry (from the full shape). Returns the tensor, the evolved scope, and the
-        keys the scope held before (what the chain added is what the caller may persist).
+        """The chain forward over a region already read: the region's scope is seeded from what the
+        read returned, then :meth:`_run_streamed_stages` walks the stages over it.
+
+        ``cache_attribute`` is the region's scope, evolved by the chain; ``case_attribute``, when
+        given, receives each region stage's case-level geometry (from the full shape). Returns the
+        tensor, the evolved scope, and the keys the scope held before (what the chain added is what
+        the caller may persist).
         """
         cache_attribute.update(attributes)
         cache_attribute["StatisticsSeeded"] = 1.0  # same contract as the pointwise route above
         keys_before = set(cache_attribute.keys())
+        tensor = self._run_streamed_stages(
+            stream_source.stages, stream_source.stage_plans, spans, tensor, cache_attribute, case_attribute
+        )
+        return tensor, cache_attribute, keys_before
 
-        plans = stream_source.stage_plans
-        for stage, plan, source, target in zip(stream_source.stages, plans, spans[:-1], spans[1:], strict=True):
+    def _run_streamed_stages(
+        self,
+        stages: Sequence[Stage],
+        plans: Sequence["_ReadStagePlan"],
+        spans: list[list[slice]],
+        tensor: torch.Tensor,
+        cache_attribute: Attribute,
+        case_attribute: Attribute | None,
+    ) -> torch.Tensor:
+        """Walk STAGES over a region already read, each on the region pair the fold computed for it:
+        HALO reads the enlarged region and is cropped back, ORIENTATION remaps what it read, a
+        CROP's remap is its action (not re-applied), REGRID interpolates to its target extent, a
+        per-voxel stage is told where its region sits.
+
+        The one dispatch: a chain read through the store and a member's per-copy tail (which reads
+        on the landing, so its regions are the blocks themselves) both come here.
+        """
+        for stage, plan, source, target in zip(stages, plans, spans[:-1], spans[1:], strict=True):
             if not plan.kind.is_region:
                 # The span is handed over rather than dropped: a stage reading a second aligned
                 # volume needs to know WHICH part of it lines up with this region, and the
@@ -3146,7 +3215,7 @@ class DatasetManager:
                 stage.write_stream_cache_attribute(case_attribute, list(plan.in_shape), self.name)
                 self._check_region_geometry_reaches_the_case(stage, scoped, cache_attribute)
 
-        return tensor, cache_attribute, keys_before
+        return tensor
 
     def _check_region_geometry_reaches_the_case(
         self, region_stage: Stage, scoped: Attribute, cache_attribute: Attribute

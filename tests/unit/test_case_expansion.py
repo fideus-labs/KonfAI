@@ -28,10 +28,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from konfai.data import patching as patching_module
 from konfai.data.augmentation import Brightness, CutOUT, Flip, Noise, Permute, Rotate, Scale
 from konfai.data.materialize import CaseMaterializer, Regime, Verdict
 from konfai.data.patching import DatasetManager
-from konfai.data.transform import Clip, Expand, Resample, Save, TensorCast, Transform, Write, split_expand
+from konfai.data.transform import Clip, Expand, Mask, Resample, Save, TensorCast, Transform, Write, split_expand
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PatchError, TransformError
 
@@ -354,6 +355,68 @@ def test_the_shared_pass_reads_the_source_once_for_every_copy(tmp_path: Path) ->
     assert len(source_reads) == 1, f"the copies did not share the read pass: {len(source_reads)} reads"
 
 
+def test_a_companion_read_in_a_copys_tail_reads_the_block_and_not_the_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stage after the marker is dispatched as a region, like the stages before it.
+
+    A ``Mask`` there reads a second volume beside the block: handed the whole volume's job on a
+    block, it reads the whole mask per block, so the peak the plan priced is one mask larger than
+    it says. Its windows are declared before the first read (the store's chunk cache evicts by next
+    use) and are the blocks' own; and the copies still equal the whole-volume ones.
+    """
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)  # 12 rows: four blocks
+    source = _source(tmp_path)
+    mask = (np.arange(12 * 10 * 8).reshape(1, 12, 10, 8) % 3 > 0).astype(np.uint8)
+    source.write("MASK", "CASE_000", mask, _image_attributes())
+    declared: list[tuple] = []
+    windows: list[tuple] = []
+    whole: list[tuple] = []
+    read_slice, read_whole = Dataset.read_data_slice, Dataset.read_data
+    monkeypatch.setattr(
+        Dataset, "plan_region_reads", lambda self, group, name, w: declared.append((group, name, list(w)))
+    )
+    monkeypatch.setattr(
+        Dataset,
+        "read_data_slice",
+        lambda self, group, name, s: (windows.append((group, name, tuple(s))), read_slice(self, group, name, s))[1],
+    )
+    monkeypatch.setattr(
+        Dataset, "read_data", lambda self, group, name: (whole.append((group, name)), read_whole(self, group, name))[1]
+    )
+
+    def chain(store: str) -> list:
+        mask = Mask(path="MASK")
+        mask.set_datasets([source])
+        return [
+            Clip(0.0, 50.0),
+            Expand(nb=2, pattern="{name}_r{a:02d}"),
+            _draw(Brightness(b_std=0.3)),
+            mask,
+            Write(f"{tmp_path / store}:h5"),
+        ]
+
+    streamed = _manager(source, chain("streamed"))
+    assert CaseMaterializer(streamed).materialize_copies([1, 2]) == {
+        1: (Verdict.STREAM, Regime.SHARED),
+        2: (Verdict.STREAM, Regime.SHARED),
+    }
+    mask_windows = [window for group, _name, window in windows if group == "MASK"]
+    blocks = [(slice(None), slice(row, row + 3), slice(0, 10), slice(0, 8)) for row in (0, 3, 6, 9)]
+    assert mask_windows == sorted(blocks * 2, key=lambda window: window[1].start), "one region per block per copy"
+    assert not [entry for entry in whole if entry[0] == "MASK"], "the whole mask was read beside a block"
+    assert [(group, name) for group, name, _w in declared].count(("MASK", "CASE_000")) == 2, "once per copy"
+    assert all(window in blocks for _g, _n, w in declared for window in w)
+
+    classic = _manager(source, chain("classic"))
+    for a in (1, 2):
+        CaseMaterializer(classic)._assemble_and_write(a)
+    for a in (1, 2):
+        entry = f"CASE_000_r{a:02d}"
+        got = Dataset(tmp_path / "streamed", "h5").read_data("CT", entry)[0]
+        np.testing.assert_array_equal(got, Dataset(tmp_path / "classic", "h5").read_data("CT", entry)[0])
+
+
 def test_a_region_draw_takes_its_own_pass_and_the_plan_names_the_draw(tmp_path: Path) -> None:
     """A draw reading elsewhere than its target slab cannot ride the shared slab, and says so."""
     source = _source(tmp_path)
@@ -417,11 +480,18 @@ def test_a_solo_copy_sweeps_on_the_requested_device(tmp_path: Path, monkeypatch:
     ],
     ids=["Noise", "CutOUT", "Rotate", "Scale"],
 )
-def test_the_geometric_and_field_draws_stream_their_copies(tmp_path: Path, draw, regime: str, atol: float) -> None:
+@pytest.mark.parametrize("rows", [64, 3], ids=["one-block", "four-blocks"])
+def test_the_geometric_and_field_draws_stream_their_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, draw, regime: str, atol: float, rows: int
+) -> None:
     """The offline-augmentation case: 4 copies of a free rotation were 4 whole-volume passes and 5x
     the volume in RSS. A rotation or a scale now pulls the source box each region maps to (its own
     pass, bounded); a noise field or a cutout is a function of the voxel's position, so their copies
-    share one read pass. Streamed copies equal the whole-volume ones."""
+    share one read pass. Streamed copies equal the whole-volume ones.
+
+    Over both decompositions: how many blocks the landing is swept in is not a value, and a draw
+    parameterised by the voxel's PLACE is exactly the one that can disagree across them."""
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", rows)
     source = _source(tmp_path)
     augmentation = draw()
     streamed = _manager(
