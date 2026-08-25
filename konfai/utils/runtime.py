@@ -1213,21 +1213,33 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
     _cpu_budget_applied = True
 
 
-def pin_gloo_to_loopback() -> None:
-    """Bind gloo to the loopback interface, for a world whose ranks all sit on this host.
+@contextmanager
+def pin_gloo_to_loopback(local: bool) -> Iterator[None]:
+    """Bind gloo to the loopback interface for a rendezvous whose ranks all sit on this host.
 
     gloo picks its interface by resolving the host's name. On a macOS runner that name is an mDNS
     ``.local`` name no resolver answers, and the rendezvous fails there rather than on the loopback
     that carries the whole single-node world (the streamed-prediction integration tests flaked on
-    the macos-latest runner for exactly that). An explicit ``GLOO_SOCKET_IFNAME`` keeps authority,
-    and a host with no loopback in ``if_nameindex`` is left to gloo's own resolution.
+    the macos-latest runner for exactly that). ``local`` says whether the world is that one: off
+    this host the loopback reaches no other rank, and gloo's own resolution stands.
+
+    gloo reads the variable as it builds the device, so it is taken back out of the environment
+    once the group is up: a later multi-node rendezvous in the same process, or a child that
+    inherits this environment, would otherwise be pinned to an interface reaching no other node.
+    An explicit ``GLOO_SOCKET_IFNAME`` keeps authority and is left untouched, and a host with no
+    loopback in ``if_nameindex`` is left to gloo's own resolution.
     """
-    if os.environ.get("GLOO_SOCKET_IFNAME"):
-        return
-    interfaces = {name for _, name in socket.if_nameindex()}
-    loopback = next((name for name in ("lo", "lo0") if name in interfaces), None)
+    loopback = None
+    if local and not os.environ.get("GLOO_SOCKET_IFNAME"):
+        interfaces = {name for _, name in socket.if_nameindex()}
+        loopback = next((name for name in ("lo", "lo0") if name in interfaces), None)
     if loopback is not None:
         os.environ["GLOO_SOCKET_IFNAME"] = loopback
+    try:
+        yield
+    finally:
+        if loopback is not None:
+            os.environ.pop("GLOO_SOCKET_IFNAME", None)
 
 
 def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = True) -> tuple[int | None, int | None]:
@@ -1278,14 +1290,13 @@ def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = Tr
         )
     else:
         if not dist.is_initialized():
-            if host_name == "localhost":
-                pin_gloo_to_loopback()
-            dist.init_process_group(
-                backend="gloo",
-                init_method=f"tcp://{host_name}:{port}",
-                rank=global_rank,
-                world_size=world_size,
-            )
+            with pin_gloo_to_loopback(local=host_name == "localhost"):
+                dist.init_process_group(
+                    backend="gloo",
+                    init_method=f"tcp://{host_name}:{port}",
+                    rank=global_rank,
+                    world_size=world_size,
+                )
     return global_rank, local_rank
 
 

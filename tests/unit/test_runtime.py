@@ -288,11 +288,16 @@ def test_a_workflow_without_collectives_gets_its_rank_and_no_process_group(monke
 
 
 def _gloo_rendezvous(monkeypatch) -> dict[str, object]:
-    """Drive ``setup_gpu`` down its gloo branch and report what it passed to torch."""
+    """Drive ``setup_gpu`` down its gloo branch and report what it passed to torch, plus the
+    interface gloo would have read as it built its device (``interface``)."""
     initialized: dict[str, object] = {}
+
+    def init_process_group(**kwargs) -> None:
+        initialized.update(kwargs, interface=os.environ.get("GLOO_SOCKET_IFNAME"))
+
     monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(rt.dist, "is_initialized", lambda: False)
-    monkeypatch.setattr(rt.dist, "init_process_group", lambda **kwargs: initialized.update(kwargs))
+    monkeypatch.setattr(rt.dist, "init_process_group", init_process_group)
     monkeypatch.setenv("KONFAI_MASTER_PORT", "29500")
     return initialized
 
@@ -309,17 +314,21 @@ def test_a_single_node_gloo_world_is_pinned_to_the_loopback_interface(monkeypatc
 
     assert initialized["backend"] == "gloo"
     assert initialized["init_method"] == "tcp://localhost:29500"
-    assert os.environ["GLOO_SOCKET_IFNAME"] in {name for _, name in rt.socket.if_nameindex()}
+    assert initialized["interface"] in {name for _, name in rt.socket.if_nameindex()}
+    # The pin lasts the rendezvous: left behind, it would follow a later multi-node group, or a
+    # child of this process, onto an interface that reaches no other node.
+    assert "GLOO_SOCKET_IFNAME" not in os.environ
 
 
 @pytest.mark.skipif(os.name == "nt", reason="setup_gpu builds no process group on Windows")
 def test_an_explicit_gloo_interface_keeps_authority(monkeypatch):
     monkeypatch.setenv("GLOO_SOCKET_IFNAME", "eth0")
     monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
-    _gloo_rendezvous(monkeypatch)
+    initialized = _gloo_rendezvous(monkeypatch)
 
     rt.setup_gpu(2, 0)
 
+    assert initialized["interface"] == "eth0"
     assert os.environ["GLOO_SOCKET_IFNAME"] == "eth0"
 
 
@@ -335,6 +344,7 @@ def test_a_multi_node_gloo_world_is_left_to_its_own_interface(monkeypatch):
     rt.setup_gpu(2, 0)
 
     assert initialized["init_method"] == "tcp://node001:29500"
+    assert initialized["interface"] is None
     assert "GLOO_SOCKET_IFNAME" not in os.environ
 
 
