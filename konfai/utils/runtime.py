@@ -769,12 +769,25 @@ class DistributedObject(ABC):
     def rank_dataloaders(self, global_rank: int) -> "list[DataLoader]":
         return self.dataloader[global_rank]
 
+    def _bound_chunk_cache(self, world_size: int) -> None:
+        """Bound the decoded-chunk cache by this rank's share of the memory budget.
+
+        Set here, on the rank: a spawned rank is a new process, and a bound set by the launcher is
+        a module global the child never sees.
+        """
+        from konfai.utils.ome_zarr import set_chunk_cache_budget
+
+        dataset = getattr(self, "dataset", None)
+        if dataset is not None and hasattr(dataset, "resolved_budget"):
+            set_chunk_cache_budget(dataset.resolved_budget().per_rank_bytes(node_local_ranks(world_size)))
+
     def __call__(self, rank: int | None = None) -> None:
         world_size = self.world_size
         global_rank, local_rank = setup_gpu(world_size, rank, process_group=self.uses_collectives)
         if global_rank is None or local_rank is None:
             return
         apply_cpu_thread_budget(world_size)
+        self._bound_chunk_cache(world_size)
         with Log(self.name, global_rank):
             if torch.cuda.is_available() and _PYNVML_AVAILABLE:
                 pynvml.nvmlInit()

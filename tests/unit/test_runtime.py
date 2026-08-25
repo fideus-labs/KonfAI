@@ -816,3 +816,39 @@ def test_a_forked_child_builds_its_own_rank_pool(monkeypatch) -> None:
         child.join()
     assert not hung, "the child's read waits on threads it does not have"
     assert child.exitcode == 0
+
+
+def test_a_rank_bounds_the_chunk_cache_by_its_own_share_of_the_budget(monkeypatch) -> None:
+    """A spawned rank is a new process: a bound the launcher set is a module global it never sees,
+    so the rank sets it at its own entry, from the budget every workflow's dataset resolves."""
+    from konfai.utils import ome_zarr
+
+    class FakeBudget:
+        def per_rank_bytes(self, world_size: int) -> float:
+            return 96 << 20
+
+    class FakeDataset:
+        def resolved_budget(self) -> FakeBudget:
+            return FakeBudget()
+
+    class FakeObject(rt.DistributedObject):
+        uses_collectives = False
+
+        def __init__(self) -> None:
+            super().__init__("fake-budget")
+            self.dataset = FakeDataset()
+
+        def setup(self, world_size: int) -> None:
+            self.dataloader = [[]]
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders) -> None:
+            pass
+
+    monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", "1")
+    monkeypatch.setattr(ome_zarr, "_chunk_cache_budget", None)
+    rt.execute_distributed_object(FakeObject(), gpu=None, cpu=1)
+
+    assert ome_zarr._chunk_cache_budget == 96 << 20
