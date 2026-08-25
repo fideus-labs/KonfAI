@@ -1016,7 +1016,8 @@ def _forget_rank_pool() -> None:
     _rank_pool, _rank_pool_lock = None, threading.Lock()
 
 
-os.register_at_fork(after_in_child=_forget_rank_pool)
+if hasattr(os, "register_at_fork"):  # POSIX only: a platform without fork inherits nothing to forget
+    os.register_at_fork(after_in_child=_forget_rank_pool)
 
 
 def rank_cpu_share(world_size: int | None = None) -> int:
@@ -1100,6 +1101,8 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
     try:
         import zarr
 
+        from konfai.utils.ome_zarr import _zarr_v3_available
+
         # A THIRD of the share: a pipelined sweep runs three of these at once, the decode of the
         # region being read, the assembly of the one before it, the encode of the one being written.
         # Re-measured under the split-thread sweep, where the chain no longer runs on the reading
@@ -1114,7 +1117,8 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
         # costs the reader its own throughput (read busy 4.4-4.6 s at 8, 5.1-5.2 s at 24). A share
         # of a few cores keeps them all, up to four: a third of it is one chunk in flight, and on a
         # remote root that is the whole of the read's parallelism.
-        zarr.config.set({"async.concurrency": max(min(cores, 4), cores // 3)})
+        if _zarr_v3_available():  # 2.x has no config object, and no async reader to share the cores with
+            zarr.config.set({"async.concurrency": max(min(cores, 4), cores // 3)})
     except ImportError:
         pass
     # Marked applied only once it is: a raise above (a bad OMP_NUM_THREADS) leaves the next call free to retry.
