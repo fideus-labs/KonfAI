@@ -90,6 +90,10 @@ PEAK = 450.0
 #   float32 ulps away. Data-dependent: this fixture happens to agree exactly, a smooth field showed
 #   1.5e-8 (0.13 ulp), so the bound is stated rather than observed.
 STAT_ATOL = 8 * float(np.finfo(np.float32).eps)
+
+#: What two routes computing the same expression over different extents may differ by, relative to
+#: each value: a few float32 ulps.
+VECTORISED_RTOL = 8 * float(np.finfo(np.float32).eps)
 # - a linear resample through a map that does NOT factorise (a field, a rotation), ON THE DEVICE:
 #   the coordinate walk keeps global float64 coordinates and is bit-identical slab for slab, but the
 #   CUDA blend goes through grid_sample, which normalises the coordinates by the extent it is handed,
@@ -372,6 +376,10 @@ class StageCase:
     transform: Transform
     group: str = "Intensity"
     atol: float = 0.0
+    #: A bound on the value's own scale, for a stage whose arithmetic the compiler is free to
+    #: vectorise differently depending on the extent it is handed: the decomposition changes that
+    #: extent, so the two routes agree to an ulp of each value rather than bit for bit.
+    rtol: float = 0.0
     #: In the equivalence sweeps. False for a case whose inputs this registry cannot build (a field
     #: on disk): its streamed-equals-whole proof lives in its own test file, against real inputs.
     sweep: bool = True
@@ -414,7 +422,13 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         # Their defaults name three axes, which a 2-D case does not have.
         "Flip": [StageCase(Flip(axes))],
         "Permute": [StageCase(Permute(axes))],
-        "Gradient": [StageCase(Gradient()), StageCase(Gradient(per_dim=True))],
+        # A magnitude is a sum of squares under a square root, and the region's extent decides how
+        # the compiler vectorises it: one voxel in 627 differed by 1.6e-07 of its own value between
+        # a one-row decomposition and the whole volume on a CI runner.
+        "Gradient": [
+            StageCase(Gradient(), rtol=VECTORISED_RTOL),
+            StageCase(Gradient(per_dim=True), rtol=VECTORISED_RTOL),
+        ],
         "HistogramMatching": [StageCase(HistogramMatching("Intensity"))],
         "InferenceStack": [StageCase(InferenceStack("Dataset", "model"))],
         # A companion volume aligned with the case: the mask is a stored group of the same grid.

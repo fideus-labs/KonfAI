@@ -206,11 +206,11 @@ def _whole_volume(dataset: Dataset, group: str, stage: Transform, destination: P
     return Written(array, attribute, Verdict.WHOLE_VOLUME, 0)
 
 
-def _assert_same(got: Written, want: Written, atol: float) -> None:
+def _assert_same(got: Written, want: Written, atol: float, rtol: float = 0.0) -> None:
     """Same voxels within the stated bound, same dtype, same geometry: streaming is invisible."""
     assert got.array.shape == want.array.shape
     assert got.array.dtype == want.array.dtype
-    np.testing.assert_allclose(got.array, want.array, rtol=0, atol=atol)
+    np.testing.assert_allclose(got.array, want.array, rtol=rtol, atol=atol)
     for key in ("Origin", "Spacing", "Direction"):
         np.testing.assert_allclose(got.attribute.get_np_array(key), want.attribute.get_np_array(key), rtol=0, atol=0)
 
@@ -297,7 +297,7 @@ def test_a_swept_case_equals_the_whole_volume_case(
     # One row per region on a case of 16 rows or more is at least two regions: without this the row
     # would pass on a sweep that never decomposed anything.
     assert streamed.regions >= (2 if route.height == 0.0 else 1)
-    _assert_same(streamed, whole, case.atol)
+    _assert_same(streamed, whole, case.atol, case.rtol)
 
 
 def test_every_read_streamable_builtin_is_in_the_matrix() -> None:
@@ -372,7 +372,7 @@ def test_a_swept_case_equals_the_whole_volume_case_on_every_dtype(
     if isinstance(case.transform, Gradient) and not np.issubdtype(expected, np.floating):
         expected = np.dtype(np.float32)
     assert streamed.array.dtype == expected
-    _assert_same(streamed, whole, case.atol)
+    _assert_same(streamed, whole, case.atol, case.rtol)
 
 
 def test_a_dtype_torch_has_no_kernel_for_refuses_on_both_routes(tmp_path: Path) -> None:
