@@ -549,7 +549,9 @@ def test_restoring_the_ema_weights_is_charged_to_the_checkpoint_phase(tmp_path: 
         trainer.setup(1)
 
     assert trainer.model_ema is not None
-    assert clock.spent("checkpoint") >= 0.05
+    # A sleep can return a hair short of what it asked for (0.04977 on a Windows runner), so the
+    # bound is the sleep less the platform's timer granularity. Charged to setup it would be 0.
+    assert clock.spent("checkpoint") >= 0.04
 
 
 # ---- RESUME LR override ----
