@@ -722,6 +722,25 @@ def test_a_reduction_that_cannot_stream_refuses_whatever_on_fallback_says(tmp_pa
         _build(tmp_path).setup(1)
 
 
+def test_a_reduction_chain_is_refused_for_a_remote_save_before_its_terminal_write(tmp_path: Path) -> None:
+    """A reduction names its own output, and the chain it folds may Save somewhere else on the way.
+    Both are destinations no route can write when they are remote, and the plan says so before a
+    member is read: the terminal Write being local does not excuse the Save."""
+    pytest.importorskip("fsspec")
+    _write_source(tmp_path, cases=2)
+    _write_config(
+        tmp_path,
+        "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
+        "              Save:\n                dataset: memory://bucket/cache:h5\n"
+        "              Reduce:\n                operator: Mean\n                output: atlas\n"
+        "              Write:\n"
+        f"                dataset: {tmp_path / 'out'}:h5\n",
+    )
+    plan = _build(tmp_path).compute_plan()
+    assert [entry.verdict for entry in plan.entries] == ["REFUSED"]
+    assert "remote root" in (plan.entries[0].reason or "")
+
+
 def test_a_finished_reduction_is_skipped_on_the_second_run(tmp_path: Path) -> None:
     _write_source(tmp_path, cases=3)
     _write_config(

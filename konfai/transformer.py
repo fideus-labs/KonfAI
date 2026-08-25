@@ -596,17 +596,17 @@ class Transformer(DistributedObject):
 
     @staticmethod
     def _remote_destination(manager: DatasetManager, *destinations: Dataset) -> str | None:
-        """Why no route writes the chain's Saves, or ``None``: the first of ``destinations`` (the
-        chain's own Saves when none is named) that is a remote root, as :func:`uri.refuse_write`
-        refuses it. Asked of the plan, not of the first slab: every route ends in that refusal, and
-        the whole-volume one reads and transforms a case before reaching it."""
-        if not destinations:
-            destinations = tuple(
-                save_destination(stage, manager.dataset, manager.group_dest)[0]
-                for stage in manager.transforms
-                if isinstance(stage, Save)
-            )
-        for destination in destinations:
+        """Why no route writes this chain, or ``None``: the first destination that is a remote root,
+        as :func:`uri.refuse_write` refuses it. The chain's own Saves are always among them, and
+        ``destinations`` names what the route adds (a reduction's own output). Asked of the plan, not
+        of the first slab: every route ends in that refusal, and the whole-volume one reads and
+        transforms a case before reaching it."""
+        chain = tuple(
+            save_destination(stage, manager.dataset, manager.group_dest)[0]
+            for stage in manager.transforms
+            if isinstance(stage, Save)
+        )
+        for destination in (*destinations, *chain):
             try:
                 uri.refuse_write(destination.filename)
             except DatasetManagerError as error:
