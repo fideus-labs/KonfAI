@@ -829,7 +829,8 @@ def test_a_strict_block_reads_once_writes_once_and_the_bytes_a_write_per_context
     # where the file-backed write-back put it: a context's own keys at its exit, after the keys the
     # contexts opened inside it appended (``depth`` from the flat child, ``entries`` from the dict's
     # entries, before ``kept``, which the root set first).
-    assert resolved["strict_block"].decode("utf-8") == (
+    # The dump goes through text mode, so the line ending is the platform's; the layout is not.
+    assert resolved["strict_block"].decode("utf-8").replace("\r\n", "\n") == (
         "Root:  # a comment on the root\n"
         "  name: bound  # a comment on a key\n"
         "  present:\n"

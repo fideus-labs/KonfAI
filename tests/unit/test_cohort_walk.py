@@ -24,6 +24,7 @@ Counted, never timed: the count is what a narrow subset and a wide root differ b
 same count on a filesystem and on an object store.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -91,6 +92,7 @@ def test_a_subset_reading_its_names_from_a_file_names_them(tmp_path: Path) -> No
     assert Subset(str(names)).required_names() == {"CASE_001", "CASE_004"}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a colon cannot appear in a Windows file name")
 def test_a_names_file_spelled_like_a_slice_is_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The selection reads a file before it reads a slice (``_resolve_selector``); what the walk asks
     the roots for must be what the selection then keeps."""
