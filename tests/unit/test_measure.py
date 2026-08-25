@@ -189,8 +189,8 @@ class TestDice:
 
 
 def _dice_per_label_oracle(labels, output, target, mask=None):
-    """The per-label spelling Dice scored hard labels with before the confusion matrix: one float
-    expansion and two sums per label, kept here as the oracle the bincount route is pinned against."""
+    """The per-label spelling Dice was scored with before the batched one: one float expansion and
+    two sums per label, kept here as the oracle both routes are pinned against."""
     if mask is not None:
         mask = torch.where(mask == 1, 1, 0)
         output, target = output * mask.to(output.dtype), target * mask.to(target.dtype)
@@ -200,10 +200,10 @@ def _dice_per_label_oracle(labels, output, target, mask=None):
         labels = [int(label) for label in torch.unique(target) if int(label) != 0]
     count = 0
     for label in labels:
-        tp = target == label
+        tp = (target == label).float()
         if tp.any().item():
-            pp = output[:, label].unsqueeze(1) if output.shape[1] > 1 else (output == label)
-            dice = Dice.dice_per_channel(pp.float(), tp.float())
+            pp = (output[:, label].unsqueeze(1) if output.shape[1] > 1 else (output == label)).float()
+            dice = (2.0 * (pp * tp).sum() + 1e-6) / (pp.sum() + tp.sum() + 1e-6)
             loss += dice
             count += 1
             result[label] = dice.item()
@@ -277,8 +277,12 @@ class TestDiceConfusionMatrix:
             reference = int(((target == 4) & (mask == 1)).sum()) if masked else int((target == 4).sum())
             assert got[1][4] == pytest.approx(1e-6 / (reference + 1e-6), abs=1e-9)  # never predicted
 
-    def test_soft_path_is_bit_identical_to_the_oracle(self):
-        torch.manual_seed(3)
+    @pytest.mark.parametrize("seed", range(4))
+    def test_soft_path_matches_the_oracle_to_the_last_float32_bits(self, seed):
+        """One reduction per label over the whole batch instead of a sum accumulated label by
+        label: the reduction order moves, the values do not beyond float32 rounding (measured
+        max |diff| 6e-8 on the loss over these seeds, 7.5e-9 per label)."""
+        torch.manual_seed(seed)
         output = torch.softmax(torch.randn(2, 5, 6, 7, 5), dim=1)
         target = torch.randint(0, 5, (2, 1, 6, 7, 5))
         target[target == 3] = 0
@@ -286,17 +290,37 @@ class TestDiceConfusionMatrix:
         for labels in (None, [1, 2, 3, 4]):
             got = Dice(labels=labels)(output, target)
             expected = _dice_per_label_oracle(labels, output, target)
-            assert got[0].item() == expected[0].item()
-            _assert_same_scores(got, expected, abs_tol=0.0)
+            _assert_same_scores(got, expected, abs_tol=1e-7)
 
-    def test_soft_path_keeps_its_gradient(self):
-        output = torch.softmax(torch.randn(1, 3, 4, 4), dim=1).requires_grad_(True)
-        target = torch.randint(0, 3, (1, 1, 4, 4))
+    def test_soft_path_keeps_the_gradient_the_per_label_oracle_gives(self):
+        torch.manual_seed(11)
+        probabilities = torch.softmax(torch.randn(2, 6, 5, 5), dim=1)
+        target = torch.randint(0, 6, (2, 1, 5, 5))
 
-        loss, _ = Dice()(output, target)
-        loss.backward()
+        gradients = []
+        for score in (lambda o, t: Dice()(o, t), lambda o, t: _dice_per_label_oracle(None, o, t)):
+            output = probabilities.clone().requires_grad_(True)
+            gradients.append(torch.autograd.grad(score(output, target)[0], output)[0])
 
-        assert output.grad is not None and torch.isfinite(output.grad).all()
+        assert torch.isfinite(gradients[0]).all()
+        assert (gradients[0] - gradients[1]).abs().max() < 1e-7 * gradients[1].abs().max()
+
+    def test_soft_loss_refuses_a_reference_label_the_probability_map_has_no_channel(self):
+        """The channels are gathered in one slice: an out-of-range label would be a device-side
+        assert on CUDA, so it is refused on the spot."""
+        output = torch.softmax(torch.randn(1, 3, 4, 4), dim=1)
+        target = torch.full((1, 1, 4, 4), 7)
+
+        with pytest.raises(MeasureError, match="no channel for"):
+            Dice()(output, target)
+
+    def test_soft_loss_of_a_reference_holding_no_label_scores_nothing(self):
+        output = torch.softmax(torch.randn(1, 3, 4, 4), dim=1)
+        target = torch.zeros(1, 1, 4, 4, dtype=torch.int64)
+
+        loss, per_label = Dice()(output, target)
+        assert loss.item() == 0.0 and per_label == {}
+        assert np.isnan(Dice(labels=[1, 2])(output, target)[1][2])
 
     def test_streamed_sums_carry_the_predicted_mass_of_a_label_the_patch_reference_lacks(self):
         # labels=None: a patch predicting label 2 where its reference has none must still count

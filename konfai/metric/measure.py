@@ -628,16 +628,6 @@ class Dice(Criterion):
     maximize = True  # reported value is the Dice coefficient (higher-is-better); DiceSaveMap inherits it
 
     @staticmethod
-    def flatten(tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.permute((1, 0, *tuple(range(2, tensor.dim())))).contiguous().view(tensor.size(1), -1)
-
-    @staticmethod
-    def dice_per_channel(tensor: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        tensor = Dice.flatten(tensor)
-        target = Dice.flatten(target)
-        return (2.0 * (tensor * target).sum() + 1e-6) / (tensor.sum() + target.sum() + 1e-6)
-
-    @staticmethod
     def on_grid(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """A label map on the output's spatial grid.
 
@@ -746,7 +736,15 @@ class Dice(Criterion):
     def _soft_sums(output: torch.Tensor, target: torch.Tensor, labels: list[int] | None) -> LabelSums:
         """The sums of a probability map against a label map, per channel: the intersection is
         taken only where the reference holds the label (it is zero elsewhere), and one
-        ``.tolist()`` brings every sum back."""
+        ``.tolist()`` brings every sum back.
+
+        A label at a time, where the loss batches them: this route carries no gradient, so its peak
+        is one channel and never the label count. Batched it read 1050 MiB instead of 346 and took
+        4.44 ms instead of 1.95 on a ``[1, 41, 128, 128, 128]`` patch of 40 labels.
+
+        With ``labels=None`` every label either map holds gets its sums, so a patch's predicted mass
+        for a label its reference lacks still reaches the whole-case ratio in ``combine_metric``.
+        """
         scored = labels if labels is not None else list(range(1, output.shape[1]))
         _, reference = Dice._reference_counts(target, scored)
         sums: list[torch.Tensor] = []
@@ -756,7 +754,8 @@ class Dice(Criterion):
                 continue
             predicted = output[:, label].unsqueeze(1).float()
             sums.append(predicted.sum())
-            sums.append((predicted * (target == label).float()).sum() if count else predicted.new_zeros(()))
+            # A bool mask multiplies in the probability's own dtype: no float copy of the reference.
+            sums.append((predicted * (target == label)).sum() if count else predicted.new_zeros(()))
         values = torch.stack(sums).tolist() if sums else []
         return {
             label: (values[2 * index + 1], values[2 * index], float(count), count > 0)
@@ -785,21 +784,44 @@ class Dice(Criterion):
         labels: list[int] | None, output: torch.Tensor, target: torch.Tensor
     ) -> tuple[torch.Tensor, dict[int, float]]:
         """The differentiable soft Dice over a probability map's channels, one per label the
-        reference holds. The readouts come back in one ``.tolist()`` after the loop: a ``.item()``
-        per label drained the CUDA queue mid-loss, twice per label."""
+        reference holds, every label in one expression: their channels gathered in one slice, the
+        reference one comparison against the label vector on an axis of its own, and each sum one
+        reduction. That axis sits before the target's channels, so a reference of any channel count
+        broadcasts against a gathered channel exactly as a per-label ``target == label`` did.
+
+        A slice per label cost a gradient write into the whole logits tensor each: 22.7 ``add_`` and
+        28.7 ``fill_`` per step, 10.2 ms of the 28.2 ms of GPU time of a training step of
+        ``examples/Segmentation`` (batch 8, 41 channels, 256x256, autocast + channels_last).
+        Backward held a float copy of both operands per label already, so training peaks lower
+        (242 -> 180 MiB on that batch); with no gradient to build it is the label count that peaks
+        where the loop peaked at one channel (6 -> 180 MiB), and ``_soft_sums`` is the frugal route.
+
+        The reference's own mass is the voxel count ``_reference_counts`` already holds, the exact
+        integer the metric route's ``_score`` divides by. The readouts come back in one
+        ``.tolist()``: a ``.item()`` per label drained the CUDA queue mid-loss, twice per label.
+        """
         labels, reference = Dice._reference_counts(target, labels)
-        loss = torch.tensor(0, dtype=torch.float32).to(output.device)
-        dices: list[torch.Tensor] = []
-        for label, count in zip(labels, reference, strict=True):
-            if count:
-                dice = Dice.dice_per_channel(output[:, label].unsqueeze(1).float(), (target == label).float())
-                loss += dice
-                dices.append(dice)
-        values = iter(torch.stack(dices).tolist() if dices else [])
+        held = [label for label, count in zip(labels, reference, strict=True) if count]
+        held_counts = [count for count in reference if count]
+        if not held:
+            return torch.tensor(0, dtype=torch.float32).to(output.device), dict.fromkeys(labels, np.nan)
+        channels = output.shape[1]
+        if min(held) < -channels or max(held) >= channels:
+            raise MeasureError(
+                f"Dice was asked to score labels {held} of a probability map of {channels} channels",
+                "the reference holds a label the prediction has no channel for",
+                "Give the criterion the `labels:` it should score, or predict one channel per label.",
+            )
+        label_vector = torch.tensor(held, device=output.device)
+        probabilities = output[:, label_vector].float().unsqueeze(2)
+        on_reference = target.unsqueeze(1) == label_vector.view(1, -1, *(1,) * (target.dim() - 1))
+        summed = (0, 2, *range(3, probabilities.dim()))
+        intersection = (probabilities * on_reference).sum(summed)
+        reference_mass = torch.tensor(held_counts, dtype=torch.float32, device=output.device)
+        dices = (2.0 * intersection + 1e-6) / (probabilities.sum(summed) + reference_mass + 1e-6)
+        values = iter(dices.tolist())
         result = {label: next(values) if count else np.nan for label, count in zip(labels, reference, strict=True)}
-        if not dices:
-            return loss, result
-        return 1 - loss / len(dices), result
+        return 1 - dices.mean(), result
 
     @staticmethod
     def _loss(
