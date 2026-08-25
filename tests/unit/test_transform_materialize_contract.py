@@ -21,13 +21,15 @@
 transform. TRANSFORM runs take the other route: :meth:`DatasetManager.materialize` sweeps the chain
 in slabs into a ``Write`` and never assembles the case. That route has its own machinery (the sweep
 rows, the region replay, the stream writers, the header composed from the first slab), so it is
-proven separately, over the SAME enumerated cases, on the same on-disk dataset: the streamed store
-must equal the store the whole-volume path writes, voxel for voxel, on every device the chain can
-run on.
+proven separately, over the SAME enumerated cases (``oracle_support``), on the same on-disk
+dataset: the streamed store must equal the store the whole-volume path writes, voxel for voxel, on
+every device the chain can run on.
+
+STORAGE is this file's axis: every source format's own region reader, every destination the sweep
+can write. ``test_streamed_oracle`` runs the same property over the other axes: the dtype, the
+rank, the geometry, and the number of regions the case is cut into.
 """
 
-import importlib.util
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -39,16 +41,13 @@ from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Write
 from konfai.utils.dataset import Dataset
+from oracle_support import CASE_NAME, FIXED_GEOMETRY, StageCase, attributes, build_case, streamable_cases, volumes
 
-# The read-side module is a test file, not a package: load it by path so its case table and fixture
-# are the single registry both sides enumerate.
-_spec = importlib.util.spec_from_file_location(
-    "transform_locality_contract", Path(__file__).with_name("test_transform_locality_contract.py")
-)
-_contract = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = _contract
-_spec.loader.exec_module(_contract)
-dataset = _contract.dataset  # the session fixture, re-exported under the name pytest resolves
+
+@pytest.fixture(scope="session")
+def dataset(tmp_path_factory: pytest.TempPathFactory) -> Dataset:
+    return build_case(tmp_path_factory.mktemp("materialize") / "Dataset", FIXED_GEOMETRY)
+
 
 _DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 # The formats a case can be READ from region by region -- each its own reader (an ITK extract, a
@@ -62,16 +61,16 @@ def sources(dataset: Dataset, tmp_path_factory: pytest.TempPathFactory) -> dict[
     """The read-side dataset, re-written in every source format (same voxels, same headers)."""
     root = tmp_path_factory.mktemp("sources")
     out = {"mha": dataset}
-    stored = dataset.read_transform("transform", _contract._CASE_NAME)
+    stored = dataset.read_transform("transform", CASE_NAME)
     for fmt in _SOURCE_FORMATS[1:]:
         copy_root = root / fmt.replace(".", "_")
         copy = Dataset(copy_root, fmt)
-        for group, volume in _contract._volumes().items():
-            copy.write(group, _contract._CASE_NAME, volume, _contract._attributes(group))
+        for group, volume in volumes(FIXED_GEOMETRY).items():
+            copy.write(group, CASE_NAME, volume, attributes(FIXED_GEOMETRY, group))
         if fmt.startswith("nii"):
             # A stored transform lives beside the case's images, as SimpleITK writes it; the store
             # formats (h5, omezarr) hold displacement fields only, so those cases have no such form.
-            sitk.WriteTransform(stored, str(copy_root / _contract._CASE_NAME / "transform.itk.txt"))
+            sitk.WriteTransform(stored, str(copy_root / CASE_NAME / "transform.itk.txt"))
         out[fmt] = copy
     return out
 
@@ -82,17 +81,17 @@ def sources(dataset: Dataset, tmp_path_factory: pytest.TempPathFactory) -> dict[
 _ATTRIBUTE_GROUPS = ("Ensemble", "Boxed")
 
 
-def _cases():
-    return [case for case in _contract._streamable_cases() if case.group != "Field"]
+def _cases() -> list[StageCase]:
+    return [case for case in streamable_cases() if case.group != "Field"]
 
 
-def _manager(dataset: Dataset, case, out: Path, fmt: str) -> DatasetManager:
+def _manager(dataset: Dataset, case: StageCase, out: Path, fmt: str) -> DatasetManager:
     case.transform.set_datasets([dataset])
     return DatasetManager(
         index=0,
         group_src=case.group,
         group_dest=case.group,
-        name=_contract._CASE_NAME,
+        name=CASE_NAME,
         dataset=dataset,
         patch=None,
         transforms=[case.transform, Write(f"{out}:{fmt}")],
@@ -130,7 +129,7 @@ def _check(
     whole = _manager(dataset, case, tmp_path / "Whole", fmt)
     verdict = CaseMaterializer(whole).materialize(prefer_whole=True, fallback_budget_bytes=1 << 30, device=dev)
     assert verdict is not Verdict.STREAM
-    expected, header_expected = Dataset(tmp_path / "Whole", fmt).read_data(case.group, _contract._CASE_NAME)
+    expected, header_expected = Dataset(tmp_path / "Whole", fmt).read_data(case.group, CASE_NAME)
     # Whatever the stage returned, what is on disk is a channel-first volume on the case's geometry.
     assert np.asarray(expected).ndim == len(header_expected.get_np_array("Spacing")) + 1
 
@@ -140,7 +139,7 @@ def _check(
     # shape asserted above, and there is no streamed store to compare.
     if CaseMaterializer(streamed).materialize(fallback_budget_bytes=1 << 30, device=dev) is not Verdict.STREAM:
         pytest.skip(f"took the whole-volume path: {streamed.stream_refusal() or streamed._sweep_failure}")
-    got, header_got = Dataset(tmp_path / "Streamed", fmt).read_data(case.group, _contract._CASE_NAME)
+    got, header_got = Dataset(tmp_path / "Streamed", fmt).read_data(case.group, CASE_NAME)
     assert got.shape == expected.shape
     assert got.dtype == expected.dtype
     np.testing.assert_allclose(np.asarray(got), np.asarray(expected), rtol=0, atol=case.atol)
