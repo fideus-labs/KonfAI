@@ -3072,21 +3072,53 @@ class DatasetManager:
         except DatasetManagerError:
             return False
 
-    def _sweep_rows(self, spatial: list[int], channels: int, depth: int | None = None) -> int:
+    def _sweep_rows(
+        self,
+        spatial: list[int],
+        channels: int,
+        plans: Sequence["_ReadStagePlan"] = (),
+        depth: int | None = None,
+    ) -> int:
         """The tallest region the sweep will cut whatever the budget: ``SWEEP_SLAB_ROWS`` on a CPU,
         taller on a GPU as its free memory allows. What the budget then affords is
         :meth:`_sweep_tile`'s.
+
+        The device's share is held to the SAME price as everything else (:meth:`sweep_block_bytes`),
+        which counts the source a region pulls and what the widest stage allocates on top of it: a
+        region counted as one landed plane raised the cap by the pull ratio of a GPU ``Resample``,
+        and nothing else bounded it where no host budget was declared.
         """
         cap = max(1, int(SWEEP_SLAB_ROWS))
-        _source, _landed, peak, _working = self._chain_channels(channels)
-        plane = int(np.prod(spatial[1:], dtype=np.int64)) * peak * _SWEEP_ELEMENT_BYTES
-        if plane > 0 and self._chain_device is not None and self._chain_device.type == "cuda":
+        if self._chain_device is not None and self._chain_device.type == "cuda":
             # On a GPU the transfers and launches per region are the cost: taller regions, as far as
             # a quarter of the free device memory allows (measured +10-20 % at 500^3 over 64 rows).
-            resident = sum(_sweep_resident_regions(_sweep_pipeline_depth() if depth is None else depth))
             free_bytes, _total = torch.cuda.mem_get_info(self._chain_device)
-            cap = max(cap, min(_SWEEP_SLAB_ROWS_DEVICE, int(free_bytes * 0.25 / (plane * resident))))
+            affordable = self._rows_within(spatial, channels, plans, depth, free_bytes * 0.25, _SWEEP_SLAB_ROWS_DEVICE)
+            cap = max(cap, affordable)
         return cap
+
+    def _rows_within(
+        self,
+        spatial: list[int],
+        channels: int,
+        plans: Sequence["_ReadStagePlan"],
+        depth: int | None,
+        budget: float,
+        cap: int,
+    ) -> int:
+        """The tallest region up to ``cap`` rows whose priced block holds inside ``budget``, ``1``
+        when none does: the one search both ceilings (the rank's budget, the device's free memory)
+        are answered by."""
+        depth = _sweep_pipeline_depth() if depth is None else depth
+        low, high = 1, max(1, int(cap))
+        while low < high:
+            middle = (low + high + 1) // 2
+            tile = self._sweep_shape(spatial, plans, middle)
+            if self.sweep_block_bytes(spatial, channels, plans, tile, depth) <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        return low
 
     def _sweep_shape(self, spatial: list[int], plans: Sequence["_ReadStagePlan"], rows: int) -> list[int]:
         """The block ``rows`` rows of the landing become: the slab itself, or the cube of the same
@@ -3170,19 +3202,12 @@ class DatasetManager:
         search is over the height, because that is the one free parameter of the decomposition.
         """
         depth = _sweep_pipeline_depth() if depth is None else depth
-        cap = self._sweep_rows(spatial, channels, depth)
+        cap = self._sweep_rows(spatial, channels, plans, depth)
         budget = self._sweep_budget_bytes
         if not budget or budget <= 0:
             return self._sweep_shape(spatial, plans, cap)
-        low, high = 1, cap  # low is never taken as affordable: the refusal below answers for it
-        while low < high:
-            middle = (low + high + 1) // 2
-            tile = self._sweep_shape(spatial, plans, middle)
-            if self.sweep_block_bytes(spatial, channels, plans, tile, depth) <= budget:
-                low = middle
-            else:
-                high = middle - 1
-        tile = self._sweep_shape(spatial, plans, low)
+        # The search never takes one row as affordable: the refusal below answers for it.
+        tile = self._sweep_shape(spatial, plans, self._rows_within(spatial, channels, plans, depth, budget, cap))
         held = self.sweep_block_bytes(spatial, channels, plans, tile, depth)
         if held > budget:
             raise DatasetManagerError(

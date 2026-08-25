@@ -306,3 +306,29 @@ def test_an_axis_whose_only_small_divisor_is_a_sliver_is_left_alone() -> None:
     """A chunk one voxel wide costs a reader the store; an oversized one costs it some bytes."""
     chunks = _store_chunks([1, 513, 1331, 1776], [1, 513, 641, 641], np.uint16)
     assert chunks == (1, 128, 641, 641)
+
+
+def test_the_device_ceiling_prices_what_a_region_pulls_and_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GPU raises the region height as its free memory allows, and free memory is the whole price.
+
+    Counted as one landed plane per resident region, the ceiling ignored the source box a REGRID
+    pulls and the buffers the widest stage declares: a chain resampling through a sheared grid was
+    given a region the device could not hold, and where no host budget was declared nothing else
+    bounded it.
+    """
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", ROWS)
+    source, _volume = _sheared_fixture(tmp_path)
+    resample = Resample(reference="TARGET", reference_group="GRID", reference_dataset=f"{tmp_path / 'ref'}:h5")
+    manager = _manager(source, [resample, Save(f"{tmp_path / 'out'}:h5")])
+    plans = _sweep_plans(manager)
+    free = 4 * _priced(manager, plans, 2 * ROWS)  # a quarter of it is what a region of 2 x ROWS holds
+    monkeypatch.setattr(manager, "_chain_device", torch.device("cuda"), raising=False)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: (free, free))
+
+    tile = manager._sweep_tile(list(LANDING), 1, plans)  # no host budget: the device is the only ceiling
+    held = manager.sweep_block_bytes(list(LANDING), 1, plans, tile, _sweep_pipeline_depth())
+
+    assert held <= free * 0.25, "the region the device was given does not fit the device"
+    assert held > _priced(manager, plans, ROWS), "and the device still buys a taller region than the host default"
