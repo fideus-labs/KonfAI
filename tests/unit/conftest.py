@@ -173,7 +173,7 @@ def _drive_tta(
         volume = transform("CASE_000", volume, attribute)
     augmentations = _tta_augmentations(augmentation, shape=list(volume.shape[1:]), case_index=case_index)
     copies = [volume, augmentation.compute("CASE_000", case_index, 0, volume)]
-    patch_slices, _ = get_patch_slices_from_shape(_TTA_PATCH_SIZE, list(volume.shape[1:]), _TTA_OVERLAP)
+    patch_slices = get_patch_slices_from_shape(_TTA_PATCH_SIZE, list(volume.shape[1:]), _TTA_OVERLAP)
     patches = [_tta_make_patches(copy, patch_slices) for copy in copies]
 
     class DummyPatch:

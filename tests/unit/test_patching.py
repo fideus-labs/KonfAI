@@ -45,7 +45,7 @@ from konfai.utils.utils import best_sweep_axis, get_patch_slices_from_shape, res
 
 def _tile_2d(full: torch.Tensor, patch_size: list[int], overlap: int):
     """Return (patch_slices, patches) tiling the spatial dims of *full* ([B, C, H, W])."""
-    patch_slices, _ = get_patch_slices_from_shape(patch_size, list(full.shape[2:]), overlap)
+    patch_slices = get_patch_slices_from_shape(patch_size, list(full.shape[2:]), overlap)
     patches = [full[:, :, sl[0], sl[1]].clone() for sl in patch_slices]
     return patch_slices, patches
 
@@ -165,7 +165,7 @@ def test_free_axis_reassembles_like_its_concrete_extent(free_axis, combine_cls):
     concrete_overlap[free_axis] = 0
 
     def assemble(patch_size: list[int], overlap: int | list[int]) -> torch.Tensor:
-        slices, _ = get_patch_slices_from_shape(patch_size, spatial, overlap)
+        slices = get_patch_slices_from_shape(patch_size, spatial, overlap)
         combine = None
         if combine_cls is not None:
             combine = combine_cls()
@@ -199,14 +199,14 @@ def test_declared_free_axis_keeps_the_fraction_overlap_after_restart_concretizat
     concrete = [64, 128, 128]  # what the restart pins it to
 
     # Baseline: passing the declared flag explicitly must not change the non-restart result.
-    declared_slices, _ = get_patch_slices_from_shape(declared, shape, None, None, True)
-    derived_slices, _ = get_patch_slices_from_shape(declared, shape, None)
+    declared_slices = get_patch_slices_from_shape(declared, shape, None, None, True)
+    derived_slices = get_patch_slices_from_shape(declared, shape, None)
     assert _axis_overlaps(declared_slices, [512, 128, 128]) == _axis_overlaps(derived_slices, [512, 128, 128])
 
     # Regression: on the concretized grid the derived flag is False (no ``0`` left) and would take the
     # remainder branch; carrying declared_free_axis=True restores the exact fraction default on the tiled axes.
-    remainder, _ = get_patch_slices_from_shape(concrete, shape, None, None, False)
-    fixed, _ = get_patch_slices_from_shape(concrete, shape, None, None, True)
+    remainder = get_patch_slices_from_shape(concrete, shape, None, None, False)
+    fixed = get_patch_slices_from_shape(concrete, shape, None, None, True)
     assert _axis_overlaps(remainder, concrete) == [0, 0, 0]
     assert _axis_overlaps(fixed, concrete) == list(resolve_overlap(None, concrete, shape))
 
@@ -386,7 +386,7 @@ def _padded_patches(full: torch.Tensor, patch_slices, patch_size: list[int]) -> 
 def test_streaming_accumulator_slabs_match_assemble(combine_cls, dtype, shape, patch_size, overlap):
     torch.manual_seed(0)
     full = torch.randn(shape, dtype=dtype)
-    patch_slices, _ = get_patch_slices_from_shape(patch_size, list(shape[1:]), overlap)
+    patch_slices = get_patch_slices_from_shape(patch_size, list(shape[1:]), overlap)
     patches = _padded_patches(full, patch_slices, patch_size)
 
     def _combine():
@@ -429,7 +429,7 @@ def test_streaming_accumulator_refuses_whole_volume_assemble():
 
 def test_streaming_accumulator_is_reusable_after_finalize():
     full = torch.arange(2 * 8, dtype=torch.float32).reshape(1, 2, 8)
-    patch_slices, _ = get_patch_slices_from_shape([1, 8], [2, 8], 0)
+    patch_slices = get_patch_slices_from_shape([1, 8], [2, 8], 0)
     streaming = StreamingAccumulator(patch_slices, [1, 8], patch_combine=None, batch=False)
     for _ in range(2):
         slabs = []
@@ -443,7 +443,7 @@ def test_streaming_accumulator_rejects_out_of_order_arrival():
     # Correctness needs patches to ARRIVE in non-decreasing first-axis-start order, not just the slice
     # list to be sorted. Arriving 0, 2, 3 then the skipped 1 flushes the window past start=2 before
     # patch 1 (start=2) shows up; without the guard its window offset goes negative -> silent misplace.
-    patch_slices, _ = get_patch_slices_from_shape([4, 8], [10, 8], 2)  # starts 0, 2, 4, 6; window 4
+    patch_slices = get_patch_slices_from_shape([4, 8], [10, 8], 2)  # starts 0, 2, 4, 6; window 4
     starts = [sl[0].start for sl in patch_slices]
     assert starts == [0, 2, 4, 6]
     streaming = StreamingAccumulator(patch_slices, [4, 8], patch_combine=None, batch=False)
@@ -466,7 +466,7 @@ def test_blend_weight_factorises_into_one_vector_per_axis(combine_cls):
     spatial-sized weight buffer.
     """
     shape, patch, overlap = [10, 12, 14], [6, 6, 6], 2
-    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
     combine = combine_cls()
     combine.set_patch_config(patch, overlap)
     accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
@@ -493,7 +493,7 @@ def test_blend_recovers_the_source_in_low_precision(combine_cls):
     """
     shape, patch, overlap = [10, 12, 14], [6, 6, 6], 2
     full = torch.rand(2, *shape)
-    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
     combine = combine_cls()
     combine.set_patch_config(patch, overlap)
     accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
@@ -515,7 +515,7 @@ def test_anisotropic_overlap_reassembles_exactly(combine_cls):
     # 12=2x6, 14=6+8, 16=4+4+8: every patch is full patch_size (the model emits full-size patches)
     shape, patch, overlap = [12, 14, 16], [6, 8, 8], [0, 2, 4]
     full = torch.rand(2, *shape)
-    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
     combine = combine_cls()
     combine.set_patch_config(patch, overlap)
     accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
@@ -533,7 +533,7 @@ def test_blend_does_not_depend_on_patch_arrival_order(combine_cls):
     """
     shape, patch, overlap = [10, 10, 14], [6, 6, 6], 2  # exact tiling at step 4
     full = torch.rand(2, *shape)
-    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
 
     def assemble(order: list[int]) -> torch.Tensor:
         combine = combine_cls()
@@ -554,7 +554,7 @@ def test_unweighted_overlap_is_last_write_wins():
     own border, with no context behind it, which is what shows up as a seam.
     """
     shape, patch, overlap = [8], [4], 2
-    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
     accumulator = Accumulator(slices, patch, patch_combine=None, batch=False)
     for index, _ in enumerate(slices):
         accumulator.add_layer(index, torch.full((1, 4), float(index)))
@@ -570,7 +570,7 @@ def test_trim_selects_the_most_central_patch():
     the axis, the first and last open to the edge, and every interior voxel sits at least one row
     inside the patch it came from. Compare test_unweighted_overlap_is_last_write_wins.
     """
-    slices, _ = get_patch_slices_from_shape([4], [8], 2)
+    slices = get_patch_slices_from_shape([4], [8], 2)
     combine = Trim()
     combine.set_patch_config([4], 2)
     accumulator = Accumulator(slices, [4], patch_combine=combine, batch=False)
@@ -594,7 +594,7 @@ def test_trim_reassembles_exactly_and_keeps_values_discrete(shape, patch, overla
     coverage gap only darkens a voxel, where a 0/1 selection leaves it unwritten.
     """
     labels = torch.randint(0, 5, (2, *shape)).float()
-    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
     combine = Trim()
     combine.set_patch_config(patch, overlap)
     accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
@@ -624,7 +624,7 @@ def test_trim_kept_boxes_partition_the_volume(shape, patch, overlap):
     This is the property the selection path rests on: if the kept boxes tiled imperfectly, assembly
     would leave holes (never written) or race (written twice), and neither shows up as an error.
     """
-    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
     combine = Trim()
     combine.set_patch_config(patch, overlap)
     accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
@@ -649,7 +649,7 @@ def test_trim_kept_boxes_are_cached_per_axis_position_not_per_patch():
     reads the windows position by position.
     """
     shape, patch, overlap = [20, 22, 24], [8, 8, 8], 4
-    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
     combine = Trim()
     combine.set_patch_config(patch, overlap)
     accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
@@ -714,7 +714,7 @@ def test_streaming_accumulator_sweeps_any_axis(sweep_axis):
     """
     shape, patch, overlap = [10, 10, 14], [6, 6, 6], 2
     full = torch.rand(2, *shape)
-    slices, _ = get_patch_slices_from_shape(patch, shape, overlap)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
     # The grid is emitted with axis 0 outermost; a sweep along another axis needs that axis outermost.
     rest = [axis for axis in range(3) if axis != sweep_axis]
     ordered = sorted(slices, key=lambda sl: tuple(sl[axis].start for axis in (sweep_axis, *rest)))
@@ -746,8 +746,8 @@ def test_patch_grid_orders_by_the_sweep_axis(sweep_axis):
     is why the set is asserted and not just the ordering.
     """
     shape, patch, overlap = [10, 12, 14], [6, 6, 6], 2
-    reference, _ = get_patch_slices_from_shape(patch, shape, overlap)
-    ordered, _ = get_patch_slices_from_shape(patch, shape, overlap, sweep_axis=sweep_axis)
+    reference = get_patch_slices_from_shape(patch, shape, overlap)
+    ordered = get_patch_slices_from_shape(patch, shape, overlap, sweep_axis=sweep_axis)
 
     assert sorted(map(str, ordered)) == sorted(map(str, reference)), "the grid itself must not change"
     starts = [patch_slice[sweep_axis].start for patch_slice in ordered]

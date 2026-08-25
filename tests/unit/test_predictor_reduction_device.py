@@ -151,7 +151,7 @@ def test_accumulate_device_budgets_the_streaming_window_not_the_whole_volume(mon
     patch = torch.zeros(64, 8, dtype=torch.float16, device="cuda")
     # The whole volume's accumulator (~3.4 GiB) overflows 3 x 0.9; the window (one patch extent,
     # ~0.13 GiB) fits easily.
-    patch_slices, _ = get_patch_slices_from_shape([16, 256, 256], [400, 256, 256], 0)
+    patch_slices = get_patch_slices_from_shape([16, 256, 256], [400, 256, 256], 0)
     combine = Cosinus()
     combine.set_patch_config([16, 256, 256], 0)
     whole = _FakeAccumulator([400, 256, 256])

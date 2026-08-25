@@ -102,14 +102,13 @@ class TestResolveOverlap:
 class TestPatchGrid:
     def test_2d_slicing_grid(self):
         # [1,0,0] -> one full slice per Z index: exactly Z patches, each spanning Y and X.
-        slices, nb_per_dim = get_patch_slices_from_shape([1, 0, 0], [37, 41, 29], None)
+        slices = get_patch_slices_from_shape([1, 0, 0], [37, 41, 29], None)
         assert len(slices) == 37
         assert slices[0] == (slice(0, 1), slice(0, 41), slice(0, 29))
-        assert nb_per_dim[0] == (37, True)
 
     def test_free_axes_cover_the_volume_disjointly(self):
         # A fixed Z with free in-plane axes tiles Z only; the plane stays whole.
-        slices, _ = get_patch_slices_from_shape([16, 0, 0], [37, 41, 29], None)
+        slices = get_patch_slices_from_shape([16, 0, 0], [37, 41, 29], None)
         zs = sorted({(s[0].start, s[0].stop) for s in slices})
         assert all(s[1] == slice(0, 41) and s[2] == slice(0, 29) for s in slices)
         covered = set()
@@ -118,13 +117,13 @@ class TestPatchGrid:
         assert covered == set(range(37))
 
     def test_all_zero_is_the_whole_volume(self):
-        slices, _ = get_patch_slices_from_shape([0, 0, 0], [10, 20, 30], None)
+        slices = get_patch_slices_from_shape([0, 0, 0], [10, 20, 30], None)
         assert slices == [(slice(0, 10), slice(0, 20), slice(0, 30))]
 
     def test_fixed_patch_grid_stays_bit_identical(self):
         # A fully-fixed patch keeps the remainder-spreading overlap grid: every stored model was
         # trained and evaluated on it.
-        fixed, _ = get_patch_slices_from_shape([16, 16, 16], [37, 41, 29], None)
+        fixed = get_patch_slices_from_shape([16, 16, 16], [37, 41, 29], None)
         assert fixed[0] == (slice(0, 16), slice(0, 16), slice(0, 16))
         assert all(s[0].stop <= 37 and s[1].stop <= 41 and s[2].stop <= 29 for s in fixed)
 
@@ -137,9 +136,8 @@ class TestFreeAxisReachesTheModelAsAValidMultiple:
     def test_whole_volume_free_axis_stays_a_single_clamped_patch(self):
         # The grid is unchanged: one whole-volume patch whose slice is clamped to the extent. The
         # round-up to the multiple is a PADDING target, not extra patches.
-        slices, nb = get_patch_slices_from_shape([0, 0, 0], [122, 250, 250], None, [16, 16, 16])
+        slices = get_patch_slices_from_shape([0, 0, 0], [122, 250, 250], None, [16, 16, 16])
         assert slices == [(slice(0, 122), slice(0, 250), slice(0, 250))]
-        assert all(count == 1 for count, _ in nb)
 
     def test_small_case_is_padded_up_to_the_model_multiple(self):
         import torch
@@ -226,7 +224,7 @@ class TestPatchedReductionIdentity:
         rng = np.random.default_rng(0)
         out = rng.random((37, 41, 29))
         tgt = rng.random((37, 41, 29))
-        slices, _ = get_patch_slices_from_shape(patch, [37, 41, 29], 0)
+        slices = get_patch_slices_from_shape(patch, [37, 41, 29], 0)
 
         abs_sum, sq_sum, count = 0.0, 0.0, 0
         for sl in slices:
@@ -244,7 +242,7 @@ class TestMetricReductionContract:
 
     @staticmethod
     def _patches(shape, patch):
-        slices, _ = get_patch_slices_from_shape(patch, list(shape), 0)
+        slices = get_patch_slices_from_shape(patch, list(shape), 0)
         return [(slice(None), slice(None), *sl) for sl in slices]
 
     @staticmethod

@@ -408,6 +408,25 @@ def test_streaming_tensorcast_persists_source_dtype_for_inverse(streaming_datase
     assert restored.dtype == torch.int16
 
 
+def test_manager_patch_copy_owns_its_patch_size(streaming_dataset_stub) -> None:
+    """The copy's grid is cut lazily, so it must not read a list its source can still change."""
+    shared = DatasetPatch([4, 4])
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, streaming_dataset_stub(np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8))),
+        patch=shared,
+        transforms=[],
+        data_augmentations_list=[],
+    )
+    shared.patch_size[:] = [8, 8]  # before any cut: nothing has read the copy's sizes yet
+
+    assert manager.patch.patch_size == [4, 4]
+    assert len(manager.patch.get_patch_slices(0)) == 4  # 8x8 in 4x4 patches, not one whole-volume patch
+
+
 # --------------------------------------------------------------------------------------
 # DatasetIter: inline augmentations and per-case state draws
 # --------------------------------------------------------------------------------------

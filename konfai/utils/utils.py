@@ -98,33 +98,6 @@ def _sweep_first(slices: list[list[slice]], sweep_axis: int) -> list[tuple[slice
     return [tuple(chunk[position] for position in back) for chunk in itertools.product(*(slices[d] for d in order))]
 
 
-def get_patch_slices_from_nb_patch_per_dim(
-    patch_size_tmp: list[int],
-    nb_patch_per_dim: list[tuple[int, bool]],
-    overlap: int | None,
-    sweep_axis: int = 0,
-) -> list[tuple[slice, ...]]:
-    slices: list[list[slice]] = []
-    if overlap is None:
-        overlap = 0
-    patch_size = []
-    i = 0
-    for nb in nb_patch_per_dim:
-        if nb[1]:
-            patch_size.append(1)
-        else:
-            patch_size.append(patch_size_tmp[i])
-            i += 1
-
-    for dim, nb in enumerate(nb_patch_per_dim):
-        slices.append([])
-        for index in range(nb[0]):
-            start = (patch_size[dim] - overlap) * index
-            end = start + patch_size[dim]
-            slices[dim].append(slice(start, end))
-    return _sweep_first(slices, sweep_axis)
-
-
 #: Default overlap on tiled axes when a free-axis patch does not say otherwise: 20 % of the patch.
 DEFAULT_OVERLAP_FRACTION = 0.2
 
@@ -298,7 +271,7 @@ def get_patch_slices_from_shape(
     multiple: list[int] | None = None,
     declared_free_axis: bool | None = None,
     sweep_axis: int = 0,
-) -> tuple[list[tuple[slice, ...]], list[tuple[int, bool]]]:
+) -> list[tuple[slice, ...]]:
 
     # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple`` so a
     # small case still reaches the network at a valid input size: the up-front worst-case sizing only
@@ -319,7 +292,6 @@ def get_patch_slices_from_shape(
             f"shape: {shape}",
             "Both must have the same number of dimensions (e.g., 3D patch for 3D volume).",
         )
-    nb_patch_per_dim = []
     slices: list[list[slice]] = []
     if overlap_tmp is None:
         if has_free_axis:
@@ -361,9 +333,8 @@ def get_patch_slices_from_shape(
                 break
             slices[dim].append(slice(start, end))
             index += 1
-        nb_patch_per_dim.append((index + 1, patch_size[dim] == 1))
 
-    return _sweep_first(slices, sweep_axis), nb_patch_per_dim
+    return _sweep_first(slices, sweep_axis)
 
 
 # Suffixes an entry can carry on disk: probed next to a case to find an entry whatever it was

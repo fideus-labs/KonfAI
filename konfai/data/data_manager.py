@@ -1546,9 +1546,8 @@ class Data(DataSources):
         The managers are rebuilt against the already-resolved sources and the SAME case lists --
         NOT through ``prepare()`` (its idempotence guard would skip the rebuild): so a later
         ``get_data`` shards cases identically across the restart: only the grids and the patch mapping change.
-        Each manager copies the shared ``DatasetPatch`` (with ``pad_to_patch``) at construction,
-        which is why the new sizes are written into that shared list IN PLACE: the loader factory
-        holds a reference to it too.
+        The new sizes are written into the shared ``patch_size`` list IN PLACE because the loader
+        factory holds a reference to it; each rebuilt manager then takes its own copy of them.
         """
         if self.patch is None or self._managers is None:
             raise DatasetManagerError(

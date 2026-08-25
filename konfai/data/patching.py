@@ -839,7 +839,6 @@ class PathCombine(ABC):
     """Base class for overlap-aware weighting schemes applied during patch assembly."""
 
     def __init__(self) -> None:
-        self.data: torch.Tensor
         self.windows_1d: list[torch.Tensor]
         self.overlap: int
         self.overlaps: list[int]
@@ -862,16 +861,25 @@ class PathCombine(ABC):
         # tapered weighting.
         if all(o <= 0 for o in overlaps):
             self.windows_1d = [torch.ones(size) for size in patch_size]
-            self.data = torch.ones(patch_size)
             return
         self.windows_1d = [
             self._window_1d(size, axis_overlap) if axis_overlap > 0 else torch.ones(size)
             for size, axis_overlap in zip(patch_size, overlaps, strict=True)
         ]
+
+    @property
+    def data(self) -> torch.Tensor:
+        """The per-voxel window: the outer product of the per-axis factors.
+
+        Derived, not stored: it is a patch of floats that ``Network.init`` builds before the spawn and
+        every rank then unpickles (a 128^3 ModelPatch at overlap 16 pickles to 8 391 775 bytes with it,
+        1355 without), while assembly goes through the factors themselves (see ``_weight_factors``).
+        :meth:`weight` caches what it builds per device and dtype.
+        """
         data = self.windows_1d[0]
         for window in self.windows_1d[1:]:
             data = data.unsqueeze(-1) * window
-        self.data = data
+        return data
 
     @property
     def selects(self) -> bool:
@@ -1654,7 +1662,7 @@ class Patch(ABC):
             # source of truth, because a grid emitted for one axis and reassembled along another hands out
             # regions that are not final, with nothing to report it.
             sweep_axis = best_sweep_axis(concretize_patch_size(self.patch_size, shape, self.free_axis_multiple), shape)
-            slices, _ = get_patch_slices_from_shape(
+            slices = get_patch_slices_from_shape(
                 self.patch_size,
                 shape,
                 self.overlap,
@@ -1910,7 +1918,9 @@ class DatasetManager:
 
         self.patch = (
             DatasetPatch(
-                patch_size=patch.patch_size,
+                # Its own list: the grid is cut lazily (``Patch._grid``), so sharing the source's list
+                # would let a later mutation of it move a grid already handed out.
+                patch_size=list(patch.patch_size) if patch.patch_size is not None else patch.patch_size,
                 overlap=patch.overlap,
                 pad_value=patch.pad_value,
                 extend_slice=patch.extend_slice,
