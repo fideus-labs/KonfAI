@@ -972,6 +972,22 @@ def test_a_strict_block_writes_the_file_a_context_materialized(tmp_path: Path, m
     assert written["Root"] == {"depth": 1, "kept": 0, "Nested": {"width": 2}}
 
 
+def test_a_block_opened_inside_another_one_on_the_same_file_keeps_both_blocks_writes(write_config) -> None:
+    """One file, two blocks: what the inner one bound is on disk beside what the outer one bound.
+
+    Each block loading its own tree would have the outer's flush, of a tree read before the inner
+    block existed, land last and take the inner's roots back to what the file held."""
+    config_path = write_config("Root:\n  kept: 1\nOther:\n  kept: 2\n")
+    with strict_config("Root"):
+        outer = apply_config("Root")(_StrictRoot)()
+        with strict_config("Other"):
+            inner = apply_config("Other")(_StrictRoot)()
+    assert (outer.kept, inner.kept) == (1, 2)
+    written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    assert written["Root"] == {"kept": 1, "depth": 1, "Nested": {"width": 2}}
+    assert written["Other"] == {"kept": 2, "depth": 1, "Nested": {"width": 2}}
+
+
 _EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 _WORKFLOWS = {
     "Trainer": ("konfai.trainer", "Trainer", "TRAIN", {"KONFAI_CHECKPOINTS_DIRECTORY", "KONFAI_STATISTICS_DIRECTORY"}),

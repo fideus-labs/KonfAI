@@ -215,14 +215,19 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
     the whole block back over the user's file.
 
     The file is read once here and written once when the block ends, whatever the number of
-    contexts opened inside it: they all resolve against the tree held in memory. A build of N
+    contexts opened inside it, and whatever the number of blocks opened over the same file: they
+    all resolve against the one tree held in memory, read and written by the outermost. A build of N
     nested objects otherwise parses the file 2N+1 times and writes it N times (Config_GAN.yml, 7 KB,
     76 objects: 153 parses and 76 dumps, 2.96 s of a 4.7 s build; 0.05 s held in memory).
     """
     filename = os.environ.get("KONFAI_config_file")
     tree: dict = {}
+    # A block opened inside another one on the same file binds to the tree already held: reloading
+    # it would hide what the outer contexts bound, and flushing it would be undone by the outer
+    # flush of a tree that predates this block.
+    outer = _shared_tree(Path(filename)) if filename else None
     if filename and Path(filename).exists():
-        tree = _load_tree(filename)
+        tree = outer.tree if outer is not None else _load_tree(filename)
         if root not in tree:
             _report(
                 refuse,
@@ -231,7 +236,7 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
                 " block appended to the file in its place.",
             )
     ledger = _KeyLedger()
-    shared = _SharedTree(Path(filename), tree) if filename else None
+    shared = _SharedTree(Path(filename), tree) if filename and outer is None else None
     _ledgers.append(ledger)
     if shared is not None:
         _shared_trees.append(shared)
