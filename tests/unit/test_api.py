@@ -31,7 +31,7 @@ sitk = pytest.importorskip("SimpleITK")
 from konfai import api  # noqa: E402
 from konfai.data.reduction import Std  # noqa: E402
 from konfai.data.transform import Clip, Magnitude, Resample, Save, Write  # noqa: E402
-from konfai.metric.measure import Dice  # noqa: E402
+from konfai.metric.measure import MAE, Dice  # noqa: E402
 from konfai.utils.errors import ConfigError, KonfAIError  # noqa: E402
 
 # --------------------------------------------------------------------------- recording and trees
@@ -230,6 +230,32 @@ def test_the_reference_follows_the_case(cohort: Path, monkeypatch: pytest.Monkey
         assert moved.GetSpacing() == pytest.approx(spacing)
         assert moved.GetOrigin() == pytest.approx(origin)
         assert moved.GetSize() == (7, 6, 5)
+
+
+def test_evaluate_scores_the_stored_values_when_no_chain_is_declared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An absent ``transforms`` key is not an absent chain: the binder materializes its own default
+    (``Normalize``), and two groups each rescaled to [-1, 1] by their own extrema no longer differ
+    where they did. On a pair related by ``0.9 x + 0.05`` that reported MAE 1.9e-8 for 0.025."""
+    monkeypatch.chdir(tmp_path)
+    truth = np.linspace(0.0, 1.0, 6 * 7 * 8, dtype=np.float32).reshape(6, 7, 8)
+    prediction = (0.9 * truth + 0.05).astype(np.float32)
+    _write_case(tmp_path / "Raw" / "P000" / "CT.mha", truth)
+    _write_case(tmp_path / "Raw" / "P000" / "sCT.mha", prediction)
+
+    result = api.evaluate(
+        "STORED_VALUES",
+        "./Raw:mha",
+        {"sCT": {"CT": [MAE()]}},
+        evaluations_dir=tmp_path / "Evaluations",
+        quiet=True,
+        overwrite=True,
+    )
+
+    assert result.metrics["TRAIN"]["case"]["sCT:CT:MAE"]["P000"] == pytest.approx(
+        float(np.abs(prediction - truth).mean()), rel=1e-5
+    )
 
 
 # --------------------------------------------------------------------------- uncertainty vocabulary

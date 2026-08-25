@@ -394,10 +394,13 @@ def evaluate(
     )
     groups_src: dict[str, object] = {}
     for group in groups:
-        destination: dict[str, object] = {"is_input": True}
-        if transforms is not None and group in transforms:
-            destination["transforms"] = _chain_tree(transforms[group], _STAGE_MODULES, f"transforms.{group}")
-        groups_src[group] = {"groups_dest": {group: destination}}
+        # An undeclared chain is spelled None, never left out: the binder materializes its own
+        # default (Normalize) for an absent key, and each group rescaled to [-1, 1] by its own
+        # extrema erases the very difference the metrics measure (MAE 1.9e-8 instead of 0.025 on a
+        # pair related by 0.9x + 0.05). ``transforms`` is the only key GroupTransformMetric reads.
+        declared = None if transforms is None else transforms.get(group)
+        chain: object = "None" if declared is None else _chain_tree(declared, _STAGE_MODULES, f"transforms.{group}")
+        groups_src[group] = {"groups_dest": {group: {"transforms": chain}}}
     metrics_tree = {
         str(output): {
             "targets_criterions": {
