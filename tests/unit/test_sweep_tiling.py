@@ -30,14 +30,16 @@ import torch
 from konfai.data import patching as patching_module
 from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import (
+    _SWEEP_ELEMENT_BYTES,
     DatasetManager,
     DatasetPatch,
     _cubic_tile,
     _pull_block_voxels,
     _sweep_pipeline_depth,
+    _sweep_resident_regions,
     _sweep_targets,
 )
-from konfai.data.transform import Resample, Save
+from konfai.data.transform import OneHot, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset, _store_chunks
 from konfai.utils.errors import DatasetManagerError
 
@@ -197,6 +199,25 @@ def _priced(manager: DatasetManager, plans, rows: int) -> int:
 def _block_voxels(manager: DatasetManager, plans) -> int:
     """The landed voxels of the block the sizing picks under the budget the manager carries."""
     return int(np.prod(manager._sweep_tile(list(LANDING), 1, plans), dtype=np.int64))
+
+
+def test_a_chain_that_widens_the_channel_axis_is_priced_on_what_it_lands(tmp_path: Path) -> None:
+    """``OneHot`` lands one block per class. The source is still pulled at one channel, so the price
+    grows by the classes on the landed term alone, not by a flat multiple of the whole."""
+    source, _volume = _sheared_fixture(tmp_path)
+    classes = 4
+    plain = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
+    widened = _manager(source, [OneHot(classes), Save(f"{tmp_path / 'out'}:h5")])
+    tile = plain._sweep_shape(list(LANDING), (), 5)
+    depth = _sweep_pipeline_depth()
+
+    _pulled, landed = _sweep_resident_regions(depth)
+    block = int(np.prod(tile, dtype=np.int64))
+    before = plain.sweep_block_bytes(list(LANDING), 1, (), tile, depth)
+    after = widened.sweep_block_bytes(list(LANDING), 1, (), tile, depth)
+
+    assert (after - before) == landed * block * (classes - 1) * _SWEEP_ELEMENT_BYTES
+    assert after < before * classes  # the pulled regions did not widen with it
 
 
 def test_the_sizing_takes_the_tallest_region_the_budget_holds(tmp_path: Path) -> None:

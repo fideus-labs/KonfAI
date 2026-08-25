@@ -3078,7 +3078,8 @@ class DatasetManager:
         :meth:`_sweep_tile`'s.
         """
         cap = max(1, int(SWEEP_SLAB_ROWS))
-        plane = int(np.prod(spatial[1:], dtype=np.int64)) * max(1, int(channels)) * _SWEEP_ELEMENT_BYTES
+        _source, _landed, peak, _working = self._chain_channels(channels)
+        plane = int(np.prod(spatial[1:], dtype=np.int64)) * peak * _SWEEP_ELEMENT_BYTES
         if plane > 0 and self._chain_device is not None and self._chain_device.type == "cuda":
             # On a GPU the transfers and launches per region are the cost: taller regions, as far as
             # a quarter of the free device memory allows (measured +10-20 % at 500^3 over 64 rows).
@@ -3115,9 +3116,10 @@ class DatasetManager:
         """What a sweep decomposed into ``tile`` holds at its peak: the source regions it has pulled
         and the blocks it has landed, both counted by :func:`_sweep_resident_regions`, plus what the
         widest stage of the chain allocates on top of the largest of them
-        (``Transform.working_multiple``). The landed block's channels are not known before the first
-        region, so the source's stand in, at ``_SWEEP_ELEMENT_BYTES`` each. Beside this, and outside
-        it, a streamed case holds ``SWEEP_ENGINE_FLOOR_BYTES`` the decomposition cannot lower.
+        (``Transform.working_multiple``). Each term is counted on the channels it actually holds
+        (:meth:`_chain_channels`), at ``_SWEEP_ELEMENT_BYTES`` each: the source pulls the source's,
+        the block lands the chain's. Beside this, and outside it, a streamed case holds
+        ``SWEEP_ENGINE_FLOOR_BYTES`` the decomposition cannot lower.
 
         Public because the sizing holds this figure to the budget and a caller sizing a budget for a
         decomposition asks for it: one price, not two that drift apart.
@@ -3125,8 +3127,29 @@ class DatasetManager:
         pulled, landed = _sweep_resident_regions(depth)
         block = int(np.prod(tile, dtype=np.int64))
         pull = max(_pull_block_voxels(spatial, tile, plans), default=block) if plans else block
-        held = pulled * pull + landed * block + self.working_multiple() * max(pull, block)
-        return int(held * max(1, int(channels)) * _SWEEP_ELEMENT_BYTES)
+        source, landed_channels, _peak, working = self._chain_channels(channels)
+        held = pulled * pull * source + landed * block * landed_channels + working * max(pull, block)
+        return int(held * _SWEEP_ELEMENT_BYTES)
+
+    def _chain_channels(self, channels: int) -> tuple[int, int, int, float]:
+        """What the channel axis costs along the chain, for the plan's arithmetic: the channels the
+        source pulls, the channels a block lands with, the widest the chain ever holds, and the
+        volumes-worth its widest stage allocates, that one counted on the channels that stage is
+        handed (``Transform.working_multiple``).
+
+        Identity for a chain that keeps the axis, where all three counts are the source's and the
+        last is :meth:`working_multiple` times it. ``OneHot`` is the stage that widens it, and a
+        block priced at the source's would be short by its class count.
+        """
+        source = held = landed = peak = max(1, int(channels))
+        working = 0.0
+        for stage in self.transforms:
+            if not isinstance(stage, Transform):
+                continue
+            working = max(working, float(stage.working_multiple) * held)
+            held = landed = max(1, int(stage.output_channels(held)))
+            peak = max(peak, held)
+        return source, landed, peak, working
 
     def working_multiple(self) -> float:
         """What this chain allocates beyond what it is handed, in volumes-worth: the largest a stage
