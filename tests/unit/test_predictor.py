@@ -31,10 +31,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 from konfai.data.augmentation import Flip
-from konfai.data.patching import blend_axes
-from konfai.predictor import PREDICTION_CLOCK, _AsyncWriter
+from konfai.data.patching import Accumulator, blend_axes
+from konfai.predictor import PREDICTION_CLOCK, OutSameAsGroupDataset, _AsyncWriter, _Predictor
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import PredictorError
+from konfai.utils.utils import get_patch_slices_from_shape
 
 
 def test_async_writer_charges_its_writes_to_the_writer_s_own_phase() -> None:
@@ -107,7 +108,6 @@ def test_a_built_in_reduction_binds_from_its_own_block_like_a_custom_one(write_c
     carries was read by nothing; every operator now binds from its block, and the write-back says so."""
     import ruamel.yaml
     from konfai.data.reduction import Mean
-    from konfai.predictor import OutSameAsGroupDataset
 
     path = write_config("Predictor:\n  outputs_dataset:\n    L:\n      OutputDataset:\n        reduction: Mean\n")
     monkeypatch.setenv("KONFAI_ROOT", "Predictor")
@@ -126,11 +126,9 @@ def test_a_built_in_reduction_binds_from_its_own_block_like_a_custom_one(write_c
     assert "Mean" in block
 
 
-def _output_dataset(write_config, monkeypatch, name: str = "L"):
+def _output_dataset(write_config, monkeypatch) -> OutSameAsGroupDataset:
     """An output dataset with its declared blend window built, as ``prepare`` leaves it."""
-    from konfai.predictor import OutSameAsGroupDataset
-
-    write_config(f"Predictor:\n  outputs_dataset:\n    {name}:\n      OutputDataset: {{}}\n")
+    write_config("Predictor:\n  outputs_dataset:\n    L:\n      OutputDataset: {}\n")
     monkeypatch.setenv("KONFAI_ROOT", "Predictor")
     output = OutSameAsGroupDataset(
         same_as_group="a:b",
@@ -139,14 +137,12 @@ def _output_dataset(write_config, monkeypatch, name: str = "L"):
         after_reduction_transforms={},
         final_transforms={},
     )
-    output.prepare(name)
+    output.prepare("L")
     return output
 
 
-def _configure_blend(output, patch_size, overlap) -> None:
+def _configure_blend(output: OutSameAsGroupDataset, patch_size: list[int], overlap: int) -> None:
     """Hand ``output`` the run's patch config the way the prediction loop does."""
-    from konfai.predictor import _Predictor
-
     _Predictor(
         world_size=1,
         global_rank=0,
@@ -176,9 +172,6 @@ def test_a_singleton_patch_axis_still_carries_its_blend_window(write_config, mon
 def test_a_grid_with_a_singleton_patch_axis_reassembles_its_case(write_config, monkeypatch, patch_size) -> None:
     """The same grid, blended: the loader drops the singleton axis of each patch, the accumulator puts it
     back, and the case comes out of the blend as it went in."""
-    from konfai.data.patching import Accumulator
-    from konfai.utils.utils import get_patch_slices_from_shape
-
     output = _output_dataset(write_config, monkeypatch)
     _configure_blend(output, patch_size, 0)
 

@@ -1077,7 +1077,7 @@ class Accumulator:
         # prod(n_d) patches, and one dict lookup per patch and axis to find them.
         self._geometry: tuple[list[list[torch.Tensor]], list[torch.Tensor]] | None = None
         self._grid: list[dict[int, int]] | None = None
-        self._shares: dict[tuple[int, int, int, torch.dtype, torch.device], torch.Tensor] = {}
+        self._shares: dict[tuple[int, int, int, torch.dtype, torch.device], torch.Tensor | None] = {}
         self._kept: dict[tuple[int, int], slice] = {}
 
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
@@ -1200,15 +1200,22 @@ class Accumulator:
     def _position(self, dim: int, start: int) -> int:
         return self._positions()[dim][start]
 
-    def _share(self, dim: int, start: int, data: torch.Tensor) -> torch.Tensor:
-        """This patch's fraction of the blend weight along one axis, ``w / sum_k w``, cached per axis."""
+    def _share(self, dim: int, start: int, data: torch.Tensor) -> torch.Tensor | None:
+        """This patch's fraction of the blend weight along one axis, ``w / sum_k w``, cached per axis.
+
+        ``None`` where that fraction is exactly one on every voxel of the axis, which is what an axis
+        holding a single grid position gives (the patch is the whole of the weight there, so the total
+        IS its own window): the blend then skips a full pass over the patch, bit for bit the same
+        values. A patch grid that tiles one axis and spans the other two is that case twice over.
+        """
         extent = data.shape[self._n + dim]
         key = (dim, start, extent, data.dtype, data.device)
         if key not in self._shares:
             windows, totals = self._weight_geometry()
             window = windows[dim][self._position(dim, start)]
             share = window[:extent] / totals[dim][start : start + extent]
-            self._shares[key] = share.to(device=data.device, dtype=data.dtype)
+            share = share.to(device=data.device, dtype=data.dtype)
+            self._shares[key] = None if torch.equal(share, torch.ones_like(share)) else share
         return self._shares[key]
 
     def _weighted_patch(self, data: torch.Tensor, patch_slice: tuple[slice, ...]) -> torch.Tensor:
@@ -1220,10 +1227,21 @@ class Accumulator:
         stays exact, and each factor is a ratio of comparable quantities, so it lives in [0, 1] where
         the raw product underflows fp16 and needed a floor.
 
-        Into a staging buffer the patches share, one patch-sized allocation per accumulator instead of
-        per blend, and out of place: the caller's tensor is never touched, so the OOM retry (which
-        re-blends the same patch on the CPU) never re-weights it.
+        Only the axes whose share is not identically one are applied (see ``_share``), each one pass
+        over the patch: a grid tiled along one axis and spanning the other two hands the patch back
+        untouched. Into a staging buffer the patches share otherwise, one patch-sized allocation per
+        accumulator instead of per blend, and out of place: the caller's tensor is never touched, so
+        the OOM retry (which re-blends the same patch on the CPU) never re-weights it.
         """
+        shares = []
+        for dim, s in enumerate(patch_slice):
+            share = self._share(dim, s.start, data)
+            if share is not None:
+                view = [1] * data.ndim
+                view[self._n + dim] = -1
+                shares.append(share.view(view))
+        if not shares:
+            return data
         if (
             self._weighted is None
             or self._weighted.shape != data.shape
@@ -1231,14 +1249,9 @@ class Accumulator:
             or self._weighted.device != data.device
         ):
             self._weighted = torch.empty_like(data)
-        for dim, s in enumerate(patch_slice):
-            view = [1] * data.ndim
-            view[self._n + dim] = -1
-            share = self._share(dim, s.start, data).view(view)
-            if dim == 0:
-                torch.mul(data, share, out=self._weighted)
-            else:
-                self._weighted.mul_(share)
+        torch.mul(data, shares[0], out=self._weighted)
+        for share in shares[1:]:
+            self._weighted.mul_(share)
         return self._weighted
 
     def _along_sweep(self, span: slice, lead: int) -> tuple[slice, ...]:

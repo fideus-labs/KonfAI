@@ -36,6 +36,7 @@ from konfai.data.patching import (
     Mean,
     StreamingAccumulator,
     Trim,
+    blend_axes,
     blend_overlap,
 )
 from konfai.utils.dataset import Dataset
@@ -169,7 +170,7 @@ def test_free_axis_reassembles_like_its_concrete_extent(free_axis, combine_cls):
         combine = None
         if combine_cls is not None:
             combine = combine_cls()
-            kept = [i if i > 1 else 1 for i in patch_size]  # the ModelPatch.init blend-window contract
+            kept = blend_axes(patch_size)
             combine.set_patch_config(kept, blend_overlap(overlap, kept))
         acc = Accumulator(slices, patch_size, patch_combine=combine, batch=True)
         for i, sl in enumerate(slices):
@@ -500,6 +501,37 @@ def test_blend_recovers_the_source_in_low_precision(combine_cls):
     for index, patch_slice in enumerate(slices):
         accumulator.add_layer(index, full[(slice(None), *patch_slice)].to(torch.float16))
     torch.testing.assert_close(accumulator.assemble().float(), full, rtol=0, atol=5e-3)
+
+
+@pytest.mark.parametrize("combine_cls", [Mean, Cosinus, Gaussian])
+@pytest.mark.parametrize(
+    ("patch", "weighted_axes"),
+    [([6, 12, 14], [0]), ([1, 12, 14], []), ([10, 12, 14], [])],
+)
+def test_an_axis_the_grid_does_not_tile_carries_no_share(combine_cls, patch, weighted_axes):
+    """One grid position on an axis makes the patch the whole of the blend weight there, so its share
+    is exactly one and the blend skips it: same values, one pass over the patch fewer. A grid that
+    tiles a single voxel at a time, or nothing at all, leaves nothing to weight and no staging buffer.
+    """
+    shape, overlap = [10, 12, 14], 2
+    full = torch.rand(2, *shape)
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
+    combine = combine_cls()
+    axes = blend_axes(patch)
+    combine.set_patch_config(axes, blend_overlap(overlap, axes))
+    accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
+    for index, patch_slice in enumerate(slices):
+        block = full[(slice(None), *patch_slice)]
+        # The loader hands the patch over with its singleton axes dropped; the accumulator puts them back.
+        tiled = [extent for extent in block.shape[1:] if extent > 1]
+        accumulator.add_layer(index, block.reshape(block.shape[0], *tiled))
+
+    # The share is keyed by the patch's own extent, and the blend asks for it at full rank.
+    probe = torch.zeros(2, *[min(size, extent) for size, extent in zip(patch, shape, strict=True)])
+    weighted = [dim for dim in range(3) if accumulator._share(dim, 0, probe) is not None]
+    assert weighted == weighted_axes
+    assert (accumulator._weighted is not None) == bool(weighted_axes)
+    torch.testing.assert_close(accumulator.assemble(), full, rtol=0, atol=1e-6)
 
 
 # --------------------------------------------------------------------------------------
