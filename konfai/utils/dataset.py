@@ -390,7 +390,9 @@ _STATISTICS_CHUNK_ELEMENTS = 8_000_000
 #: not released yet, a generator reading the next while its caller still names the last. Measured at
 #: 95.6 MiB of resident set for a 30.5 MiB block over a 78 MiB case.
 _STATISTICS_BLOCKS_IN_FLIGHT = 3
-#: The bytes a scanned element is priced at, as everything else the budget sizes prices them.
+#: The bytes a scanned element is priced at when the source's own size is not known: what everything
+#: else the budget sizes prices an element at. A block is the store's OWN dtype, never a cast copy,
+#: so where the store can be asked (:meth:`Dataset._scanned_element_bytes`) it answers instead.
 _STATISTICS_ELEMENT_BYTES = 4
 #: Elements one running-statistics update takes at once: its float64 temporaries then stay in cache,
 #: where a whole block's stream through memory. Below the block on purpose: the block is the READ
@@ -398,18 +400,17 @@ _STATISTICS_ELEMENT_BYTES = 4
 _STATISTICS_UPDATE_ELEMENTS = 1 << 18
 
 
-def _statistics_block_elements() -> int:
+def _statistics_block_elements(element_bytes: int = _STATISTICS_ELEMENT_BYTES) -> int:
     """Elements one block of a whole-volume scan may hold: its share of the budget this rank
-    published, since :data:`_STATISTICS_BLOCKS_IN_FLIGHT` of them are in flight at the peak. A fixed
-    read grain made a scan cost the same 95.6 MiB whatever the budget said. Without a declared
-    budget, the grain that keeps a chunked store's decode whole.
+    published, since :data:`_STATISTICS_BLOCKS_IN_FLIGHT` of them are in flight at the peak, each of
+    them ``element_bytes`` an element. A fixed read grain made a scan cost the same 95.6 MiB
+    whatever the budget said. Without a declared budget, the grain that keeps a chunked store's
+    decode whole.
     """
     budget = per_rank_budget_bytes()
     if budget is None:
         return _STATISTICS_CHUNK_ELEMENTS
-    return max(
-        1, min(_STATISTICS_CHUNK_ELEMENTS, int(budget / (_STATISTICS_BLOCKS_IN_FLIGHT * _STATISTICS_ELEMENT_BYTES)))
-    )
+    return max(1, min(_STATISTICS_CHUNK_ELEMENTS, int(budget / (_STATISTICS_BLOCKS_IN_FLIGHT * element_bytes))))
 
 
 def _statistics_plane_elements(shape: list[int] | tuple[int, ...], axis: int) -> int:
@@ -3323,11 +3324,17 @@ class Dataset:
         # A whole number of update pieces, so the fold sees the same sequence of pieces in the same
         # order whatever the read grain: the running mean and std are then the budget's business
         # only in how much is held, never in what they answer.
-        piece = _statistics_chunk_length(shape, 1, _STATISTICS_UPDATE_ELEMENTS)
-        rows = max(piece, _statistics_chunk_length(shape, 1, _statistics_block_elements()) // piece * piece)
         budget = per_rank_budget_bytes()
+        # Only a declared budget sizes anything from it, so only a declared budget pays the probe.
+        element_bytes = (
+            _STATISTICS_ELEMENT_BYTES if budget is None else self._scanned_element_bytes(groups, name, shape)
+        )
+        piece = _statistics_chunk_length(shape, 1, _STATISTICS_UPDATE_ELEMENTS)
+        rows = max(
+            piece, _statistics_chunk_length(shape, 1, _statistics_block_elements(element_bytes)) // piece * piece
+        )
         plane = _statistics_plane_elements(shape, 1)
-        held = rows * plane * _STATISTICS_BLOCKS_IN_FLIGHT * _STATISTICS_ELEMENT_BYTES
+        held = rows * plane * _STATISTICS_BLOCKS_IN_FLIGHT * element_bytes
         if budget is not None and held > budget:
             raise DatasetManagerError(
                 f"'{name}': the shortest block a whole-volume scan of '{groups}' can read holds"
@@ -3345,6 +3352,17 @@ class Dataset:
                 yield self.read_data_slice(groups, name, slices)[0]
 
         return slabs
+
+    def _scanned_element_bytes(self, groups: str, name: str, shape: list[int]) -> int:
+        """What one element of a scanned block costs: the store's own element size, read off a
+        one-voxel region.
+
+        A block of a scan is the bytes the store hands over, never a cast copy of them, so a
+        float64 source held twice what the budget was told at every block in flight. The probe is a
+        bounded read, which is the route this entry is on, and one voxel of it.
+        """
+        probe = (slice(0, 1),) * len(shape)
+        return max(1, int(self.read_data_slice(groups, name, probe)[0].dtype.itemsize))
 
     def read_data_quantile(self, groups: str, name: str, q: float) -> Any:
         """``numpy.quantile(volume, q)`` (the default ``linear`` method, to the value) without

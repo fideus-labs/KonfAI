@@ -301,6 +301,9 @@ def test_the_fold_reads_a_bounded_store_by_blocks_and_never_whole(
 
     monkeypatch.setattr(Dataset, "read_data_slice", counted)
     dataset.read_data_statistics("CT", "P0")
+    # Under a declared budget the blocks are priced off a one-voxel read of the store; the blocks
+    # themselves are the rest, and they cover the volume whether or not that probe happened.
+    blocks = [shape for shape in blocks if int(np.prod(shape)) > 1]
     assert len(blocks) > 1 and all(shape[0] == 1 and shape[2:] == (12, 10) for shape in blocks)
     assert sum(shape[1] for shape in blocks) == 37
 
@@ -400,3 +403,26 @@ def test_a_budget_the_shortest_block_of_a_scan_exceeds_is_refused(
 
     with pytest.raises(DatasetManagerError, match=r"over the per-rank memory budget \(4.00 KiB\)"):
         dataset.read_data_statistics("CT", "P0")
+
+
+def test_a_scan_of_a_float64_source_reads_blocks_the_budget_holds(
+    tmp_path: Path, image_attributes, monkeypatch: pytest.MonkeyPatch, budgeted_scan: None
+) -> None:
+    """A block is the bytes the store hands over, not a float32 copy of them.
+
+    Priced at four bytes an element whatever the source, the three blocks a scan holds in flight
+    over a float64 store came to twice the budget the run was given, and nothing said so.
+    """
+    dataset = Dataset(tmp_path / "store", "mha")
+    volume = _volume((1, 64, 40, 40), dtype=np.float64)
+    dataset.write("CT", "P0", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    assert dataset.read_data_slice("CT", "P0", (slice(0, 1),) * 4)[0].dtype == np.float64
+
+    budget = dataset_module._STATISTICS_BLOCKS_IN_FLIGHT * 8 * 8 * 40 * 40  # three eight-row float64 blocks
+    set_per_rank_budget(budget)
+    blocks = _scan_blocks(dataset, monkeypatch)
+    got = dataset.read_data_statistics("CT", "P0")
+
+    held = max(int(np.prod(shape)) for shape in blocks) * 8 * dataset_module._STATISTICS_BLOCKS_IN_FLIGHT
+    assert held <= budget, f"{held} B held against a {budget} B budget"
+    _assert_close_to_numpy(got, volume)
