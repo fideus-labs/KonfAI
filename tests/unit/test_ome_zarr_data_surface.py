@@ -699,3 +699,24 @@ def test_a_store_named_in_any_accepted_spelling_resolves_and_lists(tmp_path: Pat
         dataset = Dataset(str(root), "omezarr")
         assert dataset.get_group() == ["CT"], form
         assert dataset.is_dataset_exist("CT", "CASE"), form
+
+
+def test_a_store_whose_suffix_is_not_lower_case_resolves_and_reads(tmp_path: Path) -> None:
+    """The walk matches the suffix case-insensitively; the resolution has to as well.
+
+    `CT.OME.ZARR` is accepted as a store name and listed as the group `CT`, but on a case-sensitive
+    filesystem the probed spellings are all lower case: the read of a group the same object just
+    reported raised `NameError: OME-Zarr group not found`.
+    """
+    from konfai.utils.utils import is_store_name
+
+    (tmp_path / "CASE").mkdir()
+    create_ome_zarr_store(tmp_path / "CASE" / "CT.OME.ZARR", (1, 2, 3, 4), "<u1", spacing=[1.0, 1.0, 1.0])
+    assert is_store_name("CT.OME.ZARR")
+
+    dataset = Dataset(str(tmp_path), "omezarr")
+
+    assert dataset.get_group() == ["CT"]
+    assert dataset.is_dataset_exist("CT", "CASE")
+    assert dataset.get_infos("CT", "CASE")[0] == [1, 2, 3, 4]
+    assert dataset.read_data("CT", "CASE")[0].shape == (1, 2, 3, 4)

@@ -2430,12 +2430,32 @@ class Dataset:
             for candidate in candidates:
                 if uri.is_dir(candidate):
                     return candidate
+            listed = self._listed_as(name)
+            if listed is not None:
+                return listed
             if not uri.is_uri(self.filename):
                 for candidate in candidates:  # a writer killed mid-replacement left the previous store aside
                     _recover_orphaned_backup(Path(candidate))
                     if os.path.isdir(candidate):  # recovered here, or published by whoever won the race
                         return candidate
             raise NameError(f"OME-Zarr group '{name}' not found in '{self.filename}'.")
+
+        def _listed_as(self, name: str) -> str | None:
+            """Where ``name``'s store sits when the directory spells its suffix in another case,
+            ``None`` when nothing there is that store.
+
+            ``is_store_name`` and :meth:`get_group` match the suffix case-insensitively, so a
+            ``CT.OME.ZARR`` is accepted at setup and listed as ``CT``; on a case-sensitive
+            filesystem the probes above, which are the accepted spellings in lower case, all miss
+            it. Only the miss pays the listing, and it lists one case's directory.
+            """
+            prefix, _, stem = name.rpartition("/")
+            directory = uri.join(self.filename, prefix) if prefix else self.filename
+            wanted = {f"{stem}{form}".lower() for form in STORE_FORMS}
+            for entry in uri.list_names(directory):
+                if entry.lower() in wanted:
+                    return uri.join(directory, entry)
+            return None
 
         @staticmethod
         def _attributes(metadata: dict[str, Any]) -> Attribute:
