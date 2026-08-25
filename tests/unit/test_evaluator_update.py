@@ -20,12 +20,14 @@ An ``Evaluator`` is faked with the attributes ``__init__`` sets, no config or da
 paths run on in-memory batches.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from konfai.data.data_manager import BatchDataItem
-from konfai.data.patching import SweepClock
+from konfai.data.patching import DatasetPatch, SweepClock
 from konfai.evaluator import Evaluator, Statistics
-from konfai.metric.measure import MAE, MSE
+from konfai.metric.measure import MAE, MSE, SSIM
 
 
 def _evaluator(metrics: dict[str, dict[str, dict[torch.nn.Module, None]]], streamed: bool = False) -> Evaluator:
@@ -34,6 +36,7 @@ def _evaluator(metrics: dict[str, dict[str, dict[torch.nn.Module, None]]], strea
     evaluator._device = torch.device("cpu")
     evaluator._clock = SweepClock()
     evaluator._streamed = streamed
+    evaluator._halo = 0
     evaluator._pending = {}
     evaluator._pending_name = None
     evaluator._last_result = {}
@@ -41,9 +44,9 @@ def _evaluator(metrics: dict[str, dict[str, dict[torch.nn.Module, None]]], strea
     return evaluator
 
 
-def _batch(name: str, **tensors: torch.Tensor) -> dict[str, BatchDataItem]:
+def _batch(name: str, p: int = 0, **tensors: torch.Tensor) -> dict[str, BatchDataItem]:
     return {
-        group: BatchDataItem(name=[name], tensor=tensor, attribute=[None], x=[0], a=[0], p=[0], is_input=False)
+        group: BatchDataItem(name=[name], tensor=tensor, attribute=[None], x=[0], a=[0], p=[p], is_input=False)
         for group, tensor in tensors.items()
     }
 
@@ -142,3 +145,61 @@ def test_streamed_update_moves_each_group_once_per_patch(monkeypatch, registrati
     whole = _evaluator(registration_metrics).update(_batch("case", **volumes), Statistics(None))
     for key, value in whole.items():
         assert statistics.measures["case"][key] == pytest.approx(value, rel=1e-6)
+
+
+class TestStreamedUpdateWithAHalo:
+    """A grid reading a halo: a metric that declared one is handed the read and its slot's place in
+    it, the others the slot alone, and each case ends on the whole-volume value."""
+
+    @staticmethod
+    def _grid(shape: list[int], halo: int) -> DatasetPatch:
+        patch = DatasetPatch(patch_size=[5, 6], overlap=0)
+        patch.pad_to_patch = False
+        patch.halo = halo
+        patch.load(shape, 0)
+        return patch
+
+    @classmethod
+    def _stream(cls, metrics, volumes: dict[str, torch.Tensor], halo: int) -> tuple[Statistics, list]:
+        """Feed every patch of the grid as the loader would read it, halo included; the MAE states."""
+        shape = list(next(iter(volumes.values())).shape[2:])
+        patch = cls._grid(shape, halo)
+        evaluator = _evaluator(metrics, streamed=True)
+        evaluator._halo = halo
+        evaluator._iter_dataset = SimpleNamespace(get_dataset_from_index=lambda group, x: SimpleNamespace(patch=patch))
+        statistics = Statistics(None)
+        states = []
+        for index in range(patch.get_size(0)):
+            read = patch.read_slices(0, index, shape)
+            evaluator.update(_batch("case", index, **{g: t[(..., *read)] for g, t in volumes.items()}), statistics)
+            states.append(next(iter(evaluator._pending.values()))[1][-1])
+        evaluator._flush_pending(statistics)
+        return statistics, states
+
+    @pytest.mark.parametrize("masked", [False, True])
+    def test_a_halo_metric_ends_on_the_whole_volume_value(self, masked):
+        torch.manual_seed(2)
+        volumes = {"CT": torch.rand(1, 1, 17, 23), "sCT": torch.rand(1, 1, 17, 23)}
+        target = "CT"
+        if masked:
+            volumes["MASK"] = (torch.rand(1, 1, 17, 23) > 0.3).to(torch.uint8)
+            target = "CT;MASK"
+        metrics = {"sCT": {target: {MAE(): None, SSIM(dynamic_range=1.0): None}}}
+
+        statistics, _ = self._stream(metrics, volumes, SSIM.halo)
+
+        whole = _evaluator(metrics).update(_batch("case", **volumes), Statistics(None))
+        assert statistics.measures["case"][f"sCT:{target}:SSIM"] == pytest.approx(whole[f"sCT:{target}:SSIM"], rel=1e-9)
+        assert statistics.measures["case"][f"sCT:{target}:MAE"] == pytest.approx(whole[f"sCT:{target}:MAE"], rel=1e-6)
+
+    def test_a_metric_without_a_halo_sees_the_slot_alone(self):
+        # MAE's partial states with the grid read with SSIM's halo are the states without it: the
+        # context past the slot never reaches a metric that did not ask for it.
+        torch.manual_seed(3)
+        volumes = {"CT": torch.rand(1, 1, 17, 23), "sCT": torch.rand(1, 1, 17, 23)}
+        metrics = {"sCT": {"CT": {MAE(): None, SSIM(dynamic_range=1.0): None}}}
+
+        _, with_halo = self._stream(metrics, volumes, SSIM.halo)
+        _, without = self._stream({"sCT": {"CT": {MAE(): None}}}, volumes, 0)
+
+        assert with_halo == without

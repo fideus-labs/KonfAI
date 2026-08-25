@@ -1552,6 +1552,11 @@ class Patch(ABC):
         # A consumer that REDUCES patches instead (streamed evaluation) must see only in-volume voxels:
         # padded ones would pollute its running sums, so it turns this off and takes the cropped patch.
         self.pad_to_patch = True
+        #: Voxels of context read past each face of a grid patch, clamped to the volume, for a consumer
+        #: that reduces patches but scores through a window (a metric's halo). The grid keeps its
+        #: disjoint slots (``get_patch_slices``); ``core_in_read`` says where a slot sits in its read.
+        #: Unpadded only (``pad_to_patch`` False): a model input padded to the patch has no core.
+        self.halo = 0
         # The model's per-axis downsampling factor a FREE (``0``) axis rounds up to, set before the grids
         # are cut so each case's whole-axis extent lands on a valid model input. ``None`` outside a model
         # (evaluation) or for a network that never downsamples.
@@ -1589,33 +1594,43 @@ class Patch(ABC):
     def get_patch_slices(self, a: int = 0):
         return self._patch_slices[a]
 
+    def read_slices(self, a: int, index: int, shape: Sequence[int]) -> list[slice]:
+        """The region patch ``index`` of copy ``a`` reads: its grid slot, widened by the halo and
+        clamped to the volume (``shape`` may carry leading non-spatial axes)."""
+        slot = self._patch_slices[a][index]
+        if not self.halo:
+            return list(slot)
+        spatial = [int(extent) for extent in shape[len(shape) - len(slot) :]]
+        return _HaloPull([self.halo] * len(slot), spatial)(slot)
+
+    def core_in_read(self, a: int, index: int) -> tuple[slice, ...]:
+        """Where patch ``index``'s grid slot sits within its read: the halo in from each face, less
+        where the volume's own face cut the halo short."""
+        return tuple(
+            slice(min(self.halo, s.start), min(self.halo, s.start) + s.stop - s.start)
+            for s in self._patch_slices[a][index]
+        )
+
     def get_read_plan(
         self, data_shape: list[int] | tuple[int, ...], index: int, a: int, is_input: bool
     ) -> PatchReadPlan:
-        slices_pre = [slice(None) for _ in data_shape[: -len(self._patch_slices[a][0])]]
+        slot = self.read_slices(a, index, data_shape)
+        slices_pre = [slice(None) for _ in data_shape[: -len(slot)]]
         extend_slice = self.extend_slice if is_input else 0
 
         bottom = extend_slice // 2
         top = int(np.ceil(extend_slice / 2))
         s = slice(
-            (
-                self._patch_slices[a][index][0].start - bottom
-                if self._patch_slices[a][index][0].start - bottom >= 0
-                else 0
-            ),
-            (
-                self._patch_slices[a][index][0].stop + top
-                if self._patch_slices[a][index][0].stop + top <= data_shape[len(slices_pre)]
-                else data_shape[len(slices_pre)]
-            ),
+            (slot[0].start - bottom if slot[0].start - bottom >= 0 else 0),
+            (slot[0].stop + top if slot[0].stop + top <= data_shape[len(slices_pre)] else data_shape[len(slices_pre)]),
         )
-        slices = [s, *list(self._patch_slices[a][index][1:])]
+        slices = [s, *slot[1:]]
         reflect_padding = [0 for _ in range((len(slices) - 1) * 2)] + [0, 0]
         if extend_slice > 0 and (s.stop - s.start) < bottom + top + 1:
-            if self._patch_slices[a][index][0].start - bottom < 0:
-                reflect_padding[-2] = bottom - self._patch_slices[a][index][0].start
-            if self._patch_slices[a][index][0].stop + top > data_shape[len(slices_pre)]:
-                reflect_padding[-1] = self._patch_slices[a][index][0].stop + top - data_shape[len(slices_pre)]
+            if slot[0].start - bottom < 0:
+                reflect_padding[-2] = bottom - slot[0].start
+            if slot[0].stop + top > data_shape[len(slices_pre)]:
+                reflect_padding[-1] = slot[0].stop + top - data_shape[len(slices_pre)]
 
         constant_padding = []
         if self.pad_to_patch and self.patch_size is not None:
@@ -1800,6 +1815,7 @@ class DatasetManager:
             # The manager works on its own copy (per-case grids); carry the reduction-vs-model contract
             # with it, or a streamed evaluation would silently get padded border patches back.
             self.patch.pad_to_patch = patch.pad_to_patch
+            self.patch.halo = patch.halo
             # Carry the model's downsampling multiple too, so each per-case free axis rounds up to a valid
             # input size on this copy's grid, not just on the up-front worst-case sizing.
             self.patch.free_axis_multiple = patch.free_axis_multiple
@@ -2942,7 +2958,7 @@ class DatasetManager:
         which a Save sweep drives with slab targets instead of patch targets)."""
         if self._expand is not None:
             self._refold_copy_records(a, stream_source)
-        target_slices = tuple(self.patch.get_patch_slices(a)[index])
+        target_slices = tuple(self.patch.read_slices(a, index, self.shapes[a]))
         # Each patch re-runs the chain from the state the whole-volume pass started from: the case as
         # stored (plus planned stats), never the live attribute: that one carries the chain's own
         # output.

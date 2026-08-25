@@ -52,6 +52,8 @@ EVALUATION_TEMPLATE = """Evaluator:
               reduction: mean
             PSNR:
               dynamic_range: 2.0
+            SSIM:
+              dynamic_range: 2.0
             MAESaveMap:
               reduction: mean
               dataset: ./ErrorMaps:mha
@@ -92,7 +94,7 @@ def _create_paired_dataset(dataset_dir: Path, predictions_dir: Path) -> None:
     for idx in range(3):
         (dataset_dir / f"CASE_{idx:03d}").mkdir(parents=True)
         (predictions_dir / f"CASE_{idx:03d}").mkdir(parents=True)
-        ct = rng.normal(size=(5, 16, 16)).astype(np.float32)
+        ct = rng.normal(size=(12, 16, 16)).astype(np.float32)
         sct = (0.85 * ct + 0.1 * rng.normal(size=ct.shape) + 0.02 * idx).astype(np.float32)
         write_image(dataset_dir / f"CASE_{idx:03d}" / "CT.mha", ct, SimpleITK.sitkFloat32)
         write_image(predictions_dir / f"CASE_{idx:03d}" / "sCT.mha", sct, SimpleITK.sitkFloat32)
@@ -159,10 +161,12 @@ def test_streamed_evaluation_matches_whole_volume(tmp_path: Path) -> None:
     streamed_dir.mkdir()
 
     _run_evaluation(whole_dir, "None")
-    # A case here is 2 groups x 5x16x16 float32 ~= 10 KiB resident; 8000 bytes cannot hold it, so the
-    # run must patch. The log line is the proof the streamed path actually executed.
-    streamed_log = _run_evaluation(streamed_dir, "8000b")
+    # A case here is 2 groups x 12x16x16 float32 = 24 KiB resident; 40000 bytes cannot hold it at the
+    # sizing's 24 B/voxel, so the run must patch, every slot read with SSIM's halo of 3. The log line
+    # is the proof the streamed path actually executed.
+    streamed_log = _run_evaluation(streamed_dir, "40000b")
     assert "disjoint patches" in streamed_log, f"budget run did not take the patched path:\n{streamed_log}"
+    assert "read with a halo of 3" in streamed_log
 
     whole = _read_metrics(whole_dir)
     streamed = _read_metrics(streamed_dir)
@@ -182,7 +186,7 @@ def test_streamed_evaluation_matches_whole_volume(tmp_path: Path) -> None:
             else:
                 assert got == pytest.approx(value, rel=1e-4), f"{case}:{key}: whole={value} streamed={got}"
             compared += 1
-    assert compared >= 9  # 3 cases x 3 metrics: the comparison actually exercised the report
+    assert compared >= 12  # 3 cases x 4 metrics: the comparison actually exercised the report
 
     # The per-voxel error map streams region by region under the budget; being voxel-local over a
     # disjoint unpadded grid, it must land byte-identical to the whole-volume map.

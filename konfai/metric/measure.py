@@ -75,6 +75,12 @@ class Criterion(torch.nn.Module, ABC):
     # ``forward`` exactly may set it.
     reducible: bool = False
 
+    # Voxels of context a partial state needs past a patch's faces on every spatial axis (a window's
+    # radius). A reducible metric declaring one is handed patches read that much wider than their
+    # grid slot, clamped at the volume's faces, and ``partial_metric`` receives ``core=``, the slot's
+    # slices within the patch: it scores the core through the context and nothing outside it.
+    halo: int = 0
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         # A metric is config-built like a stage: record its constructor arguments as given, so
         # konfai.api can write the config tree back from live objects (see Transform).
@@ -409,12 +415,14 @@ class SSIM(MaskedLoss):
     volumes back to the host. The map is built slab by slab along the first spatial axis, so the
     five window statistics it needs hold a few MiB at a time whatever the case.
 
-    A voxel's window reaches the window's radius past a patch's faces, which the evaluation's
-    disjoint patches do not carry: not reducible.
+    A voxel's window reaches the window's radius past a patch's faces: reducible from patches read
+    with that radius of halo, each scoring the map voxels centred in its own grid slot.
     """
 
     maximize = True  # reported value is the structural similarity index (higher-is-better)
+    reducible = True
     window = 7
+    halo = (window - 1) // 2
     k1 = 0.01
     k2 = 0.03
     #: Bytes of one statistic map per slab. Measured at 512^3 float32, 12 threads / one GPU: 0.94 s /
@@ -472,52 +480,100 @@ class SSIM(MaskedLoss):
 
     @staticmethod
     @torch.no_grad()
-    def _ssim(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor | None, data_range: float) -> float:
-        """The SSIM of one ``[C, *spatial]`` pair. A mask multiplies both, slab by slab, and the
-        score is the mean over the whole cropped extent, as the masked mode always was."""
+    def _map_sum_over(
+        x: torch.Tensor,
+        y: torch.Tensor,
+        mask: torch.Tensor | None,
+        data_range: float,
+        core: tuple[slice, ...] | None,
+    ) -> tuple[float, int]:
+        """The sum and voxel count of one ``[C, *spatial]`` pair's SSIM map over the map voxels
+        centred in ``core`` (slices of the spatial axes; ``None`` is the whole pair). Each slab reads
+        the window's radius past the core and nothing more: a patch read with that radius of halo
+        scores its grid slot exactly as the whole volume does. A mask multiplies both, slab by slab,
+        and the count runs over the whole cropped extent, as the masked mode always was."""
         radius = (SSIM.window - 1) // 2
-        depth = x.shape[1] - 2 * radius
-        if depth < 1 or any(size < SSIM.window for size in x.shape[2:]):
-            raise MeasureError(
-                f"SSIM needs every spatial extent to be at least its {SSIM.window}-voxel window.",
-                f"Got a {tuple(x.shape[1:])} volume.",
-            )
-        planes = max(2 * radius + 2, SSIM.slab_bytes // (x[:, 0].numel() * 8))  # the maps are float64
+        spatial = x.shape[1:]
+        if core is None:
+            core = tuple(slice(0, extent) for extent in spatial)
+        # Per axis, the centres whose window lies inside the pair, restricted to the core.
+        spans = [(max(c.start, radius), min(c.stop, extent - radius)) for c, extent in zip(core, spatial, strict=True)]
+        if any(stop <= start for start, stop in spans):
+            return 0.0, 0
+        inner = tuple(slice(start - radius, stop + radius) for start, stop in spans[1:])
+        plane = x.shape[0] * int(np.prod([stop - start + 2 * radius for start, stop in spans[1:]]))
+        planes = max(2 * radius + 2, SSIM.slab_bytes // (plane * 8))  # the maps are float64
         total = torch.zeros((), dtype=torch.float64, device=x.device)
         count = 0
-        for start in range(0, depth, planes):
-            stop = min(depth, start + planes) + 2 * radius
-            xs, ys = x[:, start:stop], y[:, start:stop]
+        first, last = spans[0]
+        for start in range(first, last, planes):
+            rows = slice(start - radius, min(last, start + planes) + radius)
+            xs, ys = x[(slice(None), rows, *inner)], y[(slice(None), rows, *inner)]
             if mask is not None:
                 # torch.where, not a float x bool product: on a cache-resident slab the mixed-dtype
                 # product runs an unvectorised cast path (10.4 ms per 14 MiB slab against 1.3).
-                keep = mask[:, start:stop]
+                keep = mask[(slice(None), rows, *inner)]
                 xs, ys = torch.where(keep, xs, 0.0), torch.where(keep, ys, 0.0)
             slab_total, slab_count = SSIM._map_sum(xs, ys, data_range)
             total += slab_total
             count += slab_count
-        return float(total) / count
+        return float(total), count
+
+    @staticmethod
+    def _ssim(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor | None, data_range: float) -> float:
+        """The SSIM of one ``[C, *spatial]`` pair: the mean of its map over the cropped extent."""
+        if any(size < SSIM.window for size in x.shape[1:]):
+            raise MeasureError(
+                f"SSIM needs every spatial extent to be at least its {SSIM.window}-voxel window.",
+                f"Got a {tuple(x.shape[1:])} volume.",
+            )
+        total, count = SSIM._map_sum_over(x, y, mask, data_range, None)
+        return total / count
+
+    def _pairs(
+        self, output: torch.Tensor, targets: tuple[torch.Tensor, ...]
+    ) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None]:
+        """Per batch item, the float pair and its bool mask; ``None`` for an item its mask empties."""
+        if len(targets) == 0:
+            raise ValueError("SSIM expects at least one target tensor.")
+        target = targets[0].to(device=output.device)
+        mask = self.get_mask(list(targets[1:]))
+        mask = None if mask is None else mask.to(device=output.device) == 1
+        for batch in range(output.shape[0]):
+            mask_b = None if mask is None else mask[batch, ...]
+            if mask_b is not None and not torch.any(mask_b):
+                yield None
+            else:
+                yield output[batch].float(), target[batch].float(), mask_b
 
     def forward(
         self,
         output: torch.Tensor,
         *targets: torch.Tensor,
     ) -> tuple[torch.Tensor, float]:
-        if len(targets) == 0:
-            raise ValueError("SSIM expects at least one target tensor.")
-        target = targets[0].to(device=output.device)
-        mask = self.get_mask(list(targets[1:]))
-        mask = None if mask is None else mask.to(device=output.device) == 1
-        values = []
-        for batch in range(output.shape[0]):
-            mask_b = None if mask is None else mask[batch, ...]
-            if mask_b is not None and not torch.any(mask_b):
-                continue
-            values.append(SSIM._ssim(output[batch].float(), target[batch].float(), mask_b, self._dynamic_range))
+        values = [SSIM._ssim(*pair, self._dynamic_range) for pair in self._pairs(output, targets) if pair is not None]
         if not values:
             return output.new_tensor(0.0), np.nan
         value = float(np.mean(values))
         return output.new_tensor(value), value
+
+    def partial_metric(
+        self, output: torch.Tensor, *targets: torch.Tensor, core: tuple[slice, ...] | None = None
+    ) -> Any:
+        """Each batch item's map sum and count over ``core`` (the whole patch when ``None``), in
+        the ``items`` form ``MaskedLoss.combine_metric`` finishes per item and averages."""
+        items = []
+        for pair in self._pairs(output, targets):
+            if pair is None:
+                items.append((0.0, 0, False))
+            else:
+                items.append((*SSIM._map_sum_over(*pair, self._dynamic_range, core), True))
+        return ("items", items)
+
+    def _finish(self, total: float, count: int) -> float:
+        if count == 0:
+            raise MeasureError(f"SSIM needs every spatial extent to be at least its {SSIM.window}-voxel window.")
+        return total / count
 
 
 class LPIPS(MaskedLoss):

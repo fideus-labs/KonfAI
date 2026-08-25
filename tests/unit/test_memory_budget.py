@@ -363,6 +363,58 @@ def _metric_sizing_budget(
     return captured["budget"]
 
 
+def _metric_sizing(monkeypatch: pytest.MonkeyPatch, shape: list[int], budget_bytes: int, halo: int) -> DataMetric:
+    """Drive DataMetric._maybe_auto_patch over a fake two-group case of ``shape`` with a real
+    sizing, the metrics' widest halo declared."""
+    data = DataMetric(memory_budget=f"{budget_bytes}b")
+    data.datasets = {
+        "f": SimpleNamespace(
+            select_names=lambda group, requested: ["case"], get_infos=lambda group, name: (shape, None)
+        )
+    }
+    monkeypatch.setattr(
+        DataMetric,
+        "_resolve_dataset_sources",
+        lambda self, requested=None: {"CT": [("f", False)], "sCT": [("f", False)]},
+        raising=False,
+    )
+    data.patch_halo = halo
+    data._maybe_auto_patch()
+    return data
+
+
+def test_eval_sizing_reserves_the_metrics_halo_on_each_face(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Two float32 groups of 64^3 at 24 B/voxel sized (resident + 2x intermediates): the READ is
+    # what fits, and the slot is the read less a halo on each face, so every patch a metric is
+    # handed, halo included, stays within the sizing.
+    budget_bytes = 2 * 2**20
+    plain = _metric_sizing(monkeypatch, [1, 64, 64, 64], budget_bytes, 0)
+    haloed = _metric_sizing(monkeypatch, [1, 64, 64, 64], budget_bytes, 3)
+
+    assert plain.patch is not None and haloed.patch is not None
+    assert plain.patch.halo == 0 and haloed.patch.halo == 3
+    assert haloed.patch.patch_size == [size - 6 for size in plain.patch.patch_size]
+    read = [size + 6 for size in haloed.patch.patch_size]
+    assert 3 * 2 * 4 * read[0] * read[1] * read[2] <= budget_bytes * 0.8
+
+
+def test_eval_sizing_spans_an_axis_too_thin_for_its_halo(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An isotropic cut leaves a 7-deep axis 5 or 6 deep: thinner than two halos of 3, so it is
+    # read whole and the other axes pay for it instead.
+    data = _metric_sizing(monkeypatch, [1, 7, 256, 256], 512 * 2**10, 3)
+
+    assert data.patch is not None
+    assert data.patch.patch_size[0] == 7
+    assert all(1 <= size < 256 - 6 for size in data.patch.patch_size[1:])
+
+
+def test_eval_sizing_refuses_a_budget_no_halo_patch_fits(monkeypatch: pytest.MonkeyPatch) -> None:
+    from konfai.utils.errors import DatasetManagerError
+
+    with pytest.raises(DatasetManagerError, match="halo"):
+        _metric_sizing(monkeypatch, [1, 64, 64, 64], 4096, 3)
+
+
 def test_eval_auto_budget_is_divided_by_the_local_ranks(monkeypatch: pytest.MonkeyPatch) -> None:
     # 4 ranks evaluating on one node share its RAM: each sizes its patch from a quarter of the
     # auto budget, or together they over-commit the host 4-fold.
@@ -558,6 +610,86 @@ def _build_predictor(root: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
     with strict_config("Predictor", refuse=False):
         return apply_config()(Predictor)()
+
+
+_HALO_EVALUATION = """Evaluator:
+  metrics:
+    sCT:
+      targets_criterions:
+        CT:
+          criterions_loader:
+            MAE:
+              reduction: mean
+            SSIM:
+              dynamic_range: 2.0
+  Dataset:
+    groups_src:
+      CT:
+        groups_dest:
+          CT:
+            transforms: None
+            patch_transforms: None
+            is_input: true
+      sCT:
+        groups_dest:
+          sCT:
+            transforms: None
+            patch_transforms: None
+            is_input: true
+    subset: None
+    validation: None
+    memory_budget: 40000b
+    dataset_filenames:
+      - __DATASET_DIR__:a:mha
+      - __PREDICTIONS_DATASET_DIR__:i:mha
+  train_name: HALO_01
+"""
+
+
+def test_a_halo_metric_no_longer_vetoes_the_patched_evaluation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SSIM beside MAE under a budget the case exceeds: the run takes the patched path, reading
+    each slot with SSIM's halo, where SSIM once kept the whole run on the whole-volume path."""
+    pytest.importorskip("SimpleITK")
+    import numpy as np
+    from konfai.evaluator import Evaluator
+    from konfai.utils.config import apply_config, strict_config
+    from konfai.utils.dataset import Attribute, Dataset
+    from konfai.utils.runtime import State, configure_workflow_environment
+
+    for key in _WORKFLOW_ENV:
+        monkeypatch.setenv(key, "sentinel")
+        monkeypatch.delenv(key)
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([0.0, 0.0, 0.0])
+    attributes["Spacing"] = np.asarray([1.0, 1.0, 1.0])
+    attributes["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
+    volume = np.random.default_rng(0).random((1, 12, 16, 16)).astype(np.float32)
+    Dataset(tmp_path / "Dataset", "mha").write("CT", "CASE_000", volume, attributes)
+    Dataset(tmp_path / "Predictions", "mha").write("sCT", "CASE_000", volume, attributes)
+    config = tmp_path / "Evaluation.yml"
+    config.write_text(
+        _HALO_EVALUATION.replace("__DATASET_DIR__", str(tmp_path / "Dataset")).replace(
+            "__PREDICTIONS_DATASET_DIR__", str(tmp_path / "Predictions")
+        ),
+        encoding="utf-8",
+    )
+    configure_workflow_environment(
+        config_path=config,
+        root="Evaluator",
+        state=State.EVALUATION,
+        path_env={"KONFAI_EVALUATIONS_DIRECTORY": tmp_path / "Evaluations"},
+    )
+    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+    with strict_config("Evaluator", refuse=False):
+        evaluator = apply_config()(Evaluator)()
+
+    assert evaluator.dataset.auto_patch_allowed
+    assert evaluator._streamed and evaluator._halo == 3
+    assert evaluator.dataset.patch is not None and evaluator.dataset.patch.halo == 3
+    # 2 groups x 12x16x16 float32 at 24 B/voxel against 32000 B: cut on every axis, the halo reserved.
+    assert all(
+        1 <= size < extent for size, extent in zip(evaluator.dataset.patch.patch_size, [12, 16, 16], strict=True)
+    )
 
 
 def test_a_declared_budget_bounds_the_chunk_cache_in_prediction_and_evaluation(

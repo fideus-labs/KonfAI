@@ -1818,9 +1818,10 @@ class DataMetric(Data):
     Evaluation never exposes a patch: each run sizes its own from ``memory_budget`` (a missing key
     means ``"auto"``): a case that fits the budget is evaluated whole (exact); one
     that does not is cut into the largest DISJOINT patches that fit (overlap 0, no padding) and the
-    reducible metrics combine their running partials into the exact whole-case value. The evaluator
-    disables this sizing when any of its metrics is not reducible, so a metric that needs the whole
-    volume always gets it.
+    reducible metrics combine their running partials into the exact whole-case value. A metric
+    scoring through a window declares a halo, and every patch is then read that much wider than its
+    slot. The evaluator disables this sizing when any of its metrics is not reducible, so a metric
+    that needs the whole volume always gets it.
     """
 
     # One pass: each case is read once, a cache is never re-read, always stream/buffer.
@@ -1834,6 +1835,9 @@ class DataMetric(Data):
     # The evaluator clears this when any of its metrics is not reducible: that metric needs whole
     # volumes, so the budget sizing must not cut the case.
     auto_patch_allowed = True
+    # The widest halo among the evaluator's metrics: the context every patch is read with past its
+    # slot, and what the sizing reserves on each face.
+    patch_halo = 0
 
     def _maybe_auto_patch(self) -> None:
         # An explicit patch or a non-reducible metric vetoes the sizing.
@@ -1862,24 +1866,45 @@ class DataMetric(Data):
             key=lambda name: channels_by_name[name] * int(np.prod(spatial_by_name[name], dtype=np.int64)),
         )
         budget = self.resolved_budget().per_rank_bytes(node_local_ranks())
-        sized = resolve_patch(
-            [0] * len(spatial_by_name[worst]),
-            spatial_by_name[worst],
-            channels_by_name[worst],
-            _CACHE_ELEMENT_BYTES,
-            budget,
-            resident_images=1,
-            intermediate_factor=DataMetric._METRIC_INTERMEDIATE_FACTOR,
-        )
-        if sized == spatial_by_name[worst]:
+        extent = spatial_by_name[worst]
+        halo = self.patch_halo
+        # What the budget bounds is the READ: a slot plus the halo past each face. Sized as one
+        # patch; an axis the budget cuts thinner than its two halos is spanned whole instead, since
+        # the halo there would cost more than the axis, and the other axes absorb it.
+        template = [0] * len(extent)
+        while True:
+            sized = resolve_patch(
+                template,
+                extent,
+                channels_by_name[worst],
+                _CACHE_ELEMENT_BYTES,
+                budget,
+                resident_images=1,
+                intermediate_factor=DataMetric._METRIC_INTERMEDIATE_FACTOR,
+            )
+            thin = [d for d, size in enumerate(sized) if template[d] == 0 and size < extent[d] and size <= 2 * halo]
+            if not thin:
+                break
+            for d in thin:
+                template[d] = extent[d]
+        if all(template):
+            raise DatasetManagerError(
+                f"The memory budget cannot hold a patch of '{worst}' ({channels_by_name[worst]}ch x {extent}) "
+                f"with the {halo}-voxel halo its metrics read past each face.",
+                "Raise 'memory_budget'.",
+            )
+        if sized == extent:
             return  # every case fits whole: the exact whole-volume path
-        patch = DatasetPatch(patch_size=sized, overlap=0)
+        core = [size - 2 * halo if size < axis else size for size, axis in zip(sized, extent, strict=True)]
+        patch = DatasetPatch(patch_size=core, overlap=0)
         patch.pad_to_patch = False  # reduced, not modelled: only in-volume voxels may reach the sums
+        patch.halo = halo
         self.patch = patch
+        read = f" read with a halo of {halo} ({sized} resident)" if halo else ""
         print(
             f"[KonfAI] memory_budget: worst case '{worst}' "
-            f"({channels_by_name[worst]}ch x {spatial_by_name[worst]}) exceeds the budget -> "
-            f"evaluating in disjoint patches of {sized} (overlap 0), metrics combined exactly."
+            f"({channels_by_name[worst]}ch x {extent}) exceeds the budget -> "
+            f"evaluating in disjoint patches of {core} (overlap 0){read}, metrics combined exactly."
         )
 
     def prepare(self) -> None:

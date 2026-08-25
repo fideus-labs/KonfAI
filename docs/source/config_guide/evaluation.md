@@ -81,13 +81,23 @@ Evaluation bounds itself by default: an absent `memory_budget` means `auto`
 fits the budget is evaluated whole, and a case that does not is cut into the largest
 DISJOINT patches that fit. Metrics accumulate running partial sums per patch and
 combine them into the exact whole-case value (never a mean of per-patch values).
-MAE, MSE, ME, PSNR and Dice (masked or not) support this, and the SaveMap
+MAE, MSE, ME, PSNR, SSIM and Dice (masked or not) support this, and the SaveMap
 error maps stream region by region into their `dataset` (mha, h5 or omezarr). One
 caveat on the first two: `MAE` and `MSE` are reducible only for `reduction: mean` or
 `sum`, so a `reduction: none` on either forces the whole-volume path for the whole
 run, by the same rule as a non-reducible metric below.
-One metric that cannot recombine (SSIM, LPIPS, or any custom metric that does
-not declare `reducible`) keeps the whole-volume path for the entire run: correct
+
+A metric that scores each voxel through a window declares the window's radius as
+its `halo`, and the reader serves it: SSIM (7-voxel window) declares 3, so every
+patch is read 3 voxels past each face of its slot, clamped at the volume's faces,
+and the sizing counts that band in the budget. SSIM sums the map voxels centred
+in the slot, which is exactly the whole-volume map's share of it (the whole-volume
+map is cropped by the same radius at the faces); the metrics without a halo see
+the slot alone, so their values are the ones they had without SSIM in the run.
+A custom metric declares `halo` beside `reducible` and receives `core=` in
+`partial_metric`, the slot's slices within the patch it is handed.
+One metric that cannot recombine (LPIPS, or any custom metric that does not
+declare `reducible`) keeps the whole-volume path for the entire run: correct
 beats bounded. Evaluation streams its data whatever the budget says, one pass,
 a cache is never re-read; in training the same budget also picks cache versus
 streaming.

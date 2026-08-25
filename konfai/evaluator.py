@@ -303,18 +303,19 @@ class Evaluator(DistributedObject):
         self.statistics_validation = Statistics(self.metric_path / "Metric_VALIDATION.json")
         # A memory budget may patch the evaluation, but only when EVERY metric can rebuild its
         # whole-case value from partial states; one non-reducible metric keeps the whole-volume path
-        # for everything (correct beats bounded).
-        self.dataset.auto_patch_allowed = all(
-            getattr(metric, "reducible", False)
-            for targets in self.metrics.values()
-            for criterions in targets.values()
-            for metric in criterions
-        )
+        # for everything (correct beats bounded). A metric scoring through a window declares the
+        # halo its patches are read with, and the widest one is read for all.
+        criterions = [metric for targets in self.metrics.values() for group in targets.values() for metric in group]
+        self.dataset.auto_patch_allowed = all(getattr(metric, "reducible", False) for metric in criterions)
+        self.dataset.patch_halo = max((int(getattr(metric, "halo", 0)) for metric in criterions), default=0)
         self.dataset.prepare()
         set_chunk_cache_budget(self.dataset.resolved_budget().per_rank_bytes(node_local_ranks()))
         # Set iff the budget actually patched: batches then carry one disjoint patch of a case, and
         # update() accumulates partial states until the case's last patch before recording it.
         self._streamed = self.dataset.patch is not None
+        # The context each patch is read with past its slot, when the grid reads any: a metric that
+        # declared it is handed the read and told where the slot sits, the others the slot alone.
+        self._halo = self.dataset.patch.halo if self.dataset.patch is not None else 0
         self._pending: dict[tuple[str, str, int], tuple] = {}
         self._pending_name: str | None = None
         self._last_result: dict[str, float] = {}
@@ -502,16 +503,22 @@ class Evaluator(DistributedObject):
         moved = self._groups_on(batch_sample)
         for output_group in self.metrics:
             output_tensor = moved[output_group]
+            core = self._core_in_read(output_group, batch_sample[output_group])
             for target_group in self.metrics[output_group]:
                 targets = [moved[group] for group in target_group.split(";") if group in batch_sample]
+                tensors = [output_tensor, *targets]
+                cored = tensors if core is None else [t[(slice(None), slice(None), *core)] for t in tensors]
                 for index, metric in enumerate(self.metrics[output_group][target_group]):
+                    reads_halo = core is not None and int(getattr(metric, "halo", 0)) > 0
                     with self._clock.phase(metric.get_name()), torch.no_grad():
-                        state = metric.partial_metric(output_tensor, *targets)
+                        state = (
+                            metric.partial_metric(*tensors, core=core) if reads_halo else metric.partial_metric(*cored)
+                        )
                     entry = self._pending.setdefault((output_group, target_group, index), (metric, []))
                     entry[1].append(state)
                     if getattr(metric, "dataset", None) and hasattr(metric, "partial_map"):
                         with self._clock.phase(metric.get_name()), torch.no_grad():
-                            patch_map = metric.partial_map(output_tensor, *targets).squeeze(0)
+                            patch_map = metric.partial_map(*cored).squeeze(0)
                         with self._clock.phase("map"):
                             self._write_map_patch(
                                 (output_group, target_group, index),
@@ -521,6 +528,18 @@ class Evaluator(DistributedObject):
                                 patch_map,
                             )
         return self._last_result
+
+    def _manager(self, output_group: str, item: BatchDataItem):
+        """The manager whose grid cut the patch ``item`` carries."""
+        if self._iter_dataset is None:
+            raise EvaluatorError("Internal error: the streamed evaluation loop has no dataset iterator.")
+        return self._iter_dataset.get_dataset_from_index(output_group, int(item.x[0]))
+
+    def _core_in_read(self, output_group: str, item: BatchDataItem) -> tuple[slice, ...] | None:
+        """Where the patch's slot sits within its tensors; ``None`` when the grid reads no halo."""
+        if not self._halo:
+            return None
+        return self._manager(output_group, item).patch.core_in_read(int(item.a[0]), int(item.p[0]))
 
     def _write_map_patch(
         self,
@@ -535,9 +554,7 @@ class Evaluator(DistributedObject):
         ``partial_map`` is voxel-local, so the patch's map is exactly the region of the whole-case
         map; the disjoint unpadded evaluation grid writes every voxel once, never twice.
         """
-        if self._iter_dataset is None:
-            raise EvaluatorError("Internal error: the streamed evaluation loop has no dataset iterator.")
-        manager = self._iter_dataset.get_dataset_from_index(output_group, int(item.x[0]))
+        manager = self._manager(output_group, item)
         array = patch_map.numpy()
         sink = self._map_sinks.get(key)
         if sink is None:

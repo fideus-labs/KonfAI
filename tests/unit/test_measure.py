@@ -851,3 +851,71 @@ def test_fid_builds_on_cpu_and_follows_the_input_device():
 
     metric = FID()
     assert next(metric.inception_model.parameters()).device.type == "cpu"
+
+
+class TestSSIMFromHaloPatches:
+    """SSIM is reducible from patches read with the window's radius of halo, each scoring the map
+    voxels centred in its own grid slot: the streamed sum equals the whole-volume sum to float64
+    summation order, including the slots at the volume's faces, where the halo is cut short and the
+    whole-volume map is cropped the same."""
+
+    @staticmethod
+    def _grid(shape: tuple[int, ...], patch: list[int]) -> list[tuple[slice, ...]]:
+        from konfai.utils.utils import get_patch_slices_from_shape
+
+        return get_patch_slices_from_shape(patch, list(shape), 0)[0]
+
+    @staticmethod
+    def _streamed(metric: SSIM, tensors: list[torch.Tensor], patch: list[int]) -> float:
+        shape = tuple(tensors[0].shape[2:])
+        states = []
+        for slot in TestSSIMFromHaloPatches._grid(shape, patch):
+            read = tuple(
+                slice(max(0, s.start - metric.halo), min(extent, s.stop + metric.halo))
+                for s, extent in zip(slot, shape, strict=True)
+            )
+            core = tuple(slice(s.start - r.start, s.stop - r.start) for s, r in zip(slot, read, strict=True))
+            states.append(metric.partial_metric(*[t[(slice(None), slice(None), *read)] for t in tensors], core=core))
+        return metric.combine_metric(states)[1]
+
+    def test_declares_its_window_radius_as_halo(self):
+        assert SSIM.reducible and SSIM.halo == 3
+
+    @pytest.mark.parametrize("masked", [False, True])
+    @pytest.mark.parametrize(
+        ("shape", "patch"), [((37, 29), [16, 13]), ((19, 23, 17), [8, 8, 8]), ((19, 23, 17), [5, 23, 7])]
+    )
+    def test_halo_patches_reproduce_the_whole_volume(self, shape, patch, masked):
+        # Every grid here leaves a partial slot on some axis; [5, 23, 7] also spans an axis whole.
+        rng = np.random.default_rng(2)
+        x = torch.tensor(rng.normal(size=(1, 2, *shape)).astype(np.float32) * 500)
+        y = x + torch.tensor(rng.normal(size=x.shape).astype(np.float32) * 100)
+        tensors = [x, y]
+        if masked:
+            tensors.append(torch.tensor((rng.random((1, 1, *shape)) > 0.4).astype(np.uint8)))
+        metric = SSIM(dynamic_range=4095.0)
+        whole = metric(*tensors)[1]
+
+        assert self._streamed(metric, tensors, patch) == pytest.approx(whole, rel=1e-9)
+
+    def test_a_slot_without_a_valid_centre_contributes_nothing(self):
+        # A read too thin for the window (a 2-wide slot at a face, read 5 wide) has no map voxel of
+        # its own: an empty state, never an error, the whole volume's map lies in the other slots.
+        x, y = torch.rand(1, 1, 12, 12), torch.rand(1, 1, 12, 12)
+        metric = SSIM(dynamic_range=1.0)
+        thin = metric.partial_metric(x[..., :5, :], y[..., :5, :], core=(slice(0, 2), slice(0, 12)))
+        rest = metric.partial_metric(x[..., 0:, :], y[..., 0:, :], core=(slice(2, 12), slice(0, 12)))
+
+        assert thin == ("items", [(0.0, 0, True)])
+        assert metric.combine_metric([thin, rest])[1] == pytest.approx(metric(x, y)[1], rel=1e-12)
+
+    def test_an_empty_mask_item_is_skipped_as_the_whole_volume_skips_it(self):
+        x, y = torch.rand(2, 1, 9, 9), torch.rand(2, 1, 9, 9)
+        mask = torch.ones(2, 1, 9, 9, dtype=torch.uint8)
+        mask[1] = 0
+        metric = SSIM(dynamic_range=1.0)
+        states = [metric.partial_metric(x[..., :7], y[..., :7], mask[..., :7], core=(slice(0, 9), slice(0, 4)))]
+        states.append(metric.partial_metric(x[..., 1:], y[..., 1:], mask[..., 1:], core=(slice(0, 9), slice(3, 8))))
+
+        assert metric.combine_metric(states)[1] == pytest.approx(metric(x, y, mask)[1], rel=1e-12)
+        assert np.isnan(metric.combine_metric([metric.partial_metric(x, y, torch.zeros_like(mask))])[1])

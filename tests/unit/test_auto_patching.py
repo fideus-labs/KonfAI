@@ -24,6 +24,8 @@ single patch spans.
 
 import numpy as np
 import pytest
+import torch
+from konfai.data.patching import DatasetPatch
 from konfai.utils.errors import ConfigError
 from konfai.utils.utils import (
     concretize_patch_size,
@@ -347,3 +349,53 @@ class TestMetricReductionContract:
 
         with pytest.raises(NotImplementedError, match="not reducible"):
             GradientImages().partial_metric(torch.rand(1, 1, 4, 4, 4))
+
+
+class TestHaloGrid:
+    """A grid patch read with a halo: the slot widened by the halo, clamped at the volume's faces,
+    and the slot's place within that read."""
+
+    @staticmethod
+    def _grid(halo: int) -> DatasetPatch:
+        patch = DatasetPatch(patch_size=[8, 8], overlap=0)
+        patch.pad_to_patch = False
+        patch.halo = halo
+        patch.load([20, 13], 0)
+        return patch
+
+    def test_reads_widen_by_the_halo_and_stop_at_the_faces(self):
+        patch = self._grid(3)
+        slots = patch.get_patch_slices(0)
+        assert slots[0] == (slice(0, 8), slice(0, 8)) and slots[-1] == (slice(16, 20), slice(8, 13))
+
+        assert patch.read_slices(0, 0, [20, 13]) == [slice(0, 11), slice(0, 11)]
+        assert patch.read_slices(0, slots.index((slice(8, 16), slice(0, 8))), [2, 20, 13]) == [
+            slice(5, 19),
+            slice(0, 11),
+        ]
+        assert patch.read_slices(0, len(slots) - 1, [20, 13]) == [slice(13, 20), slice(5, 13)]
+
+    def test_the_core_sits_a_halo_in_except_at_a_face(self):
+        patch = self._grid(3)
+        slots = patch.get_patch_slices(0)
+
+        assert patch.core_in_read(0, 0) == (slice(0, 8), slice(0, 8))
+        assert patch.core_in_read(0, slots.index((slice(8, 16), slice(8, 13)))) == (slice(3, 11), slice(3, 8))
+        assert patch.core_in_read(0, len(slots) - 1) == (slice(3, 7), slice(3, 8))
+
+    def test_the_read_plan_and_get_data_serve_the_widened_region(self):
+        patch = self._grid(2)
+        data = torch.arange(2 * 20 * 13, dtype=torch.float32).view(2, 20, 13)
+        index = patch.get_patch_slices(0).index((slice(8, 16), slice(8, 13)))
+
+        plan = patch.get_read_plan(data.shape, index, 0, is_input=True)
+        assert plan.data_slices == (slice(None), slice(6, 18), slice(6, 13))
+        torch.testing.assert_close(patch.get_data(data, index, 0, True), data[:, 6:18, 6:13])
+        core = patch.core_in_read(0, index)
+        torch.testing.assert_close(patch.get_data(data, index, 0, True)[(slice(None), *core)], data[:, 8:16, 8:13])
+
+    def test_without_a_halo_the_read_is_the_slot(self):
+        patch = self._grid(0)
+        for index, slot in enumerate(patch.get_patch_slices(0)):
+            assert patch.read_slices(0, index, [20, 13]) == list(slot)
+            assert patch.core_in_read(0, index) == tuple(slice(0, s.stop - s.start) for s in slot)
