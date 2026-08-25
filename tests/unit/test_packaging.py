@@ -17,8 +17,11 @@
 """Packaging and public-API surface: clean imports (with and without optional deps),
 error-type message formatting, and wheel package discovery."""
 
+import json
+import os
 import subprocess
 import sys
+import sysconfig
 import zipfile
 from pathlib import Path
 
@@ -203,28 +206,34 @@ def test_konfai_models_have_no_init_and_need_namespace_discovery() -> None:
 # --------------------------------------------------------------------------- #
 # The built wheel ships the PEP 420 model zoo, the YAML catalog, and nothing else.
 # --------------------------------------------------------------------------- #
-@pytest.mark.slow
-def test_wheel_ships_model_zoo_and_catalog(tmp_path: Path) -> None:
-    """Build a real wheel and inspect it: an editable install hides PEP 420 and
-    package-data breakage, so only the built artifact proves the packaging contract."""
+@pytest.fixture(scope="module")
+def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One wheel built from the source tree, shared by the tests that inspect and install it."""
     pytest.importorskip("build")
     # --no-isolation builds offline, so every declared build requirement must be importable.
     pytest.importorskip("setuptools")
     pytest.importorskip("wheel")
     pytest.importorskip("setuptools_scm")
 
+    outdir = tmp_path_factory.mktemp("wheel")
     result = subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(tmp_path)],
+        [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(outdir)],
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
         timeout=600,
     )
     assert result.returncode == 0, f"wheel build failed:\n{result.stdout}\n{result.stderr}"
-    wheels = list(tmp_path.glob("*.whl"))
+    wheels = list(outdir.glob("*.whl"))
     assert len(wheels) == 1, wheels
+    return wheels[0]
 
-    with zipfile.ZipFile(wheels[0]) as archive:
+
+@pytest.mark.slow
+def test_wheel_ships_model_zoo_and_catalog(built_wheel: Path) -> None:
+    """Inspect the built wheel: an editable install hides PEP 420 and package-data
+    breakage, so only the built artifact proves the packaging contract."""
+    with zipfile.ZipFile(built_wheel) as archive:
         names = set(archive.namelist())
 
     # Expected contents derive from the source tree, so a catalog addition never fails this test.
@@ -246,3 +255,87 @@ def test_wheel_ships_model_zoo_and_catalog(tmp_path: Path) -> None:
     # __init__.py in the wheel would mean package discovery regressed.
     assert "konfai/models/__init__.py" not in names
     assert "konfai/models/python/__init__.py" not in names
+
+
+def _venv_binary(venv_dir: Path, name: str) -> Path:
+    """The path of an executable inside a venv, on either layout."""
+    if os.name == "nt":
+        return venv_dir / "Scripts" / f"{name}.exe"
+    return venv_dir / "bin" / name
+
+
+@pytest.mark.slow
+def test_the_installed_wheel_imports_the_model_zoo_and_runs_the_cli(built_wheel: Path, tmp_path: Path) -> None:
+    """Install the wheel NON-editable and use it: an archive holding the files does not prove the
+    installed distribution imports them. ``konfai.models.python`` is a PEP 420 namespace package,
+    the catalog is package-data and ``konfai`` is a console script, and an editable install resolves
+    all three through the source tree whatever the wheel contains (AGENTS.md 7d).
+
+    The venv is built without the host's packages, so ``konfai`` can only come from the wheel; the
+    runtime dependencies are appended to its ``sys.path`` through a ``.pth`` file, which adds the
+    path without running the host's own ``.pth`` files -- one of which installs the editable
+    ``konfai`` finder that would shadow the installed package.
+    """
+    venv_dir = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, capture_output=True, timeout=300)
+    python = _venv_binary(venv_dir, "python")
+    # PYTHONPATH, and the working directory both python -c and the CLI put on sys.path, would offer
+    # the source tree in front of the installed package: the very thing this test exists to bypass.
+    # tmp_path holds only the venv, so nothing there answers to "konfai".
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+
+    installed = subprocess.run(
+        [str(python), "-m", "pip", "install", "--no-deps", "--no-index", str(built_wheel)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env=env,
+    )
+    assert installed.returncode == 0, f"wheel install failed:\n{installed.stdout}\n{installed.stderr}"
+
+    site_packages = subprocess.run(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+        env=env,
+        cwd=tmp_path,
+    ).stdout.strip()
+    (Path(site_packages) / "_runtime_dependencies.pth").write_text(
+        f"{sysconfig.get_paths()['purelib']}\n", encoding="utf-8"
+    )
+
+    probe = """
+import json, sys
+from pathlib import Path
+import konfai, konfai.models.python
+
+prefix = Path(sys.prefix).resolve()
+package = Path(konfai.__file__).resolve().parent
+assert package.is_relative_to(prefix), f"konfai resolved outside the venv: {package}"
+zoo = [Path(entry).resolve() for entry in konfai.models.python.__path__]
+assert zoo and all(entry.is_relative_to(prefix) for entry in zoo), zoo
+print(json.dumps(sorted(path.name for path in (package / "models" / "yaml").glob("*.yml"))))
+"""
+    result = subprocess.run(
+        [str(python), "-c", probe], capture_output=True, text=True, timeout=300, env=env, cwd=tmp_path
+    )
+    assert result.returncode == 0, f"the installed package does not import:\n{result.stdout}\n{result.stderr}"
+    catalog = json.loads(result.stdout.strip().splitlines()[-1])
+    assert catalog == sorted(path.name for path in (_REPO_ROOT / "konfai" / "models" / "yaml").glob("*.yml"))
+
+    cli = _venv_binary(venv_dir, "konfai")
+    assert cli.exists(), f"the wheel installs no 'konfai' console script: {sorted(cli.parent.iterdir())}"
+    version = subprocess.run(
+        [str(cli), "--version"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+        cwd=tmp_path,
+    )
+    assert version.returncode == 0, f"konfai --version failed:\n{version.stdout}\n{version.stderr}"
+    # The wheel's file name carries the version its metadata was built with: the CLI reading the same
+    # one proves it reports the installed distribution and not another konfai on the path.
+    assert version.stdout.strip() == built_wheel.name.split("-")[1]

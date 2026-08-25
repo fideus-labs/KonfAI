@@ -23,12 +23,13 @@ keys), and the config env-var bookkeeping.
 
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Literal
 
 import pytest
 import ruamel.yaml
-from konfai.utils.config import Config, apply_config, config, strict_config
+from konfai.utils.config import Config, _load_tree, _write_tree, apply_config, config, strict_config
 from konfai.utils.errors import ConfigError
 
 
@@ -564,6 +565,60 @@ def test_config_write_back_retries_a_denied_rename_and_never_writes_in_place(wri
     with pytest.raises(ConfigError, match="atomically"):
         apply_config("Root")(Root)()
     assert config_path.read_text(encoding="utf-8") == before  # the file was left unchanged
+    assert list(config_path.parent.glob("*.tmp")) == []
+
+
+def test_a_reader_never_sees_the_config_a_writer_is_replacing(write_config) -> None:
+    """A run rewrites the config it read while an independent launch may be reading it: that reader
+    must see the whole old document or the whole new one. The write is temp + ``os.replace``, so the
+    two never overlap; an in-place rewrite would hand the reader a truncated document, and every key
+    it lost would silently bind its default.
+
+    The document is padded to ~70 KB because that is what makes the failure visible: an in-place
+    rewrite of a two-line file is nearly instantaneous, and the race would be missed.
+    """
+    config_path = write_config("Root:\n  count: 1\n")
+    padding = {f"key_{index}": "v" * 256 for index in range(256)}
+    trees = [{"Root": {"count": count, **padding}} for count in (1, 2)]
+    _write_tree(config_path, trees[0])
+
+    done = threading.Event()
+    observed: list[str] = []
+    reads = 0
+
+    def rewrite() -> None:
+        try:
+            for index in range(20):
+                _write_tree(config_path, trees[index % 2])
+        except ConfigError:
+            # Windows denies os.replace while a reader holds the target; the retry loop and its
+            # refusal are pinned above. Here the reader's observation is what matters.
+            pass
+        finally:
+            done.set()
+
+    def reread() -> None:
+        nonlocal reads
+        while not done.is_set():
+            try:
+                root = _load_tree(config_path).get("Root", {})
+            except ConfigError as error:  # a truncated document is not YAML the loader accepts
+                observed.append(f"unreadable: {error}")
+                return
+            if root.get("count") not in (1, 2) or len(root) != len(padding) + 1:
+                observed.append(f"partial: count={root.get('count')!r}, {len(root)} keys")
+                return
+            reads += 1
+
+    writer, reader = threading.Thread(target=rewrite), threading.Thread(target=reread)
+    reader.start()
+    writer.start()
+    writer.join(timeout=60)
+    reader.join(timeout=60)
+
+    assert observed == []
+    assert reads > 1, "the reader read nothing while the writer ran, so it observed nothing"
+    assert not writer.is_alive() and not reader.is_alive()
     assert list(config_path.parent.glob("*.tmp")) == []
 
 

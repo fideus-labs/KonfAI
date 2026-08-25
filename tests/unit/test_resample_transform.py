@@ -20,6 +20,9 @@ The fixture is high-frequency and its direction cosines are oblique, because a s
 an axis-aligned grid passes a map that is wrong in exactly the ways this stage can be wrong.
 """
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -31,6 +34,7 @@ sitk = pytest.importorskip("SimpleITK")
 
 SIZE = (22, 28, 34)
 CASE = "CASE_000"
+GOLDEN = Path(__file__).resolve().parents[1] / "assets" / "golden" / "resample.npz"
 
 
 def _phantom() -> np.ndarray:
@@ -121,6 +125,57 @@ def _stage(image, transform, **kwargs) -> Resample:
 
 DEVICES = [torch.device("cpu")] + ([torch.device("cuda")] if torch.cuda.is_available() else [])
 DEVICE_IDS = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+
+
+def _label_map() -> np.ndarray:
+    """The phantom as a label map: six bands of the same field, one integer per band."""
+    return (np.digitize(_phantom(), np.linspace(-200.0, 200.0, 6)) * 7).astype(np.uint16)
+
+
+def _golden_resamples() -> dict[str, np.ndarray]:
+    """Every case the golden fixture pins: the oblique phantom, as intensities and as a label map,
+    through a stored rigid and a stored affine, on the host's exact route."""
+    image = _image(oblique=True)
+    attribute = _attribute(image)
+    resampled = {}
+    for map_name, transform in (("euler", _euler(image)), ("affine", _affine(image))):
+        for dtype_name, volume, interpolation in (
+            ("float32", _phantom(), "linear"),
+            ("uint16", _label_map(), "nearest"),
+        ):
+            stage = _stage(image, transform, interpolation=interpolation)
+            output = stage(CASE, torch.from_numpy(volume).unsqueeze(0), Attribute(attribute))
+            resampled[f"{map_name}_{dtype_name}"] = output.squeeze(0).numpy()
+    return resampled
+
+
+def test_a_stored_resample_reproduces_its_golden_output() -> None:
+    """The values this stage produced when the fixture was stored, on the CPU's exact route.
+
+    The oracle tests above compare against SimpleITK, so they move with it; this one holds the
+    numbers still across releases of KonfAI and of its dependencies. A label map through nearest
+    must come back voxel-identical: nearest picks source voxels, so a coordinate walk that moved by
+    a fraction of a voxel returns another label. Intensities through linear are held to 1e-6
+    relative, the band the interpolation's last bits live in.
+
+    A deliberate value change regenerates the fixture and states the deviation in the commit:
+        python tests/unit/test_resample_transform.py --regenerate
+    """
+    assert GOLDEN.is_file(), f"the golden fixture is missing; regenerate it: {GOLDEN}"
+    with np.load(GOLDEN) as stored:
+        golden = dict(stored)
+    produced = _golden_resamples()
+    assert sorted(produced) == sorted(golden)
+
+    for key, want in golden.items():
+        got = produced[key]
+        assert got.dtype == want.dtype and got.shape == want.shape, key
+        if want.dtype == np.uint16:
+            moved = int(np.count_nonzero(got != want))
+            assert moved == 0, f"{key}: {moved} of {want.size} labels moved"
+        else:
+            deviation = float(np.abs(got.astype(np.float64) - want.astype(np.float64)).max())
+            assert deviation <= 1e-6 * float(np.abs(want).max()), f"{key}: {deviation:.4g}"
 
 
 @pytest.mark.parametrize("oblique", [False, True], ids=["axis-aligned", "oblique"])
@@ -607,3 +662,11 @@ class TestTheHostRouteReusesItsInputImage:
         assert stage._sitk_input._image is None
         stage(CASE, volume, Attribute(attribute))
         assert stage._sitk_input._image is None
+
+
+if __name__ == "__main__":  # the golden fixture's regeneration entry point
+    if sys.argv[1:] != ["--regenerate"]:
+        raise SystemExit(f"usage: python {Path(__file__).name} --regenerate")
+    GOLDEN.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(GOLDEN, **_golden_resamples())
+    print(f"wrote {GOLDEN} ({GOLDEN.stat().st_size / 1024:.0f} KiB)")

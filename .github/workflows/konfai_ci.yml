@@ -123,9 +123,10 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build --sdist --wheel
 
-      - name: Verify the wheel ships the model catalog and no sibling package
-        # The wheel contract lives in one place: the slow test builds its own wheel and checks it
-        # against the source tree (the test job's editable install hides PEP 420/package-data breakage).
+      - name: Verify the wheel ships and installs the model catalog and the CLI
+        # The wheel contract lives in one place: the slow tests build their own wheel, check it
+        # against the source tree and install it NON-editable in a fresh venv (the test job's
+        # editable install hides PEP 420/package-data breakage).
         run: pytest tests/unit/test_packaging.py -m slow
 
       - name: Upload wheel artifact
