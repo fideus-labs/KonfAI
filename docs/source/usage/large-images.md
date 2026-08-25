@@ -89,7 +89,13 @@ The generator only calls `get_infos()` and `read_data_slice()`, never
    forward passes.
 5. `num_workers` up until storage or CPU preprocessing saturates.
 6. `pin_memory: true` then measure; it locks host memory and is not always
-   faster.
+   faster. It buys the upload a real DMA: a 32 MiB `int64` target reaches the
+   device in 1.1 ms instead of 2.9 ms of compute-stream time. The epoch rarely
+   follows, because the step is bound by the device, not by the copy. On eight
+   `256³` cases, `128³` patches, batch 2, streamed over four workers, the median
+   epoch went 5.2 s to 5.1 s, inside a 4.9 to 5.5 s spread, for 430 MiB more
+   resident and page-locked; with the dataset cached in RAM the loader pins
+   inline and the epoch did not move at all (4.2 s either way).
 7. `prefetch_factor` only with worker processes, and count the extra batches in
    RAM.
 

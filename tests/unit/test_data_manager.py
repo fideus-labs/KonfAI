@@ -29,6 +29,7 @@ import pytest
 import torch
 from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
 from konfai.data.data_manager import (
+    BatchDataItem,
     Data,
     DataPrediction,
     DatasetIter,
@@ -45,6 +46,7 @@ from konfai.data.transform import TensorCast, Transform, TransformLoader
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.runtime import State, restart_startup_clock
 from konfai.utils.utils import split_path_spec
+from torch.utils.data._utils.pin_memory import pin_memory as torch_pin_memory
 
 # --------------------------------------------------------------------------------------
 # Data._split. TRAIN/RESUME shards must be equal length to avoid a DDP hang
@@ -939,6 +941,34 @@ def test_data_prediction_disables_workers_for_konfai_inference_transforms() -> N
     assert dataset.dataLoader_args["num_workers"] == 0
     assert "prefetch_factor" not in dataset.dataLoader_args
     assert "persistent_workers" not in dataset.dataLoader_args
+
+
+def test_pin_memory_reaches_the_batch_tensor() -> None:
+    # ``torch_pin_memory`` is what both DataLoader iterators call on a collated batch; it hands
+    # back untouched anything that is neither a tensor, a mapping nor a sequence. A recording
+    # subclass stands in for the pinned tensor so the contract holds without a CUDA device.
+    pinned: list[torch.Tensor] = []
+
+    class Recording(torch.Tensor):
+        def pin_memory(self, *args: object, **kwargs: object) -> "Recording":
+            pinned.append(self)
+            return self
+
+    item = BatchDataItem(
+        name=["case"],
+        tensor=torch.zeros(1, 2, 2).as_subclass(Recording),
+        attribute=[Attribute()],
+        x=[0],
+        a=[0],
+        p=[0],
+        is_input=True,
+    )
+
+    batch = torch_pin_memory({"CT": item})
+
+    assert pinned, "pin_memory: true never reached the batch's tensor"
+    assert batch["CT"].name == ["case"]
+    assert batch["CT"].is_input is True
 
 
 # --------------------------------------------------------------------------------------

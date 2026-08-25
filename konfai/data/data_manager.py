@@ -25,7 +25,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import TypeAlias, cast
@@ -493,6 +493,15 @@ class BatchDataItem:
     a: list[int]
     p: list[int]
     is_input: bool
+
+    def pin_memory(self) -> "BatchDataItem":
+        """The batch with its tensor in page-locked memory, so the upload is a real DMA.
+
+        ``torch``'s pinner walks tensors, mappings and sequences and hands anything else back
+        untouched: without this method ``pin_memory: true`` reaches nothing and every upload
+        stays a pageable copy the host has to wait for.
+        """
+        return replace(self, tensor=self.tensor.pin_memory())
 
 
 Sample: TypeAlias = dict[str, DataItem]
