@@ -80,7 +80,15 @@ The generator only calls `get_infos()` and `read_data_slice()`, never
 ## Tune in this order
 
 1. `memory_budget` first: `auto` decides from the dataset's size, an explicit
-   value below it forces streaming.
+   value below it forces streaming. Give it as much as the machine can spare:
+   the budget buys read locality, and a region that shrinks re-reads and
+   re-decodes chunks a taller one would have read once. On a 513x1331x1776
+   uint16 OME-Zarr resampled on one GPU, the whole run costs 5.0 s at 4 GiB,
+   10.9 s at 1 GiB, 22.8 s at 512 MiB and 49.1 s at 256 MiB, and the whole
+   difference is the wait on reads (0.2 s to 42.6 s); the chain itself stays
+   between 3.1 and 4.6 s. A budget pays where reading costs, so it pays most on
+   a compressed, remote or cache-cold store, and least on a small dataset the
+   operating system already holds in its page cache.
 2. `patch_size`: leave an axis at `0` and KonfAI sizes it, taking the whole
    volume when it fits and shrinking on OOM. Otherwise pin the largest size your
    model and context need.
