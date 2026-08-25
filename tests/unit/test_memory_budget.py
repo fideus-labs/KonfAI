@@ -409,9 +409,11 @@ def test_eval_sizing_spans_an_axis_too_thin_for_its_halo(monkeypatch: pytest.Mon
 
 
 def test_eval_sizing_refuses_a_budget_no_halo_patch_fits(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Its remedy is "raise memory_budget", so the refusal names the budget it broke, not only the
+    # case it could not hold: without the figure the reader has to go and find what it was.
     from konfai.utils.errors import DatasetManagerError
 
-    with pytest.raises(DatasetManagerError, match="halo"):
+    with pytest.raises(DatasetManagerError, match=r"budget \(4\.00 KiB\).+halo"):
         _metric_sizing(monkeypatch, [1, 64, 64, 64], 4096, 3)
 
 

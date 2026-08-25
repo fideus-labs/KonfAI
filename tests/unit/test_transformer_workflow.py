@@ -1036,6 +1036,29 @@ def test_on_fallback_error_holds_at_run_time_too(tmp_path: Path, monkeypatch: py
     assert not Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "CASE_000")
 
 
+def test_a_run_time_fallback_refusal_names_the_budget_it_broke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its remedy is 'raise memory_budget', so the refusal must say what the case needs AND what
+    the budget grants: with only the first figure the reader has to go and find the second."""
+    from konfai.data.patching import DatasetManager
+
+    _write_source(tmp_path)
+    config_path = _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"))
+    config_path.write_text(config_path.read_text().replace("memory_budget: auto", "memory_budget: 1KiB"))
+    workflow = _build(tmp_path)
+    workflow.setup(1)
+    monkeypatch.setattr(
+        DatasetManager,
+        "_materialize_save",
+        lambda self, sweep: self._sweep_failed_because(sweep, "OSError: no space left on device"),
+    )
+
+    with (
+        pytest.raises(TransformerError, match=r"exceeds the per-rank budget \(1.00 KiB\)"),
+        pytest.warns(UserWarning),
+    ):
+        workflow.run_process(1, 0, 0, [])
+
+
 def test_a_failing_case_does_not_stop_the_shard_and_is_listed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """One unreadable case among three: the other two are written, the rank finishes its shard, and
     it exits non-zero naming the failed case. Before, the rank died at the broken case and every

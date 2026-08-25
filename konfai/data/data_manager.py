@@ -1889,8 +1889,9 @@ class DataMetric(Data):
                 template[d] = extent[d]
         if all(template):
             raise DatasetManagerError(
-                f"The memory budget cannot hold a patch of '{worst}' ({channels_by_name[worst]}ch x {extent}) "
-                f"with the {halo}-voxel halo its metrics read past each face.",
+                f"The memory budget ({format_bytes(budget)}) cannot hold a patch of '{worst}' "
+                f"({channels_by_name[worst]}ch x {extent}) with the {halo}-voxel halo its metrics read "
+                "past each face.",
                 "Raise 'memory_budget'.",
             )
         if sized == extent:

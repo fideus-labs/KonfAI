@@ -2900,6 +2900,11 @@ class DatasetManager:
             write.abort(exception)
             if not isinstance(exception, Exception):
                 raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
+            if isinstance(exception, MemoryError | torch.cuda.OutOfMemoryError):
+                # The fallback answers a failed region with the WHOLE case: a larger allocation than
+                # the one that just failed, on the same device. Running out of memory is the one
+                # failure it cannot repair, so it propagates instead.
+                raise
             return set(), _stage_failure(exception)
         finally:
             write.shutdown()

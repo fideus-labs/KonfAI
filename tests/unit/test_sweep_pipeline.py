@@ -351,6 +351,34 @@ def test_a_uint16_case_through_a_chain_torch_cannot_run_says_so(
         CaseMaterializer(manager).materialize()
 
 
+class _OutOfMemoryOnRegions(Transform):
+    """Fails on a region the way a read under a tight cap fails, and succeeds on the whole volume."""
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.POINTWISE)
+
+    def stream_region(self, name: str, tensor, context: RegionContext, cache_attribute: Attribute):
+        raise MemoryError("Unable to allocate 30.5 MiB for an array with shape (78, 320, 320)")
+
+    def __call__(self, name: str, tensor, cache_attribute: Attribute):
+        return tensor
+
+
+def test_a_sweep_that_runs_out_of_memory_does_not_answer_with_the_whole_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole-volume fallback holds the WHOLE case, a larger allocation than the region that just
+    failed and on the same device: it repairs a stage that cannot serve a region, never a shortage
+    of memory. So an out-of-memory propagates where every other failure falls back."""
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    source = Dataset(tmp_path / "src", "mha")
+    source.write("CT", "CASE_000", np.ones((1, 14, 10, 8), np.float32), _attributes())
+    chain = [_OutOfMemoryOnRegions(), Save(f"{tmp_path / 'out'}:h5")]
+
+    with pytest.raises(MemoryError):
+        CaseMaterializer(_manager(source, chain, tmp_path)).materialize()
+
+
 def test_a_serial_sweep_charges_its_writes_where_a_pipelined_one_does(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

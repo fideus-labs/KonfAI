@@ -62,6 +62,7 @@ from konfai.data.patching import (
     _SweepMember,
 )
 from konfai.data.transform import LocalityKind, Reduce, Resample, Save, Transform
+from konfai.utils.budget import format_bytes
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PatchError
 
@@ -195,7 +196,8 @@ class CaseMaterializer:
         if case_bytes > fallback_budget_bytes:
             raise PatchError(
                 f"Case '{self.manager.name}' fell back to the whole-volume path at run time and its"
-                f" working set (~{case_bytes / 2**30:.2f} GiB) exceeds the per-rank budget.",
+                f" working set (~{format_bytes(case_bytes)}) exceeds the per-rank budget"
+                f" ({format_bytes(fallback_budget_bytes)}).",
                 "Nothing was written for this case. Raise 'memory_budget' or make the chain streamable.",
             )
 
