@@ -289,8 +289,8 @@ class _ReadSchedule:
 
     LRU is the best a cache can do without the future. With it, the fewest decodes any policy can
     reach is to evict the chunk whose next use is furthest away. Measured on a 513x1331x1776
-    resample cut into 40 blocks over 126 chunks of source, at a cache holding 39 of them: 173
-    decodes under LRU, 133 under this, 126 the floor.
+    resample cut into 40 blocks over 126 chunks of source, chunks decoded on the level array: 148
+    under LRU, 138 under this, 126 the floor.
 
     Followed only while the reads match what was declared, and abandoned at the first that does
     not: a caller that deviates loses the optimisation, never the answer.

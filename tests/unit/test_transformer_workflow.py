@@ -1700,6 +1700,9 @@ def test_the_plan_text_is_the_snapshot(tmp_path: Path, monkeypatch: pytest.Monke
     contract, and this pins it across refactors of the code that assembles it.
     """
     monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
+    monkeypatch.setattr(
+        "konfai.data.patching._sweep_pipeline_depth", lambda: 1
+    )  # the LOAD line's ~4.0x is priced at depth 1
     _write_snapshot_cohort(tmp_path)
     plan = _build(tmp_path).compute_plan(2, overwrite=False)
     assert plan.summary() == _SNAPSHOT_SUMMARY

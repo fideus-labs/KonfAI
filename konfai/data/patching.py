@@ -1697,9 +1697,8 @@ class Patch(ABC):
         and anything else with its own minimum when no value is configured.
 
         That minimum never leaves the device: the bands are filled from the 0-d tensor after a zero
-        pad. Reading it back through ``.item()`` drained the CUDA stream once per padded patch (37
-        of the 64 patches of a 100^3 case at 32^3, measured), each a wait for every kernel queued
-        before it.
+        pad, so a padded patch costs no host round trip (37 of the 64 patches of a 100^3 case at
+        32^3 are padded, measured).
         """
         if data.dtype == torch.uint8:
             return F.pad(data, padding, "constant", 0)

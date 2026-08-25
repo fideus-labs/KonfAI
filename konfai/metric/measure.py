@@ -333,8 +333,8 @@ class MAESaveMap(MAE):
         """Per-voxel ``|output - target|``, zero outside the mask when one is given, and the bool mask.
 
         The one buffer both readouts come from: ``L1Loss`` reduces exactly this tensor, so the
-        scalar and the map are what two passes computed. The mask multiplies in place as bool
-        (``torch.where(mask == 1, 1, 0)`` was 8 B/voxel of int64, made twice).
+        scalar and the map agree by construction. The mask multiplies in place as bool: one byte
+        per voxel, once.
         """
         target = targets[0].to(device=output.device)
         difference = (output.float() - target.float()).abs()

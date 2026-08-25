@@ -200,6 +200,29 @@ def test_a_subset_that_cannot_name_its_cases_still_reads_the_cohort_once(
     assert opens == (len(CASES) if file_format == "mha" else 1)
 
 
+def test_a_subset_is_asked_for_its_names_once_per_walk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A names-file subset re-reads its file on every ask; one walk asks once and threads the answer."""
+    _root(tmp_path, "mha")
+    asked = 0
+    original = PredictionSubset.required_names
+
+    def counted(self):
+        nonlocal asked
+        asked += 1
+        return original(self)
+
+    monkeypatch.setattr(PredictionSubset, "required_names", counted)
+    data = DataPrediction(
+        dataset_filenames=[f"{tmp_path / 'cases'}:mha"],
+        groups_src={"CT": Group()},
+        augmentations=None,
+        patch=None,
+        subset=PredictionSubset("CASE_003"),
+    )
+    names, _ = data._select_cases()
+    assert sorted(names) == ["CASE_003"] and asked == 1
+
+
 def test_a_name_no_listing_produces_selects_nothing(tmp_path: Path) -> None:
     """The narrow path probes disk for the names it was asked for, and disk answers ``case/`` and
     ``./case`` as it answers ``case``; the listing never spells a case that way, so neither does

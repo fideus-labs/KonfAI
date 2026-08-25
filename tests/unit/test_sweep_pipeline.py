@@ -37,6 +37,7 @@ from konfai.data.patching import (
     _ReadAhead,
     _stage_failure,
     _sweep_pipeline_depth,
+    _sweep_resident_slabs,
     _WriteBehind,
 )
 from konfai.data.transform import Clip, Save
@@ -388,6 +389,12 @@ def test_a_pipelined_sweep_holds_no_more_blocks_than_the_height_rule_prices(
     assert counts["peak"] >= depth + 2, "the pipeline did not overlap: nothing was measured"
     # The block in the chain is two slabs (pulled and landed); every other block in flight is one.
     assert counts["peak"] + 1 <= _sweep_resident_slabs(depth), f"{counts['peak']} blocks in flight"
+
+
+def test_the_height_rule_prices_the_blocks_each_depth_holds() -> None:
+    """The block in the chain (pulled and landed), ``depth`` queued ahead, one in the reader's hand
+    while the queue is full, one written behind: none past depth 0, and no more than that."""
+    assert [_sweep_resident_slabs(depth) for depth in range(4)] == [2, 5, 6, 7]
 
 
 # ---------------------------------------------------------------- the publish is a write, and is waited for
