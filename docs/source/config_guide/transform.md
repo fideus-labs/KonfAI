@@ -144,9 +144,9 @@ The log holds the same plan in full, one line per chain and per reason.
 `--plan` prints that full form and stops, without running anything:
 
 ```text
-[KonfAI] plan over 1 rank(s) | per-rank budget 7.45 GiB ('8G') | fallback working set
-= case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed
-float32 / source channels until the first slab
+[KonfAI] plan over 1 rank(s) | per-rank budget 7.45 GiB ('8G') | decoded-chunk cache 2.48 GiB
+of it | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only
+estimate | output dtype/channels assumed float32 / source channels until the first slab
   CT -> CT_iso: 120 case(s) -- 100 STREAM, 18 LOAD, 2 WHOLE-VOLUME, 0 SKIP (output already written)
     (18 case(s)) LOAD: fits the per-rank budget (~0.42 GiB vs 7.45 GiB); streaming would read
     ~2.0x the source
@@ -183,7 +183,8 @@ The verdicts, and each one is a fact about *your* run:
   prints one line for the whole cohort rather than one per case: `REDUCE` when
   the fold streams, `REFUSED` when it cannot. A reduction has no whole-volume
   path to fall back to, so `REFUSED` refuses the run whatever `on_fallback`
-  says.
+  says. A case is `REFUSED` too when its `Write:` points at a remote root
+  (`s3://...`): no route writes there, and the run stops before reading a byte.
 
 The plan is a measurement, not a prediction: it opens a **real** region-write
 stream on each destination and removes it immediately, so the verdict it prints
@@ -305,7 +306,7 @@ Under `Dataset:`:
 | Field | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `dataset_filenames` | list of `path[:format]` | `["./Dataset:mha"]` | Where cases are read. |
-| `memory_budget` | size string or number | `auto` | Per-rank ceiling on the buffers the sweep holds, not on the process: peak RSS is this plus a floor (interpreter, torch, the chain's own working set). A bare number is GiB; `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. |
+| `memory_budget` | size string or number | `auto` | Per-rank ceiling on the buffers the sweep holds, the OME-Zarr decoded-chunk cache included (a third of it, printed in the plan's header), not on the process: peak RSS is this plus a floor (interpreter, torch, the chain's own working set). A bare number is GiB; `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. |
 | `subset` | string / list / null | `null` | Restricts which cases run: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. **Not** a nested mapping; a block written under it is refused. |
 | `groups_src` | mapping |: | The chains, keyed by source group then destination group. |
 

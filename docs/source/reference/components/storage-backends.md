@@ -66,12 +66,13 @@ because publishing an entry is a rename and an object store has none: point the
 `Write:` at a local path.
 
 Give a remote run a `memory_budget` that holds its working set. The store's
-decoded-chunk cache is a share of that budget, and a cache miss on a remote root
-is a download where a local one is a decode. The same pair of brains, the same
-chain, the same link at 1.6 MB/s: 1.898 GB downloaded in 19:12 with the cache at
-a share of free RAM, 2.573 GB in 38:34 with it bounded to a third of a declared
-4 GiB. The output was identical either way; only the number of times a chunk was
-fetched changed.
+decoded-chunk cache is a third of that budget in every workflow (never more than
+the budget, and never less than 256 MiB while the budget allows it: a transform
+plan says when it does not), and a cache miss on a remote root is a download
+where a local one is a decode. The same pair of brains, the same chain, the same
+link at 1.6 MB/s: 1.898 GB downloaded in 19:12 with the cache at a share of free
+RAM, 2.573 GB in 38:34 with it bounded to a third of a declared 4 GiB. The output
+was identical either way; only the number of times a chunk was fetched changed.
 
 A root that cannot be reached raises and names the reason. That is the whole
 point of routing these probes rather than leaving them on `os`: `os.path.exists`

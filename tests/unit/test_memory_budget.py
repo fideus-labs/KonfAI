@@ -429,3 +429,154 @@ def test_auto_budget_uses_detected_memory(monkeypatch: pytest.MonkeyPatch) -> No
     roomy = _make_train("auto")
     roomy._resolve_cache_regime(world_size=1)
     assert roomy.use_cache is True
+
+
+# --------------------------------------------------------------------------------------
+# The decoded-chunk cache is part of what the budget bounds, in every workflow
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _chunk_cache_restored():
+    from konfai.utils import ome_zarr
+
+    yield
+    ome_zarr.set_chunk_cache_budget(None)
+
+
+@pytest.mark.parametrize(
+    ("declared", "capacity"),
+    [
+        (64 << 20, 64 << 20),  # under the floor: the budget itself, never more than it
+        (512 << 20, 256 << 20),  # a third would be under the floor: the floor
+        (3 << 30, 1 << 30),  # a third
+    ],
+)
+def test_the_chunk_cache_takes_a_third_of_the_budget_and_never_more_than_it(
+    declared: int, capacity: int, _chunk_cache_restored: None
+) -> None:
+    """The cache is part of what the process holds, so a budget it exceeded would be exceeded
+    before a region was read."""
+    from konfai.utils import ome_zarr
+
+    assert ome_zarr.set_chunk_cache_budget(declared) == capacity
+    assert ome_zarr._chunk_cache().capacity == capacity
+
+
+def test_an_undeclared_budget_leaves_the_chunk_cache_its_share_of_free_ram(
+    monkeypatch: pytest.MonkeyPatch, _chunk_cache_restored: None
+) -> None:
+    from konfai.utils import ome_zarr
+
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (100 * 2**30, "host"))
+    assert ome_zarr.set_chunk_cache_budget(None) == 5 * 2**30
+
+
+_WORKFLOW_ENV = (
+    "KONFAI_config_file",
+    "KONFAI_ROOT",
+    "KONFAI_STATE",
+    "KONFAI_CONFIG_MODE",
+    "KONFAI_PREDICTIONS_DIRECTORY",
+    "KONFAI_EVALUATIONS_DIRECTORY",
+)
+_ASSETS = Path(__file__).resolve().parents[1] / "assets" / "Workflows"
+
+
+def _tiny_cohort(root: Path) -> None:
+    """Two cases of MR and CT and a prediction of each, the shape the TinySynth asset works on."""
+    import numpy as np
+    from konfai.utils.dataset import Attribute, Dataset
+
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([0.0, 0.0, 0.0])
+    attributes["Spacing"] = np.asarray([1.0, 1.0, 1.0])
+    attributes["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
+    rng = np.random.default_rng(0)
+    for name in ("CASE_000", "CASE_001"):
+        for group in ("MR", "CT"):
+            Dataset(root / "Dataset", "mha").write(
+                group, name, rng.random((1, 3, 16, 16)).astype(np.float32), attributes
+            )
+        Dataset(root / "Predictions", "mha").write(
+            "sCT", name, rng.random((1, 3, 16, 16)).astype(np.float32), attributes
+        )
+
+
+def _workflow_config(root: Path, asset: str, replacements: dict[str, str], batch_line: str) -> Path:
+    """The asset's config with the cohort's paths and a declared budget under ``Dataset:``."""
+    text = (_ASSETS / asset).read_text(encoding="utf-8")
+    for placeholder, value in replacements.items():
+        text = text.replace(placeholder, value)
+    assert batch_line in text
+    path = root / asset
+    path.write_text(text.replace(batch_line, f"{batch_line}    memory_budget: 64MiB\n"), encoding="utf-8")
+    return path
+
+
+def _build_evaluator(root: Path):
+    from konfai.evaluator import Evaluator
+    from konfai.utils.config import apply_config, strict_config
+    from konfai.utils.runtime import State, configure_workflow_environment
+
+    replacements = {
+        "__DATASET_DIR__": str(root / "Dataset"),
+        "__PREDICTIONS_DATASET_DIR__": str(root / "Predictions"),
+        "__TRAIN_NAME__": "CACHE_01",
+    }
+    config = _workflow_config(root, "Evaluation.yml", replacements, "    batch_size: 4\n")
+    configure_workflow_environment(
+        config_path=config,
+        root="Evaluator",
+        state=State.EVALUATION,
+        path_env={"KONFAI_EVALUATIONS_DIRECTORY": root / "Evaluations"},
+    )
+    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+    with strict_config("Evaluator", refuse=False):
+        return apply_config()(Evaluator)()
+
+
+def _build_predictor(root: Path, monkeypatch: pytest.MonkeyPatch):
+    import shutil
+
+    from konfai.predictor import Predictor
+    from konfai.utils.config import apply_config, strict_config
+    from konfai.utils.runtime import State, configure_workflow_environment
+
+    shutil.copy2(_ASSETS / "TinySynth.py", root / "TinySynth.py")
+    monkeypatch.syspath_prepend(str(root))
+    replacements = {"__DATASET_DIR__": str(root / "Dataset"), "__TRAIN_NAME__": "CACHE_01"}
+    config = _workflow_config(root, "Prediction.yml", replacements, "    batch_size: 16\n")
+    configure_workflow_environment(
+        config_path=config,
+        root="Predictor",
+        state=State.PREDICTION,
+        path_env={"KONFAI_PREDICTIONS_DIRECTORY": root / "PredictionsOut"},
+    )
+    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+    with strict_config("Predictor", refuse=False):
+        return apply_config()(Predictor)()
+
+
+def test_a_declared_budget_bounds_the_chunk_cache_in_prediction_and_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _chunk_cache_restored: None
+) -> None:
+    """The same per-rank budget every workflow resolves bounds the same cache: a store read under
+    PREDICTION or EVALUATION is read through it as under TRANSFORM (whose plan pins it in
+    test_transformer_workflow)."""
+    pytest.importorskip("SimpleITK")
+    from konfai.utils import ome_zarr
+
+    for key in _WORKFLOW_ENV:
+        monkeypatch.setenv(key, "sentinel")
+        monkeypatch.delenv(key)
+    _tiny_cohort(tmp_path)
+
+    ome_zarr.set_chunk_cache_budget(None)
+    assert ome_zarr._chunk_cache().capacity >= ome_zarr.CHUNK_CACHE_FLOOR
+    _build_evaluator(tmp_path)
+    assert ome_zarr._chunk_cache().capacity == 64 << 20
+
+    ome_zarr.set_chunk_cache_budget(None)
+    _build_predictor(tmp_path, monkeypatch)
+    assert ome_zarr._chunk_cache().capacity == 64 << 20

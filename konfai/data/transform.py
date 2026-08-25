@@ -2423,8 +2423,7 @@ class Gradient(Transform):
     #: The one destination the differences are written into, one channel per spatial axis. Measured
     #: as VmHWM around the call on a 256^3 float32 block, beyond what it is handed and what it
     #: returns: 3.0 flattened (where the destination is working memory) and 0.0 per_dim (where the
-    #: destination IS the output). Was 7.8 and 2.9 when each difference was allocated, padded into
-    #: a second buffer and stacked into a third.
+    #: destination IS the output).
     working_multiple = 3.0
 
     def __init__(self, per_dim: bool = False):

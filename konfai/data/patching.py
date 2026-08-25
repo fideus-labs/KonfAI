@@ -93,7 +93,7 @@ SWEEP_SLAB_ROWS = 64
 
 # What a sweep holds per row while in flight (the pulled source region and the landed block) and
 # the bytes each element travels as (float32 through the chain). See DatasetManager._sweep_rows.
-# A pipelined sweep holds one more of each: see _sweep_pipeline_depth and _sweep_depth.
+# A pipelined sweep holds more: _sweep_resident_slabs counts them.
 _SWEEP_RESIDENT_SLABS = 2
 #: The most blocks a sweep keeps in flight, whatever the budget leaves room for: past a second
 #: one the jitter it absorbs is already absorbed (DatasetManager._sweep_depth).
@@ -338,13 +338,12 @@ class RegionWriter:
     surfaces where the caller can say why) and writes the block; ``close`` publishes every stream,
     ``abort`` drops every partial entry and is safe after a failure or an interrupt.
 
-    Writes here are synchronous, and whether the caller should keep them so depends on where its
-    compute runs. On a host chain the two contend: measured on a 300^3 float32 case to OME-Zarr, a
-    slab in flight on a background thread was 50 % slower than writing in place, the compression
-    competing with the next slab's compute. On a DEVICE chain the compute is not the host's, and
-    the same trade inverts: a 513x1331x1776 resample on a GPU went from 8.2 s to 6.2 s with the
-    write one block behind, and a host resample of the same case stayed at 13.0 s either way.
-    :class:`_WriteBehind` is what a sweep wraps this in to take that trade; nothing here assumes it.
+    Writes here are synchronous. Whether a caller should overlap them with its compute depends on
+    where the compute runs, since the store's encoder competes for the host's cores: measured on a
+    300^3 float32 case to OME-Zarr, a host chain writing one slab behind was 50 % slower than
+    writing in place, and a host resample of a 513x1331x1776 case stayed at 13.0 s either way,
+    where the same resample on a GPU went from 8.2 s to 6.2 s with the write one block behind.
+    :class:`_WriteBehind` is what a sweep wraps this in; nothing here assumes it.
     """
 
     def __init__(self, open_stream: Callable[[Any, np.ndarray, Attribute], DataStream]) -> None:
@@ -479,6 +478,13 @@ def _sweep_pipeline_depth() -> int:
     """How many blocks a sweep keeps in flight beside the one it is transforming: one ahead and one
     behind, or none when the rank owns a single core (``OMP_NUM_THREADS=1`` means a serial run)."""
     return 1 if rank_cpu_share() > 1 else 0
+
+
+def _sweep_resident_slabs(depth: int) -> int:
+    """How many blocks' worth a sweep of pipeline ``depth`` holds at once: the pulled region and
+    the landed block of the one in the chain, and, pipelined, the ``depth`` blocks queued ahead,
+    the one the reader holds while the queue is full, and the one being written behind."""
+    return _SWEEP_RESIDENT_SLABS + (depth + 2 if depth else 0)
 
 
 class SweepClock:
@@ -675,7 +681,8 @@ class _WriteBehind:
 
     def _publish(self) -> set[Any]:
         written = self._writer.opened
-        self._writer.close()
+        with SWEEP_CLOCK.phase("write"):
+            self._writer.close()
         return written
 
     def _on_writer(self, work: Callable[..., Any], *args: Any) -> Any:
@@ -2757,7 +2764,9 @@ class DatasetManager:
                             headers[key] = _sweep_header(member_evolved, scope, keys_before)
                         with SWEEP_CLOCK.phase("wait(write)"):
                             write.write(key, (slice(0, int(block.shape[0])), *target), block, headers[key])
-                written = write.close()
+                # The publish is a write too (an OME-Zarr pyramid is derived here), and it is waited for.
+                with SWEEP_CLOCK.phase("wait(write)"):
+                    written = write.close()
             for key in written:
                 sweep = sweeps[key]
                 self._swept_entries.add((str(sweep.destination.filename), sweep.group, sweep.entry))
@@ -2802,16 +2811,16 @@ class DatasetManager:
     def _sweep_rows(self, spatial: list[int], channels: int, depth: int | None = None) -> int:
         """How many rows one sweep region spans on the landing's first axis: the cap
         (``SWEEP_SLAB_ROWS`` on a CPU, taller on a GPU as its memory allows), lowered by the budget
-        (half of it over everything a pipelined sweep holds: the pulled region and the landed block,
-        plus the one read ahead and the one written behind), never below one row. Sized on the
-        source's channels at four bytes each: the landed block's are not known before the first
-        region, and the fallback budget check refuses on real shapes.
+        (half of it over everything a sweep of this ``depth`` holds at once:
+        :func:`_sweep_resident_slabs`), never below one row. Sized on the source's channels at four
+        bytes each: the landed block's are not known before the first region, and the fallback
+        budget check refuses on real shapes.
 
         This is the HEIGHT rule alone; :meth:`_sweep_tile` turns the volume it allows into the block
         the sweep actually reads.
         """
         cap = max(1, int(SWEEP_SLAB_ROWS))
-        resident = _SWEEP_RESIDENT_SLABS + 2 * (_sweep_pipeline_depth() if depth is None else depth)
+        resident = _sweep_resident_slabs(_sweep_pipeline_depth() if depth is None else depth)
         plane = int(np.prod(spatial[1:], dtype=np.int64)) * max(1, int(channels)) * _SWEEP_ELEMENT_BYTES
         if plane > 0 and self._chain_device is not None and self._chain_device.type == "cuda":
             # On a GPU the transfers and launches per region are the cost: taller regions, as far as

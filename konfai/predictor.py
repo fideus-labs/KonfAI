@@ -77,6 +77,7 @@ from konfai.utils.budget import node_local_ranks, resolve_memory_budget
 from konfai.utils.config import _escape_key_component, apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, PredictorError
+from konfai.utils.ome_zarr import set_chunk_cache_budget
 from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
@@ -1965,6 +1966,7 @@ class Predictor(DistributedObject):
         self.datasets_filename = []
         self.predict_path = predictions_directory() / self.name
         per_rank_budget = self.dataset.resolved_budget().per_rank_bytes(node_local_ranks())
+        set_chunk_cache_budget(per_rank_budget)
         for output_dataset in self.outputs_dataset.values():
             output_dataset.set_memory_budget(per_rank_budget)
             self.datasets_filename.append(output_dataset.filename)

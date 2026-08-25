@@ -340,3 +340,80 @@ def test_a_save_into_the_h5_file_the_sweep_reads_still_lands(tmp_path: Path, mon
     assert verdicts == [Verdict.STREAM]
     cached, _ = Dataset(tmp_path / "store", "h5").read_data("CACHE", "CASE_000")
     np.testing.assert_array_equal(cached, np.clip(volume, 10.0, 90.0))
+
+
+# ---------------------------------------------------------------- what the height rule prices is what is held
+
+
+def test_a_pipelined_sweep_holds_no_more_blocks_than_the_height_rule_prices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget bounds the blocks a sweep holds at once, so the height rule must count them
+    all: the one in the chain (its pulled region and its landed block), the ``depth`` queued
+    ahead, the one the reader holds while the queue is full, and the one being written behind.
+    Counted here as blocks between their read and their write, with a writer slower than the
+    reader so the queue fills and the reader blocks on it."""
+    from konfai.data.patching import RegionWriter, _sweep_resident_slabs
+
+    depth = 1
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr(patching_module, "_sweep_pipeline_depth", lambda: depth)
+    monkeypatch.setattr(patching_module, "_SWEEP_MAX_DEPTH", depth)  # the budget-bound case: no free blocks
+    lock = threading.Lock()
+    counts = {"handed": 0, "written": 0, "peak": 0}
+    read = DatasetManager._read_streamed_region
+    write = RegionWriter.write
+
+    def counted_read(self, *args, **kwargs):
+        block = read(self, *args, **kwargs)
+        with lock:
+            counts["handed"] += 1
+            counts["peak"] = max(counts["peak"], counts["handed"] - counts["written"])
+        return block
+
+    def slow_write(self, *args, **kwargs):
+        time.sleep(0.02)
+        write(self, *args, **kwargs)
+        with lock:
+            counts["written"] += 1
+
+    monkeypatch.setattr(DatasetManager, "_read_streamed_region", counted_read)
+    monkeypatch.setattr(RegionWriter, "write", slow_write)
+    rng = np.random.default_rng(0)
+    source = Dataset(tmp_path / "src", "mha")
+    source.write("CT", "CASE_000", (rng.random((1, 30, 10, 8)) * 100).astype(np.float32), _attributes())
+    manager = _manager(source, [Clip(min_value=10.0, max_value=90.0), Save(f"{tmp_path / 'out'}:h5")], tmp_path)
+    assert CaseMaterializer(manager).materialize() is Verdict.STREAM
+
+    assert counts["peak"] >= depth + 2, "the pipeline did not overlap: nothing was measured"
+    # The block in the chain is two slabs (pulled and landed); every other block in flight is one.
+    assert counts["peak"] + 1 <= _sweep_resident_slabs(depth), f"{counts['peak']} blocks in flight"
+
+
+# ---------------------------------------------------------------- the publish is a write, and is waited for
+
+
+@pytest.mark.parametrize("depth", [0, 1])
+def test_the_publish_is_charged_to_the_write_and_to_the_wait_for_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, depth: int
+) -> None:
+    """Closing the streams publishes them, and an OME-Zarr store derives its pyramid there: time
+    the sweep waited for while a phase named none of it was the residual the report calls
+    ``other``, the part nothing has explained."""
+    from konfai.data.patching import RegionWriter
+
+    close = RegionWriter.close
+
+    def slow_close(self) -> None:
+        time.sleep(0.2)
+        close(self)
+
+    monkeypatch.setattr(RegionWriter, "close", slow_close)
+    SWEEP_CLOCK.reset()
+    _sweep_into(tmp_path, f"published_{depth}", monkeypatch, depth=depth)
+
+    assert SWEEP_CLOCK.spent("write") >= 0.2
+    assert SWEEP_CLOCK.spent("wait(write)") >= 0.2
+    wall = SWEEP_CLOCK.spent("sweep")
+    named = sum(SWEEP_CLOCK.spent(phase) for phase in ("chain", "fetch", "wait(read)", "wait(write)"))
+    assert wall - named < 0.2, "the publish was charged to 'other'"

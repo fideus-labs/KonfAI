@@ -216,8 +216,8 @@ def _load_image(store_path: str, level: int) -> Any:
 def clear_ome_zarr_cache(store_path: str | Path | None = None) -> None:
     """Forget the memoised NGFF images, so a store replaced on disk is parsed afresh.
 
-    A named store forgets its own decoded chunks and read schedule and no one else's: creating an
-    output store used to drop every input's too, and a cohort paid that per case. The metadata
+    A named store forgets its own decoded chunks and read schedule and no one else's: an output
+    store is created per case, and the inputs' chunks are what the next case reads. The metadata
     memos are cleared whatever the caller names, being one parse each to rebuild.
 
     The write paths here call it for their own output. Anything that materialises a store by other
@@ -292,27 +292,36 @@ class _ReadSchedule:
             for coords in chunks:
                 self._uses.setdefault(coords, []).append(step)
         self._passed: dict[tuple, int] = dict.fromkeys(self._uses, 0)
+        self._reading = False
 
     def advance(self, chunks: frozenset[tuple]) -> bool:
         """Move to the read about to happen; ``False`` when it is not the one declared."""
         self._cursor += 1
+        self._reading = True
         return self._cursor < len(self._steps) and self._steps[self._cursor] == chunks
+
+    def finish(self) -> None:
+        """The read :meth:`advance` moved to is over: what it touched is behind."""
+        self._reading = False
 
     @property
     def done(self) -> bool:
         """Whether the read just begun is the last one declared."""
         return self._cursor >= len(self._steps) - 1
 
-    def next_use(self, coords: tuple) -> int:
-        """The step that reads ``coords`` next, ``_NEVER_AGAIN`` when none does."""
+    def steps_to_next_use(self, coords: tuple) -> int:
+        """How many reads away the next one touching ``coords`` is: 0 while the read touching it is
+        in progress (a chunk of the window being assembled is not the one to evict for the rest of
+        it), ``_NEVER_AGAIN`` when none does."""
         uses = self._uses.get(coords)
         if uses is None:
             return _NEVER_AGAIN
+        behind = self._cursor if self._reading else self._cursor + 1
         passed = self._passed[coords]
-        while passed < len(uses) and uses[passed] <= self._cursor:
+        while passed < len(uses) and uses[passed] < behind:
             passed += 1
         self._passed[coords] = passed
-        return uses[passed] if passed < len(uses) else _NEVER_AGAIN
+        return uses[passed] - self._cursor if passed < len(uses) else _NEVER_AGAIN
 
 
 class _DecodedChunkCache:
@@ -369,6 +378,13 @@ class _DecodedChunkCache:
             if schedule is not None and (not schedule.advance(chunks) or schedule.done):
                 del self._schedules[identity]  # deviated from, or read to its end: nothing left to plan
 
+    def end(self, identity: Any) -> None:
+        """The read begun on ``identity`` is over: what it touched competes on its next use again."""
+        with self._lock:
+            schedule = self._schedules.get(identity)
+            if schedule is not None:
+                schedule.finish()
+
     def forget(self, store_path: str | None = None) -> None:
         """Drop what one store put here, or everything when no store is named."""
         with self._lock:
@@ -383,21 +399,39 @@ class _DecodedChunkCache:
                 del self._schedules[identity]
 
     def _trim(self) -> None:
-        """Down to the ceiling: the chunk whose next declared use is furthest away, oldest first
-        among those nothing declared. Held under ``self._lock``."""
+        """Down to the ceiling: the chunk whose next use is furthest away, the least recently used
+        while nothing is declared. Held under ``self._lock``."""
         while self._bytes > self.capacity and self._entries:
-            key = max(self._entries, key=self._next_use) if self._schedules else next(iter(self._entries))
+            key = self._furthest() if self._schedules else next(iter(self._entries))
             self._bytes -= self._entries.pop(key).nbytes
 
-    def _next_use(self, key: tuple) -> int:
+    def _furthest(self) -> tuple:
+        """The chunk whose next use is furthest: a declared chunk by its schedule, an undeclared one
+        by its recency, the ``n``-th most recently used taken as ``n`` reads away (the LRU order it
+        competes in: a companion volume read beside a declared source, a mask, has no schedule and
+        is read again at the next region all the same), a declared chunk nothing reads again first
+        of all. The older wins a tie. Measured on a 48-chunk source swept through a rotated resample
+        with a mask on the same grid read beside it, at a cache of 64 chunks: 66 + 66 decodes under
+        LRU, 44 + 66 with the companion ranked never-again, 44 + 44 with it ranked by recency."""
+        newer = len(self._entries)
+        furthest, distance = next(iter(self._entries)), 0
+        for key in self._entries:
+            newer -= 1
+            steps = self._steps_to_next_use(key, undeclared=newer + 1)
+            if steps > distance:
+                furthest, distance = key, steps
+        return furthest
+
+    def _steps_to_next_use(self, key: tuple, undeclared: int) -> int:
         identity, coords = key
         schedule = self._schedules.get(identity)
-        return _NEVER_AGAIN if schedule is None else schedule.next_use(coords)
+        return undeclared if schedule is None else schedule.steps_to_next_use(coords)
 
 
-#: The floor the cache keeps whatever the budget: below a chunk or two it serves nothing and every
-#: region pays its decode again.
-_CHUNK_CACHE_FLOOR = 256 << 20
+#: The least the cache is worth: below a chunk or two of a large store, a region touching more
+#: chunks than it holds decodes them again. Kept while the budget allows it; a budget under it is
+#: not exceeded for the cache's sake, and the plan says the cache is under the floor.
+CHUNK_CACHE_FLOOR = 256 << 20
 #: The share of a DECLARED per-rank budget the cache may take. A third, because a budget is spent on
 #: what the chain holds as well, and the cache is the cheapest of the three to give up.
 _CHUNK_CACHE_BUDGET_SHARE = 1 / 3
@@ -405,25 +439,30 @@ _CHUNK_CACHE_BUDGET_SHARE = 1 / 3
 _chunk_cache_budget: int | None = None
 
 
-def set_chunk_cache_budget(budget_bytes: float | None) -> None:
-    """Bound the decoded-chunk cache by the run's declared per-rank memory budget: it is the biggest
-    thing a streamed run holds, and a declared budget bounds the process. ``None``, or no call at
-    all, leaves it the share of free RAM an undeclared budget means everywhere else.
+def set_chunk_cache_budget(budget_bytes: float | None) -> int:
+    """Bound the decoded-chunk cache by the run's per-rank memory budget, and answer the capacity
+    it has from now on: the cache is part of what the process holds, so it never exceeds the
+    budget. ``None``, or no call at all, leaves it the share of free RAM an undeclared budget means
+    everywhere else.
     """
     global _chunk_cache_budget
     _chunk_cache_budget = int(budget_bytes) if budget_bytes and budget_bytes > 0 else None
+    capacity = _chunk_cache_capacity()
     if _CHUNK_CACHE is not None:
-        _CHUNK_CACHE.set_capacity(_chunk_cache_capacity())
+        _CHUNK_CACHE.set_capacity(capacity)
+    return capacity
 
 
 def _chunk_cache_capacity() -> int:
-    """What the cache may hold: a share of the declared budget, or of what this process may allocate
-    when nothing was declared. Never below a chunk or two."""
+    """What the cache may hold: a third of the declared budget, the floor where a third is under it,
+    the budget itself where even the floor is over it; a share of what this process may allocate
+    when nothing was declared."""
     from konfai.utils.budget import available_memory_bytes
 
     if _chunk_cache_budget is not None:
-        return max(_CHUNK_CACHE_FLOOR, int(_chunk_cache_budget * _CHUNK_CACHE_BUDGET_SHARE))
-    return max(_CHUNK_CACHE_FLOOR, int(available_memory_bytes()[0] * 0.05))
+        share = int(_chunk_cache_budget * _CHUNK_CACHE_BUDGET_SHARE)
+        return min(_chunk_cache_budget, max(CHUNK_CACHE_FLOOR, share))
+    return max(CHUNK_CACHE_FLOOR, int(available_memory_bytes()[0] * 0.05))
 
 
 _CHUNK_CACHE: _DecodedChunkCache | None = None
@@ -480,12 +519,30 @@ def _read_chunked(store_path: str, level_path: str, array: Any, index: tuple) ->
     # In the machine's byte order from the start: a big-endian store is converted by the copy that
     # assembles the window, where a pass of its own over the result is a second walk of every byte.
     out = np.empty(out_shape, dtype=_native_dtype(array.dtype))
-    if any(extent == 0 for extent in out_shape):
-        return out.squeeze(axis=tuple(squeeze)) if squeeze else out
-
     identity = (store_path, level_path)
-    wanted = list(_touched_chunks(selections, chunks))
+    wanted = _touched_chunks(selections, chunks)
+    # Begun before an empty selection returns: plan_ome_zarr_reads declared that read too, and a
+    # schedule that misses one step ranks every later chunk against the wrong read.
     cache.begin(identity, frozenset(wanted))
+    try:
+        if wanted:
+            _assemble_window(cache, identity, array, selections, wanted, out)
+    finally:
+        cache.end(identity)
+    return out.squeeze(axis=tuple(squeeze)) if squeeze else out
+
+
+def _assemble_window(
+    cache: _DecodedChunkCache,
+    identity: tuple,
+    array: Any,
+    selections: Sequence[slice],
+    wanted: list[tuple],
+    out: np.ndarray,
+) -> None:
+    """Fill ``out`` with the ``wanted`` chunks of ``array``, served from ``cache`` or decoded whole
+    and cached."""
+    shape, chunks = array.shape, array.chunks
     missing = [coords for coords in wanted if cache.get((identity, coords)) is None]
     if missing:
         # ONE zarr read for the chunk-aligned hull of what is missing: zarr decodes the chunks of a
@@ -530,7 +587,6 @@ def _read_chunked(store_path: str, level_path: str, array: Any, index: tuple) ->
     # One chunk per worker: a chunk owns its window of the output, so the destinations are disjoint,
     # and numpy releases the GIL for the copy.
     map_over_rank_pool(place, wanted)
-    return out.squeeze(axis=tuple(squeeze)) if squeeze else out
 
 
 @lru_cache(maxsize=8)

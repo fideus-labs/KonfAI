@@ -1673,10 +1673,10 @@ _SNAPSHOT_SUMMARY = (
 )
 
 _SNAPSHOT_REPORT = """\
-[KonfAI] plan over 2 rank(s) | per-rank budget 96.00 KiB ('98304b', per rank: x2 = 192.00 KiB on the node) | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed float32 / source channels until the first slab
+[KonfAI] plan over 2 rank(s) | per-rank budget 96.00 KiB ('98304b', per rank: x2 = 192.00 KiB on the node) | decoded-chunk cache 96.00 KiB of it (under the 256.00 MiB floor: a region touching more OME-Zarr chunks than it holds decodes them again) | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed float32 / source channels until the first slab
 [KonfAI] 1 case(s) of 'CT' are DROPPED: the run keeps the cases every groups_src shares, minus what 'subset' excludes.
   CT -> A (Clip -> Write <tmp>/out_a:h5): 3 case(s) -- 1 STREAM, 1 LOAD, 0 WHOLE-VOLUME, 1 SKIP (output already written)
-    (1 case(s)) LOAD: fits the per-rank budget (~64.00 KiB vs 96.00 KiB); streaming would read ~3.0x the source
+    (1 case(s)) LOAD: fits the per-rank budget (~64.00 KiB vs 96.00 KiB); streaming would read ~4.0x the source
   CT -> B (Clip -> Standardize -> Write <tmp>/out_b:h5): 3 case(s) -- 0 STREAM, 0 LOAD, 3 WHOLE-VOLUME, 0 SKIP (output already written)
     (3 case(s)) WHOLE-VOLUME: stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.
     worst fallback case ~= 96.00 KiB vs per-rank budget 96.00 KiB
@@ -1704,3 +1704,58 @@ def test_the_plan_text_is_the_snapshot(tmp_path: Path, monkeypatch: pytest.Monke
     plan = _build(tmp_path).compute_plan(2, overwrite=False)
     assert plan.summary() == _SNAPSHOT_SUMMARY
     assert plan.report().replace(tmp_path.as_posix(), "<tmp>").replace(str(tmp_path), "<tmp>") == _SNAPSHOT_REPORT
+
+
+def test_the_plan_bounds_the_chunk_cache_by_the_budget_and_says_when_it_is_under_the_floor(tmp_path: Path) -> None:
+    """The store's decoded-chunk cache is part of what the process holds: a third of the budget,
+    never more than the budget, and the header names it. Under the floor the cache cannot keep a
+    region's chunks, and the header says that rather than the run paying every decode twice in
+    silence."""
+    from konfai.utils import ome_zarr
+
+    _write_source(tmp_path)
+    config_path = _write_config(tmp_path, _STREAMABLE.format(out=tmp_path / "out"))
+    text = config_path.read_text()
+    try:
+        config_path.write_text(text.replace("memory_budget: auto", "memory_budget: 98304b"))
+        report = _build(tmp_path).compute_plan().report()
+        assert ome_zarr._chunk_cache().capacity == 98304
+        assert "decoded-chunk cache 96.00 KiB of it (under the 256.00 MiB floor:" in report
+
+        config_path.write_text(text.replace("memory_budget: auto", "memory_budget: 3GiB"))
+        report = _build(tmp_path).compute_plan().report()
+        assert ome_zarr._chunk_cache().capacity == 1 << 30
+        assert "decoded-chunk cache 1.00 GiB of it | " in report
+    finally:
+        ome_zarr.set_chunk_cache_budget(None)
+
+
+@pytest.mark.parametrize(
+    ("on_fallback", "file_format"), [("allow", "omezarr"), ("warn", "omezarr"), ("error", "omezarr"), ("warn", "h5")]
+)
+def test_a_remote_write_destination_is_refused_by_the_plan_whatever_on_fallback_says(
+    tmp_path: Path, on_fallback: str, file_format: str
+) -> None:
+    """A remote root is read-only, and no route writes it: the streamed sweep refuses at its first
+    slab and the whole-volume path at its write, after reading and transforming a case. The plan
+    says REFUSED, not WHOLE-VOLUME, setup raises before a byte is read whatever on_fallback says,
+    and the run directory names no output: a Path of a URI resolves to a local directory named
+    after the scheme, which never existed."""
+    pytest.importorskip("fsspec")
+    _write_source(tmp_path)
+    _write_config(
+        tmp_path, _WRITE.format(out=f"memory://bucket/out:{file_format}")[:-4], f"  on_fallback: {on_fallback}\n"
+    )
+    workflow = _build(tmp_path)
+
+    plan = workflow.compute_plan()
+    assert [entry.verdict for entry in plan.entries] == ["REFUSED", "REFUSED"]
+    assert "remote root" in (plan.entries[0].reason or "")
+    assert not plan.fallback_entries, "no route writes there: nothing to fall back to"
+    assert "2 REFUSED" in plan.summary()
+    assert "0 SKIP (output already written), 2 REFUSED" in plan.report()
+    assert "REFUSED: 'memory://bucket/out" in plan.report()
+
+    with pytest.raises(TransformerError, match="local path"):
+        workflow.setup(1)
+    assert not (tmp_path / "Transforms" / "TEST" / "outputs.json").exists()

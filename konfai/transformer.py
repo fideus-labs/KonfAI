@@ -51,11 +51,12 @@ from konfai.data.patching import (
     save_destination,
 )
 from konfai.data.transform import Save, split_expand
+from konfai.utils import uri
 from konfai.utils.budget import format_bytes, node_local_ranks
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import ConfigError, TransformerError
-from konfai.utils.ome_zarr import set_chunk_cache_budget
+from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
+from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, set_chunk_cache_budget
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -111,6 +112,9 @@ class TransformPlan:
     #: Per (group_src, group_dest): the chain spelled out with its destination: the one fact a
     #: reader wants from a plan line ("what runs, and where does it land").
     chain_labels: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: What the store's decoded-chunk cache may hold out of the budget: part of what the process
+    #: holds, so the header says it, and says when a budget puts it under the floor it is worth.
+    chunk_cache_bytes: int = 0
 
     @property
     def fallback_entries(self) -> list[TransformPlanEntry]:
@@ -118,8 +122,9 @@ class TransformPlan:
 
     @property
     def refused_entries(self) -> list[TransformPlanEntry]:
-        """Reductions that cannot stream. Unlike a per-case chain they have no whole-volume path to
-        fall back to, so these refuse the run whatever ``on_fallback`` says."""
+        """Entries no route can write: a reduction that cannot stream (unlike a per-case chain it has
+        no whole-volume path to fall back to), an entry whose destination is a remote root (no
+        route writes there). These refuse the run whatever ``on_fallback`` says."""
         return [entry for entry in self.entries if entry.verdict is Verdict.REFUSED]
 
     def budget_violations(self) -> list[TransformPlanEntry]:
@@ -159,9 +164,15 @@ class TransformPlan:
         return "\n".join(lines)
 
     def _header(self) -> str:
+        cache = f" | decoded-chunk cache {format_bytes(self.chunk_cache_bytes)} of it" if self.chunk_cache_bytes else ""
+        if 0 < self.chunk_cache_bytes < CHUNK_CACHE_FLOOR:
+            cache += (
+                f" (under the {format_bytes(CHUNK_CACHE_FLOOR)} floor: a region touching more OME-Zarr"
+                " chunks than it holds decodes them again)"
+            )
         return (
             f"[KonfAI] plan over {self.world_size} rank(s) | per-rank budget"
-            f" {format_bytes(self.budget_bytes)} ({self.budget_desc})"
+            f" {format_bytes(self.budget_bytes)} ({self.budget_desc}){cache}"
             f" | fallback working set = case x {CASE_ELEMENT_BYTES} B x ({FALLBACK_INFLIGHT_FACTOR}"
             f" + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed"
             f" {self.dtype_hypothesis} until the first slab"
@@ -210,7 +221,7 @@ class TransformPlan:
             f"  {chain}: EXPAND {cases} case(s) ->"
             f" {len(expanded)} cop(ies): {shared} STREAM (shared read pass),"
             f" {solo} STREAM (own pass), {counts[Verdict.WHOLE_VOLUME]} WHOLE-VOLUME,"
-            f" {counts[Verdict.SKIP]} SKIP (copy already written)"
+            f" {counts[Verdict.SKIP]} SKIP (copy already written)" + TransformPlan._refused_count(counts)
         )
 
     @staticmethod
@@ -220,18 +231,24 @@ class TransformPlan:
             f"  {chain}: {len(entries)} case(s) --"
             f" {counts[Verdict.STREAM]} STREAM, {counts[Verdict.LOAD]} LOAD,"
             f" {counts[Verdict.WHOLE_VOLUME]} WHOLE-VOLUME,"
-            f" {counts[Verdict.SKIP]} SKIP (output already written)"
+            f" {counts[Verdict.SKIP]} SKIP (output already written)" + TransformPlan._refused_count(counts)
         )
 
     @staticmethod
+    def _refused_count(counts: Counter[Verdict]) -> str:
+        """The REFUSED count of a chain's line, only where there is one: no chain writes anywhere
+        it refuses, so the usual line has nothing to count."""
+        return f", {counts[Verdict.REFUSED]} REFUSED" if counts[Verdict.REFUSED] else ""
+
+    @staticmethod
     def _reason_lines(entries: list[TransformPlanEntry], expanded: bool) -> list[str]:
-        """Why a case is not a plain STREAM (fallback, LOAD, or a copy's own pass), each reason once
-        with how many entries it covers."""
+        """Why a case is not a plain STREAM (fallback, LOAD, a refusal, or a copy's own pass), each
+        reason once with how many entries it covers."""
         reasons: Counter[str] = Counter()
         for entry in entries:
             if not entry.reason:
                 continue
-            if entry.verdict in (Verdict.WHOLE_VOLUME, Verdict.LOAD):
+            if entry.verdict in (Verdict.WHOLE_VOLUME, Verdict.LOAD, Verdict.REFUSED):
                 reasons[f"{entry.verdict}: {entry.reason}"] += 1
             elif entry.regime is Regime.SOLO:
                 reasons[f"own pass: {entry.reason}"] += 1
@@ -570,13 +587,35 @@ class Transformer(DistributedObject):
                 )
         return Verdict.STREAM, None
 
+    @staticmethod
+    def _remote_destination(manager: DatasetManager, *destinations: Dataset) -> str | None:
+        """Why no route writes the chain's Saves, or ``None``: the first of ``destinations`` (the
+        chain's own Saves when none is named) that is a remote root, as :func:`uri.refuse_write`
+        refuses it. Asked of the plan, not of the first slab: every route ends in that refusal, and
+        the whole-volume one reads and transforms a case before reaching it."""
+        if not destinations:
+            destinations = tuple(
+                save_destination(stage, manager.dataset, manager.group_dest)[0]
+                for stage in manager.transforms
+                if isinstance(stage, Save)
+            )
+        for destination in destinations:
+            try:
+                uri.refuse_write(destination.filename)
+            except DatasetManagerError as error:
+                return str(error.args[0])
+        return None
+
     def _entry_refusal(
         self, item: WorkItem, copy_index: int, overwrite: bool, probed: set[tuple[str, str]]
     ) -> tuple[Verdict, str | None] | None:
-        """What stops an entry from streaming, or ``None``: an existing output is a resume (SKIP); a
-        chain the planner refuses, or whose destination fails the write probe, is the whole-volume
-        pass with the refusal."""
+        """What stops an entry from streaming, or ``None``: a destination no route writes refuses
+        (REFUSED); an existing output is a resume (SKIP); a chain the planner refuses, or whose
+        destination fails the write probe, is the whole-volume pass with the refusal."""
         manager = item.manager
+        remote = self._remote_destination(manager)
+        if remote is not None:
+            return Verdict.REFUSED, remote
         # Copies exist to carry augmentation draws: a real copy index asks the chain with them applied.
         augmented = copy_index > 0
         if not item.pending(manager.copy_entry(copy_index), overwrite):
@@ -628,10 +667,13 @@ class Transformer(DistributedObject):
         # a write the run never makes, and mha refuses on dtype.
         reduction_dtype = self._dtype_hypothesis(item.manager)
         reduction_plan = reduction.plan()
-        skipped = not item.pending(reduction.reduce.output, overwrite)
+        remote = self._remote_destination(item.manager, reduction.destination)
+        skipped = remote is None and not item.pending(reduction.reduce.output, overwrite)
         verdict = Verdict.SKIP if skipped else (Verdict.REDUCE if reduction_plan.streams else Verdict.REFUSED)
         reason = reduction_plan.refusal if not reduction_plan.streams else "\n".join(reduction_plan.body_lines())
-        if verdict is Verdict.REDUCE:
+        if remote is not None:
+            verdict, reason = Verdict.REFUSED, remote
+        elif verdict is Verdict.REDUCE:
             # A reduction has no whole-volume fallback, so a destination that would refuse
             # its stream at the first region refuses the plan: probed here, like a chain's.
             probe_failure = self._probe_destination(
@@ -686,7 +728,7 @@ class Transformer(DistributedObject):
         # the plan must measure the same run setup() will enforce. The store's decoded-chunk cache
         # is bounded here too: it is part of what the process holds.
         self._budget_bytes = per_rank_budget
-        set_chunk_cache_budget(per_rank_budget)
+        chunk_cache_bytes = set_chunk_cache_budget(per_rank_budget)
         entries: list[TransformPlanEntry] = []
         probed: set[tuple[str, str]] = set()
         planned_dtypes: set[str] = set()
@@ -715,6 +757,7 @@ class Transformer(DistributedObject):
             dtype_hypothesis,
             tuple(self._plan_notes(sub_cap_sweeps)),
             chain_labels,
+            chunk_cache_bytes,
         )
 
     #: What a streamed case whose slabs the budget lowered below the default height, and whose chain
@@ -754,16 +797,16 @@ class Transformer(DistributedObject):
         # and a second file holding the same text is one more thing to know about.
         kept = record(plan.report())
         print(f"{plan.summary()}" + (f" -> full plan in {kept}" if kept else ""))
+        self._guard_sharded_destinations(world_size)
+        self._enforce_plan(plan)
         # Where the data went, machine-readable beside the human-readable plan. This run directory
         # holds a log, a plan and a config copy, never the deliverable, which lands wherever each
         # Write pointed. Without this, the one thing a reader wants after the run is the one thing
-        # nothing in the run directory names.
+        # nothing in the run directory names. Past the refusals: a run that writes nothing names
+        # no outputs.
         (self.transform_path / "outputs.json").write_text(
             json.dumps(self.output_destinations(), indent=2) + "\n", encoding="utf-8"
         )
-
-        self._guard_sharded_destinations(world_size)
-        self._enforce_plan(plan)
 
         self._budget_bytes = plan.budget_bytes
         # The run executes the route the plan priced (LOAD assembles by choice, not fallback), and
@@ -830,6 +873,13 @@ class Transformer(DistributedObject):
             )
         if plan.refused_entries:
             first = plan.refused_entries[0]
+            if not first.reduced:
+                raise TransformerError(
+                    f"{len(plan.refused_entries)} entr(ies) cannot be written. First: case '{first.case}'"
+                    f" ({first.group_src} -> {first.group_dest}): {first.reason or 'see the plan'}",
+                    "Nothing was written. A remote root is where a cohort is read from: point every"
+                    " Write at a local path and upload the result separately.",
+                )
             reduction = self._reduction(first.group_dest, self.dataset.managers.get(first.group_dest, []))
             # A grid disagreement gets its own remedy: a Save changes nothing about the grids, so
             # the generic advice would send the reader in a circle.

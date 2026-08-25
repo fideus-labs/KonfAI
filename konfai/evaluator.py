@@ -30,9 +30,11 @@ from torch.utils.data import DataLoader
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
 from konfai.network.network import build_configured_criterions
+from konfai.utils.budget import node_local_ranks
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, EvaluatorError
+from konfai.utils.ome_zarr import set_chunk_cache_budget
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -308,6 +310,7 @@ class Evaluator(DistributedObject):
             for metric in criterions
         )
         self.dataset.prepare()
+        set_chunk_cache_budget(self.dataset.resolved_budget().per_rank_bytes(node_local_ranks()))
         # Set iff the budget actually patched: batches then carry one disjoint patch of a case, and
         # update() accumulates partial states until the case's last patch before recording it.
         self._streamed = self.dataset.patch is not None

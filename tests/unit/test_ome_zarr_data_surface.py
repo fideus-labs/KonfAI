@@ -262,6 +262,7 @@ def _sequence(cache, identity, steps):
             if cache.get((identity, coords)) is None:
                 decoded.append(coords)
                 cache.put((identity, coords), np.zeros(1, np.uint8))
+        cache.end(identity)
     return decoded
 
 
@@ -358,3 +359,186 @@ def test_a_plan_read_to_its_end_is_retired() -> None:
     cache.schedule(identity, [frozenset(step) for step in steps])
     _sequence(cache, identity, steps)
     assert not cache._schedules
+
+
+def _companion_reads(cache, source, mask, steps, declare: bool) -> dict:
+    """``steps`` read from ``source`` (declared when ``declare``), each followed by a read of one
+    chunk of ``mask`` that declares nothing; returns the chunks decoded per identity."""
+    if declare:
+        cache.schedule(source, [frozenset(step) for step in steps])
+    decoded: dict = {source: [], mask: []}
+    for chunks in steps:
+        for identity, wanted in ((source, chunks), (mask, {("m",)})):
+            cache.begin(identity, frozenset(wanted))
+            for coords in sorted(wanted):
+                if cache.get((identity, coords)) is None:
+                    decoded[identity].append(coords)
+                    cache.put((identity, coords), np.zeros(1, np.uint8))
+            cache.end(identity)
+    return decoded
+
+
+def test_a_companion_read_beside_a_declared_source_competes_by_recency() -> None:
+    """A sweep declares its source and nothing else; a stage reading a companion volume (a mask)
+    reads it at every region, undeclared. Ranked never-again, the companion's chunk is the first to
+    go whenever a declared chunk has a use ahead, and is decoded at every region: 3 of 5 here.
+    Ranked by recency it competes as under LRU, where a chunk read at every step is never the
+    oldest, and the declared source still keeps the chunk with the nearer use."""
+    from konfai.utils.ome_zarr import _DecodedChunkCache
+
+    source, mask = ("src", "0"), ("mask", "0")
+    steps = [{("a",), ("b",)}, {("c",)}, {("d",)}, {("a",)}, {("b",)}]
+
+    lru = _companion_reads(_DecodedChunkCache(3), source, mask, steps, declare=False)
+    assert [c[0] for c in lru[source]] == ["a", "b", "c", "d", "a", "b"], "LRU re-decodes both"
+    assert len(lru[mask]) == 1
+
+    planned = _companion_reads(_DecodedChunkCache(3), source, mask, steps, declare=True)
+    assert [c[0] for c in planned[source]] == ["a", "b", "c", "d", "b"], "'a' is the nearer use, kept"
+    assert len(planned[mask]) == 1, "the companion is decoded once, as under LRU"
+
+
+def test_a_chunk_of_the_window_being_assembled_outlives_the_rest_of_it() -> None:
+    """A read whose window is decoded chunk by chunk must not evict its own first chunk to admit
+    its last: the schedule counts a use at the read in progress as now, not as behind, until the
+    read ends."""
+    from konfai.utils.ome_zarr import _DecodedChunkCache
+
+    cache = _DecodedChunkCache(2)
+    source, other = ("src", "0"), ("other", "0")
+    cache.put((other, ("m",)), np.zeros(1, np.uint8))
+    cache.schedule(source, [frozenset({("a",), ("b",)}), frozenset({("c",)})])
+    cache.begin(source, frozenset({("a",), ("b",)}))
+    cache.put((source, ("a",)), np.zeros(1, np.uint8))
+    cache.put((source, ("b",)), np.zeros(1, np.uint8))
+    assert cache.get((source, ("a",))) is not None, "evicted for its own window's last chunk"
+    assert cache.get((other, ("m",))) is None, "the undeclared chunk went instead"
+    cache.end(source)
+    cache.begin(source, frozenset({("c",)}))
+    cache.put((source, ("c",)), np.zeros(1, np.uint8))
+    assert cache.get((source, ("c",))) is not None, "the read that ended is behind: its chunks go first"
+
+
+def test_an_empty_declared_read_still_advances_its_schedule(tmp_path: Path) -> None:
+    """A region a pull map folds to nothing (a block outside the source) is declared like any other;
+    a reader that returned before counting it would rank every later chunk against the wrong read."""
+    from konfai.utils.ome_zarr import _chunk_cache, plan_ome_zarr_reads
+
+    store = tmp_path / "planned.ome.zarr"
+    write_ome_zarr(store, _volume(), spacing=[1.0, 1.0, 1.0], chunks=[1, 4, 12, 16])
+    empty = (slice(0, 1), slice(0, 0), slice(0, 12), slice(0, 16))
+    first = (slice(0, 1), slice(0, 4), slice(0, 12), slice(0, 16))
+    second = (slice(0, 1), slice(4, 8), slice(0, 12), slice(0, 16))
+    plan_ome_zarr_reads(store, [empty, first, second])
+    identity = next(identity for identity in _chunk_cache()._schedules if identity[0] == str(store))
+
+    assert read_ome_zarr_data_slice(store, empty)[0].shape == (1, 0, 12, 16)
+    read_ome_zarr_data_slice(store, first)
+    assert identity in _chunk_cache()._schedules, "the empty read was not counted: the schedule deviated"
+    read_ome_zarr_data_slice(store, second)
+    assert identity not in _chunk_cache()._schedules, "read to its end, retired"
+
+
+class _CountingArray:
+    """A zarr array whose reads count the chunks they decode."""
+
+    def __init__(self, array, decoded: list[int]) -> None:
+        self._array, self._decoded = array, decoded
+        self.shape, self.chunks, self.dtype = array.shape, array.chunks, array.dtype
+
+    def __getitem__(self, index):
+        touched = 1
+        for item, chunk, extent in zip(index, self.chunks, self.shape, strict=True):
+            lo, hi, _ = item.indices(extent) if isinstance(item, slice) else (item, item + 1, 1)
+            touched *= max(0, -(-hi // chunk) - lo // chunk)
+        self._decoded[0] += touched
+        return self._array[index]
+
+
+def _sweep_with_a_mask_companion(
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, declared: bool, capacity_chunks: int, label: str
+) -> dict[str, int]:
+    """One sweep of CT through a Mask (reading Labels beside it) and a rotated resample, both
+    stores chunked alike, the decoded-chunk cache holding ``capacity_chunks``; the chunks decoded
+    per store."""
+    from konfai.data.materialize import CaseMaterializer, Verdict
+    from konfai.data.patching import DatasetManager, DatasetPatch
+    from konfai.data.transform import Mask, Resample, Save
+    from konfai.utils import ome_zarr
+
+    source = Dataset(root / "src", "omezarr")
+    mask = Mask(path="Labels", value_outside=-7)
+    mask.set_datasets([source])
+    resample = Resample(reference="TARGET", reference_group="GRID", reference_dataset=f"{root / 'ref'}:h5")
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=source,
+        patch=DatasetPatch([4, 5, 4]),
+        transforms=[mask, resample, Save(f"{root / f'out_{label}'}:h5")],
+        data_augmentations_list=[],
+    )
+    decoded: dict[str, list[int]] = {"CT": [0], "Labels": [0]}
+    level_array = ome_zarr._level_array
+    level_array.cache_clear()
+
+    def counting(store_path: str, level_path: str):
+        group = next(group for group in decoded if f"/{group}." in store_path)
+        return _CountingArray(level_array(store_path, level_path), decoded[group])
+
+    with monkeypatch.context() as patched:
+        patched.setattr(ome_zarr, "_level_array", counting)
+        if not declared:
+            patched.setattr(Dataset, "plan_region_reads", lambda self, groups, name, windows: None)
+        cache = ome_zarr._chunk_cache()
+        previous = cache.capacity
+        cache.forget()
+        cache.set_capacity(capacity_chunks * 16 * 32 * 32 * 4)
+        try:
+            assert CaseMaterializer(manager).materialize() is Verdict.STREAM
+        finally:
+            cache.set_capacity(previous)
+            cache.forget()
+    return {group: count[0] for group, count in decoded.items()}
+
+
+def test_a_mask_companion_of_a_declared_sweep_is_decoded_once_where_lru_decodes_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real two-store sweep: a Mask reads Labels at every region beside the CT the sweep
+    declared, through a 20-degree resample whose cubic blocks pull each chunk of both stores from
+    several regions. At a cache holding two thirds of the two stores together, the declared source
+    decodes each chunk once and so does the companion beside it, where LRU decodes both again."""
+    from konfai.data import patching as patching_module
+
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")  # one thread: the cache sees the read's own order
+    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 12)
+    monkeypatch.setattr(patching_module, "_sweep_pipeline_depth", lambda: 0)
+    landing = (48, 128, 128)
+    region = [1, 16, 32, 32]  # both stores chunked to it: 48 chunks of 64 KiB each
+    rng = np.random.default_rng(0)
+    source = Dataset(tmp_path / "src", "omezarr")
+    for group, volume in (
+        ("CT", (rng.random((1, *landing)) * 100).astype(np.float32)),
+        ("Labels", (rng.random((1, *landing)) > 0.5).astype(np.float32)),
+    ):
+        stream = source.open_data_stream(group, "CASE_000", list(volume.shape), volume.dtype, _attributes(), region)
+        assert stream is not None
+        with stream:
+            stream.write_slice(tuple(slice(0, extent) for extent in volume.shape), volume)
+    angle = np.deg2rad(20.0)
+    rotated = _attributes()
+    rotated["Direction"] = np.asarray(
+        [[np.cos(angle), 0.0, np.sin(angle)], [0.0, 1.0, 0.0], [-np.sin(angle), 0.0, np.cos(angle)]]
+    ).reshape(-1)
+    Dataset(tmp_path / "ref", "h5").write("GRID", "TARGET", np.zeros((1, *landing), np.float32), rotated)
+
+    floor = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared=True, capacity_chunks=96, label="all")
+    lru = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared=False, capacity_chunks=64, label="lru")
+    planned = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared=True, capacity_chunks=64, label="plan")
+
+    assert floor["CT"] == floor["Labels"] > 0, "the two stores are read alike"
+    assert lru["CT"] > floor["CT"] and lru["Labels"] > floor["Labels"], "LRU re-decodes both"
+    assert planned == floor, f"{planned} decodes against a floor of {floor}"
