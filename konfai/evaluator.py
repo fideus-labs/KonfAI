@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader
 
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
+from konfai.data.patching import SweepClock
 from konfai.network.network import build_configured_criterions
 from konfai.utils.budget import node_local_ranks
 from konfai.utils.config import apply_config, config, strict_config
@@ -327,6 +328,8 @@ class Evaluator(DistributedObject):
         # ones that own a network (a perceptual metric moves its model to the tensor's device, and a
         # segmentation metric runs a whole nested inference). `run_process` sets the run's real device.
         self._device: torch.device | int = torch.device("cpu")
+        # Where a split's wall clock goes, one clock per split (see _evaluate_split).
+        self._clock = SweepClock()
         self._validate_metric_groups()
 
     def _validate_metric_groups(self) -> None:
@@ -392,47 +395,26 @@ class Evaluator(DistributedObject):
         if self._streamed:
             return self._update_streamed(batch_sample, statistics)
         result: dict[str, float] = {}
+        moved = self._groups_on(batch_sample)
         for output_group in self.metrics:
-            metric_device = self._device
-            output_tensor = self._on(batch_sample[output_group].tensor, metric_device)
+            output_tensor = moved[output_group]
             for target_group in self.metrics[output_group]:
-                targets = self._targets_on(batch_sample, target_group, metric_device)
+                targets = [moved[group] for group in target_group.split(";") if group in batch_sample]
                 target_attribute = [batch_sample[output_group].attribute] + [
                     batch_sample[group].attribute for group in target_group.split(";") if group in batch_sample
                 ]
                 name = batch_sample[output_group].name[0]
                 for metric in self.metrics[output_group][target_group]:
-                    if getattr(metric, "accepts_attributes", False):
-                        with torch.no_grad():
-                            loss = metric(
-                                output_tensor,
-                                *targets,
-                                attributes=target_attribute,
-                            )
-                    else:
-                        with torch.no_grad():
-                            loss = metric(
-                                output_tensor,
-                                *targets,
-                            )
+                    with self._clock.phase(metric.get_name()), torch.no_grad():
+                        if getattr(metric, "accepts_attributes", False):
+                            loss = metric(output_tensor, *targets, attributes=target_attribute)
+                        else:
+                            loss = metric(output_tensor, *targets)
                     if isinstance(loss, tuple):
                         true_loss = loss[1]
-                        if len(loss) == 3:
-                            if metric.dataset:
-                                filename, _, file_format = split_path_spec(metric.dataset)
-                                map_dataset = Dataset(filename, file_format)
-                                group = metric.group if metric.group else output_group
-                                for dataset in self.dataset.datasets.values():
-                                    for g in dataset.get_group():
-                                        if dataset.is_dataset_exist(g, name):
-                                            _, cache_attribute = dataset.get_infos(g, name)
-                                            map_dataset.write(
-                                                group,
-                                                name,
-                                                loss[2].squeeze(0).numpy(),
-                                                cache_attribute,
-                                            )
-                                            break
+                        if len(loss) == 3 and metric.dataset:
+                            with self._clock.phase("map"):
+                                self._write_map(metric, output_group, name, loss[2])
                     else:
                         true_loss = loss.item()
 
@@ -443,6 +425,18 @@ class Evaluator(DistributedObject):
             statistics.add(result, name)
         return result
 
+    def _write_map(self, metric: Any, output_group: str, name: str, map_: torch.Tensor) -> None:
+        """Write a metric's whole-case map beside the case, with the case's own geometry."""
+        filename, _, file_format = split_path_spec(metric.dataset)
+        map_dataset = Dataset(filename, file_format)
+        group = metric.group if metric.group else output_group
+        for dataset in self.dataset.datasets.values():
+            for g in dataset.get_group():
+                if dataset.is_dataset_exist(g, name):
+                    _, cache_attribute = dataset.get_infos(g, name)
+                    map_dataset.write(group, name, map_.squeeze(0).numpy(), cache_attribute)
+                    return
+
     @staticmethod
     def _on(tensor: torch.Tensor, metric_device: torch.device | int) -> torch.Tensor:
         """A tensor on the metric's device, moved only when it is not already there."""
@@ -450,16 +444,23 @@ class Evaluator(DistributedObject):
             return tensor
         return tensor.to(metric_device, non_blocking=tensor.device.type == "cpu")
 
-    @staticmethod
-    def _targets_on(
-        batch_sample: BatchSample, target_group: str, metric_device: torch.device | int
-    ) -> list[torch.Tensor]:
-        """The target tensors of a ``;``-joined group spec, moved to the metric's device."""
-        return [
-            Evaluator._on(batch_sample[group].tensor, metric_device)
-            for group in target_group.split(";")
+    def _groups_on(self, batch_sample: BatchSample) -> dict[str, torch.Tensor]:
+        """Every group a metric names, on the metric device, moved once per update.
+
+        A target named by two specs (``CT`` and ``CT;MASK``) or shared by two outputs was uploaded
+        once per spec per case, and per patch on the streamed path. Sharing one copy is safe: a
+        metric never writes into its inputs (a mask multiplies into a new tensor), and the metrics
+        of one spec already read the same tensor.
+        """
+        groups = {
+            group
+            for output_group, targets in self.metrics.items()
+            for spec in (output_group, *targets)
+            for group in spec.split(";")
             if group in batch_sample
-        ]
+        }
+        with self._clock.phase("h2d"):
+            return {group: self._on(batch_sample[group].tensor, self._device) for group in sorted(groups)}
 
     @staticmethod
     def _record_value(
@@ -495,28 +496,30 @@ class Evaluator(DistributedObject):
         """
         name = batch_sample[next(iter(self.metrics))].name[0]
         if self._pending_name is not None and name != self._pending_name:
-            self._flush_pending(statistics)
+            with self._clock.phase("flush"):
+                self._flush_pending(statistics)
         self._pending_name = name
+        moved = self._groups_on(batch_sample)
         for output_group in self.metrics:
-            metric_device = self._device
-            output_tensor = self._on(batch_sample[output_group].tensor, metric_device)
+            output_tensor = moved[output_group]
             for target_group in self.metrics[output_group]:
-                targets = self._targets_on(batch_sample, target_group, metric_device)
+                targets = [moved[group] for group in target_group.split(";") if group in batch_sample]
                 for index, metric in enumerate(self.metrics[output_group][target_group]):
-                    with torch.no_grad():
+                    with self._clock.phase(metric.get_name()), torch.no_grad():
                         state = metric.partial_metric(output_tensor, *targets)
                     entry = self._pending.setdefault((output_group, target_group, index), (metric, []))
                     entry[1].append(state)
                     if getattr(metric, "dataset", None) and hasattr(metric, "partial_map"):
-                        with torch.no_grad():
+                        with self._clock.phase(metric.get_name()), torch.no_grad():
                             patch_map = metric.partial_map(output_tensor, *targets).squeeze(0)
-                        self._write_map_patch(
-                            (output_group, target_group, index),
-                            metric,
-                            batch_sample[output_group],
-                            output_group,
-                            patch_map,
-                        )
+                        with self._clock.phase("map"):
+                            self._write_map_patch(
+                                (output_group, target_group, index),
+                                metric,
+                                batch_sample[output_group],
+                                output_group,
+                                patch_map,
+                            )
         return self._last_result
 
     def _write_map_patch(
@@ -629,25 +632,59 @@ class Evaluator(DistributedObject):
             )
 
         self._iter_dataset = dataloader.dataset
+        self._clock = SweepClock()
         try:
-            with tqdm.tqdm(
-                iterable=enumerate(dataloader),
-                leave=True,
-                desc=description(None),
-                total=len(dataloader),
-                ncols=0,
-            ) as batch_iter:
-                for _, batch_sample in batch_iter:
+            with (
+                self._clock.phase("split"),
+                tqdm.tqdm(
+                    iterable=enumerate(dataloader),
+                    leave=True,
+                    desc=description(None),
+                    total=len(dataloader),
+                    ncols=0,
+                ) as batch_iter,
+            ):
+                for _, batch_sample in self._clock.waiting("wait(load)", batch_iter):
                     batch_iter.set_description(description(self.update(batch_sample, statistics)))
-            self._flush_pending(statistics)  # close the split's last case
+                with self._clock.phase("flush"):
+                    self._flush_pending(statistics)  # close the split's last case
         except BaseException as error:
             # A half-written error map must not survive as a valid-looking file: abort the open
             # region-write sinks so their backends remove the partial entries, then re-raise.
             self._abort_map_sinks(error)
             raise
+        if global_rank == 0:
+            report = self._clock_report(label)
+            if report is not None:
+                print(report)
         outputs = synchronize_data(world_size, gpu, statistics.measures)
         if global_rank == 0:
             statistics.write(outputs)
+
+    def _clock_report(self, label: str, min_seconds: float = 1.0) -> str | None:
+        """One line accounting for a split's wall clock, or ``None`` below ``min_seconds``.
+
+        The phases: the wait for the loader's next batch, the move to the metric device, one per
+        metric name, the map writes and the streamed flushes; ``other`` is what none of them names.
+        On a GPU a metric's phase is its enqueue time, not its run: no synchronize is added for the
+        report's sake, so a slow kernel shows up in whatever next waits on the device.
+        """
+        wall = self._clock.spent("split")
+        if wall < min_seconds:
+            return None
+        names = ["wait(load)", "h2d"]
+        names += sorted(
+            {
+                metric.get_name()
+                for targets in self.metrics.values()
+                for metrics in targets.values()
+                for metric in metrics
+            }
+        )
+        names += ["map", "flush"]
+        named = {name: self._clock.spent(name) for name in names if self._clock.spent(name) > 0.0}
+        parts = " + ".join(f"{name} {value:.1f}" for name, value in named.items())
+        return f"[KonfAI] evaluation {label} {wall:.1f} s = {parts} + other {wall - sum(named.values()):.1f}"
 
 
 def build_evaluate(

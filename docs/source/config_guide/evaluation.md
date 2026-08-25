@@ -109,6 +109,23 @@ The JSON structure contains:
 
 This behavior comes from `konfai.evaluator.Statistics.write()`.
 
+### Where the split's time went
+
+A split that ran for more than a second closes with a line accounting for it,
+phase by phase, in the rank's log:
+
+```text
+[KonfAI] evaluation TRAIN 4.0 s = wait(load) 0.6 + h2d 0.0 + MAE 0.2 + PSNR 0.1 + SSIM 2.5 + map 0.3 + flush 0.0 + other 0.1
+```
+
+`wait(load)` is the wait for the loader's next case or patch, `h2d` the move to
+the metric device, then one figure per metric name, `map` the error-map writes of
+the SaveMap metrics and `flush` the combination of a streamed case's partial
+states; what the named phases do not account for is `other`. The sum closes
+exactly. On a GPU a metric's figure is the time to enqueue its kernels, not to
+run them: a slow kernel shows up in whatever next waits on the device, typically
+the next `h2d` or a metric that reads a value back.
+
 ## Examples
 
 See:

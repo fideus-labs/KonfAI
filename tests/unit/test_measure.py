@@ -20,6 +20,7 @@ PerceptualLoss plumbing, and optional-dependency errors)."""
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 from konfai.metric.measure import SSIM, Dice, FocalLoss, KLDivergence, PerceptualLoss, Variance, _require_optional
 from konfai.network.network import CriterionsAttr
 from konfai.utils.errors import MeasureError
@@ -72,6 +73,35 @@ def test_a_criterion_accepts_the_integer_label_map_a_segmentation_target_is(crit
     loss = Dice()(output, target)[0] if criterion == "Dice" else FocalLoss()(output, target)
 
     assert torch.isfinite(loss).all()
+
+
+class TestOnGrid:
+    def test_a_target_on_the_output_grid_is_handed_back_as_is(self):
+        # No resample on the output's own grid: the integer label map keeps its dtype and its storage,
+        # where the unconditional float resample cost 3.7 s of copy plus float `unique` at 512^3.
+        output = torch.zeros(1, 3, 6, 5)
+        target = torch.randint(0, 3, (1, 1, 6, 5)).to(torch.uint8)
+
+        assert Dice.on_grid(output, target) is target
+
+    def test_a_target_on_another_grid_is_resampled_nearest(self):
+        output = torch.zeros(1, 3, 6, 4)
+        target = torch.tensor([[[[1, 2], [3, 4]]]], dtype=torch.uint8)
+
+        resampled = Dice.on_grid(output, target)
+
+        assert tuple(resampled.shape) == (1, 1, 6, 4)
+        assert set(resampled.unique().tolist()) == {1, 2, 3, 4}  # picked, never blended
+        assert torch.equal(resampled, F.interpolate(target.float(), (6, 4), mode="nearest"))
+
+    def test_focal_loss_takes_the_integer_target_on_its_own_grid(self):
+        output = torch.randn(1, 3, 4, 4)
+        target = torch.randint(0, 3, (1, 1, 4, 4)).to(torch.uint8)
+
+        loss = FocalLoss(alpha=[0.5, 2.0, 0.5])(output, target)
+
+        assert torch.isfinite(loss)
+        assert loss.item() == pytest.approx(FocalLoss(alpha=[0.5, 2.0, 0.5])(output, target.float()).item())
 
 
 class TestDice:
@@ -158,6 +188,249 @@ class TestDice:
         assert per_label[1] == pytest.approx(2 / 3, abs=1e-5)
 
 
+def _dice_per_label_oracle(labels, output, target, mask=None):
+    """The per-label spelling Dice scored hard labels with before the confusion matrix: one float
+    expansion and two sums per label, kept here as the oracle the bincount route is pinned against."""
+    if mask is not None:
+        mask = torch.where(mask == 1, 1, 0)
+        output, target = output * mask.to(output.dtype), target * mask.to(target.dtype)
+    result = {}
+    loss = torch.tensor(0, dtype=torch.float32)
+    if labels is None:
+        labels = [int(label) for label in torch.unique(target) if int(label) != 0]
+    count = 0
+    for label in labels:
+        tp = target == label
+        if tp.any().item():
+            pp = output[:, label].unsqueeze(1) if output.shape[1] > 1 else (output == label)
+            dice = Dice.dice_per_channel(pp.float(), tp.float())
+            loss += dice
+            count += 1
+            result[label] = dice.item()
+        else:
+            result[label] = np.nan
+    return (1 - loss / count if count else loss), result
+
+
+def _assert_same_scores(got, expected, abs_tol):
+    assert set(got[1]) == set(expected[1])
+    for label, value in expected[1].items():
+        if np.isnan(value):
+            assert np.isnan(got[1][label])
+        else:
+            assert got[1][label] == pytest.approx(value, abs=abs_tol)
+    assert got[0].item() == pytest.approx(expected[0].item(), abs=abs_tol)
+
+
+class TestDiceConfusionMatrix:
+    """Hard labels are scored from one confusion matrix; the per-label oracle above pins the values."""
+
+    @staticmethod
+    def _pair(structured: bool, dtype: torch.dtype):
+        rng = np.random.default_rng(7)
+        shape = (1, 1, 12, 13, 11)
+        if structured:
+            grid = np.stack(np.meshgrid(*[np.linspace(-1, 1, s) for s in shape[2:]], indexing="ij"))
+            target = np.clip((np.sqrt((grid**2).sum(0)) * 6).astype(np.int64), 0, 5)[None, None]
+            flips = rng.random(shape) < 0.15
+            output = np.where(flips, rng.integers(0, 6, size=shape), target)
+        else:
+            target = rng.integers(0, 6, size=shape)
+            output = rng.integers(0, 6, size=shape)
+        # Label 4 never predicted, label 5 never in the reference, label 9 in neither.
+        output[output == 4] = 0
+        target[target == 5] = 0
+        return torch.tensor(output).to(dtype), torch.tensor(target).to(dtype)
+
+    @pytest.mark.parametrize("labels", [None, [1, 2, 3], [-1, 2]])
+    def test_a_negative_label_and_a_nan_voxel_score_as_the_oracle_scores_them(self, labels):
+        """``bincount`` takes no negative index and no NaN: a label of -1 (an ignore convention) is
+        a label like any other, a NaN voxel is no label, as the per-label ``==`` always read them."""
+        output, target = self._pair(True, torch.int16)
+        output[output == 2] = -1
+        target[target == 3] = -1
+        _assert_same_scores(Dice(labels=labels)(output, target), _dice_per_label_oracle(labels, output, target), 1e-6)
+
+        output, target = self._pair(True, torch.float32)
+        output[output == 1] = float("nan")
+        target[target == 2] = float("nan")
+        # The oracle's own label discovery is torch.unique, which hands it the NaN: told the labels.
+        held = labels or sorted(int(v) for v in torch.unique(target[~target.isnan()]).tolist() if v != 0)
+        _assert_same_scores(Dice(labels=labels)(output, target), _dice_per_label_oracle(held, output, target), 1e-6)
+
+    @pytest.mark.parametrize("structured", [False, True])
+    @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
+    @pytest.mark.parametrize("labels", [None, [1, 2, 3, 4, 5, 9]])
+    @pytest.mark.parametrize("masked", [False, True])
+    def test_matches_the_per_label_oracle(self, structured, dtype, labels, masked):
+        output, target = self._pair(structured, dtype)
+        mask = (torch.rand(output.shape) > 0.3).to(torch.uint8) if masked else None
+        args = (output, target, mask) if masked else (output, target)
+
+        got = Dice(labels=labels)(*args)
+        expected = _dice_per_label_oracle(labels, output, target, mask)
+
+        # Exact integer counts against float32 sums: the 1e-6 smooth term is the only rounding left.
+        _assert_same_scores(got, expected, abs_tol=1e-6)
+        if labels is not None:
+            assert np.isnan(got[1][9]) and np.isnan(got[1][5])  # absent from the reference
+            reference = int(((target == 4) & (mask == 1)).sum()) if masked else int((target == 4).sum())
+            assert got[1][4] == pytest.approx(1e-6 / (reference + 1e-6), abs=1e-9)  # never predicted
+
+    def test_soft_path_is_bit_identical_to_the_oracle(self):
+        torch.manual_seed(3)
+        output = torch.softmax(torch.randn(2, 5, 6, 7, 5), dim=1)
+        target = torch.randint(0, 5, (2, 1, 6, 7, 5))
+        target[target == 3] = 0
+
+        for labels in (None, [1, 2, 3, 4]):
+            got = Dice(labels=labels)(output, target)
+            expected = _dice_per_label_oracle(labels, output, target)
+            assert got[0].item() == expected[0].item()
+            _assert_same_scores(got, expected, abs_tol=0.0)
+
+    def test_soft_path_keeps_its_gradient(self):
+        output = torch.softmax(torch.randn(1, 3, 4, 4), dim=1).requires_grad_(True)
+        target = torch.randint(0, 3, (1, 1, 4, 4))
+
+        loss, _ = Dice()(output, target)
+        loss.backward()
+
+        assert output.grad is not None and torch.isfinite(output.grad).all()
+
+    def test_streamed_sums_carry_the_predicted_mass_of_a_label_the_patch_reference_lacks(self):
+        # labels=None: a patch predicting label 2 where its reference has none must still count
+        # that mass in the whole-case ratio; a state built from the patch's own label set dropped it.
+        target = torch.zeros(1, 1, 4, 4, dtype=torch.uint8)
+        target[..., :2, :] = 2  # label 2 in the first half only
+        output = torch.full((1, 1, 4, 4), 2, dtype=torch.uint8)  # predicted everywhere
+        metric = Dice(labels=None)
+
+        whole = metric(output, target)
+        states = [metric.partial_metric(output[..., :2, :], target[..., :2, :])]
+        states.append(metric.partial_metric(output[..., 2:, :], target[..., 2:, :]))
+        combined = metric.combine_metric(states)
+
+        assert whole[1][2] == pytest.approx(2 * 8 / (16 + 8), abs=1e-6)
+        assert combined[1][2] == pytest.approx(whole[1][2], abs=1e-9)
+        assert set(combined[1]) == {2}  # a label no reference holds is not reported
+
+    @pytest.mark.parametrize("soft", [False, True])
+    def test_combine_reproduces_the_oracle_from_the_same_patches(self, soft):
+        torch.manual_seed(5)
+        if soft:
+            output = torch.softmax(torch.randn(1, 6, 8, 9, 7), dim=1)
+        else:
+            output = torch.randint(0, 6, (1, 1, 8, 9, 7)).to(torch.uint8)
+        target = torch.randint(0, 6, (1, 1, 8, 9, 7)).to(torch.uint8)
+        target[target == 5] = 0
+        for labels in (None, [1, 2, 5, 9]):
+            metric = Dice(labels=labels)
+            states = [
+                metric.partial_metric(output[..., z : z + 3, :, :], target[..., z : z + 3, :, :]) for z in (0, 3, 6)
+            ]
+            _assert_same_scores(metric.combine_metric(states), _dice_per_label_oracle(labels, output, target), 1e-6)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="counts CUDA synchronisations")
+    def test_syncs_do_not_grow_with_the_label_count(self):
+        import warnings
+
+        output = torch.softmax(torch.randn(1, 41, 8, 8, 8, device="cuda"), dim=1)
+        target = torch.randint(0, 41, (1, 1, 8, 8, 8), device="cuda").to(torch.uint8)
+        hard = torch.randint(0, 41, (1, 1, 8, 8, 8), device="cuda").to(torch.uint8)
+        counts = {}
+        torch.cuda.set_sync_debug_mode("warn")
+        try:
+            for name, args in (("soft", (output, target)), ("hard", (hard, target))):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    Dice()(*args)
+                    Dice().partial_metric(*args)
+                counts[name] = len(caught)
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+        # forward + partial_metric: bincount (one sync each) and one .tolist() each, never one per label.
+        assert counts["soft"] <= 8 and counts["hard"] <= 12, counts
+
+
+class TestSaveMaps:
+    """A SaveMap metric reads its scalar and its map off one difference buffer; the two-pass
+    spellings they replace are the oracles."""
+
+    @staticmethod
+    def _mae_oracle(reduction, output, target, mask=None):
+        from konfai.metric.measure import MAE
+
+        args = (output, target) if mask is None else (output, target, mask)
+        loss, value = MAE(reduction)(*args)
+        if mask is None:
+            map_ = torch.nn.L1Loss(reduction="none")(output.float(), target.float())
+        else:
+            mask64 = torch.where(mask == 1, 1, 0)
+            map_ = torch.nn.L1Loss(reduction="none")(output.float() * mask64, target.float() * mask64)
+        return loss, value, map_.to(output.dtype).cpu()
+
+    @pytest.mark.parametrize("reduction", ["mean", "sum"])
+    @pytest.mark.parametrize("masked", [False, True])
+    @pytest.mark.parametrize("batch", [1, 2])
+    def test_mae_scalar_and_map_are_bit_identical_to_the_two_pass_spelling(self, reduction, masked, batch):
+        from konfai.metric.measure import MAESaveMap
+
+        torch.manual_seed(11)
+        output = torch.rand(batch, 2, 7, 6, 5) * 4000 - 1000
+        target = output + torch.randn(batch, 2, 7, 6, 5) * 100
+        mask = (torch.rand(batch, 1, 7, 6, 5) > 0.4).to(torch.uint8) if masked else None
+        args = (output, target, mask) if masked else (output, target)
+
+        loss, value, map_ = MAESaveMap(reduction)(*args)
+        expected_loss, expected_value, expected_map = self._mae_oracle(reduction, output, target, mask)
+
+        assert value == expected_value
+        assert loss.item() == expected_loss.item()
+        assert torch.equal(map_, expected_map)
+        assert torch.equal(MAESaveMap(reduction).partial_map(*args), expected_map)
+
+    def test_mae_with_an_empty_mask_is_nan_and_its_map_zero(self):
+        from konfai.metric.measure import MAESaveMap
+
+        output, target = torch.rand(1, 1, 4, 4), torch.rand(1, 1, 4, 4)
+        mask = torch.zeros(1, 1, 4, 4, dtype=torch.uint8)
+
+        _, value, map_ = MAESaveMap()(output, target, mask)
+
+        assert np.isnan(value)
+        assert torch.equal(map_, torch.zeros(1, 1, 4, 4))
+
+    def test_dice_map_of_uint8_labels_does_not_wrap(self):
+        # |0 - 3| on uint8 labels is 3; the unmasked `output - target` wrapped to 253, and only the
+        # masked path's accidental int64 promotion got it right.
+        from konfai.metric.measure import DiceSaveMap
+
+        output = torch.tensor([[[[0, 3, 2]]]], dtype=torch.uint8)
+        target = torch.tensor([[[[3, 0, 2]]]], dtype=torch.uint8)
+
+        _, _, map_ = DiceSaveMap()(output, target)
+
+        assert map_.dtype == torch.uint8
+        assert map_.tolist() == [[[[3, 3, 0]]]]
+
+    @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
+    def test_dice_masked_map_is_bit_identical_to_the_promoted_spelling(self, dtype):
+        from konfai.metric.measure import DiceSaveMap
+
+        torch.manual_seed(2)
+        output = torch.randint(0, 6, (1, 1, 6, 7, 5)).to(dtype)
+        target = torch.randint(0, 6, (1, 1, 6, 7, 5)).to(dtype)
+        mask = (torch.rand(1, 1, 6, 7, 5) > 0.3).to(torch.uint8)
+        mask64 = torch.where(mask == 1, 1, 0)
+        expected = torch.nn.L1Loss(reduction="none")(output * mask64, target * mask64).to(torch.uint8)
+
+        _, _, map_ = DiceSaveMap()(output, target, mask)
+
+        assert torch.equal(map_, expected)
+        assert torch.equal(DiceSaveMap().partial_map(output, target, mask), expected)
+
+
 class TestSSIM:
     dynamic_range = 4.0
 
@@ -197,12 +470,112 @@ class TestSSIM:
         assert value == pytest.approx(expected, abs=1e-5)
 
     def test_identical_volumes_give_one(self):
-        pytest.importorskip("skimage.metrics")
         x, _ = self._volumes()
 
         _, value = SSIM(dynamic_range=self.dynamic_range)(x, x.clone())
 
         assert value == pytest.approx(1.0, abs=1e-6)
+
+    # . The torch port against skimage, its oracle ----------------------------------------------
+    # skimage filters in float32 and means in float64; the port does the same, so the two agree to
+    # a few 1e-8 relative (measured max 4e-8 on 64x72x80 and 256^3 inputs): pinned at 1e-6 absolute.
+
+    @staticmethod
+    def _pair(kind: str, shape: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray]:
+        rng = np.random.default_rng(0)
+        grid = np.stack(np.meshgrid(*[np.linspace(-1, 1, s) for s in shape], indexing="ij"))
+        if kind == "random":
+            x = rng.normal(size=shape).astype(np.float32) * 500
+            y = x + rng.normal(size=shape).astype(np.float32) * 100
+        elif kind == "smooth":
+            x = (np.sin(4 * grid[0]) * np.cos(3 * grid[1]) * 1000).astype(np.float32)
+            y = (x * 0.9 + 50 * np.cos(5 * grid[-1])).astype(np.float32)
+        elif kind == "masked":  # zeros outside a ball, what a body mask leaves
+            inside = (grid**2).sum(0) < 0.7
+            x = (rng.normal(size=shape).astype(np.float32) * 500) * inside
+            y = (x + rng.normal(size=shape).astype(np.float32) * 100) * inside
+        elif (
+            kind == "offset"
+        ):  # a constant 1000 against the same with a 5 HU step: the variance is nothing beside the mean
+            x = np.full(shape, 1000.0, dtype=np.float32)
+            y = x.copy()
+            y[tuple(slice(s // 2, None) for s in shape)] += 5.0
+        else:  # a CT-like field: a large mean, a little noise
+            x = (2500.0 + np.sin(4 * grid[0]) * 30 + rng.normal(size=shape) * 50).astype(np.float32)
+            y = (x + rng.normal(size=shape) * 20).astype(np.float32)
+        return x, y
+
+    @pytest.mark.parametrize("kind", ["random", "smooth", "masked", "offset", "hu"])
+    @pytest.mark.parametrize("shape", [(24, 27, 21), (40, 33)])
+    def test_matches_skimage(self, kind, shape):
+        structural_similarity = pytest.importorskip("skimage.metrics").structural_similarity
+        x, y = self._pair(kind, shape)
+        expected = float(structural_similarity(x.astype(np.float64), y.astype(np.float64), data_range=4095.0))
+
+        _, value = SSIM(dynamic_range=4095.0)(torch.tensor(x)[None, None], torch.tensor(y)[None, None])
+
+        assert value == pytest.approx(expected, abs=1e-6)
+
+    def test_channels_are_averaged_as_channel_axis_zero(self):
+        structural_similarity = pytest.importorskip("skimage.metrics").structural_similarity
+        x, y = self._pair("random", (3, 20, 22, 19))
+        expected = float(
+            structural_similarity(x.astype(np.float64), y.astype(np.float64), data_range=4095.0, channel_axis=0)
+        )
+
+        _, value = SSIM(dynamic_range=4095.0)(torch.tensor(x)[None], torch.tensor(y)[None])
+
+        assert value == pytest.approx(expected, abs=1e-6)
+
+    def test_a_mask_multiplies_the_pair_and_scores_the_whole_extent(self):
+        # The masked mode: both volumes are zeroed outside the mask and the mean still runs over the
+        # whole cropped extent, exactly what skimage sees when handed the masked volumes.
+        structural_similarity = pytest.importorskip("skimage.metrics").structural_similarity
+        x, y = self._pair("random", (18, 21, 17))
+        mask = (np.random.default_rng(1).random(x.shape) > 0.4).astype(np.uint8)
+        expected = float(structural_similarity(x * mask, y * mask, data_range=4095.0))
+
+        _, value = SSIM(dynamic_range=4095.0)(
+            torch.tensor(x)[None, None], torch.tensor(y)[None, None], torch.tensor(mask)[None, None]
+        )
+
+        assert value == pytest.approx(expected, abs=1e-6)
+
+    def test_batch_items_are_averaged_and_an_empty_mask_item_skipped(self):
+        x1, y1 = self._pair("random", (12, 14, 13))
+        x2, y2 = self._pair("smooth", (12, 14, 13))
+        x = torch.tensor(np.stack([x1, x2]))[:, None]
+        y = torch.tensor(np.stack([y1, y2]))[:, None]
+        metric = SSIM(dynamic_range=4095.0)
+        first = metric(x[:1], y[:1])[1]
+        second = metric(x[1:], y[1:])[1]
+
+        _, both = metric(x, y)
+        mask = torch.ones(2, 1, 12, 14, 13, dtype=torch.uint8)
+        mask[1] = 0
+        _, first_only = metric(x, y, mask)
+        _, none = metric(x, y, torch.zeros_like(mask))
+
+        assert both == pytest.approx((first + second) / 2, abs=1e-12)
+        assert first_only == pytest.approx(first, abs=1e-12)
+        assert np.isnan(none)
+
+    def test_slabs_reproduce_the_one_shot_map(self):
+        # The slab cut is a memory bound, not a value: every slab size gives the same map sum.
+        x, y = self._pair("random", (30, 16, 15))
+        xt, yt = torch.tensor(x)[None], torch.tensor(y)[None]
+        whole = SSIM._ssim(xt, yt, None, 4095.0)
+        original = SSIM.slab_bytes
+        try:
+            for slab_bytes in (1, 16 * 15 * 4 * 9, 16 * 15 * 4 * 13):
+                SSIM.slab_bytes = slab_bytes
+                assert SSIM._ssim(xt, yt, None, 4095.0) == pytest.approx(whole, rel=1e-7)
+        finally:
+            SSIM.slab_bytes = original
+
+    def test_an_extent_below_the_window_is_refused(self):
+        with pytest.raises(MeasureError, match="7-voxel window"):
+            SSIM(dynamic_range=1.0)(torch.rand(1, 1, 6, 9, 9), torch.rand(1, 1, 6, 9, 9))
 
 
 class TestVariance:
