@@ -20,6 +20,7 @@ import math
 import os
 import shutil
 import signal
+import threading
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -47,6 +48,7 @@ from konfai import (
     statistics_directory,
 )
 from konfai.data.data_manager import BatchSample, DataTrain
+from konfai.data.patching import SweepClock
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.errors import ConfigError, TrainerError
@@ -170,6 +172,52 @@ class EarlyStopping(EarlyStoppingBase):
         return self.early_stop
 
 
+def _on_host(value: Any) -> Any:
+    """``value`` with every tensor copied into host memory: a snapshot the writer serialises while the
+    training thread moves on. Containers keep their type and attributes (a state dict is an
+    OrderedDict, possibly carrying ``_metadata``), so the file's layout is the one torch.save of the
+    live objects would write."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().to("cpu", copy=True)
+    if isinstance(value, dict):
+        copy = value.__class__((key, _on_host(item)) for key, item in value.items())
+        for name, attribute in getattr(value, "__dict__", {}).items():
+            setattr(copy, name, attribute)
+        return copy
+    if isinstance(value, list | tuple):
+        return value.__class__(_on_host(item) for item in value)
+    return value
+
+
+class _CheckpointWriter:
+    """Serialises one checkpoint at a time on a thread of its own. ``submit`` first joins the previous
+    write, so at most one is in flight; a failure on the thread is raised by the next ``join``, on the
+    training thread, never lost."""
+
+    def __init__(self) -> None:
+        self._thread: threading.Thread | None = None
+        self._error: BaseException | None = None
+
+    def submit(self, work: Callable[[], None]) -> None:
+        self.join()
+        self._thread = threading.Thread(target=self._run, args=(work,), name="konfai-checkpoint")
+        self._thread.start()
+
+    def _run(self, work: Callable[[], None]) -> None:
+        try:
+            work()
+        except BaseException as error:  # carried to the training thread by join()
+            self._error = error
+
+    def join(self) -> None:
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+        if self._error is not None:
+            error, self._error = self._error, None
+            raise error
+
+
 class _Trainer:
     """
     Internal class for managing the training loop in a distributed or standalone setting.
@@ -186,7 +234,9 @@ class _Trainer:
     (`with _Trainer(...) as trainer:`)  inside the public `Trainer` class.
     """
 
-    # Rank-aligned poll cadence (iterations) shared by the validation-request and live-tunable pollers.
+    # Rank-aligned poll cadence (iterations) shared by the validation-request and live-tunable pollers,
+    # and the cadence of the progress bar's description (an NVML query, two psutil queries and the
+    # last values of every criterion; refreshed on the bar's own schedule, not once per batch).
     _LIVE_POLL_INTERVAL = 20
 
     def __init__(
@@ -230,6 +280,7 @@ class _Trainer:
         self.it_validation = len(dataloader_training) if it_validation is None else it_validation
         self.it_lr_update = len(dataloader_training) if it_lr_update is None else it_lr_update
         self.it = it
+        self._declare_measure_window()
         # Live steering: an external steerer (MCP/Studio) drops control.json in the run dir; the loop applies
         # each new revision at a DDP poll boundary and records the change into the run's config snapshot.
         self._config_snapshot = config_snapshot
@@ -242,6 +293,7 @@ class _Trainer:
         self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
         self._best_checkpoint_path: Path | None = None
         self._best_checkpoint_loss: float | None = None
+        self._checkpoint_writer = _CheckpointWriter()
         self._loss_keys: set[str] = set()
         if self.global_rank == 0 and self.save_checkpoint_mode == "BEST":
             self._initialize_best_checkpoint_state()
@@ -261,6 +313,17 @@ class _Trainer:
         if self.tb is not None:
             self.tb.close()
         self.checkpoint_save(None)
+        self._checkpoint_writer.join()
+
+    def _declare_measure_window(self) -> None:
+        """The widest window the logs read from a criterion's history: the training window or the
+        validation pass. Everything older is only read as a running mean (ReduceLROnPlateau)."""
+        validation = len(self.dataloader_validation) if self.dataloader_validation is not None else 0
+        models = [self.model.module] + ([self.model_ema.module] if self.model_ema is not None else [])
+        for model in models:
+            for network in model.get_networks().values():
+                if network.measure is not None:
+                    network.measure.set_window(max(self.it_validation, validation))
 
     def _initialize_best_checkpoint_state(self) -> None:
         """Bootstrap BEST-checkpoint tracking once, including resume scenarios."""
@@ -308,7 +371,7 @@ class _Trainer:
         Triggers early stopping and resets data augmentations between epochs.
         """
         # SIGUSR1 requests an on-demand validation pass (KonfAI Studio's "Validate now"); the handler only
-        # flips a flag: the loop consumes it at a poll boundary, DDP-safe (see _requested_validation).
+        # flips a flag: the loop consumes it at a poll boundary, DDP-safe (see _poll_live_requests).
         sigusr1 = getattr(signal, "SIGUSR1", None)  # absent on Windows
         if sigusr1 is not None:
             with suppress(ValueError, OSError):  # signals only install on the main thread
@@ -347,34 +410,46 @@ class _Trainer:
             self.model_ema.eval()
             self.model_ema.module.set_state(NetState.TRAIN)
 
-        with tqdm.tqdm(
-            iterable=enumerate(self.dataloader_training),
-            desc=f"Training : {description(self.model, self.model_ema)}",
-            total=len(self.dataloader_training),
-            leave=False,
-            ncols=0,
-        ) as batch_iter:
+        clock = SweepClock()
+        with (
+            clock.phase("epoch"),
+            tqdm.tqdm(
+                iterable=clock.waiting("wait(data)", enumerate(self.dataloader_training)),
+                desc=f"Training : {description(self.model, self.model_ema)}",
+                total=len(self.dataloader_training),
+                leave=False,
+                ncols=0,
+            ) as batch_iter,
+        ):
             for _, batch_sample in batch_iter:
                 with torch.amp.autocast("cuda", enabled=self.autocast):
-                    self.model(batch_sample)
-                    self.model.module.backward(self.model)
+                    with clock.phase("forward"):
+                        self.model(batch_sample, clock=clock)
+                    with clock.phase("backward+step"):
+                        self.model.module.backward(self.model)
                     if self.model_ema is not None:
-                        self.model_ema.update_parameters(self.model)
+                        with clock.phase("ema"):
+                            self.model_ema.update_parameters(self.model)
                     self.it += 1
 
-                    self._apply_live_tunables()  # before update_lr, so a fresh LR anchors the next step
+                    validate_now, pending = self._poll_live_requests()
+                    if pending:
+                        self._apply_live_tunables(pending)  # before update_lr, so a fresh LR anchors the next step
 
                     if (self.it) % self.it_lr_update == 0:
                         self.model.module.update_lr()
 
-                    if self.dataloader_validation is not None and self._requested_validation():
-                        self._validate()  # on-demand (SIGUSR1): metrics only, no checkpoint / early-stopping
+                    if self.dataloader_validation is not None and validate_now:
+                        with clock.phase("validation"):
+                            self._validate()  # on-demand (SIGUSR1): metrics only, no checkpoint / early-stopping
 
                     if (self.it) % self.it_validation == 0:
-                        loss = self._train_log(batch_sample)
+                        with clock.phase("telemetry"):
+                            loss = self._train_log(batch_sample)
 
                         if self.dataloader_validation is not None:
-                            loss = self._validate()
+                            with clock.phase("validation"):
+                                loss = self._validate()
 
                         stop = False
                         if self.global_rank == 0:
@@ -387,7 +462,8 @@ class _Trainer:
                                 score = self.early_stopping.get_score(
                                     {key: loss[key] for key in self._loss_keys if key in loss}
                                 )
-                            self.checkpoint_save(score)
+                            with clock.phase("checkpoint"):
+                                self.checkpoint_save(score)
                             stop = self.early_stopping(score)
 
                             # Stop once the schedulers have decayed the learning rate to zero:
@@ -401,7 +477,28 @@ class _Trainer:
                             self.early_stopping.stop()
                             break
 
-                batch_iter.set_description(f"Training : {description(self.model, self.model_ema)}")
+                if self.it % self._LIVE_POLL_INTERVAL == 0:
+                    with clock.phase("telemetry"):
+                        batch_iter.set_description(
+                            f"Training : {description(self.model, self.model_ema)}", refresh=False
+                        )
+        report = self._epoch_report(clock)
+        if self.global_rank == 0 and report is not None:
+            tqdm.tqdm.write(report)
+
+    @staticmethod
+    def _epoch_report(clock: SweepClock, min_seconds: float = 1.0) -> str | None:
+        """One line accounting for the epoch's wall clock, in the sweep report's format, or ``None``
+        below ``min_seconds``. ``forward`` is the graph walk alone, the criteria being timed inside it;
+        what no phase names is ``other``, so the sum closes on the wall clock."""
+        wall = clock.spent("epoch")
+        if wall < min_seconds:
+            return None
+        phases = ("wait(data)", "forward", "criteria", "backward+step", "ema", "telemetry", "validation", "checkpoint")
+        named = {phase: clock.spent(phase) for phase in phases}
+        named["forward"] -= named["criteria"]
+        parts = " + ".join(f"{phase} {value:.1f}" for phase, value in named.items())
+        return f"[KonfAI] epoch {wall:.1f} s = {parts} + other {wall - sum(named.values()):.1f}"
 
     @torch.no_grad()
     def _validate(self) -> float:
@@ -427,12 +524,13 @@ class _Trainer:
             leave=False,
             ncols=0,
         ) as batch_iter:
-            for _, batch_sample in batch_iter:
+            for i, batch_sample in batch_iter:
                 self.model(batch_sample)
                 if self.model_ema is not None:
                     self.model_ema.module(batch_sample)
 
-                batch_iter.set_description(f"Validation : {description(self.model, self.model_ema)}")
+                if i % self._LIVE_POLL_INTERVAL == 0:
+                    batch_iter.set_description(f"Validation : {description(self.model, self.model_ema)}", refresh=False)
         self.dataloader_validation.dataset.reset_augmentation("Validation")
         if dist.is_initialized():
             dist.barrier()
@@ -443,14 +541,16 @@ class _Trainer:
         return self._validation_log(batch_sample)
 
     def _broadcast_from_master(self, value: Any) -> Any:
-        """Share rank 0's value with every rank, so the loop stays synchronized under DDP. Any picklable
-        object rides through (synchronize_data uses all_gather_object): callers cast as they need."""
-        outputs = synchronize_data(
-            self.world_size,
-            self.local_rank * self.size + self.size - 1,
-            value,
-        )
-        return outputs[0]
+        """Rank 0's value on every rank, so the loop stays synchronized under DDP: one broadcast of a
+        pickled object, where an all_gather would ship every rank's copy for a rank-0 payload. Any
+        picklable object rides through; callers cast as they need."""
+        if not dist.is_initialized():
+            return value
+        payload = [value if self.global_rank == 0 else None]
+        if torch.cuda.is_available():
+            torch.cuda.set_device(self.local_rank * self.size + self.size - 1)
+        dist.broadcast_object_list(payload, src=0)
+        return payload[0]
 
     def _broadcast_stop(self, stop: bool) -> bool:
         """
@@ -470,26 +570,20 @@ class _Trainer:
             value = self._broadcast_from_master(value)
         return value
 
-    def _requested_validation(self) -> bool:
-        """Whether an on-demand validation (SIGUSR1) is pending. Polled at a modest cadence so the DDP
-        broadcast stays rare; rank 0's flag is authoritative, so every rank validates on the same
-        iteration. Single-process runs skip the collective entirely."""
-        if self.it % self._LIVE_POLL_INTERVAL != 0:  # bound the on-demand latency while keeping the poll cheap
-            return False
-        requested = bool(self._poll_from_rank0(lambda: self._validate_now))
+    def _poll_live_requests(self) -> tuple[bool, dict[str, Any] | None]:
+        """What rank 0 has pending, at the poll cadence: an on-demand validation (SIGUSR1) and the
+        control file's new tunables, in one broadcast. Rank 0's state is authoritative, so every rank
+        acts on the same pair at the same iteration; the cadence bounds the latency while keeping the
+        collective rare, and single-process runs skip it entirely."""
+        if self.it % self._LIVE_POLL_INTERVAL != 0:
+            return False, None
+        requested, pending = self._poll_from_rank0(lambda: (self._validate_now, self._live_control.take()))
         if requested:
             self._validate_now = False
-        return requested
+        return bool(requested), pending
 
-    def _apply_live_tunables(self) -> None:
-        """Poll the run's control file at the same coarse, rank-aligned cadence as the validation poll and
-        apply any new tunables. Rank 0 reads and broadcasts, so every rank applies the same change on the
-        same iteration; rank 0 also records it into the run's config snapshot. No control file → a no-op."""
-        if self.it % self._LIVE_POLL_INTERVAL != 0:
-            return
-        pending = self._poll_from_rank0(lambda: self._live_control.take())
-        if not pending:
-            return
+    def _apply_live_tunables(self, pending: dict[str, Any]) -> None:
+        """Apply the tunables rank 0 polled; rank 0 also records them into the run's config snapshot."""
         applied = self._apply_tunables(pending)
         if self.global_rank == 0 and applied:
             self._interventions.extend(applied)
@@ -505,6 +599,7 @@ class _Trainer:
         if "it_validation" in pending:
             old = self.it_validation
             self.it_validation = max(1, int(pending["it_validation"]))
+            self._declare_measure_window()
             applied.append({"it": self.it, "key": "it_validation", "from": old, "to": self.it_validation})
         return applied
 
@@ -541,11 +636,16 @@ class _Trainer:
         """
         Saves model and optimizer states. Keeps either all checkpoints or only the best one.
 
+        The training thread copies the states into host memory and returns; the serialisation, the
+        publish and the BEST-mode pruning run on the writer's thread, joined before the next save and
+        at exit.
+
         Args:
             loss (float): Current loss used for best checkpoint selection.
         """
         if self.global_rank != 0:
             return
+        self._checkpoint_writer.join()  # the previous file is on disk before this one's name is chosen
 
         path = checkpoints_directory() / self.train_name
         path.mkdir(parents=True, exist_ok=True)
@@ -560,7 +660,7 @@ class _Trainer:
         # An unscored checkpoint (the final save at close) carries the worst possible score so
         # `_update_best_checkpoint` retires it in BEST mode instead of leaving it beside the real best.
         checkpoint_loss = loss if loss is not None else self.early_stopping.worst_score
-        save_dict = {
+        save_dict: dict[str, Any] = {
             "epoch": self.epoch,
             "it": self.it,
             "loss": checkpoint_loss,
@@ -593,15 +693,19 @@ class _Trainer:
             }
         )
 
-        # Staged and renamed, the invariant the dataset writers hold: a multi-GB torch.save takes
-        # seconds, and a kill mid-write left a truncated .pt under a plausible name that RESUME
-        # then died on with an opaque unpickling error.
-        staging = save_path.with_name(f"{save_path.name}.{os.getpid()}.tmp")
-        torch.save(save_dict, staging)
-        os.replace(staging, save_path)
+        snapshot = _on_host(save_dict)
 
-        if self.save_checkpoint_mode == "BEST":
-            self._update_best_checkpoint(save_path, checkpoint_loss)
+        def publish() -> None:
+            # Staged and renamed, the invariant the dataset writers hold: a multi-GB torch.save takes
+            # seconds, and a kill mid-write left a truncated .pt under a plausible name that RESUME
+            # then died on with an opaque unpickling error.
+            staging = save_path.with_name(f"{save_path.name}.{os.getpid()}.tmp")
+            torch.save(snapshot, staging)
+            os.replace(staging, save_path)
+            if self.save_checkpoint_mode == "BEST":
+                self._update_best_checkpoint(save_path, checkpoint_loss)
+
+        self._checkpoint_writer.submit(publish)
 
     @torch.no_grad()
     def _log(
@@ -883,7 +987,7 @@ class Trainer(DistributedObject):
                 state_dict = self._load()
             self.model.load(state_dict, init=True, ema=False, override_lr=self.override_lr)
         if self.ema_decay > 0:
-            self.model_ema = AveragedModel(self.model, avg_fn=self._avg_fn)
+            self.model_ema = AveragedModel(self.model, **self._ema_update())
             if state_dict is not None:
                 self.model_ema.module.load(state_dict, init=False, ema=True)
                 if "Model_EMA_n_averaged" in state_dict:
@@ -936,6 +1040,15 @@ class Trainer(DistributedObject):
                 self.config_namefile,
                 self.config_namefile.parent / new_name,
             )
+
+    def _ema_update(self) -> dict[str, Callable]:
+        """The EMA rule for AveragedModel: torch's fused ``multi_avg_fn`` (one ``_foreach_lerp_`` per
+        device and dtype) where it exists, the per-tensor ``avg_fn`` otherwise."""
+        try:
+            from torch.optim.swa_utils import get_ema_multi_avg_fn
+        except ImportError:
+            return {"avg_fn": self._avg_fn}
+        return {"multi_avg_fn": get_ema_multi_avg_fn(self.ema_decay)}
 
     def _avg_fn(self, averaged_model_parameter: float, model_parameter, num_averaged):
         """EMA update (AveragedModel avg_fn): ``ema_decay * averaged + (1 - ema_decay) * model``."""

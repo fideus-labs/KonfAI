@@ -239,16 +239,111 @@ def test_loss_add_summarises_dict_metric_payload() -> None:
     record.add(1.0, (torch.tensor([0.7]), {"1": 0.6, "2": 0.8, "3": float("nan")}))
 
     # The dict is summarised to a scalar (nan-mean of 0.6 and 0.8), and the logging mean is safe.
-    assert isinstance(record._values[-1], float)
-    assert record._values[-1] == pytest.approx(0.7)
-    assert np.nanmean(record._values) == pytest.approx(0.7)
+    assert isinstance(record._unread[-1], float)
+    assert record._unread[-1] == pytest.approx(0.7)
+    assert _measure_of(record).get_last_values() == {"Dice": pytest.approx(0.7)}
 
 
 def test_loss_add_keeps_plain_scalar_metric() -> None:
     # A regular (tensor, float) metric is unchanged.
     record = Measure.Loss("MSE", "out", "tgt", 0, is_loss=False, accumulation=False)
     record.add(1.0, (torch.tensor([0.5]), 0.5))
-    assert record._values[-1] == pytest.approx(0.5)
+    assert record._unread[-1] == pytest.approx(0.5)
+
+
+def _measure_of(*records: Measure.Loss) -> Measure:
+    measure = Measure.__new__(Measure)
+    measure._loss = {0: {record.name: record for record in records}}
+    return measure
+
+
+def test_loss_add_does_not_read_a_loss_off_its_device() -> None:
+    # `.item()` inside the forward stalls the CPU on the whole graph before backward is enqueued:
+    # the loss is kept as a detached tensor and read when a consumer asks for the value.
+    record = _loss_record()
+    record.add(1.0, torch.tensor([3.0], requires_grad=True))
+
+    kept = record._unread[-1]
+    assert isinstance(kept, torch.Tensor) and not kept.requires_grad
+    assert len(record._values) == 0 and record.recorded == 1
+
+    assert _measure_of(record).get_last_values() == {"l": 3.0}
+    assert list(record._values) == [3.0] and record._unread == []
+
+
+def test_measure_reads_every_unread_value_in_one_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Two criteria over three batches, one of them handing a float in the middle: one stack per
+    # device reads the lot, each record keeps the order it recorded, and the floats equal `.item()`.
+    loss = Measure.Loss("l", "out", "tgt", 0, is_loss=True, accumulation=False)
+    metric = Measure.Loss("m", "out", "tgt", 0, is_loss=False, accumulation=False)
+    for i in range(3):
+        loss.add(1.0, torch.tensor(float(i)))
+        metric.add(1.0, (torch.tensor([11.0]), 11.5) if i == 1 else torch.tensor([10.0 + i]))
+    stacked: list[int] = []
+    original_stack = torch.stack
+
+    def counting_stack(tensors, *args, **kwargs):
+        stacked.append(len(tensors))
+        return original_stack(tensors, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "stack", counting_stack)
+    measure = _measure_of(loss, metric)
+
+    assert measure.format_loss(True, 3) == {"l": (1.0, 1.0)}
+    assert stacked == [5]
+    assert list(loss._values) == [0.0, 1.0, 2.0]
+    assert list(metric._values) == [10.0, 11.5, 12.0]
+    assert measure.get_last_values(3) == {"l": 1.0, "m": pytest.approx(33.5 / 3)}
+    assert stacked == [5]  # nothing was left unread: no second transfer
+
+
+def test_whole_history_mean_is_a_running_mean_and_the_window_is_bounded() -> None:
+    # The lists grew for the run and get_last_values(0) (ReduceLROnPlateau) converted the whole
+    # history every LR update. The history is a bounded window plus a running nan-mean.
+    record = _loss_record()
+    measure = _measure_of(record)
+    measure.set_window(3)
+    values = [1.0, float("nan"), 2.0, 4.0, float("nan"), 8.0, 16.0]
+    for i, value in enumerate(values):
+        record.add(float(i), torch.tensor(value))
+
+    assert measure.get_last_values(3) == {"l": pytest.approx(np.nanmean(values[-3:]))}
+    assert measure.get_last_weights(3) == {"l": 5.0}
+    assert measure.get_last_values(0) == {"l": pytest.approx(np.nanmean(values))}
+    assert measure.get_last_weights(0) == {"l": 3.0}
+    assert len(record._values) == 3 and len(record._weight) == 3 and record.recorded == 7
+    assert measure.format_loss(True, 2) == {"l": (5.5, 12.0)}
+    assert measure.format_loss(True, 8) == {}  # fewer than 8 recorded, exactly as before
+
+
+def test_a_consumer_asking_for_a_wider_window_gets_it_from_then_on() -> None:
+    # The trainer declares the widest window it reads; a consumer of its own (diffusionGan reads 4)
+    # widens the window at its first read, so its later reads see every value it asks for.
+    record = _loss_record()
+    measure = _measure_of(record)
+    measure.set_window(2)
+    for value in (1.0, 2.0, 3.0):
+        record.add(1.0, torch.tensor(value))
+    assert measure.get_last_values(4) == {}  # 3 recorded: not reported, as before
+    assert record._values.maxlen == 4
+    for value in (4.0, 5.0):
+        record.add(1.0, torch.tensor(value))
+    assert measure.get_last_values(4) == {"l": pytest.approx(3.5)}
+    measure.set_window(2)  # a narrower declaration never shrinks it
+    assert record._values.maxlen == 4
+
+
+def test_get_loss_pairs_every_accumulated_loss_with_its_own_weight_under_a_narrow_window() -> None:
+    # The gradient's weights ride with their losses, so the logging window can be one entry wide
+    # while an accumulation iteration holds several (weight, loss) pairs.
+    record = _loss_record()
+    record.set_window(1)
+    record.add(0.5, torch.tensor([2.0]))
+    record.add(2.0, torch.tensor([4.0]))
+    record.add(1.0, torch.tensor([6.0]))
+
+    assert record.get_loss().item() == pytest.approx((1.0 + 8.0 + 6.0) / 3)
+    assert record.get_last_loss().item() == 6.0
 
 
 # --------------------------------------------------------------------------------------
@@ -273,6 +368,7 @@ def _make_accumulating_measure(scaler) -> tuple[Measure, torch.Tensor]:
     key = f"out:tgt:{criterion.__class__.__name__}"
     measure.outputs_criterions = {"out": {"tgt": {criterion: _CriterionAttr()}}}
     measure._loss = {0: {key: Measure.Loss(criterion.__class__.__name__, "out", "tgt", 0, True, True)}}
+    measure._targets = {}
     measure.scaler = scaler
     output = torch.zeros(1, 1, 2, 2, requires_grad=True)
     return measure, output
@@ -327,6 +423,7 @@ def test_accumulation_backward_not_refired_by_plain_loss_in_same_group() -> None
             f"out:tgt:{plain_crit.__class__.__name__}": Measure.Loss("L1Loss", "out", "tgt", 0, True, False),
         }
     }
+    measure._targets = {}
     measure.scaler = scaler
     output = torch.zeros(1, 1, 2, 2, requires_grad=True)
     target = torch.ones(1, 1, 2, 2)
@@ -559,6 +656,7 @@ def test_checkpoint_save_round_trip_restores_nested_network_state(tmp_path: Path
     )
 
     trainer.checkpoint_save(1.0)
+    trainer._checkpoint_writer.join()
 
     state_dict = torch.load(tmp_path / "Checkpoints" / "RUN" / "ckpt.pt", map_location="cpu", weights_only=False)
     target = with_optimizers(Root())
@@ -726,6 +824,103 @@ def test_composite_criteria_are_scheduled_on_the_owning_networks_counter() -> No
 
     assert seen_its == [0, 1, 2], f"criteria must see the owner's advancing counter, got {seen_its}"
     assert root._it == 0  # the composite root still owns no optimizer and never steps
+
+
+def test_a_target_group_is_moved_once_per_forward_and_not_for_a_criterion_outside_its_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measure.update ran once per completed output group and moved the group's target each time: the
+    shipped Segmentation config uploaded SEG twice per step, a deep-supervision config once per head,
+    and a criterion outside its start/stop window still paid for the upload it never read."""
+    from konfai.metric.schedulers import Constant
+    from konfai.network.network import CriterionsAttr, Measure
+
+    class Net(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Logits", torch.nn.Conv2d(1, 3, 1))
+            self.add_module("Softmax", torch.nn.Softmax(dim=1))
+
+    def attr(start: int = 0) -> CriterionsAttr:
+        attributes = CriterionsAttr(start=start)
+        attributes.schedulers = {Constant(): None}
+        return attributes
+
+    model = Net()
+    measure = Measure("Net", {})
+    measure.outputs_criterions = {
+        "Logits": {"SEG": {torch.nn.CrossEntropyLoss(): attr(), torch.nn.MSELoss(): attr(start=5)}},
+        "Softmax": {"SEG": {torch.nn.L1Loss(): attr()}},
+    }
+    measure.init(model, ["SEG"])
+    model.measure = measure
+    model.init_outputs_group()
+
+    seg = torch.randn(2, 3, 4, 4)
+    moved: list[torch.Tensor] = []
+    original_to = torch.Tensor.to
+
+    def counting_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        if self is seg:
+            moved.append(self)
+        return original_to(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", counting_to)
+
+    class _BatchItem:
+        def __init__(self, tensor: torch.Tensor, is_input: bool) -> None:
+            self.tensor = tensor
+            self.is_input = is_input
+            self.attribute = [Attribute()]
+
+    batch = {"CT": _BatchItem(torch.randn(2, 1, 4, 4), True), "SEG": _BatchItem(seg, False)}
+    model.forward(batch)
+    assert len(moved) == 1, "one upload for the two output groups reading SEG"
+    assert measure._targets == {}, "released with the forward, not held through backward"
+
+    model._it = 5
+    model.forward(batch)
+    assert len(moved) == 2, "the next forward uploads again (a new batch in the run)"
+
+    measure.outputs_criterions["Logits"]["SEG"] = {torch.nn.MSELoss(): attr(start=50)}
+    measure.outputs_criterions["Softmax"]["SEG"] = {torch.nn.L1Loss(): attr(start=50)}
+    model.forward(batch)
+    assert len(moved) == 2, "every criterion outside its window: nothing uploaded"
+
+
+def test_forward_charges_the_criteria_to_the_clock_apart_from_the_walk() -> None:
+    from konfai.data.patching import SweepClock
+    from konfai.metric.schedulers import Constant
+    from konfai.network.network import CriterionsAttr, Measure
+
+    class Net(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Head", torch.nn.Conv2d(1, 1, 1))
+
+    model = Net()
+    measure = Measure("Net", {})
+    attr = CriterionsAttr()
+    attr.schedulers = {Constant(): None}
+    measure.outputs_criterions = {"Head": {"CT": {torch.nn.L1Loss(): attr}}}
+    measure.init(model, ["CT"])
+    model.measure = measure
+    model.init_outputs_group()
+
+    class _BatchItem:
+        def __init__(self, tensor: torch.Tensor, is_input: bool) -> None:
+            self.tensor = tensor
+            self.is_input = is_input
+            self.attribute = [Attribute()]
+
+    batch = {"CT": _BatchItem(torch.ones(1, 1, 4, 4), True)}
+    clock = SweepClock()
+    model.forward(batch, clock=clock)
+    timed = measure.get_last_values()
+    model.forward(batch)
+    assert measure.get_last_values() == timed  # the clock changes nothing but the account
+    assert clock.spent("criteria") > 0.0
+    assert clock.spent("forward") == 0.0  # the walk is the caller's phase, not the network's
 
 
 def test_measure_update_moves_the_criterion_onto_the_outputs_device_once() -> None:

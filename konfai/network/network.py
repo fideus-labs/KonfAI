@@ -18,14 +18,16 @@
 
 import importlib
 import inspect
+import math
 import os
 import warnings
 from abc import ABC
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +45,7 @@ from torch.utils.checkpoint import checkpoint
 
 from konfai import konfai_root
 from konfai.data.data_manager import BatchSample
-from konfai.data.patching import Accumulator, ModelPatch
+from konfai.data.patching import Accumulator, ModelPatch, SweepClock
 from konfai.metric.schedulers import Scheduler
 from konfai.utils.config import apply_config, config
 from konfai.utils.errors import ConfigError, MeasureError, TrainerError
@@ -231,6 +233,30 @@ class TargetCriterionsLoader:
         return targets_criterions
 
 
+class _RunningNanMean:
+    """The nan-aware mean of everything added, in O(1) per value: what ``np.nanmean`` over the whole
+    history returns, up to summation order (measured at most 3.2e-14 relative over 5e5 values)."""
+
+    __slots__ = ("count", "total")
+
+    def __init__(self) -> None:
+        self.total = 0.0
+        self.count = 0
+
+    def add(self, value: float) -> None:
+        if not math.isnan(value):
+            self.total += value
+            self.count += 1
+
+    def mean(self) -> float:
+        return self.total / self.count if self.count else float("nan")
+
+
+def _tail(values: deque[float], n: int) -> list[float]:
+    """The last ``n`` values (``n > 0``)."""
+    return list(islice(values, max(0, len(values) - n), None))
+
+
 class Measure:
     """Collect, validate, and aggregate losses or metrics across model outputs."""
 
@@ -251,14 +277,49 @@ class Measure:
             self.target_group = target_group
             self.group = group
 
-            self._loss: list[torch.Tensor] = []
-            self._weight: list[float] = []
-            self._values: list[float] = []
+            # This iteration's (weight, loss) pairs: the gradient's, cleared by ``reset_loss``.
+            self._loss: list[tuple[float, torch.Tensor]] = []
+            # The logging windows, bounded by ``set_window`` to the widest window a consumer reads;
+            # the whole-history consumers read the running means instead, so nothing grows with the run.
+            self._weight: deque[float] = deque()
+            self._values: deque[float] = deque()
+            self._mean = _RunningNanMean()
+            self._mean_weight = _RunningNanMean()
+            self._recorded = 0
+            # Values recorded but not yet in ``_values``: a loss is kept as its 0-d tensor, because
+            # reading it inside the forward stalls the CPU on the whole graph before backward is
+            # enqueued. The consumers read them in one transfer per device (``Measure._materialize``).
+            self._unread: list[float | torch.Tensor] = []
 
         def reset_loss(self) -> None:
             self._loss.clear()
 
+        @property
+        def recorded(self) -> int:
+            """How many values this record has been given, read off their device or not."""
+            return self._recorded
+
+        def set_window(self, n: int) -> None:
+            """Keep at least the last ``n`` values and weights. Grows only; until it is called the
+            history is unbounded."""
+            if self._values.maxlen is not None and self._values.maxlen >= n:
+                return
+            self._values = deque(self._values, maxlen=n)
+            self._weight = deque(self._weight, maxlen=n)
+
+        def _record(self, value: float) -> None:
+            self._values.append(value)
+            self._mean.add(value)
+
+        def values_mean(self, n: int) -> float:
+            """The nan-mean of the last ``n`` values, of the whole history for ``n <= 0``."""
+            return float(np.nanmean(_tail(self._values, n))) if n > 0 else self._mean.mean()
+
+        def weights_mean(self, n: int) -> float:
+            return float(np.nanmean(_tail(self._weight, n))) if n > 0 else self._mean_weight.mean()
+
         def add(self, weight: float, value: torch.Tensor | tuple[torch.Tensor, float | dict[str, float]]) -> None:
+            true_value: float | torch.Tensor
             if isinstance(value, tuple):
                 loss_value, true_value = value
                 if isinstance(true_value, dict):
@@ -269,25 +330,24 @@ class Measure:
                     true_value = float(np.nanmean(numeric)) if numeric else float("nan")
             else:
                 loss_value = value
-                true_value = value.item()
+                true_value = value.detach()
 
-            self._loss.append(loss_value if self.is_loss else loss_value.detach())
-            self._values.append(true_value)
+            self._loss.append((weight, loss_value if self.is_loss else loss_value.detach()))
+            self._unread.append(true_value)
             self._weight.append(weight)
+            self._mean_weight.add(weight)
+            self._recorded += 1
 
         def get_last_loss(self) -> torch.Tensor:
-            return self._loss[-1] * self._weight[-1] if len(self._loss) else torch.zeros(1, requires_grad=True)
+            if not len(self._loss):
+                return torch.zeros(1, requires_grad=True)
+            weight, loss_value = self._loss[-1]
+            return loss_value * weight
 
         def get_loss(self) -> torch.Tensor:
             if not len(self._loss):
                 return torch.zeros(1, requires_grad=True)
-            # ``_weight`` accumulates across iterations for the logging windows while ``_loss`` is
-            # reset every iteration; align the current losses with their own (trailing) weights so a
-            # loss-weight scheduler drives the gradient instead of the first weight ever recorded.
-            weights = self._weight[-len(self._loss) :]
-            return torch.stack(
-                [w * loss_value for w, loss_value in zip(weights, self._loss, strict=False)], dim=0
-            ).mean(dim=0)
+            return torch.stack([weight * loss_value for weight, loss_value in self._loss], dim=0).mean(dim=0)
 
         def __len__(self) -> int:
             return len(self._loss)
@@ -305,6 +365,20 @@ class Measure:
             )
         self._loss: dict[int, dict[str, Measure.Loss]] = {}
         self.scaler: torch.amp.GradScaler | None = None
+        # One forward's targets on the outputs' device, keyed by (group, device) and checked against
+        # the source tensor: a group feeding several outputs (two heads, deep supervision) is
+        # uploaded once. Released at the end of the forward (``Network.forward``).
+        self._targets: dict[tuple[str, torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def _target(self, group: str, tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+        moved = self._targets.get((group, device))
+        if moved is None or moved[0] is not tensor:
+            moved = (tensor, tensor.to(device).detach())
+            self._targets[(group, device)] = moved
+        return moved[1]
+
+    def release_targets(self) -> None:
+        self._targets.clear()
 
     def init(self, model: torch.nn.Module, group_dest: list[str]) -> None:
         outputs_group_rename = {}
@@ -372,16 +446,8 @@ class Measure:
         training: bool,
     ) -> None:
         for target_group in self.outputs_criterions[output_group]:
-            target_data = [
-                batch_data_with_attribute[group][0].to(output[0].device).detach()
-                for group in target_group.split(";")
-                if group in batch_data_with_attribute
-            ]
-            target_attribute = [
-                batch_data_with_attribute[group][1]
-                for group in target_group.split(";")
-                if group in batch_data_with_attribute
-            ]
+            groups = [group for group in target_group.split(";") if group in batch_data_with_attribute]
+            target_attribute = [batch_data_with_attribute[group][1] for group in groups]
 
             for criterion, criterions_attr in self.outputs_criterions[output_group][target_group].items():
                 if it >= criterions_attr.start and (criterions_attr.stop is None or it <= criterions_attr.stop):
@@ -392,6 +458,10 @@ class Measure:
                         criterion.to(output.device)
                         setattr(criterion, "_konfai_device", output.device)  # noqa: B010 -- Module.__setattr__ is Tensor-typed
                     scheduler = self.update_scheduler(criterions_attr.schedulers, it)
+                    # Below the window gate: a criterion outside its start/stop uploads nothing.
+                    target_data = [
+                        self._target(group, batch_data_with_attribute[group][0], output.device) for group in groups
+                    ]
                     if getattr(criterion, "accepts_attributes", False):
                         loss = criterion(output, *target_data, attributes=target_attribute)
                     else:
@@ -446,40 +516,51 @@ class Measure:
             for v in self._loss[group].values():
                 v.reset_loss()
 
+    def _records(self) -> Iterator[tuple[str, "Measure.Loss"]]:
+        for group in self._loss.values():
+            yield from group.items()
+
+    def _materialize(self) -> None:
+        """Append every unread value to its record's window, in the order recorded, reading the
+        tensors off their device in one transfer per device."""
+        records = [record for _, record in self._records() if record._unread]
+        tensors: dict[torch.device, list[torch.Tensor]] = {}
+        for record in records:
+            for value in record._unread:
+                if isinstance(value, torch.Tensor):
+                    tensors.setdefault(value.device, []).append(value.reshape(()))
+        read = {device: iter(torch.stack(batch).tolist()) for device, batch in tensors.items()}
+        for record in records:
+            for value in record._unread:
+                record._record(next(read[value.device]) if isinstance(value, torch.Tensor) else value)
+            record._unread.clear()
+
+    def set_window(self, n: int) -> None:
+        """Keep at least the last ``n`` values and weights per criterion: the widest window a consumer
+        will read. Grows only; without a call the history is unbounded."""
+        for _, record in self._records():
+            record.set_window(n)
+
+    def _read(self, n: int) -> Iterator[tuple[str, "Measure.Loss"]]:
+        """The records given at least ``n`` values, every value read off its device, and the window
+        at least ``n`` wide from now on: a consumer's first read declares what it will keep reading."""
+        self._materialize()
+        if n > 0:
+            self.set_window(n)
+        return ((name, record) for name, record in self._records() if record.recorded >= n)
+
     def get_last_values(self, n: int = 1) -> dict[str, float]:
-        result = {}
-        for group in self._loss.keys():
-            result.update(
-                {
-                    name: np.nanmean(value._values[-n:] if n > 0 else value._values)
-                    for name, value in self._loss[group].items()
-                    if n < 0 or len(value._values) >= n
-                }
-            )
-        return result
+        return {name: record.values_mean(n) for name, record in self._read(n)}
 
     def get_last_weights(self, n: int = 1) -> dict[str, float]:
-        result = {}
-        for group in self._loss.keys():
-            result.update(
-                {
-                    name: np.nanmean(value._weight[-n:] if n > 0 else value._weight)
-                    for name, value in self._loss[group].items()
-                    if n < 0 or len(value._values) >= n
-                }
-            )
-        return result
+        return {name: record.weights_mean(n) for name, record in self._read(n)}
 
     def format_loss(self, is_loss: bool, n: int) -> dict[str, tuple[float, float]]:
-        result = {}
-        for group in self._loss.keys():
-            for name, loss in self._loss[group].items():
-                if loss.is_loss == is_loss and len(loss._values) >= n:
-                    result[name] = (
-                        np.nanmean(loss._weight[-n:]),
-                        np.nanmean(loss._values[-n:]),
-                    )
-        return result
+        return {
+            name: (record.weights_mean(n), record.values_mean(n))
+            for name, record in self._read(n)
+            if record.is_loss == is_loss
+        }
 
     def update_scheduler(self, schedulers: dict[Scheduler, int], it: int) -> Scheduler:
         if not schedulers:
@@ -1445,11 +1526,22 @@ class Network(ModuleArgsDict, ABC):
         self,
         batch_sample: BatchSample,
         output_layers: list[str] = [],
+        clock: SweepClock | None = None,
     ) -> list[tuple[str, torch.Tensor]]:
+        """The graph walk over ``batch_sample``, its criteria evaluated as their output groups complete.
+        ``clock`` charges the criteria to its ``criteria`` phase, apart from the walk."""
         if not len(self.outputsGroup) and not len(output_layers):
             return []
 
         self.reset_loss()
+        try:
+            return self._forward(batch_sample, output_layers, clock)
+        finally:
+            self.release_targets()
+
+    def _forward(
+        self, batch_sample: BatchSample, output_layers: list[str], clock: SweepClock | None
+    ) -> list[tuple[str, torch.Tensor]]:
         results = []
         measure_output_layers = set()
         for _outputs_group in self.outputsGroup:
@@ -1492,14 +1584,15 @@ class Network(ModuleArgsDict, ABC):
                                 if k != output_group[0]
                             }
                         )
-                        output_group.measure.update(
-                            output_group[0],
-                            output_group.layers[output_group[0]],
-                            batch_data_with_attribute,
-                            output_group.network._it,
-                            nb,
-                            self.training,
-                        )
+                        with clock.phase("criteria") if clock is not None else nullcontext():
+                            output_group.measure.update(
+                                output_group[0],
+                                output_group.layers[output_group[0]],
+                                batch_data_with_attribute,
+                                output_group.network._it,
+                                nb,
+                                self.training,
+                            )
                         output_group.clear()
             if name in output_layers:
                 results.append((name, layer))
@@ -1509,6 +1602,11 @@ class Network(ModuleArgsDict, ABC):
     def reset_loss(self):
         if self.measure:
             self.measure.reset_loss()
+
+    @_function_network()
+    def release_targets(self):
+        if self.measure:
+            self.measure.release_targets()
 
     @_function_network()
     def backward(self, model: Any):
@@ -1783,5 +1881,9 @@ class Model:
         self,
         batch_sample: BatchSample,
         output_layers: list[str] = [],
+        clock: SweepClock | None = None,
     ) -> Any:
-        return self.module(batch_sample, output_layers)
+        # Passed only when given: the predictor's ModelComposite has a forward of its own, without it.
+        if clock is None:
+            return self.module(batch_sample, output_layers)
+        return self.module(batch_sample, output_layers, clock=clock)

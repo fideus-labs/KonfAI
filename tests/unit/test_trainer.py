@@ -17,6 +17,7 @@
 """Tests for konfai.trainer: checkpoint save/bootstrap, early stopping, EMA, and RESUME
 learning-rate/checkpoint handling."""
 
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,7 +66,15 @@ def _date_sequence(values: list[str]) -> Iterator[str]:
         yield values[-1]
 
 
-def _build_trainer(tmp_path: Path, monkeypatch, date_values: list[str], early_stopping=None) -> _Trainer:
+def _build_trainer(
+    tmp_path: Path,
+    monkeypatch,
+    date_values: list[str],
+    early_stopping=None,
+    model: Any = None,
+    it_validation: int = 1,
+    dataloader_validation: Any = None,
+) -> _Trainer:
     checkpoints_dir = tmp_path / "Checkpoints"
     statistics_dir = tmp_path / "Statistics"
     date_iter = _date_sequence(date_values)
@@ -87,15 +96,21 @@ def _build_trainer(tmp_path: Path, monkeypatch, date_values: list[str], early_st
         epochs=1,
         epoch=0,
         autocast=False,
-        it_validation=1,
+        it_validation=it_validation,
         it_lr_update=1,
         it=0,
-        model=cast(Any, _DummyModel()),
+        model=cast(Any, _DummyModel() if model is None else model),
         model_ema=None,
         config_snapshot=tmp_path / "Config.yml",
         dataloader_training=[object()],
-        dataloader_validation=None,
+        dataloader_validation=dataloader_validation,
     )
+
+
+def _save(trainer: _Trainer, loss: float | None) -> None:
+    """A save and its landing on disk: what the loop guarantees before the next save and at exit."""
+    trainer.checkpoint_save(loss)
+    trainer._checkpoint_writer.join()
 
 
 def test_best_checkpoint_save_keeps_only_best_without_rescanning(tmp_path: Path, monkeypatch) -> None:
@@ -107,9 +122,9 @@ def test_best_checkpoint_save_keeps_only_best_without_rescanning(tmp_path: Path,
 
     monkeypatch.setattr(trainer_module.torch, "load", fail_if_reloaded)
 
-    trainer.checkpoint_save(2.0)
-    trainer.checkpoint_save(1.0)
-    trainer.checkpoint_save(3.0)
+    _save(trainer, 2.0)
+    _save(trainer, 1.0)
+    _save(trainer, 3.0)
 
     checkpoints = sorted((tmp_path / "Checkpoints" / "RUN").glob("*.pt"))
     assert [path.name for path in checkpoints] == ["ckpt_b.pt"]
@@ -126,9 +141,9 @@ def test_best_checkpoint_keeps_highest_score_when_mode_is_max(tmp_path: Path, mo
         early_stopping=EarlyStopping(monitor=["Dice"], mode="max"),
     )
 
-    trainer.checkpoint_save(0.60)
-    trainer.checkpoint_save(0.85)  # best (highest)
-    trainer.checkpoint_save(0.70)
+    _save(trainer, 0.60)
+    _save(trainer, 0.85)  # best (highest)
+    _save(trainer, 0.70)
 
     checkpoints = sorted((tmp_path / "Checkpoints" / "RUN").glob("*.pt"))
     assert [path.name for path in checkpoints] == ["ckpt_b.pt"]
@@ -158,8 +173,8 @@ def test_best_checkpoint_bootstrap_scans_existing_files_once_and_prunes_stale_on
     assert [path.name for path in sorted(checkpoint_dir.glob("*.pt"))] == ["old_b.pt"]
     assert [path.name for path in load_calls] == ["old_a.pt", "old_b.pt"]
 
-    trainer.checkpoint_save(4.0)
-    trainer.checkpoint_save(2.0)
+    _save(trainer, 4.0)
+    _save(trainer, 2.0)
 
     assert [path.name for path in load_calls] == ["old_a.pt", "old_b.pt"]
     checkpoints = sorted(checkpoint_dir.glob("*.pt"))
@@ -170,8 +185,8 @@ def test_best_checkpoint_bootstrap_scans_existing_files_once_and_prunes_stale_on
 def test_best_checkpoint_survives_same_second_collision(tmp_path: Path, monkeypatch) -> None:
     trainer = _build_trainer(tmp_path, monkeypatch, ["same_stamp", "same_stamp"])
 
-    trainer.checkpoint_save(1.0)  # best
-    trainer.checkpoint_save(2.0)  # worse, produced within the same timestamp
+    _save(trainer, 1.0)  # best
+    _save(trainer, 2.0)  # worse, produced within the same timestamp
 
     checkpoints = sorted((tmp_path / "Checkpoints" / "RUN").glob("*.pt"))
     assert len(checkpoints) == 1
@@ -181,7 +196,7 @@ def test_best_checkpoint_survives_same_second_collision(tmp_path: Path, monkeypa
 def test_exit_checkpoint_loss_does_not_poison_best(tmp_path: Path, monkeypatch) -> None:
     trainer = _build_trainer(tmp_path, monkeypatch, ["exit_stamp"])
 
-    trainer.checkpoint_save(None)  # the save emitted on context exit
+    _save(trainer, None)  # the save emitted on context exit
 
     saved = torch.load(
         tmp_path / "Checkpoints" / "RUN" / "exit_stamp.pt",
@@ -212,7 +227,7 @@ def test_checkpoint_persists_ema_n_averaged(tmp_path: Path, monkeypatch) -> None
     trainer = _build_trainer(tmp_path, monkeypatch, ["ema_stamp"])
     trainer.model_ema = cast(Any, ema)
 
-    trainer.checkpoint_save(1.0)
+    _save(trainer, 1.0)
 
     saved = torch.load(
         tmp_path / "Checkpoints" / "RUN" / "ema_stamp.pt",
@@ -223,6 +238,78 @@ def test_checkpoint_persists_ema_n_averaged(tmp_path: Path, monkeypatch) -> None
     assert saved["Model_EMA_n_averaged"] == int(ema.n_averaged) == 2
 
 
+def test_checkpoint_save_returns_before_the_file_lands_and_the_file_equals_the_live_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The training thread pays the host copy only; the serialisation and the publish run on the
+    # writer's thread. What lands is what torch.save of the live states writes.
+    net = nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(net.parameters())
+    net(torch.ones(1, 3)).sum().backward()
+    optimizer.step()
+    network = SimpleNamespace(optimizer=optimizer, _it=4, _nb_lr_update=2, measure=None)
+    module = SimpleNamespace(state_dict=net.state_dict, get_networks=lambda: {"Net": network})
+    trainer = _build_trainer(tmp_path, monkeypatch, ["stamp"], model=SimpleNamespace(module=module))
+
+    gate = threading.Event()
+    real_save = torch.save
+
+    def gated_save(*args, **kwargs):
+        gate.wait(5)
+        real_save(*args, **kwargs)
+
+    monkeypatch.setattr(trainer_module.torch, "save", gated_save)
+    trainer.checkpoint_save(0.5)
+    assert not list((tmp_path / "Checkpoints" / "RUN").glob("*.pt")), "returned before the write"
+    gate.set()
+    trainer._checkpoint_writer.join()
+
+    reference = tmp_path / "reference.pt"
+    real_save(
+        {
+            "epoch": 0,
+            "it": 0,
+            "loss": 0.5,
+            "Model": net.state_dict(),
+            "Net_optimizer_state_dict": optimizer.state_dict(),
+            "Net_it": 4,
+            "Net_nb_lr_update": 2,
+        },
+        reference,
+    )
+    saved = torch.load(tmp_path / "Checkpoints" / "RUN" / "stamp.pt", map_location="cpu", weights_only=False)
+    expected = torch.load(reference, map_location="cpu", weights_only=False)
+
+    def flatten(value: Any, prefix: str = "") -> dict[str, Any]:
+        if isinstance(value, dict):
+            return {k: v for key, item in value.items() for k, v in flatten(item, f"{prefix}{key}.").items()}
+        if isinstance(value, list | tuple):
+            return {k: v for i, item in enumerate(value) for k, v in flatten(item, f"{prefix}{i}.").items()}
+        return {prefix: value}
+
+    flat_saved, flat_expected = flatten(saved), flatten(expected)
+    assert flat_saved.keys() == flat_expected.keys()
+    for key, value in flat_expected.items():
+        if isinstance(value, torch.Tensor):
+            assert torch.equal(flat_saved[key], value), key
+        else:
+            assert flat_saved[key] == value, key
+
+
+def test_a_failed_checkpoint_write_is_raised_at_the_next_save(tmp_path: Path, monkeypatch) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["one", "two"])
+
+    def failing_save(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(trainer_module.torch, "save", failing_save)
+    trainer.checkpoint_save(1.0)  # returns: the failure sits on the writer's thread
+    with pytest.raises(OSError, match="disk full"):
+        trainer.checkpoint_save(2.0)  # joins the failed write before choosing a name
+    trainer._checkpoint_writer.join()  # nothing in flight: the second save never got submitted
+    assert not list((tmp_path / "Checkpoints" / "RUN").glob("*.pt"))
+
+
 def test_broadcast_stop_returns_local_value_without_distributed(tmp_path: Path, monkeypatch) -> None:
     trainer = _build_trainer(tmp_path, monkeypatch, ["stamp"])
 
@@ -230,14 +317,81 @@ def test_broadcast_stop_returns_local_value_without_distributed(tmp_path: Path, 
     assert trainer._broadcast_stop(False) is False
 
 
+class _FakeGroup:
+    """A process group of one broadcast: rank 0's payload lands on the caller, whatever it offered."""
+
+    def __init__(self, monkeypatch, rank0_value: Any) -> None:
+        self.calls = 0
+        self.rank0_value = rank0_value
+        monkeypatch.setattr(trainer_module.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(trainer_module.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(trainer_module.dist, "broadcast_object_list", self.broadcast)
+
+    def broadcast(self, payload: list, src: int = 0) -> None:
+        assert src == 0
+        self.calls += 1
+        payload[0] = self.rank0_value
+
+
 def test_broadcast_stop_adopts_rank_zero_decision(tmp_path: Path, monkeypatch) -> None:
     trainer = _build_trainer(tmp_path, monkeypatch, ["stamp"])
+    trainer.global_rank = 1
 
-    monkeypatch.setattr(trainer_module, "synchronize_data", lambda *_args, **_kwargs: [True, False, False])
+    _FakeGroup(monkeypatch, True)
     assert trainer._broadcast_stop(False) is True  # a non-zero rank still stops when rank 0 does
 
-    monkeypatch.setattr(trainer_module, "synchronize_data", lambda *_args, **_kwargs: [False, True])
+    _FakeGroup(monkeypatch, False)
     assert trainer._broadcast_stop(True) is False  # a non-zero rank keeps going when rank 0 does
+
+
+def test_validation_request_and_live_tunables_ride_one_broadcast(tmp_path: Path, monkeypatch) -> None:
+    # Rank 0 polls its SIGUSR1 flag and the control file once per cadence; every rank receives the
+    # pair in one broadcast instead of two all_gathers, and acts on it at the same iteration.
+    trainer = _build_trainer(tmp_path, monkeypatch, ["stamp"])
+    trainer.world_size = 2
+    trainer.it = trainer._LIVE_POLL_INTERVAL
+    trainer._validate_now = True
+    monkeypatch.setattr(trainer._live_control, "take", lambda: {"lr": 0.5})
+    group = _FakeGroup(monkeypatch, (True, {"lr": 0.5}))
+
+    assert trainer._poll_live_requests() == (True, {"lr": 0.5})
+    assert group.calls == 1
+    assert trainer._validate_now is False  # consumed
+
+    trainer.global_rank = 1
+    trainer._validate_now = False
+    monkeypatch.setattr(trainer._live_control, "take", lambda: pytest.fail("only rank 0 reads the control file"))
+    assert trainer._poll_live_requests() == (True, {"lr": 0.5})  # rank 0's pair, not its own
+    assert group.calls == 2
+
+    trainer.it += 1
+    assert trainer._poll_live_requests() == (False, None)  # off the cadence: no collective
+    assert group.calls == 2
+
+
+# ---- Epoch wall-clock account ----
+
+
+def test_epoch_report_closes_on_the_wall_clock_with_the_criteria_apart_from_the_forward() -> None:
+    from konfai.data.patching import SweepClock
+
+    clock = SweepClock()
+    clock._spent = {
+        "epoch": 10.0,
+        "wait(data)": 1.0,
+        "forward": 5.0,  # the graph walk and, inside it, the criteria
+        "criteria": 1.0,
+        "backward+step": 2.0,
+        "telemetry": 0.5,
+        "validation": 0.5,
+        "checkpoint": 0.5,
+    }
+    assert _Trainer._epoch_report(clock) == (
+        "[KonfAI] epoch 10.0 s = wait(data) 1.0 + forward 4.0 + criteria 1.0 + backward+step 2.0 + ema 0.0"
+        " + telemetry 0.5 + validation 0.5 + checkpoint 0.5 + other 0.5"
+    )
+    clock._spent = {"epoch": 0.4}
+    assert _Trainer._epoch_report(clock) is None  # an epoch this short has nothing to account for
 
 
 # ---- OOM shrink rendezvous agreement ----
@@ -329,6 +483,29 @@ def test_avg_fn_high_decay_keeps_running_average_dominant() -> None:
     result = Trainer._avg_fn(stub, averaged, model, 5)
 
     assert result.item() == pytest.approx(9.99)
+
+
+def test_ema_runs_torchs_fused_rule_and_matches_the_per_tensor_one(monkeypatch) -> None:
+    # avg_fn forces AveragedModel's per-tensor path (n_averaged.to(device), three kernels and a copy
+    # per parameter); multi_avg_fn is the same formula as one _foreach_lerp_ per device and dtype.
+    stub = SimpleNamespace(ema_decay=0.9, _avg_fn=lambda a, m, n: Trainer._avg_fn(stub, a, m, n))
+    rule = Trainer._ema_update(cast(Any, stub))
+    assert set(rule) == {"multi_avg_fn"}
+
+    net = nn.Linear(4, 4)
+    fused, per_tensor = AveragedModel(net, **rule), AveragedModel(net, avg_fn=stub._avg_fn)
+    for _ in range(3):
+        with torch.no_grad():
+            for param in net.parameters():
+                param.add_(torch.randn_like(param))
+        fused.update_parameters(net)
+        per_tensor.update_parameters(net)
+    for a, b in zip(fused.parameters(), per_tensor.parameters(), strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=1e-6)
+    assert int(fused.n_averaged) == int(per_tensor.n_averaged) == 3
+
+    monkeypatch.delattr(torch.optim.swa_utils, "get_ema_multi_avg_fn")  # a torch without the fused rule
+    assert Trainer._ema_update(cast(Any, stub)) == {"avg_fn": stub._avg_fn}
 
 
 # ---- RESUME LR override ----
@@ -434,6 +611,23 @@ def test_apply_tunables_changes_it_validation_and_audits(tmp_path: Path, monkeyp
     assert applied == [{"it": 40, "key": "it_validation", "from": 1, "to": 5}]
 
 
+def test_trainer_bounds_each_criterions_history_to_the_widest_window_it_reads(tmp_path: Path, monkeypatch) -> None:
+    from konfai.network.network import Measure
+
+    record = Measure.Loss("l", "out", "tgt", 0, is_loss=True, accumulation=False)
+    measure = Measure.__new__(Measure)
+    measure._loss = {0: {"l": record}}
+    model = SimpleNamespace(module=SimpleNamespace(get_networks=lambda: {"Net": SimpleNamespace(measure=measure)}))
+
+    trainer = _build_trainer(
+        tmp_path, monkeypatch, ["stamp"], model=model, it_validation=7, dataloader_validation=[object()] * 3
+    )
+    assert record._values.maxlen == 7  # max(it_validation, validation batches)
+
+    trainer._apply_tunables({"it_validation": 12})
+    assert record._values.maxlen == 12
+
+
 def test_apply_tunables_clamps_it_validation_to_at_least_one(tmp_path: Path, monkeypatch) -> None:
     trainer = _build_trainer(tmp_path, monkeypatch, ["run"])
 
@@ -504,7 +698,7 @@ def test_a_saved_checkpoint_with_no_score_loses_to_one_with_a_score(tmp_path: Pa
     # finite score, so BEST freezes on the last unscored epoch and no later one can take it.
     early_stopping = EarlyStopping(monitor=None, mode=mode)
     trainer = _build_trainer(tmp_path, monkeypatch, ["ckpt_a", "ckpt_b"], early_stopping=early_stopping)
-    trainer.checkpoint_save(None)
+    _save(trainer, None)
     saved = sorted((tmp_path / "RUN" / "Checkpoints").glob("*.pt")) if (tmp_path / "RUN").exists() else []
     if not saved:
         saved = sorted(tmp_path.rglob("*.pt"))
