@@ -157,8 +157,8 @@ quarter turn are `ORIENTATION`; `ColorTransform` and its subclasses are
 `POINTWISE`, their field and their box being functions of the voxel's position in
 the whole volume. The `Mask` DRAW and `Elastix` load the volume (the draw's output grid is the
 mask's own, which is already resident); the `Mask` TRANSFORM above is pointwise and reads its
-mask by region, and declares those reads to the decoded-chunk cache ahead of a sweep, as the
-sweep declares its own.
+mask by region, and declares those reads to the decoded-chunk cache ahead of a sweep or of a
+case's patches, as the reader declares its own.
 
 The transforms that load the volume do so because their answer needs it:
 `Clip` and `Standardize` under a `mask` read a second full volume a patch cannot

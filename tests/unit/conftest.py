@@ -33,7 +33,8 @@ class StreamingDatasetStub:
     """In-memory dataset serving whole reads, region reads, and statistics, with identity geometry.
 
     The read counters (``full_reads``/``patch_reads``/``stats_reads``) let a test assert which
-    access path was taken.
+    access path was taken; ``regions`` and ``declared`` are the windows it was asked for and the
+    windows it was told to expect, in order, for a test that they are the same sequence.
     """
 
     def __init__(self, volume: np.ndarray) -> None:
@@ -41,6 +42,8 @@ class StreamingDatasetStub:
         self.full_reads = 0
         self.patch_reads = 0
         self.stats_reads = 0
+        self.regions: list[tuple[slice, ...]] = []
+        self.declared: list[tuple[slice, ...]] = []
 
     def _attributes(self) -> Attribute:
         spatial = self.volume.ndim - 1
@@ -59,7 +62,12 @@ class StreamingDatasetStub:
 
     def read_data_slice(self, group_src: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         self.patch_reads += 1
+        self.regions.append(tuple(slices))
         return self.volume[slices].copy(), self._attributes()
+
+    def plan_region_reads(self, group_src: str, name: str, windows) -> None:
+        del group_src, name
+        self.declared.extend(tuple(window) for window in windows)
 
     def read_data_statistics(self, group_src: str, name: str, channels: list[int] | None = None) -> dict[str, float]:
         self.stats_reads += 1

@@ -2849,17 +2849,7 @@ class DatasetManager:
         )
         ahead = depth if pulls else 0
         if pulls:
-            # The store is told the whole sequence, so a decoded block a later region asks for again
-            # outlives one none does. A hint: see Dataset.plan_region_reads.
-            lead = [slice(None)] * (len(source.shape) - len(spatial))
-            source.dataset.plan_region_reads(source.group, source.entry, [(*lead, *spans[0]) for spans in pulls])
-            # And each stage the regions it will be handed, in the same order, so one reading a
-            # companion volume beside them (Mask) declares those reads too.
-            for index, (stage, plan) in enumerate(zip(source.stages, source.stage_plans, strict=True)):
-                if plan.kind is LocalityKind.CROP:
-                    continue  # handed no region: its remap is its action
-                contexts = [plan.region_context(spans[index], spans[index + 1]) for spans in pulls]
-                stage.plan_region_reads(self.name, contexts)
+            self._declare_region_reads([(source, spans) for spans in pulls])
         # A member's tail reads on the landing, whose regions are the targets: known whether or not
         # the prefix folds its own pulls ahead.
         for member in members:
@@ -3156,6 +3146,63 @@ class DatasetManager:
         spans = self._region_spans(stream_source, target_slices)
         tensor, attributes = self._read_streamed_region(stream_source, spans)
         return self._apply_streamed_region(stream_source, spans, tensor, attributes, cache_attribute, case_attribute)
+
+    def plan_patch_reads(self, entries: Sequence[tuple[int, int]], is_input: bool, apply_augmentations: bool) -> None:
+        """Declare the store reads this case's patches will make, in the order one process will make
+        them: ``entries`` is its ``(copy, patch)`` sequence, from the loader's own order (see
+        :class:`~konfai.data.data_manager.PatchReadOrder`). Called once, as the case is entered.
+
+        The reads are named from the plans alone, so nothing is read here and no voxel of a patch
+        still to come is touched. A copy whose Save caches are not materialized yet is left out: the
+        sweep that materializes them declares its own reads, and what the patches then read is the
+        cache, not this source.
+        """
+        if self.loaded or not entries or not self._stream_ready(entries[0][0], apply_augmentations):
+            return
+        reads = []
+        for a, index in entries:
+            source = self._resolve_patch_stream_source(a, apply_augmentations)
+            if source is None or source.pending_sweeps:
+                continue
+            reads.append((source, self._patch_read_spans(source, index, a, is_input)))
+        self._declare_region_reads(reads)
+
+    def _patch_read_spans(
+        self, stream_source: _PatchStreamSource, index: int, a: int, is_input: bool
+    ) -> list[list[slice]]:
+        """The region each stage reads for patch ``index`` of copy ``a``, the first being the window
+        read from the store: what :meth:`_get_streamed_data` reads, without reading it. An exact-patch
+        chain hands every stage the patch itself, which is the region it reads."""
+        if stream_source.region_index is None:
+            plan = self.patch.get_read_plan(stream_source.shape, index, a, is_input)
+            region = plan.data_slices[len(plan.data_slices) - (len(stream_source.shape) - 1) :]
+            return [list(region) for _ in range(len(stream_source.stage_plans) + 1)]
+        return self._region_spans(stream_source, tuple(self.patch.read_slices(a, index, self.shapes[a])))
+
+    def _declare_region_reads(self, reads: Sequence[tuple[_PatchStreamSource, list[list[slice]]]]) -> None:
+        """Tell the stores, and the stages, the region reads about to happen in the order they will.
+
+        A store that caches decoded blocks then keeps what a later read asks for again and drops what
+        none does (:meth:`~konfai.utils.dataset.Dataset.plan_region_reads`), and a stage reading a
+        companion volume beside its region (:class:`~konfai.data.transform.Mask`) declares those reads
+        too. Grouped by the entry read and by the stage handed the region, so the copies of one case
+        interleaved over one store are declared as the single sequence that store will serve.
+        """
+        by_entry: dict[tuple[Dataset, str, str], list[tuple[slice, ...]]] = {}
+        by_stage: dict[int, tuple[Stage, list[RegionContext]]] = {}  # by identity: a Stage need not be hashable
+        for source, spans in reads:
+            lead = [slice(None)] * (len(source.shape) - len(spans[-1]))
+            by_entry.setdefault((source.dataset, source.group, source.entry), []).append((*lead, *spans[0]))
+            for index, (stage, plan) in enumerate(zip(source.stages, source.stage_plans, strict=True)):
+                if plan.kind is LocalityKind.CROP:
+                    continue  # handed no region: its remap is its action
+                by_stage.setdefault(id(stage), (stage, []))[1].append(
+                    plan.region_context(spans[index], spans[index + 1])
+                )
+        for (dataset, group, entry), windows in by_entry.items():
+            dataset.plan_region_reads(group, entry, windows)
+        for stage, contexts in by_stage.values():
+            stage.plan_region_reads(self.name, contexts)
 
     def _region_spans(self, stream_source: _PatchStreamSource, target_slices: tuple[slice, ...]) -> list[list[slice]]:
         """The region each stage of the chain reads for ``target_slices``, the last being the target

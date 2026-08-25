@@ -18,10 +18,12 @@
 subsets, DataLoader arguments, cache workers, and DatasetIter (streaming transforms, inline
 augmentations)."""
 
+import multiprocessing
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import numpy as np
@@ -36,13 +38,14 @@ from konfai.data.data_manager import (
     DataTrain,
     Group,
     GroupTransform,
+    PatchReadOrder,
     PredictionSubset,
     TrainSubset,
     WindowedCaseSampler,
     _cache_worker_count,
 )
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import TensorCast, Transform, TransformLoader
+from konfai.data.transform import Gradient, TensorCast, Transform, TransformLoader
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.runtime import State, restart_startup_clock
 from konfai.utils.utils import split_path_spec
@@ -717,6 +720,128 @@ def test_windowed_sampler_shards_cases_across_workers_without_overlap() -> None:
         for a in range(num_workers):
             for b in range(a + 1, num_workers):
                 assert worker_cases[a].isdisjoint(worker_cases[b])
+
+
+# --------------------------------------------------------------------------------------
+# PatchReadOrder: the epoch's order, from where it is drawn to where the patches are read
+# --------------------------------------------------------------------------------------
+
+
+def _published(mapping: list[tuple[int, int, int]], order: list[int], batch_size: int = 1) -> PatchReadOrder:
+    read_order = PatchReadOrder(mapping, batch_size)
+    read_order.publish(torch.as_tensor(order, dtype=torch.int64))
+    return read_order
+
+
+def test_a_case_is_declared_once_per_epoch_in_the_order_its_patches_will_be_read() -> None:
+    """A schedule is followed only while the reads match it, so what a case declares must be the
+    sequence the loader is about to ask for, and only the part of it still to come."""
+    mapping = _case_major_mapping(2, 3)
+    order = [4, 0, 3, 2, 5, 1]
+
+    read_order = _published(mapping, order)
+
+    assert read_order.entering(4) == [(0, 1), (0, 0), (0, 2)], "case 1's patches, as they will come"
+    assert read_order.entering(0) == [(0, 0), (0, 2), (0, 1)], "case 0's, from where it is entered"
+    assert [read_order.entering(index) for index in order[2:]] == [None] * 4, "and never twice"
+
+
+def test_a_second_epoch_declares_the_order_it_was_published_and_not_the_first_one() -> None:
+    """A persistent worker outlives the epoch: an order it kept would declare the previous draw."""
+    mapping = _case_major_mapping(1, 2)
+    read_order = _published(mapping, [0, 1])
+    assert read_order.entering(0) == [(0, 0), (0, 1)]
+
+    read_order.publish(torch.as_tensor([1, 0], dtype=torch.int64))
+
+    assert read_order.entering(1) == [(0, 1), (0, 0)]
+
+
+def test_a_worker_declares_the_batches_it_is_handed_and_not_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DataLoader deals one batch in num_workers to each worker, and each holds a cache of its
+    own: a worker declaring the whole epoch would deviate from its own first read."""
+    monkeypatch.setattr(torch.utils.data, "get_worker_info", lambda: SimpleNamespace(id=0, num_workers=2))
+    mapping = _case_major_mapping(4, 2)
+
+    read_order = _published(mapping, list(range(len(mapping))), batch_size=2)
+
+    assert read_order.entering(0) == [(0, 0), (0, 1)], "batch 0 is this worker's"
+    assert read_order.entering(4) == [(0, 0), (0, 1)], "and so is batch 2"
+    assert read_order.entering(2) is None, "batch 1 goes to the other worker"
+
+
+def _entering_at_each_draw(read_order: PatchReadOrder, draws, opening, answer) -> None:
+    for drawn in draws:
+        drawn.wait(30)
+        answer.put(read_order.entering(opening.get()))
+
+
+@pytest.mark.skipif("fork" not in multiprocessing.get_all_start_methods(), reason="no fork on this platform")
+def test_every_epoch_s_order_reaches_a_process_forked_before_the_first_draw() -> None:
+    """A DataLoader forks its workers before the sampler draws the epoch's order and, when they are
+    persistent, never forks them again: an order held in ordinary memory would reach neither the
+    first epoch nor the ones after it."""
+    mapping = _case_major_mapping(1, 6)
+    read_order = PatchReadOrder(mapping, batch_size=1)
+    sampler = WindowedCaseSampler(mapping, True, None, 1, 1, read_order)
+    context = multiprocessing.get_context("fork")
+    draws = [context.Event(), context.Event()]
+    opening, answer = context.SimpleQueue(), context.SimpleQueue()
+    child = context.Process(target=_entering_at_each_draw, args=(read_order, draws, opening, answer))
+    child.start()
+
+    drawn: list[list[int]] = []
+    declared: list[list[tuple[int, int]]] = []
+    for epoch, event in enumerate(draws):
+        torch.manual_seed(epoch)
+        drawn.append(list(iter(sampler)))
+        opening.put(drawn[-1][0])
+        event.set()
+        declared.append(answer.get())
+    child.join(60)
+
+    assert child.exitcode == 0
+    assert drawn[0] != drawn[1], "the two epochs drew the same order: the test would prove nothing"
+    assert declared == [[mapping[index][1:] for index in order] for order in drawn]
+
+
+@pytest.mark.parametrize("transforms", [[], [Gradient()]], ids=["exact-patch", "halo"])
+def test_the_windows_declared_are_the_windows_the_patch_route_then_reads(
+    streaming_dataset_stub, transforms: list[Transform]
+) -> None:
+    """The declaration is named from the plans and the read from the run: a window that misses what
+    the read asks for deviates the schedule at its first step and buys nothing, in silence."""
+    dataset_stub = streaming_dataset_stub(np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8))
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, dataset_stub),
+        patch=DatasetPatch([4, 4]),
+        transforms=transforms,
+        data_augmentations_list=[],
+    )
+    mapping = [(0, 0, index) for index in range(manager.get_size(0))]
+    dataset_iter = DatasetIter(
+        rank=0,
+        data={"CT": [manager]},
+        mapping=mapping,
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        inline_augmentations=False,
+        data_augmentations_list=[],
+        patch_size=[4, 4],
+        overlap=None,
+        buffer_size=1,
+        use_cache=False,
+    )
+    sampler = WindowedCaseSampler(mapping, False, None, 1, 1, dataset_iter.read_order)
+
+    for index in sampler:
+        dataset_iter[index]
+
+    assert dataset_stub.declared, "the case declared nothing"
+    assert dataset_stub.regions == dataset_stub.declared
 
 
 class _WholeVolumeDataset:

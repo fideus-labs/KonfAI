@@ -363,6 +363,60 @@ def _interleaved_case_entries(patches: list["DatasetPatch"], entries: list[tuple
     return sorted(entries, key=lambda entry: (order[entry], *entry))
 
 
+class PatchReadOrder:
+    """The epoch's patch order, published from where it is drawn to where the patches are read.
+
+    A store that caches decoded chunks decides what to keep from the sequence it is told is coming
+    (:meth:`~konfai.utils.dataset.Dataset.plan_region_reads`). On the patch route that sequence is
+    the sampler's, drawn at the epoch's start in the parent, while the reads happen in the
+    DataLoader's workers, each holding a cache of its own: a worker is forked before the draw, and a
+    persistent one is never forked again, so the order reaches it through shared memory or not at
+    all. Nothing but the order travels: neither what is read nor its values depend on this.
+
+    A worker is handed one batch in ``num_workers``, so what it declares for a case is the
+    subsequence of its own batches. Their stride is learnt from the first batch it is given, which
+    assumes only that the batches are dealt round-robin, not which worker opens the epoch.
+    """
+
+    def __init__(self, mapping: list[tuple[int, int, int]], batch_size: int) -> None:
+        self._mapping = mapping
+        self._batch_size = max(1, batch_size)
+        self._order = torch.zeros(len(mapping), dtype=torch.int64).share_memory_()
+        self._epoch = torch.zeros(1, dtype=torch.int64).share_memory_()
+        self._epoch_read = 0
+        self._entries: dict[int, list[tuple[int, int]]] = {}
+
+    def publish(self, order: torch.Tensor) -> None:
+        """The order the epoch is about to be walked in, from the sampler that drew it."""
+        self._order.copy_(order)
+        self._epoch += 1
+
+    def entering(self, index: int) -> list[tuple[int, int]] | None:
+        """The ``(copy, patch)`` entries of ``index``'s case this process still has to read, in the
+        order it will read them; ``None`` once the case has been entered this epoch, and while no
+        sampler has published an order at all."""
+        self._regroup(index)
+        return self._entries.pop(self._mapping[index][0], None)
+
+    def _regroup(self, index: int) -> None:
+        """Group this process's remaining reads by case, once per epoch, from the batch ``index``
+        opens: a batch is ``batch_size`` consecutive positions, and the next batch this process is
+        handed is ``num_workers`` batches on."""
+        epoch = int(self._epoch[0])
+        if epoch == self._epoch_read:
+            return
+        self._epoch_read = epoch
+        order = self._order.tolist()
+        worker = data.get_worker_info()
+        stride = self._batch_size * (worker.num_workers if worker is not None else 1)
+        entries: dict[int, list[tuple[int, int]]] = {}
+        for start in range(order.index(index), len(order), stride):
+            for position in range(start, min(start + self._batch_size, len(order))):
+                case, copy, patch = self._mapping[order[position]]
+                entries.setdefault(case, []).append((copy, patch))
+        self._entries = entries
+
+
 class WindowedCaseSampler(Sampler[int]):
     """Locality-aware training order: shuffle cases, window them, shuffle patches within each window.
 
@@ -386,9 +440,13 @@ class WindowedCaseSampler(Sampler[int]):
         window: int | None,
         batch_size: int,
         num_workers: int,
+        read_order: PatchReadOrder | None = None,
     ) -> None:
         self.mapping = mapping
         self.shuffle = shuffle
+        # Where the epoch's order is published for the processes that read the patches; a sampler
+        # asked for nothing but its order publishes nowhere.
+        self.read_order = read_order
         self.batch_size = max(1, batch_size)
         self.num_workers = max(1, num_workers)
         self.case_entries: dict[int, list[int]] = {}
@@ -456,10 +514,14 @@ class WindowedCaseSampler(Sampler[int]):
 
     def __iter__(self) -> Iterator[int]:
         if not self.shuffle:
-            return iter(range(len(self.mapping)))
-        if self.window is None:
-            return iter(torch.randperm(len(self.mapping)).tolist())
-        return iter(self._windowed_order())
+            order = torch.arange(len(self.mapping))
+        elif self.window is None:
+            order = torch.randperm(len(self.mapping))
+        else:
+            order = torch.as_tensor(self._windowed_order(), dtype=torch.int64)
+        if self.read_order is not None:
+            self.read_order.publish(order)
+        return iter(order.tolist())
 
     def __len__(self) -> int:
         # One epoch is one pass over the mapping: windowing chooses the ORDER, not the size. This is
@@ -541,6 +603,7 @@ class DatasetIter(data.Dataset):
         buffer_size: int,
         apply_augmentations: bool = True,
         use_cache=True,
+        batch_size: int = 1,
     ) -> None:
         self.rank = rank
         self.data = data
@@ -557,6 +620,7 @@ class DatasetIter(data.Dataset):
         self._index_cache_lookup: set[int] = set()
         self.inline_augmentations = inline_augmentations
         self.has_augmented_samples = self.apply_augmentations and any(a > 0 for _, a, _ in mapping)
+        self.read_order = PatchReadOrder(mapping, batch_size)
 
     def get_patch_config(self) -> tuple[list[int] | None, OverlapSpec]:
         return self.patch_size, self.overlap
@@ -682,6 +746,16 @@ class DatasetIter(data.Dataset):
     def unload_data(self, group_dest: str, index: int) -> None:
         return self.data[group_dest][index].unload()
 
+    def _declare_case_reads(self, index: int) -> None:
+        """Tell each group's store the patches this process will read of the case ``index`` enters,
+        in the order it will read them: once per case, at the first patch of it that arrives."""
+        entries = self.read_order.entering(index)
+        if entries is None:
+            return
+        case = self.mapping[index][0]
+        for _group_src, group_dest, chain in _chains(self.groups_src):
+            self.data[group_dest][case].plan_patch_reads(entries, chain.is_input, self.apply_augmentations)
+
     def __len__(self) -> int:
         return len(self.mapping)
 
@@ -696,6 +770,8 @@ class DatasetIter(data.Dataset):
             if len(self._index_cache) >= self.buffer_size and not self.use_cache:
                 self._unload_data(self._index_cache[0])
             self._load_data(x, a)
+
+        self._declare_case_reads(index)
 
         for _group_src, group_dest, chain in _chains(self.groups_src):
             dataset = self.data[group_dest][x]
@@ -1273,6 +1349,7 @@ class Data(DataSources):
             overlap=self.patch.overlap if self.patch is not None else None,
             buffer_size=self._buffer_size,
             use_cache=use_cache,
+            batch_size=self.batch_size,
         )
         resolved_num_workers = self._num_workers
         if self.requires_single_process_loading:
@@ -1702,23 +1779,25 @@ class Data(DataSources):
                 # (loader_index == 0). Validation is scored over the whole subset whatever the order,
                 # and ``None`` keeps it on the plain global one.
                 window = self.subset.shuffle_window if loader_index == 0 else None
+                dataset_iter = self.datasetIter(
+                    rank=i,
+                    data=dataset_items,
+                    mapping=mapping,
+                    data_augmentations_list=self._get_data_augmentations(
+                        loader_index == 0 or self.validation_augmentations
+                    ),
+                    apply_augmentations=loader_index == 0 or self.validation_augmentations,
+                )
                 data_loaders[i].append(
                     DataLoader(
-                        dataset=self.datasetIter(
-                            rank=i,
-                            data=dataset_items,
-                            mapping=mapping,
-                            data_augmentations_list=self._get_data_augmentations(
-                                loader_index == 0 or self.validation_augmentations
-                            ),
-                            apply_augmentations=loader_index == 0 or self.validation_augmentations,
-                        ),
+                        dataset=dataset_iter,
                         sampler=WindowedCaseSampler(
                             mapping,
                             self.subset.shuffle,
                             window,
                             self.batch_size,
                             self.resolved_num_workers,
+                            dataset_iter.read_order,
                         ),
                         batch_size=self.batch_size,
                         **self.dataLoader_args,

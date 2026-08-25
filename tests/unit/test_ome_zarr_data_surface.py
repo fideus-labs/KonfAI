@@ -19,6 +19,8 @@
 These cover what a hand-rolled store reader gets wrong, which is never the happy path: a big-endian
 source, a pyramid level that does not exist, and a downsampling default that changes the pixels."""
 
+import contextlib
+from collections.abc import Iterator
 from pathlib import Path, PureWindowsPath
 
 import numpy as np
@@ -34,6 +36,7 @@ from konfai.data import (
     read_ome_zarr_data_slice,
     write_ome_zarr,
 )
+from konfai.data.transform import Transform
 from konfai.utils.dataset import Attribute, Dataset, _store_chunks
 from konfai.utils.errors import DatasetManagerError
 
@@ -440,10 +443,10 @@ def test_an_empty_declared_read_still_advances_its_schedule(tmp_path: Path) -> N
 
 
 class _CountingArray:
-    """A zarr array whose reads count the chunks they decode."""
+    """A zarr array whose reads add the chunks they decode to ``decoded[group]``."""
 
-    def __init__(self, array, decoded: list[int]) -> None:
-        self._array, self._decoded = array, decoded
+    def __init__(self, array, decoded: dict[str, int], group: str) -> None:
+        self._array, self._decoded, self._group = array, decoded, group
         self.shape, self.chunks, self.dtype = array.shape, array.chunks, array.dtype
 
     def __getitem__(self, index):
@@ -451,7 +454,7 @@ class _CountingArray:
         for item, chunk, extent in zip(index, self.chunks, self.shape, strict=True):
             lo, hi, _ = item.indices(extent) if isinstance(item, slice) else (item, item + 1, 1)
             touched *= max(0, -(-hi // chunk) - lo // chunk)
-        self._decoded[0] += touched
+        self._decoded[self._group] += touched
         return self._array[index]
 
 
@@ -478,24 +481,58 @@ def _two_stores(root: Path) -> None:
     Dataset(root / "ref", "h5").write("GRID", "TARGET", np.zeros((1, *landing), np.float32), rotated)
 
 
-def _sweep_with_a_mask_companion(
-    root: Path, monkeypatch: pytest.MonkeyPatch, *, declared: str, capacity_chunks: int, label: str
-) -> dict[str, int]:
-    """One sweep of CT through a Mask (reading Labels beside it) and a rotated resample over the
-    stores of :func:`_two_stores`, one thread (the cache sees the read's own order), the
-    decoded-chunk cache holding ``capacity_chunks``; the chunks decoded per store. ``declared``
-    is what tells the cache its future: ``"nothing"`` (LRU), ``"source"`` (the sweep's own reads,
-    the mask ranked by recency) or ``"both"`` (the mask's reads too)."""
-    from konfai.data import patching as patching_module
-    from konfai.data.materialize import CaseMaterializer, Verdict
-    from konfai.data.patching import DatasetManager, DatasetPatch
-    from konfai.data.transform import Mask, Resample, Save
+@contextlib.contextmanager
+def _counting_decodes(patched: pytest.MonkeyPatch, capacity_chunks: int) -> Iterator[dict[str, int]]:
+    """The chunks each store of :func:`_two_stores` decodes while the block runs, with the
+    decoded-chunk cache holding ``capacity_chunks`` of them. The dict fills as the block runs."""
     from konfai.utils import ome_zarr
+
+    decoded = {"CT": 0, "Labels": 0}
+    level_array = ome_zarr._level_array
+    level_array.cache_clear()
+
+    def counting(store_path: str, level_path: str):
+        group = next(group for group in decoded if f"/{group}." in store_path)
+        return _CountingArray(level_array(store_path, level_path), decoded, group)
+
+    patched.setenv("OMP_NUM_THREADS", "1")  # one thread: the cache sees the read's own order
+    patched.setattr(ome_zarr, "_level_array", counting)
+    cache = ome_zarr._chunk_cache()
+    previous = cache.capacity
+    cache.forget()
+    cache.set_capacity(capacity_chunks * 16 * 32 * 32 * 4)
+    try:
+        yield decoded
+    finally:
+        cache.set_capacity(previous)
+        cache.forget()
+
+
+def _masked_resample(root: Path) -> tuple[Dataset, list[Transform]]:
+    """The store of :func:`_two_stores` and the chain both engines are measured on: a Mask reading
+    Labels at every region beside the CT, then a 20-degree rotated resample whose blocks pull each
+    chunk of both stores from several regions."""
+    from konfai.data.transform import Mask, Resample
 
     source = Dataset(root / "src", "omezarr")
     mask = Mask(path="Labels", value_outside=-7)
     mask.set_datasets([source])
     resample = Resample(reference="TARGET", reference_group="GRID", reference_dataset=f"{root / 'ref'}:h5")
+    return source, [mask, resample]
+
+
+def _sweep_with_a_mask_companion(
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, declared: str, capacity_chunks: int, label: str
+) -> dict[str, int]:
+    """One sweep of :func:`_masked_resample`; the chunks decoded per store. ``declared`` is what
+    tells the cache its future: ``"nothing"`` (LRU), ``"source"`` (the sweep's own reads, the mask
+    ranked by recency) or ``"both"`` (the mask's reads too)."""
+    from konfai.data import patching as patching_module
+    from konfai.data.materialize import CaseMaterializer, Verdict
+    from konfai.data.patching import DatasetManager, DatasetPatch
+    from konfai.data.transform import Mask, Save
+
+    source, chain = _masked_resample(root)
     manager = DatasetManager(
         index=0,
         group_src="CT",
@@ -503,36 +540,61 @@ def _sweep_with_a_mask_companion(
         name="CASE_000",
         dataset=source,
         patch=DatasetPatch([4, 5, 4]),
-        transforms=[mask, resample, Save(f"{root / f'out_{label}'}:h5")],
+        transforms=[*chain, Save(f"{root / f'out_{label}'}:h5")],
         data_augmentations_list=[],
     )
-    decoded: dict[str, list[int]] = {"CT": [0], "Labels": [0]}
-    level_array = ome_zarr._level_array
-    level_array.cache_clear()
-
-    def counting(store_path: str, level_path: str):
-        group = next(group for group in decoded if f"/{group}." in store_path)
-        return _CountingArray(level_array(store_path, level_path), decoded[group])
-
-    with monkeypatch.context() as patched:
-        patched.setenv("OMP_NUM_THREADS", "1")
+    with monkeypatch.context() as patched, _counting_decodes(patched, capacity_chunks) as decoded:
         patched.setattr(patching_module, "SWEEP_SLAB_ROWS", 12)
         patched.setattr(patching_module, "_sweep_pipeline_depth", lambda: 0)
-        patched.setattr(ome_zarr, "_level_array", counting)
         if declared == "nothing":
             patched.setattr(Dataset, "plan_region_reads", lambda self, groups, name, windows: None)
         elif declared == "source":
             patched.setattr(Mask, "plan_region_reads", lambda self, name, contexts: None)
-        cache = ome_zarr._chunk_cache()
-        previous = cache.capacity
-        cache.forget()
-        cache.set_capacity(capacity_chunks * 16 * 32 * 32 * 4)
-        try:
-            assert CaseMaterializer(manager).materialize() is Verdict.STREAM
-        finally:
-            cache.set_capacity(previous)
-            cache.forget()
-    return {group: count[0] for group, count in decoded.items()}
+        assert CaseMaterializer(manager).materialize() is Verdict.STREAM
+    return decoded
+
+
+def _patch_epoch_with_a_mask_companion(
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, declared: bool, shuffle: bool, capacity_chunks: int
+) -> dict[str, int]:
+    """One pass over a case's patches through :func:`_masked_resample`, read in the loader's own
+    order (the grid's, or a shuffled epoch's) on one process; the chunks decoded per store.
+    ``declared`` is whether the sampler publishes that order for the reads to declare."""
+    import torch
+    from konfai.data.data_manager import DatasetIter, Group, GroupTransform, WindowedCaseSampler
+    from konfai.data.patching import DatasetManager, DatasetPatch
+
+    source, chain = _masked_resample(root)
+    patch = [16, 64, 64]
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=source,
+        patch=DatasetPatch(patch),
+        transforms=chain,
+        data_augmentations_list=[],
+    )
+    mapping = [(0, 0, index) for index in range(manager.get_size(0))]
+    dataset_iter = DatasetIter(
+        rank=0,
+        data={"CT": [manager]},
+        mapping=mapping,
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        inline_augmentations=False,
+        data_augmentations_list=[],
+        patch_size=patch,
+        overlap=None,
+        buffer_size=1,
+        use_cache=False,
+    )
+    sampler = WindowedCaseSampler(mapping, shuffle, None, 1, 1, dataset_iter.read_order if declared else None)
+    with monkeypatch.context() as patched, _counting_decodes(patched, capacity_chunks) as decoded:
+        torch.manual_seed(7)
+        for index in sampler:
+            dataset_iter[index]
+    return decoded
 
 
 def test_a_mask_companion_of_a_declared_sweep_is_decoded_once_where_lru_decodes_it_again(
@@ -599,3 +661,25 @@ def test_a_declared_companion_shares_a_tight_cache_with_the_source_it_is_read_be
     assert both["Labels"] <= lru["Labels"], "and decoded no more than under LRU"
     if beats_lru:
         assert sum(both.values()) < sum(lru.values()), f"{both} against LRU's {lru}"
+
+
+@pytest.mark.parametrize("shuffle", [False, True], ids=["grid-order", "shuffled-epoch"])
+@pytest.mark.parametrize("capacity_chunks", [39, 24])
+def test_a_declared_patch_epoch_decodes_fewer_chunks_than_recency_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capacity_chunks: int, shuffle: bool
+) -> None:
+    """The patch route reads a case in a known order nobody declared: the grid's for PREDICTION and
+    EVALUATION, the sampler's for a TRAIN epoch. Told it, the cache evicts by the next declared use
+    and the mask read beside every patch is ranked against the same future. Decodes over the two
+    stores together at 39 and 24 of the 96 chunks they hold, LRU -> declared: 312 -> 212 and
+    384 -> 336 in the grid's order, 247 -> 217 and 344 -> 309 over a shuffled epoch."""
+    _two_stores(tmp_path)
+
+    def epoch(declared: bool) -> dict[str, int]:
+        return _patch_epoch_with_a_mask_companion(
+            tmp_path, monkeypatch, declared=declared, shuffle=shuffle, capacity_chunks=capacity_chunks
+        )
+
+    lru, planned = epoch(False), epoch(True)
+
+    assert sum(planned.values()) < sum(lru.values()), f"{planned} against LRU's {lru}"
