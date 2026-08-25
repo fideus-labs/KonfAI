@@ -25,7 +25,7 @@ import threading
 import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,9 +75,10 @@ from konfai.data.transform import (
 )
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.budget import node_local_ranks, resolve_memory_budget
+from konfai.utils.chain_diff import dataset_tree, input_chain_differences, training_dataset_tree
 from konfai.utils.config import _escape_key_component, apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
-from konfai.utils.errors import ConfigError, PredictorError
+from konfai.utils.errors import ConfigError, KonfAIError, PredictorError
 from konfai.utils.ome_zarr import set_chunk_cache_budget
 from konfai.utils.runtime import (
     DataLog,
@@ -2011,6 +2012,7 @@ class Predictor(DistributedObject):
         channels_last: bool = False,
         outputs_dataset: dict[str, OutputDatasetLoader] | None = {"default|Default": OutputDatasetLoader()},
         data_log: list[str] | None = None,
+        check_training_transforms: bool = True,
     ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
             raise ConfigError("Predictor requires KONFAI_CONFIG_MODE='Done' before initialization.")
@@ -2036,6 +2038,7 @@ class Predictor(DistributedObject):
 
         self.autocast = autocast
         self.channels_last = channels_last
+        self.check_training_transforms = check_training_transforms
         with startup_clock().phase("model"):
             self.model = model.get_model(train=False)
         self.it = 0
@@ -2149,10 +2152,63 @@ class Predictor(DistributedObject):
             )
         with startup_clock().phase("checkpoint"):
             self.model_composite.load(self._load())
+        try:
+            self._report_chain_drift()
+        except (OSError, KonfAIError, ValueError, TypeError) as error:
+            # A diagnostic reading someone else's config file never fails the prediction it reports
+            # on; what stopped it is said instead of swallowed.
+            print(f"[KonfAI] the training-chain check did not run: {type(error).__name__}: {error}")
 
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
 
         self.dataloader, _, _ = self.dataset.get_data(world_size // self.size)
+
+    def _report_chain_drift(self) -> None:
+        """Warn when the chain applied to a model input is not the one its checkpoint trained on.
+
+        Same checkpoint, different preprocessing is silent: the run succeeds and only the values are
+        wrong (the Synthesis example shipped ``Standardize(mask: None)`` in training against
+        ``Standardize(mask: MASK)`` here, and paid 409 HU of MAE instead of 98). A legitimate
+        difference exists, so this warns and never refuses, and ``check_training_transforms: false``
+        silences it. Compared against the resolved config the training run left in its ``Statistics``
+        directory, read without writing it back.
+        """
+        if not self.check_training_transforms:
+            return
+        applied = dataset_tree(config_file(), konfai_root())
+        runs: list[tuple[Mapping[str, Any], list[str]]] = []
+        unchecked: list[Path] = []
+        for path_to_model in self.path_to_models:
+            checkpoint = Path(path_to_model)
+            trained = training_dataset_tree(checkpoint) if checkpoint.is_file() else None
+            if trained is None:
+                unchecked.append(checkpoint)
+                continue
+            # Folds of one experiment spell the same chains: compare each distinct one once.
+            for known, names in runs:
+                if known == trained:
+                    names.append(checkpoint.parent.name)
+                    break
+            else:
+                runs.append((trained, [checkpoint.parent.name]))
+        if unchecked:
+            print(
+                f"[KonfAI] the training-chain check did not run for {len(unchecked)} checkpoint(s):"
+                f" no resolved training config beside '{unchecked[0]}'"
+                " (a TRAIN run keeps one in Statistics/<train_name>/)."
+            )
+        for trained, names in runs:
+            differences = input_chain_differences(trained, applied)
+            if not differences:
+                continue
+            print(f"[KonfAI] WARNING: this run preprocesses a model input differently from {', '.join(names)}:")
+            for difference in differences:
+                print(f"[KonfAI]   {difference}")
+            print(
+                "[KonfAI] The same checkpoint on differently preprocessed inputs predicts wrong values"
+                " without failing. Set 'check_training_transforms: false' under Predictor once the"
+                " difference is deliberate."
+            )
 
     def set_models(self, path_to_models: list[Path | str]) -> None:
         self.path_to_models = path_to_models

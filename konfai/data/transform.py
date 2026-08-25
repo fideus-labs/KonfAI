@@ -204,6 +204,11 @@ class Transform(NeedDevice, ABC):
     #: per-axis derivatives). Measured, not derived: RSS over the call, on a 300^3 float32 case.
     working_multiple: float = 0.0
 
+    #: Whether the stage changes the values it is handed. A stage that records a fact on the case
+    #: (Statistics) or writes what passes through (Save) returns its input untouched, so a chain
+    #: that drops it reads the same to a model: the PREDICTION chain check ignores it.
+    alters_values: bool = True
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         # Every stage records its constructor arguments as given, so konfai.api can write the
         # config tree back from live objects: the binder's mirror, declared once, on the base.
@@ -2698,6 +2703,8 @@ class Save(Transform):
     real volume, the Gaussian holds a 0.9998 correlation while crushing peak intensity by 20 %.
     """
 
+    alters_values = False
+
     def __init__(
         self,
         dataset: str,
@@ -3976,6 +3983,8 @@ class Statistics(Transform):
     """
 
     _KEYS = (("Min", "ImageMin"), ("Max", "ImageMax"), ("Mean", "ImageMean"), ("Std", "ImageStd"))
+
+    alters_values = False
 
     def __init__(self) -> None:
         super().__init__()

@@ -52,6 +52,7 @@ When multiple checkpoints are provided, the predictor combines them using the
 | `autocast` | bool | `false` | No | Enables AMP during inference. On the shipped Segmentation example: 4.2 s to 2.7 s, 11110 of 58.4 million label voxels change, at boundaries. |
 | `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). With `autocast`, 2.7 s to 2.2 s on the same example and no further voxel changes; alone, no gain and 3199 voxels moved by the kernels cuDNN then picks. |
 | `data_log` | list or null | `None` | No | Optional TensorBoard logging. |
+| `check_training_transforms` | bool | `true` | No | Warns when a model input is not preprocessed the way its checkpoint trained on it. See [The training-chain check](#the-training-chain-check). |
 
 ## `Predictor.Model`
 
@@ -121,6 +122,38 @@ default), resolved after the size; an axis a single patch spans gets none. A
 (`[10, 20, 0]`). Declaration-order coercion once turned `overlap: 0.25` into
 `int(0.25) == 0`: silent no-overlap; that is fixed and pinned by
 `tests/unit/test_config.py::test_apply_config_union_keeps_the_value_type_over_lossy_coercion`.
+
+### The training-chain check
+
+A checkpoint carries no record of how its inputs were preprocessed, so a
+`Prediction.yml` that standardizes a group differently from the `Config.yml` it
+trained on still runs: the model sees a scale it has never seen and the output
+is wrong in silence. The Synthesis example once shipped `Standardize(mask: None)`
+in training against `Standardize(mask: MASK)` in prediction, and paid 409 HU of
+MAE instead of 98 with the same weights.
+
+At checkpoint load, PREDICTION compares the two. For a checkpoint at
+`Checkpoints/<train_name>/*.pt` it reads the resolved config the run left in
+`Statistics/<train_name>/`, and for every group the live config declares
+`is_input: true` it walks the `transforms` and `patch_transforms` chains stage by
+stage, naming the group, the position, the class and the arguments that differ:
+
+```text
+[KonfAI] WARNING: this run preprocesses a model input differently from TRAIN_01:
+[KonfAI]   'MR:MR' transforms[1] Standardize: mask: 'None' in training, 'MASK' here
+```
+
+It warns and never refuses, because a difference can be deliberate. What is
+compared is what reaches the model, so none of these is a finding: a stage that
+alters no value (`Statistics`, `Save`), everything from an `Expand` marker on
+(the copies' draws), the `inverse` argument (an output-path setting), a group
+the live config does not declare as a model input, and anything an
+`outputs_dataset` applies afterwards. A checkpoint that keeps no resolved config
+within reach (an app bundle, a hand-copied `.pt`, a run whose `--statistics-dir`
+was elsewhere) prints one line saying the check could not run. The training
+config is only read, never bound, so the run's record stays byte-identical.
+
+Set `check_training_transforms: false` to silence it.
 
 ## `outputs_dataset`
 
