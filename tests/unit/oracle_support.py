@@ -105,9 +105,17 @@ VECTORISED_RTOL = 8 * float(np.finfo(np.float32).eps)
 #   axis-aligned volume (measured: zero differing voxels on every Resample case, field and stored
 #   map included); on OBLIQUE cosines the window's origin is one rounding the whole volume never
 #   takes, and a voxel in ~1e5 lands an ulp apart. A map that DOES factorise is read one axis at a
-#   time on global coordinates and is bit-identical everywhere; nearest uses no weights and is
-#   exact either way; cubic walks the corners itself and is exact.
+#   time on global coordinates, so the two routes sum the same weights over different extents: equal
+#   bit for bit where the compiler emits the same arithmetic for both, an ulp of the local gap apart
+#   where it contracts or vectorises them differently. Nearest uses no weights and is exact either
+#   way; cubic walks the corners itself and is exact.
 REGRID_ATOL = 64 * float(np.spacing(np.float32(PEAK)))
+# What one rounding of a value at the volume's scale is worth. `low + w * (high - low)` may be issued
+# as a fused multiply-add or as a multiply then an add, and which of the two a CPU kernel picks for a
+# given element depends on the extent it is walking: the vectorised body and the scalar tail need not
+# agree, and the tail is where the count lands. One ulp on a third of the voxels, measured; four is
+# the bound, so a deviation that is not a single rounding still fails.
+FUSED_ATOL = 4 * float(np.spacing(np.float32(PEAK)))
 # An integer volume truncates the interpolation, so a sub-ulp disagreement that straddles an integer
 # boundary becomes a whole least-significant bit.
 LSB_ATOL = 1.0
@@ -448,15 +456,14 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         # The default (the case's own grid, no map) would be a no-op resample; these are the family's
         # meaningful configurations, one per way of naming the grid and the map.
         "Resample": [
-            StageCase(Resample(spacing=spacing)),  # factorises: bit-identical
+            StageCase(Resample(spacing=spacing), atol=FUSED_ATOL),  # factorises
             StageCase(Resample(spacing=spacing), group="Int16", atol=LSB_ATOL),
             # uint8 resamples by nearest neighbour: no interpolation weights, so no rounding to disagree on.
             StageCase(Resample(spacing=spacing), group="Labels"),
-            StageCase(Resample(shape=shape)),  # factorises: bit-identical
+            StageCase(Resample(shape=shape), atol=FUSED_ATOL),  # factorises
             # Onto a grid of its own, so part of the target reads from outside the case and takes the
-            # fill. atol is 0: both paths run the SAME sampler over global coordinates, so they agree
-            # bit for bit or not at all.
-            StageCase(Resample(reference=CASE_NAME, reference_group="Reference")),
+            # fill. Both paths run the SAME sampler over global coordinates.
+            StageCase(Resample(reference=CASE_NAME, reference_group="Reference"), atol=FUSED_ATOL),
             StageCase(Resample(reference=CASE_NAME, reference_group="Reference"), group="Labels"),
             # Through a field, and through a stored map: neither factorises. Exact on the host (ITK's
             # resampler), ~ulp on the device (grid_sample's normalised coordinates): the atol says so.
