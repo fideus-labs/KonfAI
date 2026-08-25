@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.case_reduction import CaseReduction, ReductionPlan, split_chain
-from konfai.data.patching import DatasetManager
+from konfai.data.patching import SWEEP_CLOCK, DatasetManager
 from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
 from konfai.data.transform import (
     Clip,
@@ -649,3 +649,23 @@ def test_a_budget_with_room_folds_the_whole_volume(tmp_path: Path) -> None:
     # A caller that names a ceiling still gets it.
     engine.fit_budget(64 * 1024**3, cap=2)
     assert engine.slab_rows == 2
+
+
+def test_a_reduction_accounts_for_every_second_of_its_own_wall_clock(tmp_path: Path) -> None:
+    """A work item that reads N volumes must appear in the run's one accounting line.
+
+    Measured on a 5 x 384 MiB cohort (.audit-local/bench/bench_reduce_expand.py): the member reads
+    are 13-40 % of the work item, the operator 13-37 %, the write 4-9 %. None of it was attributed:
+    the fold reads through ``read_region``, which no phase of the sweep clock covers.
+    """
+    SWEEP_CLOCK.reset()
+    engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Mean", output="clocked"), [])
+    assert engine.materialize() is True
+
+    wall = SWEEP_CLOCK.spent("sweep")
+    named = sum(SWEEP_CLOCK.spent(phase) for phase in ("chain", "fetch", "wait(read)", "wait(write)"))
+    assert wall > 0.0
+    assert 0.0 <= wall - named <= wall, "a phase is counted outside the fold it belongs to"
+    # No pipeline: the store's own seconds are the seconds the fold stands still.
+    assert SWEEP_CLOCK.spent("wait(read)") >= SWEEP_CLOCK.spent("read") > 0.0
+    assert SWEEP_CLOCK.spent("wait(write)") >= SWEEP_CLOCK.spent("write") > 0.0

@@ -29,12 +29,14 @@ operator can accumulate.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import numpy as np
 import torch
 
-from konfai.data.patching import DatasetManager, RegionWriter, device_capped_budget, save_destination
+from konfai.data.patching import SWEEP_CLOCK, DatasetManager, RegionWriter, device_capped_budget, save_destination
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
 from konfai.utils.dataset import (
@@ -57,6 +59,18 @@ _POST_KINDS = frozenset({LocalityKind.POINTWISE, LocalityKind.GLOBAL_STAT})
 
 #: Bytes per sample assumed when sizing regions from headers alone, before a dtype is known.
 _ASSUMED_ITEMSIZE = 4
+
+
+@contextlib.contextmanager
+def _awaited(phase: str) -> Iterator[None]:
+    """A phase the fold both performs and stands still for.
+
+    The fold has no pipeline: every member's region is read, and every slab written, on its own
+    thread. So the store's own seconds ARE the seconds the loop waits, which is what
+    :meth:`~konfai.data.patching.SweepClock.report` prints on either side of its bar.
+    """
+    with SWEEP_CLOCK.phase(f"wait({phase})"), SWEEP_CLOCK.phase(phase):
+        yield
 
 
 @dataclass(frozen=True)
@@ -447,8 +461,17 @@ class CaseReduction:
         """
         self.operator.start()
         for manager in self.managers:
-            self.operator.accumulate(manager.read_region(region).unsqueeze(0))
-        return self.operator.finalize().squeeze(0)
+            # No name holds the region past its accumulate: one that did would keep a second member
+            # region resident, which the plan does not price (1162 MiB against 778 on a 5 x 384 MiB
+            # float32 cohort folded whole).
+            self.operator.accumulate(self._member_region(manager, region))
+        with SWEEP_CLOCK.phase("chain"):
+            return self.operator.finalize().squeeze(0)
+
+    def _member_region(self, manager: DatasetManager, region: tuple[slice, ...]) -> torch.Tensor:
+        """One member's region, in the stack-axis layout every operator is written against."""
+        with _awaited("read"):
+            return manager.read_region(region).unsqueeze(0)
 
     def _folds(self, spatial: list[int]):
         """Every region's fold, in order: the loop both passes share."""
@@ -457,9 +480,11 @@ class CaseReduction:
 
     def _apply_post(self, block: torch.Tensor, attribute: Attribute, rank: int) -> np.ndarray:
         scope = Attribute(attribute)
-        for stage in self.post:
-            block = stage(self.reduce.output, block, scope)
-        array = block.cpu().numpy()
+        with SWEEP_CLOCK.phase("chain"):
+            for stage in self.post:
+                block = stage(self.reduce.output, block, scope)
+        with SWEEP_CLOCK.phase("fetch"):
+            array = block.cpu().numpy()
         if array.ndim != rank:
             raise ReductionError(
                 f"A stage after the Reduce returned a rank-{array.ndim} region where the"
@@ -567,6 +592,12 @@ class CaseReduction:
             )
             raise ReductionError(f"The reduction into '{self.reduce.output}' cannot stream: {plan.refusal}.", remedy)
 
+        with SWEEP_CLOCK.phase("sweep"):
+            self._write_folds(plan)
+        return True
+
+    def _write_folds(self, plan: ReductionPlan) -> None:
+        """Every region of the reduced volume, folded and written in order, under one clock."""
         spatial = plan.spatial
         attribute = self._output_attributes(plan)
         rank = len(spatial) + 1
@@ -583,9 +614,10 @@ class CaseReduction:
         try:
             for region, folded in folds:
                 array = self._apply_post(folded, attribute, rank)
-                writer.write(None, (slice(0, int(array.shape[0])), *region), array, attribute)
-            writer.close()
+                with _awaited("write"):
+                    writer.write(None, (slice(0, int(array.shape[0])), *region), array, attribute)
+            with _awaited("write"):
+                writer.close()
         except BaseException as exception:
             writer.abort(exception)
             raise
-        return True
