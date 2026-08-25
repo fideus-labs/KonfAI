@@ -81,13 +81,14 @@ per group), so it ignores the dtype you stored, size-changing transforms and
 augmented copies. It is a switch, not an allocator limit.
 
 It also bounds only the buffers the pipeline holds for your data, the OME-Zarr
-decoded-chunk cache among them: a third of the budget, never more than the
-budget, and never below a 256 MiB floor unless the budget itself is smaller,
-set on every rank of every workflow. The
-interpreter, torch and its CUDA context, the model and each worker's own
-working set sit outside it, so the peak RSS a run reports is the budget plus a
-floor that does not move when the budget does: lowering the budget lowers the
-peak by roughly what you took off, never to the budget itself.
+decoded-chunk cache among them: a third of the budget, on every rank of every
+workflow. Under a 768 MiB budget that third is below the 256 MiB the cache is
+worth, where a region touching more chunks than it holds decodes them again; the
+TRANSFORM plan says so in its header. The interpreter, torch and its CUDA
+context, the model and each worker's own working set sit outside it, so the peak
+RSS a run reports is the budget plus a floor that does not move when the budget
+does: lowering the budget lowers the peak by roughly what you took off, never to
+the budget itself.
 
 ## What decides whether a chain streams
 
