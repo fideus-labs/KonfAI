@@ -92,6 +92,23 @@ def test_a_big_endian_store_is_converted_by_the_copy_that_assembles_the_window(t
     assert _native_byteorder(patch) is patch, "a second conversion would copy the whole window"
 
 
+def test_a_stepped_selection_falls_back_instead_of_returning_a_wrong_window(tmp_path: Path) -> None:
+    """The chunked reader counts the voxels between start and stop. Handed a step it would size the
+    window wrongly and fill it from the wrong places, so it refuses and the lazy array answers."""
+    from konfai.utils.ome_zarr import _normalized_selection
+
+    volume = _volume()
+    store = tmp_path / "stepped.ome.zarr"
+    array = create_ome_zarr_store(store, volume.shape, "<f4", spacing=[2.0, 1.0, 1.0])
+    array[:] = volume
+
+    with pytest.raises(DatasetManagerError):
+        _normalized_selection((slice(0, 8, 2),), (8,))
+
+    patch, _ = read_ome_zarr_data_slice(store, (slice(None), slice(0, 8, 2), slice(None), slice(None)))
+    np.testing.assert_array_equal(patch, volume[:, 0:8:2])
+
+
 def test_the_konfai_sidecar_is_read_once_and_not_once_per_region(tmp_path: Path) -> None:
     """It is metadata, and a streamed run asks for it once per region: re-opening the store each
     time is a read it never needed."""

@@ -491,15 +491,26 @@ def _level_array(store_path: str, level_path: str) -> Any:
 
 
 def _normalized_selection(index: tuple, shape: Sequence[int]) -> tuple[list[slice], list[int]]:
-    """``index`` as one unit-step slice per axis, and the axes an integer selection squeezes out."""
+    """``index`` as one unit-step slice per axis, and the axes an integer selection squeezes out.
+
+    A stepped selection is refused rather than normalised: everything downstream counts the voxels
+    between ``start`` and ``stop``, so a step would size the output wrongly and fill it from the
+    wrong places. Both callers suppress this and fall back to the lazy array, which takes any step.
+    """
     selections: list[slice] = []
     squeeze: list[int] = []
     for axis, item in enumerate(index):
         if isinstance(item, int):
             selections.append(slice(item, item + 1))
             squeeze.append(axis)
-        else:
-            selections.append(slice(*item.indices(shape[axis])))
+            continue
+        start, stop, step = item.indices(shape[axis])
+        if step != 1:
+            raise DatasetManagerError(
+                f"The chunked read takes unit-step selections; axis {axis} asks for step {step}.",
+                "Read this level through the lazy array instead.",
+            )
+        selections.append(slice(start, stop))
     return selections, squeeze
 
 
