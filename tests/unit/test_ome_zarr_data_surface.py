@@ -701,6 +701,22 @@ def test_a_store_named_in_any_accepted_spelling_resolves_and_lists(tmp_path: Pat
         assert dataset.is_dataset_exist("CT", "CASE"), form
 
 
+def test_a_format_token_the_writer_does_not_know_is_refused_by_name(tmp_path: Path) -> None:
+    """Every spelling the walk accepts on disk is a token the writer accepts, the dotted one first.
+    A token nothing knows is refused here rather than handed to SimpleITK, which wrote 'hd5' for
+    'h5' and read it back correctly while ``is_dataset_exist`` said no: a resumed run redid the work.
+    """
+    from konfai.utils.errors import DatasetManagerError
+    from konfai.utils.utils import STORE_FORMS
+
+    for form in STORE_FORMS:
+        assert Dataset(str(tmp_path / form.strip(".")), form.removeprefix(".")).file_format == "omezarr", form
+
+    for token in ("hd5", "niigz", "ome zarr", ""):
+        with pytest.raises(DatasetManagerError, match="not a format KonfAI writes"):
+            Dataset(str(tmp_path / "refused"), token)
+
+
 def test_a_store_whose_suffix_is_not_lower_case_resolves_and_reads(tmp_path: Path) -> None:
     """The walk matches the suffix case-insensitively; the resolution has to as well.
 

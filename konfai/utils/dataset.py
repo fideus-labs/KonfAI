@@ -61,6 +61,7 @@ from konfai.utils.errors import DatasetManagerError
 from konfai.utils.utils import (
     STORE_FORMS,
     SUPPORTED_EXTENSIONS,
+    SUPPORTED_FORMATS,
     directory_volume_form,
     is_store_name,
     split_format_level,
@@ -3025,8 +3026,18 @@ class Dataset:
         downsample_method: str | None = None,
     ) -> None:
         base_format, self.level = split_format_level(file_format)
-        normalized_format = base_format.lower().removeprefix(".").replace("_", "-")
-        file_format = {"ome-zarr": "omezarr", "zarr": "omezarr"}.get(normalized_format, normalized_format)
+        normalized_format = base_format.lower().removeprefix(".")
+        # One vocabulary for a store: every spelling the walk accepts on disk is a token here, the
+        # dotted one included, since that is the suffix a store actually carries.
+        file_format = "omezarr" if f".{normalized_format}" in STORE_FORMS else normalized_format
+        if file_format not in SUPPORTED_FORMATS:
+            # Unchecked, the token reaches the SimpleITK writer, which either raises on an extension
+            # it cannot name or writes a file no backend of ours probes: 'hd5' for 'h5' wrote and read
+            # back correctly while ``is_dataset_exist`` said no, so a resumed run redid the work.
+            raise DatasetManagerError(
+                f"'{base_format}' is not a format KonfAI writes.",
+                "Use one of: " + ", ".join(sorted(SUPPORTED_FORMATS)) + ".",
+            )
         self.filename, self.is_directory = Dataset._normalize_path(filename, file_format)
         self.file_format = file_format
         # The store backend is auto-detected from what is actually on disk (like SitkFile already probes
