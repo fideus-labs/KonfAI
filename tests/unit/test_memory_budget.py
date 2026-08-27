@@ -31,7 +31,12 @@ from konfai.data.data_manager import (
     DataTrain,
 )
 from konfai.utils import budget, runtime
-from konfai.utils.budget import AUTO_MEMORY_SAFETY_FRACTION, parse_memory_budget_bytes, set_per_rank_budget
+from konfai.utils.budget import (
+    AUTO_MEMORY_SAFETY_FRACTION,
+    BUDGET_SHARES,
+    parse_memory_budget_bytes,
+    set_per_rank_budget,
+)
 from konfai.utils.errors import ConfigError
 
 # --------------------------------------------------------------------------------------
@@ -502,24 +507,31 @@ def _chunk_cache_restored():
 
 
 @pytest.mark.parametrize(
-    ("declared", "capacity"),
+    "declared",
     [
-        (64 << 20, (64 << 20) // 3),  # a third, well under the floor: the rest is the regions'
-        (512 << 20, (512 << 20) // 3),  # a third, still under the floor
-        (3 << 30, 1 << 30),  # a third
+        64 << 20,  # well under the floor: the share is what it gets, and the floor does not raise it
+        512 << 20,  # still under the floor
+        3 << 30,
     ],
 )
-def test_the_chunk_cache_takes_a_third_of_a_declared_budget_and_no_floor_raises_it(
-    declared: int, capacity: int, _chunk_cache_restored: None
+def test_the_chunk_cache_takes_its_share_of_a_declared_budget_and_no_floor_raises_it(
+    declared: int, _chunk_cache_restored: None
 ) -> None:
     """The cache is part of what the process holds, so a budget it exceeded would be exceeded before
     a region was read; and a floor raising it to the whole budget priced a 128 MiB run at 2x its
-    budget, the sweep going on sizing its regions against the same 128 MiB."""
+    budget, the sweep going on sizing its regions against the same 128 MiB.
+
+    Its share is read from the one table that divides a declaration
+    (:data:`~konfai.utils.budget.BUDGET_SHARES`), not written here: a test that repeats the fraction
+    is a second place to change it, and the reason those fractions summed to 1.33 declarations was
+    that each of them lived in its own file.
+    """
     from konfai.utils import ome_zarr
 
+    expected = int(declared * BUDGET_SHARES["cache"])
     set_per_rank_budget(declared)
-    assert ome_zarr.bound_chunk_cache() == capacity
-    assert ome_zarr._chunk_cache().capacity == capacity
+    assert ome_zarr.bound_chunk_cache() == expected
+    assert ome_zarr._chunk_cache().capacity == expected
 
 
 def test_an_undeclared_budget_leaves_the_chunk_cache_its_share_of_free_ram(
@@ -716,9 +728,66 @@ def test_a_declared_budget_bounds_the_chunk_cache_in_prediction_and_evaluation(
     ome_zarr.bound_chunk_cache()
     assert ome_zarr._chunk_cache().capacity >= ome_zarr.CHUNK_CACHE_FLOOR
     _build_evaluator(tmp_path, monkeypatch)
-    assert ome_zarr._chunk_cache().capacity == (64 << 20) // 3
+    assert ome_zarr._chunk_cache().capacity == int((64 << 20) * BUDGET_SHARES["cache"])
 
     set_per_rank_budget(None)
     ome_zarr.bound_chunk_cache()
     _build_predictor(tmp_path, monkeypatch)
-    assert ome_zarr._chunk_cache().capacity == (64 << 20) // 3
+    assert ome_zarr._chunk_cache().capacity == int((64 << 20) * BUDGET_SHARES["cache"])
+
+
+def test_the_device_cap_does_not_move_as_the_process_reserves_vram() -> None:
+    """The card's share of the budget is a property of the card, not of when it was asked for.
+
+    ``device_capped_budget`` sized the regions from the FREE device memory, which shrinks as the
+    run allocates: the same fold on the same idle card sized itself at 47 rows under 4.99 GiB in
+    one run and 65 rows under 11.58 GiB in another. Region height decides the whole read plan, so
+    that made a run's cost depend on how much its own allocator happened to be holding when the
+    fit ran.
+    """
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device to cap against")
+    from konfai.data.patching import device_capped_budget
+
+    device = torch.device("cuda:0")
+    before = device_capped_budget(None, device)
+    # A real slice of THIS card, as a fold's first regions take: a fixed 256 MiB is a rounding
+    # error on a large card and the old rule passed under it.
+    free, _total = torch.cuda.mem_get_info(device)
+    ballast = torch.empty(int(free * 0.25), dtype=torch.uint8, device=device)
+    after = device_capped_budget(None, device)
+    del ballast
+    assert before is not None and after is not None
+    # The allocator's own reserve is memory the next allocation reuses, so it is still this
+    # process's to spend: the cap counts it and does not fall by what was just taken.
+    assert abs(after - before) < 0.05 * before, f"the cap moved from {before} to {after}"
+
+
+# ---------------------------------------------------------------- what the process already holds
+
+
+def test_a_machine_budget_pays_for_the_process_and_a_declared_one_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An `auto` budget is the MACHINE's figure and the interpreter is resident out of it before the
+    first voxel; a declared one is what the caller says the WORK may take, so nothing comes off it.
+
+    Getting this backwards kills a small machine (647 MiB is 22% of what a 4 GiB one offers) or
+    zeroes every budget a test declares in kilobytes."""
+    monkeypatch.setattr(budget, "resident_bytes", lambda: 600 << 20)
+
+    measured = budget.MemoryBudget(4 << 30, "auto: 4 GiB", shared_across_ranks=True)
+    assert measured.work_bytes(1) == (4 << 30) - (600 << 20)
+
+    declared = budget.MemoryBudget(4 << 30, "'4G'", shared_across_ranks=False)
+    assert declared.work_bytes(1) == 4 << 30
+
+
+def test_a_machine_budget_the_process_has_already_spent_leaves_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never negative: the refusals speak for a budget already gone, rather than arithmetic
+    handing the sizing a figure below zero to divide by."""
+    monkeypatch.setattr(budget, "resident_bytes", lambda: 8 << 30)
+    assert budget.MemoryBudget(1 << 30, "auto", shared_across_ranks=True).work_bytes(1) == 0.0

@@ -847,7 +847,10 @@ class DistributedObject(ABC):
 
         dataset = getattr(self, "dataset", None)
         if dataset is not None and hasattr(dataset, "resolved_budget"):
-            set_per_rank_budget(dataset.resolved_budget().per_rank_bytes(node_local_ranks(world_size)))
+            # work_bytes and not per_rank_bytes: the interpreter and the imaging libraries are
+            # resident before the rank reads anything, and a budget that ignores them spends those
+            # bytes twice. Measured on the rank, which is where they were paid.
+            set_per_rank_budget(dataset.resolved_budget().work_bytes(node_local_ranks(world_size)))
             bound_chunk_cache()
 
     def __call__(self, rank: int | None = None) -> None:

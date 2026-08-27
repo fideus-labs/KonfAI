@@ -74,6 +74,75 @@ class MemoryBudget:
     def per_rank_bytes(self, world_size: int) -> float:
         return self.total_bytes / max(1, world_size) if self.shared_across_ranks else self.total_bytes
 
+    def work_bytes(self, world_size: int) -> float:
+        """What is left of this rank's budget for the work itself.
+
+        An ``auto`` budget is the MACHINE's figure, and the interpreter, torch and the imaging
+        libraries are resident out of it before the first voxel is read: measured at 647 MiB, which
+        is 0.8% of an 80 GiB budget and 22% of the 2.91 GiB a 4 GiB machine offers -- the whole of
+        its margin, and why chains that ran inside an 8 GiB machine were killed on a 4 GiB one.
+
+        A DECLARED budget is not the machine's: a caller who writes ``memory_budget: 2G`` is saying
+        what the work may take, not what the process may weigh, so nothing is taken off it.
+
+        Read, not assumed: what the process holds depends on which optional libraries the chain
+        pulled in. Never below zero, where the refusals speak for a budget already spent.
+        """
+        per_rank = self.per_rank_bytes(world_size)
+        if not self.shared_across_ranks:
+            return per_rank
+        return max(0.0, per_rank - (resident_bytes() or 0))
+
+
+#: How a declared per-rank budget divides between the consumers that can be holding AT ONCE. Every
+#: one of them used to choose its own fraction of the whole figure, in its own file, and nothing
+#: summed them: a fold's regions took a half, a member's chain was handed all of it, the folds a
+#: stat pass keeps took another half and the store's chunk cache a third, so a run could honour
+#: every share and still hold one and a half times what it declared.
+#:
+#: Shares of ONE declaration, so they add to one. Which consumers are simultaneous is a property of
+#: the call path, not of this table: a whole-volume fallback and a swept tile are alternatives and
+#: each may take the route's whole share, while a fold's regions and its members' chains are not,
+#: because a member's sweep fires from inside the fold loop.
+#:
+#: The cache is the one to give up first: it is an optimisation, its own miss costs a re-decode, and
+#: the other two are the working set itself.
+BUDGET_SHARES: dict[str, float] = {
+    "regions": 0.50,  # what a route holds in the regions it is landing (a fold's kept folds included)
+    "chains": 0.35,  # what a chain may hold while producing one of them: its sweeps, its walk slab
+    "cache": 0.15,  # the store's decoded-chunk cache, which outlives any single region
+}
+
+if abs(sum(BUDGET_SHARES.values()) - 1.0) > 1e-9:  # pragma: no cover - a typo, caught at import
+    raise ValueError(f"BUDGET_SHARES must divide one declaration, not {sum(BUDGET_SHARES.values())}")
+
+
+def budget_share(name: str, budget_bytes: float | None = None) -> float | None:
+    """One consumer's share of the declared per-rank budget, or ``None`` when none was declared.
+
+    Asked by name so the division is read in one place (:data:`BUDGET_SHARES`) rather than
+    rediscovered as a fraction in each consumer's own file.
+    """
+    declared = per_rank_budget_bytes() if budget_bytes is None else budget_bytes
+    if not declared or declared <= 0:
+        return None
+    return declared * BUDGET_SHARES[name]
+
+
+def sweep_share(budget_bytes: float | None = None) -> float | None:
+    """What a per-case sweep's block may hold: the landing's share and the chain's together.
+
+    A sweep is not a fold. Its block price already folds in what the chain running on it holds
+    (:meth:`~konfai.data.patching.DatasetManager.sweep_block_bytes` multiplies the chain's working
+    multiple into the block), so the two shares are one figure here where a reduction spends them
+    separately -- its regions are landed by one loop and its members' chains run inside another.
+    What is left over is the store's cache, which holds its own beside every block either way.
+    """
+    declared = per_rank_budget_bytes() if budget_bytes is None else budget_bytes
+    if not declared or declared <= 0:
+        return None
+    return declared * (BUDGET_SHARES["regions"] + BUDGET_SHARES["chains"])
+
 
 #: This rank's share of the budget, as the workflow that resolved it published it. Some consumers of
 #: a budget sit inside a ``Dataset``, which a workflow reaches through doors that carry no budget (a
@@ -92,6 +161,59 @@ def set_per_rank_budget(budget_bytes: float | None) -> None:
 def per_rank_budget_bytes() -> float | None:
     """This rank's declared budget, or ``None`` when none was."""
     return _per_rank_bytes
+
+
+def peak_resident_bytes() -> int | None:
+    """The most this process has ever held resident, or ``None`` where the kernel does not say.
+
+    A budget is a promise about resident memory, and until a run reports what it actually held the
+    promise could only be checked from outside. ``VmHWM`` is a lifetime high-water mark, so it
+    answers "did this run stay inside its budget" and not "which region was the worst".
+
+    NOT the cgroup's ``memory.peak``, which is the figure to reach for from outside but the wrong one
+    to report from inside: it counts the page cache the run's reads pulled in, which is reclaimable
+    and kills nothing. Measured on one TRANSFORM over native-resolution fields: cgroup 36.9 GiB
+    against 31.25 here, the difference being cache behind 88 GiB of decoded chunks. What the OOM
+    killer counts is the anonymous set (``anon-rss`` in its message), and this tracks it: at the end
+    of that same run ``RssFile`` was 0.30 GiB against 11.05 of ``RssAnon``, so a process whose file
+    mappings are small -- which a streamed run's are, since it reads rather than maps -- has a
+    ``VmHWM`` that is its anonymous peak.
+    """
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def reset_resident_peak() -> bool:
+    """Set this process's resident high-water mark back to what it holds now, so the next reading of
+    :func:`peak_resident_bytes` is a peak over one scope rather than over the whole run.
+
+    ``VmHWM`` only rises, which is what makes it the right figure for a whole run and the wrong one
+    for a step. Writing ``5`` to ``/proc/self/clear_refs`` is the kernel's own reset for exactly this
+    (``CLEAR_REFS_MM_HIWATER_RSS``): it assigns the current RSS and walks nothing, so it costs a
+    write and no page-table scan. ``False`` where the kernel does not offer it, and a caller that
+    gets ``False`` has no per-step peak and should not pretend otherwise.
+    """
+    try:
+        Path("/proc/self/clear_refs").write_text("5")
+    except OSError:
+        return False
+    return True
+
+
+def resident_bytes() -> int | None:
+    """What this process holds resident right now (``VmRSS``), or ``None`` where the kernel does not say."""
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
 
 
 def _positive_int_env(name: str) -> int | None:

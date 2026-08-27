@@ -962,6 +962,10 @@ def test_a_rank_bounds_the_chunk_cache_by_its_own_share_of_the_budget(monkeypatc
         def per_rank_bytes(self, world_size: int) -> float:
             return 96 << 20
 
+        def work_bytes(self, world_size: int) -> float:
+            # A declared budget is what the work may take, so it is published as it stands.
+            return self.per_rank_bytes(world_size)
+
     class FakeDataset:
         def resolved_budget(self) -> FakeBudget:
             return FakeBudget()
