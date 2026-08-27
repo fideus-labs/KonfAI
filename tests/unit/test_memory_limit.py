@@ -322,14 +322,20 @@ def test_a_streamed_transform_tracks_the_budget_it_declared(floor: dict, cohort:
     neither of which the landed rows say anything about.
 
     Tracked down to where a full-plane region is still affordable, which on this cohort is about 96
-    MiB. Under that the shape search answers a cube, and a cube of this chain HOLDS MORE than the
-    slab it replaces while being priced for less: measured over the 695 MiB floor, 152 / 121 / 63 /
-    58 MiB held at 512 / 256 / 128 / 96, then back up to 77 at 80 and 64, where the pick turns from
-    [9, 160, 160] to [58, 58, 58]. The price counts the source voxels a region pulls, and a
-    full-plane slab of a memory-mapped store pulls a contiguous window where a cube pulls one that
-    has to be assembled -- so the two shapes are ranked against each other on a figure that does not
-    describe what either one keeps. The 64 MiB run below still holds inside its allowance; it is the
-    monotonicity that stops, and fixing it means pricing the shapes apart, not tightening this.
+    MiB. Under that the shape search answers a cube, and a cube HOLDS MORE than the slab it
+    replaces while being priced for less: over the 695 MiB floor, 152 / 121 / 63 / 58 MiB held at
+    512 / 256 / 128 / 96, then back up to 77 at 80 and 64, where the pick turns from [9, 160, 160]
+    to [58, 58, 58]. At 64 MiB the cube is priced 48.5 MiB and holds 77; the slab it rejected as
+    unaffordable at 71.1 MiB holds 46.
+
+    The extra is the STORE's, not a stage's. Forcing both shapes at one budget over four chains,
+    the cube held more every time: +17.7 MiB with no transform at all (read then Write), +16.2
+    with Gradient, +43.8 with Resample, +32.0 with both. It is already there when nothing but the
+    region read and the slab write run, so no stage explains it. ``sweep_block_bytes`` prices the
+    source voxels a region pulls and what its stages declare over them, and neither figure
+    separates a window the store hands over from one it has to assemble. Fixing it means pricing
+    that apart, not tightening this: the run below still holds inside its allowance at every
+    budget, and it is the monotonicity that stops, not the containment.
     """
     held = {}
     for budget_mib in (512, 256, 128, 64):
