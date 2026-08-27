@@ -446,9 +446,6 @@ class _DecodedChunkCache:
 #: the floor. A cache allowed the floor out of a 128 MiB budget took the budget whole, while the
 #: sweep went on sizing its regions against the same 128 MiB: the run was priced at 2x its budget.
 CHUNK_CACHE_FLOOR = 256 << 20
-#: The share of a DECLARED per-rank budget the cache may take. A third, because a budget is spent on
-#: what the chain holds as well, and the cache is the cheapest of the three to give up.
-_CHUNK_CACHE_BUDGET_SHARE = 1 / 3
 
 
 def bound_chunk_cache() -> int:
@@ -464,11 +461,11 @@ def chunk_cache_capacity() -> int:
     """What the cache may hold: its share of the declared budget, never more, so a budget under the
     floor bounds the cache instead of the floor taking the budget whole; a share of what this process
     may allocate when nothing was declared, where the floor is what makes the cache worth having."""
-    from konfai.utils.budget import available_memory_bytes, per_rank_budget_bytes
+    from konfai.utils.budget import available_memory_bytes, budget_share
 
-    declared = per_rank_budget_bytes()
-    if declared is not None:
-        return int(declared * _CHUNK_CACHE_BUDGET_SHARE)
+    share = budget_share("cache")
+    if share is not None:
+        return int(share)
     return max(CHUNK_CACHE_FLOOR, int(available_memory_bytes()[0] * 0.05))
 
 
@@ -641,6 +638,28 @@ def _store_index(
     return tuple(
         timepoint if axis == "t" else normalized[0] if axis == "c" else spatial.get(axis, slice(None)) for axis in dims
     )
+
+
+def ome_zarr_read_granularity(store_path: str | Path, *, level: int = 0) -> tuple[int, ...] | None:
+    """The stored block a read of this level is served in, as a KonfAI ``C[Z]YX`` shape.
+
+    A chunked store decodes whole chunks, so a window costs the chunk-aligned hull that covers it
+    (:func:`_assemble_window` issues one read over that hull): a decomposition whose blocks straddle
+    the grid materialises every plane it touches, twice over where it lands between two. Read from
+    the level's metadata, so it costs nothing and is answerable at plan time. ``None`` when the
+    store cannot be opened, where the caller prices a read at what it asks for.
+    """
+    if not _NGFF_ZARR_AVAILABLE:
+        return None
+    with contextlib.suppress(Exception):  # a store this cannot read simply has no granularity to state
+        image = _load_image(str(store_path), level)
+        level_path = _level_path(str(store_path), level)
+        if level_path is None:
+            return None
+        array = _level_array(str(store_path), level_path)
+        dims = [str(axis).lower() for axis in image.dims]
+        return tuple(_canonical_shape(dims, array.chunks))
+    return None
 
 
 def plan_ome_zarr_reads(

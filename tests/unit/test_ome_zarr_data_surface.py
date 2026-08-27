@@ -619,12 +619,16 @@ def test_a_mask_companion_of_a_declared_sweep_is_decoded_once_where_lru_decodes_
 ) -> None:
     """The real two-store sweep: a Mask reads Labels at every region beside the CT the sweep
     declared, through a 20-degree resample whose cubic blocks pull each chunk of both stores from
-    several regions. At a cache holding two thirds of the two stores together, the declared source
-    decodes each chunk once and so does the companion beside it, where LRU decodes both again."""
+    several regions. At a cache holding half of the two stores together, the declared source
+    decodes each chunk once and so does the companion beside it, where LRU decodes both again.
+
+    Half and not two thirds because the sweep cuts its blocks on the store's own grid: fewer regions
+    share a chunk, so there is less for either policy to keep and a cache has to be tighter before
+    the order it evicts in decides anything."""
     _two_stores(tmp_path)
     floor = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared="both", capacity_chunks=96, label="all")
-    lru = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared="nothing", capacity_chunks=64, label="lru")
-    planned = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared="both", capacity_chunks=64, label="plan")
+    lru = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared="nothing", capacity_chunks=48, label="lru")
+    planned = _sweep_with_a_mask_companion(tmp_path, monkeypatch, declared="both", capacity_chunks=48, label="plan")
 
     assert floor["CT"] == floor["Labels"] > 0, "the two stores are read alike"
     assert lru["CT"] > floor["CT"] and lru["Labels"] > floor["Labels"], "LRU re-decodes both"
