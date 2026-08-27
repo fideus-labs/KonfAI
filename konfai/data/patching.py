@@ -52,9 +52,10 @@ from konfai.data.transform import (
     split_expand,
     stat_seed_valid,
 )
-from konfai.utils.budget import format_bytes
+from konfai.utils.budget import format_bytes, peak_resident_bytes, reset_resident_peak, resident_bytes
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream, as_channel_first
+from konfai.utils.dataset import chunk_hull_voxels as _chunk_hull_voxels
 from konfai.utils.errors import ConfigError, DatasetManagerError, PatchError, TransformError
 from konfai.utils.runtime import preserved_rng, rank_cpu_share, seed_all
 from konfai.utils.utils import (
@@ -92,6 +93,9 @@ _STREAM_STAT_KEYS = frozenset(_STREAM_STATS)
 # VOLUME it allows is what DatasetManager._sweep_tile then shapes into the block actually read.
 SWEEP_SLAB_ROWS = 64
 
+# "not looked up yet", where None is itself an answer (a store with no read granularity to state).
+_UNRESOLVED = object()
+
 # The bytes each element travels as through a sweep (float32). What a sweep holds in those elements
 # is _sweep_resident_regions, and DatasetManager.sweep_block_bytes prices it.
 #
@@ -106,6 +110,13 @@ SWEEP_ENGINE_FLOOR_BYTES = 32 << 20
 _SWEEP_MAX_DEPTH = 3
 #: The region height cap when the chain runs on a GPU (bounded by free device memory as well).
 _SWEEP_SLAB_ROWS_DEVICE = 256
+#: How far above the floor a decomposition's reads may sit for its height to count as the plateau
+#: (:func:`_plateau_rows`). Measured on the prep's appearance fold, a native volume resampled
+#: through a field onto a 514x1331x1775 grid, reads against height as a multiple of the floor:
+#: 5 rows 1.79x, 10 1.40, 20 1.19, 41 1.09, 82 1.05, 169 1.02, 514 1.00. The curve is a knee, so
+#: anything from a few per cent to a tenth names the same height; five was measured to hold the
+#: fold at 17.4 GiB where an uncapped one held 28.7, for 56.9 -> 58.4 s of wall clock.
+_PLATEAU_READ_MARGIN = 0.05
 #: How much less a cubic block must read for the sweep to take it (``DatasetManager._sweep_tile``).
 #: A sheared map measures 0.61 on a 513x1331x1776 rigid+affine; an unsheared one, the margin alone.
 _SWEEP_TILE_MARGIN = 0.8
@@ -317,14 +328,70 @@ def device_capped_budget(budget_bytes: float | None, device: "torch.device | Non
     The memory budget is declared in HOST bytes -- ``auto`` measures node RAM -- but on a GPU
     chain the working sets it sizes (swept slabs, whole-volume fallbacks, a reduction's member
     regions) live in VRAM. A 64G budget on a 16 GB card is then not a budget, it is a promise of
-    an OOM. Half the card's FREE memory, read when the fit runs: the halving is also the slack
-    that covers allocations arriving after the reading, since a fold sized once can run for hours.
+    an OOM. Half of what the card can give THIS process: the halving is the slack that covers
+    allocations arriving after the reading, since a fold sized once can run for hours.
+
+    What the card can give this process is the free memory plus what this process's own allocator
+    is already sitting on, because a cached block is memory the next allocation reuses rather than
+    asks the driver for. Reading the free memory alone made the answer depend on WHEN it was read:
+    the same fold, on the same idle card, sized its regions at 47 rows under 4.99 GiB in one run
+    and 65 rows under 11.58 GiB in another, the difference being how much the process had already
+    reserved by the time the fit ran. Region height decides the whole read plan, so a sizing that
+    moves with the moment is a run whose cost cannot be reproduced or reasoned about.
     """
     if device is None or device.type != "cuda" or not torch.cuda.is_available():
         return budget_bytes
     free, _total = torch.cuda.mem_get_info(device)
-    vram = free * 0.5
+    vram = (free + torch.cuda.memory_reserved(device)) * 0.5
     return vram if budget_bytes is None or budget_bytes <= 0 else min(budget_bytes, vram)
+
+
+@dataclass(frozen=True)
+class HeldMeter:
+    """What one scope of work HELD, read by the instrument the route it runs on has.
+
+    A GPU chain has the device allocator, which counts what is in use; a host chain has the kernel's
+    resident high-water mark, which counts what the allocator is sitting on as well -- and that is
+    the better figure of the two here, since the kernel kills on resident memory. Both answer the
+    same question, so a caller asks one thing and never branches on which it got.
+    """
+
+    _peak: Callable[[], int | None]
+    _baseline: int
+
+    def held(self) -> int | None:
+        """Bytes held above where the scope started, or ``None`` if the instrument went quiet."""
+        peak = self._peak()
+        return None if peak is None else max(0, peak - self._baseline)
+
+
+def open_held_meter(device: "torch.device | None") -> HeldMeter | None:
+    """Start measuring what the next scope holds, or ``None`` where nothing can measure it.
+
+    Reading is a high-water mark either way, so what comes back bounds the NEXT scope of the same
+    shape from above -- which is what makes a measured figure usable for sizing the ones that follow
+    (:meth:`Predictor._accumulate_device` reads a forward the same way).
+    """
+    if device is not None and device.type == "cuda" and torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+            baseline = int(torch.cuda.memory_allocated(device))
+        except Exception:  # nosec B110 - an unreadable instrument measures nothing, and says so
+            return None
+
+        def device_peak() -> int | None:
+            try:
+                torch.cuda.synchronize(device)
+                return int(torch.cuda.max_memory_allocated(device))
+            except Exception:  # nosec B110 - see above
+                return None
+
+        return HeldMeter(device_peak, baseline)
+    if not reset_resident_peak():
+        return None
+    resident = resident_bytes()
+    return None if resident is None else HeldMeter(peak_resident_bytes, int(resident))
 
 
 def save_destination(save: Save, default_dataset: Dataset, default_group: str) -> tuple[Dataset, str]:
@@ -509,15 +576,59 @@ def _cubic_tile(spatial: list[int], voxels: int, align: int) -> list[int]:
     ]
 
 
-def _pull_block_voxels(spatial: list[int], tile: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> Iterator[int]:
-    """The source voxels each block of a decomposition into ``tile`` materialises, from the plans'
-    own pull maps: closed form, no voxel read. Their sum is what the decomposition reads, their
-    largest what one block of it holds."""
+def _pull_block_spans(
+    spatial: list[int], tile: Sequence[int], plans: Sequence["_ReadStagePlan"]
+) -> Iterator[list[slice]]:
+    """The source window each block of a decomposition into ``tile`` reads, from the plans' own pull
+    maps: closed form, no voxel read."""
     for target in _sweep_targets(spatial, tile):
         span = list(target)
         for plan in reversed(plans):
             span = list(plan.pull(tuple(span))) if plan.pull is not None else span
-        yield int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
+        yield span
+
+
+def _span_voxels(span: Sequence[slice]) -> int:
+    return int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
+
+
+def _pull_block_voxels(spatial: list[int], tile: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> Iterator[int]:
+    """The source voxels each block of a decomposition into ``tile`` materialises. Their sum is what
+    the decomposition reads, their largest what one block of it holds."""
+    return (_span_voxels(span) for span in _pull_block_spans(spatial, tile, plans))
+
+
+def _plateau_rows(
+    spatial: list[int], plans: Sequence["_ReadStagePlan"], tolerance: float = _PLATEAU_READ_MARGIN
+) -> int | None:
+    """The shortest region height whose decomposition already reads what the tallest one reads,
+    within ``tolerance``: the height past which taller regions pull no fewer source voxels.
+
+    Closed form, from the chain's own pull maps (:func:`_pull_block_voxels`): no voxel is read, so
+    it is answerable at plan time for any chain, whatever the YAML declares. ``None`` when nothing
+    pulls (no plans), where every height reads the same and the question does not arise.
+
+    This is a CAP, never a target: below it a region re-reads what its neighbour already pulled,
+    above it the reads are the same and only the working set grows. What a budget then affords is
+    the caller's to search for, downward.
+    """
+    if not plans:
+        return None
+    total = max(1, int(spatial[0]))
+    floor = sum(_pull_block_voxels(spatial, [total, *spatial[1:]], plans))
+    if floor <= 0:
+        return None
+    allowed = floor * (1.0 + max(0.0, float(tolerance)))
+    # Geometric, so the scan costs O(log) evaluations however tall the volume is.
+    height, ladder = max(1, total // 256), []
+    while height < total:
+        ladder.append(height)
+        height = max(height + 1, int(height * 1.5))
+    ladder.append(total)
+    for candidate in ladder:
+        if sum(_pull_block_voxels(spatial, [candidate, *spatial[1:]], plans)) <= allowed:
+            return candidate
+    return total
 
 
 def _sweep_pipeline_depth() -> int:
@@ -2011,6 +2122,8 @@ class DatasetManager:
         self._rewrite_saves = False
         # The per-rank budget the sweeps size their slabs against (None = the fixed SWEEP_SLAB_ROWS).
         self._sweep_budget_bytes: float | None = None
+        # The store's own read granularity, resolved on first use (None is an answer, not a miss).
+        self._read_granularity: object = _UNRESOLVED
         self._chain_device: torch.device | None = None
         self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None], dict[str, float]] = {}
         # Save caches already swept by THIS run, keyed by (store, group, entry): under --overwrite the
@@ -3072,6 +3185,14 @@ class DatasetManager:
         except DatasetManagerError:
             return False
 
+    def read_granularity(self) -> tuple[int, ...] | None:
+        """The stored block this case's source reads are served in, spatial axes only, or ``None``
+        when a read costs what it asks for. Read from the store's metadata once per case."""
+        if self._read_granularity is _UNRESOLVED:
+            granularity = self.dataset.read_granularity(self.group_src, self.name)
+            self._read_granularity = None if granularity is None else tuple(granularity[1:])
+        return cast(tuple[int, ...] | None, self._read_granularity)
+
     def _sweep_rows(
         self,
         spatial: list[int],
@@ -3089,6 +3210,12 @@ class DatasetManager:
         and nothing else bounded it where no host budget was declared.
         """
         cap = max(1, int(SWEEP_SLAB_ROWS))
+        # Never below the store's own block: a region shorter than one reads it whole regardless
+        # (the hull is what a chunked read decodes), so cutting under it buys no memory back and
+        # only reads the same bytes again for the next region.
+        granularity = self.read_granularity()
+        if granularity is not None:
+            cap = max(cap, int(granularity[0]))
         if self._chain_device is not None and self._chain_device.type == "cuda":
             # On a GPU the transfers and launches per region are the cost: taller regions, as far as
             # a quarter of the free device memory allows (measured +10-20 % at 500^3 over 64 rows).
@@ -3096,6 +3223,108 @@ class DatasetManager:
             affordable = self._rows_within(spatial, channels, plans, depth, free_bytes * 0.25, _SWEEP_SLAB_ROWS_DEVICE)
             cap = max(cap, affordable)
         return cap
+
+    def read_plateau_rows(self, spatial: list[int], tolerance: float = _PLATEAU_READ_MARGIN, a: int = 0) -> int | None:
+        """The shortest region height whose decomposition already reads what the tallest one reads,
+        within ``tolerance``: the point past which taller regions buy no fewer source voxels.
+
+        Closed form, from the chain's own pull maps (:func:`_pull_block_voxels`): no voxel is read.
+        A region shorter than this re-reads source its neighbours already pulled; a taller one reads
+        the same and only holds more, which is why this is a CAP a budget may lower and never a
+        target a budget should raise. ``None`` when the chain cannot stream, where there is no
+        decomposition to price.
+
+        Never below :meth:`_sweep_rows`: a chain that pulls exactly what it lands (POINTWISE) has a
+        flat curve whose plateau starts at one row, and one-row regions pay every fixed per-region
+        cost for one row of work.
+        """
+        segments = self.sweep_segments(a, apply_augmentations=False)
+        if not segments:
+            return None
+        return _plateau_rows(spatial, segments[-1].plans, tolerance)
+
+    @staticmethod
+    def _source_extents(spatial: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> list[int]:
+        """The extents a chain's pull spans live in: the first stage's own input, which is the
+        stored volume. The landing is a different grid, and a hull capped against it is under-charged
+        wherever the source is the larger of the two -- a resample onto a coarser reference reads a
+        window the landing has no extent for."""
+        return [int(extent) for extent in plans[0].in_shape] if plans else [int(extent) for extent in spatial]
+
+    def region_reads(self, rows: int, a: int = 0) -> tuple[int, int] | None:
+        """What a decomposition into ``rows``-row regions costs this chain in source voxels:
+        ``(excess, total)``. ``None`` when the chain cannot stream.
+
+        ``excess`` is what the widest region's read materialises ABOVE the window it asked for --
+        a chunked store decodes whole blocks, so a window is served by the block-aligned hull that
+        covers it. Zero on a store that serves exactly what it is asked for, which is what makes
+        this safe to charge on top of a price already counting the window.
+
+        ``total`` is what all the regions read together, the figure a caller compares heights on.
+
+        Closed form, from the chain's own pull maps and the store's metadata: no voxel is read.
+        """
+        segments = self.sweep_segments(a, apply_augmentations=False)
+        if not segments:
+            return None
+        segment = segments[-1]
+        spatial = [int(extent) for extent in segment.landing]
+        tile = [max(1, min(int(rows), spatial[0])), *spatial[1:]]
+        extents = self._source_extents(spatial, segment.plans)
+        granularity = self.read_granularity()
+        spans = list(_pull_block_spans(spatial, tile, segment.plans))
+        if granularity is None:
+            return (0, sum(_span_voxels(span) for span in spans))
+        hulls = [_chunk_hull_voxels(span, granularity, extents) for span in spans]
+        excess = max((hull - _span_voxels(span) for hull, span in zip(hulls, spans, strict=True)), default=0)
+        return (max(0, excess), sum(hulls))
+
+    def _grid_rows(self, cap: int) -> list[int]:
+        """The heights that land on the store's block grid, up to ``cap``.
+
+        A decomposition aligned to the grid reads each stored block exactly once; one that straddles
+        reads both blocks it touches, for every region, and holds the larger hull. There are only a
+        handful of such heights under any cap, so they are worth trying outright rather than hoping
+        a search over every height finds them.
+        """
+        granularity = self.read_granularity()
+        if granularity is None:
+            return []
+        block = max(1, int(granularity[0]))
+        return list(range(block, int(cap) + 1, block))
+
+    def _best_tile(
+        self,
+        spatial: list[int],
+        channels: int,
+        plans: Sequence["_ReadStagePlan"],
+        depth: int,
+        budget: float,
+        candidates: Sequence[int],
+    ) -> list[int]:
+        """The affordable candidate whose decomposition reads the least, the first one otherwise.
+
+        The search below bisects on the height, which asks the price to rise with it. It does not:
+        a stored block is decoded whole, so the price steps rather than climbs, and the shape rule
+        (:meth:`_sweep_shape`) may answer a cube at one height and a slab at the next. Bisection
+        lands somewhere affordable, not on the best region the budget buys.
+
+        Judged on reads and not on landed voxels, because that is what the sweep spends: a region
+        that lands a few more rows by straddling the store's grid reads both blocks it touches, for
+        every region of the case. Ties go to the taller block, which pays the per-region costs fewer
+        times.
+        """
+        best: list[int] | None = None
+        best_reads = 0
+        for rows in candidates:
+            tile = self._sweep_shape(spatial, plans, rows)
+            if self.sweep_block_bytes(spatial, channels, plans, tile, depth) > budget:
+                continue
+            reads = self._decomposition_reads(spatial, tile, plans)
+            taller = best is not None and np.prod(tile, dtype=np.int64) > np.prod(best, dtype=np.int64)
+            if best is None or reads < best_reads or (reads == best_reads and taller):
+                best, best_reads = tile, reads
+        return best if best is not None else self._sweep_shape(spatial, plans, candidates[0])
 
     def _rows_within(
         self,
@@ -3138,9 +3367,25 @@ class DatasetManager:
         cube = _cubic_tile(spatial, voxels, CHUNK_SPATIAL_TILE)
         if cube == slab or not plans:
             return slab
-        pulled = sum(_pull_block_voxels(spatial, cube, plans))
-        cheaper = pulled <= sum(_pull_block_voxels(spatial, slab, plans)) * _SWEEP_TILE_MARGIN
+        cheaper = self._decomposition_reads(spatial, cube, plans) <= (
+            self._decomposition_reads(spatial, slab, plans) * _SWEEP_TILE_MARGIN
+        )
         return cube if cheaper else slab
+
+    def _decomposition_reads(self, spatial: list[int], tile: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> int:
+        """What sweeping ``spatial`` in ``tile`` reads from the store, all blocks together.
+
+        The store's own currency: a chunked backend decodes whole blocks, so what a decomposition
+        reads is the sum of its blocks' hulls, and a shape is judged on the same figure it is later
+        priced with (:meth:`sweep_block_bytes`). Two currencies here and there is how a shape gets
+        chosen for pulling little and then costs what its hull costs.
+        """
+        granularity = self.read_granularity()
+        spans = _pull_block_spans(spatial, tile, plans)
+        if granularity is None:
+            return sum(_span_voxels(span) for span in spans)
+        extents = self._source_extents(spatial, plans)
+        return sum(_chunk_hull_voxels(span, granularity, extents) for span in spans)
 
     def sweep_block_bytes(
         self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"], tile: list[int], depth: int
@@ -3158,19 +3403,30 @@ class DatasetManager:
         """
         pulled, landed = _sweep_resident_regions(depth)
         block = int(np.prod(tile, dtype=np.int64))
-        pull = max(_pull_block_voxels(spatial, tile, plans), default=block) if plans else block
+        spans = list(_pull_block_spans(spatial, tile, plans))
+        pull = max((_span_voxels(span) for span in spans), default=block)
         source, landed_channels, _peak, working = self._chain_channels(channels)
         held = pulled * pull * source + landed * block * landed_channels + working * max(pull, block)
+        # A chunked store serves a window by decoding the block-aligned hull that covers it, and
+        # assembles the window out of that: one read is in flight at a time, so the hull is resident
+        # ONCE, and the window is the part of it the chain keeps. What a straddling region costs is
+        # exactly this term, and it does not fall when the region does -- below one stored block a
+        # shorter region reads the same bytes and only reads them more often.
+        granularity = self.read_granularity()
+        if granularity is not None and spans:
+            extents = self._source_extents(spatial, plans)
+            hull = max(_chunk_hull_voxels(span, granularity, extents) for span in spans)
+            held += max(0, hull - pull) * source
         return int(held * _SWEEP_ELEMENT_BYTES)
 
     def _chain_channels(self, channels: int) -> tuple[int, int, int, float]:
         """What the channel axis costs along the chain, for the plan's arithmetic: the channels the
         source pulls, the channels a block lands with, the widest the chain ever holds, and the
         volumes-worth its widest stage allocates, that one counted on the channels that stage is
-        handed (``Transform.working_multiple``).
+        handed (``Transform.case_working_multiple``).
 
         Identity for a chain that keeps the axis, where all three counts are the source's and the
-        last is :meth:`working_multiple` times it. ``OneHot`` is the stage that widens it, and a
+        last is the widest declaration times it. ``OneHot`` is the stage that widens it, and a
         block priced at the source's would be short by its class count.
         """
         source = held = landed = peak = max(1, int(channels))
@@ -3178,16 +3434,22 @@ class DatasetManager:
         for stage in self.transforms:
             if not isinstance(stage, Transform):
                 continue
-            working = max(working, float(stage.working_multiple) * held)
+            working = max(working, float(stage.case_working_multiple(self.name)) * held)
             held = landed = max(1, int(stage.output_channels(held)))
             peak = max(peak, held)
         return source, landed, peak, working
 
     def working_multiple(self) -> float:
         """What this chain allocates beyond what it is handed, in volumes-worth: the largest a stage
-        declares (``Transform.working_multiple``)."""
+        declares for THIS case (``Transform.case_working_multiple``, whose default is the class's
+        own ``working_multiple``)."""
         return max(
-            (float(stage.working_multiple) for stage in self.transforms if isinstance(stage, Transform)), default=0.0
+            (
+                float(stage.case_working_multiple(self.name))
+                for stage in self.transforms
+                if isinstance(stage, Transform)
+            ),
+            default=0.0,
         )
 
     def _sweep_tile(
@@ -3206,8 +3468,11 @@ class DatasetManager:
         budget = self._sweep_budget_bytes
         if not budget or budget <= 0:
             return self._sweep_shape(spatial, plans, cap)
-        # The search never takes one row as affordable: the refusal below answers for it.
-        tile = self._sweep_shape(spatial, plans, self._rows_within(spatial, channels, plans, depth, budget, cap))
+        # The bisection never takes one row as affordable: the refusal below answers for it. What it
+        # finds is then judged against the store's own heights, because the price steps rather than
+        # climbs and bisection lands somewhere affordable, not on the best region the budget buys.
+        low = self._rows_within(spatial, channels, plans, depth, budget, cap)
+        tile = self._best_tile(spatial, channels, plans, depth, budget, [low, *self._grid_rows(cap)])
         held = self.sweep_block_bytes(spatial, channels, plans, tile, depth)
         if held > budget:
             raise DatasetManagerError(

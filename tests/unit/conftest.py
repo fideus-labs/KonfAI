@@ -39,6 +39,9 @@ class StreamingDatasetStub:
 
     def __init__(self, volume: np.ndarray) -> None:
         self.volume = volume
+        # The stored block reads are served in: an in-memory volume has none, a test that exercises
+        # a chunked store's decomposition sets one.
+        self.granularity: tuple[int, ...] | None = None
         self.full_reads = 0
         self.patch_reads = 0
         self.stats_reads = 0
@@ -64,6 +67,10 @@ class StreamingDatasetStub:
         self.patch_reads += 1
         self.regions.append(tuple(slices))
         return self.volume[slices].copy(), self._attributes()
+
+    def read_granularity(self, groups: str, name: str) -> tuple[int, ...] | None:
+        del groups, name
+        return self.granularity
 
     def plan_region_reads(self, group_src: str, name: str, windows) -> None:
         del group_src, name

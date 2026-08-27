@@ -33,6 +33,7 @@ from konfai.data.patching import (
     _SWEEP_ELEMENT_BYTES,
     DatasetManager,
     DatasetPatch,
+    _chunk_hull_voxels,
     _cubic_tile,
     _pull_block_voxels,
     _sweep_pipeline_depth,
@@ -216,7 +217,11 @@ def test_a_chain_that_widens_the_channel_axis_is_priced_on_what_it_lands(tmp_pat
     before = plain.sweep_block_bytes(list(LANDING), 1, (), tile, depth)
     after = widened.sweep_block_bytes(list(LANDING), 1, (), tile, depth)
 
-    assert (after - before) == landed * block * (classes - 1) * _SWEEP_ELEMENT_BYTES
+    # Two terms, and only two: the landed blocks widen by the classes, and OneHot's own declared
+    # buffers enter a chain that had none (Save declares nothing). The pulled regions do not widen.
+    widening = landed * block * (classes - 1) * _SWEEP_ELEMENT_BYTES
+    own = OneHot(classes).working_multiple * block * _SWEEP_ELEMENT_BYTES
+    assert (after - before) == widening + own
     assert after < before * classes  # the pulled regions did not widen with it
 
 
@@ -332,3 +337,82 @@ def test_the_device_ceiling_prices_what_a_region_pulls_and_holds(
 
     assert held <= free * 0.25, "the region the device was given does not fit the device"
     assert held > _priced(manager, plans, ROWS), "and the device still buys a taller region than the host default"
+
+
+# ---------------------------------------------------------------- what a chunked store really costs
+
+
+def _chunked(monkeypatch: pytest.MonkeyPatch, block: tuple[int, ...]) -> None:
+    """Answer ``block`` for every read granularity, as a chunked store would."""
+    monkeypatch.setattr(Dataset, "read_granularity", lambda self, groups, name: (1, *block))
+
+
+def test_a_window_on_the_store_grid_pays_itself_and_a_straddling_one_pays_both_blocks() -> None:
+    """What a chunked read materialises is the block-aligned hull, not the window: the closed form
+    the sizing prices with."""
+    grid, extent = [128, 128, 128], [512, 512, 512]
+    whole = [slice(0, 128), slice(0, 512), slice(0, 512)]
+    assert _chunk_hull_voxels(whole, grid, extent) == 128 * 512 * 512
+
+    aligned = [slice(128, 256), slice(0, 512), slice(0, 512)]
+    assert _chunk_hull_voxels(aligned, grid, extent) == 128 * 512 * 512, "one block, read once"
+
+    straddling = [slice(100, 228), slice(0, 512), slice(0, 512)]
+    assert _chunk_hull_voxels(straddling, grid, extent) == 256 * 512 * 512, "the same rows, two blocks"
+
+    short = [slice(0, 18), slice(0, 512), slice(0, 512)]
+    assert _chunk_hull_voxels(short, grid, extent) == _chunk_hull_voxels(whole, grid, extent), (
+        "cutting under one stored block buys nothing back: the read decodes the block either way"
+    )
+
+
+def test_an_unchunked_store_costs_what_it_is_asked_for() -> None:
+    span = [slice(3, 21), slice(0, 40)]
+    assert _chunk_hull_voxels(span, [1, 1], [64, 40]) == 18 * 40
+
+
+def test_a_region_under_one_stored_block_is_priced_at_the_block_it_decodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shorter region does not hold less on a chunked store, so the price may not say it does.
+    Without this a budget buys rows that were never free, and the run is killed holding what the
+    plan promised it would not."""
+    source, _volume = _sheared_fixture(tmp_path)
+    manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
+    ungranular = _priced(manager, (), 4)
+
+    _chunked(monkeypatch, (16, 128, 128))
+    manager._read_granularity = patching_module._UNRESOLVED
+    assert _priced(manager, (), 4) > ungranular, "the block it decodes is charged"
+    # Halving the rows does not halve the price: both cut inside one stored block, and that block is
+    # decoded whole either way.
+    assert _priced(manager, (), 4) > _priced(manager, (), 8) / 2
+
+
+def test_the_sizing_lands_on_the_store_grid_when_a_block_fits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aligned is free at the peak and cheaper on the way, so a budget that holds one stored block
+    buys a decomposition that lands on the grid rather than one that straddles it."""
+    source, _volume = _sheared_fixture(tmp_path)
+    manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
+    _chunked(monkeypatch, (16, 128, 128))
+    manager._read_granularity = patching_module._UNRESOLVED
+    manager.set_memory_budget(float(_priced(manager, (), 20)))
+
+    assert manager._sweep_tile(list(LANDING), 1)[0] % 16 == 0
+
+
+def test_a_region_read_is_charged_only_for_what_the_block_grid_adds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``region_reads`` answers the EXCESS a block-aligned decode materialises above the window it
+    was asked for: zero on a store that serves exactly that, and more the shorter the region, since
+    a region under one stored block decodes the block anyway and simply wastes more of it."""
+    source, _volume = _sheared_fixture(tmp_path)
+    manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
+    assert manager.region_reads(6)[0] == 0, "a store with no block grid adds nothing"
+
+    _chunked(monkeypatch, (16, 128, 128))
+    manager._read_granularity = patching_module._UNRESOLVED
+    assert manager.region_reads(16)[0] < manager.region_reads(4)[0], (
+        "a region under one stored block wastes more of the block it decodes, not less"
+    )
