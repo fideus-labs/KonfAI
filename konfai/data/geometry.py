@@ -120,6 +120,18 @@ class WorldBox:
         radius = np.broadcast_to(np.asarray(radius_xyz, dtype=np.float64), self.low_xyz.shape)
         return WorldBox(self.low_xyz - radius, self.high_xyz + radius)
 
+    def extended(self, low_xyz: np.ndarray, high_xyz: np.ndarray) -> WorldBox:
+        """This box plus a per-component interval: each end moved by its own end of it.
+
+        The asymmetric form of :meth:`grown`, and the one a signed displacement bound needs. An
+        interval that does not straddle zero MOVES the box instead of widening it, which is the
+        difference between a field's reach and twice its largest value.
+        """
+        return WorldBox(
+            self.low_xyz + np.asarray(low_xyz, dtype=np.float64),
+            self.high_xyz + np.asarray(high_xyz, dtype=np.float64),
+        )
+
     def image_under(self, affine: AffineMap) -> WorldBox:
         """The axis-aligned hull of this box's image under ``affine``.
 
@@ -361,37 +373,74 @@ class Grid:
 
 @dataclass(frozen=True)
 class TransformBound:
-    """What a stored transform is guaranteed to do: an exact affine part and a bounded residual.
+    """What a stored transform is guaranteed to do: an exact affine part and a bounded interval.
 
-    ``T(p)`` lies in ``affine(p) ± residual_xyz`` for every ``p``, per world component. For a
-    linear transform the residual is zero and the statement is exact; for a BSpline it is the
-    sup-norm of the coefficients (non-negative basis functions summing to one make every
-    displacement a convex combination of them); for a dense field it is the recorded or declared
-    per-component bound. The affine part is read structurally off the transform, never probed:
-    a probe measures a local gradient and extrapolates it, which under-bounds (measured).
+    ``T(p)`` lies in ``affine(p) + [low_xyz, high_xyz]`` for every ``p``, per world component. For a
+    linear transform the interval is empty and the statement is exact; for a BSpline it is the range
+    of the coefficients (non-negative basis functions summing to one make every displacement a
+    convex combination of them, so it lies between their smallest and largest); for a dense field it
+    is the range of its values. The affine part is read structurally off the transform, never
+    probed: a probe measures a local gradient and extrapolates it, which under-bounds (measured).
+
+    SIGNED, NOT A RADIUS. A displacement field solved between two frames carries the offset between
+    them in its values, and an interval that does not straddle zero MOVES a region's window rather
+    than widening it. Measured on an ExaSPIM field whose z component runs [-28.1, -22.2] mm on a
+    volume 20.6 mm thick: as a radius it reaches 28.1 mm either way, so every region pulls the whole
+    volume and the fold refuses (23.57 GiB held against a 19.01 GiB budget); as an interval it
+    reaches 5.9 mm, and a 24-row region pulls 175 source rows of 514. The same two reductions
+    produce either (:attr:`DisplacementStage.range_xyz`), so the tighter one is free.
     """
 
     affine: AffineMap
-    residual_xyz: np.ndarray
+    low_xyz: np.ndarray
+    high_xyz: np.ndarray
 
     @staticmethod
     def exact(affine: AffineMap) -> TransformBound:
-        return TransformBound(affine, np.zeros(affine.rank))
+        return TransformBound(affine, np.zeros(affine.rank), np.zeros(affine.rank))
+
+    @staticmethod
+    def interval(low_xyz: np.ndarray, high_xyz: np.ndarray) -> TransformBound:
+        """A pure displacement whose value lies in ``[low_xyz, high_xyz]`` per component."""
+        low = np.asarray(low_xyz, dtype=np.float64)
+        return TransformBound(AffineMap.identity(int(low.size)), low, np.asarray(high_xyz, dtype=np.float64))
 
     @staticmethod
     def shift(residual_xyz: np.ndarray) -> TransformBound:
-        return TransformBound(AffineMap.identity(int(residual_xyz.size)), np.asarray(residual_xyz, dtype=np.float64))
+        """A pure displacement bounded in magnitude only, ``± residual_xyz``.
+
+        For a caller that knows a radius and not a range. Anything that can state both ends should
+        say so with :meth:`interval`: this one is twice as wide wherever the range is one-sided.
+        """
+        radius = np.asarray(residual_xyz, dtype=np.float64)
+        return TransformBound.interval(-radius, radius)
+
+    @property
+    def residual_xyz(self) -> np.ndarray:
+        """The symmetric envelope of the interval, for a caller that wants one number per axis."""
+        return np.maximum(np.abs(self.low_xyz), np.abs(self.high_xyz))
 
     def after(self, inner: TransformBound) -> TransformBound:
-        """The bound of ``self(inner(p))``: interval arithmetic through the outer affine."""
+        """The bound of ``self(inner(p))``: interval arithmetic through the outer affine.
+
+        NOT ``|A| @ residual``. That is right for an interval centred on zero and wrong for one that
+        is not: a negative entry of ``A`` sends the inner interval's low end to the outer's high,
+        and taking absolute values first loses which end went where -- so a rotation folded onto a
+        one-sided field would be bounded by a box that does not contain it. Splitting the matrix
+        into its non-negative and non-positive parts is the same arithmetic written to hold either
+        way, and it reduces to ``|A| @ r`` when ``low = -high``.
+        """
+        matrix = self.affine.matrix
+        rise, fall = np.maximum(matrix, 0.0), np.minimum(matrix, 0.0)
         return TransformBound(
             inner.affine.then(self.affine),
-            np.abs(self.affine.matrix) @ inner.residual_xyz + self.residual_xyz,
+            rise @ inner.low_xyz + fall @ inner.high_xyz + self.low_xyz,
+            rise @ inner.high_xyz + fall @ inner.low_xyz + self.high_xyz,
         )
 
     def map_box(self, box: WorldBox) -> WorldBox:
         """Where the image of ``box`` is guaranteed to lie."""
-        return box.image_under(self.affine).grown(self.residual_xyz)
+        return box.image_under(self.affine).extended(self.low_xyz, self.high_xyz)
 
 
 @dataclass(frozen=True)
@@ -467,28 +516,40 @@ class DisplacementStage:
     def __getstate__(self) -> dict:
         state = dict(self.__dict__)
         state["_tensors"] = {}
+        state.pop("range_xyz", None)
         state.pop("bound_xyz", None)
         return state
 
     @cached_property
-    def bound_xyz(self) -> np.ndarray:
-        """``sup |values|`` per component: one pass over the field, kept for the stage's life.
+    def range_xyz(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(min, max)`` per component: one pass over the field, kept for the stage's life.
 
         Every pull map asks for it (per patch, per plan block, per pushed slab), so it is kept:
         a thousand patches recomputing one constant 3-vector cost 73 s on a 3x160x256x256 field.
         ``cached_property`` writes through ``__dict__``, which a frozen dataclass allows; the entry
         is dropped from the pickle beside ``_tensors``.
 
-        Two reductions and no temporary: ``sup |v| = max(max v, -min v)`` is exact for real values,
-        where ``np.abs(...).max()`` first writes a values-sized copy and then walks it again. On the
-        31 M-voxel field the difference is 72 ms and 250 MiB; on a native ExaSPIM field window
-        (3 x 141 x 1331 x 1775) the copy alone is 4 GiB, and the fold spent 26.4 s of its 179 s here.
+        Two reductions and no temporary, which is what the pair costs and what its magnitude cost
+        before it: ``np.abs(...).max()`` would first write a values-sized copy and then walk it
+        again. On the 31 M-voxel field that copy is 72 ms and 250 MiB; on a native ExaSPIM field
+        window (3 x 141 x 1331 x 1775) it is 4 GiB, and the fold spent 26.4 s of its 179 s here.
+        Keeping both ends instead of the larger magnitude measured 79 ms against 80 on a 184
+        M-value window: the range is free, and it is the one a region can be sized from.
         """
         flat = self.values.reshape(self.values.shape[0], -1)
-        return np.maximum(flat.max(axis=1), -flat.min(axis=1))
+        return flat.min(axis=1), flat.max(axis=1)
+
+    @cached_property
+    def bound_xyz(self) -> np.ndarray:
+        """``sup |values|`` per component, the range's symmetric envelope."""
+        low, high = self.range_xyz
+        return np.maximum(np.abs(low), np.abs(high))
 
     def bound(self) -> TransformBound:
-        return TransformBound.shift(self.bound_xyz)
+        # The interval is clamped to include zero: the stage applies NO displacement outside its
+        # grid, so a target region past the field's edge still needs its identity-mapped samples.
+        low, high = self.range_xyz
+        return TransformBound.interval(np.minimum(low, 0.0), np.maximum(high, 0.0))
 
 
 #: A decoded stored transform: stages in APPLICATION order (first applied first). SimpleITK's

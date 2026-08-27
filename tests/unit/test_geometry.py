@@ -174,13 +174,46 @@ class TestTransformBound:
         rng = np.random.RandomState(3)
         affine = AffineMap(np.eye(3) + rng.randn(3, 3) * 0.1, rng.randn(3) * 10.0)
         residual = np.array([4.0, 2.0, 1.0])
-        bound = TransformBound(affine, residual)
+        bound = TransformBound(affine, -residual, residual)
         box = WorldBox(np.array([-20.0, -10.0, 0.0]), np.array([15.0, 25.0, 30.0]))
         mapped = bound.map_box(box)
         points = rng.uniform(box.low_xyz, box.high_xyz, size=(500, 3))
         # Any map of the form affine + bounded wiggle stays inside.
         images = affine.apply(points) + rng.uniform(-1.0, 1.0, size=(500, 3)) * residual
         assert np.all(images >= mapped.low_xyz - 1e-9) and np.all(images <= mapped.high_xyz + 1e-9)
+
+    def test_a_one_sided_interval_moves_the_box_instead_of_widening_it(self):
+        # The whole reason the bound is a range and not a radius. A field that displaces every point
+        # by the same 30 mm is an offset, not a spread: the region it reads sits 30 mm away and is
+        # no larger. Priced as a radius it would be 60 mm wider AND still centred where it started,
+        # which on a volume thinner than 60 mm is every voxel there is.
+        box = WorldBox(np.zeros(3), np.array([10.0, 10.0, 10.0]))
+        offset = TransformBound.interval(np.full(3, -30.0), np.full(3, -30.0))
+        moved = offset.map_box(box)
+        np.testing.assert_array_equal(moved.low_xyz, [-30.0, -30.0, -30.0])
+        np.testing.assert_array_equal(moved.high_xyz, [-20.0, -20.0, -20.0])
+        # The radius spelling of the same field is the one that cannot say that.
+        radius = TransformBound.shift(np.full(3, 30.0)).map_box(box)
+        assert np.all(radius.high_xyz - radius.low_xyz > moved.high_xyz - moved.low_xyz)
+
+    def test_after_carries_a_one_sided_interval_through_a_sign_flip(self):
+        # |A| @ residual is right for an interval centred on zero and wrong for one that is not: a
+        # negative entry sends the inner low end to the outer high end. Here the outer affine
+        # mirrors x, so a field that only ever pushes -x must come out only ever pushing +x. The
+        # symmetric arithmetic would answer [-4, +4] on every axis: containing, but four times the
+        # width, and it hides which side the map actually reaches.
+        mirror = TransformBound.exact(AffineMap(np.diag([-1.0, 1.0, 1.0]), np.zeros(3)))
+        pushes = TransformBound.interval(np.array([-4.0, 0.0, 0.0]), np.array([-2.0, 0.0, 0.0]))
+        folded = mirror.after(pushes)
+        np.testing.assert_array_equal(folded.low_xyz, [2.0, 0.0, 0.0])
+        np.testing.assert_array_equal(folded.high_xyz, [4.0, 0.0, 0.0])
+        # And it still contains the map it bounds, which is the property the sign trick must keep.
+        rng = np.random.RandomState(11)
+        points = rng.uniform(-50.0, 50.0, size=(400, 3))
+        displaced = points + np.stack([rng.uniform(-4.0, -2.0, 400), np.zeros(400), np.zeros(400)], axis=-1)
+        images = mirror.affine.apply(displaced)
+        box = folded.map_box(WorldBox(points.min(axis=0), points.max(axis=0)))
+        assert np.all(images >= box.low_xyz - 1e-9) and np.all(images <= box.high_xyz + 1e-9)
 
 
 class TestDisplacementStageBound:
@@ -207,6 +240,26 @@ class TestDisplacementStageBound:
             skewed_stage = DisplacementStage(_grid(), skewed, 1)
             np.testing.assert_array_equal(skewed_stage.bound_xyz, np.abs(skewed).reshape(3, -1).max(axis=1))
         # The cache is per instance, not per pickle: a rank rebuilds it from the values it receives.
-        assert "bound_xyz" not in stage.__getstate__()
+        assert "bound_xyz" not in stage.__getstate__() and "range_xyz" not in stage.__getstate__()
         again = pickle.loads(pickle.dumps(stage))
         np.testing.assert_array_equal(again.bound_xyz, first)
+
+    def test_the_stage_bounds_a_one_sided_field_by_where_it_reaches(self):
+        from konfai.data.geometry import DisplacementStage
+
+        # A field that only ever pushes one way -- which is what a registration between two frames
+        # writes, the offset between them baked into every voxel. The stage must say where it
+        # reaches, not how far: as a magnitude this field is worth 12 either side, and it never
+        # sends a point anywhere but 8 to 12 units below where it started.
+        values = np.random.RandomState(7).uniform(-12.0, -8.0, (3, 5, 6, 7))
+        stage = DisplacementStage(_grid(), values, 1)
+        low, high = stage.range_xyz
+        np.testing.assert_allclose(low, values.reshape(3, -1).min(axis=1))
+        np.testing.assert_allclose(high, values.reshape(3, -1).max(axis=1))
+        bound = stage.bound()
+        # The BOUND still includes zero: outside its grid the stage displaces nothing, so a region
+        # past the field's edge keeps its identity-mapped samples in the source window.
+        np.testing.assert_array_equal(bound.low_xyz, low)
+        np.testing.assert_array_equal(bound.high_xyz, np.zeros(3))
+        # The envelope is still there for whoever wants one number, and it is the old sup |v|.
+        np.testing.assert_array_equal(stage.bound_xyz, np.abs(values).reshape(3, -1).max(axis=1))

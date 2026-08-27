@@ -88,13 +88,18 @@ def _recorded(warp: Resample, attribute: Attribute | None = None, shape: tuple[i
     return warp
 
 
-def test_the_source_region_is_the_target_grown_by_the_field_reach(tmp_path: Path) -> None:
-    """A warp is a regrid onto the case's own grid, and its window is the field's reach in voxels.
+def test_the_source_region_is_the_target_moved_by_the_field_range(tmp_path: Path) -> None:
+    """A warp is a regrid onto the case's own grid, and its window is where the field points.
 
     Spacing is (x=2, y=1, z=1), so in array order (z, y, x) 4 um of displacement is 4, 4 and 2
     voxels: plus the one voxel the linear taps reach. Declared as REGRID and not HALO because the
     window is derived from the case's GEOMETRY: see the oblique case below, which a per-axis halo
     cannot express at all.
+
+    MOVED, not grown. This field displaces every point by the same +4 um, so the region reads a
+    window of its own size sitting 4 um along, not one twice as wide centred where it started. The
+    two spellings differ by the whole displacement on each face, which is nothing on a wiggle and
+    everything on a field that carries the offset between two frames.
     """
     _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 4.0, 4.0))
     warp = _recorded(Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF"))
@@ -104,14 +109,18 @@ def test_the_source_region_is_the_target_grown_by_the_field_reach(tmp_path: Path
     window = warp.measured_region_source("CASE_000", target, [10, 12, 14], _attributes())
 
     # The rule, written out: the region's OUTER faces (start - 0.5 .. stop - 0.5) in world units,
-    # grown by the field's 4 um, back to indices, floor/ceil, one voxel of margin for the taps.
+    # extended by the field's range CLAMPED TO INCLUDE the identity -- here [0, +4] um, so the
+    # window keeps its own faces and reaches one-sidedly where the field points -- back to indices,
+    # floor/ceil, one voxel of margin for the taps.
     extents, per_voxel = (10, 12, 14), (1.0, 1.0, 2.0)  # array order (z, y, x)
     expected = []
     for axis, extent in enumerate(extents):
         reach = 4.0 / per_voxel[axis]
-        low, high = 4 - 0.5 - reach, 6 - 0.5 + reach
+        low, high = 4 - 0.5, 6 - 0.5 + reach
         expected.append((max(0, int(np.floor(low)) - 1), min(extent, int(np.ceil(high)) + 2)))
     assert [(part.start, part.stop) for part in window] == expected
+    # And it is strictly less than what the same field priced as a radius would have read.
+    assert all(part.stop - part.start < 2 * reach + 5 for part, reach in zip(window, (4.0, 4.0, 2.0), strict=True))
 
 
 def test_an_oblique_case_grows_its_window_on_every_axis(tmp_path: Path) -> None:
@@ -169,8 +178,10 @@ def test_a_field_with_no_bound_still_streams_with_windows_measured_at_run(tmp_pa
 
     # The plan prices as if the field were zero: the target's outer faces plus the taps' voxel.
     assert [(part.start, part.stop) for part in priced] == [(2, 8), (2, 8), (2, 8)]
-    # The run pays the shift the values actually hold: 4 um at spacing 2 is 2 voxels, on x alone.
-    assert [(part.start, part.stop) for part in measured] == [(2, 8), (2, 8), (0, 10)]
+    # The run pays the shift the values actually hold: 4 um at spacing 2 is 2 voxels, on x alone,
+    # and only where the field points -- the window keeps its identity faces (the field displaces
+    # nothing outside its grid) and extends one-sidedly along x.
+    assert [(part.start, part.stop) for part in measured] == [(2, 8), (2, 8), (2, 10)]
 
 
 def test_sizing_and_sampling_share_one_field_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
