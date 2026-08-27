@@ -592,6 +592,26 @@ def _span_voxels(span: Sequence[slice]) -> int:
     return int(np.prod([max(0, part.stop - part.start) for part in span], dtype=np.int64))
 
 
+class BlockReads(NamedTuple):
+    """What one decomposition's blocks read, in the currencies the sizing spends.
+
+    Every consumer of the enumeration wants an aggregate of it and none wants the blocks, so it is
+    walked once and the aggregates are kept: the widest window one block materialises, the widest
+    hull the store decodes to serve one, and what the whole decomposition reads. Walking it per
+    consumer made the plan spend 96% of its time in ``Resample.stream_region_source``.
+    """
+
+    widest_pull: int
+    widest_hull: int
+    total: int
+
+    @property
+    def widest_excess(self) -> int:
+        """What the widest read materialises ABOVE the window it asked for: zero on a store that
+        serves exactly what it is asked for."""
+        return max(0, self.widest_hull - self.widest_pull)
+
+
 def _pull_block_voxels(spatial: list[int], tile: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> Iterator[int]:
     """The source voxels each block of a decomposition into ``tile`` materialises. Their sum is what
     the decomposition reads, their largest what one block of it holds."""
@@ -2124,6 +2144,9 @@ class DatasetManager:
         self._sweep_budget_bytes: float | None = None
         # The store's own read granularity, resolved on first use (None is an answer, not a miss).
         self._read_granularity: object = _UNRESOLVED
+        #: One walk of a decomposition per (decomposition, plans), keyed with the plans held
+        #: beside the answer so no identity under the key can be reused (:meth:`block_reads`).
+        self._block_reads: dict[tuple, tuple[tuple, BlockReads]] = {}
         self._chain_device: torch.device | None = None
         self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None], dict[str, float]] = {}
         # Save caches already swept by THIS run, keyed by (store, group, entry): under --overwrite the
@@ -3275,14 +3298,8 @@ class DatasetManager:
         segment = segments[-1]
         spatial = [int(extent) for extent in segment.landing]
         tile = [max(1, min(int(rows), spatial[0])), *spatial[1:]]
-        extents = self._source_extents(spatial, segment.plans)
-        granularity = self.read_granularity()
-        spans = list(_pull_block_spans(spatial, tile, segment.plans))
-        if granularity is None:
-            return (0, sum(_span_voxels(span) for span in spans))
-        hulls = [_chunk_hull_voxels(span, granularity, extents) for span in spans]
-        excess = max((hull - _span_voxels(span) for hull, span in zip(hulls, spans, strict=True)), default=0)
-        return (max(0, excess), sum(hulls))
+        reads = self.block_reads(spatial, tile, segment.plans)
+        return (reads.widest_excess, reads.total)
 
     def _grid_rows(self, cap: int) -> list[int]:
         """The heights that land on the store's block grid, up to ``cap``.
@@ -3296,6 +3313,11 @@ class DatasetManager:
         if granularity is None:
             return []
         block = max(1, int(granularity[0]))
+        # A grain of one row is met by every height, so there is no shortlist to try: a store banded
+        # along its leading axis (a memmap) says its grain on the axes BELOW, and enumerating every
+        # height here would hand the search the whole range one at a time.
+        if block <= 1:
+            return []
         return list(range(block, int(cap) + 1, block))
 
     def _best_tile(
@@ -3385,12 +3407,31 @@ class DatasetManager:
         priced with (:meth:`sweep_block_bytes`). Two currencies here and there is how a shape gets
         chosen for pulling little and then costs what its hull costs.
         """
+        return self.block_reads(spatial, tile, plans).total
+
+    def block_reads(self, spatial: list[int], tile: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> BlockReads:
+        """What a decomposition of ``spatial`` into ``tile`` reads, walked once and kept.
+
+        The sizing asks the same question of the same decomposition many times over -- the shape
+        search prices each candidate and then judges its reads, the height search bisects, and the
+        plateau walks a ladder -- and every one of those goes through the chain's pull maps, which
+        for a ``Resample`` is real geometry per block. Keyed by the decomposition AND by the plans
+        that map it, whose tuple is held here so no identity is reused under the key.
+        """
         granularity = self.read_granularity()
-        spans = _pull_block_spans(spatial, tile, plans)
-        if granularity is None:
-            return sum(_span_voxels(span) for span in spans)
-        extents = self._source_extents(spatial, plans)
-        return sum(_chunk_hull_voxels(span, granularity, extents) for span in spans)
+        key = (tuple(spatial), tuple(tile), tuple(id(plan) for plan in plans), granularity)
+        held = self._block_reads.get(key)
+        if held is not None:
+            return held[1]
+        extents = self._source_extents(spatial, plans) if granularity is not None else []
+        widest_pull = widest_hull = total = 0
+        for span in _pull_block_spans(list(spatial), tile, plans):
+            pull = _span_voxels(span)
+            hull = pull if granularity is None else _chunk_hull_voxels(span, granularity, extents)
+            widest_pull, widest_hull, total = max(widest_pull, pull), max(widest_hull, hull), total + hull
+        reads = BlockReads(widest_pull, widest_hull, total)
+        self._block_reads[key] = (tuple(plans), reads)
+        return reads
 
     def sweep_block_bytes(
         self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"], tile: list[int], depth: int
@@ -3408,8 +3449,8 @@ class DatasetManager:
         """
         pulled, landed = _sweep_resident_regions(depth)
         block = int(np.prod(tile, dtype=np.int64))
-        spans = list(_pull_block_spans(spatial, tile, plans))
-        pull = max((_span_voxels(span) for span in spans), default=block)
+        reads = self.block_reads(spatial, tile, plans)
+        pull = reads.widest_pull or block
         source, landed_channels, _peak, working = self._chain_channels(channels)
         held = pulled * pull * source + landed * block * landed_channels + working * max(pull, block)
         # A chunked store serves a window by decoding the block-aligned hull that covers it, and
@@ -3417,11 +3458,7 @@ class DatasetManager:
         # ONCE, and the window is the part of it the chain keeps. What a straddling region costs is
         # exactly this term, and it does not fall when the region does -- below one stored block a
         # shorter region reads the same bytes and only reads them more often.
-        granularity = self.read_granularity()
-        if granularity is not None and spans:
-            extents = self._source_extents(spatial, plans)
-            hull = max(_chunk_hull_voxels(span, granularity, extents) for span in spans)
-            held += max(0, hull - pull) * source
+        held += reads.widest_excess * source
         return int(held * _SWEEP_ELEMENT_BYTES)
 
     def _chain_channels(self, channels: int) -> tuple[int, int, int, float]:

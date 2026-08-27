@@ -321,28 +321,20 @@ def test_a_streamed_transform_tracks_the_budget_it_declared(floor: dict, cohort:
     (four source voxels per landed one) and what Gradient allocates over them (eight volumes-worth),
     neither of which the landed rows say anything about.
 
-    Tracked down to where a full-plane region is still affordable, which on this cohort is about 96
-    MiB. Under that the shape search answers a cube, and a cube HOLDS MORE than the slab it
-    replaces while being priced for less: over the 695 MiB floor, 152 / 121 / 63 / 58 MiB held at
-    512 / 256 / 128 / 96, then back up to 77 at 80 and 64, where the pick turns from [9, 160, 160]
-    to [58, 58, 58]. At 64 MiB the cube is priced 48.5 MiB and holds 77; the slab it rejected as
-    unaffordable at 71.1 MiB holds 46.
-
-    The extra is the STORE's, not a stage's. Forcing both shapes at one budget over four chains,
-    the cube held more every time: +17.7 MiB with no transform at all (read then Write), +16.2
-    with Gradient, +43.8 with Resample, +32.0 with both. It is already there when nothing but the
-    region read and the slab write run, so no stage explains it. ``sweep_block_bytes`` prices the
-    source voxels a region pulls and what its stages declare over them, and neither figure
-    separates a window the store hands over from one it has to assemble. Fixing it means pricing
-    that apart, not tightening this: the run below still holds inside its allowance at every
-    budget, and it is the monotonicity that stops, not the containment.
+    Tracked all the way down, which took the store saying what a read of it costs. A memmapped
+    block is served band by band, so a region narrower than a plane touches a plane's pages and
+    the kernel counts them: sized on the voxels it asked for, the search answered a cube under
+    96 MiB and the run HELD MORE at a smaller budget, 77 MiB at both 80 and 64 against 58 at 96.
+    ``SitkFile.read_granularity`` now declares that band the way a chunked store declares its
+    chunk, and one mechanism prices both: 152 / 121 / 63 / 57 / 46 / 38 MiB held over the floor
+    at 512 / 256 / 128 / 96 / 80 / 64, monotone, every region a full-plane slab.
     """
     held = {}
-    for budget_mib in (512, 256, 128, 64):
+    for budget_mib in (512, 128, 64):
         measured = _within_its_budget(_TRANSFORM, budget_mib * _MIB, floor, cohort)
         held[budget_mib] = (measured["resident_kib"] - floor["resident_kib"]) * 1024
 
-    assert held[128] < held[256] < held[512], f"flat against the budget: {held}"
+    assert held[64] < held[128] < held[512], f"flat against the budget: {held}"
     plan = (cohort / "Transforms" / "MEMORY_LIMIT" / "log_0.txt").read_text(encoding="utf-8")
     assert "1 STREAM" in plan and "0 WHOLE-VOLUME" in plan
 

@@ -1283,8 +1283,12 @@ def test_the_decomposition_note_is_printed_only_where_it_can_matter(tmp_path: Pa
         config_path = _write_config(
             tmp_path, chain + f"              Write:\n                dataset: {tmp_path / 'out'}:h5\n"
         )
+        # Eight volumes-worth, which is what the smallest region of the sheared chain costs: it pulls
+        # about four source rows per landed one, and on a memmapped store those rows are read as
+        # whole planes (SitkFile.read_granularity). Three fitted while the cube looked cheap, which
+        # it was only under the fiction that a memmap serves exactly the window it is asked for.
         config_path.write_text(
-            config_path.read_text().replace("memory_budget: auto", f"memory_budget: {3 * 8 * 32 * 32 * 4}b")
+            config_path.read_text().replace("memory_budget: auto", f"memory_budget: {8 * 8 * 32 * 32 * 4}b")
         )
         plan = _build(tmp_path).compute_plan()
         assert plan.entries[0].verdict == "STREAM", plan.entries[0].reason

@@ -1789,6 +1789,26 @@ class Dataset:
             and an unknown backend is priced pessimistically. What it prices is the ROUTE: a store
             that decodes the whole volume once per slab makes streaming read the source many times
             over, where loading reads it once.
+
+            A compressed stream answers ``False`` but is not all-or-nothing: ITK decodes forward from
+            the start and stops on the region, so a read costs its END offset, not its size. Measured
+            on a 256^3 int16 volume, one 32^3 region at z = 0 / 64 / 128 / 224:
+
+            =============  ======  ======  ======  ======
+            store            z=0    z=64   z=128   z=224
+            =============  ======  ======  ======  ======
+            .mha            0.8ms   0.9ms   0.8ms   0.8ms
+            .mha (zlib)    14.6ms  41.8ms  70.5ms  112.6ms
+            .nii.gz        16.1ms  35.8ms  55.5ms  85.2ms
+            =============  ======  ======  ======  ======
+
+            The uncompressed row is flat because it seeks; the other two are linear in depth, and the
+            deepest read costs the whole file (102 ms). Sweeping in K regions therefore costs about
+            K/2 whole decodes, which is why ``False`` here buys the LOAD verdict -- one ordered read
+            -- rather than a streamed route, and why the patch route can only warn and advise a
+            chunked store. Blocked compression (Zarr, HDF5) and indexed access into one stream
+            (``zran``/``indexed_gzip``, which nibabel uses) both solve it; ITK does neither, and the
+            header it writes carries ``CompressedDataSize`` and no compression table.
             """
             del name
             return False
@@ -2164,6 +2184,35 @@ class Dataset:
                 with open(path, "rb") as file:
                     return file.read(2) != b"\x1f\x8b"  # gzip magic: a .nii.gz stream
             return False
+
+        def read_granularity(self, name: str) -> tuple[int, ...] | None:
+            """A memmapped block is served BAND by band: the read maps the outermost axis the window
+            spans and every axis below it whole (:func:`_mapped_band`), then copies its sub-box out
+            of that. The pages a window touches are the band's, not its own, and the kernel counts
+            them, so a region narrower than a plane costs a plane here exactly as a window narrower
+            than a chunk costs a chunk on a chunked store.
+
+            Measured, writing one volume with the tile forced and nothing else in the chain: a
+            [58, 116, 116] block held 25 MiB over the floor against a 22.7 MiB band, a
+            [200, 64, 64] one held 79 against 78.1, and a full-plane [8, 320, 320] held its own 3.
+            One step along the banded axis, everything below it whole: that is what this says.
+
+            ``None`` where ITK decodes instead of mapping (a compressed stream), where the whole
+            volume is the cost and the streaming refusal already says so.
+            """
+            path = self._resolve_data_path(name)
+            block = _pixel_block(path) if path is not None else None
+            if block is None:
+                return None
+            shape = [int(extent) for extent in block.shape]
+            # The order the map sees, which is the order the region read reorders into: MetaIO's
+            # channel axis is the fastest, so an interleaved block is spatial-first with the channel
+            # last. The band narrows the first axis of THAT order carrying more than one element,
+            # and every axis after it is mapped whole.
+            order = [*range(1, len(shape)), 0] if block.interleaved else list(range(len(shape)))
+            banded = next((axis for axis in order if shape[axis] > 1), order[-1])
+            whole = set(order[order.index(banded) + 1 :])
+            return tuple(shape[axis] if axis in whole else 1 for axis in range(len(shape)))
 
         def _resolve_data_path(self, name: str) -> str | None:
             base = f"{self.filename}{name}"
