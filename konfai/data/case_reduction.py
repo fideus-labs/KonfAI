@@ -36,9 +36,19 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
-from konfai.data.patching import SWEEP_CLOCK, DatasetManager, RegionWriter, device_capped_budget, save_destination
+from konfai.data.patching import (
+    SWEEP_CLOCK,
+    SWEEP_SLAB_ROWS,
+    DatasetManager,
+    HeldMeter,
+    RegionWriter,
+    device_capped_budget,
+    open_held_meter,
+    save_destination,
+)
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
+from konfai.utils.budget import budget_share, format_bytes
 from konfai.utils.dataset import (
     Attribute,
     Dataset,
@@ -59,6 +69,11 @@ _POST_KINDS = frozenset({LocalityKind.POINTWISE, LocalityKind.GLOBAL_STAT})
 
 #: Bytes per sample assumed when sizing regions from headers alone, before a dtype is known.
 _ASSUMED_ITEMSIZE = 4
+
+#: How much of the regions' own share the folds a stat pass KEEPS may take, the regions getting the
+#: rest. Not a share of the declaration: they sit beside the regions for the whole write pass, so
+#: they come out of what the regions were given (:data:`~konfai.utils.budget.BUDGET_SHARES`).
+_KEPT_FOLDS_SHARE_OF_REGIONS = 0.5
 
 
 @contextlib.contextmanager
@@ -89,6 +104,21 @@ class ReductionPlan:
     #: charging the members at the output's width over-states the peak by the cohort's size.
     source_channels: int = 0
     working_multiple: float = 0.0
+    #: Volumes-worth the MEMBER CHAIN allocates beside the region it is producing
+    #: (``DatasetManager.working_multiple()``, the largest ``Transform.working_multiple`` on the
+    #: chain: ``Resample`` declares 3.0 for its sampling grid). Distinct from ``working_multiple``,
+    #: which is the OPERATOR's: a fold is a chain replay per member and then an accumulate, and
+    #: pricing only the second half under-states a resampling cohort by the first. Charged ONCE
+    #: whatever the cohort's size, because ``_fold`` accumulates the members one after another, so
+    #: only one chain is ever replaying.
+    chain_multiple: float = 0.0
+    #: What ONE member's region makes the store decode ABOVE the window it asked for
+    #: (:meth:`~konfai.data.patching.DatasetManager.region_reads`). A chunked backend decodes whole
+    #: blocks, so below one stored block this is the SAME figure at every height: it is charged flat
+    #: and never divided by the rows. Measured on the prep's cohort at 4.51 GiB for a 17-row region
+    #: whose own tensor was 70 MiB, and 4.57 GiB for a 4-row one -- the sizing had been cutting the
+    #: height to buy memory that cutting cannot buy.
+    read_bytes: int = 0
     #: Members read from a store that cannot serve a bounded region read (a gzipped NIfTI, a
     #: compressed MetaImage, NRRD), by name, with the store's format: every region asked of such a
     #: member decodes its whole volume, so the fold reads it once per region rather than once.
@@ -128,9 +158,10 @@ class ReductionPlan:
     @property
     def resident_regions(self) -> float:
         """Regions held at the peak, in member regions: the buffer, what the operator builds over
-        it (``working_multiple`` buffers-worth) and the output's own. A count for ``describe``;
-        ``peak_bytes`` is the figure the plan sizes by."""
-        return self.buffered_regions * (1 + self.working_multiple) + 1
+        it (``working_multiple`` buffers-worth), what the one replaying chain holds beside the
+        region it is producing (``chain_multiple``), and the output's own. A count for
+        ``describe``; ``peak_bytes`` is the figure the plan sizes by."""
+        return self.buffered_regions * (1 + self.working_multiple) + self.chain_multiple + 1
 
     def _region_bytes(self, channels: int) -> int:
         return int(self.slab_rows * np.prod(self.spatial[1:], dtype=np.int64) * channels * _ASSUMED_ITEMSIZE)
@@ -147,8 +178,20 @@ class ReductionPlan:
         #
         # A statistics pass is a second traversal, not a second working set: it holds exactly what
         # one region holds, so the peak is the same whether there are one or two passes.
-        members = self.buffered_regions * self._region_bytes(self.source_channels or self.channels)
-        return int(members * (1 + self.working_multiple) + self.region_bytes)
+        member_bytes = self._region_bytes(self.source_channels or self.channels)
+        members = self.buffered_regions * member_bytes
+        # The chain replaying a member holds its own buffers beside the region it lands, and it is
+        # the members' own width it holds them at. Once: the members are accumulated in turn.
+        # Plus what the store decodes to serve ONE member's region: the chain's buffers are built
+        # over the window it asked for, the decode materialises the blocks that window falls in, and
+        # the two are resident together. One read is in flight at a time (the members accumulate in
+        # turn), so it is charged once.
+        return int(
+            members * (1 + self.working_multiple)
+            + self.chain_multiple * member_bytes
+            + self.region_bytes
+            + self.read_bytes
+        )
 
     def describe(self) -> str:
         verdict = "STREAM" if self.streams else "REFUSED"
@@ -292,30 +335,89 @@ class CaseReduction:
         Below one row nothing fits; the plan then reports a peak above the budget and the workflow
         refuses, which is the only honest answer: there is no whole-volume path to fall back to.
 
-        THE BUDGET IS THE ONLY CEILING. ``cap`` defaults to the output's own height, so a node with
-        room folds the whole volume in one region and reads each case ONCE. A fixed cap did the
-        opposite of what it looked like: it bounded the region at 64 rows however much memory the
-        run was given, so a cohort measured at 0.11 GiB resident against a 59.60 GiB budget still
-        paid a full sweep of every source per 64 rows -- and the sweeps are what a chain resampling
-        through a field pays for, since a region's source window is not the region. What is spent
-        stays declared: half a budget the caller named, or ``auto``, which measures the node.
+        THE BUDGET IS A CEILING, NOT A TARGET. ``cap`` defaults to the shortest region that already
+        reads what the whole volume reads (``DatasetManager.read_plateau_rows``, closed form from
+        the chain's pull maps): past it a taller region pulls no fewer source voxels and only holds
+        more. A FIXED cap was wrong in the other direction -- 64 rows however much memory the run
+        was given made a cohort measured at 0.11 GiB against a 59.60 GiB budget re-sweep every
+        source per 64 rows, which is what a chain resampling through a field pays for, since a
+        region's source window is not the region. The plateau is neither: it is where that
+        re-sweeping stops, per chain, and the budget may still lower it. What is spent stays
+        declared: half a budget the caller named, or ``auto``, which measures the node.
 
         The budget also goes to the cases' own managers, because a chain crossing a ``Save`` sweeps
         that cache when first read, and ``read_region`` carries no budget of its own.
         """
         self._budget_bytes = budget_bytes
+        # THE REMAINDER, not the whole figure. A member's chain holds what it holds WHILE the fold
+        # is holding its regions -- its own sweeps fire from inside the fold loop, when the operator
+        # already has earlier members in its buffer -- so handing it the full budget six lines above
+        # spending half of it on the regions declared the same bytes twice.
+        chains = budget_share("chains", budget_bytes)
         for manager in self.managers:
-            manager.set_memory_budget(budget_bytes)
+            manager.set_memory_budget(budget_bytes if chains is None else chains)
         if not budget_bytes or budget_bytes <= 0:
             return
         plan = self.plan()
-        row_bytes = plan.peak_bytes / max(1, plan.slab_rows)
+        # What the store decodes does NOT fall with the height: below one stored block the same
+        # blocks are decoded whatever the region asks for, and the fold simply asks more often. It
+        # is taken off the allowance whole, never divided by the rows -- dividing it is what made a
+        # small budget cut the regions, decode the same bytes twice as often, and hold MORE.
+        flat = plan.read_bytes
+        row_bytes = (plan.peak_bytes - flat) / max(1, plan.slab_rows)
         if row_bytes <= 0:
             return
-        # Past the output's own height there is nothing left to hold, so that is the ceiling when
-        # the caller names none.
-        ceiling = int(cap) if cap is not None else int(plan.spatial[0])
-        self.slab_rows = max(1, min(ceiling, int(budget_bytes * 0.5 / row_bytes)))
+        # Past the plateau a taller region reads no less and holds more, so that is the ceiling
+        # when the caller names none; a chain that cannot price one falls back to the output height.
+        ceiling = int(cap) if cap is not None else self._plateau_rows(plan)
+        # What the fold's own share leaves the regions: the folds it keeps live beside them, for the
+        # whole write pass, so they come out of the same half rather than out of nothing. Decided
+        # here and not at the stat pass, because the regions cannot be sized against a decision that
+        # has not been taken yet.
+        allowance = budget_share("regions", budget_bytes) or 0.0
+        if self.keeps_folds(plan):
+            allowance -= self._folded_output_bytes(plan)
+        allowance -= flat
+        self.slab_rows = max(1, min(ceiling, int(max(row_bytes, allowance) / row_bytes)))
+
+    def keeps_folds(self, plan: ReductionPlan) -> bool:
+        """Whether the stat pass hands its folds to the write pass instead of re-folding them.
+
+        One rule, two callers: the sizing subtracts what they will hold, the stat pass fills them.
+        Two rules would let the regions be cut for folds nobody keeps, or folds be kept the regions
+        made no room for. They may take their share of what the FOLD holds, never of the whole
+        declaration: a member's chain is holding the rest of it at the same moment.
+        """
+        if not plan.stat_pass or not self._budget_bytes or self._budget_bytes <= 0:
+            return False
+        regions = budget_share("regions", self._budget_bytes)
+        return regions is not None and self._folded_output_bytes(plan) <= regions * _KEPT_FOLDS_SHARE_OF_REGIONS
+
+    def _plateau_rows(self, plan: ReductionPlan) -> int:
+        """The tallest region worth cutting: the WORST member's plateau, because one chain still
+        re-reading paces the fold whatever the others do.
+
+        Never below ``SWEEP_SLAB_ROWS``, the floor the sweep applies for the same reason: a chain
+        that pulls exactly what it lands (every stage POINTWISE) has a FLAT read curve, so its
+        plateau is one row -- and one-row regions pay every fixed per-region cost for one row of
+        work. Measured: a ``Clip`` before the fold sized the regions at 1 row without this floor.
+
+        And never the WHOLE VOLUME when no member can price one. A chain with no stage before the
+        fold has no segment to read a pull map from, so every member answers None -- and answering
+        the output's own height there made the ceiling depend on something that is not a property
+        of the data: the same cohort, the same budget and the same voxels read gave 512 rows with
+        no stage and 64 with one value-neutral ``Clip`` in front, an eightfold difference from a
+        stage that changes nothing. Unpriced reads get the floor, like flat ones: it is the same
+        ignorance, and the conservative answer to it is the same.
+
+        The whole-volume answer was also the one place the run-time probe could not help. At full
+        height a fold has exactly ONE region, and :meth:`_refit_to_measurement` only ever cuts the
+        ones after the first: the net was disarmed exactly where the most was held.
+        """
+        heights = [manager.read_plateau_rows(plan.spatial) for manager in self.managers]
+        measured = [height for height in heights if height is not None]
+        floor = min(int(SWEEP_SLAB_ROWS), int(plan.spatial[0]))
+        return max(max(measured), floor) if measured else floor
 
     # ---------------------------------------------------------------- planning
 
@@ -438,10 +540,26 @@ class CaseReduction:
             slab_rows=self.slab_rows,
             incremental=self.operator.incremental,
             working_multiple=float(self.operator.working_multiple_for(len(self.managers))),
+            # The worst member's, because the fold is paced by whichever chain holds the most.
+            chain_multiple=max((float(manager.working_multiple()) for manager in self.managers), default=0.0),
+            read_bytes=self._member_read_bytes(int(reference.base_shape[0])),
             stat_pass=self._needs_stat_pass(),
             unbounded=self._unbounded_members(),
             refusal=self._first_refusal(),
         )
+
+    def _member_read_bytes(self, channels: int) -> int:
+        """What the widest member's region makes its store decode, at the current height.
+
+        The fold is paced by whichever member decodes the most, and one read is in flight at a
+        time. ``None`` from a manager (a chain that cannot answer) contributes nothing: the peak
+        then says what it did before, which is what the run-time probe is there to correct.
+        """
+        from konfai.data.patching import _SWEEP_ELEMENT_BYTES
+
+        reads = [manager.region_reads(self.slab_rows) for manager in self.managers]
+        widest = max((excess for read in reads if read is not None for excess, _total in [read]), default=0)
+        return int(widest * max(1, channels) * _SWEEP_ELEMENT_BYTES)
 
     # --------------------------------------------------------------- execution
 
@@ -481,10 +599,72 @@ class CaseReduction:
         with _awaited("read"):
             return manager.read_region(region).unsqueeze(0)
 
-    def _folds(self, spatial: list[int]):
-        """Every region's fold, in order: the loop both passes share."""
-        for region in self._regions(spatial):
+    # What the first region's measurement leaves for the rest, as the predictor's accumulation gate
+    # keeps a reserve for the same reason (Predictor._ACCUMULATE_MARGIN): the measurement is of the
+    # region that just ran, and the next one meets an allocator in a different state.
+    _MEASURED_MARGIN = 0.9
+
+    def _folds(self, spatial: list[int], measure: bool = False):
+        """Every region's fold, in order: the loop both passes share.
+
+        With ``measure``, the FIRST region is also the probe. What the plan priced is a model, and a
+        model of what a chain holds has to be right about every stage, every store and every bridge
+        it crosses; what the region actually held is a fact, and it costs one counter read on work
+        the fold had to do anyway. The remaining regions are then cut against the fact.
+
+        Only ever SHORTER. A taller region than the plan allowed would be a promise the plan never
+        made, and the first region has already been folded at the planned height: this can correct
+        an optimistic price, never spend a budget the sizing declined to spend.
+        """
+        start, refitted = 0, not measure
+        while start < int(spatial[0]):
+            stop = min(start + self.slab_rows, int(spatial[0]))
+            region = (slice(start, stop), *(slice(0, extent) for extent in spatial[1:]))
+            # Only around the region that is actually the probe. The host meter RESETS the
+            # process's resident high-water mark to take its reading, and that mark is what the
+            # run's closing line reports: resetting it before every region would leave that line
+            # describing the last region instead of the run, which is the one thing it exists to
+            # say honestly.
+            meter = None if refitted else self._open_meter()
             yield region, self._fold(region)
+            if not refitted:
+                refitted = True
+                self._refit_to_measurement(meter, stop - start, spatial)
+            start = stop
+
+    def _open_meter(self) -> HeldMeter | None:
+        """What will read the probe region, chosen by the route it runs on."""
+        return open_held_meter(self.managers[0]._chain_device if self.managers else None)
+
+    def _refit_to_measurement(self, meter: HeldMeter | None, rows: int, spatial: list[int]) -> None:
+        """Cut the remaining regions against what the first one HELD, when that is more than the
+        declaration allows. The reading is a high-water mark over the region that just ran, so it
+        bounds the next one from above, exactly as the predictor's gate reads a forward's transient
+        from the batch that just ran (:meth:`Predictor._accumulate_device`).
+
+        Against the BUDGET, not the share the sizing aims at: a share is how a height is chosen,
+        and what must not be exceeded is the whole declaration. This exists to prevent a kill, not
+        to shave bytes -- and it cannot shave many, since the region that set the peak has already
+        run and cutting the rest never undoes it. What it catches is a LATER region holding more
+        than the first: a case with a wider halo, a region touching more chunks.
+        """
+        del spatial
+        held = meter.held() if meter is not None else None
+        if held is None or not self._budget_bytes or self._budget_bytes <= 0 or rows <= 0 or held <= 0:
+            return
+        allowed = float(self._budget_bytes) * self._MEASURED_MARGIN
+        if held <= allowed:
+            return
+        fitted = max(1, int(rows * allowed / held))
+        if fitted >= self.slab_rows:
+            return
+        print(
+            f"[Reduce] '{self.reduce.output}': first region held {format_bytes(held)} of the"
+            f" {format_bytes(allowed)} its {rows} row(s) may hold --"
+            f" the rest are cut to {fitted} row(s).",
+            flush=True,
+        )
+        self.slab_rows = fitted
 
     def _apply_post(self, block: torch.Tensor, attribute: Attribute, rank: int) -> np.ndarray:
         scope = Attribute(attribute)
@@ -515,12 +695,11 @@ class CaseReduction:
             attribute["konfai_reduce_cases"] = "|".join(plan.cases)
         if plan.stat_pass:
             statistics = _RunningStatistics()
-            # The folds this pass computes ARE the folds the write pass needs: keep them when the
-            # whole folded output fits half the budget (regions, not member volumes -- for a field
-            # or a mask that is megabytes), and the write pass then only applies the post stages.
-            # Otherwise the second pass re-folds, as before: correctness never depends on the keep.
-            keep = self._folded_output_bytes(plan) <= 0.5 * float(self._budget_bytes or 0)
-            self._kept_folds = [] if keep else None
+            # The folds this pass computes ARE the folds the write pass needs: keep them when they
+            # fit their share of what the fold holds (:meth:`keeps_folds`, the same rule the sizing
+            # subtracted them by), and the write pass then only applies the post stages. Otherwise
+            # the second pass re-folds, as before: correctness never depends on the keep.
+            self._kept_folds = [] if self.keeps_folds(plan) else None
             for _region, folded in self._folds(plan.spatial):
                 statistics.update(folded)
                 if self._kept_folds is not None:
@@ -583,7 +762,7 @@ class CaseReduction:
                 print(
                     f"[Reduce] '{self.reduce.output}': regions re-sized for {device} --"
                     f" {self.slab_rows} row(s) under {capped / 2**30:.2f} GiB"
-                    f" (min of the declared budget and half the card's free memory).",
+                    f" (min of the declared budget and half of what the card can give this process).",
                     flush=True,
                 )
         plan = self.plan()
@@ -616,7 +795,7 @@ class CaseReduction:
         folds = (
             ((region, kept[index]) for index, region in enumerate(self._regions(spatial)))
             if kept is not None
-            else self._folds(spatial)
+            else self._folds(spatial, measure=True)
         )
         writer = RegionWriter(lambda _key, array, header: self._open_stream(spatial, array, header))
         try:

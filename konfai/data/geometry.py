@@ -474,12 +474,18 @@ class DisplacementStage:
     def bound_xyz(self) -> np.ndarray:
         """``sup |values|`` per component: one pass over the field, kept for the stage's life.
 
-        Every pull map asks for it (per patch, per plan block, per pushed slab), and the pass costs
-        72 ms and a values-sized temporary on a 3x160x256x256 field: a thousand patches recomputed
-        one constant 3-vector for 73 s. ``cached_property`` writes through ``__dict__``, which a
-        frozen dataclass allows; the entry is dropped from the pickle beside ``_tensors``.
+        Every pull map asks for it (per patch, per plan block, per pushed slab), so it is kept:
+        a thousand patches recomputing one constant 3-vector cost 73 s on a 3x160x256x256 field.
+        ``cached_property`` writes through ``__dict__``, which a frozen dataclass allows; the entry
+        is dropped from the pickle beside ``_tensors``.
+
+        Two reductions and no temporary: ``sup |v| = max(max v, -min v)`` is exact for real values,
+        where ``np.abs(...).max()`` first writes a values-sized copy and then walks it again. On the
+        31 M-voxel field the difference is 72 ms and 250 MiB; on a native ExaSPIM field window
+        (3 x 141 x 1331 x 1775) the copy alone is 4 GiB, and the fold spent 26.4 s of its 179 s here.
         """
-        return np.abs(self.values.reshape(self.values.shape[0], -1)).max(axis=1)
+        flat = self.values.reshape(self.values.shape[0], -1)
+        return np.maximum(flat.max(axis=1), -flat.min(axis=1))
 
     def bound(self) -> TransformBound:
         return TransformBound.shift(self.bound_xyz)

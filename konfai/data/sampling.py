@@ -350,25 +350,34 @@ def source_index(
 #: patch; a budget only sizes a slab, and a slab changes no value, so a second of staleness costs
 #: nothing.
 _BUDGET_TTL_SECONDS = 1.0
-_default_budgets: dict[str, tuple[float, float]] = {}
+_default_budgets: dict[tuple, tuple[float, float]] = {}
 _now = time.monotonic
 
 
 def _default_walk_budget(device: torch.device) -> float:
-    """The machine's budget for a walk on ``device``, probed once per :data:`_BUDGET_TTL_SECONDS`.
+    """The budget for a walk on ``device``, probed once per :data:`_BUDGET_TTL_SECONDS`.
 
-    The one rule every consumer shares (:func:`~konfai.data.patching.device_capped_budget`): on
-    CUDA half the free VRAM, on CPU a quarter of what this process may still allocate.
+    THE RUN'S DECLARED BUDGET FIRST, and the machine's only when nothing was declared. A walk that
+    sizes itself from free memory is a stage that holds what the machine happens to have rather
+    than what the run promised: measured on an oblique resample, whose map does not factorise so
+    the general walk runs, the stage held 21 volumes-worth of its input against a declaration of 3
+    -- and would have held more on an emptier machine. That is also why the declaration could not
+    be right: what the stage holds was not a property of the stage.
+
+    Undeclared, the machine's own share stands (:func:`~konfai.data.patching.device_capped_budget`):
+    on CUDA half the free VRAM, on CPU a quarter of what this process may still allocate.
     """
     from konfai.data.patching import device_capped_budget
-    from konfai.utils.budget import available_memory_bytes
+    from konfai.utils.budget import available_memory_bytes, budget_share, per_rank_budget_bytes
 
-    key = str(device)
+    declared = per_rank_budget_bytes()
+    key = (str(device), declared)
     now = _now()
     cached = _default_budgets.get(key)
     if cached is not None and now < cached[0]:
         return cached[1]
-    budget = device_capped_budget(available_memory_bytes()[0] * 0.25, device) or 0.0
+    wanted = budget_share("chains", declared) if declared else available_memory_bytes()[0] * 0.25
+    budget = device_capped_budget(wanted, device) or 0.0
     _default_budgets[key] = (now + _BUDGET_TTL_SECONDS, budget)
     return budget
 

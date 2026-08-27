@@ -49,11 +49,19 @@ from konfai.data.patching import (
     SWEEP_CLOCK,
     SWEEP_ENGINE_FLOOR_BYTES,
     DatasetManager,
+    device_capped_budget,
     save_destination,
 )
 from konfai.data.transform import Save, split_expand
 from konfai.utils import uri
-from konfai.utils.budget import format_bytes, node_local_ranks, set_per_rank_budget
+from konfai.utils.budget import (
+    budget_share,
+    format_bytes,
+    node_local_ranks,
+    peak_resident_bytes,
+    set_per_rank_budget,
+    sweep_share,
+)
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
@@ -116,6 +124,9 @@ class TransformPlan:
     #: What the store's decoded-chunk cache may hold out of the budget: part of what the process
     #: holds, so the header says it, and says when a budget puts it under the floor it is worth.
     chunk_cache_bytes: int = 0
+    #: Where the chain will run, so the header can name the ceiling the REGIONS are cut
+    #: under, which on a GPU is not the declared budget (see device_capped_budget).
+    chain_device: "torch.device | None" = None
 
     @property
     def fallback_entries(self) -> list[TransformPlanEntry]:
@@ -129,13 +140,34 @@ class TransformPlan:
         return [entry for entry in self.entries if entry.verdict is Verdict.REFUSED]
 
     def budget_violations(self) -> list[TransformPlanEntry]:
-        """Entries whose working set exceeds the per-rank budget: a whole-volume fallback (the case,
-        its in-flight copy, the widest stage's buffers) or a reduction whose regions are down to one
-        row. A headers-only estimate; the report prints the margin."""
-        candidates = [
-            entry for entry in self.entries if entry.verdict in (Verdict.WHOLE_VOLUME, Verdict.LOAD, Verdict.REDUCE)
+        """Entries whose working set exceeds what they were sized against: a whole-volume fallback
+        (the case, its in-flight copy, the widest stage's buffers) against the whole budget, a
+        reduction against the share its regions were solved for. A headers-only estimate; the
+        report prints the margin.
+
+        The share and not the whole figure for a REDUCE, because that is the number ``fit_budget``
+        solves the height against: judged on the whole budget it could only ever speak when a
+        single row did not fit, so a fold needing twice its share announced a plan it could not
+        keep and was killed by the kernel instead of refused here.
+        """
+        return [
+            entry
+            for entry in self.entries
+            if entry.verdict in (Verdict.WHOLE_VOLUME, Verdict.LOAD, Verdict.REDUCE)
+            and entry.working_set_bytes > self.ceiling_for(entry.verdict)
         ]
-        return [entry for entry in candidates if entry.working_set_bytes > self.budget_bytes]
+
+    def ceiling_for(self, verdict: Verdict) -> float:
+        """What an entry of this verdict is judged against, and what the report names.
+
+        A whole-volume fallback holds the case and nothing else is running: the whole budget. A
+        reduction holds its regions while the member chains and the store's cache hold theirs, so
+        it is judged against the share ``fit_budget`` solved its height for -- the same figure, in
+        the gate and on the line that explains it.
+        """
+        if verdict is Verdict.REDUCE:
+            return budget_share("regions", self.budget_bytes) or self.budget_bytes
+        return self.budget_bytes
 
     def summary(self) -> str:
         """The plan in one line: what the run will do, and where to read the rest.
@@ -164,6 +196,21 @@ class TransformPlan:
             lines.extend(self._chain_lines(f"{group_src} -> {group_dest}{f' ({label})' if label else ''}", entries))
         return "\n".join(lines)
 
+    def _region_ceiling(self) -> str:
+        """What the REGIONS are cut under, said only when that is not the declared budget.
+
+        The budget is declared in host bytes and the regions of a GPU chain live in VRAM, so the two
+        ceilings differ and only one of them was printed. A second group whose card was already full
+        was cut at 7.63 GiB where the first had 11.58, and nothing in the plan said so: the run just
+        halved its region height and read twice as much."""
+        capped = device_capped_budget(self.budget_bytes, self.chain_device)
+        if capped is None or self.chain_device is None or capped >= self.budget_bytes:
+            return ""
+        return (
+            f" | regions on {self.chain_device} under {format_bytes(capped)}"
+            f" (half of what the card can give this process)"
+        )
+
     def _header(self) -> str:
         # What a rank holds that the region sizing does not take out of the budget: said here rather
         # than left to be discovered in a resident set.
@@ -179,7 +226,7 @@ class TransformPlan:
         held_beside = " | held beside the regions: " + ", ".join(beside)
         return (
             f"[KonfAI] plan over {self.world_size} rank(s) | per-rank budget"
-            f" {format_bytes(self.budget_bytes)} ({self.budget_desc}){held_beside}"
+            f" {format_bytes(self.budget_bytes)} ({self.budget_desc}){self._region_ceiling()}{held_beside}"
             f" | fallback working set = case x {CASE_ELEMENT_BYTES} B x ({FALLBACK_INFLIGHT_FACTOR}"
             f" + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed"
             f" {self.dtype_hypothesis} until the first slab"
@@ -211,8 +258,9 @@ class TransformPlan:
             lines.extend(f"    {line}" for line in entry.reason.splitlines())
         if entry.verdict is Verdict.REDUCE:
             lines.append(
-                f"    peak ~= {format_bytes(entry.working_set_bytes)} vs per-rank budget"
-                f" {format_bytes(self.budget_bytes)}"
+                f"    peak ~= {format_bytes(entry.working_set_bytes)} vs the regions' share of the"
+                f" budget, {format_bytes(self.ceiling_for(entry.verdict))} of"
+                f" {format_bytes(self.budget_bytes)} per rank"
             )
         lines.append(f"    cases: {', '.join(entry.reduced)}")
         return lines
@@ -354,6 +402,9 @@ class Transformer(DistributedObject):
         self._overwrite = False
         self._budget_bytes: float | None = None
         self._items: list[WorkItem] | None = None  # built once by _work_items(), after prepare()
+        # What the RANK may hold, beside _budget_bytes which is the share left for the work: the
+        # closing line judges the process's peak against the first, the sizing spends the second.
+        self._rank_budget_bytes: float = 0.0
         self._shards: list[list[int]] = []
         self._reductions: dict[str, CaseReduction | None] = {}
         self._planned: dict[tuple[str, str], Verdict] = {}
@@ -658,8 +709,13 @@ class Transformer(DistributedObject):
         """The plan lines of one work item: one for a case or a reduction, one per copy for an expansion."""
         if item.kind == "reduction":
             return [self._plan_reduction(item, overwrite)]
-        # The plan prices the very slabs the run will sweep: same budget, same rows.
-        item.manager.set_memory_budget(budget_bytes)
+        # The plan prices the very slabs the run will sweep: same budget, same rows. And the SHARE,
+        # not the whole declaration: a sweep's block price already covers the chain that runs on it
+        # (DatasetManager.sweep_block_bytes folds in working_multiple), so it takes the landing's
+        # share and the chain's together -- what is left is the store's cache, which is holding its
+        # own beside every block. Handed the whole figure, a per-case sweep and the cache summed to
+        # more than the declaration and a 12 GiB machine was killed on a chain a reduction survived.
+        item.manager.set_memory_budget(sweep_share(budget_bytes))
         if item.kind == "expansion":
             return self._plan_copies(item, overwrite, probed)
         return [self._plan_case(item, budget_bytes, overwrite, probed)]
@@ -726,8 +782,11 @@ class Transformer(DistributedObject):
         """Plan every (case, chain) on the launcher, headers plus one write probe per destination."""
         budget = self.dataset.resolved_budget()
         node_ranks = node_local_ranks(world_size)
-        per_rank_budget = budget.per_rank_bytes(node_ranks)
+        per_rank_budget = budget.work_bytes(node_ranks)
         budget_desc = budget.description
+        held_already = budget.per_rank_bytes(node_ranks) - per_rank_budget
+        if held_already > 0:
+            budget_desc += f", less {format_bytes(held_already)} the process already holds"
         if not budget.shared_across_ranks and node_ranks > 1:
             # An explicit budget is per rank and never divided: the node holds N of them.
             budget_desc += f", per rank: x{node_ranks} = {format_bytes(per_rank_budget * node_ranks)} on the node"
@@ -735,6 +794,7 @@ class Transformer(DistributedObject):
         # the plan must measure the same run setup() will enforce. The store's decoded-chunk cache
         # is bounded here too: it is part of what the process holds.
         self._budget_bytes = per_rank_budget
+        self._rank_budget_bytes = budget.per_rank_bytes(node_ranks)
         set_per_rank_budget(per_rank_budget)
         chunk_cache_bytes = bound_chunk_cache()
         entries: list[TransformPlanEntry] = []
@@ -756,6 +816,9 @@ class Transformer(DistributedObject):
         kept = set(self.dataset.case_names)
         dropped = {group: len(held - kept) for group, held in (self.dataset.cohort_names or {}).items()}
         dtype_hypothesis = f"{'/'.join(sorted(planned_dtypes)) or 'float32'} / source channels"
+        # The rule run_process applies, asked here so the plan names the ceiling the run will use.
+        resolved = get_device(0)
+        chain_device = torch.device(f"cuda:{resolved}") if isinstance(resolved, int) else resolved
         return TransformPlan(
             entries,
             per_rank_budget,
@@ -766,6 +829,7 @@ class Transformer(DistributedObject):
             tuple(self._plan_notes(sub_cap_sweeps)),
             chain_labels,
             chunk_cache_bytes,
+            chain_device,
         )
 
     #: What a streamed case whose slabs the budget lowered below the default height, and whose chain
@@ -866,7 +930,8 @@ class Transformer(DistributedObject):
             )
             raise TransformerError(
                 f"{len(violations)} output(s) do not fit the per-rank budget"
-                f" ({format_bytes(plan.budget_bytes)}): worst is"
+                f" ({format_bytes(plan.budget_bytes)}, of which"
+                f" {format_bytes(plan.ceiling_for(worst.verdict))} for this): worst is"
                 f" ~{format_bytes(worst.working_set_bytes)}: {what}.",
                 remedy,
             )
@@ -939,6 +1004,30 @@ class Transformer(DistributedObject):
     def rank_dataloaders(self, global_rank: int) -> list:
         return []  # a rank walks its shard of work items; there is no loader
 
+    def _held_line(self) -> str | None:
+        """What this rank actually held, against what it was allowed to hold.
+
+        A budget is a promise about resident memory, and until the run says what it held the promise
+        could only be checked from outside, with a cgroup and a stopwatch. The plan announces what it
+        SIZED for, which is not the same number: the sizing solves for a share of the budget, so a
+        chain holding more than it was priced at shows up here and nowhere else.
+        """
+        peak = peak_resident_bytes()
+        if peak is None:
+            return None
+        # The RANK's whole figure, not the share left for the work. The peak is this process's
+        # high-water mark and it includes the interpreter and the libraries; the work budget has
+        # those taken off it, so judging one against the other counts the same bytes twice and
+        # reads as an overshoot that is not there (2.26x on a 2 GiB machine where the truth is
+        # 1.24x, the difference being the 661 MiB the process held before it read anything).
+        budget = self._rank_budget_bytes or self._budget_bytes
+        held = f"held {format_bytes(peak)} at its peak"
+        if not budget or budget <= 0:
+            return f"{held} (no memory_budget declared: nothing bounded it)"
+        over = peak / budget
+        verdict = "within" if over <= 1.0 else f"{over:.2f}x"
+        return f"{held} against a per-rank budget of {format_bytes(budget)}: {verdict}"
+
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders):
         """Materialize this rank's cases. The plan already said what will happen: the console gets
         the deviations from it, the live counter, and one final line that says how it went."""
@@ -990,6 +1079,9 @@ class Transformer(DistributedObject):
         clock = SWEEP_CLOCK.report()
         if clock is not None:
             print(clock)
+        held = self._held_line()
+        if held is not None:
+            print(f"[KonfAI] {who}{held}")
         if failed:
             listed = "\n".join(f"  {group_dest}: '{what}': {reason}" for group_dest, what, reason in failed)
             raise TransformerError(

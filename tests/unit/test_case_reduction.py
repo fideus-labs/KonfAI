@@ -24,23 +24,39 @@ import itertools
 import time
 import weakref
 from pathlib import Path
+from types import SimpleNamespace
 
+import konfai.data.patching as patching_module
+import konfai.data.transform as transform_module
 import numpy as np
 import pytest
 import torch
-from konfai.data.case_reduction import CaseReduction, ReductionPlan, split_chain
-from konfai.data.patching import SWEEP_CLOCK, DatasetManager
+from konfai.data.case_reduction import (
+    _KEPT_FOLDS_SHARE_OF_REGIONS,
+    CaseReduction,
+    ReductionPlan,
+    split_chain,
+)
+from konfai.data.patching import (
+    SWEEP_CLOCK,
+    SWEEP_SLAB_ROWS,
+    DatasetManager,
+    HeldMeter,
+    open_held_meter,
+)
 from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
 from konfai.data.transform import (
     Clip,
     Dilate,
     Normalize,
     Reduce,
+    Resample,
     Save,
     TensorCast,
     Transform,
     resolve_operator,
 )
+from konfai.utils.budget import BUDGET_SHARES
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ReductionError, TransformError
 
@@ -720,3 +736,260 @@ def test_an_incremental_fold_holds_one_member_region_at_a_time(tmp_path: Path, m
     assert engine.plan().resident_regions == 2
     assert engine.materialize() is True
     assert len(alive) > CASES, "the fold read fewer regions than it has cases"
+
+
+def test_the_plan_prices_what_a_member_chain_holds_beside_its_region(tmp_path: Path) -> None:
+    """A reduction's peak is not the operator's buffers alone: each member REPLAYS its chain to
+    produce its region, and a stage that allocates beyond what it is handed holds that too.
+
+    ``Resample`` declares ``working_multiple = 6.5`` (its sampling grid, its taps, and the widening a
+    stored integer forces), which
+    ``DatasetManager.working_multiple()`` already reports; the plan asks only the OPERATOR, whose
+    multiple for ``Mean`` is 0.0. Measured on the ExaSPIM prep Fold over a 3-channel native field
+    (``[514, 1331, 1775]``, 8 regions of 70 rows, incremental ``Mean``): the plan announced
+    3.696 GiB and the run peaked at 14.5 GiB, of which one member read alone added 2.161 GiB.
+    """
+    plain = _run(tmp_path / "plain", [], Reduce(operator="Mean", output="t"), [])[0].plan()
+    # The cohort's own spacing, so the grid is untouched and the ONLY thing that differs between
+    # the two plans is what the chain holds while it produces a region.
+    resampled = _run(
+        tmp_path / "resampled", [Resample(spacing=[1.0, 1.0, 2.0])], Reduce(operator="Mean", output="t"), []
+    )[0]
+    assert resampled.managers[0].working_multiple() == 6.5, "the chain declares what it holds"
+    assert resampled.plan().spatial == plain.spatial, "same grid: the chain's hold is the one variable"
+    assert resampled.plan().peak_bytes > plain.peak_bytes, (
+        "a chain holding three volumes-worth per member region must price above one that holds none:"
+        " the plan is what the region sizing is derived from, so a peak it under-states is not a bound"
+    )
+
+
+def test_a_generous_budget_stops_at_the_plateau_and_never_below_the_slab_floor(tmp_path: Path) -> None:
+    """The budget is a CEILING, not a target: past the height where a chain reads no fewer source
+    voxels, a taller region only holds more, so the sizing stops there however much memory it is
+    given. And never below the per-region floor: a chain that pulls exactly what it lands has a
+    flat read curve whose plateau starts at one row, and one-row regions pay every fixed cost of a
+    region for one row of work.
+    """
+    # Clip, not a Resample: a resample's taps reach a halo, so its read curve is not flat and its
+    # plateau is not one row. A POINTWISE stage is the case the floor exists for.
+    engine = _run(tmp_path, [Clip(0.0, 50.0)], Reduce(operator="Mean", output="t"), [])[0]
+    engine.fit_budget(64 * (1 << 30))  # far more than this cohort could ever hold
+    assert engine.slab_rows >= min(SWEEP_SLAB_ROWS, engine.plan().spatial[0]), (
+        "an identity resample pulls what it lands, so its plateau is one row: the floor is what"
+        " keeps the sizing off one-row regions"
+    )
+
+
+def test_a_field_resample_prices_the_field_window_its_case_actually_holds(tmp_path: Path) -> None:
+    """What a stage holds can be a property of its CONFIGURATION, not of its class.
+
+    A ``Resample`` through a field solved on the case's own grid holds three channels of it beside
+    the sampling grid; through a field solved coarser it holds a fraction of that. Same class, same
+    ``working_multiple``, different holds -- so the plan asks the stage about the case
+    (``case_working_multiple``) rather than reading the class attribute.
+
+    Measured on the prep's appearance fold over native-resolution fields: priced at the class's
+    figure the plan announced 12.41 GiB, and the run held 38.2.
+    """
+    _cohort(tmp_path / "cases")
+    fields = Dataset(tmp_path / "dvf", "h5")
+    for index in range(CASES):
+        # Same grid as the cohort: one field component per axis, at the case's own density.
+        fields.write("DVF", f"CASE_{index:03d}", np.zeros((3, 8, 10, 6), np.float32), _attributes())
+    warp = Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF")
+    for index in range(CASES):
+        warp.transform_shape("CT", f"CASE_{index:03d}", [8, 10, 6], _attributes())
+
+    plain = Resample(spacing=[1.0, 1.0, 2.0])
+    plain.transform_shape("CT", "CASE_000", [8, 10, 6], _attributes())
+    # A separable map has no field window and is not walked coordinate by coordinate.
+    assert plain.case_working_multiple("CASE_000") == plain.working_multiple, "no field, no field window"
+    # Three components at the case's own density, each weighing TWO of the plan's volumes (a field
+    # is read as float64 and the plan counts a volume at four bytes), materialised THREE times over
+    # while ITK is handed it. The general walk this case also takes is NOT added: it slabs itself
+    # against the declared budget.
+    expected = warp.working_multiple + 3.0 * 2.0 * transform_module._FIELD_WINDOW_COPIES
+    assert warp.case_working_multiple("CASE_000") == pytest.approx(expected)
+    # A case this stage has never met answers the class's figure rather than guessing at a grid.
+    assert warp.case_working_multiple("NEVER_SEEN") == warp.working_multiple
+
+
+def _engine_for_refit(tmp_path: Path, budget: float, rows: int) -> CaseReduction:
+    engine = _run(tmp_path, [], Reduce(operator="Mean", output="t"), [])[0]
+    engine._budget_bytes = budget
+    engine.slab_rows = rows
+    for manager in engine.managers:
+        manager.set_chain_device(torch.device("cuda:0"))
+    return engine
+
+
+def test_the_first_region_is_the_probe_and_only_ever_shortens_the_rest(tmp_path: Path) -> None:
+    """What the plan priced is a model; what the first region held is a fact.
+
+    The model has to be right about every stage, every store and every bridge the chain crosses,
+    and this work found it wrong at all three. The measurement costs one counter read on a region
+    the fold had to compute anyway, and it bounds the next region from above because a high-water
+    mark does -- the same reading Predictor._accumulate_device makes of the batch that just ran.
+
+    Driven through a HeldMeter built on a chosen reading, so the arithmetic is exercised on both
+    routes at once: which instrument answered is the meter's business and not the fold's.
+    """
+    budget = 1 << 30
+    allowed = budget * CaseReduction._MEASURED_MARGIN
+
+    def engine_holding(name: str, held: int) -> CaseReduction:
+        engine = _run(tmp_path / name, [], Reduce(operator="Mean", output="t"), [])[0]
+        engine._budget_bytes = budget
+        engine.slab_rows = 100
+        return engine
+
+    # Held twice what the declaration allows: the rest are cut to half the height.
+    engine = engine_holding("over", 0)
+    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 2), 0), 100, [1000, 10, 6])
+    assert engine.slab_rows == 50
+
+    # Held less than the declaration: nothing moves. A measurement is never a licence to spend a
+    # budget the sizing declined to spend, and the region that set the peak has already run.
+    engine = engine_holding("under", 0)
+    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 0.25), 0), 100, [1000, 10, 6])
+    assert engine.slab_rows == 100, "a region that fits must not make the next one taller"
+
+    # The baseline is subtracted: the same peak over a higher starting point held less.
+    engine = engine_holding("baseline", 0)
+    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 2), int(allowed * 1.9)), 100, [1000, 10, 6])
+    assert engine.slab_rows == 100
+
+    # Never below one row, however badly the first region overshot.
+    engine = engine_holding("tiny", 0)
+    engine.slab_rows = 4
+    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 10_000), 0), 4, [1000, 10, 6])
+    assert engine.slab_rows == 1
+
+    # An instrument that went quiet, and no instrument at all, both leave the planned height.
+    engine = engine_holding("blind", 0)
+    engine._refit_to_measurement(HeldMeter(lambda: None, 0), 100, [1000, 10, 6])
+    assert engine.slab_rows == 100
+    engine._refit_to_measurement(None, 100, [1000, 10, 6])
+    assert engine.slab_rows == 100
+
+    # No budget declared: nothing bounds anything, so nothing is re-fitted.
+    engine = engine_holding("none", 0)
+    engine._budget_bytes = 0.0
+    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 8), 0), 100, [1000, 10, 6])
+    assert engine.slab_rows == 100
+
+
+def test_a_host_chain_gets_a_meter_and_a_kernel_without_one_gets_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host chain has no allocator counter, and the kernel's resident peak is the meter it does
+    have. A kernel that offers no reset gets no meter at all, rather than a run-long peak read as
+    if it were one region's."""
+    monkeypatch.setattr(patching_module, "reset_resident_peak", lambda: True)
+    monkeypatch.setattr(patching_module, "resident_bytes", lambda: 1_000_000)
+    monkeypatch.setattr(patching_module, "peak_resident_bytes", lambda: 1_500_000)
+    meter = open_held_meter(None)
+    assert meter is not None and meter.held() == 500_000
+
+    monkeypatch.setattr(patching_module, "reset_resident_peak", lambda: False)
+    assert open_held_meter(None) is None
+
+
+def test_the_folds_a_stat_pass_keeps_come_out_of_the_regions_share(tmp_path: Path) -> None:
+    """A kept fold is memory the regions are not holding, so it comes out of the same share.
+
+    A stat pass can hand its folds to the write pass instead of re-folding them: a memory trade, not
+    a correctness one. It was allowed half the WHOLE declaration, beside regions that had already
+    taken half and members that had been handed all of it -- one and a half times the budget, from
+    three consumers each sure it was the only one.
+    """
+    from konfai.data.transform import Standardize  # GLOBAL_STAT after the fold: the stat pass runs
+
+    engine, _destination, _volumes = _run(
+        tmp_path, [], Reduce(operator="Mean", output="t"), [Standardize()], slab_rows=3
+    )
+    plan = engine.plan()
+    assert plan.stat_pass, "a GLOBAL_STAT stage after the fold is what makes the second pass"
+    output = engine._folded_output_bytes(plan)
+    share = BUDGET_SHARES["regions"] * _KEPT_FOLDS_SHARE_OF_REGIONS
+
+    # The output at 40 % of the declaration: it fitted the half the old rule allowed, and does not
+    # fit the share of the FOLD's own half that is all it may have.
+    engine.fit_budget(output / 0.4)
+    assert not engine.keeps_folds(engine.plan()), (
+        "folds that fit half the whole budget do not fit their share of it: the regions and the"
+        " members are holding the rest at the same moment"
+    )
+
+    # Just inside its share: kept. Just outside: not.
+    engine.fit_budget(output / (share * 0.99))
+    assert engine.keeps_folds(engine.plan())
+    engine.fit_budget(output / (share * 1.01))
+    assert not engine.keeps_folds(engine.plan())
+
+    # A chain with no stat pass never keeps anything, whatever it would fit.
+    plain = _run(tmp_path / "plain", [], Reduce(operator="Mean", output="t"), [])[0]
+    plain.fit_budget(output * 1000)
+    assert not plain.plan().stat_pass and not plain.keeps_folds(plain.plan())
+
+    # No budget: nothing is subtracted from nothing, and nothing is kept.
+    engine.fit_budget(None)
+    assert not engine.keeps_folds(engine.plan())
+
+
+def test_a_value_neutral_stage_does_not_decide_the_region_height(tmp_path: Path) -> None:
+    """The sizing must follow the data, not the shape of the stage list.
+
+    A chain with no stage before the fold has no segment to read a pull map from, so every member
+    answers None when asked where its reads stop paying. Answering the output's own HEIGHT there
+    made the ceiling depend on something that is not a property of the cohort: the same cases, the
+    same budget and the same voxels read gave the whole volume with no stage and the floor with one
+    ``Clip`` whose bounds lie outside the data. An eightfold difference in what the fold holds, from
+    a stage that changes no voxel.
+
+    It was also the one place the run-time probe could not help: at full height a fold has exactly
+    one region, and the probe only ever cuts the ones after the first.
+    """
+    # Taller than SWEEP_SLAB_ROWS and tiny in bytes: the difference the fallback makes is between
+    # the floor and the whole height, so a cohort shorter than the floor cannot show it at all.
+    dataset = Dataset(tmp_path / "tall", "h5")
+    for index in range(CASES):
+        dataset.write("CT", f"CASE_{index:03d}", np.zeros((1, 200, 4, 4), np.float32), _attributes())
+    budget = 8 << 30
+
+    def rows(pre: list) -> int:
+        engine = CaseReduction(
+            managers=_managers(dataset, pre),
+            reduce=Reduce(operator="Mean", output="t"),
+            post=[],
+            destination=Dataset(tmp_path / f"out{len(pre)}", "h5"),
+            group="CT",
+            slab_rows=3,
+        )
+        engine.fit_budget(budget)
+        return engine.slab_rows
+
+    # Clip's bounds are outside the fixture's range, so it is the identity on every voxel.
+    assert rows([]) == rows([Clip(-1.0e9, 1.0e9)]), "a stage that changes no voxel must not change how the fold is cut"
+
+
+# ---------------------------------------------------------------- what a chunked store adds
+
+
+def test_a_store_that_serves_what_it_is_asked_for_adds_nothing_to_the_peak(tmp_path: Path) -> None:
+    """The charge is the EXCESS a block-aligned decode materialises above the window, so a backend
+    with no block grid contributes zero and the peak says exactly what it said before."""
+    engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Mean", output="avg"), [])
+    assert engine.plan().read_bytes == 0
+
+
+def test_a_fold_is_judged_against_the_share_its_height_was_solved_for(tmp_path: Path) -> None:
+    """``fit_budget`` solves the height against the regions' share, so that is what the peak is
+    judged against. Judged against the whole budget instead, the gate could only speak when a
+    single row did not fit: a fold needing twice its share announced a plan it could not keep and
+    was killed by the kernel rather than refused here."""
+    from konfai.transformer import TransformPlan, Verdict
+
+    engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Median", output="m"), [])
+    budget = float(engine.plan().peak_bytes) * 1.5  # over the regions' share, under the whole budget
+    plan = SimpleNamespace(budget_bytes=budget)
+    assert TransformPlan.ceiling_for(plan, Verdict.REDUCE) < engine.plan().peak_bytes
+    assert TransformPlan.ceiling_for(plan, Verdict.WHOLE_VOLUME) == budget

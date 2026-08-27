@@ -184,23 +184,28 @@ class TestTransformBound:
 
 
 class TestDisplacementStageBound:
-    def test_the_bound_is_one_pass_per_stage_and_stays_out_of_the_pickle(self, monkeypatch):
+    def test_the_bound_is_one_pass_per_stage_and_stays_out_of_the_pickle(self):
         import pickle
 
         from konfai.data.geometry import DisplacementStage
 
         values = np.random.RandomState(5).normal(0.0, 3.0, (3, 6, 7, 8))
         stage = DisplacementStage(_grid(), values, 1)
-        passes: list[int] = []
-        absolute = np.abs
-        monkeypatch.setattr(np, "abs", lambda *args, **kwargs: passes.append(1) or absolute(*args, **kwargs))
+        # Computed once and kept: asked of the property itself rather than of whichever numpy call
+        # it happens to make, so the claim survives a change of arithmetic. It did not: the body
+        # used to call np.abs and the count was the probe.
+        assert "bound_xyz" not in stage.__dict__
         first = stage.bound_xyz
+        assert "bound_xyz" in stage.__dict__
         for _ in range(5):
             stage.bound()
             assert stage.bound_xyz is first
-        assert len(passes) == 1
-        monkeypatch.undo()
+        # sup |v| per component, however it is computed: no values-sized temporary is needed for it.
         np.testing.assert_array_equal(first, np.abs(values).reshape(3, -1).max(axis=1))
+        # Signs both ways, since max(max v, -min v) is only sup |v| if both ends are looked at.
+        for skewed in (np.abs(values), -np.abs(values), values * 0.0):
+            skewed_stage = DisplacementStage(_grid(), skewed, 1)
+            np.testing.assert_array_equal(skewed_stage.bound_xyz, np.abs(skewed).reshape(3, -1).max(axis=1))
         # The cache is per instance, not per pickle: a rank rebuilds it from the values it receives.
         assert "bound_xyz" not in stage.__getstate__()
         again = pickle.loads(pickle.dumps(stage))

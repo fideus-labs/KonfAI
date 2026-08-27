@@ -25,7 +25,7 @@ import pytest
 from konfai.data.materialize import Regime, Verdict
 from konfai.data.reduction import Mean
 from konfai.data.transform import Reduce
-from konfai.utils.budget import set_per_rank_budget
+from konfai.utils.budget import BUDGET_SHARES, format_bytes, set_per_rank_budget
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformerError
 
@@ -1382,8 +1382,9 @@ def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(
                 dataset: {out}:h5
 """
     config_path = _write_config(tmp_path, transforms, header="  on_fallback: error\n")
-    # 3x the case: fits (working set = 2x), while the sweep rows drop below the case's extent.
-    budget = 3 * 8 * 32 * 32 * 4
+    # 5x the case: fits (the working set is the case, its in-flight copy and Clip's own 2.5), while
+    # the sweep rows drop below the case's extent.
+    budget = 5 * 8 * 32 * 32 * 4
     config_path.write_text(config_path.read_text().replace("memory_budget: auto", f"memory_budget: {budget}b"))
     workflow = _build(tmp_path)
     plan = workflow.compute_plan()
@@ -1452,7 +1453,9 @@ def _write_mixed_cohort(tmp_path: Path) -> Path:
         bounded.write("CT", f"CASE_{index:03d}", volume, _image_attributes())
     gzipped = Dataset(tmp_path / "source_gz", "nii.gz")
     gzipped.write("CT", "CASE_002", (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
-    budget = 3 * 8 * 32 * 32 * 4  # the case fits (working set 2x), the sweep still slabs it
+    # The case fits: its working set is the case, its in-flight copy and Clip's own 2.5. The sweep
+    # still slabs it, which is what makes the gzipped member cheaper to LOAD than to stream.
+    budget = 5 * 8 * 32 * 32 * 4
     config_path = tmp_path / "Transform.yml"
     config_path.write_text(
         "Transformer:\n"
@@ -1653,7 +1656,9 @@ def _write_snapshot_cohort(tmp_path: Path) -> Path:
         bounded.write("CT", name, (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
     gzipped = Dataset(tmp_path / "source_gz", "nii.gz")
     gzipped.write("CT", "CASE_002", (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
-    budget = 3 * 8 * 32 * 32 * 4
+    # 5x the case, so the gzipped member still fits WHOLE (the case, its in-flight copy and
+    # Clip's own 2.5) and the plan keeps printing its LOAD line.
+    budget = 5 * 8 * 32 * 32 * 4
     clip = "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
     config_path = tmp_path / "Transform.yml"
     config_path.write_text(
@@ -1711,27 +1716,23 @@ def _write_snapshot_cohort(tmp_path: Path) -> Path:
     return config_path
 
 
-_SNAPSHOT_SUMMARY = (
-    "[KonfAI] plan over 2 rank(s) | 17 entr(ies): 1 LOAD, 1 REDUCE, 1 REFUSED, 4 SKIP, 7 STREAM,"
-    " 3 WHOLE-VOLUME | per-rank budget 96.00 KiB ('98304b', per rank: x2 = 192.00 KiB on the node)"
-    " | 1 case(s) dropped"
-)
+_SNAPSHOT_SUMMARY = "[KonfAI] plan over 2 rank(s) | 17 entr(ies): 1 LOAD, 1 REDUCE, 1 REFUSED, 4 SKIP, 7 STREAM, 3 WHOLE-VOLUME | per-rank budget 160.00 KiB ('163840b', per rank: x2 = 320.00 KiB on the node) | 1 case(s) dropped"
 
 _SNAPSHOT_REPORT = """\
-[KonfAI] plan over 2 rank(s) | per-rank budget 96.00 KiB ('98304b', per rank: x2 = 192.00 KiB on the node) | held beside the regions: engine ~32.00 MiB, decoded-chunk cache up to 32.00 KiB (under the 256.00 MiB floor: a region touching more OME-Zarr chunks than it holds decodes them again) | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed float32 / source channels until the first slab
+[KonfAI] plan over 2 rank(s) | per-rank budget 160.00 KiB ('163840b', per rank: x2 = 320.00 KiB on the node) | held beside the regions: engine ~32.00 MiB, decoded-chunk cache up to 24.00 KiB (under the 256.00 MiB floor: a region touching more OME-Zarr chunks than it holds decodes them again) | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed float32 / source channels until the first slab
 [KonfAI] 1 case(s) of 'CT' are DROPPED: the run keeps the cases every groups_src shares, minus what 'subset' excludes.
   CT -> A (Clip -> Write <tmp>/out_a:h5): 3 case(s) -- 1 STREAM, 1 LOAD, 0 WHOLE-VOLUME, 1 SKIP (output already written)
-    (1 case(s)) LOAD: fits the per-rank budget (~64.00 KiB vs 96.00 KiB); streaming would read ~2.0x the source
+    (1 case(s)) LOAD: fits the per-rank budget (~144.00 KiB vs 160.00 KiB); streaming would read ~2.0x the source
   CT -> B (Clip -> Standardize -> Write <tmp>/out_b:h5): 3 case(s) -- 0 STREAM, 0 LOAD, 3 WHOLE-VOLUME, 0 SKIP (output already written)
     (3 case(s)) WHOLE-VOLUME: stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.
-    worst fallback case ~= 96.00 KiB vs per-rank budget 96.00 KiB
+    worst fallback case ~= 144.00 KiB vs per-rank budget 160.00 KiB
   CT -> C (Clip -> Expand -> Brightness -> Write <tmp>/out_c:h5): EXPAND 3 case(s) -> 9 cop(ies): 5 STREAM (shared read pass), 1 STREAM (own pass), 0 WHOLE-VOLUME, 3 SKIP (copy already written)
     (1 cop(ies)) own pass: the only copy of this case still to write; a shared pass with one member is its own sweep.
   CT -> D (Clip -> Reduce -> Write <tmp>/out_d:h5): REDUCE 3 case(s) -> 1 output 'atlas': REDUCE
-    2 resident region(s) of 6 row(s) = 0.00 GiB  (incremental accumulator)
+    4.5 resident region(s) of 4 row(s) = 0.00 GiB  (incremental accumulator)
     reads: 1 of 3 member(s) sit on nii.gz, which decodes the whole volume behind every region read: 2 decodes per member (one per region), 2 in all
     put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first
-    peak ~= 48.00 KiB vs per-rank budget 96.00 KiB
+    peak ~= 72.00 KiB vs the regions' share of the budget, 80.00 KiB of 160.00 KiB per rank
     cases: CASE_000, CASE_001, CASE_002
   CT -> E (Clip -> Standardize -> Reduce -> Write <tmp>/out_e:h5): REDUCE 3 case(s) -> 1 output 'atlas': REFUSED
     case 'CASE_000': stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.
@@ -1767,13 +1768,17 @@ def test_the_plan_bounds_the_chunk_cache_by_the_budget_and_says_when_it_is_under
     try:
         config_path.write_text(text.replace("memory_budget: auto", "memory_budget: 98304b"))
         report = _build(tmp_path).compute_plan().report()
-        assert ome_zarr._chunk_cache().capacity == 98304 // 3
-        assert "decoded-chunk cache up to 32.00 KiB (under the 256.00 MiB floor:" in report
+        assert ome_zarr._chunk_cache().capacity == int(98304 * BUDGET_SHARES["cache"])
+        assert (
+            f"decoded-chunk cache up to {format_bytes(int(98304 * BUDGET_SHARES['cache']))}"
+            " (under the 256.00 MiB floor:" in report
+        )
 
         config_path.write_text(text.replace("memory_budget: auto", "memory_budget: 3GiB"))
         report = _build(tmp_path).compute_plan().report()
-        assert ome_zarr._chunk_cache().capacity == 1 << 30
-        assert "decoded-chunk cache up to 1.00 GiB" in report
+        cache = int((3 << 30) * BUDGET_SHARES["cache"])
+        assert ome_zarr._chunk_cache().capacity == cache
+        assert f"decoded-chunk cache up to {format_bytes(cache)}" in report
     finally:
         set_per_rank_budget(None)
         ome_zarr.bound_chunk_cache()
@@ -1808,3 +1813,36 @@ def test_a_remote_write_destination_is_refused_by_the_plan_whatever_on_fallback_
     with pytest.raises(TransformerError, match="local path"):
         workflow.setup(1)
     assert not (tmp_path / "Transforms" / "TEST" / "outputs.json").exists()
+
+
+def test_the_plan_names_the_ceiling_the_regions_are_actually_cut_under() -> None:
+    """A GPU chain has TWO ceilings from one declaration and the header printed only one.
+
+    The budget is declared in host bytes and bounds what the host retains (the store's decoded-chunk
+    cache reads it); the REGIONS of a GPU chain live in VRAM and are cut under
+    ``device_capped_budget``. A run whose second group met a card its first group had filled was cut
+    at 7.63 GiB where the first had 11.58, halving its region height, and nothing in the plan said
+    so. On a host chain the two are the same figure and the clause is not printed.
+    """
+    import torch
+    from konfai.transformer import TransformPlan
+
+    def plan(device: "torch.device | None") -> TransformPlan:
+        return TransformPlan(
+            entries=[],
+            budget_bytes=32 * 10**9,
+            budget_desc="'32G'",
+            world_size=1,
+            dropped_cases={},
+            dtype_hypothesis="float32 / source channels",
+            chain_device=device,
+        )
+
+    assert "regions on" not in plan(None)._header(), "a host chain has one ceiling, so it names one"
+    assert "regions on" not in plan(torch.device("cpu"))._header()
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device: the second ceiling cannot be exercised")
+    header = plan(torch.device("cuda:0"))._header()
+    assert "regions on cuda:0 under" in header, header
+    # And the declared figure is still there: the reader must be able to tell the two apart.
+    assert "per-rank budget" in header
