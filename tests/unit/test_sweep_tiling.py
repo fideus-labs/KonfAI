@@ -253,15 +253,48 @@ def test_a_regrid_pays_for_what_it_pulls_and_not_for_what_it_lands(tmp_path: Pat
     assert _block_voxels(regrid, plans) < _block_voxels(pointwise, ())
 
 
+def test_a_budget_that_only_fits_without_the_queue_gives_the_queue_up(tmp_path: Path) -> None:
+    """The read-ahead is bought, not owed. A sweep that cannot afford it stops buying it.
+
+    Three source regions are resident with a queue and one without, so a chain whose stage buffers
+    do not dominate holds a quarter to a third less serially. That band is narrow -- 1.31x to 1.34x
+    on this fixture -- and inside it the alternative is not a slower run but no run at all.
+    """
+    source, _volume = _sheared_fixture(tmp_path)
+    resample = Resample(reference="TARGET", reference_group="GRID", reference_dataset=f"{tmp_path / 'ref'}:h5")
+    manager = _manager(source, [resample, Save(f"{tmp_path / 'out'}:h5")])
+    plans = _sweep_plans(manager)
+    base = _sweep_pipeline_depth()
+    assert base > 0, "a rank with one core queues nothing and has nothing to give up"
+
+    tile = manager._sweep_shape(list(LANDING), plans, 1)
+    queued = manager.sweep_block_bytes(list(LANDING), 1, plans, tile, base)
+    serial = manager.sweep_block_bytes(list(LANDING), 1, plans, tile, 0)
+    assert serial < queued, "the queue is part of what one row costs"
+
+    # A budget between the two: the queue is what makes it refuse, and nothing else does.
+    manager.set_memory_budget((queued + serial) / 2.0)
+    found = manager._sweep_tile(list(LANDING), 1, plans)
+    assert manager.sweep_block_bytes(list(LANDING), 1, plans, found, 0) <= manager._sweep_budget_bytes
+
+    # And the run walks the depth the sizing solved for, or it holds what it was never priced for.
+    assert manager._sweep_depth(list(LANDING), 1, plans, found) == 0
+
+
 def test_a_budget_no_region_fits_refuses_with_both_figures(tmp_path: Path) -> None:
     """A budget one row of the landing does not fit is not a one-row sweep: it is a refusal naming
     the budget and what the smallest region holds, so the reader knows what to raise it to."""
     source, _volume = _sheared_fixture(tmp_path)
     manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
-    manager.set_memory_budget(_priced(manager, (), 1) / 2.0)
+    # Under what one row holds WITHOUT the queue, since that is the last thing the sizing tries:
+    # half of the queued price is a budget the serial retry now buys, and buying it is the point.
+    serial = manager.sweep_block_bytes(list(LANDING), 1, (), manager._sweep_shape(list(LANDING), (), 1), 0)
+    manager.set_memory_budget(serial / 2.0)
 
-    with pytest.raises(DatasetManagerError, match=r"no region of 'CT' fits the per-rank memory budget"):
+    with pytest.raises(DatasetManagerError, match=r"no region of 'CT' fits the per-rank memory budget") as raised:
         manager._sweep_tile(list(LANDING), 1)
+    # Both attempts, so the reader raising the budget knows which figure to clear.
+    assert "with the read-ahead given up" in str(raised.value)
     assert manager.stream_refusal(0) is not None, "and the plan routes the case away from streaming"
 
 

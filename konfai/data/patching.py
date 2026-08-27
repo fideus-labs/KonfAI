@@ -3194,6 +3194,11 @@ class DatasetManager:
         second block in flight recovers 0.5 s of a 6.7 s run and a third recovers none.
         """
         depth = _sweep_pipeline_depth()
+        # DOWN BEFORE UP. `tile` may be the one the sizing found only after giving the queue up
+        # (:meth:`_sweep_tile`), and a run that kept the queue anyway would hold what the sizing was
+        # never told about -- the budget's whole promise, lost to a default nobody revisited.
+        while depth and not self._keeps_the_block(spatial, channels, plans, tile, depth):
+            depth -= 1
         while depth and depth < _SWEEP_MAX_DEPTH and self._keeps_the_block(spatial, channels, plans, tile, depth + 1):
             depth += 1
         return depth
@@ -3201,12 +3206,15 @@ class DatasetManager:
     def _keeps_the_block(
         self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"], tile: list[int], depth: int
     ) -> bool:
-        """Whether a queue of ``depth`` still leaves the sweep exactly ``tile``: a deeper one the
-        budget cannot hold refuses, and a refusal here is the answer no, not the sweep's failure."""
-        try:
-            return self._sweep_tile(spatial, channels, plans, depth) == tile
-        except DatasetManagerError:
-            return False
+        """Whether a queue of ``depth`` both affords ``tile`` and still picks it.
+
+        Asked of the search and not of :meth:`_sweep_tile`, which falls back to no queue at all: a
+        depth that cannot hold the block would come back holding it, and every depth would look
+        affordable.
+        """
+        budget = self._sweep_budget_bytes
+        found, held = self._tile_within(spatial, channels, plans, depth, budget)
+        return found == tile and (not budget or budget <= 0 or held <= budget)
 
     def read_granularity(self) -> tuple[int, ...] | None:
         """The stored block this case's source reads are served in, spatial axes only, or ``None``
@@ -3506,24 +3514,54 @@ class DatasetManager:
         search is over the height, because that is the one free parameter of the decomposition.
         """
         depth = _sweep_pipeline_depth() if depth is None else depth
-        cap = self._sweep_rows(spatial, channels, plans, depth)
         budget = self._sweep_budget_bytes
+        tile, held = self._tile_within(spatial, channels, plans, depth, budget)
+        if not budget or budget <= 0 or held <= budget:
+            return tile
+        # THE READ-AHEAD IS THE ONE PART OF THE PRICE THE SIZING CHOSE. Everything else in the block
+        # is what the chain must hold to run at all; the queue is bought, and what it buys is wall
+        # clock (_sweep_depth: half a second of a 6.7 s run). A sweep about to refuse has no clock to
+        # buy, so it gives the queue up and asks once more. Three source regions resident become one,
+        # which is a quarter to a third of the block on a chain whose stage buffers dominate -- a
+        # narrow band, and inside it the difference is running against not running.
+        serial = None
+        if depth > 0:
+            candidate, serial = self._tile_within(spatial, channels, plans, 0, budget)
+            if serial <= budget:
+                return candidate
+        raise DatasetManagerError(
+            f"'{self.name}': no region of '{self.group_src}' fits the per-rank memory budget"
+            f" ({format_bytes(budget)}): the smallest one this chain can sweep holds"
+            f" {format_bytes(held)}"
+            + (f", and {format_bytes(serial)} with the read-ahead given up" if serial is not None else "")
+            + ".",
+            "Raise 'memory_budget'.",
+        )
+
+    def _tile_within(
+        self,
+        spatial: list[int],
+        channels: int,
+        plans: Sequence["_ReadStagePlan"],
+        depth: int,
+        budget: float | None,
+    ) -> tuple[list[int], int]:
+        """The best block a sweep of ``depth`` can afford, and what it holds: the search alone.
+
+        No refusal and no fallback, because two callers ask it two different questions -- whether a
+        deeper queue still buys the same block (:meth:`_keeps_the_block`) and what to do when none
+        of them fits (:meth:`_sweep_tile`) -- and a search that answered either for them would
+        answer the other one wrong.
+        """
+        cap = self._sweep_rows(spatial, channels, plans, depth)
         if not budget or budget <= 0:
-            return self._sweep_shape(spatial, plans, cap)
-        # The bisection never takes one row as affordable: the refusal below answers for it. What it
-        # finds is then judged against the store's own heights, because the price steps rather than
-        # climbs and bisection lands somewhere affordable, not on the best region the budget buys.
+            return self._sweep_shape(spatial, plans, cap), 0
+        # The bisection never takes one row as affordable: the caller answers for it. What it finds
+        # is then judged against the store's own heights, because the price steps rather than climbs
+        # and bisection lands somewhere affordable, not on the best region the budget buys.
         low = self._rows_within(spatial, channels, plans, depth, budget, cap)
         tile = self._best_tile(spatial, channels, plans, depth, budget, [low, *self._grid_rows(cap)])
-        held = self.sweep_block_bytes(spatial, channels, plans, tile, depth)
-        if held > budget:
-            raise DatasetManagerError(
-                f"'{self.name}': no region of '{self.group_src}' fits the per-rank memory budget"
-                f" ({format_bytes(budget)}): the smallest one this chain can sweep holds"
-                f" {format_bytes(held)}.",
-                "Raise 'memory_budget'.",
-            )
-        return tile
+        return tile, self.sweep_block_bytes(spatial, channels, plans, tile, depth)
 
     def _get_streamed_data(
         self,
