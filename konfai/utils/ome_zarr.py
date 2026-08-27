@@ -39,6 +39,7 @@ import dataclasses
 import itertools
 import operator
 import shutil
+import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -48,6 +49,7 @@ from typing import Any
 
 import numpy as np
 
+from konfai.utils import uri
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.runtime import map_over_rank_pool
 
@@ -177,6 +179,22 @@ def _konfai_attributes(store_path: str) -> dict[str, Any]:
         return {}
 
 
+def _from_ngff_zarr(store_path: str | Path) -> Any:
+    """ngff-zarr's multiscales for ``store_path``. A remote root goes in as a key-to-bytes mapping
+    over its own filesystem (ngff-zarr >= 0.44 reads a remote string as a local path) and as its URL
+    when ngff-zarr refuses the mapping, which older releases resolve themselves."""
+    if not uri.is_uri(store_path):
+        return ngff_zarr.from_ngff_zarr(str(store_path))
+    # Through uri.filesystem, so a missing fsspec backend or configuration is the structured
+    # DatasetManagerError, never a raw dependency error.
+    filesystem = uri.filesystem(store_path)
+    _, target = uri.split_scheme(str(store_path))
+    try:
+        return ngff_zarr.from_ngff_zarr(filesystem.get_mapper(target))
+    except ValueError:
+        return ngff_zarr.from_ngff_zarr(str(store_path))
+
+
 @lru_cache(maxsize=8)
 def _load_image(store_path: str, level: int) -> Any:
     """Return the ``NgffImage`` for ``level`` of an OME-Zarr store, memoised per (store, level).
@@ -194,7 +212,7 @@ def _load_image(store_path: str, level: int) -> Any:
     """
     _require_ngff_zarr()
     try:
-        multiscales = ngff_zarr.from_ngff_zarr(str(store_path))
+        multiscales = _from_ngff_zarr(store_path)
     except (KeyError, IndexError, OSError, TypeError, ValueError) as exc:
         raise DatasetManagerError(
             f"Cannot open OME-Zarr store '{store_path}' (level {level}).",
@@ -258,7 +276,7 @@ def is_displacement_field(store_path: str | Path) -> bool:
     if not _NGFF_ZARR_AVAILABLE:
         return False
     try:
-        metadata = ngff_zarr.from_ngff_zarr(str(store_path)).metadata
+        metadata = _from_ngff_zarr(store_path).metadata
     except Exception:
         # "Not a displacement field" is the only answer this owes: it is asked purely to decide HOW to
         # read an entry, and an absent or unreadable store is not one either.
@@ -608,7 +626,7 @@ def _assemble_window(
 def _level_path(store_path: str, level: int) -> str | None:
     """The zarr path of one level, from the store's multiscales metadata, memoised beside the image."""
     try:
-        datasets = ngff_zarr.from_ngff_zarr(store_path).metadata.datasets
+        datasets = _from_ngff_zarr(store_path).metadata.datasets
         return str(datasets[level if len(datasets) > 1 else 0].path)
     except Exception:
         return None
@@ -624,7 +642,32 @@ def _read_level_window(store_path: str, level: int, image: Any, index: tuple) ->
             array = _level_array(store_path, level_path)
             if tuple(array.shape) == tuple(image.data.shape):
                 return _read_chunked(store_path, level_path, array, index)
-    return np.asarray(image.data[index])
+    return _lazy_window(image.data, index)
+
+
+def _lazy_window(data: Any, index: tuple) -> np.ndarray:
+    """The plain lazy read. A lazy array that refuses a stepped slice (ngff-zarr >= 0.44 wraps the
+    level in an adapter that takes unit steps only) is read over the unit-step span and stepped here."""
+    try:
+        return np.asarray(data[index])
+    except NotImplementedError:
+        # Each slice normalized against the shape, then its ascending unit-step span; a negative
+        # step reads that span backwards from its own end, which lands on the indices the original
+        # slice named.
+        bounds = tuple(
+            slice(*item.indices(size)) if isinstance(item, slice) else item
+            for item, size in zip(index, data.shape, strict=True)
+        )
+        span = tuple(
+            slice(item.stop + 1, item.start + 1)
+            if isinstance(item, slice) and item.step < 0
+            else slice(item.start, item.stop)
+            if isinstance(item, slice)
+            else item
+            for item in bounds
+        )
+        steps = tuple(slice(None, None, item.step) for item in bounds if isinstance(item, slice))
+        return np.asarray(data[span])[steps]
 
 
 def _store_index(
@@ -813,6 +856,11 @@ def write_ome_zarr(
     exist only from 0.6, so a caller passing both could only ever pass them consistently: an
     invariant worth removing rather than documenting.
     """
+    if scale_factors and uri.is_uri(store_path):
+        raise DatasetManagerError(
+            f"Cannot append pyramid levels to the remote store '{store_path}'.",
+            "Levels are derived in place through local paths; write the store locally and upload it.",
+        )
     array_data = np.asarray(data)
     # The one write path: the store described and created empty (ngff-zarr's metadata, the
     # caller's chunking), filled by zarr itself, its levels grafted beside level 0. Handing
@@ -876,6 +924,30 @@ def _type_component_axis(multiscales: Any, axis_type: str) -> None:
                 axis.type = axis_type
 
 
+def _write_skeleton(store_path: str | Path, multiscales: Any, version: str) -> None:
+    """ngff-zarr's metadata for the store, written in place. ngff-zarr (>= 0.44) writes local
+    directories only, so a remote root gets the skeleton written locally and uploaded through the
+    root's own filesystem: a few bytes of metadata, before the array is created underneath it."""
+    if not uri.is_uri(store_path):
+        ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=version)
+        return
+    filesystem = uri.filesystem(store_path)
+    _, target = uri.split_scheme(str(store_path))
+    if "/" not in target.strip("/"):
+        raise DatasetManagerError(
+            f"Refusing to create the store at the filesystem root '{store_path}'.",
+            "Name a key under the root (e.g. '.../dataset.ome.zarr'): creating a store replaces what its path holds.",
+        )
+    if filesystem.exists(target):
+        filesystem.rm(target, recursive=True)
+    filesystem.makedirs(target, exist_ok=True)
+    with tempfile.TemporaryDirectory() as scratch:
+        local = Path(scratch) / "skeleton"
+        ngff_zarr.to_ngff_zarr(str(local), multiscales, overwrite=True, version=version)
+        for file in sorted(path for path in local.rglob("*") if path.is_file()):
+            filesystem.put_file(str(file), uri.join(target, file.relative_to(local).as_posix()))
+
+
 def create_ome_zarr_store(
     store_path: str | Path,
     shape: Sequence[int],
@@ -934,7 +1006,7 @@ def create_ome_zarr_store(
         _type_component_axis(multiscales, _DISPLACEMENT_AXIS_TYPE)
         version = _RFC5_VERSION
     # version is explicit because to_ngff_zarr defaults to 0.5, which zarr-python 2 cannot write.
-    ngff_zarr.to_ngff_zarr(str(store_path), multiscales, overwrite=True, version=version)
+    _write_skeleton(store_path, multiscales, version)
 
     # The level-0 key comes from the metadata rather than a literal: ngff-zarr builds it from the
     # image name, so "scale0/image" is its convention to change, not ours to hardcode.
@@ -1077,13 +1149,18 @@ def append_ome_zarr_levels(
     KonfAI attribute sidecar is untouched, being a key beside theirs; a displacement field keeps its
     typed component axis through the same call that types it at creation.
     """
+    if uri.is_uri(store_path):
+        raise DatasetManagerError(
+            f"Cannot append pyramid levels to the remote store '{store_path}'.",
+            "Levels are derived in place through local paths; write the store locally and upload it.",
+        )
     _require_ngff_zarr()
     if not scale_factors:
         return
     store = Path(store_path)
     clear_ome_zarr_cache(store)
     field = is_displacement_field(store)
-    base = ngff_zarr.from_ngff_zarr(str(store)).images[0]
+    base = _from_ngff_zarr(store).images[0]
     stored_chunks = tuple(int(size) for size in base.data.chunksize)
     if downsample_method in (None, "ITKWASM_BIN_SHRINK"):
         multiscales = _bin_shrink_multiscales(base, _level_zero_scale_factors(scale_factors), stored_chunks)
@@ -1152,7 +1229,7 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
     image = _load_image(str(store_path), level)
     dims = [str(axis).lower() for axis in image.dims]
     try:
-        n_levels = len(ngff_zarr.from_ngff_zarr(str(store_path)).images)
+        n_levels = len(_from_ngff_zarr(store_path).images)
     except (OSError, TypeError, ValueError):
         n_levels = 1
     return {

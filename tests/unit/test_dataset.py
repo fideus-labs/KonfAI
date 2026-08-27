@@ -177,7 +177,7 @@ def test_sitk_file_to_data_missing_entry_raises_nameerror(tmp_path: Path) -> Non
     root = tmp_path / "Dataset"
     root.mkdir()
     with Dataset.File(f"{root}/", True, "mha", 0) as file:
-        with pytest.raises(NameError, match="not found"):
+        with pytest.raises(DatasetManagerError, match="is not in"):
             file.file_to_data("", "missing_case")
 
 
@@ -286,7 +286,7 @@ def test_resolve_data_path_skips_a_crashed_writer_temporary(tmp_path: Path, imag
     assert sitk_file._resolve_data_path("Transf") is None
     # The full read must agree with the slice/statistics paths: a missing entry raises, never returns the
     # temporary as a (partial) volume.
-    with pytest.raises(NameError, match="not found"):
+    with pytest.raises(DatasetManagerError, match="is not in"):
         sitk_file.file_to_data("", "Transf")
 
 

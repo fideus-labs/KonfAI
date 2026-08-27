@@ -113,6 +113,77 @@ def _run(tmp_path: Path, pre: list[Transform], reduce: Reduce, post: list[Transf
     return engine, destination, volumes
 
 
+def _field_cohort(tmp_path: Path, count: int = CASES) -> tuple[Dataset, np.ndarray]:
+    """A cohort and, beside it, a displacement field per case: coarse against the volume and steep.
+
+    Sized after the case this exists for. A registration field is read at a fraction of the density
+    of the volume it moves -- four times coarser here -- and its values reverse between neighbouring
+    nodes, which is the steepest thing a lattice can carry: the interpolated displacement then swings
+    the full amplitude across one cell, and a region's face cuts through that swing.
+    """
+    dataset, volumes = _cohort(tmp_path, count=count)
+    lattice = (3, 4, 3)
+    parity = (-1.0) ** np.add.outer(np.add.outer(np.arange(lattice[0]), np.arange(lattice[1])), np.arange(lattice[2]))
+    reference = np.zeros((1, 7, 9, 5), dtype=np.float32)
+    for index in range(count):
+        field = np.stack([weight * 4.0 * parity for weight in (1.0, -0.7, 0.5)]).astype(np.float32)
+        dataset.write("FIELD", f"CASE_{index:03d}", field, _attributes((3.0, 3.0, 4.0)))
+        # A grid of its own for the stage to resample ONTO. The pipeline case this stands for changes
+        # grid AND applies a field in the same stage, which is the combination nothing covered: a
+        # field alone leaves the target grid where it was, and the source window is then a
+        # translation of the target's rather than a box that has to be found.
+        dataset.write("REF", f"CASE_{index:03d}", reference, _attributes((1.3, 1.1, 2.4)))
+    return dataset, volumes
+
+
+@pytest.mark.parametrize("other_rows", [2, 5, 8])
+def test_a_field_driven_resample_under_a_reduce_does_not_depend_on_the_slab(tmp_path: Path, other_rows: int) -> None:
+    """The fold's answer must be the same whatever height it cuts its regions at.
+
+    A Reduce streams slabs along the first spatial axis, and the per-member stage before it is a
+    REGRID that sizes the source window it reads from the field values it finds inside the region.
+    Whether that window still covers what the interpolator produces at the region's FACES -- where it
+    blends field nodes the region does not contain -- is what decides whether the answer depends on
+    where the slabs were cut. It must not: streaming is an optimisation, so it has to be invisible.
+
+    Measured on a real build before this test existed: the same ten brains folded with regions of 24
+    rows and of 8 rows gave templates that differ, with steps in the slab axis and in no other, at
+    planes that moved with the region height.
+    """
+    reference = None
+    for rows in (3, other_rows):
+        dataset, _ = _field_cohort(tmp_path / f"rows{rows}")
+        destination = Dataset(tmp_path / f"out{rows}", "h5")
+        engine = CaseReduction(
+            # Named by PATH, not by group alone: a field found by group is looked up among the
+            # run's own roots, and this harness builds managers directly rather than a run.
+            managers=_managers(
+                dataset,
+                [
+                    Resample(
+                        reference="CASE_000",
+                        reference_group="REF",
+                        reference_dataset=f"{dataset.filename}:h5",
+                        field=f"{dataset.filename}:h5",
+                        field_group="FIELD",
+                    )
+                ],
+                CASES,
+            ),
+            reduce=Reduce(operator="Median", output="template"),
+            post=[],
+            destination=destination,
+            group="CT",
+            slab_rows=rows,
+        )
+        assert engine.materialize() is True
+        written, _ = destination.read_data("CT", "template")
+        if reference is None:
+            reference = written
+        else:
+            np.testing.assert_allclose(written, reference, rtol=0, atol=1e-5)
+
+
 def test_split_chain_finds_the_cardinality_change() -> None:
     reduce = Reduce(output="t")
     pre, found, post = split_chain([Clip(0.0, 50.0), reduce, TensorCast("float32")])

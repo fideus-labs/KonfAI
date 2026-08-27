@@ -366,6 +366,20 @@ def _default_walk_budget(device: torch.device) -> float:
 
     Undeclared, the machine's own share stands (:func:`~konfai.data.patching.device_capped_budget`):
     on CUDA half the free VRAM, on CPU a quarter of what this process may still allocate.
+
+    IT IS THE CHAIN SHARE AGAIN, DELIBERATELY, and that reads like double-spending: the sweep takes
+    regions + chains (85%) and the block price already folds in what the chain holds, so a walk
+    asking for chains again could reach 120% of the declaration on paper. It does not, because the
+    two are not independent -- the walk's target grid IS the sweep's region, so it slabs inside a
+    block that ``sweep_block_bytes`` already sized against ``Resample``'s declaration, and the block
+    price binds first. Measured on an oblique resample (verified non-separable, on the card, where
+    the host hands a non-factorising map to ITK and this walk never runs): peak against declaration
+    0.10x at 4 GiB, 0.13 at 2, 0.19 at 1, 0.29 at 512 MiB, 0.42 at 256, monotone and never near 100.
+
+    Bounding it by the stage's own declaration instead (``case_working_multiple`` times the block it
+    was handed) was built and MEASURED WORSE: that product is the LARGER of the two at these region
+    sizes, so it loosens rather than tightens, and the peak went 141 -> 188 MiB at 512 and 103 -> 123
+    at 256 with the seconds unchanged. This share is the tighter bound available. Do not re-derive it.
     """
     from konfai.data.patching import device_capped_budget
     from konfai.utils.budget import available_memory_bytes, budget_share, per_rank_budget_bytes

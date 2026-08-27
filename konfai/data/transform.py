@@ -64,7 +64,7 @@ from konfai.data.sampling import (
 )
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset, DataStream, data_to_image, image_to_data
-from konfai.utils.errors import ReductionError, TransformError
+from konfai.utils.errors import DatasetManagerError, ReductionError, TransformError
 from konfai.utils.ITK import _require_simpleitk
 from konfai.utils.runtime import NeedDevice
 from konfai.utils.utils import get_module, split_path_spec
@@ -2414,7 +2414,7 @@ class Resample(TransformInverse):
             )
         try:
             self._inverse_geometry(Attribute(cache_attribute))
-        except NameError:
+        except DatasetManagerError:
             return PatchLocality(
                 LocalityKind.WHOLE_VOLUME,
                 reason=(
@@ -2427,7 +2427,7 @@ class Resample(TransformInverse):
     def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
         try:
             return self._inverse_geometry(Attribute(cache_attribute))
-        except NameError:
+        except DatasetManagerError:
             return shape
 
     def inverse_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
@@ -2835,8 +2835,9 @@ class Argmax(Transform):
 
 
 class Softmax(Transform):
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
-    working_multiple = 0.0
+    # Measured at 0.00 on a float input and 1.00 on the int16 a store serves, which widens to float
+    # before the kernel runs: the declaration is the worse of the two.
+    working_multiple = 1.0
 
     def __init__(self, dim: int = 0) -> None:
         super().__init__()
@@ -2854,7 +2855,10 @@ class Softmax(Transform):
         )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return torch.softmax(tensor, dim=self.dim)
+        # A store serves int16, and torch.softmax has no integer kernel: a chain that softmaxes a
+        # stored volume failed on the tensor, with torch's message about "host_softmax" and not one
+        # naming the stage. Widened here, where the scores an integer carries are what it means.
+        return torch.softmax(tensor if tensor.is_floating_point() else tensor.float(), dim=self.dim)
 
 
 class FlatLabel(Transform):
@@ -3754,7 +3758,10 @@ class HistogramMatching(Transform):
             if dataset.is_dataset_exist(self.reference_group, name):
                 image_ref = dataset.read_image(self.reference_group, name)
         if image_ref is None:
-            raise NameError(f"Image : {self.reference_group}/{name} not found")
+            raise DatasetManagerError(
+                f"The reference '{self.reference_group}/{name}' is not in any dataset.",
+                "Add the group to a dataset the run reads, or name one that is there.",
+            )
         _require_simpleitk()
         matcher = sitk.HistogramMatchingImageFilter()
         matcher.SetNumberOfHistogramLevels(256)
