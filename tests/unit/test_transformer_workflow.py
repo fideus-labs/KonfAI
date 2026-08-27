@@ -1825,12 +1825,13 @@ def test_the_plan_names_the_ceiling_the_regions_are_actually_cut_under() -> None
     so. On a host chain the two are the same figure and the clause is not printed.
     """
     import torch
+    from konfai.data.patching import device_capped_budget
     from konfai.transformer import TransformPlan
 
-    def plan(device: "torch.device | None") -> TransformPlan:
+    def plan(device: "torch.device | None", budget_bytes: float = 32 * 10**9) -> TransformPlan:
         return TransformPlan(
             entries=[],
-            budget_bytes=32 * 10**9,
+            budget_bytes=budget_bytes,
             budget_desc="'32G'",
             world_size=1,
             dropped_cases={},
@@ -1842,7 +1843,12 @@ def test_the_plan_names_the_ceiling_the_regions_are_actually_cut_under() -> None
     assert "regions on" not in plan(torch.device("cpu"))._header()
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device: the second ceiling cannot be exercised")
-    header = plan(torch.device("cuda:0"))._header()
+    # Declared above what the card can give, whatever card runs this: below it the two ceilings are
+    # the declared figure and the clause is rightly absent, which is the other branch, not a failure.
+    device = torch.device("cuda:0")
+    card = device_capped_budget(None, device)
+    assert card is not None
+    header = plan(device, float(card) * 2.0)._header()
     assert "regions on cuda:0 under" in header, header
     # And the declared figure is still there: the reader must be able to tell the two apart.
     assert "per-rank budget" in header

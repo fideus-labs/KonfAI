@@ -3241,7 +3241,12 @@ class DatasetManager:
         segments = self.sweep_segments(a, apply_augmentations=False)
         if not segments:
             return None
-        return _plateau_rows(spatial, segments[-1].plans, tolerance)
+        segment = segments[-1]
+        plateau = _plateau_rows(spatial, segment.plans, tolerance)
+        if plateau is None:
+            return None
+        floor = self._sweep_rows(spatial, segment.channels, segment.plans)
+        return max(plateau, min(floor, int(spatial[0])))
 
     @staticmethod
     def _source_extents(spatial: Sequence[int], plans: Sequence["_ReadStagePlan"]) -> list[int]:

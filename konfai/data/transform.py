@@ -635,8 +635,8 @@ class Foreign(Transform):
     reorients owns both, and a ``Transform`` subclass is what states them.
     """
 
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
-    working_multiple = 0.0
+    # Not declared: what a foreign callable allocates between its input and its output is its own,
+    # and nothing here can measure it. The base default is what an unknown stage is priced at.
 
     def __init__(self, transform, classpath: str) -> None:
         super().__init__()
@@ -669,7 +669,7 @@ def _seeded_scalar(cache_attribute: Attribute, key: str) -> float:
 class Clip(Transform):
     """Clip tensor intensities to a fixed or data-dependent value range."""
 
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
+    # Measured at 2.50 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 2.5
 
     def __init__(
@@ -1006,7 +1006,7 @@ class Standardize(TransformInverse):
 
 
 class TensorCast(TransformInverse):
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
+    # Measured at 1.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 1.0
 
     # Wide enough to hold every dtype a volume is read as (int8/int16/uint8/float32) with no value moved.
@@ -4068,7 +4068,7 @@ class Magnitude(Transform):
     reads that voxel alone: POINTWISE, so it streams.
     """
 
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
+    # Measured at 1.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 1.0
 
     def __init__(self) -> None:
@@ -4090,7 +4090,7 @@ class Norm(Transform):
     dropped from ``Origin``/``Spacing``/``Direction``.
     """
 
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
+    # Measured at 2.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 2.0
 
     def __init__(self) -> None:
@@ -4115,7 +4115,7 @@ class Norm(Transform):
 
 
 class Variance(Transform):
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
+    # Measured at 2.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 2.0
 
     def __init__(self) -> None:
@@ -4193,7 +4193,7 @@ class Percentage(Transform):
 
 
 class StandardDeviation(Transform):
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
+    # Measured at 2.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 2.0
 
     def __init__(self) -> None:
@@ -4217,7 +4217,7 @@ class Statistics(Transform):
     of a region's own.
     """
 
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
+    # Measured at 2.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 2.0
 
     _KEYS = (("Min", "ImageMin"), ("Max", "ImageMax"), ("Mean", "ImageMean"), ("Std", "ImageStd"))

@@ -27,12 +27,15 @@ configurations come from the same registry the locality contract enumerates, so 
 the day it lands.
 """
 
+import contextlib
+
 import numpy as np
 import pytest
 import torch
 from konfai.data.transform import Resample, Transform
 from konfai.utils.budget import set_per_rank_budget
 from konfai.utils.dataset import Attribute
+from konfai.utils.errors import KonfAIError
 from oracle_support import CASE_NAME, FIXED_GEOMETRY, attributes, builtin_transforms, cases_of
 
 pytestmark = pytest.mark.skipif(
@@ -55,6 +58,19 @@ _BUDGET = 16 << 30
 #: and that walk slabs itself against the declared budget: charging the region for it as well would
 #: shrink every resampling chain sevenfold for memory the walk does not take.
 _SELF_BOUNDED = {(Resample, "Oblique")}
+
+
+#: What one payload and a seeded ``Attribute`` cannot drive, and what each asks for that is not
+#: here. Named rather than caught: a blanket ``except Exception`` read a stage that broke on its
+#: own payload as a covered one, and five stages were being skipped without anyone choosing it.
+_NEEDS_MORE_THAN_A_PAYLOAD = {
+    "HistogramMatching": "a reference dataset to match the histogram against",
+    "KonfAIInference": "a model to run",
+    "Resample": "a reference dataset to resample onto",
+    # torch.softmax has no integer kernel, and a store serves int16. A chain that softmaxes a
+    # stored integer volume fails on the tensor, with torch's message and not KonfAI's.
+    "Softmax": "a floating-point input",
+}
 
 
 #: Groups whose values are labels whatever the store: a small integer range, never CT units.
@@ -85,27 +101,39 @@ _STORED_DTYPES = (torch.float32, torch.int16)
 def _seeded(group: str, channels: int) -> Attribute:
     """The group's metadata, plus the whole-volume statistics a GLOBAL_STAT stage reads."""
     attribute = Attribute(attributes(FIXED_GEOMETRY, group))
-    for key, value in (("Mean", 0.5), ("Std", 0.25), ("Min", 0.0), ("Max", 1.0)):
-        attribute[key] = np.asarray([value] * channels) if channels > 1 else np.asarray(value)
+    # Each in the form its producers write, because its readers parse that form and no other:
+    # Mean and Std per channel (``case_reduction`` and ``Standardize`` write a one-element array
+    # even at one channel, and ``get_tensor`` reads it), Min and Max as bare scalars (both
+    # ``case_reduction`` and ``Normalize`` itself write one, and ``float()`` reads it).
+    for key, value in (("Mean", 0.5), ("Std", 0.25)):
+        attribute[key] = np.asarray([value] * channels)
+    for key, value in (("Min", 0.0), ("Max", 1.0)):
+        attribute[key] = np.float32(value)
     return attribute
 
 
 def _held(stage: Transform, group: str, stored: torch.dtype) -> float | None:
-    """Volumes-worth held above the input and the output, or None when the stage refuses this
-    payload (it wants a companion the registry cannot hand it standalone)."""
+    """Volumes-worth held above the input and the output, or None when the stage cannot run here.
+
+    Two ways it cannot: a DESIGNED refusal, and one of the stages :data:`_NEEDS_MORE_THAN_A_PAYLOAD`
+    names. Anything else -- an allocation that failed, a stage that broke on its own payload -- is
+    the finding this test exists for, so it is left to escape.
+    """
     tensor = _payload(group, stored)
     scope = _seeded(group, int(tensor.shape[0]))
-    try:
+    with contextlib.suppress(KonfAIError):
         stage.transform_shape("CT", CASE_NAME, list(_SPATIAL), Attribute(scope))
-    except Exception:
-        pass
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     base = torch.cuda.memory_allocated()
     try:
         out = stage(CASE_NAME, tensor, scope)
-    except Exception:
+    except KonfAIError:
         return None
+    except Exception:
+        if type(stage).__name__ in _NEEDS_MORE_THAN_A_PAYLOAD:
+            return None
+        raise
     torch.cuda.synchronize()
     peak = torch.cuda.max_memory_allocated()
     given = tensor.numel() * tensor.element_size()

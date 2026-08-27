@@ -422,7 +422,12 @@ def chunk_hull_voxels(span: Sequence[slice], granularity: Sequence[int], shape: 
 
 
 def _scan_block_on_the_store_grid(
-    rows: int, extent: int, plane: int, granularity: Sequence[int] | None, budget: float | None
+    rows: int,
+    extent: int,
+    plane: int,
+    granularity: Sequence[int] | None,
+    budget: float | None,
+    element_bytes: int = _STATISTICS_ELEMENT_BYTES,
 ) -> tuple[int, int]:
     """The rows one scan block reads, and what reading it holds.
 
@@ -447,7 +452,7 @@ def _scan_block_on_the_store_grid(
     def held_for(step: int) -> int:
         """Blocks in flight, plus what the read in flight decodes above the step it serves."""
         resident = step * _STATISTICS_BLOCKS_IN_FLIGHT + max(0, decoded(step) - step)
-        return int(resident * plane * _STATISTICS_ELEMENT_BYTES)
+        return int(resident * plane * element_bytes)
 
     if block:
         aligned = max(block, rows // block * block)
@@ -3425,9 +3430,8 @@ class Dataset:
         plane = _statistics_plane_elements(shape, 1)
         granularity = self.read_granularity(groups, name)
         rows, held = _scan_block_on_the_store_grid(
-            rows, int(shape[1]), plane, granularity[1:2] if granularity else None, budget
+            rows, int(shape[1]), plane, granularity[1:2] if granularity else None, budget, element_bytes
         )
-        held = rows * plane * _STATISTICS_BLOCKS_IN_FLIGHT * element_bytes
         if budget is not None and held > budget:
             raise DatasetManagerError(
                 f"'{name}': the shortest block a whole-volume scan of '{groups}' can read holds"
