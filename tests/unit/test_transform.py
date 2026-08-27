@@ -1052,3 +1052,31 @@ def test_inference_stack_median_picks_the_same_element_whatever_the_dtype(dtype:
     reduced = InferenceStack(dataset="", name="pred", mode="median")._reduce(stack)
     assert reduced.dtype == dtype
     assert torch.equal(reduced, expected)
+
+
+def test_gradient_keeps_the_axis_dimension_apart_from_the_channels() -> None:
+    """The differences are ``(C, rank, *spatial)`` and the axis dimension is its own.
+
+    It used to be dropped with ``squeeze(0)``, which only fires when the case has ONE channel: a
+    multi-channel case then took its norm across the CHANNELS instead of across the axes and handed
+    the writer a rank-5 array (measured on a 3-channel case: [1, 3, 128, 256, 256], refused by
+    OME-Zarr). Every case here is four-dimensional, and the channel count is the one the stage
+    declares -- a plan sizes its regions from that declaration.
+    """
+    from konfai.data.transform import Gradient
+
+    attribute = Attribute()
+    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
+    attribute["Spacing"] = np.asarray([1.0, 1.0, 1.0])
+    attribute["Direction"] = np.eye(3).astype(np.float64).reshape(-1)
+
+    for channels in (1, 3):
+        for per_dim in (False, True):
+            stage = Gradient(per_dim=per_dim)
+            out = stage("CASE", torch.rand((channels, 8, 16, 16)), Attribute(attribute))
+            assert out.dim() == 4, f"{channels} channel(s), per_dim={per_dim}: got shape {list(out.shape)}"
+            assert out.shape[0] == stage.output_channels(channels), (
+                f"{channels} channel(s), per_dim={per_dim}: writes {out.shape[0]} channels and"
+                f" declares {stage.output_channels(channels)}, so a region is sized for the wrong width"
+            )
+            assert list(out.shape[1:]) == [8, 16, 16]
