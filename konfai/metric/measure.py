@@ -20,8 +20,9 @@ import copy
 import importlib
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from functools import partial, reduce
+from itertools import chain
 from types import ModuleType
 from typing import Any
 
@@ -1284,7 +1285,7 @@ class FID(Criterion):
         return FID.calculate_fid(real_features, generated_features)
 
 
-class MutualInformationLoss(torch.nn.Module):
+class MutualInformationLoss(Criterion):
     def __init__(
         self,
         num_bins: int = 23,
@@ -1318,8 +1319,8 @@ class MutualInformationLoss(torch.nn.Module):
         probability = torch.mean(weight, dim=-2, keepdim=True)  # (batch, 1, num_bin)
         return weight, probability
 
-    def forward(self, pred: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        wa, pa, wb, pb = self.parzen_windowing(pred, targets[0])  # (batch, num_sample, num_bin), (batch, 1, num_bin)
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        wa, pa, wb, pb = self.parzen_windowing(output, targets[0])  # (batch, num_sample, num_bin), (batch, 1, num_bin)
         pab = torch.bmm(wa.permute(0, 2, 1), wb.to(wa)).div(wa.shape[1])  # (batch, num_bins, num_bins)
         papb = torch.bmm(pa.permute(0, 2, 1), pb.to(pa))  # (batch, num_bins, num_bins)
         mi = torch.sum(
@@ -1402,7 +1403,7 @@ def _masked_feature_loss(
     loss is NaN, contributes nothing. Returns the summed loss and the number of scored patches: the
     caller divides.
     """
-    loss = torch.zeros((1), requires_grad=True).to(output[0].device, non_blocking=False).type(torch.float32)
+    loss = torch.zeros(1, device=output[0].device, requires_grad=True)
     true_nb = 0
     for output_patch, target_patch, mask_patch in _patch_views(output[0], target[0], mask, patch_shape):
         if mask_patch is not None and not torch.any(mask_patch == 1):
@@ -1427,6 +1428,108 @@ def _masked_feature_loss(
     return loss, true_nb
 
 
+def _feature_loss_mean(slices: Iterable[tuple[torch.Tensor, int]]) -> tuple[torch.Tensor, float]:
+    """The slice losses summed and divided by the number of scored patches, with the scalar to report.
+    No scored patch (a mask with no foreground) would divide by zero: the loss is then its zero seed,
+    returned as-is, and the scalar is NaN."""
+    losses, counts = zip(*slices, strict=True)
+    loss, true_nb = reduce(torch.add, losses), sum(counts)
+    return (loss / true_nb if true_nb else loss), np.nan if true_nb == 0 else loss.item() / true_nb
+
+
+def _denormalized(tensor: torch.Tensor, attributes: list[Attribute]) -> torch.Tensor:
+    """``tensor`` mapped back to intensities from the per-sample ``Mean``/``Std`` (``Standardize``) or
+    ``Min``/``Max`` (``Normalize``) attributes; untouched when neither is recorded."""
+
+    def per_sample(key: str) -> torch.Tensor:
+        values = [float(attribute[key]) for attribute in attributes]
+        return torch.tensor(values, device=tensor.device).view(-1, *([1] * (tensor.dim() - 1)))
+
+    if "Mean" in attributes[0] and "Std" in attributes[0]:
+        return tensor * per_sample("Std") + per_sample("Mean")
+    if "Min" in attributes[0] and "Max" in attributes[0]:
+        return (tensor + 1) / 2 * (per_sample("Max") - per_sample("Min")) + per_sample("Min")
+    return tensor
+
+
+class ImpactFeatureModel:
+    """An IMPACT TorchScript feature extractor and what its inputs need: the channel count it expects
+    (a narrower input is repeated to it), the per-layer weights, the tile it is fed (``None`` = the
+    whole tensor) and whether a standardized input is mapped back to intensities first. The model is
+    loaded on first use."""
+
+    def __init__(
+        self,
+        model_path: str,
+        in_channels: int,
+        weights: list[float],
+        shape: list[int] | None,
+        dim: int,
+        denormalize: bool = False,
+    ) -> None:
+        self.model_path = model_path
+        self.in_channels = in_channels
+        self.weights = weights
+        self.shape = shape
+        self.dim = dim
+        self.denormalize = denormalize
+        self.model: torch.nn.Module | None = None
+
+    @classmethod
+    def download(
+        cls,
+        filename: str,
+        in_channels: int,
+        weights: list[float],
+        shape: list[int],
+        repo_id: str = "VBoussot/impact-torchscript-models",
+        denormalize: bool = False,
+    ) -> "ImpactFeatureModel":
+        """The model ``filename`` of the HuggingFace ``repo_id``, probed once on the CPU. ``shape`` is the
+        tile, its length the dimension; an entry ``<= 0`` scores the whole tensor instead."""
+        model_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+        tile = shape if all(s > 0 for s in shape) else None
+        _check_feature_model(model_path, in_channels, tile or [224] * len(shape), len(weights))
+        return cls(model_path, in_channels, weights, tile, len(shape), denormalize)
+
+    def inputs(self, tensor: torch.Tensor, attributes: list[Attribute]) -> list[torch.Tensor]:
+        """The ``[tensor, nb_layer, stats]`` triple the extractor takes: one
+        ``[ImageMin, ImageMean, ImageMax, ImageStd]`` row per sample."""
+        if tensor.shape[1] != self.in_channels:
+            tensor = tensor.repeat(1, self.in_channels, *([1] * (tensor.dim() - 2)))
+        if self.denormalize:
+            tensor = _denormalized(tensor, attributes)
+        stats = [[float(a[key]) for key in ("ImageMin", "ImageMean", "ImageMax", "ImageStd")] for a in attributes]
+        return [tensor, torch.tensor([len(self.weights)]), torch.tensor(stats)]
+
+    def slice_losses(
+        self,
+        output: torch.Tensor,
+        output_attributes: list[Attribute],
+        target: torch.Tensor,
+        target_attributes: list[Attribute],
+        mask: torch.Tensor | None,
+        loss_function: torch.nn.Module,
+        project: Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None = None,
+    ) -> Iterator[tuple[torch.Tensor, int]]:
+        """The weighted feature distance and the number of scored patches: per 2-D slice of a 3-D batch
+        when the extractor is 2-D, once for the whole batch otherwise."""
+        if self.model is None:
+            self.model = torch.jit.load(self.model_path, map_location="cpu").eval()  # nosec B614
+        self.model.to(output.device)
+        for z in range(output.shape[2]) if output.dim() == 5 and self.dim == 2 else (slice(None),):
+            yield _masked_feature_loss(
+                self.model,
+                self.inputs(output[:, :, z], output_attributes),
+                self.inputs(target[:, :, z], target_attributes),
+                self.weights,
+                loss_function,
+                mask[:, :, z] if mask is not None else None,
+                self.shape,
+                project,
+            )
+
+
 class IMPACTReg(CriterionWithAttribute):
     def __init__(
         self,
@@ -1439,43 +1542,11 @@ class IMPACTReg(CriterionWithAttribute):
         pca: int = 0,
     ) -> None:
         super().__init__()
-        if model_name is None:
-            return
         self.name = name
-        self.in_channels = in_channels
-        self.nb_layer = len(weights)
-        module, name = get_module(loss, "konfai.metric.measure")
-        self.loss = apply_config(os.environ["KONFAI_CONFIG_PATH"])(getattr(module, name))()
-
-        self.weights = weights
+        loss_module, loss_class = get_module(loss, "konfai.metric.measure")
+        self.loss = apply_config(os.environ["KONFAI_CONFIG_PATH"])(getattr(loss_module, loss_class))()
         self.pca = int(pca)
-        self.model_path = hf_hub_download(
-            repo_id="VBoussot/impact-torchscript-models", filename=model_name, repo_type="model", revision=None
-        )  # nosec B615
-        self.dim = len(shape)
-        self.shape = shape if all(s > 0 for s in shape) else None
-        _check_feature_model(self.model_path, self.in_channels, self.shape or [224] * self.dim, self.nb_layer)
-        self.model: torch.nn.Module | None = None
-
-    def preprocessing(self, tensor: torch.Tensor, attribute: list[Attribute]) -> list[torch.Tensor]:
-        if tensor.shape[1] != self.in_channels:
-            tensor = tensor.repeat(tuple([1, 3] + [1 for _ in range(self.dim)]))
-
-        return [
-            tensor,
-            torch.tensor([self.nb_layer]),
-            torch.tensor(
-                [
-                    [
-                        float(attr["ImageMin"]),
-                        float(attr["ImageMean"]),
-                        float(attr["ImageMax"]),
-                        float(attr["ImageStd"]),
-                    ]
-                    for attr in attribute
-                ]
-            ),
-        ]
+        self.model = ImpactFeatureModel.download(model_name, in_channels, weights, shape)
 
     def get_name(self):
         return self.name
@@ -1513,60 +1584,25 @@ class IMPACTReg(CriterionWithAttribute):
             projected_target.append(self._pca_transform(target_feature[b : b + 1], basis))
         return torch.cat(projected_output), torch.cat(projected_target)
 
-    def _compute(
-        self,
-        output: torch.Tensor,
-        output_attributes: list[Attribute],
-        target: torch.Tensor,
-        target_attributes: list[Attribute],
-        mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, int]:
-        model = self.model
-        if model is None:
-            raise RuntimeError("IMPACT feature model is not initialized.")
-        return _masked_feature_loss(
-            model,
-            self.preprocessing(output, output_attributes),
-            self.preprocessing(target, target_attributes),
-            self.weights,
-            self.loss,
-            mask,
-            self.shape,
-            project=self._pca_project if self.pca > 0 else None,
-        )
-
     def forward(  # type: ignore[override]
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
     ) -> tuple[torch.Tensor, float]:
         mask = targets[-1] if targets[-1].dtype == torch.uint8 else None
-
         # The prediction and the target share the same intensity space, so a single target attribute
         # (single-group target such as ``CT``) is reused to normalize both output and target; a second
         # attribute set is honored when the target is multi-group.
-        output_attributes = attributes[0]
         target_attributes = attributes[1] if len(attributes) > 1 else attributes[0]
-
-        if self.model is None:
-            self.model = torch.jit.load(self.model_path)  # nosec B614
-        self.model.to(output.device)
-        self.model.eval()
-
-        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
-        true_nb = 0
-        z_slices = range(output.shape[2]) if output.dim() == 5 and self.dim == 2 else (slice(None),)
-        for z in z_slices:
-            slice_loss, slice_nb = self._compute(
-                output[:, :, z],
-                output_attributes,
-                targets[0][:, :, z],
+        return _feature_loss_mean(
+            self.model.slice_losses(
+                output,
+                attributes[0],
+                targets[0],
                 target_attributes,
-                mask[:, :, z] if mask is not None else None,
+                mask,
+                self.loss,
+                project=self._pca_project if self.pca > 0 else None,
             )
-            loss = loss + slice_loss
-            true_nb += slice_nb
-        # true_nb == 0 (a mask with no foreground) would divide the differentiable loss by zero; the loss is
-        # still its zero seed then, so return it as-is and report NaN for the scalar.
-        return (loss / true_nb if true_nb else loss), np.nan if true_nb == 0 else loss.item() / true_nb
+        )
 
 
 class IMPACTSynth(CriterionWithAttribute):
@@ -1582,146 +1618,27 @@ class IMPACTSynth(CriterionWithAttribute):
         weights_criterion_style: list[float] = [1, 1, 1],
     ) -> None:
         super().__init__()
-        if model_content_name is None:
-            return
-        self.in_channels_content = in_channels_content
-        self.in_channels_style = in_channels_style
-
-        self.weights_criterion_content = weights_criterion_content
-        self.weights_criterion_style = weights_criterion_style
-
-        self.loss_content_function = torch.nn.MSELoss()
-        self.loss_style_function = Gram()
-
-        self.model_path_content = hf_hub_download(
-            repo_id="VBoussot/impact-torchscript-models", filename=model_content_name, repo_type="model", revision=None
-        )  # nosec B615
-
-        self.model_path_style = hf_hub_download(
-            repo_id="VBoussot/impact-torchscript-models", filename=model_style_name, repo_type="model", revision=None
-        )  # nosec B615
-
-        self.shape_content = shape_content if all(s > 0 for s in shape_content) else None
-        self.shape_style = shape_style if all(s > 0 for s in shape_style) else None
-        self.dim_content = len(shape_content)
-        self.dim_style = len(shape_style)
-
-        _check_feature_model(
-            self.model_path_content,
-            self.in_channels_content,
-            self.shape_content or [224] * self.dim_content,
-            len(weights_criterion_content),
+        self.content = ImpactFeatureModel.download(
+            model_content_name, in_channels_content, weights_criterion_content, shape_content, denormalize=True
         )
-        _check_feature_model(
-            self.model_path_style,
-            self.in_channels_style,
-            self.shape_style or [224] * self.dim_style,
-            len(weights_criterion_style),
+        self.style = ImpactFeatureModel.download(
+            model_style_name, in_channels_style, weights_criterion_style, shape_style, denormalize=True
         )
-        self.model_content: torch.nn.Module | None = None
-        self.model_style: torch.nn.Module | None = None
-
-    def _preprocessing(
-        self, tensor: torch.Tensor, in_channels: int, nb_layer: int, attribute: list[Attribute]
-    ) -> list[torch.Tensor]:
-        if tensor.shape[1] != in_channels:
-            tensor = tensor.repeat(tuple([1, in_channels] + [1 for _ in range(tensor.dim() - 2)]))
-
-        if "Mean" in attribute[0] and "Std" in attribute[0]:
-            mean_value = torch.tensor([float(a["Mean"]) for a in attribute], device=tensor.device).view(
-                -1, *([1] * (tensor.dim() - 1))
-            )
-            std_value = torch.tensor([float(a["Std"]) for a in attribute], device=tensor.device).view(
-                -1, *([1] * (tensor.dim() - 1))
-            )
-            tensor = tensor * std_value + mean_value
-        elif "Min" in attribute[0] and "Max" in attribute[0]:
-            min_value = torch.tensor([float(a["Min"]) for a in attribute], device=tensor.device).view(
-                -1, *([1] * (tensor.dim() - 1))
-            )
-            max_value = torch.tensor([float(a["Max"]) for a in attribute], device=tensor.device).view(
-                -1, *([1] * (tensor.dim() - 1))
-            )
-            tensor = (tensor + 1) / 2 * (max_value - min_value) + min_value
-
-        return [
-            tensor,
-            torch.tensor([nb_layer]),
-            torch.tensor(
-                [
-                    [
-                        float(attr["ImageMin"]),
-                        float(attr["ImageMean"]),
-                        float(attr["ImageMax"]),
-                        float(attr["ImageStd"]),
-                    ]
-                    for attr in attribute
-                ]
-            ),
-        ]
+        self.content_loss = torch.nn.MSELoss()
+        self.style_loss = Gram()
 
     def forward(  # type: ignore[override]
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
     ) -> tuple[torch.Tensor, float]:
         if len(targets) < 2:
             raise ValueError("At least two target tensors are required.")
-
-        if self.model_content is None:
-            self.model_content = torch.jit.load(self.model_path_content, map_location=torch.device("cpu"))  # nosec B614
-            self.model_content.eval()
-        if self.model_style is None:
-            self.model_style = torch.jit.load(self.model_path_style, map_location=torch.device("cpu"))  # nosec B614
-            self.model_style.eval()
-        model_content, model_style = self.model_content, self.model_style
-        if model_content is None or model_style is None:
-            raise RuntimeError("IMPACTSynth models were not initialized correctly.")
-
         mask = targets[2] if len(targets) == 3 and targets[2].dtype == torch.uint8 else None
-
-        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
-        true_nb = 0
-        streams = (
-            (
-                targets[0],
-                attributes[0],
-                attributes[1],
-                self.in_channels_content,
-                self.weights_criterion_content,
-                self.shape_content,
-                self.dim_content,
-                model_content,
-                self.loss_content_function,
-            ),
-            (
-                targets[1],
-                attributes[2],
-                attributes[2],
-                self.in_channels_style,
-                self.weights_criterion_style,
-                self.shape_style,
-                self.dim_style,
-                model_style,
-                self.loss_style_function,
-            ),
+        return _feature_loss_mean(
+            chain(
+                self.content.slice_losses(output, attributes[0], targets[0], attributes[1], mask, self.content_loss),
+                self.style.slice_losses(output, attributes[2], targets[1], attributes[2], mask, self.style_loss),
+            )
         )
-        for target, output_attrs, target_attrs, in_channels, weights, shape, dim, model, loss_function in streams:
-            model.to(output.device)
-            z_slices = range(output.shape[2]) if output.dim() == 5 and dim == 2 else (slice(None),)
-            for z in z_slices:
-                stream_loss, stream_nb = _masked_feature_loss(
-                    model,
-                    self._preprocessing(output[:, :, z], in_channels, len(weights), output_attrs),
-                    self._preprocessing(target[:, :, z], in_channels, len(weights), target_attrs),
-                    weights,
-                    loss_function,
-                    mask[:, :, z] if mask is not None else None,
-                    shape,
-                )
-                loss = loss + stream_loss
-                true_nb += stream_nb
-        # true_nb == 0 (a mask with no foreground) would divide the differentiable loss by zero; the loss is
-        # still its zero seed then, so return it as-is and report NaN for the scalar.
-        return (loss / true_nb if true_nb else loss), np.nan if true_nb == 0 else loss.item() / true_nb
 
 
 class SAM_Perceptual(CriterionWithAttribute):
@@ -1740,50 +1657,13 @@ class SAM_Perceptual(CriterionWithAttribute):
         weights: list[float] | None = None,
     ) -> None:
         super().__init__()
-        self.model: torch.nn.Module | None = None
         self.loss = torch.nn.L1Loss()
-        self.weights = weights
-        self.nb_layer = len(weights) if weights is not None else 4
         if train:
             repo_id, filename = "VBoussot/impact-torchscript-models", f"SAM2.1/{model_name}"
         else:
             repo_id, filename = "VBoussot/ImpactSynth", model_name
-        self.model_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
-
-    def preprocessing(self, tensor: torch.Tensor, attribute: list[Attribute]) -> list[torch.Tensor]:
-        tensor = tensor.repeat(1, 3, 1, 1)
-        return [
-            tensor,
-            torch.tensor([self.nb_layer]),
-            torch.tensor(
-                [
-                    [
-                        float(attr["ImageMin"]),
-                        float(attr["ImageMean"]),
-                        float(attr["ImageMax"]),
-                        float(attr["ImageStd"]),
-                    ]
-                    for attr in attribute
-                ]
-            ),
-        ]
-
-    def _compute(
-        self, output: torch.Tensor, target: torch.Tensor, target_attributes: list[Attribute], mask: torch.Tensor | None
-    ) -> tuple[torch.Tensor, int]:
-        model = self.model
-        if model is None:
-            raise RuntimeError("SAM perceptual model is not initialized.")
-        weights = self.weights if self.weights is not None else [1.0] * self.nb_layer
-        return _masked_feature_loss(
-            model,
-            self.preprocessing(output, target_attributes),
-            self.preprocessing(target, target_attributes),
-            weights,
-            self.loss,
-            mask,
-            [512, 512],
-        )
+        model_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+        self.model = ImpactFeatureModel(model_path, 3, [1.0] * 4 if weights is None else weights, [512, 512], 2)
 
     def forward(  # type: ignore[override]
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
@@ -1791,28 +1671,9 @@ class SAM_Perceptual(CriterionWithAttribute):
         mask = targets[-1] if targets[-1].dtype == torch.uint8 else None
         # ``targets[0]`` is the reference (e.g. CT), normalized with its own stats; the same stats
         # normalize the prediction since both live in the same intensity space.
-        target_attributes = attributes[0]
-
-        if self.model is None:
-            self.model = torch.jit.load(self.model_path, map_location=torch.device("cpu"))  # nosec B614
-        self.model.eval()
-        self.model.to(output.device)
-
-        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
-        true_nb = 0
-        z_slices = range(output.shape[2]) if output.dim() == 5 else (slice(None),)
-        for z in z_slices:
-            slice_loss, slice_nb = self._compute(
-                output[:, :, z],
-                targets[0][:, :, z],
-                target_attributes,
-                mask[:, :, z] if mask is not None else None,
-            )
-            loss = loss + slice_loss
-            true_nb += slice_nb
-        # true_nb == 0 (a mask with no foreground) would divide the differentiable loss by zero; the loss is
-        # still its zero seed then, so return it as-is and report NaN for the scalar.
-        return (loss / true_nb if true_nb else loss), np.nan if true_nb == 0 else loss.item() / true_nb
+        return _feature_loss_mean(
+            self.model.slice_losses(output, attributes[0], targets[0], attributes[0], mask, self.loss)
+        )
 
 
 class Variance(Criterion):
