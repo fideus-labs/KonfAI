@@ -94,13 +94,8 @@ class MemoryBudget:
         return max(0.0, per_rank - (resident_bytes() or 0))
 
 
-#: How a declared per-rank budget divides between the consumers that can be holding AT ONCE. Every
-#: one of them used to choose its own fraction of the whole figure, in its own file, and nothing
-#: summed them: a fold's regions took a half, a member's chain was handed all of it, the folds a
-#: stat pass keeps took another half and the store's chunk cache a third, so a run could honour
-#: every share and still hold one and a half times what it declared.
-#:
-#: Shares of ONE declaration, so they add to one. Which consumers are simultaneous is a property of
+#: How a declared per-rank budget divides between the consumers that can be holding AT ONCE:
+#: shares of ONE declaration, so they add to one. Which consumers are simultaneous is a property of
 #: the call path, not of this table: a whole-volume fallback and a swept tile are alternatives and
 #: each may take the route's whole share, while a fold's regions and its members' chains are not,
 #: because a member's sweep fires from inside the fold loop.

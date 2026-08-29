@@ -1123,8 +1123,7 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
 
         # A THIRD of the share: a pipelined sweep runs three of these at once, the decode of the
         # region being read, the assembly of the one before it, the encode of the one being written.
-        # Re-measured under the split-thread sweep, where the chain no longer runs on the reading
-        # thread. 24 cores, ExaSPIM 513x1331x1776 through a stored affine, two runs per point,
+        # Measured with the chain off the reading thread: 24 cores, ExaSPIM 513x1331x1776 through a stored affine, two runs per point,
         # nothing else moved (a wrapper sets this alone, not OMP_NUM_THREADS, which would move ITK
         # with it). Wall clock, host path then device path:
         #   4  -> 12.1 / 13.4 s     4  -> 5.1 / 5.2 s

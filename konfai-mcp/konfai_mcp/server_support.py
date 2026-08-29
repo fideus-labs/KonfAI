@@ -99,11 +99,7 @@ class DatasetGroupUnreadableError(ValueError):
 
 
 def aggregate_case_statistics(stats: dict[str, dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
-    """Aggregate per-case statistics into the KonfAI ``case``/``aggregates`` payload shape.
-
-    Vendored in the MCP package so it depends only on KonfAI's public API: the
-    equivalent logic also lives inline in ``Dataset.get_statistics``.
-    """
+    """Aggregate per-case statistics into the KonfAI ``case``/``aggregates`` payload shape."""
     result: dict[str, dict[str, dict[str, Any]]] = {"case": {}, "aggregates": {}}
     if not stats:
         return result

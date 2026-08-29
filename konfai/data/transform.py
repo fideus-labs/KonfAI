@@ -2065,16 +2065,15 @@ class Resample(TransformInverse):
         the sampling grid already costs; at a field solved four times coarser per axis it is a
         sixteenth of that, and the plan should not charge the same for the two.
 
-        The plan priced it at nothing: a fold over native-resolution fields announced 12.41 GiB and
-        held 38.2. Answered from headers alone; a case whose grids are not both known yet answers
-        the class's figure rather than guessing.
+        Answered from headers alone; a case whose grids are not both known yet answers the class's
+        figure rather than guessing.
         """
         base = float(self.working_multiple)
         # NOT the general walk. A map that does not factorise is walked coordinate by coordinate in
         # float64 and holds 21.4 to 21.6 volumes-worth where a separable one holds 0.19 to 2.85 --
         # but that walk slabs ITSELF against the declared budget (konfai.data.sampling), so it is
         # bounded whatever the region is. Charging the region for it as well would shrink every
-        # resampling chain sevenfold to make room for memory the walk no longer takes.
+        # resampling chain sevenfold for memory the walk does not take.
         if self.displacement is None:
             return base
         try:

@@ -664,9 +664,11 @@ _HALO_EVALUATION = """Evaluator:
 """
 
 
-def test_a_halo_metric_no_longer_vetoes_the_patched_evaluation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_halo_metric_evaluates_patched_under_a_budget_the_case_exceeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """SSIM beside MAE under a budget the case exceeds: the run takes the patched path, reading
-    each slot with SSIM's halo, where SSIM once kept the whole run on the whole-volume path."""
+    each slot with SSIM's halo."""
     pytest.importorskip("SimpleITK")
     import numpy as np
     from konfai.evaluator import Evaluator
