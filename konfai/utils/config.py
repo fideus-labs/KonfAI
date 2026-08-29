@@ -315,18 +315,12 @@ class Config:
             ledger.opened(tuple(self.keys), self.config if isinstance(self.config, collections.abc.Mapping) else ())
         return self
 
-    def create_dictionary(self, data, keys, i) -> dict:
-        if keys[i] not in data:
-            data = {keys[i]: data}
-        if i == 0:
-            return data
-        else:
-            i -= 1
-            return self.create_dictionary(data, keys, i)
-
     def __exit__(self, exc_type, value, traceback) -> None:
         # Only the visited subtree is folded back; the merge preserves the rest of the tree untouched.
-        subtree = self.create_dictionary(self.config, self.keys, len(self.keys) - 1)
+        subtree = self.config
+        for key in reversed(self.keys):
+            if key not in subtree:
+                subtree = {key: subtree}
         if self._shared is not None:
             _merge_into(self._shared.tree, subtree)
             return
