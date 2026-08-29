@@ -345,7 +345,7 @@ def test_a_regrid_draw_pulls_the_hull_of_its_mapped_corners() -> None:
     """The pull box is the affine image of the target box (``WorldBox.image_under``): the hull of
     the ``2^n`` mapped corners, which is enumerated here the long way and must give the very same
     voxel window, for a rotation composed with a scale at free angles."""
-    from konfai.data.augmentation import EulerTransform, _reflect_interval, _rotation_3d_matrix, _scale_3d_matrix
+    from konfai.data.augmentation import EulerTransform, _reflect_interval, _rotation_3d_matrix, _scale_matrix
 
     class _Draw(EulerTransform):
         def _state_init(self, index, shapes, caches_attribute):
@@ -381,7 +381,7 @@ def test_a_regrid_draw_pulls_the_hull_of_its_mapped_corners() -> None:
     full = (7, 11, 13)
     for _ in range(20):
         draw = _Draw()
-        matrix = _rotation_3d_matrix(torch.deg2rad(torch.rand(3) * 360)) @ _scale_3d_matrix(
+        matrix = _rotation_3d_matrix(torch.deg2rad(torch.rand(3) * 360)) @ _scale_matrix(
             torch.exp2(torch.randn(1) * 0.3).repeat(3)
         )
         draw.matrix[0] = [matrix.unsqueeze(0)]

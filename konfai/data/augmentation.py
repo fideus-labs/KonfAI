@@ -48,44 +48,18 @@ def _require_simpleitk() -> None:
         )
 
 
-def _translate_2d_matrix(t: torch.Tensor) -> torch.Tensor:
-    return torch.cat(
-        (
-            torch.cat((torch.eye(2), torch.tensor([[t[0]], [t[1]]])), dim=1),
-            torch.Tensor([[0, 0, 1]]),
-        ),
-        dim=0,
-    )
+def _translate_matrix(t: torch.Tensor) -> torch.Tensor:
+    """The homogeneous matrix of the translation ``t`` (one entry per axis)."""
+    matrix = torch.eye(t.shape[0] + 1)
+    matrix[:-1, -1] = t
+    return matrix
 
 
-def _translate_3d_matrix(t: torch.Tensor) -> torch.Tensor:
-    return torch.cat(
-        (
-            torch.cat((torch.eye(3), torch.tensor([[t[0]], [t[1]], [t[2]]])), dim=1),
-            torch.Tensor([[0, 0, 0, 1]]),
-        ),
-        dim=0,
-    )
-
-
-def _scale_2d_matrix(s: torch.Tensor) -> torch.Tensor:
-    return torch.cat(
-        (
-            torch.cat((torch.eye(2) * s, torch.tensor([[0], [0]])), dim=1),
-            torch.tensor([[0, 0, 1]]),
-        ),
-        dim=0,
-    )
-
-
-def _scale_3d_matrix(s: torch.Tensor) -> torch.Tensor:
-    return torch.cat(
-        (
-            torch.cat((torch.eye(3) * s, torch.tensor([[0], [0], [0]])), dim=1),
-            torch.tensor([[0, 0, 0, 1]]),
-        ),
-        dim=0,
-    )
+def _scale_matrix(s: torch.Tensor) -> torch.Tensor:
+    """The homogeneous matrix of the per-axis scaling ``s`` (one entry per axis)."""
+    matrix = torch.eye(s.shape[0] + 1)
+    matrix[:-1, :-1] = torch.diag(s)
+    return matrix
 
 
 def _rotation_3d_matrix(rotation: torch.Tensor, center: torch.Tensor | None = None) -> torch.Tensor:
@@ -664,9 +638,8 @@ class Translate(EulerTransform):
         # The draw is a shift in VOXELS, in (x, y, z). ``affine_grid`` spans [-1, 1] over whatever
         # extent it is given, so the same shift is a different matrix on a patch than on the volume:
         # normalise it against the extent it is about to be applied to, never against a fixed one.
-        func = _translate_3d_matrix if len(shape) == 3 else _translate_2d_matrix
         sizes = torch.tensor(list(reversed(shape)), dtype=torch.float32)
-        return torch.unsqueeze(func(self.translate[index][a] * 2.0 / (sizes - 1)), dim=0)
+        return torch.unsqueeze(_translate_matrix(self.translate[index][a] * 2.0 / (sizes - 1)), dim=0)
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         # A uniform shift sends a target patch to that same patch displaced by the draw, so the source
@@ -814,12 +787,11 @@ class Scale(EulerTransform):
         self.s_std = s_std
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
-        func = _scale_3d_matrix if len(shapes[0]) == 3 else _scale_2d_matrix
         scale = torch.Tensor.repeat(
             torch.exp2(torch.randn(len(shapes)) * self.s_std).unsqueeze(1),
             [1, len(shapes[0])],
         )
-        self.matrix[index] = [torch.unsqueeze(func(value), dim=0) for value in scale]
+        self.matrix[index] = [torch.unsqueeze(_scale_matrix(value), dim=0) for value in scale]
         return shapes
 
 
@@ -1001,7 +973,7 @@ class Brightness(ColorTransform):
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         brightness = torch.Tensor.repeat((torch.randn(len(shapes)) * self.b_std).unsqueeze(1), [1, 3])
-        self.matrix[index] = [torch.unsqueeze(_translate_3d_matrix(value), dim=0) for value in brightness]
+        self.matrix[index] = [torch.unsqueeze(_translate_matrix(value), dim=0) for value in brightness]
         return shapes
 
 
@@ -1012,7 +984,7 @@ class Contrast(ColorTransform):
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         contrast = torch.exp2(torch.randn(len(shapes)) * self.c_std)
-        self.matrix[index] = [torch.unsqueeze(_scale_3d_matrix(value), dim=0) for value in contrast]
+        self.matrix[index] = [torch.unsqueeze(_scale_matrix(value.expand(3)), dim=0) for value in contrast]
         return shapes
 
 
