@@ -373,7 +373,7 @@ def test_validation_request_and_live_tunables_ride_one_broadcast(tmp_path: Path,
 
 
 def test_epoch_report_closes_on_the_wall_clock_with_the_criteria_apart_from_the_forward() -> None:
-    from konfai.data.patching import SweepClock
+    from konfai.utils.clock import SweepClock
 
     clock = SweepClock()
     clock._spent = {
@@ -490,7 +490,7 @@ def test_restoring_the_ema_weights_is_charged_to_the_checkpoint_phase(tmp_path: 
     accounts for it there: reported under ``setup`` it would read as the loaders' cost."""
     import time
 
-    from konfai.utils.runtime import restart_startup_clock
+    from konfai.utils.clock import restart_startup_clock
 
     class _SlowLoad:
         def load(self, state_dict: dict, **kwargs) -> None:

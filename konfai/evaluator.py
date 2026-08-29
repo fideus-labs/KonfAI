@@ -29,9 +29,9 @@ from torch.utils.data import DataLoader
 
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
-from konfai.data.patching import SweepClock
 from konfai.network.network import build_configured_criterions
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
+from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, EvaluatorError

@@ -28,7 +28,6 @@ import hashlib
 import itertools
 import queue
 import threading
-import time
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -53,6 +52,7 @@ from konfai.data.transform import (
     stat_seed_valid,
 )
 from konfai.utils.budget import format_bytes, peak_resident_bytes, reset_resident_peak, resident_bytes
+from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream, as_channel_first
 from konfai.utils.dataset import chunk_hull_voxels as _chunk_hull_voxels
@@ -678,63 +678,6 @@ class SweepSegment(NamedTuple):
     @property
     def channels(self) -> int:
         return int(self.source_shape[0])
-
-
-class SweepClock:
-    """Where a sweep's wall clock went, phase by phase, so none of it is unattributed.
-
-    A phase is accumulated by exactly one thread (the read by the producer, the write by the
-    writer, the rest by the sweep's own), so the additions need no lock, and the report is read
-    once both helpers have been joined. Two ``perf_counter`` calls per phase per block: the cost
-    is the report's own, not a mode the run has to be put into.
-    """
-
-    _END = object()
-
-    def __init__(self) -> None:
-        self._spent: dict[str, float] = {}
-
-    def reset(self) -> None:
-        self._spent = {}
-
-    def spent(self, name: str) -> float:
-        return self._spent.get(name, 0.0)
-
-    @contextlib.contextmanager
-    def phase(self, name: str) -> Iterator[None]:
-        start = time.perf_counter()
-        try:
-            yield
-        finally:
-            self._spent[name] = self._spent.get(name, 0.0) + time.perf_counter() - start
-
-    def waiting(self, name: str, blocks: Iterable[Any]) -> Iterator[Any]:
-        """``blocks``, charging to ``name`` the time spent waiting for each one."""
-        blocks = iter(blocks)
-        while True:
-            with self.phase(name):
-                block = next(blocks, SweepClock._END)
-            if block is SweepClock._END:
-                return
-            yield block
-
-    def report(self, min_seconds: float = 1.0) -> str | None:
-        """One line accounting for the sweeps' wall clock, or ``None`` below ``min_seconds``.
-
-        The sum before the bar is the sweep's own thread and closes exactly: what its phases do
-        not name is ``other``, the part of the run nothing has explained yet. After the bar are
-        the read and the write themselves, which run beside that thread when the sweep pipelines
-        and inside its ``wait`` when it does not.
-        """
-        wall = self.spent("sweep")
-        if wall < min_seconds:
-            return None  # a sweep this short has nothing to account for, and says so by saying nothing
-        named = {phase: self.spent(phase) for phase in ("chain", "fetch", "wait(read)", "wait(write)")}
-        parts = " + ".join(f"{phase} {value:.1f}" for phase, value in named.items())
-        return (
-            f"[KonfAI] sweep {wall:.1f} s = {parts} + other {wall - sum(named.values()):.1f}"
-            f" | stages read {self.spent('read'):.1f} s, write {self.spent('write'):.1f} s"
-        )
 
 
 #: This rank's sweeps, summed over the cases it ran: the unit the report is about.

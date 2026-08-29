@@ -46,8 +46,9 @@ from konfai.data.data_manager import (
 )
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Gradient, TensorCast, Transform, TransformLoader
+from konfai.utils.clock import restart_startup_clock
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.runtime import State, restart_startup_clock
+from konfai.utils.runtime import State
 from konfai.utils.utils import split_path_spec
 from torch.utils.data._utils.pin_memory import pin_memory as torch_pin_memory
 

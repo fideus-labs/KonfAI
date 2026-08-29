@@ -45,8 +45,9 @@ from torch.utils.checkpoint import checkpoint
 
 from konfai import cuda_visible_devices, konfai_root
 from konfai.data.data_manager import BatchSample
-from konfai.data.patching import Accumulator, ModelPatch, SweepClock
+from konfai.data.patching import Accumulator, ModelPatch
 from konfai.metric.schedulers import Scheduler
+from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config
 from konfai.utils.errors import ConfigError, MeasureError, TrainerError
 from konfai.utils.runtime import State, get_device, get_gpu_memory

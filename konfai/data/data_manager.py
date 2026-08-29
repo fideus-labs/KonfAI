@@ -56,17 +56,11 @@ from konfai.utils.budget import (
     node_local_ranks,
     resolve_memory_budget,
 )
+from konfai.utils.clock import startup_clock
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
-from konfai.utils.runtime import (
-    State,
-    get_cpu_info,
-    get_memory,
-    get_memory_info,
-    memory_forecast,
-    startup_clock,
-)
+from konfai.utils.runtime import State, get_cpu_info, get_memory, get_memory_info, memory_forecast
 from konfai.utils.utils import SUPPORTED_FORMATS, OverlapSpec, resolve_patch, split_path_spec
 
 # A cached case is a float32 tensor (torch's default dtype, and the default TensorCast's target), so

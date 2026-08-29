@@ -21,7 +21,6 @@ import pytest
 import torch
 import tqdm
 from konfai.data.data_manager import BatchDataItem, DatasetIter
-from konfai.data.patching import SweepClock
 from konfai.data.transform import TransformInverse
 from konfai.network.network import Network
 from konfai.predictor import (
@@ -33,6 +32,7 @@ from konfai.predictor import (
     _prediction_report,
     _Predictor,
 )
+from konfai.utils.clock import SweepClock
 from konfai.utils.dataset import Attribute
 
 

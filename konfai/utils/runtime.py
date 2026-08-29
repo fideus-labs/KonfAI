@@ -32,7 +32,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AbstractContextManager, closing, contextmanager
+from contextlib import closing, contextmanager
 from enum import Enum
 from functools import wraps
 from pathlib import Path
@@ -67,6 +67,7 @@ from konfai import (
 )
 from konfai.utils import State  # also the re-export ``konfai.utils.runtime.State`` callers import
 from konfai.utils.budget import available_cpus, node_local_ranks, set_per_rank_budget
+from konfai.utils.clock import StartupClock, restart_startup_clock, startup_clock
 from konfai.utils.errors import ConfigError, KonfAIError
 from konfai.utils.utils import env_flag
 
@@ -672,72 +673,6 @@ def seed_all(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
-
-class StartupClock:
-    """Where a run's time went before its ranks start, phase by phase, in the sweep's format.
-
-    Built at the launcher's entry (:func:`run_distributed_app`), carried to the ranks on the
-    workflow object, reported once by rank 0 as it starts. The build's phases (``cases``: the
-    cohort listed, ``grids``: the managers built, ``model``: the network built) and the setup's
-    (``checkpoint``: the weights loaded) are taken out of ``build`` and ``setup``, which then read
-    as their remainders (the config bound, the workflow's own init; the loaders made); ``launch``
-    is spawn to the rank's start. The two stamps are ``time.time``: a rank reads them on another
-    node under a cluster launch, where a process counter means nothing; the phases are the
-    launcher's own and use the process counter.
-    """
-
-    def __init__(self) -> None:
-        from konfai.data.patching import SweepClock  # imports this module: bound at first use
-
-        self._phases = SweepClock()
-        self.started = time.time()
-        self.launched: float | None = None
-
-    def phase(self, name: str) -> AbstractContextManager[None]:
-        return self._phases.phase(name)
-
-    def spent(self, name: str) -> float:
-        return self._phases.spent(name)
-
-    def launch(self) -> None:
-        self.launched = time.time()
-
-    def report(self, min_seconds: float = 1.0) -> str | None:
-        """One line accounting for the wall clock since the launcher's entry, or ``None`` below
-        ``min_seconds``; ``other`` is what no phase names."""
-        now = time.time()
-        wall = now - self.started
-        if wall < min_seconds:
-            return None
-        nested = {name: self.spent(name) for name in ("cases", "grids", "model")}
-        named = {
-            "build": max(0.0, self.spent("build") - sum(nested.values())),
-            **nested,
-            "checkpoint": self.spent("checkpoint"),
-            "setup": max(0.0, self.spent("setup") - self.spent("checkpoint")),
-            "launch": 0.0 if self.launched is None else now - self.launched,
-        }
-        parts = " + ".join(f"{name} {value:.1f}" for name, value in named.items())
-        return f"[KonfAI] startup {wall:.1f} s = {parts} + other {wall - sum(named.values()):.1f}"
-
-
-_startup_clock: StartupClock | None = None
-
-
-def startup_clock() -> StartupClock:
-    """This process's startup clock, built on first use."""
-    global _startup_clock
-    if _startup_clock is None:
-        _startup_clock = StartupClock()
-    return _startup_clock
-
-
-def restart_startup_clock() -> StartupClock:
-    """A fresh startup clock: the Python API runs several workflows in one process, each its own."""
-    global _startup_clock
-    _startup_clock = StartupClock()
-    return _startup_clock
 
 
 class DistributedObject(ABC):

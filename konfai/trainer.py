@@ -48,8 +48,8 @@ from konfai import (
     statistics_directory,
 )
 from konfai.data.data_manager import BatchSample, DataTrain
-from konfai.data.patching import SweepClock
 from konfai.network.network import Model, ModelLoader, NetState, Network
+from konfai.utils.clock import SweepClock, startup_clock
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.errors import ConfigError, TrainerError
 from konfai.utils.live_control import LiveControl
@@ -64,7 +64,6 @@ from konfai.utils.runtime import (
     run_distributed_app,
     safe_torch_load,
     seed_all,
-    startup_clock,
     synchronize_data,
 )
 from konfai.utils.utils import concretize_patch_size, size_free_axes

@@ -82,7 +82,7 @@ def _awaited(phase: str) -> Iterator[None]:
 
     The fold has no pipeline: every member's region is read, and every slab written, on its own
     thread. So the store's own seconds ARE the seconds the loop waits, which is what
-    :meth:`~konfai.data.patching.SweepClock.report` prints on either side of its bar.
+    :meth:`~konfai.utils.clock.SweepClock.report` prints on either side of its bar.
     """
     with SWEEP_CLOCK.phase(f"wait({phase})"), SWEEP_CLOCK.phase(phase):
         yield

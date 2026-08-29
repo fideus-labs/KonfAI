@@ -874,8 +874,8 @@ def test_a_target_group_is_moved_once_per_forward_and_not_for_a_criterion_outsid
 
 
 def test_forward_charges_the_criteria_to_the_clock_apart_from_the_walk() -> None:
-    from konfai.data.patching import SweepClock
     from konfai.network.network import Measure
+    from konfai.utils.clock import SweepClock
 
     class Net(Network):
         def __init__(self) -> None:

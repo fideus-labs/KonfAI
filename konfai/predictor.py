@@ -54,7 +54,6 @@ from konfai.data.patching import (
     SlabAligner,
     SlabRegionStream,
     StreamingAccumulator,
-    SweepClock,
     _halo_radii,
     _HaloPull,
     _RemapPull,
@@ -77,6 +76,7 @@ from konfai.data.transform import (
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.budget import node_local_ranks, resolve_memory_budget, set_per_rank_budget
 from konfai.utils.chain_diff import dataset_tree, input_chain_differences, training_dataset_tree
+from konfai.utils.clock import SweepClock, startup_clock
 from konfai.utils.config import _escape_key_component, apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, KonfAIError, PredictorError
@@ -91,7 +91,6 @@ from konfai.utils.runtime import (
     description,
     run_distributed_app,
     safe_torch_load,
-    startup_clock,
 )
 from konfai.utils.utils import concretize_patch_size, env_flag, get_module, size_free_axes, split_path_spec
 from konfai.utils.vram import next_patch_candidate, usable_vram
