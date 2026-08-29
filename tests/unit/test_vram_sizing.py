@@ -162,7 +162,7 @@ class _Data:
         return self._worst
 
 
-def _predictor(out_channels, nb_augmentation, reduction, margined, candidate=None):
+def _predictor(out_channels, nb_augmentation, reduction, candidate=None):
     predictor = Predictor.__new__(Predictor)
     predictor._vram_patch_template = [0, 0, 0]
     predictor._vram_patch_candidate = candidate
@@ -172,7 +172,6 @@ def _predictor(out_channels, nb_augmentation, reduction, margined, candidate=Non
     predictor.combine = Mean()
     predictor.path_to_models = ["model.pt"]
     predictor.outputs_dataset = {"Head.Tanh": _Writer(nb_augmentation, reduction)}
-    predictor._usable_vram_after_oom = lambda device: margined
     return predictor
 
 
@@ -184,23 +183,23 @@ class TestPredictorShrinkBudget:
         # reserve = (3+1)ch x 100^3 x 2B x 2aug = 1.6e7 -> usable 1e6 of the 1.7e7 margined budget;
         # measured 8e6 -> exact isotropic step (1/8)^(1/3) halves each axis. Without the reserve the
         # measurement would claim a fit and only the fixed 0.8 step would apply.
-        predictor = _predictor(3, nb_augmentation=2, reduction=Mean(), margined=1.7e7)
-        assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
+        predictor = _predictor(3, nb_augmentation=2, reduction=Mean())
+        assert predictor._shrunken_patch(8_000_000, usable=1.7e7) == [50, 50, 50]
 
     def test_a_streaming_writer_reserves_only_its_window(self):
         # Single augmentation + voxel-local reduction -> window = candidate_z x cross-section:
         # reserve 8e5 -> usable 3.2e6, measured 6.4e6 -> per-axis (1/2)^(1/3). A volume reserve
         # (8e6) would not fit the 4e6 budget and would have fallen back to [8, 85, 85].
-        predictor = _predictor(3, nb_augmentation=1, reduction=Mean(), margined=4e6, candidate=[10, 100, 100])
-        assert predictor._shrunken_patch(6_400_000, device=None) == [7, 79, 79]
+        predictor = _predictor(3, nb_augmentation=1, reduction=Mean(), candidate=[10, 100, 100])
+        assert predictor._shrunken_patch(6_400_000, usable=4e6) == [7, 79, 79]
 
     def test_an_unfittable_reserve_falls_back_to_the_forward_alone(self):
         # The non-streamable volume reserve (1.6e7) exceeds the whole budget (1e6): the writer will
         # blend on the CPU, and the patch is still sized for the forward instead of refusing.
-        predictor = _predictor(3, nb_augmentation=2, reduction=_SpatialReduction(), margined=1e6)
-        assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
+        predictor = _predictor(3, nb_augmentation=2, reduction=_SpatialReduction())
+        assert predictor._shrunken_patch(8_000_000, usable=1e6) == [50, 50, 50]
 
     def test_unpriceable_channels_skip_the_reserve(self):
-        predictor = _predictor(None, nb_augmentation=2, reduction=Mean(), margined=1e6)
+        predictor = _predictor(None, nb_augmentation=2, reduction=Mean())
         assert predictor._accumulation_reserve([100, 100, 100], [100, 100, 100]) is None
-        assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
+        assert predictor._shrunken_patch(8_000_000, usable=1e6) == [50, 50, 50]

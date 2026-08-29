@@ -40,6 +40,7 @@ from pathlib import Path
 import torch
 
 import konfai.predictor as predictor_module
+import konfai.utils.vram as vram_module
 from konfai.predictor import build_predict, predict
 from konfai.trainer import train
 
@@ -57,8 +58,8 @@ def install_auto_patch_probes() -> None:
         return original_run(self)
 
     predictor_module._Predictor.run = run_with_forced_oom
-    predictor_module.Predictor._transient_at_oom = lambda self, device: None
-    predictor_module.Predictor._usable_vram_after_oom = lambda self, device: 1.0
+    vram_module.transient_at_oom = lambda device: None
+    vram_module.usable_after_oom = lambda device: 1.0
 
 
 def main() -> None:

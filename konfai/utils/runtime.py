@@ -405,6 +405,16 @@ class DataLog(Enum):
     VIDEO = "VIDEO"
     AUDIO = "AUDIO"
 
+    @classmethod
+    def parse(cls, entries: list[str] | None) -> dict[str, tuple["DataLog", int]]:
+        """``{target: (strategy, count)}`` from ``"group_or_module/STRATEGY/N"`` entries; a ``:``-spelled
+        module path is keyed by its dotted name."""
+        parsed: dict[str, tuple[DataLog, int]] = {}
+        for entry in entries or []:
+            target, strategy, count = entry.split("/")
+            parsed[target.replace(":", ".")] = (cls[strategy], int(count))
+        return parsed
+
     def __call__(self, tb: SummaryWriter, name: str, layer: torch.Tensor, it: int):
         if self == DataLog.SIGNAL:
             return [

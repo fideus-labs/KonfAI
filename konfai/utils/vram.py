@@ -27,6 +27,8 @@ transient when there is one, a fixed factor when the OOM left no number) re-plan
 restarts. When everything fits (the common case) nothing here runs at all.
 """
 
+import torch
+
 #: Fraction of the free VRAM a step may claim; the reserve absorbs allocator fragmentation and
 #: transients the measured run did not exercise (mirrors the accumulation gate's margin).
 VRAM_BUDGET_SAFETY_FRACTION = 0.8
@@ -41,6 +43,41 @@ def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = 
     nothing extra for training, whose resident set is already allocated when ``free_bytes`` is read).
     """
     return free_bytes * margin - resident_bytes
+
+
+def transient_at_oom(device: int | None) -> int | None:
+    """The failed step's transient (CUDA peak over resident), ``None`` off CUDA or when unreadable."""
+    if device is None:
+        return None
+    try:
+        transient = int(torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device))
+    except Exception:  # nosec B110 - an unreadable measurement falls back to the fixed shrink step
+        return None
+    return transient if transient > 0 else None
+
+
+def reset_peak(device: int | None) -> None:
+    """Drop the failed attempt's high-water mark, so the rerun measures its own steps: the mark
+    only rises, and the full-extent attempt's would overstate every later transient."""
+    if device is None:
+        return
+    try:
+        torch.cuda.reset_peak_memory_stats(device)
+    except Exception:  # nosec B110 - stale stats only cost precision, never correctness
+        pass
+
+
+def usable_after_oom(device: int | None) -> float:
+    """The VRAM the next attempt's step may claim, read once the failed state is freed; ``0.0``
+    (which refuses the restart) off CUDA or when unreadable."""
+    if device is None:
+        return 0.0
+    try:
+        torch.cuda.empty_cache()
+        free, _ = torch.cuda.mem_get_info(device)
+    except Exception:  # nosec B110
+        return 0.0
+    return usable_vram(free)
 
 
 def next_patch_candidate(

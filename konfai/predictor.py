@@ -74,6 +74,7 @@ from konfai.data.transform import (
     TransformLoader,
 )
 from konfai.network.network import Model, ModelLoader, NetState, Network
+from konfai.utils import vram
 from konfai.utils.budget import node_local_ranks, resolve_memory_budget, set_per_rank_budget
 from konfai.utils.chain_diff import dataset_tree, input_chain_differences, training_dataset_tree
 from konfai.utils.clock import SweepClock, startup_clock
@@ -93,7 +94,6 @@ from konfai.utils.runtime import (
     safe_torch_load,
 )
 from konfai.utils.utils import concretize_patch_size, env_flag, get_module, size_free_axes, split_path_spec
-from konfai.utils.vram import next_patch_candidate, usable_vram
 
 #: This rank's prediction loop, phase by phase, summed over the cases it ran: the unit the line
 #: at the end of a run accounts for (see ``_prediction_report``).
@@ -1598,13 +1598,7 @@ class _Predictor:
                     ]
                 ),
             )
-        self.data_log: dict[str, tuple[DataLog, int]] = {}
-        if data_log is not None:
-            for data in data_log:
-                self.data_log[data.split("/")[0].replace(":", ".")] = (
-                    DataLog[data.split("/")[1]],
-                    int(data.split("/")[2]),
-                )
+        self.data_log = DataLog.parse(data_log)
         self._has_runtime_measures = any(
             network.measure is not None for network in self.model_composite.module.get_networks().values()
         )
@@ -2061,20 +2055,16 @@ class Predictor(DistributedObject):
             # h5 output as a directory and write the hidden dotfile Predictions/<run>/Dataset/.h5.
             output_dataset.rebase(self.predict_path)
         self.data_log = data_log
-        modules = []
-        for i, _ in self.model.named_modules():
-            modules.append(i)
-        if self.data_log is not None:
-            for k in self.data_log:
-                tmp = k.split("/")[0].replace(":", ".")
-                if tmp not in self.dataset.get_groups_dest() and tmp not in modules:
-                    raise PredictorError(
-                        f"Invalid key '{tmp}' in `data_log`.",
-                        f"This key is neither a destination group from the dataset ({self.dataset.get_groups_dest()})",
-                        f"nor a valid module name in the model ({modules}).",
-                        "Please check your `data_log` configuration,"
-                        " it should reference either a model output or a dataset group.",
-                    )
+        modules = [name for name, _ in self.model.named_modules()]
+        for target in DataLog.parse(self.data_log):
+            if target not in self.dataset.get_groups_dest() and target not in modules:
+                raise PredictorError(
+                    f"Invalid key '{target}' in `data_log`.",
+                    f"This key is neither a destination group from the dataset ({self.dataset.get_groups_dest()})",
+                    f"nor a valid module name in the model ({modules}).",
+                    "Please check your `data_log` configuration,"
+                    " it should reference either a model output or a dataset group.",
+                )
 
         self.gpu_checkpoints = gpu_checkpoints
         # Cut the grids with the model's downsampling multiple already known, so each case's free axis
@@ -2313,15 +2303,15 @@ class Predictor(DistributedObject):
                 # in-flight state: open streamed sinks abort and remove their partial entries, so a
                 # reader never sees a half-written volume even when the OOM is fatal, then read the
                 # honest free VRAM.
-                measured = self._transient_at_oom(device)
+                measured = vram.transient_at_oom(device)
                 for output_dataset in self.outputs_dataset.values():
                     output_dataset.reset()
                 if self._vram_patch_template is None:
                     raise  # no free axis declared: not auto-patched
-                candidate = self._shrunken_patch(measured, device)
+                candidate = self._shrunken_patch(measured, vram.usable_after_oom(device))
                 if candidate is None:
                     raise
-                self._reset_cuda_peak(device)
+                vram.reset_peak(device)
                 print(
                     f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> "
                     f"re-planning the free patch axes to {candidate} and restarting this rank's cases."
@@ -2330,7 +2320,7 @@ class Predictor(DistributedObject):
                 self.dataset.replan_patch(candidate)
                 dataloader = self.dataset.get_data(world_size)[0][global_rank][0]
 
-    def _shrunken_patch(self, measured: int | None, device: int | None) -> list[int] | None:
+    def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
         """One shrink step for the free patch axes after a CUDA OOM (``None`` = not auto, or floor).
 
         The first OOM starts from the worst prepared case at full extent (the size the failed grid
@@ -2348,14 +2338,15 @@ class Predictor(DistributedObject):
         candidate = self._vram_patch_candidate or concretize_patch_size(
             self._vram_patch_template, worst, self._downsampling_factor
         )
-        usable = self._usable_vram_after_oom(device)
         reserve = self._accumulation_reserve(candidate, worst)
         snap = self._downsampling_factor
         if reserve is not None:
-            shrunk = next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable - reserve, snap)
+            shrunk = vram.next_patch_candidate(
+                candidate, self._vram_patch_template, worst, measured, usable - reserve, snap
+            )
             if shrunk is not None:
                 return shrunk
-        return next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable, snap)
+        return vram.next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable, snap)
 
     def _accumulation_reserve(self, candidate: list[int], worst: list[int]) -> float | None:
         """Bytes each case keeps resident while its patches accumulate, per output writer: the
@@ -2377,42 +2368,6 @@ class Predictor(DistributedObject):
             voxels = candidate[0] * np.prod(worst[1:], dtype=np.int64) if streams else np.prod(worst, dtype=np.int64)
             reserve += float((out_channels + 1) * voxels * elem * nb_augmentation)
         return reserve
-
-    @staticmethod
-    def _reset_cuda_peak(device: int | None) -> None:
-        """Drop the failed attempt's high-water mark so the rerun measures its own steps.
-
-        ``max_memory_allocated`` only rises: left in place, the full-extent attempt's peak would
-        overstate every later transient: a second shrink would overshoot, and the accumulation
-        gate would keep the rerun's blend on the CPU.
-        """
-        if device is None:
-            return
-        try:
-            torch.cuda.reset_peak_memory_stats(device)
-        except Exception:  # nosec B110 - stale stats only cost precision, never correctness
-            pass
-
-    def _transient_at_oom(self, device: int | None) -> int | None:
-        """The failed step's measured transient (CUDA peak over resident), ``None`` when unreadable."""
-        if device is None:
-            return None
-        try:
-            transient = int(torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device))
-        except Exception:  # nosec B110 - an unreadable measurement just falls back to the fixed step
-            return None
-        return transient if transient > 0 else None
-
-    def _usable_vram_after_oom(self, device: int | None) -> float:
-        """The VRAM budget the next attempt's step may claim, read once the failed state is freed."""
-        if device is None:
-            return 0.0
-        try:
-            torch.cuda.empty_cache()
-            free, _ = torch.cuda.mem_get_info(device)
-        except Exception:  # nosec B110 - an unreadable budget refuses the restart (the OOM re-raises)
-            return 0.0
-        return usable_vram(free)
 
     def __str__(self) -> str:
         params = {
