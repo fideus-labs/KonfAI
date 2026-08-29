@@ -177,7 +177,7 @@ def route():
                 "num_workers": 0,
             },
             "outputs_dataset": {"Head:Scale": {"OutputDataset": {
-                "name_class": "OutSameAsGroupDataset",
+                "name_class": "OutputDataset",
                 "before_reduction_transforms": "None",
                 "after_reduction_transforms": "None",
                 "final_transforms": "None",

@@ -24,7 +24,7 @@ import pytest
 import torch
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager import DatasetIter
-from konfai.predictor import Mean, OutSameAsGroupDataset, Reduction
+from konfai.predictor import Mean, OutputDataset, Reduction
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.utils import get_patch_slices_from_shape
 
@@ -214,7 +214,7 @@ def _drive_tta(
         def get_dataset_from_index(group_dest: str, index: int):
             return DummyManager()
 
-    output_dataset = OutSameAsGroupDataset(
+    output_dataset = OutputDataset(
         same_as_group="src:dest",
         dataset_filename=f"{tmp_path}/output.h5:h5" if file_format == "h5" else f"{tmp_path}/output:{file_format}",
         group="out",

@@ -78,7 +78,7 @@ Predictor:
   outputs_dataset:
     Head:Tanh:  # Model output used to generate the predicted dataset
       OutputDataset: # Output dataset built using the same spatial structure as the input group
-        name_class: OutSameAsGroupDataset
+        name_class: OutputDataset
         before_reduction_transforms: None
         after_reduction_transforms: None
         final_transforms:  # Final transforms applied before saving the prediction

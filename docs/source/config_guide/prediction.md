@@ -163,7 +163,7 @@ Set `check_training_transforms: false` to silence it.
 outputs_dataset:
   Head:Tanh:
     OutputDataset:
-      name_class: OutSameAsGroupDataset
+      name_class: OutputDataset
       group: sCT
       same_as_group: MR:MR
       reduction: Mean
@@ -174,7 +174,7 @@ Important nested fields:
 | Field | Effect |
 | --- | --- |
 | output key | Selects the model output to export. |
-| `name_class` | Selects the output dataset implementation. |
+| `name_class` | Classpath of the output sink; a bare name resolves in `konfai.predictor` (default `OutputDataset`). |
 | `group` | Output group name written to disk. |
 | `dataset_filename` | Destination dataset path and format. |
 | `same_as_group` | Geometry reference group for exported volumes. |

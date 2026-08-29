@@ -27,7 +27,7 @@ from konfai.predictor import (
     PREDICTION_CLOCK,
     Mean,
     ModelComposite,
-    OutSameAsGroupDataset,
+    OutputDataset,
     _colocate_loaded_modules,
     _prediction_report,
     _Predictor,
@@ -201,7 +201,7 @@ def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> No
             assert index == 0
             return DummyManager()
 
-    output_dataset = OutSameAsGroupDataset(
+    output_dataset = OutputDataset(
         same_as_group="src:dest",
         dataset_filename="./Output:mha",
         group="out",
@@ -279,7 +279,7 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
             self.cpu_calls += 1
             return torch.ones(1, 2, 2)
 
-    output_dataset = OutSameAsGroupDataset(
+    output_dataset = OutputDataset(
         same_as_group="src:dest",
         dataset_filename="./Output:mha",
         group="out",
@@ -401,8 +401,8 @@ def test_patch_headers_are_copied_only_for_a_patch_inverse_to_undo_on() -> None:
             self.undone_on.append(cache_attribute)
             return tensor
 
-    def output_dataset() -> OutSameAsGroupDataset:
-        return OutSameAsGroupDataset(
+    def output_dataset() -> OutputDataset:
+        return OutputDataset(
             same_as_group="src:dest",
             dataset_filename="./Output:mha",
             group="out",
@@ -433,7 +433,7 @@ def test_get_output_hands_the_assembled_volume_on_as_a_view() -> None:
     the member itself, a fold of several copies first, Median/Vote/Concat build a new tensor), so
     the accumulator's own buffer, which assemble() has already let go of, can be the answer.
     """
-    output_dataset = OutSameAsGroupDataset(
+    output_dataset = OutputDataset(
         same_as_group="src:dest",
         dataset_filename="./Output:mha",
         group="out",
@@ -690,7 +690,7 @@ def test_gate_approved_blend_falls_back_to_cpu_when_the_allocation_fails() -> No
         def cpu(self) -> torch.Tensor:
             return torch.ones(1, 2, 2)
 
-    output_dataset = OutSameAsGroupDataset(
+    output_dataset = OutputDataset(
         same_as_group="src:dest",
         dataset_filename="./Output:mha",
         group="out",
@@ -745,7 +745,7 @@ def test_mid_blend_oom_stays_fatal() -> None:
         def element_size() -> int:
             return 4
 
-    output_dataset = OutSameAsGroupDataset(
+    output_dataset = OutputDataset(
         same_as_group="src:dest",
         dataset_filename="./Output:mha",
         group="out",
@@ -814,10 +814,10 @@ def test_ensemble_load_colocates_late_added_head_on_gpu() -> None:
 # ---------------------------------------------------------------------------
 # CPU offload of patch predictions (pinned staging buffer)
 # ---------------------------------------------------------------------------
-def _dataset(monkeypatch: pytest.MonkeyPatch) -> OutSameAsGroupDataset:
+def _dataset(monkeypatch: pytest.MonkeyPatch) -> OutputDataset:
     monkeypatch.setenv("KONFAI_config_file", "unused.yml")
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
-    return OutSameAsGroupDataset(same_as_group="default:default", dataset_filename="default|./Dataset:mha")
+    return OutputDataset(same_as_group="default:default", dataset_filename="default|./Dataset:mha")
 
 
 def test_offload_cpu_tensor_is_passed_through(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -888,7 +888,7 @@ def test_a_grid_swept_off_axis_zero_takes_the_whole_volume_path(monkeypatch: pyt
         def get_dataset_from_index(group_dest: str, index: int):
             return DummyManager()
 
-    output_dataset = OutSameAsGroupDataset(
+    output_dataset = OutputDataset(
         same_as_group="src:dest",
         dataset_filename="./Output:mha",
         group="out",
@@ -897,7 +897,7 @@ def test_a_grid_swept_off_axis_zero_takes_the_whole_volume_path(monkeypatch: pyt
     )
     output_dataset._streaming_enabled = True
     # A plan would exist if streaming were allowed to consider this case at all.
-    monkeypatch.setattr(OutSameAsGroupDataset, "_plan_stream", lambda self, *a, **k: object(), raising=True)
+    monkeypatch.setattr(OutputDataset, "_plan_stream", lambda self, *a, **k: object(), raising=True)
 
     output_dataset.add_layer(
         index_dataset=0,

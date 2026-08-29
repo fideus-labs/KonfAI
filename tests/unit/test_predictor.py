@@ -32,7 +32,7 @@ import pytest
 import torch
 from konfai.data.augmentation import Flip
 from konfai.data.patching import Accumulator, blend_axes
-from konfai.predictor import PREDICTION_CLOCK, OutSameAsGroupDataset, _AsyncWriter, _Predictor
+from konfai.predictor import PREDICTION_CLOCK, OutputDataset, _AsyncWriter, _Predictor
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import PredictorError
 from konfai.utils.utils import get_patch_slices_from_shape
@@ -111,7 +111,7 @@ def test_a_built_in_reduction_binds_from_its_own_block_like_a_custom_one(write_c
 
     path = write_config("Predictor:\n  outputs_dataset:\n    L:\n      OutputDataset:\n        reduction: Mean\n")
     monkeypatch.setenv("KONFAI_ROOT", "Predictor")
-    output = OutSameAsGroupDataset(
+    output = OutputDataset(
         same_as_group="a:b",
         dataset_filename="./Out:mha",
         before_reduction_transforms={},
@@ -126,11 +126,11 @@ def test_a_built_in_reduction_binds_from_its_own_block_like_a_custom_one(write_c
     assert "Mean" in block
 
 
-def _output_dataset(write_config, monkeypatch) -> OutSameAsGroupDataset:
+def _output_dataset(write_config, monkeypatch) -> OutputDataset:
     """An output dataset with its declared blend window built, as ``prepare`` leaves it."""
     write_config("Predictor:\n  outputs_dataset:\n    L:\n      OutputDataset: {}\n")
     monkeypatch.setenv("KONFAI_ROOT", "Predictor")
-    output = OutSameAsGroupDataset(
+    output = OutputDataset(
         same_as_group="a:b",
         dataset_filename="./Out:mha",
         before_reduction_transforms={},
@@ -141,7 +141,7 @@ def _output_dataset(write_config, monkeypatch) -> OutSameAsGroupDataset:
     return output
 
 
-def _configure_blend(output: OutSameAsGroupDataset, patch_size: list[int], overlap: int) -> None:
+def _configure_blend(output: OutputDataset, patch_size: list[int], overlap: int) -> None:
     """Hand ``output`` the run's patch config the way the prediction loop does."""
     _Predictor(
         world_size=1,

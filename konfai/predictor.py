@@ -17,13 +17,11 @@
 """Prediction workflow classes and the streamed-write dispatcher."""
 
 import copy
-import importlib
 import os
 import queue
 import shutil
 import threading
 import warnings
-from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -152,27 +150,116 @@ class _AsyncWriter:
             raise error
 
 
-class OutputDataset(Dataset, NeedDevice, ABC):
-    """
-    Abstract prediction sink that accumulates model outputs and writes them to disk.
+# Streaming pays per-slab work (the pipe traversal, region writes, the TTA aligner); when the
+# assembled accumulators of all copies are below this fraction of allocatable memory (a 2.5D case),
+# holding them whole costs nothing and the case takes the whole-volume path.
+# KONFAI_STREAM_WORTH_THRESHOLD overrides the fraction (tests set 0 to exercise the streamed
+# machinery on toy volumes). See OutputDataset._worth_streaming.
+_STREAM_WORTH_MIN_FRACTION = 0.05
 
-    Concrete subclasses define how layers are accumulated across patches,
-    augmentations, and multiple models before the final prediction volume is
-    materialized.
+
+def _slab_context(region: slice, spatial: list[int]) -> RegionContext:
+    """Where one z-slab of the accumulator grid sits: the same region as source and target."""
+    slices = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
+    shape = tuple(int(extent) for extent in spatial)
+    return RegionContext(slices, slices, shape, shape)
+
+
+@dataclass(frozen=True)
+class _FinalizeStage:
+    """One step of the finalize chain, bound to how the chain applies it (forward or inverted)."""
+
+    transform: Transform
+    inverted: bool
+
+    def locality(self, attribute: Attribute) -> PatchLocality:
+        if self.inverted:
+            return cast(TransformInverse, self.transform).inverse_patch_locality(attribute)
+        return self.transform.patch_locality(attribute)
+
+    def __call__(self, name: str, tensor: torch.Tensor, attribute: Attribute) -> torch.Tensor:
+        if self.inverted:
+            return cast(TransformInverse, self.transform).inverse(name, tensor, attribute)
+        return self.transform(name, tensor, attribute)
+
+    def stream_region(
+        self, name: str, tensor: torch.Tensor, context: RegionContext, attribute: Attribute
+    ) -> torch.Tensor:
+        """The call, told where the region sits (both default to the whole-volume call)."""
+        if self.inverted:
+            return cast(TransformInverse, self.transform).stream_region_inverse(name, tensor, context, attribute)
+        return self.transform.stream_region(name, tensor, context, attribute)
+
+
+@dataclass(frozen=True)
+class _StreamPlan:
+    """How one case streams: the post-reduction stages, split into a per-slab pointwise prefix, a
+    streamed pipe of region and pointwise stages, and (past what streaming can honour) a
+    whole-volume tail.
+
+    ``to_sink`` streams straight into a region-write ``DataStream``; ``pipe_start`` is the first
+    region stage (``None`` when the chain is pointwise throughout), and the pipe runs from there to
+    the end: region stages compose, so their number is not limited. Without ``to_sink`` the prefix
+    streams into a post-reduction buffer and ``stages[tail_start:]`` runs once on it (the chain
+    split). The invariants: ``to_sink`` implies no tail, and a pipe implies ``to_sink``: a tail
+    swallows the region stages, so the buffer always sits on the accumulator grid.
     """
+
+    stages: list[_FinalizeStage]
+    pipe_start: int | None
+    tail_start: int
+    to_sink: bool
+    # Prefix stages whose declaration is SLAB: per-voxel value maps with a per-region side effect,
+    # run through ``Transform.stream_slab`` so they learn where each slab sits.
+    slab_stages: frozenset[int] = frozenset()
+
+    @property
+    def boundary(self) -> int:
+        """Where the per-slab pointwise prefix ends."""
+        return self.pipe_start if self.pipe_start is not None else self.tail_start
+
+    @property
+    def mode(self) -> str:
+        if not self.to_sink:
+            return "buffered"
+        return "region" if self.pipe_start is not None else "direct"
+
+
+@dataclass
+class _RegionState:
+    """One case's live streamed pipe: its slab scheduler and the geometry its closures share.
+
+    ``shapes[i]`` is the spatial shape between pipe stage ``i - 1`` and ``i`` (``shapes[0]`` the
+    accumulator's, ``shapes[-1]`` the written image's); a pointwise stage leaves it unchanged, so the
+    per-stage region bookkeeping folds through the same list the pull map composes over. The pipe's
+    stages themselves live in the ``produce``/``pull`` closures the stream was built on.
+    """
+
+    shapes: list[list[int]]
+    stream: SlabRegionStream | None = None
+    # The attribute the latest emission ran the pipe on: what the sink opens with.
+    attribute: Attribute | None = None
+
+
+@config("OutputDataset")
+class OutputDataset(Dataset, NeedDevice):
+    """The sink of one model output: accumulates a case's patches across its copies and models,
+    mirrors the geometry and transform chain of the input group ``same_as_group``, and writes the
+    result, streamed by slabs whenever that is byte-identical to the assembled path."""
 
     def __init__(
         self,
-        filename: str,
-        group: str,
-        before_reduction_transforms: dict[str, TransformLoader],
-        after_reduction_transforms: dict[str, TransformLoader],
-        final_transforms: dict[str, TransformLoader],
-        patch_combine: str | None,
-        reduction: str,
+        same_as_group: str = "default",
+        dataset_filename: str = "default|./Dataset:mha",
+        group: str = "default",
+        before_reduction_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
+        after_reduction_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
+        final_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
+        patch_combine: str | None = None,
+        reduction: str = "Mean",
         attributes: list[str] | None = None,
     ) -> None:
-        filename, _, file_format = split_path_spec(filename)
+        filename, _, file_format = split_path_spec(dataset_filename)
         super().__init__(filename, file_format)
         # ``Dataset.__init__`` does not forward ``super().__init__()``, so the ``NeedDevice`` mixin is
         # never initialised through the MRO; call it explicitly so ``self.device`` always has its CPU
@@ -233,6 +320,23 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         else:
             self._async_writes = None  # decided at the first write, once the device is placed
         self._writer: _AsyncWriter | None = None
+        self.group_src, self.group_dest = same_as_group.split(":")
+        # Slab streaming has no config knob: it is applied automatically, per case, whenever it is
+        # byte-identical to the assembled path (see ``_plan_stream``), finalizing each z-slab as its
+        # patches complete so RAM is bounded at one patch window; otherwise the whole-volume path is
+        # used transparently. ``KONFAI_STREAMED_WRITES=0`` is a global ops/debug kill-switch (also how
+        # a test gets the assembled reference), not a per-output option.
+        self._streaming_enabled = env_flag("KONFAI_STREAMED_WRITES", True)
+        self._stream_plans: dict[int, _StreamPlan | None] = {}
+        self._stream_sinks: dict[int, DataStream] = {}
+        self._region_states: dict[int, _RegionState] = {}
+        self._stream_buffers: dict[int, torch.Tensor] = {}
+        self._post_prefix_attributes: dict[int, Attribute] = {}
+        self._reported_paths: set[str] = set()
+        # One aligner per streamed case: the copies' accumulators emit slabs at their own pace, and
+        # the finalize needs every copy's rows together (the cross-copy reduction). A single copy is
+        # simply a one-stream aligner: same path, no special case.
+        self._aligners: dict[int, SlabAligner] = {}
 
     def set_memory_budget(self, budget_bytes: float | None) -> None:
         """The per-rank budget the streamed-vs-assembled route is priced against."""
@@ -340,10 +444,6 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         for transform in self.final_transforms:
             transform.set_datasets([*datasets, self])
 
-    @abstractmethod
-    def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
-        self.set_datasets(datasets)
-
     def set_patch_config(
         self,
         patch_size: list[int] | None,
@@ -373,19 +473,6 @@ class OutputDataset(Dataset, NeedDevice, ABC):
                 for transform in transform_type:
                     transform.to(device)
 
-    @abstractmethod
-    def add_layer(
-        self,
-        index_dataset: int,
-        index_augmentation: int,
-        index_patch: int,
-        layer: torch.Tensor,
-        dataset: DatasetIter,
-        attribute: Attribute | None = None,
-        number_of_channels_per_model: list[int] | None = None,
-    ):
-        raise NotImplementedError()
-
     def is_done(self, index: int) -> bool:
         # ``.get``: a streamed case cleans itself up inside ``add_layer`` (its slabs are already on
         # disk), so by the time the run loop asks, the index is gone and the answer is "nothing to do".
@@ -393,10 +480,6 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         if accumulators is None or len(accumulators) != self.nb_data_augmentation:
             return False
         return all(acc.is_full() for acc in accumulators.values())
-
-    @abstractmethod
-    def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
-        raise NotImplementedError()
 
     def _submit_final_write(self, name: str, tensor: torch.Tensor, attribute: Attribute) -> None:
         """Queue one whole-volume entry write (D2H copy included) on the write path."""
@@ -412,15 +495,6 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self.attributes.pop(index)
         self._submit_final_write(name, layer, attribute)
 
-    def reset(self) -> None:
-        """Drop every in-flight accumulation (the OOM-restart path re-runs the rank's cases from scratch)."""
-        self.output_layer_accumulator.clear()
-        self.attributes.clear()
-        self.names.clear()
-        self._accum_device.clear()
-        self._reduce_device.clear()
-        self._pin_buffer = None
-
     def __str__(self) -> str:
         params = {
             "filename": self.filename,
@@ -435,146 +509,6 @@ class OutputDataset(Dataset, NeedDevice, ABC):
 
     def __repr__(self) -> str:
         return str(self)
-
-
-# Streaming pays per-slab work (the pipe traversal, region writes, the TTA aligner); when the
-# assembled accumulators of all copies are below this fraction of allocatable memory (a 2.5D case),
-# holding them whole costs nothing and the case takes the whole-volume path.
-# KONFAI_STREAM_WORTH_THRESHOLD overrides the fraction (tests set 0 to exercise the streamed
-# machinery on toy volumes). See OutSameAsGroupDataset._worth_streaming.
-_STREAM_WORTH_MIN_FRACTION = 0.05
-
-
-def _slab_context(region: slice, spatial: list[int]) -> RegionContext:
-    """Where one z-slab of the accumulator grid sits: the same region as source and target."""
-    slices = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
-    shape = tuple(int(extent) for extent in spatial)
-    return RegionContext(slices, slices, shape, shape)
-
-
-@dataclass(frozen=True)
-class _FinalizeStage:
-    """One step of the finalize chain, bound to how the chain applies it (forward or inverted)."""
-
-    transform: Transform
-    inverted: bool
-
-    def locality(self, attribute: Attribute) -> PatchLocality:
-        if self.inverted:
-            return cast(TransformInverse, self.transform).inverse_patch_locality(attribute)
-        return self.transform.patch_locality(attribute)
-
-    def __call__(self, name: str, tensor: torch.Tensor, attribute: Attribute) -> torch.Tensor:
-        if self.inverted:
-            return cast(TransformInverse, self.transform).inverse(name, tensor, attribute)
-        return self.transform(name, tensor, attribute)
-
-    def stream_region(
-        self, name: str, tensor: torch.Tensor, context: RegionContext, attribute: Attribute
-    ) -> torch.Tensor:
-        """The call, told where the region sits (both default to the whole-volume call)."""
-        if self.inverted:
-            return cast(TransformInverse, self.transform).stream_region_inverse(name, tensor, context, attribute)
-        return self.transform.stream_region(name, tensor, context, attribute)
-
-
-@dataclass(frozen=True)
-class _StreamPlan:
-    """How one case streams: the post-reduction stages, split into a per-slab pointwise prefix, a
-    streamed pipe of region and pointwise stages, and (past what streaming can honour) a
-    whole-volume tail.
-
-    ``to_sink`` streams straight into a region-write ``DataStream``; ``pipe_start`` is the first
-    region stage (``None`` when the chain is pointwise throughout), and the pipe runs from there to
-    the end: region stages compose, so their number is not limited. Without ``to_sink`` the prefix
-    streams into a post-reduction buffer and ``stages[tail_start:]`` runs once on it (the chain
-    split). The invariants: ``to_sink`` implies no tail, and a pipe implies ``to_sink``: a tail
-    swallows the region stages, so the buffer always sits on the accumulator grid.
-    """
-
-    stages: list[_FinalizeStage]
-    pipe_start: int | None
-    tail_start: int
-    to_sink: bool
-    # Prefix stages whose declaration is SLAB: per-voxel value maps with a per-region side effect,
-    # run through ``Transform.stream_slab`` so they learn where each slab sits.
-    slab_stages: frozenset[int] = frozenset()
-
-    @property
-    def boundary(self) -> int:
-        """Where the per-slab pointwise prefix ends."""
-        return self.pipe_start if self.pipe_start is not None else self.tail_start
-
-    @property
-    def mode(self) -> str:
-        if not self.to_sink:
-            return "buffered"
-        return "region" if self.pipe_start is not None else "direct"
-
-
-@dataclass
-class _RegionState:
-    """One case's live streamed pipe: its slab scheduler and the geometry its closures share.
-
-    ``shapes[i]`` is the spatial shape between pipe stage ``i - 1`` and ``i`` (``shapes[0]`` the
-    accumulator's, ``shapes[-1]`` the written image's); a pointwise stage leaves it unchanged, so the
-    per-stage region bookkeeping folds through the same list the pull map composes over. The pipe's
-    stages themselves live in the ``produce``/``pull`` closures the stream was built on.
-    """
-
-    shapes: list[list[int]]
-    stream: SlabRegionStream | None = None
-    # The attribute the latest emission ran the pipe on: what the sink opens with.
-    attribute: Attribute | None = None
-
-
-@config("OutputDataset")
-class OutSameAsGroupDataset(OutputDataset):
-    """
-    Output dataset that mirrors the geometry and transform chain of an input group.
-
-    This is the default output writer used by KonfAI prediction workflows.
-    """
-
-    def __init__(
-        self,
-        same_as_group: str = "default",
-        dataset_filename: str = "default|./Dataset:mha",
-        group: str = "default",
-        before_reduction_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
-        after_reduction_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
-        final_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
-        patch_combine: str | None = None,
-        reduction: str = "Mean",
-        attributes: list[str] | None = None,
-    ) -> None:
-        super().__init__(
-            dataset_filename,
-            group,
-            before_reduction_transforms,
-            after_reduction_transforms,
-            final_transforms,
-            patch_combine,
-            reduction,
-            attributes,
-        )
-        self.group_src, self.group_dest = same_as_group.split(":")
-        # Slab streaming has no config knob: it is applied automatically, per case, whenever it is
-        # byte-identical to the assembled path (see ``_plan_stream``), finalizing each z-slab as its
-        # patches complete so RAM is bounded at one patch window; otherwise the whole-volume path is
-        # used transparently. ``KONFAI_STREAMED_WRITES=0`` is a global ops/debug kill-switch (also how
-        # a test gets the assembled reference), not a per-output option.
-        self._streaming_enabled = env_flag("KONFAI_STREAMED_WRITES", True)
-        self._stream_plans: dict[int, _StreamPlan | None] = {}
-        self._stream_sinks: dict[int, DataStream] = {}
-        self._region_states: dict[int, _RegionState] = {}
-        self._stream_buffers: dict[int, torch.Tensor] = {}
-        self._post_prefix_attributes: dict[int, Attribute] = {}
-        self._reported_paths: set[str] = set()
-        # One aligner per streamed case: the copies' accumulators emit slabs at their own pace, and
-        # the finalize needs every copy's rows together (the cross-copy reduction). A single copy is
-        # simply a one-stream aligner: same path, no special case.
-        self._aligners: dict[int, SlabAligner] = {}
 
     def add_layer(
         self,
@@ -1261,6 +1195,7 @@ class OutSameAsGroupDataset(OutputDataset):
         return result, attribute
 
     def reset(self) -> None:
+        """Drop every in-flight accumulation (the OOM-restart path re-runs the rank's cases from scratch)."""
         # Aborting an attempt mid-stream: abort each open sink so the backend removes the partial
         # entry (a reader must never see a half-written volume); the restart rewrites it.
         error = PredictorError("prediction restart: the partial streamed output is discarded")
@@ -1275,7 +1210,12 @@ class OutSameAsGroupDataset(OutputDataset):
         self._stream_buffers.clear()
         self._post_prefix_attributes.clear()
         self._aligners.clear()
-        super().reset()
+        self.output_layer_accumulator.clear()
+        self.attributes.clear()
+        self.names.clear()
+        self._accum_device.clear()
+        self._reduce_device.clear()
+        self._pin_buffer = None
 
     def _close_stream(self, index: int) -> None:
         """Finalize the case's sink and drop its bookkeeping (``is_done`` then reports nothing left)."""
@@ -1297,8 +1237,7 @@ class OutSameAsGroupDataset(OutputDataset):
         self._reduce_device.pop(index, None)
 
     def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
-        super().setup(datasets, groups)
-
+        self.set_datasets(datasets)
         if self.group_src not in groups.keys():
             raise PredictorError(f"Source group '{self.group_src}' not found. Available groups: {list(groups.keys())}.")
 
@@ -1497,17 +1436,21 @@ class OutSameAsGroupDataset(OutputDataset):
         return result.cpu() if result.device.type != "cpu" else result
 
 
+# ``name_class: OutSameAsGroupDataset`` is what published Prediction.yml carry.
+OutSameAsGroupDataset = OutputDataset
+
+
 @config("OutputDataset")
 class OutputDatasetLoader:
-    """Factory that instantiates output dataset classes from predictor config."""
+    """Builds one output's sink from ``Predictor.outputs_dataset.<layer>``: ``name_class`` is the
+    sink's classpath, a bare name resolving in ``konfai.predictor``."""
 
-    def __init__(self, name_class: str = "OutSameAsGroupDataset") -> None:
+    def __init__(self, name_class: str = "OutputDataset") -> None:
         self.name_class = name_class
 
     def get_output_dataset(self, layer_name: str) -> OutputDataset:
-        return apply_config(f"Predictor.outputs_dataset.{layer_name}")(
-            getattr(importlib.import_module("konfai.predictor"), self.name_class)
-        )()
+        module, name = get_module(self.name_class, "konfai.predictor")
+        return apply_config(f"Predictor.outputs_dataset.{layer_name}")(getattr(module, name))()
 
 
 def _prediction_report(clock: SweepClock, min_seconds: float = 1.0) -> str | None:

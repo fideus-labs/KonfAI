@@ -18,12 +18,12 @@ from typing import cast
 
 import pytest
 import torch
-from konfai.predictor import OutSameAsGroupDataset
+from konfai.predictor import OutputDataset
 from konfai.utils.utils import get_patch_slices_from_shape
 
 
-def _dataset(device: torch.device | int, nb_data_augmentation: int = 1) -> OutSameAsGroupDataset:
-    ds = OutSameAsGroupDataset.__new__(OutSameAsGroupDataset)
+def _dataset(device: torch.device | int, nb_data_augmentation: int = 1) -> OutputDataset:
+    ds = OutputDataset.__new__(OutputDataset)
     ds.device = device  # NeedDevice stores a torch.device on CPU and a CUDA ordinal (int) on GPU
     ds.nb_data_augmentation = nb_data_augmentation
     return ds
@@ -35,7 +35,7 @@ def test_output_dataset_device_defaults_to_cpu_without_to(monkeypatch: pytest.Mo
     # set, otherwise a CPU-only PREDICTION run (device propagation is CUDA-gated) raises AttributeError.
     monkeypatch.setenv("KONFAI_config_file", "unused.yml")
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
-    ds = OutSameAsGroupDataset(same_as_group="default:default", dataset_filename="default|./Dataset:mha")
+    ds = OutputDataset(same_as_group="default:default", dataset_filename="default|./Dataset:mha")
     assert ds.device == torch.device("cpu")
     assert ds._reduction_device(torch.zeros(4, 8, dtype=torch.float16)).type == "cpu"
 

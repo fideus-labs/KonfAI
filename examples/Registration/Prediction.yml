@@ -61,7 +61,7 @@ Predictor:
   outputs_dataset:
     MovingImageResample:  # Model output = MOVING warped into FIXED space
       OutputDataset:
-        name_class: OutSameAsGroupDataset
+        name_class: OutputDataset
         before_reduction_transforms: None
         after_reduction_transforms: None
         final_transforms:
