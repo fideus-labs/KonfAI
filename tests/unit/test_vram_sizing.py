@@ -23,10 +23,9 @@ primitive itself runs on a real CUDA device when one is present.
 
 import numpy as np
 import pytest
-import torch
 from konfai.predictor import Mean, Predictor, Reduction
 from konfai.utils.utils import concretize_patch_size
-from konfai.utils.vram import measure_transient_bytes, next_patch_candidate, usable_vram
+from konfai.utils.vram import next_patch_candidate, usable_vram
 
 
 def _linear_probe(bytes_per_voxel: float):
@@ -205,48 +204,3 @@ class TestPredictorShrinkBudget:
         predictor = _predictor(None, nb_augmentation=2, reduction=Mean(), margined=1e6)
         assert predictor._accumulation_reserve([100, 100, 100], [100, 100, 100]) is None
         assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-class TestMeasurementOnGpu:
-    def test_transient_reflects_a_forward_and_scales_with_the_patch(self):
-        device = torch.device("cuda:0")
-        net = torch.nn.Sequential(
-            torch.nn.Conv3d(1, 8, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv3d(8, 1, 3, padding=1)
-        ).to(device)
-
-        def run_at(size):
-            def run():
-                with torch.inference_mode():
-                    net(torch.zeros(1, 1, *size, device=device))
-
-            return run
-
-        small = measure_transient_bytes(run_at([16, 16, 16]), device)
-        large = measure_transient_bytes(run_at([48, 48, 48]), device)
-        assert small is not None and large is not None
-        assert small > 0
-        # 27x the voxels must cost markedly more: the measurement really tracks the activations.
-        assert large > small * 4
-
-    def test_the_restart_loop_sizes_a_real_model_into_the_budget(self):
-        device = torch.device("cuda:0")
-        net = torch.nn.Sequential(
-            torch.nn.Conv3d(1, 16, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv3d(16, 1, 3, padding=1)
-        ).to(device)
-
-        def probe(patch_size):
-            def run():
-                with torch.inference_mode():
-                    net(torch.zeros(1, 1, *patch_size, device=device))
-
-            return measure_transient_bytes(run, device)
-
-        whole = probe([96, 96, 96])
-        assert whole is not None
-        usable = whole // 2  # the whole volume does NOT fit -> the loop must shrink and still fit
-        sized = run_until_fits([0, 0, 0], [96, 96, 96], probe, usable)
-        assert sized is not None
-        assert all(p < 96 for p in sized)
-        measured = probe(sized)
-        assert measured is not None and measured <= usable

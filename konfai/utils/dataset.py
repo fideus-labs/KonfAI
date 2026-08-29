@@ -380,9 +380,6 @@ class Attribute(dict[str, Any]):
             return False
         return any(Attribute._is_stack_member(k, key) for k in super().keys())
 
-    def is_info(self, key: str, value: str) -> bool:
-        return key in self and self[key] == value
-
 
 #: Elements a block of ``Dataset.iter_data_blocks`` holds when no budget was declared: the read grain
 #: of a scan (the statistics fold, the quantile scan), whatever the backend.
@@ -3714,66 +3711,4 @@ class Dataset:
             return list(shape), Attribute(attr)
         result = self._resolve_entry(groups, name, lambda file, group, entry: file.get_infos(group, entry))
         self._infos_cache[cache_key] = (list(result[0]), Attribute(result[1]))
-        return result
-
-    def get_statistics(self, groups: str) -> dict[str, dict[str, dict[str, float | list[float]]]]:
-        names = self.get_names(groups)
-        stats = {}
-        for name in names:
-            data, attr = self.read_data(groups, name)
-
-            min_, max_ = data.min(), data.max()
-            mean_ = data.mean()
-            std_ = data.std()
-
-            p25, p50, p75 = np.percentile(data, (25, 50, 75))
-
-            stats[name] = {
-                "min": float(min_),
-                "max": float(max_),
-                "mean": float(mean_),
-                "std": float(std_),
-                "25pc": float(p25),
-                "50pc": float(p50),
-                "75pc": float(p75),
-                "shape": list(data.shape),
-                "spacing": attr.get_np_array("Spacing").tolist(),
-            }
-
-        result: dict[str, dict[str, dict[str, Any]]] = {}
-        result["case"] = {}
-        for name, v in stats.items():
-            for metric_name, value in v.items():
-                if metric_name not in result["case"]:
-                    result["case"][metric_name] = {}
-                result["case"][metric_name][name] = value
-
-        result["aggregates"] = {}
-        tmp: dict[str, list[float]] = {}
-        for _, v in stats.items():
-            for metric_name, _ in v.items():
-                if metric_name not in tmp:
-                    tmp[metric_name] = []
-                tmp[metric_name].append(v[metric_name])
-        for metric_name, values in tmp.items():
-            if isinstance(values[0], float):
-                result["aggregates"][metric_name] = {
-                    "max": float(np.nanmax(values)) if np.any(~np.isnan(values)) else np.nan,
-                    "min": float(np.nanmin(values)) if np.any(~np.isnan(values)) else np.nan,
-                    "std": float(np.nanstd(values)) if np.any(~np.isnan(values)) else np.nan,
-                    "25pc": float(np.nanpercentile(values, 25)) if np.any(~np.isnan(values)) else np.nan,
-                    "50pc": float(np.nanpercentile(values, 50)) if np.any(~np.isnan(values)) else np.nan,
-                    "75pc": float(np.nanpercentile(values, 75)) if np.any(~np.isnan(values)) else np.nan,
-                    "mean": float(np.nanmean(values)) if np.any(~np.isnan(values)) else np.nan,
-                    "count": float(np.count_nonzero(~np.isnan(values))) if np.any(~np.isnan(values)) else np.nan,
-                }
-            else:
-                p25, p50, p75 = np.nanpercentile(values, (25, 50, 75))
-
-                result["aggregates"][metric_name] = {
-                    "max": np.nanmax(values, axis=0).tolist(),
-                    "min": np.nanmin(values, axis=0).tolist(),
-                    "std": np.nanstd(values, axis=0).tolist(),
-                    "mean": np.nanmean(values, axis=0).tolist(),
-                }
         return result

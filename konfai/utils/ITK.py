@@ -96,12 +96,6 @@ def _copy_transform(transform_cls: type[sitk.Transform], transform: sitk.Transfo
     return transform
 
 
-def _image_like(array: np.ndarray, reference: sitk.Image) -> sitk.Image:
-    result = sitk.GetImageFromArray(array)
-    result.CopyInformation(reference)
-    return result
-
-
 def _open_transform(
     transform_files: dict[str | sitk.Transform, bool], image: sitk.Image = None
 ) -> list[sitk.Transform]:

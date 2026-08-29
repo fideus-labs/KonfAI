@@ -495,7 +495,6 @@ def test_network_criterion_loader_resets_scheduler_state(monkeypatch: pytest.Mon
     first_schedulers = dict(attr.schedulers)
     loader.get_criterions("DemoModel", "Output", "Target")
 
-    assert attr.isTorchCriterion is True
     assert len(attr.schedulers) == 1
     assert attr.schedulers == first_schedulers
 

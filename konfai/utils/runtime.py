@@ -221,24 +221,6 @@ def gpu_info() -> str:
     return f"{node_name}GPU({devices}) Memory GPU ({memory.used / 1e9:.2f}G ({memory.used / memory.total * 100:.2f} %))"
 
 
-def get_max_gpu_memory(device: int | torch.device) -> float:
-    """Return the total VRAM in GB for one device, or ``0`` on CPU."""
-    if not _PYNVML_AVAILABLE:
-        return 0
-    if isinstance(device, torch.device):
-        if str(device).startswith("cuda:"):
-            device = int(str(device).replace("cuda:", ""))
-        else:
-            return 0
-    device = cuda_visible_devices()[device]
-    if device < pynvml.nvmlDeviceGetCount():
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-        memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    else:
-        return 0
-    return float(memory.total) / (10**9)
-
-
 def get_gpu_memory(device: int | torch.device) -> float:
     """Return current VRAM usage in GB for one device, or ``0`` on CPU."""
     if not _PYNVML_AVAILABLE:

@@ -27,36 +27,12 @@ transient when there is one, a fixed factor when the OOM left no number) re-plan
 restarts. When everything fits (the common case) nothing here runs at all.
 """
 
-from collections.abc import Callable
-
-import torch
-
 #: Fraction of the free VRAM a step may claim; the reserve absorbs allocator fragmentation and
 #: transients the measured run did not exercise (mirrors the accumulation gate's margin).
 VRAM_BUDGET_SAFETY_FRACTION = 0.8
 
 #: Per-axis shrink applied when an OOM left no usable measurement to scale from.
 _OOM_SHRINK_STEP = 0.8
-
-
-def measure_transient_bytes(run: Callable[[], None], device: torch.device | int) -> int | None:
-    """Measure the transient VRAM one ``run()`` peaks above the resident set, or ``None`` on OOM.
-
-    The caller provides the run (a forward for prediction, forward+backward for training) so this
-    stays model-agnostic; an out-of-memory run is reported as ``None`` (a valid "does not fit"
-    measurement), with the partial allocations released. ``max_memory_allocated`` is a running
-    high-water mark, so a stale peak can only over-estimate the transient, never under.
-    """
-    torch.cuda.synchronize(device)
-    torch.cuda.reset_peak_memory_stats(device)
-    resident = torch.cuda.memory_allocated(device)
-    try:
-        run()
-    except torch.cuda.OutOfMemoryError:
-        torch.cuda.empty_cache()
-        return None
-    torch.cuda.synchronize(device)
-    return int(torch.cuda.max_memory_allocated(device) - resident)
 
 
 def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = VRAM_BUDGET_SAFETY_FRACTION) -> float:

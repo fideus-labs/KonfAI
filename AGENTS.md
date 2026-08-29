@@ -71,7 +71,7 @@ Every extension point is **"subclass a base, reference it by classpath in YAML"*
 
 **Classpaths:** a bare name (e.g. `Dice`) resolves inside that kind's package; `module:Class` imports *any* module: a local file (`Loss:MyWrapper`) or an installed library (`monai.losses:DiceLoss`, `torch:nn:L1Loss`). Model classpaths resolve against `konfai.models.python`. The pre-1.6.0 absolute form `konfai.models.<kind>.<file>:<Class>` still resolves via a rewrite + `DeprecationWarning`; new code uses the relative or `default|` form.
 
-**YAML model builder** (`utils/model_builder.py`): builds a `Network` from a `.yml`, **safe by construction** (node types must come from two curated registries, no `eval`/import injection). The shipped catalog (`models/yaml/`, 14 models incl. `UNet`/`NestedUNet`/`ResNet`/`UNETR`/`ViT`/`VNet`) now covers the feed-forward subset; custom-`forward` models (DDPM/DiffusionGAN/ConvNeXt) stay Python. `default|<Name>.yml` addresses the flat catalog only; a name with a path separator is refused.
+**YAML model builder** (`utils/model_builder.py`): builds a `Network` from a `.yml`, **safe by construction** (node types must come from two curated registries, no `eval`/import injection). The shipped catalog (`models/yaml/`, 14 models incl. `UNet`/`NestedUNet`/`ResNet`/`UNETR`/`ViT`/`VNet`) now covers the feed-forward subset; custom-`forward` models (DiffusionGAN/ConvNeXt) stay Python. `default|<Name>.yml` addresses the flat catalog only; a name with a path separator is refused.
 
 ## 5. Apps (`konfai-apps`)
 

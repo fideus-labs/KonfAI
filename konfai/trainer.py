@@ -31,7 +31,7 @@ import torch.distributed as dist
 import tqdm
 from ruamel.yaml import YAML
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim.swa_utils import AveragedModel
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from torch.utils.data import DataLoader
 
 try:
@@ -1050,17 +1050,9 @@ class Trainer(DistributedObject):
             )
 
     def _ema_update(self) -> dict[str, Callable]:
-        """The EMA rule for AveragedModel: torch's fused ``multi_avg_fn`` (one ``_foreach_lerp_`` per
-        device and dtype) where it exists, the per-tensor ``avg_fn`` otherwise."""
-        try:
-            from torch.optim.swa_utils import get_ema_multi_avg_fn
-        except ImportError:
-            return {"avg_fn": self._avg_fn}
+        """The EMA rule for AveragedModel: torch's fused ``multi_avg_fn``, one ``_foreach_lerp_``
+        per device and dtype."""
         return {"multi_avg_fn": get_ema_multi_avg_fn(self.ema_decay)}
-
-    def _avg_fn(self, averaged_model_parameter: float, model_parameter, num_averaged):
-        """EMA update (AveragedModel avg_fn): ``ema_decay * averaged + (1 - ema_decay) * model``."""
-        return self.ema_decay * averaged_model_parameter + (1 - self.ema_decay) * model_parameter
 
     def run_process(
         self,

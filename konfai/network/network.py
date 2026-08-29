@@ -162,32 +162,16 @@ class LossSchedulersLoader:
 def build_configured_criterions(
     criterions_loader: dict[str, Any],
     config_key_prefix: str,
-    configure_attr: Callable[[str, Any, Any], None] | None = None,
+    configure_attr: Callable[[str, Any], None] | None = None,
 ) -> dict[torch.nn.Module, Any]:
-    """
-    Instantiate criteria from a KonfAI config subtree.
-
-    Parameters
-    ----------
-    criterions_loader : dict[str, Any]
-        Mapping from criterion classpath to criterion attributes.
-    config_key_prefix : str
-        Config subtree preceding ``.criterions_loader.<classpath>``.
-    configure_attr : Callable[[str, Any, Any], None] | None, optional
-        Optional callback used to enrich the attribute object with runtime
-        metadata before the criterion is instantiated. It receives the
-        criterion classpath, the attribute object, and the imported module.
-
-    Returns
-    -------
-    dict[torch.nn.Module, Any]
-        Instantiated criteria mapped to their configuration attributes.
-    """
+    """Instantiate the criteria a ``criterions_loader`` mapping names, each bound from
+    ``<config_key_prefix>.criterions_loader.<classpath>``; ``configure_attr`` (classpath, attribute)
+    enriches the attribute before its criterion is built."""
     criterions = {}
     for module_classpath, criterions_attr in criterions_loader.items():
         module, name = get_module(module_classpath, "konfai.metric.measure")
         if configure_attr is not None:
-            configure_attr(module_classpath, criterions_attr, module)
+            configure_attr(module_classpath, criterions_attr)
         criterions[
             apply_config(f"{config_key_prefix}.criterions_loader.{module_classpath}")(getattr(module, name))()
         ] = criterions_attr
@@ -207,7 +191,6 @@ class CriterionsAttr:
         accumulation: bool = False,
     ) -> None:
         self.schedulersLoader = schedulers
-        self.isTorchCriterion = True
         self.is_loss = is_loss
         self.start = start
         self.stop = stop
@@ -228,8 +211,7 @@ class CriterionsLoader:
     def get_criterions(
         self, model_classname: str, output_group: str, target_group: str
     ) -> dict[torch.nn.Module, CriterionsAttr]:
-        def configure_attr(module_classpath: str, criterions_attr: CriterionsAttr, module: Any) -> None:
-            criterions_attr.isTorchCriterion = module.__name__.startswith("torch")
+        def configure_attr(module_classpath: str, criterions_attr: CriterionsAttr) -> None:
             criterions_attr.schedulers = {}
             for (
                 scheduler_classname,

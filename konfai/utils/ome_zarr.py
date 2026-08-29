@@ -833,26 +833,6 @@ def write_ome_zarr(
         append_ome_zarr_levels(store_path, scale_factors, downsample_method=downsample_method)
 
 
-def update_konfai_attributes(store_path: str | Path, extra: dict[str, Any]) -> None:
-    """Merge ``extra`` into the store's KonfAI attribute sidecar, keeping what is already there.
-
-    For facts that are only knowable once the last region has landed (a streamed field's own bound
-    being the case that motivated it), so they can still be recorded without holding the volume.
-    """
-    if not extra:
-        return
-    _require_zarr()
-    group = zarr.open_group(str(store_path), mode="r+")
-    sidecar = dict(dict(group.attrs).get(_KONFAI_ATTR_KEY, {}).get("attributes", {}))
-    sidecar.update(extra)
-    # Writing through an `r+` group updates the consolidated copy with it, so a sidecar landing here
-    # is readable by a consolidated reader without a second consolidation pass. Measured, because the
-    # opposite is the plausible assumption: a foreign `zarr.open_group(mode="r")` reads back a bound
-    # written this way on both sides of this line.
-    group.attrs[_KONFAI_ATTR_KEY] = {"attributes": sidecar}
-    clear_ome_zarr_cache(store_path)
-
-
 def _type_component_axis(multiscales: Any, axis_type: str) -> None:
     """Type the ``c`` axis of every coordinate system, in place.
 

@@ -37,7 +37,6 @@ from typing import Any, Literal, Union, get_args, get_origin
 import ruamel.yaml
 import torch
 
-from konfai import config_file
 from konfai.utils.errors import ConfigError
 
 yaml = ruamel.yaml.YAML()
@@ -326,10 +325,6 @@ class Config:
             return self.create_dictionary(data, keys, i)
 
     def __exit__(self, exc_type, value, traceback) -> None:
-        if os.environ["KONFAI_CONFIG_MODE"] == "remove":
-            if os.path.exists(config_file()):
-                os.remove(config_file())
-            return
         # Only the visited subtree is folded back; the merge preserves the rest of the tree untouched.
         subtree = self.create_dictionary(self.config, self.keys, len(self.keys) - 1)
         if self._shared is not None:

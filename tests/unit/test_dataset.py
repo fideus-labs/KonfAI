@@ -44,7 +44,6 @@ def test_attribute_underscore_key_is_readable_and_consistent() -> None:
     # __contains__ reports membership; the getter must agree with it.
     assert "ITK_InputFilterName" in attribute
     assert attribute["ITK_InputFilterName"] == "GradientAnisotropicDiffusion"
-    assert attribute.is_info("ITK_InputFilterName", "GradientAnisotropicDiffusion")
 
 
 def test_attribute_underscore_key_can_be_popped() -> None:

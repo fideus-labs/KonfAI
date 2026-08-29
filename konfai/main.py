@@ -111,9 +111,6 @@ def _add_resume(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--model", type=str, required=True, help="Checkpoint path to resume from")
     _add_dir_argument(parser, "checkpoints", "Directory where checkpoints are saved")
     _add_dir_argument(parser, "statistics", "Directory where training statistics/logs are saved")
-    # Up to 1.8 RESUME alone spelled these with a single dash; keep the old flags parsing, out of help.
-    parser.add_argument("-checkpoints-dir", "-checkpoints_dir", dest="checkpoints_dir", help=argparse.SUPPRESS)
-    parser.add_argument("-statistics-dir", "-statistics_dir", dest="statistics_dir", help=argparse.SUPPRESS)
     parser.add_argument(
         "--lr",
         type=float,

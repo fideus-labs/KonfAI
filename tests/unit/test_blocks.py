@@ -20,7 +20,6 @@ import pytest
 import torch
 from konfai.network.blocks import (
     ClipNormalize,
-    Exit,
     LatentDistribution,
     MultiHeadSelfAttention,
     ResNetBasicBlock,
@@ -52,11 +51,6 @@ def test_select_squeezes_size_one_dims_by_size():
     # a tensor with no size-1 dims is unchanged
     out2 = Select([slice(None), slice(None)])(torch.randn(4, 5))
     assert out2.shape == (4, 5)
-
-
-def test_debug_exit_block_raises_runtime_error() -> None:
-    with pytest.raises(RuntimeError, match="debug Exit block"):
-        Exit()(torch.ones(1))
 
 
 def test_clip_normalize_is_the_identity_until_a_checkpoint_states_it() -> None:

@@ -1127,7 +1127,6 @@ class KLDivergence(CriterionWithInit):
         self.latent_dim = dim
         self.mu = torch.Tensor([mu])
         self.std = torch.Tensor([std])
-        self.modelDim = 3
         self.shape = shape
         self.loss = torch.nn.KLDivLoss()
 
@@ -1429,10 +1428,6 @@ def _masked_feature_loss(
 
 
 class IMPACTReg(CriterionWithAttribute):
-    class Weights:
-        def __init__(self, weights: list[float] = [0, 1]) -> None:
-            self.weights = weights
-
     def __init__(
         self,
         name: str = "Reg",
@@ -1575,10 +1570,6 @@ class IMPACTReg(CriterionWithAttribute):
 
 
 class IMPACTSynth(CriterionWithAttribute):
-    class Weights:
-        def __init__(self, weights: list[float] = [0, 1]) -> None:
-            self.weights = weights
-
     def __init__(
         self,
         model_content_name: str,

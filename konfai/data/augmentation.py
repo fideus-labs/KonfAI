@@ -1109,11 +1109,6 @@ class Noise(PlacedDraw):
         self.alpha_hat = torch.concat((torch.ones(1), torch.cumprod(self.alphas, dim=0)))
         self.max_T = 0.0
 
-        self.C = 1
-        self.n = 4
-        self.d = 0.25
-        self._prob = 1
-
     @staticmethod
     def enforce_zero_terminal_snr(betas: torch.Tensor):
         alphas = 1 - betas
@@ -1130,6 +1125,8 @@ class Noise(PlacedDraw):
         return betas
 
     def load(self, prob: float):
+        # Every copy is drawn: the probability scales the noise step, not whether a copy gets one.
+        self._prob = 1.0
         self.max_T = prob * self.noise_step
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
@@ -1215,7 +1212,6 @@ class Elastix(DataAugmentation):
         print(f"[KonfAI] Compute Displacement Field for index {index}")
         self.displacement_fields[index] = []
         for i, (shape, cache_attribute) in enumerate(zip(shapes, caches_attribute, strict=False)):
-            shape = shape
             dim = len(shape)
             if "Spacing" not in cache_attribute:
                 spacing = np.array([1.0 for _ in range(dim)])
