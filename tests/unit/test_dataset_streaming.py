@@ -956,7 +956,7 @@ def _write_mask(path, z, y, x, seed=0):
 
 def _slab_context(z0: int, z1: int, shape: tuple[int, int, int]) -> RegionContext:
     region = (slice(z0, z1), slice(0, shape[1]), slice(0, shape[2]))
-    return RegionContext(region, region, shape, shape)
+    return RegionContext(region, region, shape)
 
 
 @pytest.mark.parametrize("slab", [1, 4, 5])

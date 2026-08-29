@@ -489,7 +489,7 @@ def test_streamed_nearest_resample_matches_whole_volume_at_any_ratio(n_in: int, 
 
     target = tuple(slice(0, n_out) for _ in range(3))
     window = resample.stream_region_source("case", target, [n_in] * 3, Attribute(attribute))
-    context = RegionContext(tuple(window), target, (n_in,) * 3, (n_out,) * 3)
+    context = RegionContext(tuple(window), target, (n_in,) * 3)
     got = resample.stream_region("case", volume[(slice(None), *window)], context, Attribute(attribute))
     torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
@@ -505,7 +505,7 @@ def test_streamed_resample_handles_2d(dtype: torch.dtype) -> None:
 
     target = (slice(0, 5), slice(0, 6))
     window = resample.stream_region_source("case", target, [9, 11], Attribute(attribute))
-    context = RegionContext(tuple(window), target, (9, 11), (5, 6))
+    context = RegionContext(tuple(window), target, (9, 11))
     got = resample.stream_region("case", volume[(slice(None), *window)], context, Attribute(attribute))
     torch.testing.assert_close(got, expected, rtol=0, atol=0)
 

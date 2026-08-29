@@ -162,7 +162,7 @@ def _slab_context(region: slice, spatial: list[int]) -> RegionContext:
     """Where one z-slab of the accumulator grid sits: the same region as source and target."""
     slices = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
     shape = tuple(int(extent) for extent in spatial)
-    return RegionContext(slices, slices, shape, shape)
+    return RegionContext(slices, slices, shape)
 
 
 @dataclass(frozen=True)
@@ -407,22 +407,17 @@ class OutputDataset(Dataset, NeedDevice):
         return out
 
     def prepare(self, name_layer: str) -> None:
-        self.before_reduction_transforms = []
-        self.after_reduction_transforms = []
-        self.final_transforms = []
-        transforms_type = [
-            "before_reduction_transforms",
-            "after_reduction_transforms",
-            "final_transforms",
-        ]
         konfai_args = f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset"
-        for name, _transform_type, transform_type in [
-            (k, getattr(self, f"_{k}"), getattr(self, k)) for k in transforms_type
-        ]:
-            if _transform_type is not None:
-                for classpath, transform in _transform_type.items():
-                    transform = transform.get_transform(classpath, konfai_args=f"{konfai_args}.{name}")
-                    transform_type.append(transform)
+
+        def build(name: str, loaders: dict[str, TransformLoader] | None) -> list[Transform]:
+            return [
+                loader.get_transform(classpath, konfai_args=f"{konfai_args}.{name}")
+                for classpath, loader in (loaders or {}).items()
+            ]
+
+        self.before_reduction_transforms = build("before_reduction_transforms", self._before_reduction_transforms)
+        self.after_reduction_transforms = build("after_reduction_transforms", self._after_reduction_transforms)
+        self.final_transforms = build("final_transforms", self._final_transforms)
 
         # A patch grid overlaps whether or not a combine is declared, so the overlap needs a
         # deterministic owner. Trim keeps each patch's central band: the bands tile the volume
@@ -463,15 +458,8 @@ class OutputDataset(Dataset, NeedDevice):
 
     def to(self, device: torch.device):
         super().to(device)
-        transforms_type = [
-            "before_reduction_transforms",
-            "after_reduction_transforms",
-            "final_transforms",
-        ]
-        for transform_type in [(getattr(self, k)) for k in transforms_type]:
-            if transform_type is not None:
-                for transform in transform_type:
-                    transform.to(device)
+        for transform in [*self.before_reduction_transforms, *self.after_reduction_transforms, *self.final_transforms]:
+            transform.to(device)
 
     def is_done(self, index: int) -> bool:
         # ``.get``: a streamed case cleans itself up inside ``add_layer`` (its slabs are already on
@@ -1047,7 +1035,7 @@ class OutputDataset(Dataset, NeedDevice):
         if kind is LocalityKind.REGRID:
             # Region-aware on both sides, and the geometry written from the FULL shape: what the
             # stage records on the way is one region's, and the case's answer is the whole grid's.
-            context = RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape))
+            context = RegionContext(tuple(source), tuple(target), tuple(in_shape))
             if stage.inverted:
                 remapper = cast(TransformInverse, stage.transform)
                 result = remapper.stream_region_inverse(name, block, context, Attribute(attribute))

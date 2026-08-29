@@ -189,7 +189,6 @@ class DiscriminatorADA(network.Network):
             self.n = 4
             self.ada_target = 0.25
             self.ada_interval = 0.001
-            self.ada_kimg = 500
 
             self.measure = None
             self.names = []

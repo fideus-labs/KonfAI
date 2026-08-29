@@ -67,14 +67,12 @@ if TYPE_CHECKING:
 try:
     import pydicom
     from pydicom.dataset import Dataset as DicomDataset
-    from pydicom.sequence import Sequence as DicomSequence
 
     _PYDICOM_AVAILABLE = True
 except ImportError:
     _PYDICOM_AVAILABLE = False
     pydicom = None  # type: ignore[assignment]
     DicomDataset = None  # type: ignore[assignment,misc]
-    DicomSequence = None  # type: ignore[assignment]
 
 
 def _require_pydicom() -> None:

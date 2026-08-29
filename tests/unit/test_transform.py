@@ -971,7 +971,6 @@ def test_a_streamed_mask_refuses_a_mask_off_the_stage_input_grid(tmp_path: Path)
         source=(slice(0, 2), slice(0, 8), slice(0, 8)),
         target=(slice(0, 2), slice(0, 8), slice(0, 8)),
         source_shape=(8, 8, 8),
-        target_shape=(8, 8, 8),
     )
     mask = Mask(path="MASK")
     mask.set_datasets([store])
@@ -1003,7 +1002,6 @@ def test_a_streamed_mask_declares_the_windows_of_the_mask_it_will_read(tmp_path:
             source=(slice(z, z + 2), slice(0, 8), slice(0, 8)),
             target=(slice(z, z + 2), slice(0, 8), slice(0, 8)),
             source_shape=(8, 8, 8),
-            target_shape=(8, 8, 8),
         )
         for z in (0, 2)
     ]
@@ -1034,7 +1032,6 @@ def test_a_streamed_mha_mask_is_read_by_region_and_never_held_whole(tmp_path: Pa
         source=(slice(1, 4), slice(0, 8), slice(0, 8)),
         target=(slice(1, 4), slice(0, 8), slice(0, 8)),
         source_shape=(8, 8, 8),
-        target_shape=(8, 8, 8),
     )
     out = stage.stream_region("CASE", torch.ones(1, 3, 8, 8), context, Attribute())
     np.testing.assert_array_equal(out[0, :, 0, 0].numpy(), [-1, 1, 1])  # rows 1..3 of the mask: 0, 1, 1

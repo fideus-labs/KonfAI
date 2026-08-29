@@ -155,14 +155,13 @@ class RegionContext:
 
     ``source`` is the part of the stage's INPUT the tensor covers, ``target`` the part of its OUTPUT
     it must produce; they differ whenever the stage moves or resizes data (a halo read, a resample,
-    a warp onto another grid). ``source_shape`` and ``target_shape`` are the two whole extents those
-    regions are cut from: a region alone cannot say how far it is from an edge.
+    a warp onto another grid). ``source_shape`` is the whole extent the source region is cut from: a
+    region alone cannot say how far it is from an edge.
     """
 
     source: tuple[slice, ...]
     target: tuple[slice, ...]
     source_shape: tuple[int, ...]
-    target_shape: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -212,7 +211,6 @@ def stat_seed_valid(upstream: Iterable[PatchLocality]) -> bool:
 class Transform(NeedDevice, ABC):
     """Base class for transforms operating on tensors and cached attributes."""
 
-    supports_dataloader_workers = True
     #: What ``__call__`` allocates ON TOP of its input and its output, in volumes-worth of the case.
     #: Every sizing route reads it: the sweep prices a region with it, a reduction charges the member
     #: chain by it, the whole-volume fallback is sized against it.
@@ -3848,8 +3846,6 @@ class KonfAIInference(Transform):
     has cases; its GPU/RAM usage lives outside the ``memory_budget`` a TRANSFORM plan bounds. Inference
     over a cohort is PREDICTION's job; this stage is for an inference that feeds a later stage.
     """
-
-    supports_dataloader_workers = False
 
     def __init__(
         self,

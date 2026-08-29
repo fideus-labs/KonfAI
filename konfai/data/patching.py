@@ -319,7 +319,7 @@ class _ReadStagePlan:
 
     def region_context(self, source: Sequence[slice], target: Sequence[slice]) -> RegionContext:
         """Where one region of this stage sits: the part of its input read, the part of its output due."""
-        return RegionContext(tuple(source), tuple(target), tuple(self.in_shape), tuple(self.out_shape))
+        return RegionContext(tuple(source), tuple(target), tuple(self.in_shape))
 
 
 def device_capped_budget(budget_bytes: float | None, device: "torch.device | None") -> float | None:
@@ -3509,7 +3509,7 @@ class DatasetManager:
             # volume (a mask) reads the part that lines up with it.
             spatial = tuple(int(extent) for extent in stream_source.shape[1:])
             region = tuple(plan.data_slices[len(plan.data_slices) - len(spatial) :])
-            context = RegionContext(region, region, spatial, spatial)
+            context = RegionContext(region, region, spatial)
             for stage in stream_source.stages:
                 tensor = stage.stream_region(self.name, tensor, context, cache_attribute)
             # The read plan is applied AFTER the chain, as the whole-volume path transforms before

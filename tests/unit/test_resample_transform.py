@@ -224,7 +224,7 @@ def test_the_streamed_slabs_agree_with_the_whole_volume(device: torch.device, ro
             target = (slice(start, stop), slice(0, SIZE[1]), slice(0, SIZE[2]))
             source = tuple(stage.stream_region_source(CASE, target, list(SIZE), Attribute(attribute)))
             block = volume[(slice(None), *source)]
-            context = RegionContext(source, target, tuple(SIZE), tuple(SIZE))
+            context = RegionContext(source, target, tuple(SIZE))
             streamed[(slice(None), *target)] = stage.stream_region(CASE, block, context, Attribute(attribute))
         span = float((reference.max() - reference.min()).item())
         torch.testing.assert_close(streamed, reference, rtol=0.0, atol=1e-5 * span, msg=label)
@@ -680,7 +680,7 @@ class TestTheHostRouteReusesItsInputImage:
         stage = _stage(image, _euler(image))  # never separable: the host route runs ITK
         target = (slice(0, 4), slice(0, SIZE[1]), slice(0, SIZE[2]))
         source = tuple(stage.stream_region_source(CASE, target, list(SIZE), Attribute(attribute)))
-        context = RegionContext(source, target, tuple(SIZE), tuple(SIZE))
+        context = RegionContext(source, target, tuple(SIZE))
         stage.stream_region(CASE, volume[(slice(None), *source)], context, Attribute(attribute))
         held = stage._sitk_input._image
         assert held is not None

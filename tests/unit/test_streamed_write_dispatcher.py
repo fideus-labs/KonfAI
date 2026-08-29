@@ -234,7 +234,7 @@ def test_stream_rescale_nearest_is_byte_identical_to_the_whole_volume_inverse(se
         lambda window, target, source: resample.stream_region_inverse(
             "case",
             window,
-            RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape)),
+            RegionContext(tuple(source), tuple(target), tuple(in_shape)),
             Attribute(attribute),
         ),
         in_shape,
@@ -264,7 +264,7 @@ def test_stream_rescale_linear_matches_the_whole_volume_inverse_to_float_roundin
         lambda window, target, source: resample.stream_region_inverse(
             "case",
             window,
-            RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape)),
+            RegionContext(tuple(source), tuple(target), tuple(in_shape)),
             Attribute(attribute),
         ),
         in_shape,
@@ -318,7 +318,7 @@ def test_stream_window_is_bounded_by_the_pull_span() -> None:
         lambda window, target, source: resample.stream_region_inverse(
             "case",
             window,
-            RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape)),
+            RegionContext(tuple(source), tuple(target), tuple(in_shape)),
             Attribute(attribute),
         ),
         in_shape,
