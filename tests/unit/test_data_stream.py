@@ -600,7 +600,7 @@ def test_the_listing_names_a_case_whose_only_version_is_an_orphaned_backup(tmp_p
     assert sorted(fresh.get_names("CT")) == ["CASE_000", "CASE_001"]
 
 
-@pytest.mark.parametrize("file_format", ["mha", "omezarr"])
+@pytest.mark.parametrize("file_format", ["mha", pytest.param("omezarr", marks=pytest.mark.slow)])
 def test_recovery_never_lands_on_a_publish_that_won_the_race(tmp_path: Path, file_format: str, monkeypatch) -> None:
     """A writer can publish between the moment recovery finds the entry missing and the moment it
     puts the backup back. The move itself must refuse then, because a second existence check would

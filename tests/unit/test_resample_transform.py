@@ -541,6 +541,7 @@ def test_the_plan_keeps_a_case_s_bound_and_the_run_holds_one_case_s_stages():
     torch.testing.assert_close(rank("CASE_003", volume, Attribute(attribute)), first, rtol=0.0, atol=0.0)
 
 
+@pytest.mark.slow
 def test_the_slabbed_walk_lands_each_slab_in_the_one_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """Above the walk budget the general path gathers slab by slab, and each slab is written into
     the output as it lands: bit for bit the single pass, with no parts held for a cat."""
@@ -572,6 +573,7 @@ def _diagonal_maps(image) -> list[tuple[str, "sitk.Transform"]]:
     ]
 
 
+@pytest.mark.slow
 def test_a_diagonal_stored_map_resamples_separably_within_the_routes_it_replaces() -> None:
     """A stored translation, an axis-aligned scale or their composition factorises: the region is
     read one axis at a time, from the very coordinates the general walk computes, and no coordinate

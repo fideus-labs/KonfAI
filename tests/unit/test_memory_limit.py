@@ -303,6 +303,7 @@ def _within_its_budget(source: str, budget_bytes: int, floor: dict, cohort: Path
     return measured
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("budget_mib", [512, 128])
 def test_a_streamed_evaluation_holds_the_budget_it_declared(budget_mib: int, floor: dict, cohort: Path) -> None:
     """The case exceeds both budgets, so both runs cut it into disjoint patches read with SSIM's
@@ -312,6 +313,7 @@ def test_a_streamed_evaluation_holds_the_budget_it_declared(budget_mib: int, flo
     assert "disjoint patches" in measured["log"] and "halo of 3" in measured["log"]
 
 
+@pytest.mark.slow
 def test_a_streamed_transform_tracks_the_budget_it_declared(floor: dict, cohort: Path) -> None:
     """Resample (REGRID) then Gradient (HALO): a chain that streams, so the sweep sizes its regions
     from the budget and the case is never resident.
