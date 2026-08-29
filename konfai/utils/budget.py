@@ -179,13 +179,7 @@ def peak_resident_bytes() -> int | None:
     mappings are small -- which a streamed run's are, since it reads rather than maps -- has a
     ``VmHWM`` that is its anonymous peak.
     """
-    try:
-        for line in Path("/proc/self/status").read_text().splitlines():
-            if line.startswith("VmHWM:"):
-                return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        return None
-    return None
+    return _status_bytes("VmHWM")
 
 
 def reset_resident_peak() -> bool:
@@ -207,9 +201,14 @@ def reset_resident_peak() -> bool:
 
 def resident_bytes() -> int | None:
     """What this process holds resident right now (``VmRSS``), or ``None`` where the kernel does not say."""
+    return _status_bytes("VmRSS")
+
+
+def _status_bytes(field: str) -> int | None:
+    """A ``kB`` field of ``/proc/self/status`` in bytes, ``None`` where the kernel does not say."""
     try:
         for line in Path("/proc/self/status").read_text().splitlines():
-            if line.startswith("VmRSS:"):
+            if line.startswith(field + ":"):
                 return int(line.split()[1]) * 1024
     except (OSError, ValueError, IndexError):
         return None
@@ -255,14 +254,14 @@ _CGROUP_V2_HELD_KEYS: tuple[str, ...] = ("anon", "kernel")
 _CGROUP_V1_HELD_KEYS: tuple[str, ...] = ("rss",)
 
 
-def _cgroup_paths() -> list[tuple[Path, str, tuple[str, ...]]]:
-    """The (directory, limit file, held-memory keys of ``memory.stat``) of this process's memory cgroup
-    and its ancestors, innermost first: v2 (``0::/path``) or v1 (``N:memory:/path``); empty when there
-    is no cgroup."""
+def _own_cgroup(controller: str) -> tuple[Path, str, bool] | None:
+    """``(hierarchy mount, this process's cgroup path in it, v2)`` for ``controller``, read from
+    ``/proc/self/cgroup``: the unified v2 line (``0::/path``) or the v1 line naming the controller;
+    ``None`` when there is no cgroup."""
     try:
         lines = Path(_PROC_SELF_CGROUP).read_text().splitlines()
     except OSError:
-        return []
+        return None
     root = Path(_CGROUP_ROOT)
     for line in lines:
         parts = line.split(":", 2)
@@ -270,44 +269,43 @@ def _cgroup_paths() -> list[tuple[Path, str, tuple[str, ...]]]:
             continue
         hierarchy, controllers, path = parts
         if hierarchy == "0" and controllers == "":
-            base, limit_name, held_keys = root, "memory.max", _CGROUP_V2_HELD_KEYS
-        elif "memory" in controllers.split(","):
-            base, limit_name, held_keys = root / "memory", "memory.limit_in_bytes", _CGROUP_V1_HELD_KEYS
-        else:
-            continue
-        leaf = base / path.lstrip("/")
-        chain = [leaf, *leaf.parents]
-        return [(d, limit_name, held_keys) for d in chain if d == base or base in d.parents]
-    return []
+            return root, path, True
+        if controller in controllers.split(","):
+            # A v1 controller mounts under the name it is mounted with: on most distributions the
+            # joint "cpu,cpuacct" with a "cpu" symlink beside it, on some only the joint one.
+            mount = next((root / d for d in (controllers, controller) if (root / d).is_dir()), None)
+            if mount is not None:
+                return mount, path, False
+    return None
+
+
+def _cgroup_ancestry(base: Path, path: str) -> list[Path]:
+    """The cgroup directory ``path`` under ``base`` and its ancestors up to ``base``, innermost first."""
+    leaf = base / path.lstrip("/")
+    return [d for d in (leaf, *leaf.parents) if d == base or base in d.parents]
+
+
+def _cgroup_paths() -> list[tuple[Path, str, tuple[str, ...]]]:
+    """The (directory, limit file, held-memory keys of ``memory.stat``) of this process's memory cgroup
+    and its ancestors, innermost first; empty when there is no cgroup."""
+    own = _own_cgroup("memory")
+    if own is None:
+        return []
+    base, path, v2 = own
+    limit_name, held_keys = (
+        ("memory.max", _CGROUP_V2_HELD_KEYS) if v2 else ("memory.limit_in_bytes", _CGROUP_V1_HELD_KEYS)
+    )
+    return [(d, limit_name, held_keys) for d in _cgroup_ancestry(base, path)]
 
 
 def _cpu_cgroup_paths() -> list[tuple[Path, bool]]:
     """This process's cpu cgroup directory and its ancestors, innermost first, each flagged v2
     (``cpu.max``) or v1 (``cpu.cfs_quota_us`` / ``cpu.cfs_period_us``)."""
-    try:
-        lines = Path(_PROC_SELF_CGROUP).read_text().splitlines()
-    except OSError:
+    own = _own_cgroup("cpu")
+    if own is None:
         return []
-    root = Path(_CGROUP_ROOT)
-    for line in lines:
-        parts = line.split(":", 2)
-        if len(parts) != 3:
-            continue
-        hierarchy, controllers, path = parts
-        if hierarchy == "0" and controllers == "":
-            base, v2 = root, True
-        elif "cpu" in controllers.split(","):
-            # A v1 controller mounts under the name it is mounted with: on most distributions the
-            # joint "cpu,cpuacct" with a "cpu" symlink beside it, on some only the joint one.
-            mount = next((root / d for d in (controllers, "cpu") if (root / d).is_dir()), None)
-            if mount is None:
-                continue
-            base, v2 = mount, False
-        else:
-            continue
-        leaf = base / path.lstrip("/")
-        return [(d, v2) for d in (leaf, *leaf.parents) if d == base or base in d.parents]
-    return []
+    base, path, v2 = own
+    return [(d, v2) for d in _cgroup_ancestry(base, path)]
 
 
 def _cpu_quota(directory: Path, v2: bool) -> float | None:
