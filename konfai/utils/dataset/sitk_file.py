@@ -24,6 +24,7 @@ import functools
 import glob
 import os
 import re
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -40,15 +41,13 @@ from konfai.utils.dataset.attribute import (
     data_to_image,
     image_to_data,
     is_an_image,
-    read_landmarks,
-    write_landmarks,
 )
+from konfai.utils.dataset.landmarks import read_landmarks, write_landmarks
 from konfai.utils.dataset.raw_block import (
     _nifti_extract_aborts,
     _pixel_block,
     _pixel_block_attributes,
     _pixel_block_region,
-    _warn_unstreamed_region_read,
 )
 from konfai.utils.dataset.staging import _recover_orphaned_backup, _retire_dead_debris, is_staging_entry
 from konfai.utils.dataset.stream import (
@@ -61,6 +60,29 @@ from konfai.utils.dataset.stream import (
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
 )
+
+# Formats already reported by _warn_unstreamed_region_read. Keyed by format, not by file: the remedy
+# is dataset-wide, so every case of a dataset would otherwise repeat the same warning.
+_unstreamed_formats_warned: set[str] = set()
+
+
+def _warn_unstreamed_region_read(path: str) -> None:
+    """Warn that `path`'s format decodes the whole volume for every patch region read from it.
+
+    `warnings.warn` dedups per call site, which here is one line in a loop over every patch of every
+    case: the seen-set is what makes this once per format rather than thousands of times.
+    """
+    suffix = Path(path).suffix
+    if suffix in _unstreamed_formats_warned:
+        return
+    _unstreamed_formats_warned.add(suffix)
+    warnings.warn(
+        f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region "
+        "(NRRD, or any compressed file), so every patch decodes the whole volume again: many times "
+        "the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI "
+        "streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
+        stacklevel=2,
+    )
 
 
 class SitkFile(AbstractFile):

@@ -23,7 +23,7 @@ import contextlib
 import os
 from collections.abc import Callable, Generator, Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -39,7 +39,6 @@ from konfai.utils.dataset import statistics
 from konfai.utils.dataset.abstract import AbstractFile as _AbstractFile
 from konfai.utils.dataset.attribute import (
     Attribute,
-    _is_listed_name,
     as_channel_first,
     data_to_image,
     data_to_transform,
@@ -73,8 +72,14 @@ from konfai.utils.utils import (
 )
 
 if TYPE_CHECKING:
-    from konfai.utils.dataset.raw_block import _T
     from konfai.utils.dataset.stream import DataStream
+
+_T = TypeVar("_T")
+
+
+def _is_listed_name(name: str) -> bool:
+    """Whether ``name`` is one component of a directory listing, which is how a root spells its cases."""
+    return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
 
 
 class Dataset:
@@ -220,7 +225,7 @@ class Dataset:
         """Whether writes to different entries land in disjoint files, so a background writer may
         flush one entry while another thread writes elsewhere in the dataset.
 
-        Mirrors the backend dispatch in ``_File.__enter__``: everything that is not a single-store
+        Mirrors the backend dispatch in ``File.__enter__``: everything that is not a single-store
         backend is a :class:`SitkFile` directory, one image file per ``(group, name)``. A single
         store (one HDF5 file, one zarr hierarchy, a DICOM series) shares handles and metadata across
         entries and must stay serial.

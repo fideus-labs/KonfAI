@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import ast
 import copy
-import csv
 import sys
 from pathlib import Path
 from typing import Any
@@ -63,11 +62,6 @@ def _attribute_text(value: Any) -> str:
         value = np.asarray(value, dtype=np.float64)[()] if isinstance(value, np.generic) else value.astype(np.float64)
     with np.printoptions(threshold=sys.maxsize, floatmode="unique"):
         return str(value).replace("\n", "")
-
-
-def _is_listed_name(name: str) -> bool:
-    """Whether ``name`` is one component of a directory listing, which is how a root spells its cases."""
-    return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
 
 
 class Attribute(dict[str, Any]):
@@ -377,40 +371,3 @@ def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     size = list(reversed(file_reader.GetSize()))
     size = [file_reader.GetNumberOfComponents(), *size]
     return size, attributes
-
-
-def read_landmarks(filename: Path) -> np.ndarray | None:
-    """Read Slicer-style fiducial landmarks from disk."""
-    data = None
-    with open(filename, newline="") as csvfile:
-        reader = csv.reader(filter(lambda row: row[0] != "#", csvfile))
-        lines = list(reader)
-        data = np.zeros((len(list(lines)), 3), dtype=np.double)
-        for i, row in enumerate(lines):
-            data[i] = np.array(row[1:4], dtype=np.double)
-        csvfile.close()
-    return data
-
-
-def write_landmarks(data: np.ndarray, filename: Path) -> None:
-    """Write landmarks to the Slicer Markups fiducial CSV-like format."""
-    with open(filename, "w") as f:
-        f.write(
-            "# Markups fiducial file version = 4.6\n# CoordinateSystem = LPS\n#"
-            " columns = id,x,y,z,ow,ox,oy,oz,vis,sel,lock,label,desc,associatedNodeID\n",
-        )
-        for i in range(data.shape[0]):
-            f.write(
-                "vtkMRMLMarkupsFiducialNode_"
-                + str(i + 1)
-                + ","
-                + str(data[i, 0])
-                + ","
-                + str(data[i, 1])
-                + ","
-                + str(data[i, 2])
-                + ",0,0,0,1,1,1,0,F-"
-                + str(i + 1)
-                + ",,vtkMRMLScalarVolumeNode1\n"
-            )
-        f.close()

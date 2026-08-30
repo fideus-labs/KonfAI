@@ -22,10 +22,8 @@ from __future__ import annotations
 import functools
 import os
 import struct
-import warnings
 from collections.abc import Sequence
-from pathlib import Path
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -35,8 +33,6 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai.utils.dataset.attribute import Attribute, _attribute_text
 from konfai.utils.dataset.stream import _MHA_ELEMENT_TYPES, _NIFTI_DATATYPES
-
-_T = TypeVar("_T")
 
 #: NumPy dtype of each element type the raw-block route reads (the inverses of the writers' tables).
 _NIFTI_DTYPES = {code: np.dtype(name) for name, code in _NIFTI_DATATYPES.items()}
@@ -276,65 +272,3 @@ def _nifti_extract_aborts(path: str) -> bool:
     reader.SetFileName(path)
     reader.ReadImageInformation()
     return reader.GetNumberOfComponents() > 1
-
-
-# Formats already reported by _warn_unstreamed_region_read. Keyed by format, not by file: the remedy
-# is dataset-wide, so every case of a dataset would otherwise repeat the same warning.
-_unstreamed_formats_warned: set[str] = set()
-
-
-def _warn_unstreamed_region_read(path: str) -> None:
-    """Warn that `path`'s format decodes the whole volume for every patch region read from it.
-
-    `warnings.warn` dedups per call site, which here is one line in a loop over every patch of every
-    case: the seen-set is what makes this once per format rather than thousands of times.
-    """
-    suffix = Path(path).suffix
-    if suffix in _unstreamed_formats_warned:
-        return
-    _unstreamed_formats_warned.add(suffix)
-    warnings.warn(
-        f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region "
-        "(NRRD, or any compressed file), so every patch decodes the whole volume again: many times "
-        "the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI "
-        "streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
-        stacklevel=2,
-    )
-
-
-def _store_chunks(shape: list[int], region_shape: list[int] | None, dtype: Any) -> tuple[int, ...] | None:
-    """Chunks a store should use, given the region shape its writer declared.
-
-    A region write that straddles a chunk becomes a read-modify-write of it, so the writer's own
-    region is the starting point; verbatim it is a gigabyte in one chunk at 2048x2048 float32, paid
-    by every later partial read. A region that fits ``CHUNK_TARGET_BYTES`` is taken as it stands; one
-    that does not is cut on EVERY axis longer than ``CHUNK_SPATIAL_TILE`` at once, the shape that
-    writes fastest (2.4 GB into a (1, 128, 128, 128) uint16 store takes 2.18 s, into
-    (1, 128, 640, 128) 3.53 s).
-
-    A covered axis may be cut anywhere; a partial one only into a DIVISOR of the region, since a
-    writer advancing in blocks of its declared size starts every block at a multiple of it. One whose
-    largest usable divisor would be a sliver is left long. ``None`` when the writer declared nothing.
-    """
-    from konfai.utils.ome_zarr import CHUNK_SPATIAL_TILE, CHUNK_TARGET_BYTES
-
-    if region_shape is None or len(region_shape) != len(shape):
-        return None
-    chunk = [max(1, min(int(region), int(extent))) for region, extent in zip(region_shape, shape, strict=True)]
-    itemsize = max(1, np.dtype(dtype).itemsize)
-    if int(np.prod(chunk, dtype=np.int64)) * itemsize <= CHUNK_TARGET_BYTES:
-        return tuple(chunk)
-    return tuple(
-        min(extent, CHUNK_SPATIAL_TILE) if extent >= int(shape[axis]) else _divisor_tile(extent, CHUNK_SPATIAL_TILE)
-        for axis, extent in enumerate(chunk)
-    )
-
-
-def _divisor_tile(extent: int, cap: int) -> int:
-    """The largest divisor of ``extent`` that is at most ``cap``, or ``extent`` when that divisor
-    would be a sliver (under a quarter of the cap): a chunk axis of one voxel is worse than a long
-    one."""
-    if extent <= cap:
-        return max(1, extent)
-    divisor = next((candidate for candidate in range(cap, 0, -1) if extent % candidate == 0), 1)
-    return divisor if divisor * 4 >= cap else extent

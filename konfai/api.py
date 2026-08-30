@@ -146,17 +146,24 @@ def _yaml_safe(value: object, where: str) -> object:
     )
 
 
+def _public_module(cls: type, default_modules: tuple[str, ...]) -> str:
+    """The module a config names ``cls`` by: the shipped package that re-exports it, else its own."""
+    return next(
+        (m for m in default_modules if cls.__module__ == m or cls.__module__.startswith(m + ".")), cls.__module__
+    )
+
+
 def _classpath(stage: object, default_modules: tuple[str, ...]) -> str:
     """The name the config tree references ``stage`` by: bare for a shipped class, qualified else."""
     cls = type(stage)
-    shipped = any(cls.__module__ == m or cls.__module__.startswith(m + ".") for m in default_modules)
-    return cls.__name__ if shipped else f"{cls.__module__}:{cls.__name__}"
+    module = _public_module(cls, default_modules)
+    return cls.__name__ if module in default_modules else f"{module}:{cls.__name__}"
 
 
 def _qualified_spelling(stage: object, name: str, default_modules: tuple[str, ...]) -> str:
     """A repeated bare name's second spelling: module-qualified, resolved as the binder resolves it."""
     if not isinstance(stage, Mapping):
-        return f"{type(stage).__module__}:{type(stage).__name__}"
+        return f"{_public_module(type(stage), default_modules)}:{type(stage).__name__}"
     for module in default_modules:
         if hasattr(importlib.import_module(module), name):
             return f"{module}:{name}"

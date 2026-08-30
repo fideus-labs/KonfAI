@@ -115,7 +115,7 @@ def _list_subclasses(module_path: str, base_name: str) -> list[dict[str, Any]]:
     base = getattr(module, base_name)
     components: list[dict[str, Any]] = []
     for name, obj in inspect.getmembers(module, inspect.isclass):
-        # A subscripted builtin generic (konfai.data.transform.SpatialStages) passes isclass on
+        # A subscripted builtin generic (konfai.data.geometry.SpatialStages) passes isclass on
         # Python 3.10 but is not a class there, and issubclass refuses it.
         if isinstance(obj, types.GenericAlias):
             continue

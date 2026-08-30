@@ -198,7 +198,7 @@ def test_patch_stream_warns_once_per_format_that_cannot_serve_a_disk_region(
     Two cases x three patches: the warning is about the format, so it must survive neither the patch
     loop nor the second case. Streaming an uncompressed .mha is a win and must stay silent.
     """
-    monkeypatch.setattr("konfai.utils.dataset.raw_block._unstreamed_formats_warned", set())
+    monkeypatch.setattr("konfai.utils.dataset.sitk_file._unstreamed_formats_warned", set())
     dataset = Dataset(tmp_path / "Dataset", file_format)
     volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
     for name in ("CASE_000", "CASE_001"):
