@@ -264,6 +264,15 @@ class Transform(NeedDevice, ABC):
     def set_datasets(self, datasets: list[Dataset]):
         self.datasets = datasets
 
+    def read_companion(self, group: str, name: str) -> np.ndarray:
+        """The case's ``group`` volume, whole, from whichever dataset holds it."""
+        for dataset in self.datasets:
+            if dataset.is_dataset_exist(group, name):
+                return dataset.read_data(group, name)[0]
+        raise ValueError(
+            f"Requested group '{group}' is not present in any dataset. Check your dataset group names or configuration."
+        )
+
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
 
@@ -714,21 +723,7 @@ class Clip(Transform):
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        mask = None
-        if self.mask is not None:
-            for dataset in self.datasets:
-                if dataset.is_dataset_exist(self.mask, name):
-                    mask, _ = dataset.read_data(self.mask, name)
-                    break
-        if mask is None and self.mask is not None:
-            raise ValueError(
-                f"Requested mask '{self.mask}' is not present in any dataset. "
-                "Check your dataset group names or configuration."
-            )
-        if mask is None:
-            tensor_masked = tensor
-        else:
-            tensor_masked = tensor[mask == 1]
+        tensor_masked = tensor if self.mask is None else tensor[self.read_companion(self.mask, name) == 1]
 
         if isinstance(self.min_value, str):
             if self.min_value == "min":
@@ -944,21 +939,7 @@ class Standardize(TransformInverse):
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        mask = None
-        if self.mask is not None:
-            for dataset in self.datasets:
-                if dataset.is_dataset_exist(self.mask, name):
-                    mask, _ = dataset.read_data(self.mask, name)
-                    break
-        if mask is None and self.mask is not None:
-            raise ValueError(
-                f"Requested mask '{self.mask}' is not present in any dataset."
-                " Check your dataset group names or configuration."
-            )
-        if mask is None:
-            tensor_masked = tensor
-        else:
-            tensor_masked = tensor[mask == 1]
+        tensor_masked = tensor if self.mask is None else tensor[self.read_companion(self.mask, name) == 1]
 
         if "Mean" not in cache_attribute:
             cache_attribute["Mean"] = (
@@ -2675,15 +2656,7 @@ class Sum(Transform):
         self.dim = dim
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Pointwise only when reducing the leading channel/model axis (dim 0); a spatial sum spans
-        # the whole extent, so it falls back to the whole volume.
-        if self.dim == 0:
-            return PatchLocality(LocalityKind.POINTWISE)
-        return PatchLocality(
-            LocalityKind.WHOLE_VOLUME,
-            reason=f"dim {self.dim} reduces a spatial axis, which spans the whole extent; dim: 0"
-            " reduces the channels and streams",
-        )
+        return _axis_reduction_locality(self.dim)
 
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
@@ -2808,6 +2781,17 @@ class Gradient(Transform):
         return result.norm(dim=1)
 
 
+def _axis_reduction_locality(dim: int) -> PatchLocality:
+    """POINTWISE for a reduction over the channel axis (dim 0); over a spatial axis it spans the whole
+    extent, so the stage takes the whole volume."""
+    if dim == 0:
+        return PatchLocality(LocalityKind.POINTWISE)
+    return PatchLocality(
+        LocalityKind.WHOLE_VOLUME,
+        reason=f"dim {dim} reduces a spatial axis, which spans the whole extent; dim: 0 reduces the channels and streams",
+    )
+
+
 class Argmax(Transform):
     # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
     working_multiple = 0.0
@@ -2817,15 +2801,7 @@ class Argmax(Transform):
         self.dim = dim
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Pointwise ONLY when reducing the channel axis (dim 0). Over a spatial axis the argmax spans
-        # the whole extent, so a per-patch argmax would diverge: fall back to the whole volume.
-        if self.dim == 0:
-            return PatchLocality(LocalityKind.POINTWISE)
-        return PatchLocality(
-            LocalityKind.WHOLE_VOLUME,
-            reason=f"dim {self.dim} reduces a spatial axis, which spans the whole extent; dim: 0"
-            " reduces the channels and streams",
-        )
+        return _axis_reduction_locality(self.dim)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.argmax(tensor, dim=self.dim).unsqueeze(self.dim)
@@ -2840,15 +2816,7 @@ class Softmax(Transform):
         self.dim = dim
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Pointwise ONLY when reducing the channel axis (dim 0). Over a spatial axis softmax normalises
-        # across the whole extent, so a per-patch softmax would diverge: fall back to the whole volume.
-        if self.dim == 0:
-            return PatchLocality(LocalityKind.POINTWISE)
-        return PatchLocality(
-            LocalityKind.WHOLE_VOLUME,
-            reason=f"dim {self.dim} reduces a spatial axis, which spans the whole extent; dim: 0"
-            " reduces the channels and streams",
-        )
+        return _axis_reduction_locality(self.dim)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.softmax(tensor, dim=self.dim)
