@@ -12,10 +12,30 @@ konfai.network.blocks module
    :show-inheritance:
    :undoc-members:
 
-konfai.network.network module
------------------------------
+konfai.network.network package
+------------------------------
 
-.. automodule:: konfai.network.network
+.. automodule:: konfai.network.network.base
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.network.network.loaders
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.network.network.measure
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.network.network.network
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.network.network.model
    :members:
    :show-inheritance:
    :undoc-members:

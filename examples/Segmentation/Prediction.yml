@@ -48,7 +48,7 @@ Predictor:
   outputs_dataset:
     UNetBlock_0:Head:Argmax:
       OutputDataset:
-        name_class: OutSameAsGroupDataset
+        name_class: OutputDataset
         before_reduction_transforms: None
         after_reduction_transforms: None
         final_transforms:

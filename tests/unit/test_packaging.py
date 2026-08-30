@@ -74,7 +74,7 @@ import konfai.utils.config
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
 
 
-def test_transform_and_blocks_import_without_simpleitk() -> None:
+def test_transform_imports_without_simpleitk() -> None:
     """Modules using SimpleITK guard it at point-of-use, so import must succeed without it."""
     script = """
 import builtins
@@ -88,10 +88,8 @@ def import_without_simpleitk(name, *args, **kwargs):
 
 builtins.__import__ = import_without_simpleitk
 import konfai.data.transform
-import konfai.network.blocks
 
 assert konfai.data.transform.sitk is None
-assert konfai.network.blocks.sitk is None
 try:
     konfai.data.transform._require_simpleitk()
 except Exception as exc:

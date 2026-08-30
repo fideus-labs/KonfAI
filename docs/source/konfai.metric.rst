@@ -4,10 +4,30 @@ konfai.metric package
 Submodules
 ----------
 
-konfai.metric.measure module
-----------------------------
+konfai.metric.measure package
+-----------------------------
 
-.. automodule:: konfai.metric.measure
+.. automodule:: konfai.metric.measure.base
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.metric.measure.segmentation
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.metric.measure.regression
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.metric.measure.adversarial
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.metric.measure.impact
    :members:
    :show-inheritance:
    :undoc-members:

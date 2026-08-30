@@ -43,8 +43,8 @@ YAML_REFERENCE_SYNTAX = {
     "external_library": "`package.module:Class` -> a class imported directly from an installed library, e.g. `monai.losses:DiceLoss`, `torch.nn:L1Loss`, `segmentation_models_pytorch:Unet`. Works for any installed library via get_module(); no wrapper needed when the class's call/forward convention already matches the KonfAI base.",
 }
 
-# Curated, code-grounded extension contract per kind (see konfai/metric/measure.py, konfai/network/network.py,
-# konfai/data/transform.py, konfai/data/augmentation.py, konfai/metric/schedulers.py, AGENTS.md section 7c).
+# Curated, code-grounded extension contract per kind (see konfai/metric/measure/, konfai/network/network/,
+# konfai/data/transform/, konfai/data/augmentation/, konfai/metric/schedulers.py, AGENTS.md section 7c).
 EXTENSION_POINTS: dict[str, dict[str, Any]] = {
     "loss": {
         "base_class": "konfai.metric.measure:Criterion",

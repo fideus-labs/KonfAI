@@ -57,9 +57,9 @@ extras, API details) lives in {doc}`../reference/components/storage-backends`.
 
 | Module | Role |
 | --- | --- |
-| `konfai/data/data_manager.py` | grouped `Data*` datasets, `GroupTransform`, subset/validation splitting |
-| `konfai/data/augmentation.py` | `DataAugmentationsList`: on-the-fly augmentation |
-| `konfai/data/patching.py` | `DatasetPatch`: patch extraction and reassembly |
+| `konfai/data/data_manager/` | grouped `Data*` datasets, `GroupTransform`, subset/validation splitting |
+| `konfai/data/augmentation/` | `DataAugmentationsList`: on-the-fly augmentation |
+| `konfai/data/patching/` | `DatasetPatch`: patch extraction and reassembly |
 | `konfai/data/case_reduction.py` | `CaseReduction`, `ReductionPlan`: the N-to-1 engine behind a `Reduce` stage |
 | `konfai/data/reduction.py` | `Reduction` and the built-in operators `Mean`, `Median`, `Concat` |
 

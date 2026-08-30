@@ -31,7 +31,7 @@ import torch.distributed as dist
 import tqdm
 from ruamel.yaml import YAML
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim.swa_utils import AveragedModel
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from torch.utils.data import DataLoader
 
 try:
@@ -48,8 +48,9 @@ from konfai import (
     statistics_directory,
 )
 from konfai.data.data_manager import BatchSample, DataTrain
-from konfai.data.patching import SweepClock
 from konfai.network.network import Model, ModelLoader, NetState, Network
+from konfai.utils import vram
+from konfai.utils.clock import SweepClock, startup_clock
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.errors import ConfigError, TrainerError
 from konfai.utils.live_control import LiveControl
@@ -64,11 +65,9 @@ from konfai.utils.runtime import (
     run_distributed_app,
     safe_torch_load,
     seed_all,
-    startup_clock,
     synchronize_data,
 )
 from konfai.utils.utils import concretize_patch_size, size_free_axes
-from konfai.utils.vram import next_patch_candidate, usable_vram
 
 
 class EarlyStoppingBase:
@@ -297,13 +296,7 @@ class _Trainer:
         self._loss_keys: set[str] = set()
         if self.global_rank == 0 and self.save_checkpoint_mode == "BEST":
             self._initialize_best_checkpoint_state()
-        self.data_log: dict[str, tuple[DataLog, int]] = {}
-        if data_log is not None:
-            for data in data_log:
-                self.data_log[data.split("/")[0].replace(":", ".")] = (
-                    DataLog[data.split("/")[1]],
-                    int(data.split("/")[2]),
-                )
+        self.data_log = DataLog.parse(data_log)
 
     def __enter__(self):
         return self
@@ -949,13 +942,8 @@ class Trainer(DistributedObject):
             # actual training happens later in the distributed runtime.
             seed_all(self.manual_seed)
         self.dataset.prepare()
-        self.model.init(self.autocast, state, self.dataset.get_groups_dest())
-        self.model.init_outputs_group()
-        self.model._compute_channels_trace(
-            self.model,
-            self.model.in_channels,
-            self.gradient_checkpoints,
-            self.gpu_checkpoints,
+        self.model.bind(
+            self.autocast, state, self.dataset.get_groups_dest(), self.gradient_checkpoints, self.gpu_checkpoints
         )
         # The per-axis multiple a free patch axis rounds up to, read off the model's downsampling graph.
         self._downsampling_factor = self.model.downsampling_factor()
@@ -1050,17 +1038,9 @@ class Trainer(DistributedObject):
             )
 
     def _ema_update(self) -> dict[str, Callable]:
-        """The EMA rule for AveragedModel: torch's fused ``multi_avg_fn`` (one ``_foreach_lerp_`` per
-        device and dtype) where it exists, the per-tensor ``avg_fn`` otherwise."""
-        try:
-            from torch.optim.swa_utils import get_ema_multi_avg_fn
-        except ImportError:
-            return {"avg_fn": self._avg_fn}
+        """The EMA rule for AveragedModel: torch's fused ``multi_avg_fn``, one ``_foreach_lerp_``
+        per device and dtype."""
         return {"multi_avg_fn": get_ema_multi_avg_fn(self.ema_decay)}
-
-    def _avg_fn(self, averaged_model_parameter: float, model_parameter, num_averaged):
-        """EMA update (AveragedModel avg_fn): ``ema_decay * averaged + (1 - ema_decay) * model``."""
-        return self.ema_decay * averaged_model_parameter + (1 - self.ema_decay) * model_parameter
 
     def run_process(
         self,
@@ -1136,9 +1116,9 @@ class Trainer(DistributedObject):
                 # optimizer.step(), so no weights are updated. The rare case where it fires mid-step
                 # instead leaves that first batch's partial update in place (the restart continues from
                 # it); this is a bounded one-batch perturbation, not worth a whole-run state snapshot.
-                measured = self._transient_at_oom(device)
+                measured = vram.transient_at_oom(device)
                 self.model.zero_grad(set_to_none=True)
-                candidate = self._shrunken_patch(measured, self._usable_vram_after_oom(device))
+                candidate = self._shrunken_patch(measured, vram.usable_after_oom(device))
                 # Every rank must train the same grid, so the shrink is agreed at a rendezvous: each
                 # failing rank proposes its own candidate and all adopt the per-axis MIN. A rank that
                 # did NOT run out never reaches this all-gather; the job then dies at the collective
@@ -1161,7 +1141,7 @@ class Trainer(DistributedObject):
                 )
                 self._vram_patch_candidate = agreed
                 self.dataset.replan_patch(agreed)
-                self._reset_cuda_peak(device)
+                vram.reset_peak(device)
                 dataloaders = self.dataset.get_data(world_size)[0][global_rank]
 
     def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
@@ -1178,40 +1158,9 @@ class Trainer(DistributedObject):
         candidate = self._vram_patch_candidate or concretize_patch_size(
             self._vram_patch_template, worst, self._downsampling_factor
         )
-        return next_patch_candidate(
+        return vram.next_patch_candidate(
             candidate, self._vram_patch_template, worst, measured, usable, self._downsampling_factor
         )
-
-    @staticmethod
-    def _reset_cuda_peak(device: int | None) -> None:
-        """Drop the failed attempt's high-water mark so the rerun measures its own steps."""
-        if device is None:
-            return
-        try:
-            torch.cuda.reset_peak_memory_stats(device)
-        except Exception:  # nosec B110 - stale stats only cost precision, never correctness
-            pass
-
-    def _transient_at_oom(self, device: int | None) -> int | None:
-        """The failed step's measured transient (CUDA peak over resident), ``None`` when unreadable."""
-        if device is None:
-            return None
-        try:
-            transient = int(torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device))
-        except Exception:  # nosec B110 - an unreadable measurement just falls back to the fixed step
-            return None
-        return transient if transient > 0 else None
-
-    def _usable_vram_after_oom(self, device: int | None) -> float:
-        """The VRAM budget the next attempt's step may claim, read once the failed state is freed."""
-        if device is None:
-            return 0.0
-        try:
-            torch.cuda.empty_cache()
-            free, _ = torch.cuda.mem_get_info(device)
-        except Exception:  # nosec B110 - an unreadable budget refuses the restart (the OOM re-raises)
-            return 0.0
-        return usable_vram(free)
 
 
 def build_train(

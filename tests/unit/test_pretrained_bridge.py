@@ -52,6 +52,7 @@ def _konfai_logits(net: Network, inputs: torch.Tensor) -> torch.Tensor:
     return logits
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("dim,input_shape", [(2, (1, 1, 32, 32)), (3, (1, 1, 16, 16, 16))])
 def test_monai_pretrained_weights_drive_the_konfai_graph(dim: int, input_shape: tuple[int, ...]) -> None:
     pytest.importorskip("monai")

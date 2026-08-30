@@ -33,7 +33,7 @@ from konfai.data.data_manager import DatasetIter, _interleaved_case_entries
 from konfai.data.patching import DatasetPatch, Gaussian, SlabAligner
 from konfai.data.transform import Flip as FlipTransform
 from konfai.data.transform import InferenceStack, LocalityKind, Sum
-from konfai.predictor import Concat, Mean, Median, OutSameAsGroupDataset
+from konfai.predictor import Concat, Mean, Median, OutputDataset
 from konfai.utils.dataset import Attribute, Dataset
 
 SHAPE = [6, 4, 3]
@@ -164,7 +164,7 @@ def _gate(augmentation, nb: int = 1) -> bool:
         def get_dataset_from_index(group_dest: str, index: int):
             return DummyManager()
 
-    output_dataset = OutSameAsGroupDataset.__new__(OutSameAsGroupDataset)
+    output_dataset = OutputDataset.__new__(OutputDataset)
     output_dataset.nb_data_augmentation = nb + 1
     output_dataset.group_dest = "dest"
     return output_dataset._tta_streamable(cast(DatasetIter, DummyDatasetIter()), 0, _geometry_attribute())

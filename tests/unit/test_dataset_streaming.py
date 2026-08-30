@@ -56,21 +56,17 @@ from konfai.data.transform import (
     Transform,
     TransformLoader,
 )
-from konfai.utils import dataset as dataset_module
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import State
+from oracle_support import geometry
 
 SimpleITK = pytest.importorskip("SimpleITK")
 h5py = pytest.importorskip("h5py")
 
 
 def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray(origin, dtype=np.float64)
-    attributes["Spacing"] = np.asarray(spacing, dtype=np.float64)
-    attributes["Direction"] = np.eye(len(origin), dtype=np.float64).reshape(-1)
-    return attributes
+    return geometry(origin, spacing)
 
 
 def test_dataset_read_data_slice_h5_reads_only_requested_region(tmp_path: Path) -> None:
@@ -202,7 +198,7 @@ def test_patch_stream_warns_once_per_format_that_cannot_serve_a_disk_region(
     Two cases x three patches: the warning is about the format, so it must survive neither the patch
     loop nor the second case. Streaming an uncompressed .mha is a win and must stay silent.
     """
-    monkeypatch.setattr(dataset_module, "_unstreamed_formats_warned", set())
+    monkeypatch.setattr("konfai.utils.dataset.sitk_file._unstreamed_formats_warned", set())
     dataset = Dataset(tmp_path / "Dataset", file_format)
     volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
     for name in ("CASE_000", "CASE_001"):
@@ -235,7 +231,7 @@ def test_dataset_read_data_statistics_sitk_accumulates_slabs_without_loading_ful
     dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
 
     # One slab per plane, so the running merge spans several reads on a volume this small.
-    monkeypatch.setattr(dataset_module, "_STATISTICS_CHUNK_ELEMENTS", 1)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_CHUNK_ELEMENTS", 1)
     monkeypatch.setattr(SimpleITK, "ReadImage", _reject_whole_volume_read)
 
     stats = dataset.read_data_statistics("CT", "CASE_000")
@@ -253,7 +249,7 @@ def test_dataset_read_data_statistics_sitk_selects_channels_while_streaming(
     volume = np.arange(3 * 4 * 5 * 6, dtype=np.float32).reshape(3, 4, 5, 6)
     dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
 
-    monkeypatch.setattr(dataset_module, "_STATISTICS_CHUNK_ELEMENTS", 1)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_CHUNK_ELEMENTS", 1)
     monkeypatch.setattr(SimpleITK, "ReadImage", _reject_whole_volume_read)
 
     stats = dataset.read_data_statistics("CT", "CASE_000", [0, 2])
@@ -956,7 +952,7 @@ def _write_mask(path, z, y, x, seed=0):
 
 def _slab_context(z0: int, z1: int, shape: tuple[int, int, int]) -> RegionContext:
     region = (slice(z0, z1), slice(0, shape[1]), slice(0, shape[2]))
-    return RegionContext(region, region, shape, shape)
+    return RegionContext(region, region, shape)
 
 
 @pytest.mark.parametrize("slab", [1, 4, 5])

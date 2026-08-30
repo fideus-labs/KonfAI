@@ -1,7 +1,7 @@
 # Storage backends & formats
 
 KonfAI reads and writes datasets through pluggable backends in
-`konfai/utils/dataset.py` (inner classes of `Dataset`). You rarely name a backend
+`konfai/utils/dataset/` (one module per backend, addressed as `Dataset.<Backend>`). You rarely name a backend
 directly, you pick a **format token** in a `dataset_filenames` spec
 (`./Dataset:a:mha`), and the token is dispatched to a backend. See
 {doc}`../../concepts/datasets` for the grouped case/group layout these backends
@@ -307,7 +307,7 @@ slices. In workflow YAML use `./Dataset:dicom` or `./Dataset:omezarr` in
 
 ## Patching, streaming & reassembly
 
-The data layer (`konfai/data/patching.py`, `konfai/data/data_manager.py`) never
+The data layer (`konfai/data/patching/`, `konfai/data/data_manager/`) never
 loads a whole volume when it can avoid it:
 
 - **`DatasetPatch`** (the `Patch:` config block): `patch_size` (default

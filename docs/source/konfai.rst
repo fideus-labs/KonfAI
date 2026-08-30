@@ -31,10 +31,25 @@ konfai.main module
    :show-inheritance:
    :undoc-members:
 
-konfai.predictor module
------------------------
+konfai.predictor package
+------------------------
 
-.. automodule:: konfai.predictor
+.. automodule:: konfai.predictor.output
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.predictor.ensemble
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.predictor.loop
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.predictor.workflow
    :members:
    :show-inheritance:
    :undoc-members:

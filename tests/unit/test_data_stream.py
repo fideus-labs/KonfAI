@@ -25,16 +25,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 from konfai.utils.dataset import Attribute, Dataset, is_staging_entry
+from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
 
 
 def _image_attributes() -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray([10.0, 20.0, 30.0])
-    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
-    attributes["Direction"] = np.asarray([1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0])
-    return attributes
+    return geometry((10.0, 20.0, 30.0), (0.5, 1.5, 2.0), [1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0])
 
 
 def _volume(channels: int = 2, dtype: type = np.float32) -> np.ndarray:
@@ -569,12 +566,11 @@ def test_a_backup_orphaned_by_a_killed_writer_is_served_again(tmp_path: Path, fi
     between the first two moves leaves the previous, COMPLETE entry under a name every listing
     hides: the output is preserved and not served, which reads as data loss. It is served again."""
     _skip_unavailable(file_format)
-    import konfai.utils.dataset as dataset_module
 
     volume, attributes = _volume(), _image_attributes()
     dataset = Dataset(tmp_path / "store", file_format)
     _kill_between_the_two_moves(dataset, "CASE_001", volume, attributes)
-    monkeypatch.setattr(dataset_module, "_writer_is_dead", lambda pid: True)
+    monkeypatch.setattr("konfai.utils.dataset.staging._writer_is_dead", lambda pid: True)
 
     fresh = Dataset(tmp_path / "store", file_format)
     # Whichever question comes first recovers it, and says so: the probe a resume makes, or the read.
@@ -589,24 +585,22 @@ def test_the_listing_names_a_case_whose_only_version_is_an_orphaned_backup(tmp_p
     """A listing that hid what the probe and the read recover would name fewer cases than the store
     serves, and a run walking the listing would skip that case without a word."""
     pytest.importorskip("h5py")
-    import konfai.utils.dataset as dataset_module
 
     dataset = Dataset(tmp_path / "store", "h5")
     dataset.write("CT", "CASE_000", _volume(), _image_attributes())
     _kill_between_the_two_moves(dataset, "CASE_001", _volume(), _image_attributes())
-    monkeypatch.setattr(dataset_module, "_writer_is_dead", lambda pid: True)
+    monkeypatch.setattr("konfai.utils.dataset.staging._writer_is_dead", lambda pid: True)
 
     fresh = Dataset(tmp_path / "store", "h5")
     assert sorted(fresh.get_names("CT")) == ["CASE_000", "CASE_001"]
 
 
-@pytest.mark.parametrize("file_format", ["mha", "omezarr"])
+@pytest.mark.parametrize("file_format", ["mha", pytest.param("omezarr", marks=pytest.mark.slow)])
 def test_recovery_never_lands_on_a_publish_that_won_the_race(tmp_path: Path, file_format: str, monkeypatch) -> None:
     """A writer can publish between the moment recovery finds the entry missing and the moment it
     puts the backup back. The move itself must refuse then, because a second existence check would
     only move the window: the previous version must never land on top of the new one."""
     _skip_unavailable(file_format)
-    import konfai.utils.dataset as dataset_module
 
     published, backed_up = _volume(), _volume() * 0 + 7
     dataset = Dataset(tmp_path / "store", file_format)
@@ -616,7 +610,7 @@ def test_recovery_never_lands_on_a_publish_that_won_the_race(tmp_path: Path, fil
         Dataset(tmp_path / "store", file_format).write("CT", "CASE_001", published, _image_attributes())
         return True
 
-    monkeypatch.setattr(dataset_module, "_writer_is_dead", publish_then_answer)
+    monkeypatch.setattr("konfai.utils.dataset.staging._writer_is_dead", publish_then_answer)
     fresh = Dataset(tmp_path / "store", file_format)
     assert fresh.is_dataset_exist("CT", "CASE_001")
     np.testing.assert_array_equal(fresh.read_data("CT", "CASE_001")[0], published)

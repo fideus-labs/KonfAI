@@ -28,6 +28,7 @@ import pytest
 from konfai.utils import uri
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import DatasetManagerError
+from oracle_support import geometry
 
 pytest.importorskip("zarr")
 pytest.importorskip("ngff_zarr")
@@ -45,11 +46,7 @@ def memory_root() -> str:
 
 
 def _attributes() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
-    attribute["Spacing"] = np.asarray([1.0, 1.0, 1.0])
-    attribute["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attribute
+    return geometry()
 
 
 def _publish(memory_root: str, case: str, group: str, volume: np.ndarray) -> None:

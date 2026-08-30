@@ -103,6 +103,16 @@ class RemoteServer:
         """Return the base URL of the remote server."""
         return f"http://{self.host}:{self.port}"
 
+    def get_json(self, path: str, timeout_s: float, params: list[tuple[str, int]] | None = None) -> dict:
+        """The JSON body of ``GET <base url>/<path>``; a failed status raises."""
+        import requests
+
+        response = requests.get(
+            f"{self.get_url()}/{path}", params=params, headers=self.get_headers(), timeout=timeout_s
+        )
+        response.raise_for_status()
+        return response.json()
+
 
 def cuda_visible_devices() -> list[int]:
     """
@@ -143,13 +153,7 @@ def get_available_devices(
         Available device indices and the corresponding device names.
     """
     if remote_server is not None:
-        import requests
-
-        r = requests.get(
-            f"{remote_server.get_url()}/available_devices", headers=remote_server.get_headers(), timeout=timeout_s
-        )
-        r.raise_for_status()
-        data = r.json()
+        data = remote_server.get_json("available_devices", timeout_s)
         return data["devices_index"], data["devices_name"]
     else:
         from torch.cuda import get_device_name
@@ -178,15 +182,7 @@ def get_ram(remote_server: RemoteServer | None = None, timeout_s: float = 2.0) -
         Used RAM and total RAM in gigabytes.
     """
     if remote_server is not None:
-        import requests
-
-        r = requests.get(
-            f"{remote_server.get_url()}/ram",
-            headers=remote_server.get_headers(),
-            timeout=timeout_s,
-        )
-        r.raise_for_status()
-        data = r.json()
+        data = remote_server.get_json("ram", timeout_s)
         return data["used_gb"], data["total_gb"]
     else:
         ram = psutil.virtual_memory()
@@ -216,16 +212,7 @@ def get_vram(
         Used VRAM and total VRAM in gigabytes.
     """
     if remote_server is not None:
-        import requests
-
-        r = requests.get(
-            f"{remote_server.get_url()}/vram",
-            params=[("devices", device_index) for device_index in devices],
-            headers=remote_server.get_headers(),
-            timeout=timeout_s,
-        )
-        r.raise_for_status()
-        data = r.json()
+        data = remote_server.get_json("vram", timeout_s, params=[("devices", device) for device in devices])
         return data["used_gb"], data["total_gb"]
     else:
         if not _PYNVML_AVAILABLE:

@@ -24,7 +24,8 @@ import pytest
 import torch
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager import DatasetIter
-from konfai.predictor import Mean, OutSameAsGroupDataset, Reduction
+from konfai.predictor import Mean, OutputDataset, Reduction
+from konfai.utils import budget as budget_module
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.utils import get_patch_slices_from_shape
 
@@ -93,6 +94,15 @@ class StreamingDatasetStub:
     def is_dataset_exist(self, group_src: str, name: str) -> bool:
         del group_src, name
         return True  # the one entry it serves is always there
+
+
+@pytest.fixture(autouse=True)
+def _no_declared_budget():
+    """A per-rank budget one test declares never reaches the next: the walk's default budget is
+    probed only when nothing is declared."""
+    budget_module.set_per_rank_budget(None)
+    yield
+    budget_module.set_per_rank_budget(None)
 
 
 @pytest.fixture
@@ -214,7 +224,7 @@ def _drive_tta(
         def get_dataset_from_index(group_dest: str, index: int):
             return DummyManager()
 
-    output_dataset = OutSameAsGroupDataset(
+    output_dataset = OutputDataset(
         same_as_group="src:dest",
         dataset_filename=f"{tmp_path}/output.h5:h5" if file_format == "h5" else f"{tmp_path}/output:{file_format}",
         group="out",

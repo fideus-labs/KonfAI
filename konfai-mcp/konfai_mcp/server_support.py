@@ -28,6 +28,7 @@ from typing import Any
 
 import numpy as np
 
+from .classpaths import public_module
 from .config_io import YAML_DUMP as YAML_DUMP
 from .config_io import YAML_SAFE
 from .config_io import _lint_config_data as _lint_config_data
@@ -99,11 +100,7 @@ class DatasetGroupUnreadableError(ValueError):
 
 
 def aggregate_case_statistics(stats: dict[str, dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
-    """Aggregate per-case statistics into the KonfAI ``case``/``aggregates`` payload shape.
-
-    Vendored in the MCP package so it depends only on KonfAI's public API: the
-    equivalent logic also lives inline in ``Dataset.get_statistics``.
-    """
+    """Aggregate per-case statistics into the KonfAI ``case``/``aggregates`` payload shape."""
     result: dict[str, dict[str, dict[str, Any]]] = {"case": {}, "aggregates": {}}
     if not stats:
         return result
@@ -804,6 +801,11 @@ _KONFAI_COMPONENT_BASES = {
 }
 
 
+def _resolve_base(classpath: str) -> type:
+    module, name = classpath.rsplit(".", 1)
+    return getattr(importlib.import_module(module), name)
+
+
 def _imported_object_extras(obj: Any) -> dict[str, Any]:
     """Base classes, ``forward`` contract, and KonfAI-component detection for an imported object.
 
@@ -813,10 +815,11 @@ def _imported_object_extras(obj: Any) -> dict[str, Any]:
     extras: dict[str, Any] = {"bases": [], "forward": None, "konfai_base": None, "integration_hint": None}
     if not inspect.isclass(obj):
         return extras
-    mro = [f"{cls.__module__}.{cls.__qualname__}" for cls in obj.__mro__ if cls is not object]
+    mro = [f"{public_module(cls)}.{cls.__qualname__}" for cls in obj.__mro__ if cls is not object]
     extras["bases"] = mro
     extras["konfai_base"] = next(
-        (_KONFAI_COMPONENT_BASES[name] for name in mro if name in _KONFAI_COMPONENT_BASES), None
+        (kind for classpath, kind in _KONFAI_COMPONENT_BASES.items() if issubclass(obj, _resolve_base(classpath))),
+        None,
     )
     extras["integration_hint"] = (
         f"Already a KonfAI {extras['konfai_base']}: reference it directly by classpath."

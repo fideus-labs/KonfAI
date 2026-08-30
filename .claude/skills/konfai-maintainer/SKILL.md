@@ -22,9 +22,9 @@ actually bitten**, and the **release gate**. Use it to decide whether a framewor
 ## The reflex before editing
 
 1. **Read before editing.** The most central files are dense with invariants: `utils/config.py` (the
-   reflection binder: reading a config *mutates the file*), `data/patching.py` +
-   `data/data_manager.py` (patch order, loading regimes), `network/network.py` (the model/criterion
-   runtime), `predictor.py` (the streamed-write dispatcher). A one-line change here is rarely local.
+   reflection binder: reading a config *mutates the file*), `data/patching/` +
+   `data/data_manager/` (patch order, loading regimes), `network/network/` (the model/criterion
+   runtime), `predictor/output.py` (the streamed-write dispatcher). A one-line change here is rarely local.
 2. **Identify which invariant the diff touches** using [references/review-checklist.md](references/review-checklist.md): it maps each subsystem to the invariant a change most easily breaks, and lists the confirmed traps.
 3. **Keep the diff one logical change**, no unrelated reformats, and honour the conventions in AGENTS.md §8
    (120 cols, SPDX header on new files, `utils/errors` classes, import-guarded optional deps, Conventional

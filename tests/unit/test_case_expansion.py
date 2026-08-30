@@ -28,23 +28,19 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data import patching as patching_module
 from konfai.data.augmentation import Brightness, CutOUT, Flip, Noise, Permute, Rotate, Scale
 from konfai.data.materialize import CaseMaterializer, Regime, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Expand, Mask, Resample, Save, TensorCast, Transform, Write, split_expand
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PatchError, TransformError
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
 
 def _image_attributes() -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray([10.0, 20.0, 30.0])
-    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
-    attributes["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attributes
+    return geometry((10.0, 20.0, 30.0), (0.5, 1.5, 2.0))
 
 
 def _source(tmp_path: Path, name: str = "CASE_000") -> Dataset:
@@ -67,16 +63,7 @@ def _drawn_scales(augmentation: Scale, index: int = 0) -> list[torch.Tensor]:
 
 
 def _manager(source: Dataset, transforms: list[Transform], name: str = "CASE_000", index: int = 0) -> DatasetManager:
-    return DatasetManager(
-        index=index,
-        group_src="CT",
-        group_dest="CT",
-        name=name,
-        dataset=source,
-        patch=None,
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(source, transforms, name=name, index=index)
 
 
 # --------------------------------------------------------------------- the marker
@@ -365,7 +352,7 @@ def test_a_companion_read_in_a_copys_tail_reads_the_block_and_not_the_volume(
     it says. Its windows are declared before the first read (the store's chunk cache evicts by next
     use) and are the blocks' own; and the copies still equal the whole-volume ones.
     """
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)  # 12 rows: four blocks
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)  # 12 rows: four blocks
     source = _source(tmp_path)
     mask = (np.arange(12 * 10 * 8).reshape(1, 12, 10, 8) % 3 > 0).astype(np.uint8)
     source.write("MASK", "CASE_000", mask, _image_attributes())
@@ -491,7 +478,7 @@ def test_the_geometric_and_field_draws_stream_their_copies(
 
     Over both decompositions: how many blocks the landing is swept in is not a value, and a draw
     parameterised by the voxel's PLACE is exactly the one that can disagree across them."""
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", rows)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", rows)
     source = _source(tmp_path)
     augmentation = draw()
     streamed = _manager(

@@ -130,7 +130,7 @@ def _prediction_config(dataset_dir: Path, train_name: str) -> str:
                 "outputs_dataset": {
                     "Head:Tanh": {
                         "OutputDataset": {
-                            "name_class": "OutSameAsGroupDataset",
+                            "name_class": "OutputDataset",
                             "before_reduction_transforms": None,
                             "after_reduction_transforms": None,
                             "final_transforms": None,

@@ -71,10 +71,7 @@ defaults. See {doc}`../concepts/configuration`.
 
 - `--model`: checkpoint path to resume from (**required**)
 - `--lr`: override the learning rate on resume (omit to keep the checkpoint LR)
-- `-checkpoints-dir` / `-statistics-dir`: note the **single leading dash** here, an
-  inconsistency with TRAIN's `--` forms. Only the single-dash spelling parses on
-  RESUME (`--checkpoints-dir` gives *unrecognized arguments*), so invoke them exactly
-  as written; the underscore variants (`-checkpoints_dir`) also work.
+- `--checkpoints-dir` / `--statistics-dir`: as for TRAIN
 
 `PREDICTION`
 

@@ -34,6 +34,7 @@ from konfai.data import Attribute, LocalityKind, PatchLocality, Transform, Write
 from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.utils.dataset import Dataset
+from oracle_support import manager
 
 pytest.importorskip("SimpleITK")
 
@@ -77,16 +78,7 @@ def _field(tmp_path: Path) -> Dataset:
 
 
 def _manager(source: Dataset, transforms) -> DatasetManager:
-    return DatasetManager(
-        index=0,
-        group_src="DVF",
-        group_dest="DVF",
-        name="CASE_000",
-        dataset=source,
-        patch=None,
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(source, transforms, group="DVF", name="CASE_000")
 
 
 def test_the_statistic_is_per_component(tmp_path: Path) -> None:

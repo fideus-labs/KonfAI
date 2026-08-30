@@ -158,7 +158,7 @@ def _predict_config(dataset: Path) -> dict:
             "outputs_dataset": {
                 "Head:Softmax": {
                     "OutputDataset": {
-                        "name_class": "OutSameAsGroupDataset",
+                        "name_class": "OutputDataset",
                         "before_reduction_transforms": "None",
                         "after_reduction_transforms": "None",
                         "final_transforms": {

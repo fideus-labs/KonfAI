@@ -32,6 +32,8 @@ import os
 import types
 from typing import Any
 
+from konfai_mcp.classpaths import public_module
+
 # Kinds backed by "concrete subclasses of a base class defined in a single module".
 _SUBCLASS_KINDS: dict[str, tuple[str, str]] = {
     "criterion": ("konfai.metric.measure", "Criterion"),
@@ -113,7 +115,7 @@ def _list_subclasses(module_path: str, base_name: str) -> list[dict[str, Any]]:
     base = getattr(module, base_name)
     components: list[dict[str, Any]] = []
     for name, obj in inspect.getmembers(module, inspect.isclass):
-        # A subscripted builtin generic (konfai.data.transform.SpatialStages) passes isclass on
+        # A subscripted builtin generic (konfai.data.geometry.SpatialStages) passes isclass on
         # Python 3.10 but is not a class there, and issubclass refuses it.
         if isinstance(obj, types.GenericAlias):
             continue
@@ -129,8 +131,8 @@ def _list_subclasses(module_path: str, base_name: str) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "config_reference": name,
-                "inspect_classpath": f"{obj.__module__}:{name}",
-                "module": obj.__module__,
+                "inspect_classpath": f"{public_module(obj)}:{name}",
+                "module": public_module(obj),
                 "doc": _doc_summary(obj),
             }
         )

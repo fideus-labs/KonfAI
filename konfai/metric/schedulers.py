@@ -114,6 +114,3 @@ class PolyLRScheduler(torch.optim.lr_scheduler._LRScheduler):
             param_group["lr"] = new_lr
 
         self._last_lr = [group["lr"] for group in self.optimizer.param_groups]
-
-    def get_last_lr(self):
-        return self._last_lr

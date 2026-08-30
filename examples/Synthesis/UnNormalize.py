@@ -16,7 +16,7 @@
 
 import torch
 
-from konfai.data.data_manager import Attribute
+from konfai.utils.dataset import Attribute
 from konfai.data.transform import Transform
 
 

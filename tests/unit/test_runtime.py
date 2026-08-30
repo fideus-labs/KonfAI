@@ -26,7 +26,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import konfai as konfai_module
-import konfai.utils.runtime as rt
+import konfai.utils.runtime.distributed as rt_dist
+import konfai.utils.runtime.logging as rt_logg
 import pytest
 from konfai.evaluator import Evaluator
 from konfai.predictor import Predictor
@@ -141,9 +142,9 @@ def test_execute_distributed_object_sets_shared_master_port_without_forcing_laun
         spawn_calls["master_port"] = os.environ["KONFAI_MASTER_PORT"]
         spawn_calls["cuda_visible_devices"] = os.environ["CUDA_VISIBLE_DEVICES"]
 
-    monkeypatch.setattr("konfai.utils.runtime.Log", DummyContext)
-    monkeypatch.setattr("konfai.utils.runtime.TensorBoard", DummyContext)
-    monkeypatch.setattr("konfai.utils.runtime.mp.spawn", fake_spawn)
+    monkeypatch.setattr("konfai.utils.runtime.distributed.Log", DummyContext)
+    monkeypatch.setattr("konfai.utils.runtime.distributed.TensorBoard", DummyContext)
+    monkeypatch.setattr("konfai.utils.runtime.distributed.mp.spawn", fake_spawn)
 
     execute_distributed_object(DummyDistributed(), gpu=[0, 1], cpu=1, quiet=True)
 
@@ -191,8 +192,8 @@ def test_cluster_resubmit_flag_warns_that_auto_requeue_is_not_wired(
         def run_process(self, world_size, global_rank, local_rank, dataloaders):
             raise AssertionError("run_process should not be called on the submitting side")
 
-    monkeypatch.setattr("konfai.utils.runtime.Log", DummyContext)
-    monkeypatch.setattr("konfai.utils.runtime.TensorBoard", DummyContext)
+    monkeypatch.setattr("konfai.utils.runtime.distributed.Log", DummyContext)
+    monkeypatch.setattr("konfai.utils.runtime.distributed.TensorBoard", DummyContext)
     monkeypatch.setitem(sys.modules, "submitit", SimpleNamespace(AutoExecutor=DummyExecutor))
 
     cluster_kwargs = {"name": "job", "memory": 8, "num_nodes": 1, "time_limit": 60, "resubmit": True}
@@ -239,12 +240,12 @@ def test_synchronize_data_gathers_on_cpu(monkeypatch):
     def fail_set_device(*_args, **_kwargs):
         raise AssertionError("set_device must not be called when CUDA is unavailable")
 
-    monkeypatch.setattr(rt.dist, "is_initialized", lambda: True)
-    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(rt.torch.cuda, "set_device", fail_set_device)
-    monkeypatch.setattr(rt.dist, "all_gather_object", fake_all_gather_object)
+    monkeypatch.setattr(rt_dist.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(rt_dist.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(rt_dist.torch.cuda, "set_device", fail_set_device)
+    monkeypatch.setattr(rt_dist.dist, "all_gather_object", fake_all_gather_object)
 
-    result = rt.synchronize_data(3, 0, {"a": 1})
+    result = rt_dist.synchronize_data(3, 0, {"a": 1})
 
     assert calls.get("called") is True
     assert result == [{"a": 1}, {"a": 1}, {"a": 1}]
@@ -258,12 +259,12 @@ def test_synchronize_data_sets_device_on_cuda(monkeypatch):
         for i in range(len(outputs)):
             outputs[i] = data
 
-    monkeypatch.setattr(rt.dist, "is_initialized", lambda: True)
-    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(rt.torch.cuda, "set_device", lambda gpu: seen.setdefault("gpu", gpu))
-    monkeypatch.setattr(rt.dist, "all_gather_object", fake_all_gather_object)
+    monkeypatch.setattr(rt_dist.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(rt_dist.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(rt_dist.torch.cuda, "set_device", lambda gpu: seen.setdefault("gpu", gpu))
+    monkeypatch.setattr(rt_dist.dist, "all_gather_object", fake_all_gather_object)
 
-    result = rt.synchronize_data(2, 1, {"b": 2})
+    result = rt_dist.synchronize_data(2, 1, {"b": 2})
 
     assert seen.get("gpu") == 1
     assert result == [{"b": 2}, {"b": 2}]
@@ -276,15 +277,15 @@ def test_a_workflow_without_collectives_gets_its_rank_and_no_process_group(monke
     def fail_init(*_args, **_kwargs):
         raise AssertionError("no process group must be initialized")
 
-    monkeypatch.setattr(rt.dist, "init_process_group", fail_init)
-    monkeypatch.setattr(rt.shutil, "which", lambda _name: pytest.fail("scontrol must not be looked up"))
-    assert rt.setup_gpu(2, 1, process_group=False) == (1, 1)
-    assert rt.setup_gpu(2, 2, process_group=False) == (None, None)  # a rank past the world is idle
+    monkeypatch.setattr(rt_dist.dist, "init_process_group", fail_init)
+    monkeypatch.setattr(rt_dist.shutil, "which", lambda _name: pytest.fail("scontrol must not be looked up"))
+    assert rt_dist.setup_gpu(2, 1, process_group=False) == (1, 1)
+    assert rt_dist.setup_gpu(2, 2, process_group=False) == (None, None)  # a rank past the world is idle
 
     from konfai.transformer import Transformer
 
     assert Transformer.uses_collectives is False
-    assert rt.DistributedObject.uses_collectives is True
+    assert rt_dist.DistributedObject.uses_collectives is True
 
 
 def _gloo_rendezvous(monkeypatch) -> dict[str, object]:
@@ -295,9 +296,9 @@ def _gloo_rendezvous(monkeypatch) -> dict[str, object]:
     def init_process_group(**kwargs) -> None:
         initialized.update(kwargs, interface=os.environ.get("GLOO_SOCKET_IFNAME"))
 
-    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(rt.dist, "is_initialized", lambda: False)
-    monkeypatch.setattr(rt.dist, "init_process_group", init_process_group)
+    monkeypatch.setattr(rt_dist.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(rt_dist.dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(rt_dist.dist, "init_process_group", init_process_group)
     monkeypatch.setenv("KONFAI_MASTER_PORT", "29500")
     return initialized
 
@@ -310,11 +311,11 @@ def test_a_single_node_gloo_world_is_pinned_to_the_loopback_interface(monkeypatc
     monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
     initialized = _gloo_rendezvous(monkeypatch)
 
-    assert rt.setup_gpu(2, 0) == (0, 0)
+    assert rt_dist.setup_gpu(2, 0) == (0, 0)
 
     assert initialized["backend"] == "gloo"
     assert initialized["init_method"] == "tcp://localhost:29500"
-    assert initialized["interface"] in {name for _, name in rt.socket.if_nameindex()}
+    assert initialized["interface"] in {name for _, name in rt_dist.socket.if_nameindex()}
     # The pin lasts the rendezvous: left behind, it would follow a later multi-node group, or a
     # child of this process, onto an interface that reaches no other node.
     assert "GLOO_SOCKET_IFNAME" not in os.environ
@@ -326,7 +327,7 @@ def test_an_explicit_gloo_interface_keeps_authority(monkeypatch):
     monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
     initialized = _gloo_rendezvous(monkeypatch)
 
-    rt.setup_gpu(2, 0)
+    rt_dist.setup_gpu(2, 0)
 
     assert initialized["interface"] == "eth0"
     assert os.environ["GLOO_SOCKET_IFNAME"] == "eth0"
@@ -337,11 +338,11 @@ def test_a_multi_node_gloo_world_is_left_to_its_own_interface(monkeypatch):
     """Off this host the loopback reaches no other rank: only a localhost rendezvous is pinned."""
     monkeypatch.delenv("GLOO_SOCKET_IFNAME", raising=False)
     monkeypatch.setenv("SLURM_JOB_NODELIST", "node[001-002]")
-    monkeypatch.setattr(rt.shutil, "which", lambda _name: "/usr/bin/scontrol")
-    monkeypatch.setattr(rt.subprocess, "check_output", lambda *_args, **_kwargs: "node001\nnode002\n")
+    monkeypatch.setattr(rt_dist.shutil, "which", lambda _name: "/usr/bin/scontrol")
+    monkeypatch.setattr(rt_dist.subprocess, "check_output", lambda *_args, **_kwargs: "node001\nnode002\n")
     initialized = _gloo_rendezvous(monkeypatch)
 
-    rt.setup_gpu(2, 0)
+    rt_dist.setup_gpu(2, 0)
 
     assert initialized["init_method"] == "tcp://node001:29500"
     assert initialized["interface"] is None
@@ -350,18 +351,18 @@ def test_a_multi_node_gloo_world_is_left_to_its_own_interface(monkeypatch):
 
 def test_synchronize_data_no_dist(monkeypatch):
     """Without an active process group the local data is returned as-is."""
-    monkeypatch.setattr(rt.dist, "is_initialized", lambda: False)
-    assert rt.synchronize_data(4, 0, {"a": 1}) == [{"a": 1}]
+    monkeypatch.setattr(rt_dist.dist, "is_initialized", lambda: False)
+    assert rt_dist.synchronize_data(4, 0, {"a": 1}) == [{"a": 1}]
 
 
 def _run_execute(monkeypatch, obj):
-    monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
-    monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
-    monkeypatch.setattr(rt.mp, "spawn", lambda *a, **k: None)
+    monkeypatch.setattr(rt_dist, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist.mp, "spawn", lambda *a, **k: None)
     # These cover what the PARENT does before execution, and stub spawn to skip the run itself.
     # The single-rank inline path would run it here instead, so it is turned off.
     monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", "0")
-    rt.execute_distributed_object(obj, gpu=None, cpu=1)
+    rt_dist.execute_distributed_object(obj, gpu=None, cpu=1)
 
 
 def test_execute_seeds_parent_before_setup(monkeypatch):
@@ -369,7 +370,7 @@ def test_execute_seeds_parent_before_setup(monkeypatch):
 
     recorded = []
 
-    class FakeObject(rt.DistributedObject):
+    class FakeObject(rt_dist.DistributedObject):
         def __init__(self) -> None:
             super().__init__("fake-seeded")
             self.manual_seed = 123
@@ -390,7 +391,7 @@ def test_execute_puts_the_callers_rng_and_cudnn_flags_back(monkeypatch):
     """Inline (the single-rank default) the run seeds the CALLER's process: a notebook or Slicer
     whose own random draws must not become a function of having run a KonfAI workflow."""
 
-    class FakeObject(rt.DistributedObject):
+    class FakeObject(rt_dist.DistributedObject):
         def __init__(self) -> None:
             super().__init__("fake-seeded")
             self.manual_seed = 123
@@ -422,11 +423,11 @@ def test_preserved_rng_puts_the_three_cpu_generators_back():
     import numpy as np
     import torch
 
-    rt.seed_all(7)
+    rt_dist.seed_all(7)
     expected = (random.random(), float(np.random.random()), float(torch.rand(1)))
-    rt.seed_all(7)
-    with rt.preserved_rng():
-        rt.seed_all(123)
+    rt_dist.seed_all(7)
+    with rt_dist.preserved_rng():
+        rt_dist.seed_all(123)
         random.random(), np.random.random(), torch.rand(1)
     assert (random.random(), float(np.random.random()), float(torch.rand(1))) == expected
 
@@ -438,7 +439,7 @@ def test_execute_puts_the_callers_cuda_rng_back(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA device")
 
-    class FakeObject(rt.DistributedObject):
+    class FakeObject(rt_dist.DistributedObject):
         def __init__(self) -> None:
             super().__init__("fake-seeded")
             self.manual_seed = 123
@@ -536,7 +537,7 @@ def test_the_mirror_folds_a_redrawing_bar_off_a_terminal(monkeypatch):
     monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
     monkeypatch.setattr(sys, "stderr", sys.stdout)
     monkeypatch.setenv("KONFAI_VERBOSE", "True")
-    log = rt.MinimalLog(rank=0)
+    log = rt_logg.MinimalLog(rank=0)
 
     for i in range(500):
         log.write(f"\rProgress: {i}/500")
@@ -564,7 +565,7 @@ def test_the_mirror_stays_raw_on_a_terminal(monkeypatch):
     monkeypatch.setattr(sys, "stdout", _Terminal())
     monkeypatch.setattr(sys, "stderr", sys.stdout)
     monkeypatch.setenv("KONFAI_VERBOSE", "True")
-    log = rt.MinimalLog(rank=0)
+    log = rt_logg.MinimalLog(rank=0)
 
     log.write("\rProgress: 1/2")
     log.write("\rProgress: 2/2")
@@ -578,7 +579,7 @@ def test_a_crlf_line_is_a_message_not_a_bar_frame(monkeypatch):
     monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
     monkeypatch.setattr(sys, "stderr", sys.stdout)
     monkeypatch.setenv("KONFAI_VERBOSE", "True")
-    log = rt.MinimalLog(rank=0)
+    log = rt_logg.MinimalLog(rank=0)
 
     log.write("\rProgress: 1/100")
     log.write("important warning\r\n")
@@ -595,7 +596,7 @@ def test_the_bar_state_held_by_the_throttle_lands_on_exit(monkeypatch):
     monkeypatch.setenv("KONFAI_VERBOSE", "True")
     mirror = sys.stdout
 
-    with rt.MinimalLog(rank=0) as log:
+    with rt_logg.MinimalLog(rank=0) as log:
         log.write("\rProgress: 0/100")
         log.write("\rProgress: 100/100")  # inside the throttle window: withheld
 
@@ -610,7 +611,7 @@ def test_interleaved_bars_each_keep_their_final_state(monkeypatch):
     monkeypatch.setenv("KONFAI_VERBOSE", "True")
     mirror = sys.stdout
 
-    with rt.MinimalLog(rank=0) as log:
+    with rt_logg.MinimalLog(rank=0) as log:
         for i in range(50):
             log.write(f"\rTrain: {i}/50")
             log.write(f"\rVal: {i}/50")
@@ -631,9 +632,9 @@ def test_record_keeps_detail_in_the_log_without_printing_it(tmp_path, monkeypatc
     monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
     mirror = sys.stdout
 
-    rt.record("nothing is installed: this goes nowhere")
-    with rt.Log("RUN", 0) as log:
-        rt.record("line one\nline two")
+    rt_logg.record("nothing is installed: this goes nowhere")
+    with rt_dist.Log("RUN", 0) as log:
+        rt_logg.record("line one\nline two")
         log.write("printed\n")
 
     assert "goes nowhere" not in mirror.written
@@ -652,7 +653,7 @@ def _execute_counting(monkeypatch, *, cpu: int, inline: str | None):
     ran_here: list[int | None] = []
     spawned: list[int] = []
 
-    class FakeObject(rt.DistributedObject):
+    class FakeObject(rt_dist.DistributedObject):
         def __init__(self) -> None:
             super().__init__("fake-inline")
 
@@ -665,14 +666,14 @@ def _execute_counting(monkeypatch, *, cpu: int, inline: str | None):
         def run_process(self, *args, **kwargs) -> None:  # pragma: no cover - never spawned here
             pass
 
-    monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
-    monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
-    monkeypatch.setattr(rt.mp, "spawn", lambda obj, nprocs=1, **k: spawned.append(nprocs))
+    monkeypatch.setattr(rt_dist, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist.mp, "spawn", lambda obj, nprocs=1, **k: spawned.append(nprocs))
     if inline is None:
         monkeypatch.delenv("KONFAI_INLINE_SINGLE_RANK", raising=False)
     else:
         monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", inline)
-    rt.execute_distributed_object(FakeObject(), gpu=None, cpu=cpu)
+    rt_dist.execute_distributed_object(FakeObject(), gpu=None, cpu=cpu)
     return ran_here, spawned
 
 
@@ -719,15 +720,15 @@ def _budget_applied(
     world_size: int | None = None,
 ) -> list[int]:
     calls: list[int] = []
-    monkeypatch.setattr(rt, "_cpu_budget_applied", False)
-    monkeypatch.setattr(rt.sys, "platform", platform)
-    monkeypatch.setattr(rt, "available_cpus", lambda: cores)
-    monkeypatch.setattr(rt.torch, "set_num_threads", calls.append)
+    monkeypatch.setattr(rt_dist, "_cpu_budget_applied", False)
+    monkeypatch.setattr(rt_dist.sys, "platform", platform)
+    monkeypatch.setattr(rt_dist, "available_cpus", lambda: cores)
+    monkeypatch.setattr(rt_dist.torch, "set_num_threads", calls.append)
     for key, value in (("KONFAI_LOCAL_RANKS", ranks), ("OMP_NUM_THREADS", omp)):
         monkeypatch.delenv(key, raising=False)
         if value is not None:
             monkeypatch.setenv(key, value)
-    rt.apply_cpu_thread_budget(world_size)
+    rt_dist.apply_cpu_thread_budget(world_size)
     return calls
 
 
@@ -829,7 +830,7 @@ def test_cpu_thread_budget_is_applied_once_per_process(monkeypatch) -> None:
     """set_num_threads is documented as pre-parallel-work only, and the Python API runs several
     workflows in one process: a second application mid-process can crash the OpenMP runtime."""
     calls = _budget_applied(monkeypatch, cores=24, ranks=None, omp=None)
-    rt.apply_cpu_thread_budget()
+    rt_dist.apply_cpu_thread_budget()
     assert calls == [12]
 
 
@@ -859,7 +860,7 @@ def test_the_startup_line_takes_the_nested_phases_out_and_closes_on_other() -> N
     the grids and the model are inside the build, the checkpoint inside the setup."""
     import time
 
-    clock = rt.StartupClock()
+    clock = rt_dist.StartupClock()
     clock._phases._spent = {"build": 1.0, "cases": 0.2, "grids": 0.1, "model": 0.3, "setup": 0.5, "checkpoint": 0.2}
     now = time.time()
     clock.started, clock.launched = now - 3.0, now - 0.5
@@ -874,9 +875,9 @@ def test_the_startup_line_takes_the_nested_phases_out_and_closes_on_other() -> N
 def test_rank_zero_reports_the_launchers_clock_as_it_starts(monkeypatch, capsys) -> None:
     """The clock built at the launcher's entry crosses to the rank on the workflow object and is
     printed once, by rank 0, before the run: build, setup and launch each charged where they ran."""
-    ran: list[tuple[int, rt.StartupClock | None]] = []
+    ran: list[tuple[int, rt_dist.StartupClock | None]] = []
 
-    class FakeObject(rt.DistributedObject):
+    class FakeObject(rt_dist.DistributedObject):
         uses_collectives = False
 
         def __init__(self) -> None:
@@ -888,13 +889,13 @@ def test_rank_zero_reports_the_launchers_clock_as_it_starts(monkeypatch, capsys)
         def run_process(self, world_size, global_rank, local_rank, dataloaders) -> None:
             ran.append((global_rank, self.startup_clock))
 
-    monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
-    monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
-    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(rt_dist, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist.torch.cuda, "is_available", lambda: False)
     monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", "1")
-    clock = rt.restart_startup_clock()
+    clock = rt_dist.restart_startup_clock()
     clock.started -= 5.0  # a startup long enough to be reported
-    rt.execute_distributed_object(FakeObject(), gpu=None, cpu=1)
+    rt_dist.execute_distributed_object(FakeObject(), gpu=None, cpu=1)
 
     assert ran == [(0, clock)]
     assert clock.spent("setup") > 0 and clock.launched is not None
@@ -905,28 +906,28 @@ def test_rank_zero_reports_the_launchers_clock_as_it_starts(monkeypatch, capsys)
 def test_the_rank_pool_is_rebuilt_when_the_share_changes(monkeypatch) -> None:
     """A multi-rank build followed by an inline single-rank workflow changes the share within one
     process: the pool follows it instead of keeping the size of its first use."""
-    monkeypatch.setattr(rt, "_rank_pool", None)
-    monkeypatch.setattr(rt, "_rank_pool_share", 0)
+    monkeypatch.setattr(rt_dist, "_rank_pool", None)
+    monkeypatch.setattr(rt_dist, "_rank_pool_share", 0)
     monkeypatch.setenv("OMP_NUM_THREADS", "4")
-    four = rt.rank_pool()
+    four = rt_dist.rank_pool()
     assert four is not None and four._max_workers == 4
-    assert rt.rank_pool() is four
+    assert rt_dist.rank_pool() is four
     monkeypatch.setenv("OMP_NUM_THREADS", "8")
-    eight = rt.rank_pool()
+    eight = rt_dist.rank_pool()
     assert eight is not four and eight is not None and eight._max_workers == 8
-    assert rt.rank_pool() is eight
+    assert rt_dist.rank_pool() is eight
     # A share of one keeps no pool: the one built for the wider share is let go with its threads,
     # instead of idling for the rest of the process.
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
-    assert rt.rank_pool() is None
-    assert rt._rank_pool is None
+    assert rt_dist.rank_pool() is None
+    assert rt_dist._rank_pool is None
     with pytest.raises(RuntimeError):
         eight.submit(int)
 
 
 def _map_in_child() -> None:
     seen: list[int] = []
-    rt.map_over_rank_pool(seen.append, [1, 2, 3])
+    rt_dist.map_over_rank_pool(seen.append, [1, 2, 3])
     sys.exit(0 if sorted(seen) == [1, 2, 3] else 1)
 
 
@@ -937,9 +938,9 @@ def test_a_forked_child_builds_its_own_rank_pool(monkeypatch) -> None:
     import multiprocessing
 
     monkeypatch.setenv("OMP_NUM_THREADS", "4")
-    monkeypatch.setattr(rt, "_rank_pool", None)
+    monkeypatch.setattr(rt_dist, "_rank_pool", None)
     warmed: list[int] = []
-    rt.map_over_rank_pool(warmed.append, [1, 2, 3])  # the parent's pool exists and has run
+    rt_dist.map_over_rank_pool(warmed.append, [1, 2, 3])  # the parent's pool exists and has run
 
     child = multiprocessing.get_context("fork").Process(target=_map_in_child)
     child.start()
@@ -970,7 +971,7 @@ def test_a_rank_bounds_the_chunk_cache_by_its_own_share_of_the_budget(monkeypatc
         def resolved_budget(self) -> FakeBudget:
             return FakeBudget()
 
-    class FakeObject(rt.DistributedObject):
+    class FakeObject(rt_dist.DistributedObject):
         uses_collectives = False
 
         def __init__(self) -> None:
@@ -983,12 +984,12 @@ def test_a_rank_bounds_the_chunk_cache_by_its_own_share_of_the_budget(monkeypatc
         def run_process(self, world_size, global_rank, local_rank, dataloaders) -> None:
             pass
 
-    monkeypatch.setattr(rt, "Log", lambda *a, **k: contextlib.nullcontext())
-    monkeypatch.setattr(rt, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
-    monkeypatch.setattr(rt.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(rt_dist, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist.torch.cuda, "is_available", lambda: False)
     monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", "1")
     monkeypatch.setattr(budget_module, "_per_rank_bytes", None)
-    rt.execute_distributed_object(FakeObject(), gpu=None, cpu=1)
+    rt_dist.execute_distributed_object(FakeObject(), gpu=None, cpu=1)
 
     assert budget_module.per_rank_budget_bytes() == 96 << 20
     assert ome_zarr._chunk_cache().capacity == ome_zarr.chunk_cache_capacity()

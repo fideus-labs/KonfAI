@@ -21,10 +21,10 @@ from typing import Literal, cast
 import numpy as np
 import torch
 from konfai.data import augmentation
-from konfai.data.patching import Attribute, ModelPatch
-from konfai.models.python.generation.ddpm import DDPM
+from konfai.data.patching import ModelPatch
 from konfai.models.python.segmentation import NestedUNet, UNet
 from konfai.network import blocks, network
+from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError
 
 
@@ -99,6 +99,26 @@ class Discriminator(network.Network):
 
 
 class DiscriminatorADA(network.Network):
+    class TimeEmbedding(torch.nn.Module):
+        """A frozen sinusoidal embedding of the diffusion step, looked up from the ADA probability."""
+
+        def __init__(self, noise_step: int = 1000, time_embedding_dim: int = 100) -> None:
+            super().__init__()
+            steps = noise_step + 1
+            embedding = torch.zeros(steps, time_embedding_dim)
+            wk = torch.tensor([1 / 10_000 ** (2 * j / time_embedding_dim) for j in range(time_embedding_dim)])
+            wk = wk.reshape((1, time_embedding_dim))
+            t = torch.arange(steps).reshape((steps, 1))
+            embedding[:, ::2] = torch.sin(t * wk[:, ::2])
+            embedding[:, 1::2] = torch.cos(t * wk[:, ::2])
+            self.time_embed = torch.nn.Embedding(steps, time_embedding_dim)
+            self.time_embed.weight.data = embedding
+            self.time_embed.requires_grad_(False)
+            self.noise_step = noise_step
+
+        def forward(self, tensor: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+            return self.time_embed((p * self.noise_step).long().repeat(tensor.shape[0]))
+
     class DDPMTE(torch.nn.Module):
         def __init__(self, in_channels: int, out_channels: int) -> None:
             super().__init__()
@@ -170,7 +190,6 @@ class DiscriminatorADA(network.Network):
             self.n = 4
             self.ada_target = 0.25
             self.ada_interval = 0.001
-            self.ada_kimg = 500
 
             self.measure = None
             self.names = []
@@ -259,7 +278,7 @@ class DiscriminatorADA(network.Network):
             )
             self.add_module(
                 "t",
-                DDPM.DDPMTimeEmbedding(1000, 100),
+                DiscriminatorADA.TimeEmbedding(1000, 100),
                 in_branch=[0, "p"],
                 out_branch=["te"],
             )

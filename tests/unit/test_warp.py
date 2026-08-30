@@ -30,6 +30,7 @@ from konfai.data.transform import LocalityKind, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 from konfai.utils.ome_zarr import _zarr_v3_available
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
@@ -44,11 +45,7 @@ SPACING = (2.0, 1.0, 1.0)  # (x, y, z) SimpleITK order
 
 
 def _attributes() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
-    attribute["Spacing"] = np.asarray(list(SPACING))
-    attribute["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attribute
+    return geometry(spacing=SPACING)
 
 
 def _fixture(
@@ -70,16 +67,7 @@ def _fixture(
 
 
 def _manager(source: Dataset, transforms: list) -> DatasetManager:
-    return DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=source,
-        patch=None,
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(source, transforms, name="CASE_000")
 
 
 def _recorded(warp: Resample, attribute: Attribute | None = None, shape: tuple[int, ...] = (10, 12, 14)) -> Resample:
@@ -217,9 +205,8 @@ def test_a_constant_shift_moves_the_volume_by_that_many_voxels(tmp_path: Path) -
 def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The claim that matters: the same answer, region by region, with several regions: and
     nothing was declared to make it true, the windows being measured from the field itself."""
-    from konfai.data import patching as patching_module
 
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
     source, _fields, volume = _fixture(tmp_path, shift_um=(1.0, 2.0, 3.0))
     warp = Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF")
 

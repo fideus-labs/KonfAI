@@ -24,7 +24,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-import konfai.data.transform as transform_module
+import konfai.data.transform.resample as transform_module
 import numpy as np
 import pytest
 import torch
@@ -304,7 +304,7 @@ def test_the_streamed_slabs_agree_with_the_whole_volume(device: torch.device, ro
             target = (slice(start, stop), slice(0, SIZE[1]), slice(0, SIZE[2]))
             source = tuple(stage.stream_region_source(CASE, target, list(SIZE), Attribute(attribute)))
             block = volume[(slice(None), *source)]
-            context = RegionContext(source, target, tuple(SIZE), tuple(SIZE))
+            context = RegionContext(source, target, tuple(SIZE))
             streamed[(slice(None), *target)] = stage.stream_region(CASE, block, context, Attribute(attribute))
         span = float((reference.max() - reference.min()).item())
         torch.testing.assert_close(streamed, reference, rtol=0.0, atol=1e-5 * span, msg=label)
@@ -714,9 +714,12 @@ def test_a_region_reads_the_window_of_a_stored_field_and_not_the_field():
     assert (source.asked and source.asked[-1] != read) or len(stage._stored) == 2
 
 
+@pytest.mark.slow
 def test_the_slabbed_walk_lands_each_slab_in_the_one_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """Above the walk budget the general path gathers slab by slab, and each slab is written into
     the output as it lands: bit for bit the single pass, with no parts held for a cat."""
+    from konfai.data.transform import resample as transform_module
+
     image = _image(oblique=True)
     attribute = _attribute(image)
     volume = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
@@ -743,6 +746,7 @@ def _diagonal_maps(image) -> list[tuple[str, "sitk.Transform"]]:
     ]
 
 
+@pytest.mark.slow
 def test_a_diagonal_stored_map_resamples_separably_within_the_routes_it_replaces() -> None:
     """A stored translation, an axis-aligned scale or their composition factorises: the region is
     read one axis at a time, from the very coordinates the general walk computes, and no coordinate
@@ -835,7 +839,7 @@ class TestTheHostRouteReusesItsInputImage:
         assert _optional_image_filler() is None
         assert transform_module.sitk is not None
 
-        monkeypatch.setattr(transform_module, "_set_image_from_array", None)
+        monkeypatch.setattr("konfai.data.transform.resample._set_image_from_array", None)
         holder = _SitkInput()
         array = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
         first = holder.filled(array)
@@ -849,7 +853,7 @@ class TestTheHostRouteReusesItsInputImage:
         stage = _stage(image, _euler(image))  # never separable: the host route runs ITK
         target = (slice(0, 4), slice(0, SIZE[1]), slice(0, SIZE[2]))
         source = tuple(stage.stream_region_source(CASE, target, list(SIZE), Attribute(attribute)))
-        context = RegionContext(source, target, tuple(SIZE), tuple(SIZE))
+        context = RegionContext(source, target, tuple(SIZE))
         stage.stream_region(CASE, volume[(slice(None), *source)], context, Attribute(attribute))
         held = stage._sitk_input._image
         assert held is not None

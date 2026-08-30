@@ -58,7 +58,6 @@ The `Model:UNetpp5` used in the `Synthesis` example is a **local** class in
 | `VAE` | `generation.vae.VAE` | Convolutional auto-encoder. **Deterministic**: despite the name there is no latent sampling. | 2D / 3D | Yes |
 | `LinearVAE` | `generation.vae.LinearVAE` | Fully-connected variational AE (`LatentDistribution` reparam bottleneck). Pairs with the `KLDivergence` loss. | 1D (flat vectors) | No (`LatentDistribution`) |
 | `Generator` / `Discriminator` / `Gan` | `generation.gan.*` | PatchGAN discriminator + ResNet-autoencoder generator + composite adversarial graph. | 2D / 3D | No |
-| `DDPM` (+ `MSE`) | `generation.ddpm.DDPM` | Conditional denoising-diffusion U-Net. | 2D / 3D | No |
 | `DiffusionGan`, `DiffusionGanV2`, `DiffusionCycleGan`, `CycleGan*` | `generation.diffusionGan.*` | Adversarial + diffusion + CycleGAN family. | 2D / 3D | No |
 | `cStyleGan.Generator` | `generation.cStyleGan.Generator` | Conditional StyleGAN-style generator with weight-modulated convs. | 2D / 3D | No |
 
@@ -110,10 +109,6 @@ reusable pieces are the vocabulary:
   (`MAXPOOL/AVGPOOL/CONV_STRIDE`).
 - **Tensor ops** (leaf modules): `Add`, `Multiply`, `Concat`, `Detach`,
   `ArgMax`, `Select`, `View`, `Permute`, `NormalNoise`, and more.
-
-`konfai.network.blocks` also defines **debug-only** blocks (`Print`, `Write`,
-`Exit`) that have side effects (print / write-to-disk / raise) on every forward.
-They are for graph debugging; do not leave them in a trained model.
 
 ## Next steps
 

@@ -204,8 +204,8 @@ def test_declared_free_axis_keeps_the_fraction_overlap_after_restart_concretizat
     derived_slices = get_patch_slices_from_shape(declared, shape, None)
     assert _axis_overlaps(declared_slices, [512, 128, 128]) == _axis_overlaps(derived_slices, [512, 128, 128])
 
-    # Regression: on the concretized grid the derived flag is False (no ``0`` left) and would take the
-    # remainder branch; carrying declared_free_axis=True restores the exact fraction default on the tiled axes.
+    # On the concretized grid the derived flag is False (no ``0`` left), which takes the remainder
+    # branch; carrying declared_free_axis=True keeps the fraction default on the tiled axes.
     remainder = get_patch_slices_from_shape(concrete, shape, None, None, False)
     fixed = get_patch_slices_from_shape(concrete, shape, None, None, True)
     assert _axis_overlaps(remainder, concrete) == [0, 0, 0]

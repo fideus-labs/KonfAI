@@ -359,7 +359,7 @@ def _metric_sizing_budget(
         captured["budget"] = budget
         return list(shape)  # "fits whole": the sizing exits without installing a patch
 
-    monkeypatch.setattr(data_manager, "resolve_patch", capture)
+    monkeypatch.setattr("konfai.data.data_manager.sources.resolve_patch", capture)
     if local_ranks is None:
         monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
     else:
@@ -664,9 +664,11 @@ _HALO_EVALUATION = """Evaluator:
 """
 
 
-def test_a_halo_metric_no_longer_vetoes_the_patched_evaluation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_halo_metric_evaluates_patched_under_a_budget_the_case_exceeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """SSIM beside MAE under a budget the case exceeds: the run takes the patched path, reading
-    each slot with SSIM's halo, where SSIM once kept the whole run on the whole-volume path."""
+    each slot with SSIM's halo."""
     pytest.importorskip("SimpleITK")
     import numpy as np
     from konfai.evaluator import Evaluator

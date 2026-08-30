@@ -82,7 +82,7 @@ def _awaited(phase: str) -> Iterator[None]:
 
     The fold has no pipeline: every member's region is read, and every slab written, on its own
     thread. So the store's own seconds ARE the seconds the loop waits, which is what
-    :meth:`~konfai.data.patching.SweepClock.report` prints on either side of its bar.
+    :meth:`~konfai.utils.clock.SweepClock.report` prints on either side of its bar.
     """
     with SWEEP_CLOCK.phase(f"wait({phase})"), SWEEP_CLOCK.phase(phase):
         yield
@@ -116,9 +116,8 @@ class ReductionPlan:
     #: What ONE member's region makes the store decode ABOVE the window it asked for
     #: (:meth:`~konfai.data.patching.DatasetManager.region_reads`). A chunked backend decodes whole
     #: blocks, so below one stored block this is the SAME figure at every height: it is charged flat
-    #: and never divided by the rows. Measured on the prep's cohort at 4.51 GiB for a 17-row region
-    #: whose own tensor was 70 MiB, and 4.57 GiB for a 4-row one -- the sizing had been cutting the
-    #: height to buy memory that cutting cannot buy.
+    #: and never divided by the rows: measured on the prep's cohort at 4.51 GiB for a 17-row region
+    #: whose own tensor was 70 MiB, and 4.57 GiB for a 4-row one.
     read_bytes: int = 0
     #: Members read from a store that cannot serve a bounded region read (a gzipped NIfTI, a
     #: compressed MetaImage, NRRD), by name, with the store's format: every region asked of such a

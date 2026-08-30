@@ -34,6 +34,7 @@ import inspect
 import types
 from typing import Any, Union, get_args, get_origin
 
+from konfai_mcp.classpaths import public_classpath
 from konfai_mcp.workflows import WORKFLOW_SPECS
 
 # Workflow -> (root YAML key, module, class name).
@@ -154,7 +155,7 @@ def _nested_config_classpath(annotation: Any) -> str | None:
     # nested config object the agent can drill into with inspect_object_signature (unwrap Optional first).
     resolved = _unwrap_annotation(annotation)
     if inspect.isclass(resolved) and getattr(resolved, "_key", None) is not None:
-        return f"{resolved.__module__}:{resolved.__qualname__}"
+        return public_classpath(resolved)
     return None
 
 
@@ -229,7 +230,7 @@ def describe_config_schema(workflow: str, path: str | None = None) -> dict[str, 
         "workflow": canonical,
         "root_key": root_key,
         "yaml_path": yaml_path,
-        "classpath": f"{cls.__module__}:{cls.__qualname__}",
+        "classpath": public_classpath(cls),
         "fields": _field_payloads(cls),
         "reference_hint": (
             f"These are the keys under {':'.join(yaml_path)}:. Each field's yaml_key is the literal key to write. "

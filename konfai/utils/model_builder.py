@@ -142,7 +142,6 @@ class YamlNetwork(Network):
             dim=dim,
         )
         self.name = name
-        self.yaml_parameters = copy.deepcopy(parameters)
         _populate_graph(self, module_specs, parameters)
 
     def forward_tensor(self, *inputs: torch.Tensor) -> torch.Tensor:

@@ -373,7 +373,7 @@ def test_validation_request_and_live_tunables_ride_one_broadcast(tmp_path: Path,
 
 
 def test_epoch_report_closes_on_the_wall_clock_with_the_criteria_apart_from_the_forward() -> None:
-    from konfai.data.patching import SweepClock
+    from konfai.utils.clock import SweepClock
 
     clock = SweepClock()
     clock._spent = {
@@ -465,35 +465,15 @@ def test_get_score_reports_missing_metric_and_available_keys() -> None:
 # ---- EMA ----
 
 
-def test_avg_fn_follows_standard_ema_convention() -> None:
+def test_ema_runs_torchs_fused_rule_and_matches_the_per_tensor_one() -> None:
+    # multi_avg_fn is the EMA formula as one _foreach_lerp_ per device and dtype.
     stub = SimpleNamespace(ema_decay=0.9)
-    averaged = torch.tensor(1.0)
-    model = torch.tensor(0.0)
-
-    result = Trainer._avg_fn(stub, averaged, model, 0)
-
-    assert result.item() == pytest.approx(0.9)
-
-
-def test_avg_fn_high_decay_keeps_running_average_dominant() -> None:
-    stub = SimpleNamespace(ema_decay=0.999)
-    averaged = torch.tensor(10.0)
-    model = torch.tensor(0.0)
-
-    result = Trainer._avg_fn(stub, averaged, model, 5)
-
-    assert result.item() == pytest.approx(9.99)
-
-
-def test_ema_runs_torchs_fused_rule_and_matches_the_per_tensor_one(monkeypatch) -> None:
-    # avg_fn forces AveragedModel's per-tensor path (n_averaged.to(device), three kernels and a copy
-    # per parameter); multi_avg_fn is the same formula as one _foreach_lerp_ per device and dtype.
-    stub = SimpleNamespace(ema_decay=0.9, _avg_fn=lambda a, m, n: Trainer._avg_fn(stub, a, m, n))
     rule = Trainer._ema_update(cast(Any, stub))
     assert set(rule) == {"multi_avg_fn"}
 
     net = nn.Linear(4, 4)
-    fused, per_tensor = AveragedModel(net, **rule), AveragedModel(net, avg_fn=stub._avg_fn)
+    fused = AveragedModel(net, **rule)
+    per_tensor = AveragedModel(net, avg_fn=lambda averaged, current, _n: 0.9 * averaged + 0.1 * current)
     for _ in range(3):
         with torch.no_grad():
             for param in net.parameters():
@@ -504,16 +484,13 @@ def test_ema_runs_torchs_fused_rule_and_matches_the_per_tensor_one(monkeypatch) 
         torch.testing.assert_close(a, b, rtol=0, atol=1e-6)
     assert int(fused.n_averaged) == int(per_tensor.n_averaged) == 3
 
-    monkeypatch.delattr(torch.optim.swa_utils, "get_ema_multi_avg_fn")  # a torch without the fused rule
-    assert Trainer._ema_update(cast(Any, stub)) == {"avg_fn": stub._avg_fn}
-
 
 def test_restoring_the_ema_weights_is_charged_to_the_checkpoint_phase(tmp_path: Path, monkeypatch) -> None:
     """The EMA copy is restored from the same checkpoint as the model, and the startup line
     accounts for it there: reported under ``setup`` it would read as the loaders' cost."""
     import time
 
-    from konfai.utils.runtime import restart_startup_clock
+    from konfai.utils.clock import restart_startup_clock
 
     class _SlowLoad:
         def load(self, state_dict: dict, **kwargs) -> None:

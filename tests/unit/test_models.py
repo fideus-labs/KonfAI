@@ -19,7 +19,6 @@
 import pytest
 import torch
 from konfai.models.python.classification.convNeXt import LayerScaler
-from konfai.models.python.generation.ddpm import DDPM
 from konfai.models.python.generation.diffusionGan import CycleGanDiscriminator
 from konfai.models.python.generation.vae import LinearVAE
 from konfai.models.python.registration.registration import VoxelMorph, rigid_affine
@@ -103,18 +102,6 @@ def test_adaptation_sets_requires_grad_at_construction():
     # State is correct immediately after construction, before any forward pass.
     assert all(not p.requires_grad for p in adaptation.Encoder_1.parameters())
     assert all(p.requires_grad for p in adaptation.FCT_1.parameters())
-
-
-# --------------------------------------------------------------------------------------
-# Experimental models fail fast with a clear message
-# --------------------------------------------------------------------------------------
-
-
-def test_ddpm_is_marked_experimental() -> None:
-    # DDPM cannot execute a forward pass (broken time-embedding wiring); constructing it must raise
-    # an actionable error instead of crashing opaquely deep in the graph later.
-    with pytest.raises(NotImplementedError, match="experimental"):
-        DDPM()
 
 
 # --------------------------------------------------------------------------------------
