@@ -329,7 +329,7 @@ def test_a_sweep_declares_the_regions_it_will_read(tmp_path: Path, monkeypatch: 
     from konfai.data.patching import DatasetManager, DatasetPatch
     from konfai.data.transform import Clip, Save
 
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
     declared: list[list] = []
     monkeypatch.setattr(
         Dataset, "plan_region_reads", lambda self, groups, name, windows: declared.append(list(windows))
@@ -541,7 +541,6 @@ def _sweep_with_a_mask_companion(
     """One sweep of :func:`_masked_resample`; the chunks decoded per store. ``declared`` is what
     tells the cache its future: ``"nothing"`` (LRU), ``"source"`` (the sweep's own reads, the mask
     ranked by recency) or ``"both"`` (the mask's reads too)."""
-    from konfai.data import patching as patching_module
     from konfai.data.materialize import CaseMaterializer, Verdict
     from konfai.data.patching import DatasetManager, DatasetPatch
     from konfai.data.transform import Mask, Save
@@ -558,8 +557,8 @@ def _sweep_with_a_mask_companion(
         data_augmentations_list=[],
     )
     with monkeypatch.context() as patched, _counting_decodes(patched, capacity_chunks) as decoded:
-        patched.setattr(patching_module, "SWEEP_SLAB_ROWS", 12)
-        patched.setattr(patching_module, "_sweep_pipeline_depth", lambda: 0)
+        patched.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 12)
+        patched.setattr("konfai.data.patching.sweep._sweep_pipeline_depth", lambda: 0)
         if declared == "nothing":
             patched.setattr(Dataset, "plan_region_reads", lambda self, groups, name, windows: None)
         elif declared == "source":

@@ -36,7 +36,6 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 import torch
-from konfai.data import patching as patching_module
 from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Write
@@ -125,7 +124,7 @@ def _check(
     case, dev: torch.device, fmt: str, dataset: Dataset, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Two-row slabs, so the sweep really is several slabs and every seam is exercised.
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 2)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 2)
     whole = _manager(dataset, case, tmp_path / "Whole", fmt)
     verdict = CaseMaterializer(whole).materialize(prefer_whole=True, fallback_budget_bytes=1 << 30, device=dev)
     assert verdict is not Verdict.STREAM

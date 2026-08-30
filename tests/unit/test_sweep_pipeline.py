@@ -28,7 +28,6 @@ from typing import ClassVar
 
 import numpy as np
 import pytest
-from konfai.data import patching as patching_module
 from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import (
     SWEEP_CLOCK,
@@ -195,8 +194,8 @@ def _manager(source: Dataset, transforms: list, out: Path) -> DatasetManager:
 
 
 def _sweep_into(tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch, depth: int) -> np.ndarray:
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
-    monkeypatch.setattr(patching_module, "_sweep_pipeline_depth", lambda: depth)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr("konfai.data.patching.sweep._sweep_pipeline_depth", lambda: depth)
     rng = np.random.default_rng(0)
     source = Dataset(tmp_path / f"src_{name}", "mha")
     source.write("CT", "CASE_000", (rng.random((1, 14, 10, 8)) * 100).astype(np.float32), _attributes())
@@ -241,8 +240,8 @@ def test_a_sweep_declares_to_each_stage_the_regions_it_will_hand_it(
     the sweep tells it ahead: the contexts ``stream_region`` will be handed, all of them before the
     first, in the order they come. And in the stage's own space: through a resample after it, the
     regions it sees are the source hulls the landing's blocks pull, not the blocks."""
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
-    monkeypatch.setattr(patching_module, "_sweep_pipeline_depth", lambda: 0)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr("konfai.data.patching.sweep._sweep_pipeline_depth", lambda: 0)
     source = Dataset(tmp_path / "src", "mha")
     source.write("CT", "CASE_000", np.ones((1, 14, 10, 8), np.float32), _attributes())
     stage = _DeclaredThenHanded()
@@ -328,7 +327,7 @@ def test_a_uint16_case_through_a_chain_torch_cannot_run_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end, on the dtype a microscopy store actually hands the sweep."""
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
     source = Dataset(tmp_path / "src", "mha")
     source.write(
         "CT", "CASE_000", (np.arange(14 * 10 * 8).reshape(1, 14, 10, 8) % 900).astype(np.uint16), _attributes()
@@ -358,7 +357,7 @@ def test_a_sweep_that_runs_out_of_memory_does_not_answer_with_the_whole_case(
     """The whole-volume fallback holds the WHOLE case, a larger allocation than the region that just
     failed and on the same device: it repairs a stage that cannot serve a region, never a shortage
     of memory. So an out-of-memory propagates where every other failure falls back."""
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
     source = Dataset(tmp_path / "src", "mha")
     source.write("CT", "CASE_000", np.ones((1, 14, 10, 8), np.float32), _attributes())
     chain = [_OutOfMemoryOnRegions(), Save(f"{tmp_path / 'out'}:h5")]
@@ -380,8 +379,8 @@ def test_a_serial_sweep_charges_its_writes_where_a_pipelined_one_does(
 def test_a_save_into_the_h5_file_the_sweep_reads_still_lands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The h5 backend holds a per-file lock for a stream's whole life, on the thread that opened it.
     A sweep reading that file on another thread would wait for a close its own read holds up."""
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
-    monkeypatch.setattr(patching_module, "_sweep_pipeline_depth", lambda: 1)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr("konfai.data.patching.sweep._sweep_pipeline_depth", lambda: 1)
     rng = np.random.default_rng(0)
     source = Dataset(tmp_path / "store", "h5")
     # Twenty blocks: more than the pipeline reads before its first write opens the stream.
@@ -416,9 +415,9 @@ def test_a_pipelined_sweep_holds_no_more_blocks_than_the_height_rule_prices(
     from konfai.data.patching import RegionWriter, _sweep_resident_regions
 
     depth = 1
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
-    monkeypatch.setattr(patching_module, "_sweep_pipeline_depth", lambda: depth)
-    monkeypatch.setattr(patching_module, "_SWEEP_MAX_DEPTH", depth)  # the budget-bound case: no free blocks
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr("konfai.data.patching.sweep._sweep_pipeline_depth", lambda: depth)
+    monkeypatch.setattr("konfai.data.patching.budget._SWEEP_MAX_DEPTH", depth)  # the budget-bound case: no free blocks
     lock = threading.Lock()
     counts = {"handed": 0, "written": 0, "peak": 0}
     read = DatasetManager._read_streamed_region

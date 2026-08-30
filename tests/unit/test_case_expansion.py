@@ -28,7 +28,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data import patching as patching_module
 from konfai.data.augmentation import Brightness, CutOUT, Flip, Noise, Permute, Rotate, Scale
 from konfai.data.materialize import CaseMaterializer, Regime, Verdict
 from konfai.data.patching import DatasetManager
@@ -353,7 +352,7 @@ def test_a_companion_read_in_a_copys_tail_reads_the_block_and_not_the_volume(
     it says. Its windows are declared before the first read (the store's chunk cache evicts by next
     use) and are the blocks' own; and the copies still equal the whole-volume ones.
     """
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)  # 12 rows: four blocks
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)  # 12 rows: four blocks
     source = _source(tmp_path)
     mask = (np.arange(12 * 10 * 8).reshape(1, 12, 10, 8) % 3 > 0).astype(np.uint8)
     source.write("MASK", "CASE_000", mask, _image_attributes())
@@ -479,7 +478,7 @@ def test_the_geometric_and_field_draws_stream_their_copies(
 
     Over both decompositions: how many blocks the landing is swept in is not a value, and a draw
     parameterised by the voxel's PLACE is exactly the one that can disagree across them."""
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", rows)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", rows)
     source = _source(tmp_path)
     augmentation = draw()
     streamed = _manager(

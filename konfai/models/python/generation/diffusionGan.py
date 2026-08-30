@@ -21,9 +21,10 @@ from typing import Literal, cast
 import numpy as np
 import torch
 from konfai.data import augmentation
-from konfai.data.patching import Attribute, ModelPatch
+from konfai.data.patching import ModelPatch
 from konfai.models.python.segmentation import NestedUNet, UNet
 from konfai.network import blocks, network
+from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError
 
 

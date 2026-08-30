@@ -194,9 +194,8 @@ def test_a_constant_shift_moves_the_volume_by_that_many_voxels(tmp_path: Path) -
 def test_streamed_equals_whole_volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The claim that matters: the same answer, region by region, with several regions: and
     nothing was declared to make it true, the windows being measured from the field itself."""
-    from konfai.data import patching as patching_module
 
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 3)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
     source, _fields, volume = _fixture(tmp_path, shift_um=(1.0, 2.0, 3.0))
     warp = Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF")
 
