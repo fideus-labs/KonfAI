@@ -475,11 +475,10 @@ def test_network_criterion_loader_resets_scheduler_state(monkeypatch: pytest.Mon
         def getschedulers(self, key: str, scheduler_classname: str):
             return f"{key}:{scheduler_classname}"
 
-    monkeypatch.setattr(network_module, "apply_config", lambda *args, **kwargs: lambda cls: cls)
-    monkeypatch.setattr(network_module, "konfai_root", lambda: "Trainer")
+    monkeypatch.setattr("konfai.network.network.loaders.apply_config", lambda *args, **kwargs: lambda cls: cls)
+    monkeypatch.setattr("konfai.network.network.loaders.konfai_root", lambda: "Trainer")
     monkeypatch.setattr(
-        network_module,
-        "get_module",
+        "konfai.network.network.loaders.get_module",
         lambda classpath, default: (SimpleNamespace(Measure=DummyMeasure, __name__="torch.optim"), "Measure"),
     )
 

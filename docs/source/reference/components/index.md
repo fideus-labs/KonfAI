@@ -59,9 +59,9 @@ ways to get the exhaustive list for any component:
 
    | Kind | Bare name resolves in |
    | --- | --- |
-   | criteria | `konfai/metric/measure.py` |
-   | transforms | `konfai/data/transform/` (one module per family), then `konfai/data/augmentation.py` |
-   | augmentations | `konfai/data/augmentation.py` |
+   | criteria | `konfai/metric/measure/` |
+   | transforms | `konfai/data/transform/` (one module per family), then `konfai/data/augmentation/` |
+   | augmentations | `konfai/data/augmentation/` |
    | models | `konfai/models/python/**` |
    | learning-rate schedulers | `torch.optim.lr_scheduler` **first**, then `konfai/metric/schedulers.py` |
    | loss-weight schedulers | `konfai/metric/schedulers.py` only |

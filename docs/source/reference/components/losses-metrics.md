@@ -1,7 +1,7 @@
 # Losses & metrics
 
 Losses and metrics are both **criteria**: subclasses of
-`konfai.metric.measure.Criterion` in `konfai/metric/measure.py`. You attach them
+`konfai.metric.measure.Criterion` in `konfai/metric/measure/`. You attach them
 to a **named model output** and one or more **target dataset groups**, under
 `outputs_criterions:` (training) or `metrics:` (evaluation). Bare names resolve
 inside `konfai.metric.measure`; you can also point at any library, e.g.

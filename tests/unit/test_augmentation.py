@@ -427,7 +427,7 @@ def test_translate_is_int_rounds_to_whole_voxels():
 def test_simpleitk_augmentations_fail_clearly_when_dependency_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(augmentation_module, "sitk", None)
+    monkeypatch.setattr("konfai.data.augmentation.base.sitk", None)
 
     with pytest.raises(AugmentationError, match="SimpleITK"):
         Elastix()

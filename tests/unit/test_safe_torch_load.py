@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from konfai.utils import runtime as runtime_module
+from konfai.utils.runtime import environment as runtime_module
 from konfai.utils.runtime import safe_torch_load
 
 
