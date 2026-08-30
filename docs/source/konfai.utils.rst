@@ -20,10 +20,75 @@ konfai.utils.config module
    :show-inheritance:
    :undoc-members:
 
-konfai.utils.dataset module
----------------------------
+konfai.utils.dataset package
+----------------------------
 
-.. automodule:: konfai.utils.dataset
+.. automodule:: konfai.utils.dataset.attribute
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.statistics
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.staging
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.stream
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.raw_block
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.abstract
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.h5
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.sitk_file
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.ome_zarr_file
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.dicom_file
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.itk_transform_file
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.backend
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.landmarks
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. automodule:: konfai.utils.dataset.core
    :members:
    :show-inheritance:
    :undoc-members:
@@ -43,4 +108,3 @@ Module contents
    :members:
    :show-inheritance:
    :undoc-members:
-   :no-index:

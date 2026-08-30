@@ -307,7 +307,7 @@ slices. In workflow YAML use `./Dataset:dicom` or `./Dataset:omezarr` in
 
 ## Patching, streaming & reassembly
 
-The data layer (`konfai/data/patching.py`, `konfai/data/data_manager/`) never
+The data layer (`konfai/data/patching/`, `konfai/data/data_manager/`) never
 loads a whole volume when it can avoid it:
 
 - **`DatasetPatch`** (the `Patch:` config block): `patch_size` (default

@@ -65,7 +65,7 @@ ways to get the exhaustive list for any component:
    | models | `konfai/models/python/**` |
    | learning-rate schedulers | `torch.optim.lr_scheduler` **first**, then `konfai/metric/schedulers.py` |
    | loss-weight schedulers | `konfai/metric/schedulers.py` only |
-   | patch blending (`patch_combine`) | `konfai/data/patching.py` |
+   | patch blending (`patch_combine`) | `konfai/data/patching/blend.py` |
    | reduction operators (a prediction's copies *and* a cohort's cases) | `konfai/data/reduction.py` |
 
    So a bare `StepLR` resolves *outside* KonfAI, in torch.
