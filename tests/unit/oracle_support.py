@@ -40,7 +40,7 @@ from konfai.data import augmentation as augmentation_module
 from konfai.data import transform as transform_module
 from konfai.data.augmentation import DataAugmentation
 from konfai.data.augmentation import Flip as FlipAugmentation
-from konfai.data.data_manager import DatasetManager, DatasetPatch
+from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import (
     Argmax,
     Canonical,

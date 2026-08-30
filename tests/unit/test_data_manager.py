@@ -207,7 +207,7 @@ def test_train_split_shuffle_draws_from_sorted_names(monkeypatch):
         assert k == len(population)
         return list(reversed(population))
 
-    monkeypatch.setattr("konfai.data.data_manager.random.sample", fake_sample)
+    monkeypatch.setattr("konfai.data.data_manager.sources.random.sample", fake_sample)
 
     data = DataTrain(augmentations=None, validation="0:2")
     names = {"CASE_010", "CASE_002", "CASE_001", "CASE_005", "CASE_003"}
@@ -299,7 +299,6 @@ def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_b
     tail: same names, same indices, one draw per case. Validation without the draws is rebuilt
     (2 cases x 2 groups more), never cut with them."""
     pytest.importorskip("SimpleITK")
-    from konfai.data import data_manager as data_manager_module
     from konfai.data.augmentation import Prob
 
     names = [f"CASE_{index:03d}" for index in range(10)]
@@ -314,7 +313,7 @@ def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_b
             constructed.append((name, index))
             super().__init__(index, group_src, group_dest, name, *args, **kwargs)
 
-    monkeypatch.setattr(data_manager_module, "DatasetManager", CountingManager)
+    monkeypatch.setattr("konfai.data.data_manager.sources.DatasetManager", CountingManager)
     monkeypatch.delenv("KONFAI_config_file")  # the draw binds its own defaults
     monkeypatch.setenv("KONFAI_ROOT", "Trainer")
     augmentations = DataAugmentationsList(nb=1, data_augmentations={"Flip": Prob(1)})
@@ -1205,7 +1204,7 @@ def test_prediction_subset_accepts_windows_style_case_list_paths(monkeypatch: py
     subset = PredictionSubset([windows_file])
 
     monkeypatch.setattr(
-        "konfai.data.data_manager.os.path.exists",
+        "konfai.data.data_manager.sources.os.path.exists",
         lambda path: path == windows_file,
     )
     monkeypatch.setattr(

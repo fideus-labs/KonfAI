@@ -359,7 +359,7 @@ def _metric_sizing_budget(
         captured["budget"] = budget
         return list(shape)  # "fits whole": the sizing exits without installing a patch
 
-    monkeypatch.setattr(data_manager, "resolve_patch", capture)
+    monkeypatch.setattr("konfai.data.data_manager.sources.resolve_patch", capture)
     if local_ranks is None:
         monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
     else:

@@ -154,7 +154,7 @@ def test_model_composite_runs_a_weightless_model_without_a_checkpoint() -> None:
 def test_model_composite_refuses_empty_sources_for_a_model_with_weights() -> None:
     """Defense in depth: load([]) is only for a weightless model. A model WITH parameters and no checkpoint
     would run random weights, so the composite refuses it rather than relying on the Predictor's guard."""
-    from konfai.predictor import PredictorError
+    from konfai.utils.errors import PredictorError
 
     class WeightedNetwork(Network):
         def __init__(self) -> None:
@@ -463,7 +463,7 @@ def test_predict_log_skips_measure_sync_when_tensorboard_is_disabled(monkeypatch
     predictor_any.model_composite = object()
 
     monkeypatch.setattr(
-        "konfai.predictor.DistributedObject.get_measure",
+        "konfai.utils.runtime.DistributedObject.get_measure",
         staticmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected sync"))),
     )
 
@@ -583,7 +583,7 @@ def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_out
 
     log_calls: list[int] = []
     monkeypatch.setattr(predictor, "_predict_log", lambda batch_sample: log_calls.append(len(batch_sample)))
-    monkeypatch.setattr("konfai.predictor.description", lambda model: "stub")
+    monkeypatch.setattr("konfai.predictor.loop.description", lambda model: "stub")
 
     predictor.run()
 
@@ -605,7 +605,7 @@ def test_prediction_loop_refreshes_its_status_every_tenth_batch_and_clocks_its_p
     predictor, _dataset, outputs_dataset, _model_composite = _loop_doubles(batches=25)
     monkeypatch.setattr(predictor, "_predict_log", lambda batch_sample: None)
     described: list[str] = []
-    monkeypatch.setattr("konfai.predictor.description", lambda model: described.append("status") or "status")
+    monkeypatch.setattr("konfai.predictor.loop.description", lambda model: described.append("status") or "status")
     refreshes: list[bool] = []
     set_description = tqdm.tqdm.set_description
 
