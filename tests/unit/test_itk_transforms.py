@@ -119,8 +119,14 @@ def test_decoding_a_displacement_field_copies_it_once() -> None:
 
 
 def test_a_stored_displacement_entry_decodes_to_the_stage_the_image_route_gives(tmp_path) -> None:
-    """Straight from the store's array, on the grid its attributes describe: the same stage, bit
-    for bit, as reading the entry as a transform and decoding that."""
+    """Straight from the store's array, on the grid its attributes describe: the same stage, value
+    for value, as reading the entry as a transform and decoding that.
+
+    Not byte for byte, because the two routes do not hold it at the same WIDTH and should not. The
+    direct read holds a field at the width the store holds it at; the transform route has no store
+    to ask -- SimpleITK's field is float64 whatever was written -- so it answers the same numbers
+    widened. Equal as maps, and the direct one is the one that fits in half the memory.
+    """
     from konfai.utils.dataset import Attribute, Dataset
     from konfai.utils.ITK import decode_transform_stages, read_transform_stages
 
@@ -139,7 +145,10 @@ def test_a_stored_displacement_entry_decodes_to_the_stage_the_image_route_gives(
     assert direct.grid.size_zyx == through_itk.grid.size_zyx
     for axis in ("origin_xyz", "spacing_xyz", "direction_xyz"):
         np.testing.assert_array_equal(getattr(direct.grid, axis), getattr(through_itk.grid, axis))
-    assert direct.values.tobytes() == through_itk.values.tobytes()
+    # Exactly equal, not close: widening a float32 is lossless, so no tolerance is called for.
+    np.testing.assert_array_equal(direct.values.astype(np.float64), through_itk.values)
+    assert direct.values.dtype == np.float32, "a float32 store is not widened to be held"
+    assert through_itk.values.dtype == np.float64, "and a SimpleITK field has no other width"
 
 
 def test_a_store_serving_transforms_alone_still_decodes() -> None:

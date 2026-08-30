@@ -390,6 +390,11 @@ class _DecodedChunkCache:
             self._bytes += chunk.nbytes
             self._trim()
 
+    @property
+    def held_bytes(self) -> int:
+        """What the cache holds right now: decoded chunks, in the bytes they take resident."""
+        return self._bytes
+
     def set_capacity(self, capacity_bytes: int) -> None:
         """Re-cap the cache, evicting down to the new ceiling."""
         with self._lock:
@@ -464,6 +469,18 @@ class _DecodedChunkCache:
 #: the floor. A cache allowed the floor out of a 128 MiB budget took the budget whole, while the
 #: sweep went on sizing its regions against the same 128 MiB: the run was priced at 2x its budget.
 CHUNK_CACHE_FLOOR = 256 << 20
+
+
+def chunk_cache_held_bytes() -> int:
+    """What the decoded-chunk cache holds resident right now, or 0 with no cache.
+
+    For an instrument reading the process's resident memory over one scope of work: the cache
+    outlives that scope by design (it is what a later region asks for again), so what it gained
+    during the scope is not the scope's own cost. A fold's probe region read VmHWM over its ten
+    members and charged the region 24.4 GiB, 13.2 of which was this cache filling from empty --
+    and cut every region after it to 78 % of the height that would have fit.
+    """
+    return _CHUNK_CACHE.held_bytes if _CHUNK_CACHE is not None else 0
 
 
 def bound_chunk_cache() -> int:

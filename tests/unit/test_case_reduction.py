@@ -56,7 +56,7 @@ from konfai.data.transform import (
     Transform,
     resolve_operator,
 )
-from konfai.utils.budget import BUDGET_SHARES
+from konfai.utils.budget import BUDGET_SHARES, budget_share
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ReductionError, TransformError
 
@@ -620,7 +620,7 @@ def test_the_peak_is_charged_at_each_side_s_own_width(
     assert plan.peak_bytes == member_regions * member, why
 
 
-@pytest.mark.parametrize("cases", [1, 2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("cases", [1, 2, 3, 4, 5, 6, 7, 10, 16])
 def test_median_selects_the_middle_instead_of_sorting_the_stack(cases: int) -> None:
     """Up to five members the middle is SELECTED by a network of element-wise min/max; past that a
     sort finds it. The values are the same to the bit either way -- ``torch.quantile`` is the
@@ -635,7 +635,7 @@ def test_median_selects_the_middle_instead_of_sorting_the_stack(cases: int) -> N
     folded = Median()(members)
 
     assert torch.equal(folded, torch.quantile(torch.stack(members, dim=0), 0.5, dim=0))
-    assert Median().working_multiple_for(cases) == {1: 1.0, 2: 1.5, 3: 1.0, 4: 2.5, 5: 1.5}.get(cases, 4.0)
+    assert Median().working_multiple_for(cases) == {1: 1.0, 2: 1.5, 3: 1.0, 4: 2.5, 5: 1.5}.get(cases, 1.8)
 
 
 @pytest.mark.parametrize(
@@ -695,6 +695,23 @@ def _vote_by_sorting(tensors: list[torch.Tensor]) -> torch.Tensor:
         best = torch.where(better, member, best)
         best_count = torch.where(better, count, best_count)
     return best
+
+
+def test_median_keeps_integer_members_narrow_and_holds_a_window_not_a_stack() -> None:
+    """Ten uint16 regions are folded without ten float32 copies of them and without a sorted stack.
+
+    A sort along the case axis returns int64 indices, eight bytes an element whatever the members
+    weigh: ten uint16 regions sorted at 6.0x their own size. The window holds k + 1 float32 buffers
+    and nothing else -- 1.8x, measured on a 293 MiB member -- and the members stay uint16.
+    """
+    torch.manual_seed(5)
+    members = [torch.randint(0, 60000, (1, 1, 8, 96, 96), dtype=torch.int32).to(torch.uint16) for _ in range(10)]
+    folded = Median()(members)
+    ranked = torch.stack([member.float() for member in members], dim=0).sort(dim=0).values
+    assert torch.equal(folded, torch.lerp(ranked[4], ranked[5], 0.5)), "the window selects what the sort ranks"
+    assert folded.dtype is torch.float32
+    assert all(member.dtype is torch.uint16 for member in members), "the members were not widened in place"
+    assert Median().working_multiple_for(10) == Median._WINDOW_MULTIPLE < Median.working_multiple + 1
 
 
 @pytest.mark.parametrize("cases", [2, 3, 4, 6, 7])
@@ -894,6 +911,27 @@ def _engine_for_refit(tmp_path: Path, budget: float, rows: int) -> CaseReduction
     return engine
 
 
+def test_the_probe_is_short_so_its_own_overshoot_cannot_be_the_kill(tmp_path: Path) -> None:
+    """The one region no measurement can bound is the probe, because it runs before any.
+
+    At the planned height a probe over registration fields held 1.5x its allowance three times
+    out of three, and at an `auto` budget of 77 GiB on a 122 GiB host the probe alone reached 90
+    GiB and the host went down with nothing measured. The host gives nothing to catch: the kernel
+    kills. So the probe walks a quarter of the planned height, and every region after it walks
+    what the projection allows.
+    """
+    engine = _run(tmp_path / "probe", [], Reduce(operator="Mean", output="t"), [])[0]
+    engine._budget_bytes = 1 << 30
+    engine.slab_rows = 100
+    walked = []
+    engine._fold = lambda region: walked.append(region[0].stop - region[0].start) or torch.zeros(1)  # type: ignore[method-assign]
+    engine._open_meter = lambda: HeldMeter(lambda: 1, 0)  # type: ignore[method-assign]
+    list(engine._folds([1000, 10, 6], measure=True))
+    assert walked[0] == int(100 * CaseReduction._PROBE_SHARE), "the probe is a quarter of the planned height"
+    assert all(rows == 100 for rows in walked[1:-1]), "and the rest walk the planned height once it fits"
+    assert sum(walked) == 1000, "every row is folded exactly once"
+
+
 def test_the_first_region_is_the_probe_and_only_ever_shortens_the_rest(tmp_path: Path) -> None:
     """What the plan priced is a model; what the first region held is a fact.
 
@@ -906,7 +944,9 @@ def test_the_first_region_is_the_probe_and_only_ever_shortens_the_rest(tmp_path:
     routes at once: which instrument answered is the meter's business and not the fold's.
     """
     budget = 1 << 30
-    allowed = budget * CaseReduction._MEASURED_MARGIN
+    # Less the cache's share: the meter does not count the decoded-chunk cache, so the comparison
+    # does not offer it either -- see test_the_allowance_leaves_the_chunk_cache_its_share.
+    allowed = (budget - (budget_share("cache", budget) or 0.0)) * CaseReduction._MEASURED_MARGIN
 
     def engine_holding(name: str, held: int) -> CaseReduction:
         engine = _run(tmp_path / name, [], Reduce(operator="Mean", output="t"), [])[0]
@@ -914,9 +954,16 @@ def test_the_first_region_is_the_probe_and_only_ever_shortens_the_rest(tmp_path:
         engine.slab_rows = 100
         return engine
 
-    # Held twice what the declaration allows: the rest are cut to half the height.
+    # A full-height probe that held twice what the declaration allows: the rest are cut to half.
     engine = engine_holding("over", 0)
     engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 2), 0), 100, [1000, 10, 6])
+    assert engine.slab_rows == 50
+
+    # A QUARTER-height probe that held half the allowance: scaled to the planned height that is
+    # twice the allowance, and the rest are cut to half. The probe is short so that its own
+    # overshoot cannot reach the host; what it measures is projected before it is judged.
+    engine = engine_holding("short-probe", 0)
+    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 0.5), 0), 25, [1000, 10, 6])
     assert engine.slab_rows == 50
 
     # Held less than the declaration: nothing moves. A measurement is never a licence to spend a
@@ -924,6 +971,10 @@ def test_the_first_region_is_the_probe_and_only_ever_shortens_the_rest(tmp_path:
     engine = engine_holding("under", 0)
     engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 0.25), 0), 100, [1000, 10, 6])
     assert engine.slab_rows == 100, "a region that fits must not make the next one taller"
+    # ... and a short probe under ITS share does not either, once projected.
+    engine = engine_holding("under-short", 0)
+    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 0.2), 0), 25, [1000, 10, 6])
+    assert engine.slab_rows == 100
 
     # The baseline is subtracted: the same peak over a higher starting point held less.
     engine = engine_holding("baseline", 0)
@@ -962,6 +1013,57 @@ def test_a_host_chain_gets_a_meter_and_a_kernel_without_one_gets_none(monkeypatc
 
     monkeypatch.setattr(patching_module, "reset_resident_peak", lambda: False)
     assert open_held_meter(None) is None
+
+
+def test_the_allowance_leaves_the_chunk_cache_its_share(tmp_path: Path) -> None:
+    """The meter's reading and the figure it is judged against must cover the same bytes.
+
+    The meter stopped counting the decoded-chunk cache (it outlives the region, and charging the
+    region for it cut every region after the probe). Judged against the whole budget, a reading
+    that excludes the cache would let the cache be spent twice: once inside the allowance the
+    regions may fill, and again by the cache itself -- which is how a run held 1.09x what it
+    declared. The allowance comes down by exactly the cache's share.
+    """
+    budget = 1 << 30
+    engine = _run(tmp_path, [], Reduce(operator="Mean", output="t"), [])[0]
+    engine._budget_bytes = budget
+    engine.slab_rows = 100
+
+    cache = budget_share("cache", budget) or 0.0
+    assert cache > 0, "the fixture only says anything where the cache has a share"
+    # A probe holding just under the OLD allowance (the whole budget) and above the new one.
+    held = int((budget - cache / 2) * CaseReduction._MEASURED_MARGIN)
+    engine._refit_to_measurement(HeldMeter(lambda: held, 0), 100, [1000, 10, 6])
+    assert engine.slab_rows < 100, "a region filling the cache's share as well is cut"
+
+    engine.slab_rows = 100
+    fits = int((budget - cache) * CaseReduction._MEASURED_MARGIN)
+    engine._refit_to_measurement(HeldMeter(lambda: fits, 0), 100, [1000, 10, 6])
+    assert engine.slab_rows == 100, "a region inside the allowance keeps the height the plan chose"
+
+
+def test_a_host_meter_does_not_charge_the_scope_for_the_chunk_cache_it_filled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The decoded-chunk cache sits inside the process's resident peak and outlives any one scope.
+
+    A fold's probe read VmHWM over its ten members and charged the region 24.4 GiB, 13.2 of which
+    was the cache filling from empty -- a budget line with a share of its own -- and cut every
+    region after it to 78 % of the height that would have fit. What the cache gained during the
+    scope is subtracted; what the scope held on its own is what it is charged.
+    """
+    from konfai.utils import ome_zarr
+
+    cache = ome_zarr._DecodedChunkCache(1 << 30)
+    monkeypatch.setattr(ome_zarr, "_CHUNK_CACHE", cache)
+    monkeypatch.setattr(patching_module, "reset_resident_peak", lambda: True)
+    monkeypatch.setattr(patching_module, "resident_bytes", lambda: 1_000_000)
+    peak = {"value": 1_000_000}
+    monkeypatch.setattr(patching_module, "peak_resident_bytes", lambda: peak["value"])
+
+    meter = open_held_meter(None)
+    chunk = np.ones((256, 256), np.float32)  # 256 KiB decoded, kept by the cache past the scope
+    cache.put(("store", 0), chunk)
+    peak["value"] = 1_000_000 + chunk.nbytes + 100_000  # the process grew by the chunk and by the scope's own 100 KB
+    assert meter is not None and meter.held() == 100_000, "the cache's growth is not the scope's cost"
 
 
 def test_the_folds_a_stat_pass_keeps_come_out_of_the_regions_share(tmp_path: Path) -> None:

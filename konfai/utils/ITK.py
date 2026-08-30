@@ -31,7 +31,7 @@ except ImportError:
 from konfai.utils.errors import TransformError
 
 if TYPE_CHECKING:
-    from konfai.data.geometry import AffineMap, AffineStage, DisplacementStage, Grid, SpatialStages
+    from konfai.data.geometry import AffineMap, AffineStage, DisplacementStage, Grid, SpatialStages, WorldBox
 
 
 def _require_simpleitk() -> None:
@@ -205,12 +205,34 @@ def _grid_of_image(image: sitk.Image) -> Grid:
     )
 
 
-def _displacement_stage(grid: Grid, values: np.ndarray, order: int, what: str) -> DisplacementStage:
-    """A stage over ``values``, component-first ``(rank, *grid)``, contiguous float64: one copy where
-    they are not that already, none where they are."""
+def _displacement_stage(
+    grid: Grid, values: np.ndarray, order: int, what: str, dtype: np.dtype | type = np.float64
+) -> DisplacementStage:
+    """A stage over ``values``, component-first ``(rank, *grid)``, contiguous in ``dtype``: one copy
+    where they are not that already, none where they are.
+
+    ``dtype`` is a CEILING, not a target: the values are held at the width the STORE holds them at,
+    never widened past it. A field written in float32 -- which is how ITK writes one, and how a DVF
+    normally sits on disk -- carries no more information as float64, so widening it buys a copy of
+    twice the bytes to say exactly the same thing, three times over once the sampler holds its own
+    (``_FIELD_WINDOW_COPIES``), and quantised straight back by any walk that runs in float32.
+
+    So float64 (the default ceiling, the bit-exact contract with SimpleITK) narrows nothing that
+    was stored wide, and lets a float32 store stay float32 -- losslessly, with no flag to set and
+    no precision traded, which is also what lets :func:`~konfai.data.transform._warp_field_float32`
+    apply such a field without a float64 transform to hold it. A caller whose coordinate walk runs
+    in float32 lowers the ceiling to float32, and there a genuinely float64 field does narrow: that
+    is the trade ``precision: fast`` names.
+
+    Anything not already float32 or float64 -- an integer field, a float16 one -- is converted to
+    the ceiling: those are widths SimpleITK has no pixel type for, and the walk no kernel for.
+    """
     from konfai.data.geometry import DisplacementStage
 
-    values = np.ascontiguousarray(values, dtype=np.float64)
+    ceiling = np.dtype(dtype)
+    stored = np.asarray(values).dtype
+    held = stored if stored.kind == "f" and np.float32().itemsize <= stored.itemsize <= ceiling.itemsize else ceiling
+    values = np.ascontiguousarray(values, dtype=held)
     if not np.isfinite(values).all():
         raise TransformError(
             f"{what} carries a non-finite displacement value, so no bound on its reach exists.",
@@ -264,7 +286,14 @@ def decode_transform_stages(transform: sitk.Transform) -> SpatialStages:
     )
 
 
-def read_transform_stages(dataset: Any, group: str, name: str) -> SpatialStages:
+def read_transform_stages(
+    dataset: Any,
+    group: str,
+    name: str,
+    box: WorldBox | None = None,
+    headers_only: bool = False,
+    field_dtype: np.dtype | type = np.float64,
+) -> SpatialStages:
     """The stored transform ``(group, name)`` of ``dataset`` as geometry stages in APPLICATION order.
 
     A displacement entry becomes its stage straight from the array the store hands over, on the
@@ -273,6 +302,25 @@ def read_transform_stages(dataset: Any, group: str, name: str) -> SpatialStages:
     once more on the way out). Every other entry decodes through :func:`decode_transform_stages`,
     as does everything a store that serves transforms alone (``read_transform`` and nothing else)
     hands over.
+
+    ``box`` is the world box the caller will evaluate the map over, and it is read from the headers
+    before a voxel is fetched: a field entry then comes back as its own sub-grid over the window
+    that box falls in, plus the lattice point linear interpolation reaches for. Without it the whole
+    entry is read, which is what a whole-volume call and the plan's own decode still want. A field
+    solved at full resolution is gigabytes -- 14.5 GiB per ExaSPIM case, and float64 on the way in
+    doubles it -- so a region that read the whole one would hold, per case, more than the budget
+    sizing it was ever told about.
+
+    Only a displacement entry is windowed. An affine is a matrix and a BSpline a coarse control
+    grid: both are small, and a BSpline's coefficients are not indexed by the box anyway.
+
+    ``headers_only`` is the plan's read: a dense field comes back as NO stage at all, which is the
+    identity, and its values are never touched. Nothing bounds a field from headers -- so a plan
+    that read them would pay a case's worth of memory for a number it cannot use, which is exactly
+    what the declared route already declines to do (:meth:`Resample._pricing_bound`).
+
+    ``field_dtype`` is what a dense field's values are held in: float64 for the bit-exact walk,
+    float32 for a caller whose walk runs in float32 and would quantise them back anyway.
     """
     from konfai.data.geometry import Grid
     from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, data_to_transform
@@ -280,12 +328,35 @@ def read_transform_stages(dataset: Any, group: str, name: str) -> SpatialStages:
     read_data = getattr(dataset, "read_data", None)
     if read_data is None:
         return decode_transform_stages(dataset.read_transform(group, name))
+    what = f"the displacement field '{group}' of case '{name}'"
+    if headers_only:
+        # The PLAN's read: a dense field answers as the identity and its values are never touched.
+        # Nothing bounds a field from headers, so there is nothing to read them for -- and reading
+        # them anyway is what put 29 GiB of one native case beside a budget that never saw it.
+        # Everything else is coefficients, small, and bounded exactly, so it decodes as usual.
+        shape, header = dataset.get_infos(group, name)
+        if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+            return ()
+        data, attribute = read_data(group, name)
+        return decode_transform_stages(data_to_transform(data, attribute, name))
+    window = None
+    # A backend that cannot serve a slice reads whole, which is what it would do for any window it
+    # was given: the transform-only stores (read_transform and nothing else) are already out above.
+    if box is not None and getattr(dataset, "read_data_slice", None) is not None:
+        shape, header = dataset.get_infos(group, name)
+        if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+            grid = Grid.of([int(extent) for extent in shape[1:]], header, what)
+            window = grid.index_window(box, 1)
+    if window is not None:
+        data, attribute = dataset.read_data_slice(group, name, (slice(None), *window))
+        return (_displacement_stage(grid.sub_grid(window), data, 1, what, field_dtype),)
     data, attribute = read_data(group, name)
     if DISPLACEMENT_FIELD_ATTRIBUTE not in attribute:
         return decode_transform_stages(data_to_transform(data, attribute, name))
-    what = f"the displacement field '{group}' of case '{name}'"
     return (
-        _displacement_stage(Grid.of([int(extent) for extent in np.shape(data)[1:]], attribute, what), data, 1, what),
+        _displacement_stage(
+            Grid.of([int(extent) for extent in np.shape(data)[1:]], attribute, what), data, 1, what, field_dtype
+        ),
     )
 
 

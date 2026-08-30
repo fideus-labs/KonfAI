@@ -21,12 +21,14 @@ an axis-aligned grid passes a map that is wrong in exactly the ways this stage c
 """
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import konfai.data.transform as transform_module
 import numpy as np
 import pytest
 import torch
+from konfai.data.geometry import DisplacementStage, Grid
 from konfai.data.transform import (
     LocalityKind,
     RegionContext,
@@ -34,7 +36,7 @@ from konfai.data.transform import (
     _optional_image_filler,
     _SitkInput,
 )
-from konfai.utils.dataset import Attribute
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute
 from konfai.utils.errors import TransformError
 
 sitk = pytest.importorskip("SimpleITK")
@@ -154,6 +156,84 @@ def _golden_resamples() -> dict[str, np.ndarray]:
             output = stage(CASE, torch.from_numpy(volume).unsqueeze(0), Attribute(attribute))
             resampled[f"{map_name}_{dtype_name}"] = output.squeeze(0).numpy()
     return resampled
+
+
+@pytest.mark.parametrize("interpolation", ["linear", "nearest"])
+def test_a_float32_field_is_warped_and_says_what_the_float64_transform_says(
+    monkeypatch: pytest.MonkeyPatch, interpolation: str
+) -> None:
+    """A map that is one float32 field on the output grid does not go through a float64 transform.
+
+    ``sitk.Warp`` is templated on the field's own type; ``DisplacementFieldTransform`` is not --
+    SimpleITK's hierarchy is ``TransformBaseTemplate<double>``, so a field read as float32 is cast
+    to float64 to be held and interleaved into a vector image at that width. On a 122-row native
+    ExaSPIM region that is 6.9 GiB built in 5.0 s, 39% of what the whole member-region costs.
+
+    The claim is that Warp over the float32 values and the transform over those same values widened
+    (a lossless widening: every float32 is a float64) write the very same bytes. Both are run over
+    one captured region, so nothing but the route differs.
+    """
+    image = _image(oblique=False)
+    volume = _phantom() if interpolation == "linear" else _label_map()
+    stage = _stage(image, _field(image), interpolation=interpolation)
+
+    captured: list[tuple] = []
+    real_resample = transform_module._resample_with_sitk
+
+    def capture(payload, region, source, stages, starts, mode, fill, sitk_input=None):
+        captured.append((payload, region, source, stages, starts, mode, fill))
+        return real_resample(payload, region, source, stages, starts, mode, fill, sitk_input)
+
+    monkeypatch.setattr(transform_module, "_resample_with_sitk", capture)
+    stage(CASE, torch.from_numpy(volume).unsqueeze(0), Attribute(_attribute(image)))
+    assert captured, "the host route is what this pins"
+    payload, region, source, stages, starts, mode, fill = captured[0]
+    assert len(stages) == 1 and isinstance(stages[0], DisplacementStage)
+
+    narrowed = replace(stages[0], values=stages[0].values.astype(np.float32))
+    widened = replace(narrowed, values=narrowed.values.astype(np.float64))
+    assert transform_module._warp_field_float32((narrowed,), region) is not None, "Warp is for exactly this"
+    assert transform_module._warp_field_float32((widened,), region) is None, "and never for float64"
+
+    fast = real_resample(payload, region, source, (narrowed,), starts, mode, fill)
+    exact = real_resample(payload, region, source, (widened,), starts, mode, fill)
+    assert torch.equal(fast, exact), "float32 Warp and the float64 transform are the same map"
+
+
+def test_a_float32_store_is_held_at_float32_with_no_flag_to_set() -> None:
+    """The width a field is held at comes from the STORE, not from a precision the user declares.
+
+    A DVF normally sits on disk in float32 -- it is how ITK writes one -- and widening it to
+    float64 buys a copy of twice the bytes to say exactly the same thing. Held at its own width it
+    is lossless, costs no flag, and is what lets ``sitk.Warp`` apply it without a float64 transform
+    to hold it. The default ceiling narrows nothing: a genuinely float64 field stays float64.
+    """
+    from konfai.utils.ITK import _displacement_stage
+
+    grid = Grid(size_zyx=(4, 5, 6), origin_xyz=np.zeros(3), spacing_xyz=np.ones(3), direction_xyz=np.eye(3))
+    stored32 = np.zeros((3, 4, 5, 6), np.float32)
+    stored64 = np.zeros((3, 4, 5, 6), np.float64)
+
+    assert _displacement_stage(grid, stored32, 1, "f", np.float64).values.dtype == np.float32, "not widened"
+    assert _displacement_stage(grid, stored64, 1, "f", np.float64).values.dtype == np.float64, "not narrowed"
+    # 'fast' lowers the ceiling, and there a genuinely float64 field does narrow: the declared trade.
+    assert _displacement_stage(grid, stored64, 1, "f", np.float32).values.dtype == np.float32, "the trade"
+    # A width SimpleITK has no pixel type for goes to the ceiling rather than staying as it is.
+    stored16 = np.zeros((3, 4, 5, 6), np.float16)
+    assert _displacement_stage(grid, stored16, 1, "f", np.float64).values.dtype == np.float64, "no f16 pixel type"
+
+
+def test_a_float64_field_is_not_narrowed_into_the_warp() -> None:
+    """The fast route is a cheaper way to the same values, never a cheaper set of values.
+
+    A field carrying float64 values has bits float32 does not, so narrowing it to reach
+    ``sitk.Warp`` would answer a different map. 'exact' promises bit-identity with
+    ``sitk.Resample``, and the guard keeps that promise by declining.
+    """
+
+    grid = Grid(size_zyx=(4, 5, 6), origin_xyz=np.zeros(3), spacing_xyz=np.ones(3), direction_xyz=np.eye(3))
+    values = np.full((3, 4, 5, 6), np.nextafter(1.0, 2.0), dtype=np.float64)  # not a float32
+    assert transform_module._warp_field_float32((DisplacementStage(grid, values, 1),), grid) is None
 
 
 def test_a_stored_resample_reproduces_its_golden_output() -> None:
@@ -525,15 +605,16 @@ def test_the_plan_keeps_a_case_s_bound_and_the_run_holds_one_case_s_stages():
 
     volume = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
     first = ten("CASE_003", volume, Attribute(attribute))
-    assert set(ten._stored) == {"CASE_003"}
+    # The cache is keyed on (case, box): a field read for one region answers for that one.
+    assert {key[0] for key in ten._stored} == {"CASE_003"}
     ten("CASE_007", volume, Attribute(attribute))
-    assert set(ten._stored) == {"CASE_003", "CASE_007"}, "the last cases' stages are held, within the bound"
+    assert {key[0] for key in ten._stored} == {"CASE_003", "CASE_007"}, "the last cases are held, in bound"
     ten.stored_stage_bytes = 1
     ten("CASE_005", volume, Attribute(attribute))
-    assert set(ten._stored) == {"CASE_005"}, "past the bound, the slot follows the case being sampled"
+    assert {key[0] for key in ten._stored} == {"CASE_005"}, "past the bound, the slot follows the case"
     # The same values as a stage that decoded the map once and kept it.
     kept = planned(10)
-    kept._stored["CASE_003"] = kept._decode_stored("CASE_003")
+    kept._stored[("CASE_003", None)] = kept._decode_stored("CASE_003")
     torch.testing.assert_close(first, kept("CASE_003", volume, Attribute(attribute)), rtol=0.0, atol=0.0)
     # What a rank receives holds no stages either; it decodes what it samples.
     rank = pickle.loads(pickle.dumps(ten))
@@ -541,11 +622,101 @@ def test_the_plan_keeps_a_case_s_bound_and_the_run_holds_one_case_s_stages():
     torch.testing.assert_close(rank("CASE_003", volume, Attribute(attribute)), first, rtol=0.0, atol=0.0)
 
 
+class _SlicedFieldStore:
+    """A store that serves a dense field group and can serve a slice of it, counting what is asked."""
+
+    def __init__(self, attribute: Attribute, reference: "sitk.Image | None" = None) -> None:
+        self.values = np.random.RandomState(4).normal(0.0, 2.0, (3, *SIZE))
+        self.header = Attribute(attribute)
+        self.header[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+        self.reference = reference
+        self.asked: list[tuple[int, ...]] = []
+        self.whole = 0
+
+    def is_dataset_exist(self, group: str, name: str) -> bool:
+        del name
+        return group == "reg" or (group == "Reference" and self.reference is not None)
+
+    def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
+        del name
+        if group == "Reference" and self.reference is not None:
+            return [1, *list(self.reference.GetSize())[::-1]], _attribute(self.reference)
+        return [int(extent) for extent in self.values.shape], Attribute(self.header)
+
+    def read_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
+        del group, name
+        self.whole += 1
+        return self.values, Attribute(self.header)
+
+    def read_data_slice(self, group: str, name: str, slices) -> tuple[np.ndarray, Attribute]:
+        del group, name
+        block = self.values[tuple(slices)]
+        self.asked.append(tuple(block.shape[1:]))
+        return block, Attribute(self.header)
+
+
+def test_a_stored_field_bridging_disjoint_frames_is_not_refused_as_disjoint():
+    """The rigid case above, with the bridge stored as a dense field instead of a matrix.
+
+    The plan prices a field at the identity, declared or stored, because nothing bounds one from
+    headers. So coverage judged through the priced map is zero for exactly the cohort the stage
+    exists to serve -- ten brains registered onto a template they sit 25 mm from -- and the all-fill
+    gate has to let a field through the way it already lets a declared one through. It did not, and
+    the whole build would have been refused before a byte was read.
+    """
+    case = _image(oblique=False)
+    case.SetOrigin((1000.0, 0.0, 0.0))
+    reference = _image(oblique=False)  # origin (10, -5, 2): ~1000 mm from the case in x
+    source = _SlicedFieldStore(_attribute(reference), reference=reference)
+    source.values[:] = 0.0
+    source.values[0] = 990.0  # the offset between the frames, carried in every voxel
+
+    stage = Resample(reference="ref", reference_group="Reference", transforms={"reg": False})
+    stage.set_datasets([source])
+    # Does not raise, which is the whole test: the gate cannot know where a field reaches, so it
+    # does not pretend to. transform_shape is where it fires, before a byte is read.
+    assert stage.transform_shape("", "CASE_000", list(SIZE), Attribute(_attribute(case))) == list(SIZE)
+    # And the target is NOT the case's own grid, so the gate was really reached: the affine part of
+    # the priced map is the identity, and coverage judged through it is nothing at all.
+    assert stage.coverage("CASE_000") == 0.0
+
+
+def test_a_region_reads_the_window_of_a_stored_field_and_not_the_field():
+    """A stored dense field is read on the box its region reaches, not whole.
+
+    The declared route has always done this (``_field_stage``); the stored one read every voxel of
+    every member, so a chain the plan sized in gigabytes held tens of them beside the budget --
+    a cost the sizing never saw, because a decoded transform lives outside the regions it prices.
+    At full resolution that is 14.5 GiB per case on disk and twice that in memory, float64 on the
+    way in.
+
+    Counted at the store, not inferred: what a region asks for is the slice it asks for.
+    """
+    attribute = _attribute(_image(oblique=False))
+    source = _SlicedFieldStore(attribute)
+    stage = Resample(transforms={"reg": False})
+    stage.set_datasets([source])
+    stage.transform_shape("", "CASE_000", list(SIZE), Attribute(attribute))
+
+    grid = Grid.of(list(SIZE), Attribute(attribute), "the case")
+    source.asked.clear()
+    stage._stages("CASE_000", grid.sub_grid((slice(0, 2), slice(0, 2), slice(0, 2))))
+
+    assert source.asked, "the region read a window rather than the whole entry"
+    read = source.asked[-1]
+    assert all(got < full for got, full in zip(read, SIZE, strict=True)), (
+        f"a 2x2x2 region read {list(read)} of a {list(SIZE)} field"
+    )
+    # A second region is its own read: the cache is keyed on the box, so it cannot be handed the
+    # first one's window and sample outside it.
+    source.asked.clear()
+    stage._stages("CASE_000", grid.sub_grid((slice(18, 20), slice(24, 26), slice(30, 32))))
+    assert (source.asked and source.asked[-1] != read) or len(stage._stored) == 2
+
+
 def test_the_slabbed_walk_lands_each_slab_in_the_one_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """Above the walk budget the general path gathers slab by slab, and each slab is written into
     the output as it lands: bit for bit the single pass, with no parts held for a cat."""
-    from konfai.data import transform as transform_module
-
     image = _image(oblique=True)
     attribute = _attribute(image)
     volume = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
