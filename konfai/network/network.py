@@ -1547,6 +1547,21 @@ class Network(ModuleArgsDict, ABC):
             if not len(layers_name):
                 break
 
+    def bind(
+        self,
+        autocast: bool,
+        state: State,
+        group_dest: list[str],
+        gradient_checkpoints: list[str] | None = None,
+        gpu_checkpoints: list[str] | None = None,
+    ) -> None:
+        """Wire the root model to the dataset's destination groups for ``state``: every network's
+        criteria and patch, the output groups the measures address, and the channel trace the
+        checkpoints are placed on."""
+        self.init(autocast, state, group_dest)
+        self.init_outputs_group()
+        self._compute_channels_trace(self, self.in_channels, gradient_checkpoints, gpu_checkpoints)
+
     def init_outputs_group(self):
         for network in self.get_networks().values():
             if not network.measure:

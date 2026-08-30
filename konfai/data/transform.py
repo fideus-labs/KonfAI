@@ -22,7 +22,7 @@ import os
 import tempfile
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing import current_process, get_context
@@ -4077,23 +4077,28 @@ class Norm(Transform):
         return shape[:-1]
 
 
-class Variance(Transform):
+class _MemberSpread(Transform):
+    """A per-voxel spread across the leading member axis (no spatial neighbour); one member spreads 0."""
+
     # Measured at 2.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 2.0
+    _spread: Callable[[torch.Tensor, int], torch.Tensor]
 
     def __init__(self) -> None:
         super().__init__()
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Variance across the leading member axis at each voxel: no spatial neighbour.
         return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        # Keep the leading member axis in BOTH branches: the N>1 var(0) drops it and re-adds it via
-        # unsqueeze(0), so the single-member zeros must unsqueeze too or the output rank is off by one.
-        return (
-            tensors.float().var(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0]).unsqueeze(0)
-        )
+        # The member axis stays in both branches: var/std drop it and unsqueeze re-adds it.
+        if tensors.shape[0] > 1:
+            return self._spread(tensors.float(), 0).unsqueeze(0)
+        return torch.zeros_like(tensors[0]).unsqueeze(0)
+
+
+class Variance(_MemberSpread):
+    _spread = staticmethod(torch.var)
 
 
 class SegmentationDisagreement(Transform):
@@ -4155,21 +4160,8 @@ class Percentage(Transform):
         return tensors / self.baseline * 100.0
 
 
-class StandardDeviation(Transform):
-    # Measured at 2.00 on the CUDA allocator, in volumes-worth of what it is handed.
-    working_multiple = 2.0
-
-    def __init__(self) -> None:
-        super().__init__()
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Standard deviation across the leading member axis at each voxel: no spatial neighbour.
-        return PatchLocality(LocalityKind.POINTWISE)
-
-    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return (
-            tensors.float().std(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0]).unsqueeze(0)
-        )
+class StandardDeviation(_MemberSpread):
+    _spread = staticmethod(torch.std)
 
 
 class Statistics(Transform):

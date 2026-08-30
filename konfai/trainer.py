@@ -942,13 +942,8 @@ class Trainer(DistributedObject):
             # actual training happens later in the distributed runtime.
             seed_all(self.manual_seed)
         self.dataset.prepare()
-        self.model.init(self.autocast, state, self.dataset.get_groups_dest())
-        self.model.init_outputs_group()
-        self.model._compute_channels_trace(
-            self.model,
-            self.model.in_channels,
-            self.gradient_checkpoints,
-            self.gpu_checkpoints,
+        self.model.bind(
+            self.autocast, state, self.dataset.get_groups_dest(), self.gradient_checkpoints, self.gpu_checkpoints
         )
         # The per-axis multiple a free patch axis rounds up to, read off the model's downsampling graph.
         self._downsampling_factor = self.model.downsampling_factor()

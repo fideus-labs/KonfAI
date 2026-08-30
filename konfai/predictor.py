@@ -2002,9 +2002,9 @@ class Predictor(DistributedObject):
         # rounds up to a valid input size (the graph (hence the factor) is final before init()).
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
         self.dataset.prepare()
-        self.model.init(self.autocast, State.PREDICTION, self.dataset.get_groups_dest())
-        self.model.init_outputs_group()
-        self.model._compute_channels_trace(self.model, self.model.in_channels, None, self.gpu_checkpoints)
+        self.model.bind(
+            self.autocast, State.PREDICTION, self.dataset.get_groups_dest(), gpu_checkpoints=self.gpu_checkpoints
+        )
         # The per-axis multiple a free patch axis rounds up to, read off the model's downsampling graph.
         self._downsampling_factor = self.model.downsampling_factor()
         self.output_modules = [name for name, _, _ in self.model.named_module_args_dict()]
