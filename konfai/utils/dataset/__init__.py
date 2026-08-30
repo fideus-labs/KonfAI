@@ -18,7 +18,7 @@
 """Dataset file abstractions and image conversion utilities for KonfAI.
 
 The storage backends live one per module and are addressed as ``Dataset.<Backend>``; every name of
-the package is re-exported here."""
+the package is re-exported here; the backends are public as ``Dataset.<Backend>``."""
 
 from konfai.utils.dataset.abstract import AbstractFile as AbstractFile
 from konfai.utils.dataset.attribute import DISPLACEMENT_FIELD_ATTRIBUTE as DISPLACEMENT_FIELD_ATTRIBUTE
@@ -117,16 +117,9 @@ from konfai.utils.dataset.stream import _RawBlockStream as _RawBlockStream
 
 __all__ = [
     "DISPLACEMENT_FIELD_ATTRIBUTE",
-    "AbstractFile",
     "Attribute",
     "DataStream",
     "Dataset",
-    "DicomFile",
-    "File",
-    "H5File",
-    "ItkTransformFile",
-    "OmeZarrFile",
-    "SitkFile",
     "as_channel_first",
     "chunk_hull_voxels",
     "data_to_image",
