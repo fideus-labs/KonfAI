@@ -56,7 +56,6 @@ from konfai.data.transform import (
     Transform,
     TransformLoader,
 )
-from konfai.utils import dataset as dataset_module
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import State
@@ -199,7 +198,7 @@ def test_patch_stream_warns_once_per_format_that_cannot_serve_a_disk_region(
     Two cases x three patches: the warning is about the format, so it must survive neither the patch
     loop nor the second case. Streaming an uncompressed .mha is a win and must stay silent.
     """
-    monkeypatch.setattr(dataset_module, "_unstreamed_formats_warned", set())
+    monkeypatch.setattr("konfai.utils.dataset.raw_block._unstreamed_formats_warned", set())
     dataset = Dataset(tmp_path / "Dataset", file_format)
     volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
     for name in ("CASE_000", "CASE_001"):
@@ -232,7 +231,7 @@ def test_dataset_read_data_statistics_sitk_accumulates_slabs_without_loading_ful
     dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
 
     # One slab per plane, so the running merge spans several reads on a volume this small.
-    monkeypatch.setattr(dataset_module, "_STATISTICS_CHUNK_ELEMENTS", 1)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_CHUNK_ELEMENTS", 1)
     monkeypatch.setattr(SimpleITK, "ReadImage", _reject_whole_volume_read)
 
     stats = dataset.read_data_statistics("CT", "CASE_000")
@@ -250,7 +249,7 @@ def test_dataset_read_data_statistics_sitk_selects_channels_while_streaming(
     volume = np.arange(3 * 4 * 5 * 6, dtype=np.float32).reshape(3, 4, 5, 6)
     dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
 
-    monkeypatch.setattr(dataset_module, "_STATISTICS_CHUNK_ELEMENTS", 1)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_CHUNK_ELEMENTS", 1)
     monkeypatch.setattr(SimpleITK, "ReadImage", _reject_whole_volume_read)
 
     stats = dataset.read_data_statistics("CT", "CASE_000", [0, 2])

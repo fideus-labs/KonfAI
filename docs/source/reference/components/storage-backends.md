@@ -1,7 +1,7 @@
 # Storage backends & formats
 
 KonfAI reads and writes datasets through pluggable backends in
-`konfai/utils/dataset.py` (inner classes of `Dataset`). You rarely name a backend
+`konfai/utils/dataset/` (one module per backend, addressed as `Dataset.<Backend>`). You rarely name a backend
 directly, you pick a **format token** in a `dataset_filenames` spec
 (`./Dataset:a:mha`), and the token is dispatched to a backend. See
 {doc}`../../concepts/datasets` for the grouped case/group layout these backends

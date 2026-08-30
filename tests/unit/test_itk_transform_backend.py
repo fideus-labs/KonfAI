@@ -207,7 +207,7 @@ def test_without_h5py_the_backend_names_the_extra_to_install(tmp_path: Path, mon
     """The parameters are touched region by region through h5py, so it is a requirement, not a
     preference: a peak memory that turns on whether an optional import succeeded is one nobody can
     size. The ``h5`` backend has always demanded it: this says so out loud."""
-    monkeypatch.setattr("konfai.utils.dataset.h5py", None)
+    monkeypatch.setattr("konfai.utils.dataset.itk_transform_file.h5py", None)
 
     with pytest.raises(DatasetManagerError, match="h5py"):
         Dataset(tmp_path / "out", "itktransform").write("Transform", "P000", _field(), _attributes())
@@ -226,7 +226,7 @@ def test_a_region_read_opens_the_file_once_for_the_process(tmp_path: Path, monke
         opens["count"] += 1
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(dataset_module, "_open_h5", counting)
+    monkeypatch.setattr("konfai.utils.dataset.h5._open_h5", counting)
     for start in range(3):
         region = (slice(0, 3), slice(start, start + 2), slice(1, 4), slice(2, 6))
         got, _ = dataset.read_data_slice("Transform", "P000", region)

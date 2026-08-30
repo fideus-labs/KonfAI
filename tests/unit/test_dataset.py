@@ -890,7 +890,7 @@ def test_a_region_off_the_raw_block_is_the_one_itk_decodes(
     backend = _block_backend(path)
     got, attributes = backend.file_to_data_slice("", path.name.split(".", 1)[0], region)
 
-    monkeypatch.setattr(dataset_module, "_pixel_block", lambda path: None)
+    monkeypatch.setattr("konfai.utils.dataset.sitk_file._pixel_block", lambda path: None)
     want, want_attributes = backend.file_to_data_slice("", path.name.split(".", 1)[0], region)
 
     assert got.dtype == want.dtype and got.dtype.isnative
@@ -918,7 +918,6 @@ def test_every_patch_of_a_grid_records_what_itk_records(tmp_path: Path, monkeypa
 
     Character for character against ITK's own reader, on every patch of a grid: a record built from
     the file's printed geometry says the same thing as one printed per patch."""
-    from konfai.utils import dataset as dataset_module
 
     path, _ = _write_block_fixture(tmp_path, "rotated.mha")
     backend = _block_backend(path)
@@ -926,7 +925,7 @@ def test_every_patch_of_a_grid_records_what_itk_records(tmp_path: Path, monkeypa
         (slice(None), slice(z, z + 4), slice(y, y + 4), slice(x, x + 4)) for z in (0, 5) for y in (0, 6) for x in (0, 7)
     ]
     got = [backend.file_to_data_slice("", "rotated", window)[1] for window in windows]
-    monkeypatch.setattr(dataset_module, "_pixel_block", lambda path: None)
+    monkeypatch.setattr("konfai.utils.dataset.sitk_file._pixel_block", lambda path: None)
     want = [backend.file_to_data_slice("", "rotated", window)[1] for window in windows]
 
     assert [dict(record) for record in got] == [dict(record) for record in want]
@@ -953,13 +952,12 @@ def test_a_file_the_block_route_declines_is_still_read_by_itk(tmp_path: Path, ki
 def test_a_stepped_region_off_the_raw_block_reads_as_itk_reads_it_whole(tmp_path: Path, monkeypatch) -> None:
     """A step ITK cannot extract is served whole and sliced: the block serves the same values and
     keeps the record ITK's route leaves, the volume's own geometry."""
-    from konfai.utils import dataset as dataset_module
 
     path, data = _write_block_fixture(tmp_path, "vector.mha")
     region = (slice(0, 3, 2), slice(1, 12, 3), slice(0, 14, 2), slice(2, 16, 3))
     backend = _block_backend(path)
     got, attributes = backend.file_to_data_slice("", "vector", region)
-    monkeypatch.setattr(dataset_module, "_pixel_block", lambda path: None)
+    monkeypatch.setattr("konfai.utils.dataset.sitk_file._pixel_block", lambda path: None)
     want, want_attributes = backend.file_to_data_slice("", "vector", region)
 
     np.testing.assert_array_equal(got, want)
