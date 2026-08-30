@@ -557,7 +557,7 @@ def builtin_transforms() -> list[type[Transform]]:
         for _, cls in inspect.getmembers(transform_module, inspect.isclass)
         if not isinstance(cls, types.GenericAlias)
         and issubclass(cls, Transform)
-        and cls.__module__ == transform_module.__name__
+        and cls.__module__.startswith(transform_module.__name__)
         and not inspect.isabstract(cls)
     ]
 

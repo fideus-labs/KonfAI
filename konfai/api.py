@@ -149,7 +149,8 @@ def _yaml_safe(value: object, where: str) -> object:
 def _classpath(stage: object, default_modules: tuple[str, ...]) -> str:
     """The name the config tree references ``stage`` by: bare for a shipped class, qualified else."""
     cls = type(stage)
-    return cls.__name__ if cls.__module__ in default_modules else f"{cls.__module__}:{cls.__name__}"
+    shipped = any(cls.__module__ == m or cls.__module__.startswith(m + ".") for m in default_modules)
+    return cls.__name__ if shipped else f"{cls.__module__}:{cls.__name__}"
 
 
 def _qualified_spelling(stage: object, name: str, default_modules: tuple[str, ...]) -> str:

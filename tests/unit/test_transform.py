@@ -529,7 +529,7 @@ def test_konfai_inference_raises_clear_error_inside_daemon_workers(monkeypatch: 
     class DaemonProcess:
         daemon = True
 
-    monkeypatch.setattr("konfai.data.transform.current_process", lambda: DaemonProcess())
+    monkeypatch.setattr("konfai.data.transform.inference.current_process", lambda: DaemonProcess())
 
     with pytest.raises(RuntimeError, match=r"Dataset\.num_workers: 0"):
         transform("CASE_000", torch.zeros(1, 4, 4), Attribute())
@@ -923,7 +923,7 @@ def test_string_encoded_parameters_are_refused_with_their_spelling() -> None:
 def test_konfai_inference_hands_the_nested_run_this_ranks_device_only(tmp_path: Path, monkeypatch) -> None:
     """Under --gpu 0 1 each rank runs on its own device; the nested prediction it spawns per case
     must run there too, not on every device the launch was given (a two-GPU prediction per rank)."""
-    import konfai.data.transform as transform_module
+    import konfai.data.transform.inference as transform_module
 
     pytest.importorskip("SimpleITK")
     launched: dict[str, list[int]] = {}
@@ -945,9 +945,9 @@ def test_konfai_inference_hands_the_nested_run_this_ranks_device_only(tmp_path: 
 
     monkeypatch.setattr(transform_module, "get_context", lambda _method: _Context())
     monkeypatch.setattr(transform_module, "cuda_visible_devices", lambda: [4, 7])
-    monkeypatch.setattr(transform_module.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(transform_module.torch.cuda, "empty_cache", lambda: None)
-    monkeypatch.setattr(transform_module.torch.cuda, "current_device", lambda: 1)  # local rank 1
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)  # local rank 1
     monkeypatch.setattr(KonfAIInference, "_reassemble_output", staticmethod(lambda _dir: torch.zeros(1, 2, 2, 2)))
     attributes = Attribute()
     attributes["Origin"] = np.zeros(3)

@@ -545,7 +545,7 @@ def test_the_plan_keeps_a_case_s_bound_and_the_run_holds_one_case_s_stages():
 def test_the_slabbed_walk_lands_each_slab_in_the_one_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """Above the walk budget the general path gathers slab by slab, and each slab is written into
     the output as it lands: bit for bit the single pass, with no parts held for a cat."""
-    from konfai.data import transform as transform_module
+    from konfai.data.transform import resample as transform_module
 
     image = _image(oblique=True)
     attribute = _attribute(image)
@@ -666,7 +666,7 @@ class TestTheHostRouteReusesItsInputImage:
         assert _optional_image_filler() is None
         assert transform_module.sitk is not None
 
-        monkeypatch.setattr(transform_module, "_set_image_from_array", None)
+        monkeypatch.setattr("konfai.data.transform.resample._set_image_from_array", None)
         holder = _SitkInput()
         array = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
         first = holder.filled(array)

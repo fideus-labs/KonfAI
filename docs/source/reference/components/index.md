@@ -60,7 +60,7 @@ ways to get the exhaustive list for any component:
    | Kind | Bare name resolves in |
    | --- | --- |
    | criteria | `konfai/metric/measure.py` |
-   | transforms | `konfai/data/transform.py`, then `konfai/data/augmentation.py` |
+   | transforms | `konfai/data/transform/` (one module per family), then `konfai/data/augmentation.py` |
    | augmentations | `konfai/data/augmentation.py` |
    | models | `konfai/models/python/**` |
    | learning-rate schedulers | `torch.optim.lr_scheduler` **first**, then `konfai/metric/schedulers.py` |

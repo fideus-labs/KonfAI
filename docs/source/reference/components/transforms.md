@@ -4,7 +4,7 @@ See the {doc}`../../examples/visual-gallery` for before/after images generated b
 the actual transform implementations.
 
 Transforms are **deterministic** pre/post-processing steps in
-`konfai/data/transform.py`. They run every time (train / predict / evaluate / transform),
+`konfai/data/transform/`. They run every time (train / predict / evaluate / transform),
 either whole-image at load time (`transforms:`) or per extracted patch
 (`patch_transforms:`), under a dataset group:
 

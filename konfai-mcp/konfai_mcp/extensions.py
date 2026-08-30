@@ -44,7 +44,7 @@ YAML_REFERENCE_SYNTAX = {
 }
 
 # Curated, code-grounded extension contract per kind (see konfai/metric/measure.py, konfai/network/network.py,
-# konfai/data/transform.py, konfai/data/augmentation.py, konfai/metric/schedulers.py, AGENTS.md section 7c).
+# konfai/data/transform/, konfai/data/augmentation.py, konfai/metric/schedulers.py, AGENTS.md section 7c).
 EXTENSION_POINTS: dict[str, dict[str, Any]] = {
     "loss": {
         "base_class": "konfai.metric.measure:Criterion",
