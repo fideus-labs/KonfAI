@@ -30,14 +30,11 @@ from konfai.utils.utils import (
     split_path_spec,
     storage_form,
 )
+from oracle_support import geometry
 
 
 def _image_attributes() -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray([10.0, 20.0, 30.0])
-    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
-    attributes["Direction"] = np.eye(3, dtype=np.float64).flatten()
-    return attributes
+    return geometry((10.0, 20.0, 30.0), (0.5, 1.5, 2.0))
 
 
 def test_flatten_transforms_recurses_into_nested_composites() -> None:

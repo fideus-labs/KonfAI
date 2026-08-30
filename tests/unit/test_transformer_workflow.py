@@ -28,6 +28,7 @@ from konfai.data.transform import Reduce
 from konfai.utils.budget import BUDGET_SHARES, format_bytes, set_per_rank_budget
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformerError
+from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
 
@@ -51,11 +52,7 @@ def _workflow_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _image_attributes() -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray([10.0, 20.0, 30.0])
-    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
-    attributes["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attributes
+    return geometry((10.0, 20.0, 30.0), (0.5, 1.5, 2.0))
 
 
 def _write_source(tmp_path: Path, cases: int = 2) -> Path:

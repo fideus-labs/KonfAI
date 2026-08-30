@@ -50,6 +50,7 @@ from konfai.utils.clock import restart_startup_clock
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.runtime import State
 from konfai.utils.utils import split_path_spec
+from oracle_support import geometry
 from torch.utils.data._utils.pin_memory import pin_memory as torch_pin_memory
 
 # --------------------------------------------------------------------------------------
@@ -366,11 +367,7 @@ def test_cache_worker_count_never_drops_below_one() -> None:
 
 
 def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray(origin, dtype=np.float64)
-    attributes["Spacing"] = np.asarray(spacing, dtype=np.float64)
-    attributes["Direction"] = np.eye(len(origin), dtype=np.float64).reshape(-1)
-    return attributes
+    return geometry(origin, spacing)
 
 
 def test_streaming_tensorcast_persists_source_dtype_for_inverse(streaming_dataset_stub) -> None:

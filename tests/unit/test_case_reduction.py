@@ -59,16 +59,13 @@ from konfai.data.transform import (
 from konfai.utils.budget import BUDGET_SHARES
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ReductionError, TransformError
+from oracle_support import geometry
 
 CASES = 4  # even on purpose: an even cases is where a lower-median would show
 
 
 def _attributes(spacing: tuple[float, float, float] = (1.0, 1.0, 2.0)) -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
-    attribute["Spacing"] = np.asarray(list(spacing))
-    attribute["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attribute
+    return geometry(spacing=spacing)
 
 
 def _cohort(

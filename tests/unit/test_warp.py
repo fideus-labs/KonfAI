@@ -30,6 +30,7 @@ from konfai.data.transform import LocalityKind, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 from konfai.utils.ome_zarr import _zarr_v3_available
+from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
 
@@ -44,11 +45,7 @@ SPACING = (2.0, 1.0, 1.0)  # (x, y, z) SimpleITK order
 
 
 def _attributes() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
-    attribute["Spacing"] = np.asarray(list(SPACING))
-    attribute["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attribute
+    return geometry(spacing=SPACING)
 
 
 def _fixture(

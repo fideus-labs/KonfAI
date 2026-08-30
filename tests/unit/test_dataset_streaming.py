@@ -60,17 +60,14 @@ from konfai.utils import dataset as dataset_module
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import State
+from oracle_support import geometry
 
 SimpleITK = pytest.importorskip("SimpleITK")
 h5py = pytest.importorskip("h5py")
 
 
 def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray(origin, dtype=np.float64)
-    attributes["Spacing"] = np.asarray(spacing, dtype=np.float64)
-    attributes["Direction"] = np.eye(len(origin), dtype=np.float64).reshape(-1)
-    return attributes
+    return geometry(origin, spacing)
 
 
 def test_dataset_read_data_slice_h5_reads_only_requested_region(tmp_path: Path) -> None:

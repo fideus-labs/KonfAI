@@ -43,6 +43,7 @@ from konfai.data.patching import (
 from konfai.data.transform import OneHot, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset, _store_chunks
 from konfai.utils.errors import DatasetManagerError
+from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
 
@@ -50,11 +51,7 @@ SPACING = (1.0, 1.0, 1.0)  # (x, y, z) SimpleITK order
 
 
 def _attributes(direction: np.ndarray | None = None) -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
-    attribute["Spacing"] = np.asarray(list(SPACING))
-    attribute["Direction"] = (np.eye(3) if direction is None else direction).astype(np.float64).reshape(-1)
-    return attribute
+    return geometry(spacing=SPACING, direction=direction)
 
 
 #: The landing, and the height rule these tests pin, chosen so the two decompositions are far apart:

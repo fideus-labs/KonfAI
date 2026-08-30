@@ -39,6 +39,7 @@ from konfai.data import (
 from konfai.data.transform import Transform
 from konfai.utils.dataset import Attribute, Dataset, _store_chunks
 from konfai.utils.errors import DatasetManagerError
+from oracle_support import geometry
 
 
 def _volume(dtype: str = "<f4") -> np.ndarray:
@@ -263,11 +264,7 @@ def test_a_writer_that_declares_nothing_leaves_the_store_its_own_default() -> No
 
 
 def _attributes() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
-    attribute["Spacing"] = np.asarray([1.0, 1.0, 1.0])
-    attribute["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attribute
+    return geometry()
 
 
 # ---------------------------------------------------------------- what a declared read plan buys

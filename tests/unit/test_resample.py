@@ -29,6 +29,7 @@ from konfai.data.transform import (
     Resample,
 )
 from konfai.utils.dataset import Attribute
+from oracle_support import geometry
 
 sitk = pytest.importorskip("SimpleITK")
 
@@ -37,11 +38,7 @@ _SHAPE = (24, 30, 32)
 
 
 def _attributes(origin=None, spacing=None, direction=None) -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray(_ORIGIN if origin is None else origin, dtype=np.float64)
-    attribute["Spacing"] = np.asarray(_SPACING if spacing is None else spacing, dtype=np.float64)
-    attribute["Direction"] = (np.eye(3) if direction is None else direction).reshape(-1)
-    return attribute
+    return geometry(_ORIGIN if origin is None else origin, _SPACING if spacing is None else spacing, direction)
 
 
 def _volume(shape=_SHAPE, seed: int = 0) -> np.ndarray:

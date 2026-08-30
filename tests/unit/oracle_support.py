@@ -30,6 +30,7 @@ seed, which is how the oracle varies rank and geometry without varying anything 
 
 import inspect
 import types
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -328,6 +329,22 @@ def _field(geometry: Geometry) -> np.ndarray:
         shape[axis] = geometry.field_extents[axis]
         components.append(amplitude * wave.reshape(shape) * np.ones(geometry.field_extents))
     return np.stack(components).astype(np.float32)
+
+
+def geometry(
+    origin: Sequence[float] = (0.0, 0.0, 0.0),
+    spacing: Sequence[float] = (1.0, 1.0, 1.0),
+    direction: np.ndarray | Sequence[float] | None = None,
+) -> Attribute:
+    """The stored geometry of a volume: ``(x, y, z)`` origin and spacing, a flattened direction
+    (identity when not given)."""
+    attribute = Attribute()
+    attribute["Origin"] = np.asarray(origin, dtype=np.float64)
+    attribute["Spacing"] = np.asarray(spacing, dtype=np.float64)
+    attribute["Direction"] = (
+        (np.eye(len(origin)) if direction is None else np.asarray(direction)).astype(np.float64).reshape(-1)
+    )
+    return attribute
 
 
 def attributes(geometry: Geometry, group: str) -> Attribute:

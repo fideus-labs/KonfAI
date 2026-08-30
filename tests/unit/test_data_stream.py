@@ -25,16 +25,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 from konfai.utils.dataset import Attribute, Dataset, is_staging_entry
+from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
 
 
 def _image_attributes() -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray([10.0, 20.0, 30.0])
-    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
-    attributes["Direction"] = np.asarray([1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0])
-    return attributes
+    return geometry((10.0, 20.0, 30.0), (0.5, 1.5, 2.0), [1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0])
 
 
 def _volume(channels: int = 2, dtype: type = np.float32) -> np.ndarray:

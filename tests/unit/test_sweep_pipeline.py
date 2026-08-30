@@ -43,6 +43,7 @@ from konfai.data.patching import (
 from konfai.data.transform import Clip, LocalityKind, PatchLocality, RegionContext, Resample, Save, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
+from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
 
@@ -185,11 +186,7 @@ def test_write_behind_raises_what_the_write_raised() -> None:
 
 
 def _attributes() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([10.0, 20.0, 30.0])
-    attribute["Spacing"] = np.asarray([0.5, 1.5, 2.0])
-    attribute["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attribute
+    return geometry((10.0, 20.0, 30.0), (0.5, 1.5, 2.0))
 
 
 def _manager(source: Dataset, transforms: list, out: Path) -> DatasetManager:

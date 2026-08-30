@@ -31,17 +31,14 @@ pytest.importorskip("h5py")
 
 from konfai.utils.dataset import Attribute, Dataset  # noqa: E402
 from konfai.utils.errors import DatasetManagerError  # noqa: E402
+from oracle_support import geometry  # noqa: E402
 
 _ORIGIN, _SPACING = [7.0, -3.0, 10.0], [1.5, 1.5, 2.0]
 _DIRECTION = [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
 
 def _attributes() -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray(_ORIGIN)
-    attributes["Spacing"] = np.asarray(_SPACING)
-    attributes["Direction"] = np.asarray(_DIRECTION)
-    return attributes
+    return geometry(_ORIGIN, _SPACING, _DIRECTION)
 
 
 def _field(seed: int = 0) -> np.ndarray:
