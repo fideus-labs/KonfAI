@@ -40,6 +40,7 @@ from konfai.data import augmentation as augmentation_module
 from konfai.data import transform as transform_module
 from konfai.data.augmentation import DataAugmentation
 from konfai.data.augmentation import Flip as FlipAugmentation
+from konfai.data.data_manager import DatasetManager, DatasetPatch
 from konfai.data.transform import (
     Argmax,
     Canonical,
@@ -329,6 +330,27 @@ def _field(geometry: Geometry) -> np.ndarray:
         shape[axis] = geometry.field_extents[axis]
         components.append(amplitude * wave.reshape(shape) * np.ones(geometry.field_extents))
     return np.stack(components).astype(np.float32)
+
+
+def manager(
+    dataset: Dataset,
+    transforms: list[Transform],
+    group: str = "CT",
+    name: str = CASE_NAME,
+    patch: DatasetPatch | None = None,
+    index: int = 0,
+) -> DatasetManager:
+    """One case's manager over ``dataset``: the same group in and out, no augmentation."""
+    return DatasetManager(
+        index=index,
+        group_src=group,
+        group_dest=group,
+        name=name,
+        dataset=dataset,
+        patch=patch,
+        transforms=transforms,
+        data_augmentations_list=[],
+    )
 
 
 def geometry(

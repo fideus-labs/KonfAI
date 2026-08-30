@@ -80,6 +80,7 @@ from oracle_support import (
     StageCase,
     attributes,
     build_case,
+    manager,
     seeded_geometry,
     streamable_cases,
     volumes,
@@ -157,16 +158,7 @@ def _sweep_height(manager: DatasetManager, segments: Sequence[SweepSegment]) -> 
 
 
 def _manager(dataset: Dataset, group: str, chain: list[Transform], name: str = CASE_NAME) -> DatasetManager:
-    return DatasetManager(
-        index=0,
-        group_src=group,
-        group_dest=group,
-        name=name,
-        dataset=dataset,
-        patch=None,
-        transforms=chain,
-        data_augmentations_list=[],
-    )
+    return manager(dataset, chain, group=group, name=name)
 
 
 @dataclass(frozen=True)

@@ -43,7 +43,7 @@ from konfai.data.patching import (
 from konfai.data.transform import Clip, LocalityKind, PatchLocality, RegionContext, Resample, Save, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
-from oracle_support import geometry
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
@@ -191,16 +191,7 @@ def _attributes() -> Attribute:
 
 def _manager(source: Dataset, transforms: list, out: Path) -> DatasetManager:
     del out
-    return DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=source,
-        patch=DatasetPatch([4, 5, 4]),
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(source, transforms, name="CASE_000", patch=DatasetPatch([4, 5, 4]))
 
 
 def _sweep_into(tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch, depth: int) -> np.ndarray:

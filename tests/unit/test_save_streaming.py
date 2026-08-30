@@ -27,7 +27,7 @@ import torch
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Clip, Permute, Save, Standardize, Transform
 from konfai.utils.dataset import Attribute, Dataset
-from oracle_support import geometry
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
@@ -45,15 +45,8 @@ def _source(tmp_path: Path) -> Dataset:
 
 
 def _manager(source: Dataset, transforms: list[Transform], patch_size: list[int] | None = None) -> DatasetManager:
-    return DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=source,
-        patch=DatasetPatch(patch_size if patch_size is not None else [4, 5, 4]),
-        transforms=transforms,
-        data_augmentations_list=[],
+    return manager(
+        source, transforms, name="CASE_000", patch=DatasetPatch(patch_size if patch_size is not None else [4, 5, 4])
     )
 
 

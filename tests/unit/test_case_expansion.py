@@ -35,7 +35,7 @@ from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Expand, Mask, Resample, Save, TensorCast, Transform, Write, split_expand
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PatchError, TransformError
-from oracle_support import geometry
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
@@ -64,16 +64,7 @@ def _drawn_scales(augmentation: Scale, index: int = 0) -> list[torch.Tensor]:
 
 
 def _manager(source: Dataset, transforms: list[Transform], name: str = "CASE_000", index: int = 0) -> DatasetManager:
-    return DatasetManager(
-        index=index,
-        group_src="CT",
-        group_dest="CT",
-        name=name,
-        dataset=source,
-        patch=None,
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(source, transforms, name=name, index=index)
 
 
 # --------------------------------------------------------------------- the marker

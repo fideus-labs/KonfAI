@@ -43,7 +43,7 @@ from konfai.data.patching import (
 from konfai.data.transform import OneHot, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset, _store_chunks
 from konfai.utils.errors import DatasetManagerError
-from oracle_support import geometry
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
@@ -88,16 +88,7 @@ def _sweep_plans(manager: DatasetManager):
 
 
 def _manager(source: Dataset, transforms: list) -> DatasetManager:
-    return DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=source,
-        patch=DatasetPatch([4, 5, 4]),
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(source, transforms, name="CASE_000", patch=DatasetPatch([4, 5, 4]))
 
 
 # ---------------------------------------------------------------- the block itself

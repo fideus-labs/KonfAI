@@ -30,7 +30,7 @@ from konfai.data.transform import LocalityKind, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 from konfai.utils.ome_zarr import _zarr_v3_available
-from oracle_support import geometry
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
@@ -67,16 +67,7 @@ def _fixture(
 
 
 def _manager(source: Dataset, transforms: list) -> DatasetManager:
-    return DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=source,
-        patch=None,
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(source, transforms, name="CASE_000")
 
 
 def _recorded(warp: Resample, attribute: Attribute | None = None, shape: tuple[int, ...] = (10, 12, 14)) -> Resample:

@@ -41,7 +41,16 @@ from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Write
 from konfai.utils.dataset import Dataset
-from oracle_support import CASE_NAME, FIXED_GEOMETRY, StageCase, attributes, build_case, streamable_cases, volumes
+from oracle_support import (
+    CASE_NAME,
+    FIXED_GEOMETRY,
+    StageCase,
+    attributes,
+    build_case,
+    manager,
+    streamable_cases,
+    volumes,
+)
 
 
 @pytest.fixture(scope="session")
@@ -87,16 +96,7 @@ def _cases() -> list[StageCase]:
 
 def _manager(dataset: Dataset, case: StageCase, out: Path, fmt: str) -> DatasetManager:
     case.transform.set_datasets([dataset])
-    return DatasetManager(
-        index=0,
-        group_src=case.group,
-        group_dest=case.group,
-        name=CASE_NAME,
-        dataset=dataset,
-        patch=None,
-        transforms=[case.transform, Write(f"{out}:{fmt}")],
-        data_augmentations_list=[],
-    )
+    return manager(dataset, [case.transform, Write(f"{out}:{fmt}")], group=case.group)
 
 
 @pytest.mark.parametrize("fmt", ["mha", "omezarr"])
