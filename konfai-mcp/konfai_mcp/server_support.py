@@ -28,6 +28,7 @@ from typing import Any
 
 import numpy as np
 
+from .classpaths import public_module
 from .config_io import YAML_DUMP as YAML_DUMP
 from .config_io import YAML_SAFE
 from .config_io import _lint_config_data as _lint_config_data
@@ -809,7 +810,7 @@ def _imported_object_extras(obj: Any) -> dict[str, Any]:
     extras: dict[str, Any] = {"bases": [], "forward": None, "konfai_base": None, "integration_hint": None}
     if not inspect.isclass(obj):
         return extras
-    mro = [f"{cls.__module__}.{cls.__qualname__}" for cls in obj.__mro__ if cls is not object]
+    mro = [f"{public_module(cls)}.{cls.__qualname__}" for cls in obj.__mro__ if cls is not object]
     extras["bases"] = mro
     extras["konfai_base"] = next(
         (_KONFAI_COMPONENT_BASES[name] for name in mro if name in _KONFAI_COMPONENT_BASES), None
