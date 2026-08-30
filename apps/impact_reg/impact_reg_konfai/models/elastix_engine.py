@@ -217,8 +217,17 @@ class ElastixEngine:
                             replaced = " ".join(per_token[token_key] for _ in values.split())
                             line = f"{indent}({key} {replaced})"
             lines.append(line)
-        # Overrides never inject keys, so a knob set for a key absent from every map silently does nothing: #
-        # surface it (e.g. final_grid_spacing on a rigid-only preset).
+        # A raw ``parameter_overrides`` entry is the escape hatch for ANY elastix parameter, including one
+        # the preset's map never mentions (an ITK default such as RequiredRatioOfValidSamples). Replacing
+        # only pre-existing keys made those silently do nothing, so an absent exact override is APPENDED.
+        # The named knobs (final_grid_spacing, spatial_samples, ...) keep replacing what exists and only
+        # warn: injecting them into a map that does not use them is meaningless (e.g. a B-spline grid
+        # spacing in a rigid-only preset).
+        missing_exact = [(key, value) for key, value in exact if key not in seen]
+        if missing_exact:
+            lines.append("// appended by impact_reg_konfai parameter_overrides")
+            lines += [f"({key} {value})" for key, value in missing_exact]
+            seen.update(key for key, _ in missing_exact)
         for key in sorted(requested - seen):
             print(f"[ImpactReg] note: override '{key}' matched no entry in the preset's parameter maps.")
         return "\n".join(lines)
@@ -422,8 +431,6 @@ class ElastixRegistration(torch.nn.Module):
             moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
             fixed_mask_img = data_to_image(fixed_mask[b].detach().cpu().numpy(), fmask_attrs[b])
             moving_mask_img = data_to_image(moving_mask[b].detach().cpu().numpy(), mmask_attrs[b])
-            dvf_np = self._engine.register(
-                fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img
-            )
+            dvf_np = self._engine.register(fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img)
             combined.append(torch.from_numpy(dvf_np))
         return torch.stack(combined, dim=0).to(fixed.device)
