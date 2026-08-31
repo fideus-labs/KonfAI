@@ -604,6 +604,17 @@ class CaseReduction:
     # keeps a reserve for the same reason (Predictor._ACCUMULATE_MARGIN): the measurement is of the
     # region that just ran, and the next one meets an allocator in a different state.
     _MEASURED_MARGIN = 0.9
+    #: The probe's share of the planned height. The probe is the one region that runs BEFORE any
+    #: measurement can bound it, so it is the one region that must not be able to kill the run on
+    #: its own. At the planned height it could: a fold over registration fields held 1.42x, 1.47x
+    #: and 1.50x what its first region was allowed at three budgets, and at an `auto` budget of 77
+    #: GiB that first region reached 90 GiB resident on a 122 GiB host, and the host went down
+    #: before the probe could read anything. The host gives no OutOfMemoryError to catch: the
+    #: kernel kills. A quarter-height probe overshooting by the same 1.5x holds 0.4 of the budget,
+    #: which is survivable, and the ratio it measures is the same one -- the halo does not shrink
+    #: with the region, so a short region over-holds by MORE than a tall one, and a refit from it
+    #: is conservative. Its price is one extra region: seconds, on a fold of minutes.
+    _PROBE_SHARE = 0.25
 
     def _folds(self, spatial: list[int], measure: bool = False):
         """Every region's fold, in order: the loop both passes share.
@@ -619,7 +630,11 @@ class CaseReduction:
         """
         start, refitted = 0, not measure
         while start < int(spatial[0]):
-            stop = min(start + self.slab_rows, int(spatial[0]))
+            # The probe is SHORT. Every later region is cut against what it measured; the probe
+            # itself is cut against nothing, so it is sized so that its own overshoot cannot
+            # reach the host's limit (_PROBE_SHARE).
+            rows = self.slab_rows if refitted else max(1, int(self.slab_rows * self._PROBE_SHARE))
+            stop = min(start + rows, int(spatial[0]))
             region = (slice(start, stop), *(slice(0, extent) for extent in spatial[1:]))
             # Only around the region that is actually the probe. The host meter RESETS the
             # process's resident high-water mark to take its reading, and that mark is what the
@@ -643,26 +658,37 @@ class CaseReduction:
         bounds the next one from above, exactly as the predictor's gate reads a forward's transient
         from the batch that just ran (:meth:`Predictor._accumulate_device`).
 
-        Against the BUDGET, not the share the sizing aims at: a share is how a height is chosen,
-        and what must not be exceeded is the whole declaration. This exists to prevent a kill, not
-        to shave bytes -- and it cannot shave many, since the region that set the peak has already
-        run and cutting the rest never undoes it. What it catches is a LATER region holding more
-        than the first: a case with a wider halo, a region touching more chunks.
+        Against the whole declaration LESS the chunk cache's share, because that is what the
+        reading covers. A share is how a height is chosen and what must not be exceeded is the
+        declaration -- but the meter no longer counts the decoded-chunk cache (it outlives the
+        region, and charging the region for it cut every region after the probe), so the cache's
+        bytes have to come off the other side of the comparison too. Judged against the whole
+        budget, a reading that excludes the cache lets the cache be spent twice: once inside the
+        allowance, and again by the cache itself. This exists to prevent a kill, not to shave
+        bytes. The probe is a short region (_PROBE_SHARE), so what it held is scaled to
+        the planned height before it is judged: a probe that held its share of the budget says the
+        full region would hold the budget, and a probe that held more says the full region would
+        be the kill this exists to prevent. Only ever shorter: a probe that came in under its
+        share does not talk the fold into a taller region than the plan allowed.
         """
         del spatial
         held = meter.held() if meter is not None else None
         if held is None or not self._budget_bytes or self._budget_bytes <= 0 or rows <= 0 or held <= 0:
             return
-        allowed = float(self._budget_bytes) * self._MEASURED_MARGIN
-        if held <= allowed:
+        cache = budget_share("cache", self._budget_bytes) or 0.0
+        allowed = (float(self._budget_bytes) - cache) * self._MEASURED_MARGIN
+        # What the FULL region would hold, from what the probe held: the halo is a fixed cost the
+        # probe paid in full, so scaling by height over-estimates, which is the safe direction.
+        projected = held * (self.slab_rows / float(rows))
+        if projected <= allowed:
             return
-        fitted = max(1, int(rows * allowed / held))
+        fitted = max(1, int(self.slab_rows * allowed / projected))
         if fitted >= self.slab_rows:
             return
         print(
-            f"[Reduce] '{self.reduce.output}': first region held {format_bytes(held)} of the"
-            f" {format_bytes(allowed)} its {rows} row(s) may hold --"
-            f" the rest are cut to {fitted} row(s).",
+            f"[Reduce] '{self.reduce.output}': a {rows}-row probe held {format_bytes(held)}, so the planned"
+            f" {self.slab_rows} row(s) would hold {format_bytes(projected)} of the {format_bytes(allowed)}"
+            f" allowed -- the rest are cut to {fitted} row(s).",
             flush=True,
         )
         self.slab_rows = fitted

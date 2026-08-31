@@ -438,6 +438,32 @@ def test_a_case_that_never_meets_the_reference_is_refused(tmp_path: Path) -> Non
         _stage(dataset).transform_shape("Case", _CASE, list(_SOURCE_SPATIAL), source)
 
 
+def test_a_case_apart_says_nothing_about_coverage_when_a_field_bridges_it(tmp_path: Path) -> None:
+    """The plan's note and the refusal read the same coverage, so they take the same exemption.
+
+    A field's reach is known only when its values are read, and the plan reads none -- it prices
+    the field at the identity. The refusal has always stood aside for that (bridging two frames is
+    what a field is for). The note did not, and said the opposite of the truth: on a ten-member
+    ExaSPIM build whose fields bridge a 20 mm gap, it called one member 0.0% covered and everything
+    it wrote fill, while the run read that member in full and the template carried its anatomy.
+    """
+    dataset = Dataset(tmp_path / "Apart", "mha")
+    source = _attributes([1000.0, 1000.0, 1000.0], _SOURCE_SPACING)
+    dataset.write("Case", _CASE, _volume(_SOURCE_SPATIAL), source)
+    dataset.write(
+        "Reference", _CASE, _volume(_REFERENCE_SPATIAL, 1), _attributes(_REFERENCE_ORIGIN, _REFERENCE_SPACING)
+    )
+    fields = Dataset(tmp_path / "dvf", "mha")
+    fields.write("DVF", _CASE, np.zeros((3, *_SOURCE_SPATIAL), np.float32), source)
+    stage = Resample(reference=_CASE, reference_group="Reference", field=f"{tmp_path / 'dvf'}:mha", field_group="DVF")
+    stage.set_datasets([dataset])
+
+    # The same geometry the refusal above raises on, now with a field configured.
+    stage.transform_shape("Case", _CASE, list(_SOURCE_SPATIAL), source)
+    note = stage.plan_note("Case_out", _CASE, list(_SOURCE_SPATIAL), source)
+    assert note is None or "covers" not in note, f"a field-bridged case must not be given a coverage: {note}"
+
+
 def test_an_unknown_entry_is_refused(dataset: Dataset) -> None:
     stage = Resample(reference="NOT_THERE", reference_group="Reference")
     stage.set_datasets([dataset])

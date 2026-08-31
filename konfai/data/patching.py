@@ -406,7 +406,25 @@ def open_held_meter(device: "torch.device | None") -> HeldMeter | None:
     if not reset_resident_peak():
         return None
     resident = resident_bytes()
-    return None if resident is None else HeldMeter(peak_resident_bytes, int(resident))
+    if resident is None:
+        return None
+    # THE CACHE IS NOT THE SCOPE'S. A host peak is the whole process's high-water mark, and the
+    # decoded-chunk cache sits inside it: a scope that reads from a store fills the cache on its
+    # way, and the cache keeps what it decoded past the scope, for the next one. Charging the scope
+    # for that is charging it for a budget line that has its own share (BUDGET_SHARES['cache']).
+    # Measured on a fold's probe over ten native members: 24.4 GiB read, 13.2 of it the cache
+    # filling from empty, and the fold cut to 78 % of the height its regions actually needed.
+    from konfai.utils.ome_zarr import chunk_cache_held_bytes
+
+    cache_at_start = chunk_cache_held_bytes()
+
+    def resident_peak_less_cache() -> int | None:
+        peak = peak_resident_bytes()
+        if peak is None:
+            return None
+        return peak - max(0, chunk_cache_held_bytes() - cache_at_start)
+
+    return HeldMeter(resident_peak_less_cache, int(resident))
 
 
 def save_destination(save: Save, default_dataset: Dataset, default_group: str) -> tuple[Dataset, str]:

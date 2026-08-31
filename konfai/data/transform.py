@@ -47,6 +47,7 @@ from konfai.data.geometry import (
     Grid,
     SpatialStages,
     TransformBound,
+    WorldBox,
     bound_of,
 )
 from konfai.data.reduction import Reduction
@@ -1405,6 +1406,54 @@ class _SitkInput:
         self._image = self._key = None
 
 
+def _warp_field_float32(stages: SpatialStages, region: Grid) -> "Any | None":
+    """The one displacement this whole map is, as a float32 vector image on ``region`` -- or None.
+
+    ``sitk.Warp`` is templated on the field's own type, where ``DisplacementFieldTransform`` is
+    not: SimpleITK's transform hierarchy is ``TransformBaseTemplate<double>``, so a field handed to
+    a transform is cast to float64 whatever it was read as, and interleaved into a vector image at
+    that width. On a 122-row native region that is 6.9 GiB built in 5.0 s, 39% of everything the
+    member-region costs -- for a field that came off the store as float32 and whose values fit it
+    exactly.
+
+    Taken only where it changes no value. The field must ALREADY be float32 -- which is what
+    ``precision: fast`` reads, and what a store written in float32 holds either way -- because
+    narrowing a genuine float64 field is a different map, not a cheaper one (pinned: on a field
+    carrying float64 values the two routes disagree). Warp also evaluates the displacement on the
+    OUTPUT grid rather than interpolating it at the target point, so it stands in only where the
+    field IS the output grid, and only where the field is the whole map: one order-1 stage, no
+    affine beside it, nothing to compose. Anything else keeps the composite path.
+
+    Verified bit-identical on two ExaSPIM members at 89% and 98% real coverage (max |diff| 0 over
+    the region), 1.3x faster end to end, and the field's buffer halves.
+    """
+    from konfai.data.geometry import DisplacementStage
+
+    if len(stages) != 1:
+        return None
+    stage = stages[0]
+    if not isinstance(stage, DisplacementStage) or stage.order != 1:
+        return None
+    if stage.values.dtype != np.float32:
+        return None
+    grid = stage.grid
+    if (
+        tuple(grid.size_zyx) != tuple(region.size_zyx)
+        or not np.allclose(grid.origin_xyz, region.origin_xyz, rtol=0.0, atol=1e-9)
+        or not np.allclose(grid.spacing_xyz, region.spacing_xyz, rtol=0.0, atol=1e-9)
+        or not np.allclose(grid.direction_xyz, region.direction_xyz, rtol=0.0, atol=1e-9)
+    ):
+        return None
+    components = [
+        sitk.GetImageFromArray(np.ascontiguousarray(stage.values[component])) for component in range(grid.rank)
+    ]
+    field = sitk.Compose(components)
+    field.SetOrigin(np.asarray(grid.origin_xyz, dtype=np.float64).tolist())
+    field.SetSpacing(np.asarray(grid.spacing_xyz, dtype=np.float64).tolist())
+    field.SetDirection(np.asarray(grid.direction_xyz, dtype=np.float64).ravel().tolist())
+    return field
+
+
 def _resample_with_sitk(
     payload: torch.Tensor,
     region: Grid,
@@ -1433,7 +1482,14 @@ def _resample_with_sitk(
     if mode == "cubic":
         return None  # ITK's BSpline is not Keys' Catmull-Rom: the walk keeps its own cubic
     rank = source.rank
-    transform = encode_transform_stages(stages) if stages else sitk.Transform(rank, sitk.sitkIdentity)
+    # A map that is one field ON the output grid is applied by the filter templated on the field's
+    # own type, never by one that casts it to float64 to hold it (:func:`_warp_field_float32`).
+    warp_field = _warp_field_float32(stages, region) if stages else None
+    transform = (
+        None
+        if warp_field is not None
+        else (encode_transform_stages(stages) if stages else sitk.Transform(rank, sitk.sitkIdentity))
+    )
     # The window's own origin: the source origin moved by the window's start along each axis.
     start_index = np.asarray(list(reversed(region_starts)), dtype=np.float64)  # (x, y, z)
     window_origin = source.index_to_world.apply(start_index)
@@ -1445,7 +1501,8 @@ def _resample_with_sitk(
     resampler.SetOutputOrigin(np.asarray(region.origin_xyz, dtype=np.float64).tolist())
     resampler.SetOutputSpacing(np.asarray(region.spacing_xyz, dtype=np.float64).tolist())
     resampler.SetOutputDirection(np.asarray(region.direction_xyz, dtype=np.float64).ravel().tolist())
-    resampler.SetTransform(transform)
+    if transform is not None:
+        resampler.SetTransform(transform)
     resampler.SetInterpolator(interpolator[mode])
     resampler.SetDefaultPixelValue(float(fill))
     # A blend interpolates in the dtype the walk accumulates in, and torch makes the final cast:
@@ -1471,9 +1528,26 @@ def _resample_with_sitk(
         image.SetOrigin(np.asarray(window_origin, dtype=np.float64).tolist())
         image.SetSpacing(np.asarray(source.spacing_xyz, dtype=np.float64).tolist())
         image.SetDirection(np.asarray(source.direction_xyz, dtype=np.float64).ravel().tolist())
-        resampler.SetOutputPixelType(image.GetPixelID() if mode == "nearest" else blend_pixel_id)
+        pixel_id = image.GetPixelID() if mode == "nearest" else blend_pixel_id
         # Held: a view borrows the image's buffer, and a temporary's is freed under it.
-        resampled = resampler.Execute(image)
+        if warp_field is not None:
+            # Warp answers in its INPUT's type where the resampler is asked for an output type, so
+            # the blend's dtype is carried in rather than requested. ITK interpolates in double
+            # from either, and float32 carries a uint16 payload exactly, so the values are the
+            # ones the resampler would have written (pinned in test_resample_transform.py).
+            resampled = sitk.Warp(
+                image if image.GetPixelID() == pixel_id else sitk.Cast(image, pixel_id),
+                warp_field,
+                interpolator[mode],
+                [int(e) for e in reversed(region.size_zyx)],
+                np.asarray(region.origin_xyz, dtype=np.float64).tolist(),
+                np.asarray(region.spacing_xyz, dtype=np.float64).tolist(),
+                np.asarray(region.direction_xyz, dtype=np.float64).ravel().tolist(),
+                float(fill),
+            )
+        else:
+            resampler.SetOutputPixelType(pixel_id)
+            resampled = resampler.Execute(image)
         np.copyto(landing[channel], sitk.GetArrayViewFromImage(resampled), casting="unsafe")
     return result
 
@@ -1492,6 +1566,9 @@ class _StoredMap:
 
     bound: TransformBound
     affine: bool
+    #: Whether a dense field member was priced as the identity rather than bounded. The plan cannot
+    #: bound one from headers, so the run measures its window from the values it samples anyway.
+    field: bool = False
 
 
 def _stages_bytes(stages: SpatialStages) -> int:
@@ -1512,10 +1589,11 @@ def _stages_bytes(stages: SpatialStages) -> int:
 #: the run.
 _FIELD_WINDOW_COPIES = 3.0
 
-#: What one element of a decoded field weighs. It is read as float64 whatever the store holds
-#: (:meth:`_DisplacementSource.read`), while the plan counts its volumes at
-#: :data:`~konfai.data.patching._SWEEP_ELEMENT_BYTES`: the ratio is what a field window costs in the
-#: currency the plan is written in.
+#: What one element of a decoded field weighs under the bit-exact walk: read as float64 whatever
+#: the store holds (:meth:`_DisplacementSource.read`), while the plan counts its volumes at
+#: :data:`~konfai.data.patching._SWEEP_ELEMENT_BYTES`: the ratio is what a field window costs in
+#: the currency the plan is written in. Under ``precision: fast`` the field is held in float32 and
+#: weighs half (:meth:`Resample._field_element_bytes`).
 _FIELD_ELEMENT_BYTES = 8
 
 
@@ -1627,7 +1705,9 @@ class Resample(TransformInverse):
                 "'exact' (the default) walks coordinates in float64, bit-identical to"
                 " sitk.Resample. 'fast' lets the device walk in float32: half the bytes and about"
                 " twice the rows per slab, at ~|world|/2^24 of coordinate error -- for INTENSITY"
-                " resamples only (on the host ITK's own resampler is used either way)."
+                " resamples only. On the host it holds a stored field at float32 and applies it"
+                " with sitk.Warp instead of a float64 transform, which for a field STORED in"
+                " float32 is the same answer to the bit and half the field's memory."
                 " A nearest pick that lands within that band of a voxel boundary picks the other"
                 " voxel, so a label map must stay 'exact'.",
             )
@@ -1656,7 +1736,8 @@ class Resample(TransformInverse):
         self._maps: dict[str, _StoredMap] = {}
         #: The decoded stages of the last cases sampled, most recent last, within
         #: ``stored_stage_bytes``. Not pickled: a rank decodes what it samples, not the cohort.
-        self._stored: OrderedDict[str, SpatialStages] = OrderedDict()
+        # Keyed on (case, box): a field read for one region answers for that region alone.
+        self._stored: OrderedDict[tuple, SpatialStages] = OrderedDict()
         #: The last field window read, kept for the sampler: sizing a region's source window reads
         #: the very field slab the sampler needs next, so one slot makes the two one read.
         self._field_window: tuple[str, object, DisplacementStage] | None = None
@@ -1676,6 +1757,8 @@ class Resample(TransformInverse):
     #: bytes each) and the dense fields of the last two or three, so a fold reading N members per
     #: region does not decode a member per region.
     stored_stage_bytes = 512 << 20
+    #: Region-keyed entries kept at once: an all-affine map prices zero bytes and would never evict.
+    stored_stage_slots = 64
 
     @staticmethod
     def _target_from(
@@ -1813,19 +1896,25 @@ class Resample(TransformInverse):
 
     # ------------------------------------------------------------------ the map
 
-    def _stored_stages(self, name: str) -> SpatialStages:
+    def _stored_stages(self, name: str, box: WorldBox | None = None) -> SpatialStages:
         """This case's stored transforms, decoded and composed, in application order.
 
         The last cases' stages are held, most recent last, within ``stored_stage_bytes``: a run
         samples its cases one after the other, a fold reads its members region by region, and
         a loader interleaving cases through a dense field decodes at each switch past the bound.
+
+        KEYED ON THE BOX, because a region's stages are not the case's. A field read for one region
+        answers for that region and no other, so a second region asking with the same case name
+        would otherwise be handed the first one's window and sample outside it -- the border value,
+        silently, where the values it needed were on disk all along.
         """
-        stages = self._stored.pop(name, None)
+        key = (name, None if box is None else (tuple(box.low_xyz), tuple(box.high_xyz)))
+        stages = self._stored.pop(key, None)
         if stages is None:
-            stages = self._decode_stored(name)
-        self._stored[name] = stages
+            stages = self._decode_stored(name, box)
+        self._stored[key] = stages
         held = sum(_stages_bytes(kept) for kept in self._stored.values())
-        while len(self._stored) > 1 and held > self.stored_stage_bytes:
+        while len(self._stored) > 1 and (held > self.stored_stage_bytes or len(self._stored) > self.stored_stage_slots):
             held -= _stages_bytes(self._stored.popitem(last=False)[1])
         return stages
 
@@ -1833,17 +1922,53 @@ class Resample(TransformInverse):
         """The plan's record of this case's stored map, decoded once and kept without its stages."""
         stored = self._maps.get(name)
         if stored is None:
-            stages = self._stored.get(name)
-            if stages is None:
-                stages = self._decode_stored(name)
             rank = self._source_grid(name).rank
+            # HEADERS ONLY, always: a cached region's stages are that region's, not the case's, and
+            # the plan's own read must not pull a field's values for a bound it cannot form from
+            # them anyway. What comes back is the affine part, exact, with any dense field standing
+            # as the identity -- the same price the declared route puts on its field.
+            priced = self._decode_stored(name, headers_only=True)
+            has_field = self._stored_has_field(name)
             stored = self._maps[name] = _StoredMap(
-                bound_of(stages, rank), all(isinstance(stage, AffineStage) for stage in stages)
+                bound_of(priced, rank),
+                not has_field and all(isinstance(stage, AffineStage) for stage in priced),
+                field=has_field,
             )
         return stored
 
-    def _decode_stored(self, name: str) -> SpatialStages:
-        """This case's stored transforms read and decoded, application order, nothing kept."""
+    def _stored_has_field(self, name: str) -> bool:
+        """Whether any member of this case's stored map is a dense field, from headers alone.
+
+        Asked rather than counted: one entry can decode to several stages (a composite of two
+        affines is two), so a stage count says nothing about how many members there were, let
+        alone which of them the plan priced away.
+        """
+        from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE
+
+        for group in cast("dict[str, bool]", self.transforms or {}):
+            for dataset in self.datasets:
+                if not dataset.is_dataset_exist(group, name):
+                    continue
+                if getattr(dataset, "read_data", None) is None:
+                    break  # a transform-only store serves no field
+                _shape, header = dataset.get_infos(group, name)
+                if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+                    return True
+                break
+        return False
+
+    def _decode_stored(self, name: str, box: WorldBox | None = None, headers_only: bool = False) -> SpatialStages:
+        """This case's stored transforms read and decoded, application order, nothing kept.
+
+        ``box`` is the world box the map will be evaluated over, folded through the members already
+        decoded so each one is read on the box IT sees rather than the one the region started as: a
+        field applied second is evaluated where the first sent the points, and reading it on the
+        region's own box would be short by everything the first one moves. Without a box the whole
+        entry is read, which is the whole-volume route's answer.
+
+        ``headers_only`` is the plan's read: a dense field member decodes to no stage, which is the
+        identity, and its values are never touched.
+        """
         from konfai.utils.ITK import invert_stages, read_transform_stages
 
         _require_simpleitk()
@@ -1857,7 +1982,7 @@ class Resample(TransformInverse):
             decoded = None
             for dataset in self.datasets:
                 if dataset.is_dataset_exist(group, name):
-                    decoded = read_transform_stages(dataset, group, name)
+                    decoded = read_transform_stages(dataset, group, name, box, headers_only, self._field_dtype)
                     break
             if decoded is None:
                 raise TransformError(
@@ -1876,6 +2001,13 @@ class Resample(TransformInverse):
                         " invert it where it is written.",
                     )
                 decoded = inverted
+            if box is not None:
+                # The box the NEXT member is read on, which is where this one sends the points it
+                # was read for: the EFFECTIVE stages, after any inversion. An affine moves it
+                # exactly; a field grows it by the range of the values just read, and a member that
+                # only pushes one way moves the box instead of opening it (TransformBound is an
+                # interval, not a radius).
+                box = bound_of(decoded, rank).map_box(box)
             stages.extend(decoded)
         return tuple(stages)
 
@@ -1896,31 +2028,36 @@ class Resample(TransformInverse):
         spatial = [int(extent) for extent in shape[1:]]
         grid = Grid.of(spatial, attribute, f"the field for case '{name}'")
         window = grid.index_window(region.world_box(), margin=1)
-        values = source.read(name, window, len(spatial))
+        values = source.read(name, window, len(spatial), self._field_dtype)
         stage = DisplacementStage(grid.sub_grid(window), values.numpy(), order=1)
         self._field_window = (name, key, stage)
         return stage
 
     def stream_abort(self, name: str) -> None:
-        self._stored.pop(name, None)
+        for key in [key for key in self._stored if key[0] == name]:
+            self._stored.pop(key, None)
         if self._field_window is not None and self._field_window[0] == name:
             self._field_window = None
         self._sitk_input.drop()
 
     def _stages(self, name: str, region: Grid) -> SpatialStages:
-        """The whole map over one target region, in application order."""
+        """The whole map over one target region, in application order, each stage read on the box
+        the stages before it send that region to."""
         stages: list[AffineStage | DisplacementStage] = []
+        box = region.world_box()
         if self.displacement is not None:
-            stages.append(self._field_stage(name, region))
+            field = self._field_stage(name, region)
+            stages.append(field)
+            box = bound_of((field,), self._source_grid(name).rank).map_box(box)
         if self.transforms is not None:
-            stages.extend(self._stored_stages(name))
+            stages.extend(self._stored_stages(name, box))
         return tuple(stages)
 
     def _bound(self, name: str) -> TransformBound:
         """What the map is guaranteed to do, from stored coefficients alone, no voxel read."""
         rank = self._source_grid(name).rank
         folded = TransformBound.exact(AffineMap.identity(rank))
-        if self.displacement is not None:
+        if self.displacement is not None or (self.transforms is not None and self._stored_map(name).field):
             raise TransformError(
                 "a field's reach is unknown before its values are read; nothing bounds it from headers."
             )
@@ -1931,12 +2068,12 @@ class Resample(TransformInverse):
     def _pricing_bound(self, name: str) -> TransformBound:
         """The map's bound as the PLAN prices it: headers and declarations, never a voxel.
 
-        A field prices as zero displacement. The run never trusts this window: a field's
-        regions are sized from the values it reads for sampling anyway
-        (:meth:`measured_region_source`), so the optimism here costs estimate accuracy, not bytes.
+        A field prices as zero displacement, declared or stored: nothing bounds one from headers,
+        and reading its values to find out costs a case's worth of memory for a number the run
+        replaces anyway. The run never trusts this window -- a field's regions are sized from the
+        values it reads for sampling (:meth:`measured_region_source`) -- so the optimism here costs
+        estimate accuracy, not bytes. What is left is the affine part, which is exact.
         """
-        if self.displacement is None:
-            return self._bound(name)
         rank = self._source_grid(name).rank
         folded = TransformBound.exact(AffineMap.identity(rank))
         if self.transforms is not None:
@@ -2052,8 +2189,17 @@ class Resample(TransformInverse):
 
     @property
     def measures_at_run(self) -> bool:
-        """Whether the run sizes this stage's windows from the data it reads: any declared field."""
-        return self.displacement is not None
+        """Whether the run sizes this stage's windows from the data it reads: any field at all.
+
+        Declared or stored: both are priced as the identity by the plan, so both need the run to
+        say where they actually reach. An affine-only ``transforms`` is not one of them -- its
+        bound is exact from the coefficients, the plan's window is already the right one, and
+        measuring it per region would buy nothing and cost a decode.
+
+        Read off the plan's own records, which ``transform_shape`` fills for every case before
+        anything asks this.
+        """
+        return self.displacement is not None or any(stored.field for stored in self._maps.values())
 
     def case_working_multiple(self, name: str) -> float:
         """The sampling grid, plus the field window this case's region holds beside it.
@@ -2096,9 +2242,27 @@ class Resample(TransformInverse):
         # Charging it at one was counting eight bytes as four.
         from konfai.data.patching import _SWEEP_ELEMENT_BYTES
 
-        widening = _FIELD_ELEMENT_BYTES / _SWEEP_ELEMENT_BYTES
+        widening = self._field_element_bytes / _SWEEP_ELEMENT_BYTES
         window = max(1, int(shape[0])) * (target_voxel / field_voxel) * widening
         return base + window * _FIELD_WINDOW_COPIES
+
+    @property
+    def _field_dtype(self) -> type:
+        """The CEILING a field's values are held at, never the width they are widened to.
+
+        float64 is the bit-exact contract with SimpleITK and narrows nothing; a field stored in
+        float32 stays float32 under it, losslessly (see
+        :func:`~konfai.utils.ITK._displacement_stage`). ``precision: fast`` lowers the ceiling to
+        the float32 its coordinate walk runs in, which is where a genuinely float64 field narrows.
+        """
+        return np.float32 if self.precision == "fast" else np.float64
+
+    @property
+    def _field_element_bytes(self) -> int:
+        """What the PLAN charges a field value, at the ceiling rather than at the width the store
+        turns out to hold: the plan reads no field header, and over-charging reserves memory a run
+        then does not need, which is the safe direction to be wrong in."""
+        return int(np.dtype(self._field_dtype).itemsize)
 
     def measured_region_source(
         self, name: str, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
@@ -2296,8 +2460,8 @@ class Resample(TransformInverse):
         Judged THROUGH the declared map's affine part: a stored transform is what makes a
         cross-frame pair meet (an MR and a CT in different scanner frames with a rigid bridging
         them), and a coverage judged before applying it would call every such registration
-        disjoint. The residual (a spline's or a field's sup-norm) only ever moves a sample by a
-        bounded amount, so it widens the inside band rather than moving the lattice. Counted on a
+        disjoint. The interval MOVES the lattice too, by the offset a stored map carries, and only
+        what varies widens the inside band. Counted on a
         capped lattice rather than solved, because the sampled set is a box only while the grids
         are axis-aligned and a rotation makes it a polytope.
         """
@@ -2308,16 +2472,21 @@ class Resample(TransformInverse):
         lattice = np.stack([axis.ravel() for axis in np.meshgrid(*axes, indexing="ij")], axis=-1)
         to_world = target.index_to_world if bound is None else target.index_to_world.then(bound.affine)
         index = to_world.then(source.world_to_index).apply(lattice)
-        margin_xyz = (
-            np.zeros(source.rank)
-            if bound is None
-            # A world-space residual box reaches |W2I| @ r in index space, component-wise.
-            else np.abs(source.world_to_index.matrix) @ np.asarray(bound.residual_xyz, dtype=np.float64)
-        )
+        low = high = np.zeros((1, source.rank))
+        if bound is not None:
+            # The interval, folded into index space the way a world box is: its two ends land
+            # where the matrix sends them, and a negative entry swaps which end is which. As a
+            # radius, a map that sent every sample 500 m PAST the case reached back over it just
+            # as far, and covered it.
+            matrix = source.world_to_index.matrix
+            rise, fall = np.maximum(matrix, 0.0), np.minimum(matrix, 0.0)
+            low = (rise @ bound.low_xyz + fall @ bound.high_xyz)[None, :]
+            high = (rise @ bound.high_xyz + fall @ bound.low_xyz)[None, :]
         inside = np.ones(index.shape[0], dtype=bool)
         for axis in range(source.rank):
             extent = float(source.size_zyx[source.rank - 1 - axis])
-            inside &= (index[:, axis] >= -0.5 - margin_xyz[axis]) & (index[:, axis] < extent - 0.5 + margin_xyz[axis])
+            # A probe reaches [index + low, index + high]: inside when that span meets the grid.
+            inside &= (index[:, axis] + high[:, axis] >= -0.5) & (index[:, axis] + low[:, axis] < extent - 0.5)
         return float(np.count_nonzero(inside)) / float(inside.size)
 
     def _refuse_if_disjoint(self, name: str) -> None:
@@ -2328,10 +2497,13 @@ class Resample(TransformInverse):
         would report: a median over the cohort would simply be pulled toward the background by a
         member that contributed no anatomy. Counted from the headers, before a byte is read.
 
-        Never with a field configured: its reach is unknown before its values are read, and
-        bridging two frames is precisely what a field may be for.
+        Never with a field configured, DECLARED OR STORED: its reach is unknown before its values
+        are read -- the plan prices both at the identity -- and bridging two frames is precisely
+        what a field may be for. A cohort registered onto a template it sits 25 mm from covers
+        exactly nothing until its own field is applied, and refusing it here would drop every
+        member of the build the stage exists to serve.
         """
-        if self._target_is_own or self.displacement is not None or self.coverage(name) > 0.0:
+        if self._target_is_own or self._prices_a_field(name) or self.coverage(name) > 0.0:
             return
         where = f"case '{name}'" if name else "the case"
         raise TransformError(
@@ -2341,6 +2513,21 @@ class Resample(TransformInverse):
             " acquisition's stage coordinates are not an anatomical one), pick a target the cohort"
             " actually surrounds, or drop this case with 'subset'.",
         )
+
+    def _prices_a_field(self, name: str) -> bool:
+        """Whether this case's map carries a field the plan prices at the identity.
+
+        A field's reach is known only once its values are read, and the plan reads none: it prices
+        a declared field and a stored one alike as zero displacement. Every geometric judgement
+        built on that price is then a judgement about two grids sitting bare in world space, not
+        about where the samples land -- so neither the refusal nor the plan's coverage note may
+        speak. Measured on a ten-member ExaSPIM build whose fields bridge a 20 mm gap: judged bare,
+        one member covered 0.0% of the target and the note called everything it wrote fill, while
+        the run it was describing read that member in full and the template carried its anatomy.
+        """
+        if self.displacement is not None:
+            return True
+        return self.transforms is not None and bool(self._stored_map(name).field)
 
     def plan_note(self, group_dest: str, name: str, shape: list[int], cache_attribute: Attribute) -> str | None:
         """What this case covers of the target grid: measured on the header HANDED OVER.
@@ -2361,7 +2548,7 @@ class Resample(TransformInverse):
             )
         try:
             source, missing = Grid.from_header([int(extent) for extent in shape], cache_attribute, f"case '{name}'")
-            if not missing & self._target.needs:
+            if not missing & self._target.needs and not self._prices_a_field(name):
                 covered = self._coverage(source, self._target.of(source, name), self._map_bound(name))
                 if covered < self._WORTH_SAYING:
                     notes.append(
@@ -3085,18 +3272,21 @@ class _DisplacementSource:
             ) from error
         self._probed.add(name)
 
-    def read(self, name: str, region: tuple[slice, ...] | None, channels: int) -> torch.Tensor:
+    def read(
+        self, name: str, region: tuple[slice, ...] | None, channels: int, dtype: type = np.float64
+    ) -> torch.Tensor:
         group = self.group_for(name)
         root = self._root_for(name)
         if region is None:
             data, _attributes = root.read_data(group, name)
         else:
             data, _attributes = root.read_data_slice(group, name, (slice(None), *region))
-        # float64, not .float(): the walk evaluates the field in float64 (DisplacementStage's own
-        # contract), and a .float() here quantized a float64-stored field before the exact
-        # arithmetic ever saw it -- a silent sitk divergence for any field an external tool wrote
-        # in double. A float32 store widens losslessly.
-        field = torch.from_numpy(np.ascontiguousarray(data)).to(torch.float64)
+        # The walk's dtype, handed down by the owner. float64 is the bit-exact contract: a .float()
+        # here would quantise a float64-stored field before the exact arithmetic ever saw it -- a
+        # silent sitk divergence for any field an external tool wrote in double. float32 is what a
+        # `precision: fast` walk takes the values in regardless, so widening them first is a copy
+        # that costs twice the window and buys nothing.
+        field = torch.from_numpy(np.ascontiguousarray(data)).to(torch.float32 if dtype is np.float32 else torch.float64)
         if field.shape[0] != channels:
             raise TransformError(
                 f"The field for case '{name}' has {field.shape[0]} component(s) where the case has"

@@ -191,17 +191,29 @@ class Median(Reduction):
     """
 
     voxel_local = True
-    # ``torch.stack`` copies the buffer and the sort along the case axis returns values and
-    # int64 indices over that: measured at 4x the stack it is handed (6 x 16 MiB float32 cases).
-    # A fold of three, four or five members takes the network instead and costs far less; the
-    # attribute is the worst case, :meth:`working_multiple_for` is what the plan asks.
-    working_multiple = 4.0
-
-    #: What the selection networks below hold beside the members they are handed, measured on a
-    #: 24 MiB member (float32): the sort's own 4.0 is what anything wider still costs.
+    # THE MIDDLE IS SELECTED, NEVER SORTED. A sort along the case axis copies the stack and returns
+    # int64 indices over it -- eight bytes an element whatever the members weigh -- so ten uint16
+    # regions of 33 x 1331 x 1775 (1.45 GiB) sorted at 6.0x their own size, and ten float32 ones
+    # at 4.0x (peak resident above the members, measured). A selection network of element-wise
+    # min/max holds a WINDOW of the k+1 smallest members seen so far, in the averaging dtype, and
+    # inserts each member into it: no stack, no indices, and the members stay in the dtype they
+    # arrived in. Ten uint16 members: 1.8x, against 6.0x. Twice the arithmetic of the sort (3.4 s
+    # against 1.6 on that region) on a fold whose clock is the disk by 40 to 1, and whose regions
+    # the planner may now cut two to three times taller.
+    #
+    # The attribute is the worst case the plan may see; :meth:`working_multiple_for` prices the
+    # network for the count it is handed.
+    working_multiple = 2.5
+    #: What the hand-written networks (three to five) hold beside the members they are handed,
+    #: measured on a 24 MiB float32 member.
     _NETWORK_MULTIPLE: ClassVar[dict[int, float]] = {1: 1.0, 2: 1.5, 3: 1.0, 4: 2.5, 5: 1.5}
+    #: Past five, the window: k+1 float32 buffers for k = count // 2, and the two it blends,
+    #: measured on a 293 MiB uint16 member at ten.
+    _WINDOW_MULTIPLE = 1.8
 
     def working_multiple_for(self, cases: int) -> float:
+        if cases > 5:
+            return self._WINDOW_MULTIPLE
         return self._NETWORK_MULTIPLE.get(cases, float(self.working_multiple))
 
     @staticmethod
@@ -210,23 +222,23 @@ class Median(Reduction):
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         dtype = _averaged_dtype(tensors[0].dtype)
-        members = [tensor.to(dtype) for tensor in tensors]
-        if len(members) == 1:
-            return members[0]
-        # Three to five members is what a fold has, and there the middle is SELECTED by a network of
-        # element-wise min/max rather than found by sorting the whole stack: same values to the bit,
-        # a fraction of the time (CUDA 7.20 -> 0.45 ms at three, 8.42 -> 1.10 at five; CPU 55 -> 26
-        # at three), and no stack to hold, which is what lets the planner cut taller slabs. Beyond
-        # five the sort is simpler and no slower: what torch.quantile computes without its
-        # interpolation machinery (1.5-2x on CPU, 3.5x on CUDA, measured).
-        low, high = self._middle_pair(members)
+        if len(tensors) == 1:
+            return tensors[0].to(dtype)
+        # The members are handed over in the dtype they arrived in and widened one at a time as the
+        # network takes them: torch has no integer min/max kernel on the CPU, and widening ten
+        # members up front is what put ten float32 copies beside ten uint16 regions.
+        low, high = self._middle_pair(tensors, dtype)
         return low if low is high else torch.lerp(low, high, 0.5)
 
-    def _middle_pair(self, members: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _middle_pair(self, members: list[torch.Tensor], dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         """The one middle member of an odd fold (the same tensor twice), or the two an even fold
-        averages: by network up to five members, off a sorted stack past it."""
+        averages: by a hand-written network up to five members, by the insertion window past it.
+        ``dtype`` is what the network computes in; the members are widened to it as they enter."""
         minimum, maximum = torch.minimum, torch.maximum
         count = len(members)
+        if count > 5:
+            return self._middle_pair_by_window(members, dtype)
+        members = [member.to(dtype) for member in members]
         if count == 2:
             first, second = members
             return minimum(first, second), maximum(first, second)
@@ -239,19 +251,40 @@ class Median(Reduction):
             c, d = minimum(c, d), maximum(c, d)
             second, third = maximum(a, c), minimum(b, d)
             return minimum(second, third), maximum(second, third)
-        if count == 5:
-            a, b, c, d, e = members
-            a, b = minimum(a, b), maximum(a, b)
-            c, d = minimum(c, d), maximum(c, d)
-            a, c = minimum(a, c), maximum(a, c)  # a is the fold's smallest: out of the running
-            b, d = minimum(b, d), maximum(b, d)  # d is its largest: out too
-            middle = self._median_of_three(b, c, e)
-            return middle, middle
-        ranked = torch.stack(members, dim=0).sort(dim=0).values
+        a, b, c, d, e = members
+        a, b = minimum(a, b), maximum(a, b)
+        c, d = minimum(c, d), maximum(c, d)
+        a, c = minimum(a, c), maximum(a, c)  # a is the fold's smallest: out of the running
+        b, d = minimum(b, d), maximum(b, d)  # d is its largest: out too
+        middle = self._median_of_three(b, c, e)
+        return middle, middle
+
+    @staticmethod
+    def _middle_pair_by_window(members: list[torch.Tensor], dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        """The middle pair of any count, by an insertion window of the ``k + 1`` smallest seen.
+
+        The middle of ``count`` members is rank ``count // 2`` (0-based; the pair ``count // 2 - 1``
+        and ``count // 2`` on an even count). A window that keeps the ``k + 1`` smallest members
+        seen so far, ``k = count // 2``, holds those ranks exactly once every member has passed
+        through it: a member larger than the whole window can be no smaller than rank ``k + 1`` of
+        the members seen, so dropping it off the end loses nothing the answer needs. Each insertion
+        is a chain of element-wise min/max, which is what makes the selection exact -- the same
+        values a full sort returns, to the bit (pinned against ``torch.sort`` in the tests).
+        """
+        count = len(members)
+        keep = count // 2 + 1
+        window: list[torch.Tensor] = []
+        for member in members:
+            window.append(member.to(dtype))
+            for index in range(len(window) - 1, 0, -1):
+                lower, upper = window[index - 1], window[index]
+                window[index - 1], window[index] = torch.minimum(lower, upper), torch.maximum(lower, upper)
+            if len(window) > keep:
+                window.pop()
+        middle = window[count // 2]
         if count % 2:
-            middle = ranked[count // 2]
             return middle, middle
-        return ranked[count // 2 - 1], ranked[count // 2]
+        return window[count // 2 - 1], middle
 
 
 class Vote(Reduction):
